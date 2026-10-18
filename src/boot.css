@@ -1,0 +1,78 @@
+/* The frame before the bundle lands: the canvas in the builder's palette
+   (public/theme-preseed.js sets data-theme). The intro's particles assemble
+   on an empty canvas, so only a routine reload shows the still mark — 96
+   wide, lifted by half the caption below it, as the routine overlay then
+   draws it. The support line appears only if startup is still stuck after
+   4 s.
+
+   This lives in its own file, not a <style> block in index.html, on purpose:
+   Tauri stamps every inline <style> with a CSP nonce, and a style-src that
+   carries a nonce makes browsers ignore 'unsafe-inline' — which xterm's DOM
+   renderer needs for its runtime <style> (colour classes, bold, dim, the mono
+   face) and its style="color:#…" cells. See scripts/verify-config.mjs. */
+html {
+  background: #0a0a0a;
+  color: #fafafa;
+}
+html[data-theme="light"] {
+  background: #e5e5e5;
+  color: #0a0a0a;
+}
+body {
+  margin: 0;
+}
+.boot {
+  position: fixed;
+  inset: 0;
+  font-family:
+    "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system,
+    BlinkMacSystemFont, sans-serif;
+  font-size: 13px;
+}
+.boot-mark {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 96px;
+  height: 96px;
+  margin: -62px 0 0 -48px;
+  pointer-events: none;
+}
+html[data-launch="routine"] .boot-mark {
+  display: block;
+}
+.boot-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.boot-support {
+  position: fixed;
+  right: 0;
+  bottom: 48px;
+  left: 0;
+  padding: 0 32px;
+  text-align: center;
+  opacity: 0;
+  animation: boot-late 200ms ease-out 4s forwards;
+}
+.boot-support strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.boot-secondary {
+  color: #a1a1a1;
+  font-size: 12px;
+}
+html[data-theme="light"] .boot-secondary {
+  color: #525252;
+}
+@keyframes boot-late {
+  to {
+    opacity: 1;
+  }
+}

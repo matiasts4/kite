@@ -1,0 +1,259 @@
+/* Kite Code - Agents Settings Tab & Shared Controls CSS */
+
+/* ==========================================================================
+   SETTINGS TAB (agent-settings)
+   ========================================================================== */
+.agent-settings {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-settings__scroll {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6) 0;
+}
+
+.agent-settings__form {
+  width: min(calc(var(--column-agent, 680px) + 2 * var(--space-6)), 100%);
+  padding: 0 var(--space-6);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.agent-settings__field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-settings__field-label {
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--text-secondary, #8b949e);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow, 0.05em);
+}
+
+.agent-settings__field-desc {
+  font-size: var(--text-row, 13px);
+  color: var(--text-secondary, #8b949e);
+  margin: 0;
+  line-height: var(--leading-row, 18px);
+}
+
+.agent-settings__identity-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.agent-settings__swatches {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-settings__swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform var(--duration-ink) var(--ease-ink), border-color var(--duration-ink) var(--ease-ink);
+  outline: none;
+}
+
+.agent-settings__swatch:hover {
+  transform: scale(1.1);
+}
+
+.agent-settings__swatch--active {
+  border-color: #ffffff;
+  transform: scale(1.15);
+}
+
+.agent-settings__danger-zone {
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  border-radius: var(--radius-card, 12px);
+  padding: 16px;
+  background: rgba(248, 81, 73, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-settings__danger-info h3 {
+  font-size: var(--text-body, 14px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--danger-ink, #f85149);
+  margin: 0 0 4px;
+}
+
+.agent-settings__danger-info p {
+  font-size: var(--text-caption, 12px);
+  color: var(--text-secondary, #8b949e);
+  margin: 0;
+  line-height: var(--leading-caption, 16px);
+}
+
+.agent-settings__danger-btn {
+  background: var(--danger-fill, rgba(248, 81, 73, 0.12));
+  color: var(--danger-ink, #f85149);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  font-family: inherit;
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-semibold, 600);
+  padding: 6px 14px;
+  border-radius: var(--radius-chip, 6px);
+  cursor: pointer;
+  transition: all var(--duration-ink) var(--ease-ink);
+  white-space: nowrap;
+}
+
+.agent-settings__danger-btn:hover {
+  background: var(--danger-fill-hover, #f85149);
+  color: #ffffff;
+}
+
+.agent-settings__footer {
+  border-top: 1px solid var(--block-stroke, #30363d);
+  padding: 12px var(--space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--pane, #0d1117);
+  flex: none;
+}
+
+.agent-settings__footer-status {
+  font-size: var(--text-caption, 12px);
+  color: var(--text-secondary, #8b949e);
+}
+
+.agent-settings__footer-status--saved {
+  color: var(--status-running, #3fb950);
+}
+
+.agent-settings__footer-status--error {
+  color: var(--status-failed, #f85149);
+}
+
+.agent-settings__footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ==========================================================================
+   Shared Buttons & Inputs
+   ========================================================================== */
+.primary-button,
+.secondary-button {
+  font-family: inherit;
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-semibold, 600);
+  border-radius: var(--radius-chip, 6px);
+  padding: 6px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all var(--duration-ink) var(--ease-ink);
+  outline: none;
+}
+
+.primary-button {
+  background: var(--accent-fill, #1f6feb);
+  color: #ffffff;
+  border: 1px solid transparent;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--accent-fill-hover, #388bfd);
+}
+
+.primary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.secondary-button {
+  background: var(--block-fill, #161b22);
+  color: var(--text-primary, #f0f6fc);
+  border: 1px solid var(--block-stroke, #30363d);
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  border-color: var(--panel-stroke, #484f58);
+}
+
+.secondary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ui-field {
+  width: 100%;
+  background: var(--composer, #090d13);
+  border: 1px solid var(--block-stroke, #30363d);
+  border-radius: var(--radius-chip, 6px);
+  color: var(--text-primary, #f0f6fc);
+  font-family: inherit;
+  font-size: var(--text-row, 13px);
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color var(--duration-ink) var(--ease-ink);
+}
+
+.ui-field:focus {
+  border-color: var(--focus-ring, #58a6ff);
+}
+
+.ui-field--area {
+  min-height: 90px;
+  resize: vertical;
+  line-height: var(--leading-body, 20px);
+}
+
+.agent-settings__readonly-row {
+  min-height: 50px;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-body, 14px);
+  align-items: center;
+  gap: 10px;
+  display: flex;
+}
+
+.agent-settings__readonly-row > span {
+  flex: 1 1 0%;
+  min-width: 0;
+}
+
+.agent-settings__rows {
+  overflow: hidden;
+}
+
+.agent-settings__empty-row {
+  gap: var(--space-2, 8px);
+  padding: 0 var(--space-3, 12px);
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+}
+
+.agent-settings__empty-row > svg {
+  flex: none;
+}
+

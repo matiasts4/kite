@@ -1,0 +1,560 @@
+/* Kite Code - Agents View CSS
+   Exact Visual Replica for 1400x900 Dark Theme (data-theme="dark", data-palette="kite-dark")
+   Classes identical to production bundle: MainSurfaces, agent-pane, agent-face-tabs, agent-mind-column, agent-memory, agent-skills
+*/
+
+@import './agents-memory.css';
+@import './agents-skills.css';
+@import './agents-settings.css';
+
+:root,
+[data-theme="dark"],
+[data-palette="kite-dark"] {
+  --column-agent: 680px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-chip: 6px;
+  --radius-row: 8px;
+  --radius-tile: 10px;
+  --radius-card: 12px;
+  --radius-pill: 9999px;
+  --control-pane-header: 28px;
+  --control-row: 32px;
+  --control-regular: 36px;
+  --control-settings-slot: 140px;
+  --text-meta: 10px;
+  --text-badge: 11px;
+  --text-caption: 12px;
+  --text-row: 13px;
+  --text-body: 14px;
+  --text-composer: 13.5px;
+  --text-title: 17px;
+  --text-mono: 12.5px;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  --leading-meta: 14px;
+  --leading-badge: 15px;
+  --leading-caption: 16px;
+  --leading-row: 18px;
+  --leading-body: 20px;
+  --leading-composer: 20px;
+  --leading-title: 22px;
+  --leading-mono: 18px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --tracking-eyebrow: 0.05em;
+  --duration-state: 160ms;
+  --duration-ink: 120ms;
+  --duration-nav: 200ms;
+  --duration-press: 80ms;
+  --ease-snappy: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-ink: ease-out;
+  --press-scale: 0.96;
+  --shadow-press: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+  --disabled-opacity: 0.45;
+  --memory-used: 0%;
+
+  /* Dark Theme Colors */
+  --pane: #0d1117;
+  --block-fill: #161b22;
+  --block-stroke: #30363d;
+  --panel-stroke: #484f58;
+  --hover-fill: rgba(255, 255, 255, 0.06);
+  --selected-fill: rgba(56, 139, 253, 0.15);
+  --separator: #21262d;
+  --text-primary: #f0f6fc;
+  --text-secondary: #8b949e;
+  --text-faint: #484f58;
+  --accent: #58a6ff;
+  --accent-fill: #1f6feb;
+  --accent-fill-hover: #388bfd;
+  --accent-fill-active: #1158c7;
+  --accent-fill-edge: rgba(255, 255, 255, 0.2);
+  --accent-fill-ring: rgba(56, 139, 253, 0.35);
+  --accent-on-fill: #ffffff;
+  --chip-fill: #21262d;
+  --composer: #090d13;
+  --focus-ring: #58a6ff;
+  --status-running: #3fb950;
+  --status-failed: #f85149;
+  --warning: #d29922;
+  --warning-tint: rgba(210, 153, 34, 0.15);
+  --warning-tint-strong: rgba(210, 153, 34, 0.3);
+  --danger-fill: rgba(248, 81, 73, 0.12);
+  --danger-fill-hover: #f85149;
+  --danger-ink: #f85149;
+}
+
+/* ==========================================================================
+   MainSurfaces & Base Agent Pane
+   ========================================================================== */
+.MainSurfaces.agent-pane,
+.agent-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+  min-width: 0;
+  background-color: var(--pane, #0d1117);
+  color: var(--text-primary, #f0f6fc);
+  position: relative;
+  overflow: hidden;
+}
+
+.agent-pane__header {
+  min-height: 54px;
+  padding: var(--space-3) var(--space-5);
+  align-items: center;
+  gap: 12px;
+  display: flex;
+  flex: none;
+  background: var(--pane, #0d1117);
+  border-bottom: 1px solid var(--separator, #21262d);
+  z-index: 10;
+}
+
+.agent-pane__identity {
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+  display: flex;
+}
+
+.agent-pane__identity h1 {
+  font-size: var(--text-body, 14px);
+  font-weight: var(--weight-semibold, 600);
+  line-height: var(--leading-row, 18px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary, #f0f6fc);
+}
+
+.agent-pane__identity small {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  line-height: var(--leading-caption, 16px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.agent-pane__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.agent-pin-button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-chip, 6px);
+  color: var(--text-secondary, #8b949e);
+  cursor: pointer;
+  padding: 5px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-caption, 12px);
+  transition: all var(--duration-ink) var(--ease-ink);
+}
+
+.agent-pin-button:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f0f6fc);
+  border-color: var(--block-stroke, #30363d);
+}
+
+.agent-pin-button--active {
+  color: var(--accent, #58a6ff);
+  background: var(--selected-fill, rgba(56, 139, 253, 0.15));
+  border-color: rgba(56, 139, 253, 0.3);
+}
+
+.agent-roster-select {
+  background: var(--block-fill, #161b22);
+  border: 1px solid var(--block-stroke, #30363d);
+  border-radius: var(--radius-chip, 6px);
+  color: var(--text-primary, #f0f6fc);
+  font-size: var(--text-caption, 12px);
+  padding: 4px 8px;
+  outline: none;
+  cursor: pointer;
+}
+
+.agent-roster-select:focus {
+  border-color: var(--focus-ring, #58a6ff);
+}
+
+.running-pill {
+  border-radius: var(--radius-pill, 9999px);
+  background: var(--chip-fill, #21262d);
+  height: 24px;
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-medium, 500);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  display: inline-flex;
+}
+
+.running-pill i {
+  background: var(--text-faint, #484f58);
+  width: 6px;
+  height: 6px;
+  transition: background-color var(--duration-state) var(--ease-snappy);
+  border-radius: 50%;
+}
+
+.running-pill--live i {
+  background: var(--status-running, #3fb950);
+}
+
+.agent-pane__rule {
+  background: var(--separator, #21262d);
+  height: 1px;
+  min-height: 1px;
+  width: 100%;
+}
+
+/* ==========================================================================
+   Agent Avatar
+   ========================================================================== */
+.agent-avatar-wrap {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1f6feb 0%, #388bfd 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-weight: var(--weight-semibold, 600);
+  font-size: 13px;
+  flex: none;
+  box-shadow: 0 0 0 1px var(--block-stroke, #30363d);
+}
+
+/* ==========================================================================
+   Navigation Tabs (agent-face-tabs & ui-tabs)
+   ========================================================================== */
+.agent-face-tabs {
+  height: 36px;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--separator, #21262d);
+  align-items: flex-end;
+  display: flex;
+  background: var(--pane, #0d1117);
+  flex: none;
+}
+
+.ui-tabs__list {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 100%;
+}
+
+.ui-tab {
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-chip, 6px) var(--radius-chip, 6px) 0 0;
+  background: transparent;
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  align-items: center;
+  gap: 6px;
+  display: inline-flex;
+  position: relative;
+  transition: color var(--duration-ink) var(--ease-ink), background-color var(--duration-ink) var(--ease-ink);
+  outline: none;
+}
+
+.ui-tab:hover {
+  color: var(--text-primary, #f0f6fc);
+  background: var(--hover-fill, rgba(255, 255, 255, 0.04));
+}
+
+.ui-tab--selected {
+  color: var(--text-primary, #f0f6fc);
+  font-weight: var(--weight-semibold, 600);
+  border-bottom: 2px solid var(--accent, #58a6ff);
+  background: transparent;
+}
+
+.ui-tab__label {
+  display: inline;
+}
+
+.ui-tab__count {
+  font-size: 10px;
+  background: var(--chip-fill, #21262d);
+  color: var(--text-secondary, #8b949e);
+  padding: 1px 5px;
+  border-radius: var(--radius-pill, 9999px);
+  font-weight: var(--weight-semibold, 600);
+}
+
+.ui-tab--selected .ui-tab__count {
+  background: rgba(56, 139, 253, 0.2);
+  color: var(--accent, #58a6ff);
+}
+
+/* ==========================================================================
+   Agent Face Main Body
+   ========================================================================== */
+.agent-face {
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: agent-face-in var(--duration-nav, 200ms) var(--ease-snappy) both;
+  overflow: hidden;
+}
+
+@keyframes agent-face-in {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.agent-mind-column {
+  width: min(calc(var(--column-agent, 680px) + 2 * var(--space-6)), 100%);
+  padding: 18px var(--space-6);
+  margin: 0 auto;
+}
+
+.agent-mind-lede {
+  margin: 0 0 var(--space-3);
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+}
+
+.agent-mind-lede--warning {
+  color: var(--warning, #d29922);
+}
+
+.agent-detail-state {
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  padding: 32px;
+  display: flex;
+}
+
+/* Feedback & alerts */
+.agent-feedback {
+  margin: 0 0 var(--space-4);
+  border: 1px solid var(--block-stroke, #30363d);
+  border-radius: var(--radius-row, 8px);
+  background: var(--block-fill, #161b22);
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-feedback--error {
+  border-color: var(--danger-fill-hover, #f85149);
+  color: var(--status-failed, #f85149);
+  background: var(--danger-fill, rgba(248, 81, 73, 0.12));
+}
+
+.agent-feedback--success {
+  border-color: rgba(63, 185, 80, 0.4);
+  color: var(--status-running, #3fb950);
+  background: rgba(63, 185, 80, 0.1);
+}
+
+/* ==========================================================================
+   Agent Terminal Surface Styles (matches AgentTerminalSurface-C4J3lhMJ.css)
+   ========================================================================== */
+.agent-terminal {
+  background: var(--pane, #0d1117);
+  min-height: 0;
+  animation: agent-terminal-in var(--duration-nav, 200ms) var(--ease-snappy, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  flex-direction: column;
+  flex: 1 1 0%;
+  display: flex;
+}
+
+@keyframes agent-terminal-in {
+  0% {
+    opacity: 0;
+  }
+}
+
+.agent-terminal__notice {
+  background: color-mix(in srgb, var(--chip-fill, #21262d) 62%, transparent);
+  min-height: 42px;
+  color: var(--text-secondary, #8b949e);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 16px;
+  display: flex;
+  border-bottom: 1px solid var(--separator, #21262d);
+}
+
+.agent-terminal__notice svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.agent-terminal__notice p {
+  max-width: 75ch;
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+  text-wrap: pretty;
+  margin: 0;
+}
+
+.agent-terminal__state {
+  min-height: 0;
+  color: var(--text-secondary, #8b949e);
+  text-align: center;
+  flex-direction: column;
+  flex: 1 1 0%;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 28px;
+  display: flex;
+}
+
+.agent-terminal__state > svg {
+  color: var(--text-faint, #484f58);
+  margin-bottom: 2px;
+}
+
+.agent-terminal__logo {
+  opacity: 0.9;
+  margin-bottom: 2px;
+  display: inline-flex;
+}
+
+.agent-terminal__logo img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.agent-terminal__state strong {
+  color: var(--text-primary, #f0f6fc);
+  font-size: var(--text-composer, 13.5px);
+  font-weight: var(--weight-semibold, 600);
+  line-height: var(--leading-composer, 20px);
+}
+
+.agent-terminal__state span,
+.agent-terminal__state small {
+  max-width: 480px;
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+}
+
+.agent-terminal__state .primary-button {
+  margin-top: 6px;
+}
+
+.agent-terminal__state > span:not(.agent-terminal__logo) {
+  text-wrap: balance;
+  max-width: 360px;
+}
+
+.agent-terminal__state--error > svg,
+.agent-terminal__state--error strong {
+  color: var(--status-failed, #f85149);
+}
+
+.agent-terminal__live {
+  background: var(--terminal-canvas, #000000);
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+}
+
+.agent-terminal__toolbar {
+  border-bottom: 1px solid var(--block-stroke, #30363d);
+  background: var(--pane, #0d1117);
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 8px 0 12px;
+  display: flex;
+}
+
+.agent-terminal__toolbar > span {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  margin-right: auto;
+}
+
+.agent-terminal__toolbar > button {
+  height: var(--control-chrome, 26px);
+  padding: 0 var(--space-2, 8px);
+  border-radius: var(--radius-chip, 6px);
+  color: var(--text-secondary, #8b949e);
+  cursor: pointer;
+  font-size: var(--text-caption, 12px);
+  transition: background-color var(--duration-ink, 120ms) var(--ease-ink, ease-out), color var(--duration-ink, 120ms) var(--ease-ink, ease-out);
+  background: transparent;
+  border: 0;
+  align-items: center;
+  gap: 5px;
+  display: inline-flex;
+}
+
+.agent-terminal__toolbar > button:hover:not(:disabled) {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f0f6fc);
+}
+
+.agent-terminal__toolbar > button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.agent-terminal__readonly,
+.agent-terminal__inline-error {
+  background: var(--pane, #0d1117);
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  line-height: var(--leading-caption, 16px);
+  padding: 7px 12px;
+}
+
+.agent-terminal__inline-error {
+  color: var(--status-failed, #f85149);
+}
+
+
+
+

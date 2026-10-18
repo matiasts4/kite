@@ -1,0 +1,299 @@
+/* Kite Code - Agents Skills & Starters Tab CSS */
+
+/* ==========================================================================
+   SKILLS TAB (agent-skills)
+   ========================================================================== */
+.agent-skills {
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0%;
+  display: flex;
+  overflow: hidden;
+}
+
+.agent-skills__list-scroll,
+.agent-skills__detail-scroll {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.agent-skills__rows {
+  border: 1px solid var(--block-stroke, #30363d);
+  border-radius: var(--radius-card, 12px);
+  background: var(--block-fill, #161b22);
+  overflow: hidden;
+}
+
+.agent-skills__rows > .ui-card__row {
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 56px;
+  padding: 12px var(--space-4);
+  color: var(--text-primary, #f0f6fc);
+  text-align: left;
+  transition: background-color var(--duration-ink) var(--ease-ink);
+  background: 0 0;
+  border: 0;
+  border-bottom: 1px solid var(--separator, #21262d);
+  display: flex;
+  cursor: pointer;
+}
+
+.agent-skills__rows > .ui-card__row:last-child {
+  border-bottom: 0;
+}
+
+.agent-skills__rows > .ui-card__row:hover,
+.agent-skills__rows > .ui-card__row:focus-visible {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+}
+
+.agent-skills__row-icon {
+  border-radius: var(--radius-row, 8px);
+  background: var(--chip-fill, #21262d);
+  width: 34px;
+  height: 34px;
+  color: var(--accent, #58a6ff);
+  flex: none;
+  justify-content: center;
+  align-items: center;
+  display: inline-flex;
+}
+
+.agent-skills__row-copy {
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+  display: flex;
+}
+
+.agent-skills__row-copy strong {
+  font-size: var(--text-body, 14px);
+  font-weight: var(--weight-semibold, 600);
+  line-height: var(--leading-row, 18px);
+}
+
+.agent-skills__row-copy > span {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  line-height: var(--leading-caption, 16px);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agent-skills__row-copy small {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-medium, 500);
+}
+
+.agent-skills__stamp {
+  width: 68px;
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium, 500);
+  line-height: var(--leading-caption, 16px);
+  text-align: right;
+  white-space: nowrap;
+  flex: none;
+}
+
+.agent-skills__stamp-open,
+.agent-skills__rows > .ui-card__row:is(:hover, :focus-visible) .agent-skills__stamp-age {
+  display: none;
+}
+
+.agent-skills__rows > .ui-card__row:is(:hover, :focus-visible) .agent-skills__stamp-open {
+  display: inline;
+  color: var(--accent, #58a6ff);
+  font-weight: var(--weight-semibold, 600);
+}
+
+.agent-skills__back {
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-semibold, 600);
+  transition: color var(--duration-ink) var(--ease-ink);
+  background: 0 0;
+  border: 0;
+  padding: 4px 8px;
+  border-radius: var(--radius-chip, 6px);
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.agent-skills__back:hover {
+  color: var(--text-primary, #f0f6fc);
+  background: var(--hover-fill, rgba(255, 255, 255, 0.04));
+}
+
+.agent-skills__toolbar-spacer {
+  flex: 1;
+}
+
+.agent-skills__delete-copy {
+  color: var(--status-failed, #f85149);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-medium, 500);
+  margin-right: 6px;
+}
+
+.agent-skills__delete {
+  color: var(--status-failed, #f85149);
+}
+
+.agent-skills__editor {
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+}
+
+.agent-skills__document {
+  user-select: text;
+  width: min(720px, 100%);
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+.agent-skills__document > header {
+  flex-direction: column;
+  gap: 8px;
+  display: flex;
+}
+
+.agent-skills__document > header > div {
+  align-items: baseline;
+  gap: var(--space-2);
+  display: flex;
+}
+
+.agent-skills__document h1 {
+  font-size: var(--text-title, 17px);
+  font-weight: var(--weight-semibold, 600);
+  line-height: var(--leading-title, 22px);
+  margin: 0;
+  color: var(--text-primary, #f0f6fc);
+}
+
+.agent-skills__document time {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.agent-skills__document header p {
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  display: flex;
+}
+
+.agent-skills__document header p strong {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-semibold, 600);
+  letter-spacing: var(--tracking-eyebrow, 0.05em);
+  text-transform: uppercase;
+  flex: none;
+}
+
+.agent-skills__document header p span {
+  color: var(--text-secondary, #8b949e);
+  font-size: var(--text-body, 14px);
+  line-height: var(--leading-body, 20px);
+}
+
+.agent-skills__document-body {
+  border-top: 1px solid var(--separator, #21262d);
+  margin-top: 16px;
+  padding-top: 16px;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono, 12.5px);
+  line-height: var(--leading-mono, 18px);
+  color: var(--text-primary, #f0f6fc);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ==========================================================================
+   STARTERS TAB (agent-starters)
+   ========================================================================== */
+.agent-starters {
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+  overflow-y: auto;
+}
+
+.agent-starters__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+  margin-top: var(--space-4);
+}
+
+.agent-starter-card {
+  background: var(--block-fill, #161b22);
+  border: 1px solid var(--block-stroke, #30363d);
+  border-radius: var(--radius-card, 12px);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  transition: border-color var(--duration-ink) var(--ease-ink);
+}
+
+.agent-starter-card:hover {
+  border-color: var(--panel-stroke, #484f58);
+}
+
+.agent-starter-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-starter-card__title {
+  font-size: var(--text-body, 14px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--text-primary, #f0f6fc);
+  margin: 0;
+}
+
+.agent-starter-card__badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill, 9999px);
+  font-weight: var(--weight-medium, 500);
+}
+
+.agent-starter-card__badge--installed {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--status-running, #3fb950);
+}
+
+.agent-starter-card__badge--available {
+  background: var(--chip-fill, #21262d);
+  color: var(--text-secondary, #8b949e);
+}
+
+.agent-starter-card__summary {
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+  color: var(--text-secondary, #8b949e);
+  margin: 0;
+  flex: 1;
+}

@@ -1,0 +1,368 @@
+@import "./boot.css";
+@import "./bundle.css";
+@import "./chunks.css";
+
+
+/* Root Theme Presets Matching Production Bundle */
+:root {
+  --sidebar-width: 232px;
+  color-scheme: dark;
+}
+
+.main-pane--stacked {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.mode-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  min-width: 0;
+  min-height: 0;
+  display: none;
+  flex-direction: column;
+}
+
+.mode-layer--visible {
+  z-index: 1;
+  display: flex;
+}
+
+/* Fullscreen mode for the right dock/browser sidebar */
+.app-browser-sidebar--fullscreen,
+.workspace-shell > .app-browser-sidebar--fullscreen,
+.workspace-shell--sidebar-hidden > .app-browser-sidebar--fullscreen {
+  position: absolute !important;
+  top: 0 !important;
+  right: var(--layout-gutter, 14px) !important;
+  bottom: var(--layout-gutter, 14px) !important;
+  left: var(--layout-gutter, 14px) !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  height: auto !important;
+  margin-left: 0 !important;
+  z-index: 10 !important;
+  background: var(--pane, #141414) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+.app-browser-sidebar__spacer {
+  flex: none;
+}
+
+.workspace-shell--sidebar-hidden > .app-browser-sidebar__spacer {
+  margin-left: var(--layout-gutter, 14px);
+}
+
+/* Authentic grip centered precisely in the layout-gutter between main pane and right dock */
+.app-browser-sidebar__grip {
+  position: absolute !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  left: calc(-1 * var(--layout-gutter, 14px) - 2px) !important;
+  width: calc(var(--layout-gutter, 14px) + 4px) !important;
+  z-index: 50 !important;
+  box-sizing: border-box !important;
+  cursor: col-resize !important;
+  outline: none !important;
+  outline-offset: -2px !important;
+  touch-action: none !important;
+  background: transparent !important;
+  border: 0 !important;
+  justify-content: center !important;
+  align-items: center !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex !important;
+}
+
+.app-browser-sidebar__grip::after {
+  content: "" !important;
+  width: 2px !important;
+  height: 100% !important;
+  transition: background-color var(--duration-ink, 0.12s) var(--ease-out, ease-out) !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  display: block !important;
+}
+
+.app-browser-sidebar__grip:hover::after,
+.app-browser-sidebar__grip:active::after,
+.app-browser-sidebar__grip[data-dragging="true"]::after,
+.app-browser-sidebar__grip:focus-visible::after {
+  background: var(--text-faint, #6e6e6e) !important;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: var(--background, #0a0a0a);
+  color: var(--text-primary, #fafafa);
+  font-family: var(--font-sans, "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif);
+}
+
+/* Custom scrollbars matching bundle density */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, rgba(255, 255, 255, 0.18));
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--control-stroke-hover, rgba(255, 255, 255, 0.32));
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ==========================================================================
+   Cursor-inspired Circular & Subtle Updater Component Styles
+   ========================================================================== */
+
+@keyframes update-dot-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.85;
+    box-shadow: 0 0 0 0 rgba(92, 143, 255, 0.6);
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 1;
+    box-shadow: 0 0 0 4px rgba(92, 143, 255, 0);
+  }
+}
+
+@keyframes update-dot-pulse-ready {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.9;
+    box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.7);
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 1;
+    box-shadow: 0 0 0 4px rgba(52, 199, 89, 0);
+  }
+}
+
+@keyframes update-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes update-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.update-circular-btn {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 50% !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex: none;
+  cursor: pointer;
+  background: rgba(92, 143, 255, 0.12);
+  color: var(--accent, #5c8fff);
+  border: 1px solid rgba(92, 143, 255, 0.28);
+  transition: all 0.16s cubic-bezier(0.2, 0, 0, 1);
+  outline: none;
+}
+
+.update-circular-btn:hover {
+  background: rgba(92, 143, 255, 0.22);
+  border-color: rgba(92, 143, 255, 0.45);
+  color: #ffffff;
+  transform: scale(1.05);
+  box-shadow: 0 0 10px rgba(92, 143, 255, 0.35);
+}
+
+.update-circular-btn:active {
+  transform: scale(0.95);
+}
+
+.update-circular-btn--ready {
+  background: rgba(52, 199, 89, 0.14);
+  color: #34c759;
+  border-color: rgba(52, 199, 89, 0.35);
+}
+
+.update-circular-btn--ready:hover {
+  background: rgba(52, 199, 89, 0.25);
+  border-color: rgba(52, 199, 89, 0.5);
+  color: #ffffff;
+  box-shadow: 0 0 10px rgba(52, 199, 89, 0.35);
+}
+
+.update-circular-btn__dot {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, #5c8fff);
+  box-shadow: 0 0 6px rgba(92, 143, 255, 0.9);
+  animation: update-dot-pulse 2s infinite ease-in-out;
+  pointer-events: none;
+}
+
+.update-circular-btn--ready .update-circular-btn__dot {
+  background: #34c759;
+  box-shadow: 0 0 6px rgba(52, 199, 89, 0.9);
+  animation: update-dot-pulse-ready 2s infinite ease-in-out;
+}
+
+.update-detail-card {
+  margin: 0 8px 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(22, 22, 26, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  animation: update-card-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-primary, #ffffff);
+  z-index: 10;
+}
+
+[data-theme="light"] .update-detail-card {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.05);
+}
+
+/* ==========================================================================
+   RightDock & UI Menu Authentic Styling (DevHub Parity)
+   ========================================================================== */
+
+.ui-menu.side-panel-add-menu {
+  min-width: 210px;
+  max-width: 260px;
+  width: max-content;
+  background: var(--menu-plate, #202020);
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-card, 10px);
+  box-shadow: var(--shadow-overlay, 0 16px 36px rgba(0, 0, 0, 0.55));
+  padding: 4px;
+}
+
+.ui-menu__row {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary, #9da2b4);
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-chip, 6px);
+  transition: background-color var(--duration-ink, 0.12s) var(--ease-ink, ease),
+              color var(--duration-ink, 0.12s) var(--ease-ink, ease);
+  user-select: none;
+  -webkit-user-select: none;
+  width: 100%;
+  box-sizing: border-box;
+  outline: none;
+}
+
+button.ui-menu__row {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  padding: 0 var(--space-2, 8px);
+}
+
+.ui-menu__row:hover:not([aria-disabled="true"]),
+.ui-menu__row[data-highlighted="true"] {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #ffffff);
+}
+
+.ui-menu__row:hover:not([aria-disabled="true"]) .ui-menu__icon,
+.ui-menu__row[data-highlighted="true"] .ui-menu__icon {
+  color: var(--text-primary, #ffffff);
+}
+
+.ui-menu__row:hover:not([aria-disabled="true"]) .ui-menu__shortcut,
+.ui-menu__row[data-highlighted="true"] .ui-menu__shortcut {
+  color: var(--text-secondary, #9da2b4);
+}
+
+.ui-menu__row .ui-menu__label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  text-align: left;
+  min-width: 0;
+  flex: 1;
+}
+
+.ui-menu__row .ui-menu__row-title {
+  text-align: left;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 500;
+  color: inherit;
+}
+
+.ui-menu__row .ui-menu__shortcut {
+  font-size: 11px;
+  color: var(--text-faint, #6e6e6e);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  margin-left: auto;
+  padding-left: 10px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.ui-menu__row .ui-menu__icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: inherit;
+}
+
+

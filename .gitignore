@@ -1,0 +1,44 @@
+# Dependencies & Build Outputs
+node_modules/
+src-tauri/target/
+dist/
+feed/
+releases/
+
+# Binaries & Installers
+*.exe
+*.msi
+*.AppImage
+*.dmg
+
+# Databases & Logs
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.cargo/
+src-tauri/.cargo/
+
+# Environment & Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Local Agent & Indexing Artifacts (DO NOT COMMIT)
+.codegraph/
+.atl/
+scratch/
+seguimiento/
+skills/
+contracts/
+frontend/
+*-clipboard/

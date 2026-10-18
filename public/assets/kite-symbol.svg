@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="frame-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+    <linearGradient id="chev-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="50%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+    <linearGradient id="inner-dark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#111638"/>
+      <stop offset="100%" stop-color="#080B1E"/>
+    </linearGradient>
+    <filter id="glow-symbol" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#6366F1" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <!-- Full-bleed Terminal Console Window without outer squircle box -->
+  <rect x="40" y="40" width="944" height="944" rx="220" fill="url(#inner-dark)" stroke="url(#frame-grad)" stroke-width="64" filter="url(#glow-symbol)"/>
+  
+  <!-- 3 Window Header Dots (Proportional and crisp) -->
+  <circle cx="190" cy="180" r="32" fill="#6366F1"/>
+  <circle cx="280" cy="180" r="32" fill="#818CF8" opacity="0.75"/>
+  <circle cx="370" cy="180" r="32" fill="#A5B4FC" opacity="0.45"/>
+  
+  <!-- Monogram K_ : Bold, centered, filling the entire viewport -->
+  <!-- Vertical Stem -->
+  <line x1="260" y1="320" x2="260" y2="800" stroke="#FFFFFF" stroke-width="96" stroke-linecap="round"/>
+  
+  <!-- Angled Chevron forming K -->
+  <path d="M 610 330 L 380 560 L 610 790" fill="none" stroke="url(#chev-grad)" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Terminal Underscore Cursor '_' -->
+  <rect x="680" y="704" width="190" height="96" rx="48" fill="#38BDF8"/>
+</svg>

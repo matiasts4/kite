@@ -1,0 +1,40 @@
+[package]
+name = "kite-code"
+version = "0.1.14"
+description = "Kite Code Desktop Application"
+authors = ["Kite Code Authors"]
+edition = "2021"
+
+[dependencies]
+tauri = { version = "2", features = ["unstable"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v5"] }
+tokio = { version = "1", features = ["full"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+portable-pty = "0.9.0"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.dev]
+debug = 0
+incremental = true
+
+[profile.release]
+opt-level = 2
+codegen-units = 16
+lto = false
+incremental = true
+strip = "symbols"
+

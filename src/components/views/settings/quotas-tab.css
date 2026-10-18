@@ -1,0 +1,320 @@
+/* Quotas & accounts settings tab — built only on the app's theme tokens so it
+   follows every palette (Kite, Tokyo Night, Nord, light themes…). */
+
+.qt-lead {
+  margin: calc(var(--space-1) * -1) 0 var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+
+.qt-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.qt-group-head__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* ── Buttons / inputs / chips ───────────────────────────── */
+.qt-button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--block-stroke);
+  border-radius: var(--radius-chip);
+  background: var(--chip-fill);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.qt-button:hover:not(:disabled) { background: var(--hover-fill); }
+.qt-button:disabled { opacity: 0.55; cursor: default; }
+.qt-button--primary {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill-edge, transparent);
+  color: var(--accent-on-fill, #fff);
+}
+.qt-button--primary:hover:not(:disabled) { background: var(--accent-fill-hover, var(--accent-fill)); }
+.qt-button--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.qt-button--ghost:hover:not(:disabled) { color: var(--text-primary); }
+
+.qt-input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--block-stroke);
+  border-radius: var(--radius-chip);
+  background: var(--composer);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: 0;
+  resize: vertical;
+}
+.qt-input:focus-visible { border-color: var(--focus-ring); }
+
+.qt-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--chip-fill);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: var(--weight-semibold, 600);
+  white-space: nowrap;
+}
+.qt-chip[data-tone='ok'] { background: color-mix(in srgb, var(--status-running) 18%, transparent); color: var(--status-running); }
+.qt-chip[data-tone='warn'] { background: var(--warning-tint); color: var(--warning-text); }
+
+.qt-hint { color: var(--text-secondary); font-size: 11.5px; }
+
+.qt-banner {
+  padding: 8px 12px;
+  border-radius: var(--radius-row);
+  font-size: 12px;
+}
+.qt-banner[data-tone='error'] { background: var(--danger-fill); color: var(--danger-ink); }
+.qt-banner[data-tone='ok'] { background: color-mix(in srgb, var(--status-running) 16%, transparent); color: var(--status-running); }
+
+/* ── Segmented control ──────────────────────────────────── */
+.qt-segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-card);
+  background: var(--block-fill);
+  border: 1px solid var(--block-stroke);
+  align-self: flex-start;
+}
+.qt-segment__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-row);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.qt-segment__item:hover { color: var(--text-primary); }
+.qt-segment__item[data-active] {
+  background: var(--selected-fill);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold, 600);
+}
+.qt-segment--compact .qt-segment__item { height: 24px; padding: 0 10px; font-size: 11.5px; }
+
+/* ── Meter ──────────────────────────────────────────────── */
+.qt-meter {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--chip-fill);
+  overflow: hidden;
+}
+.qt-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--status-running);
+  transition: width 300ms ease;
+}
+.qt-meter[data-tone='warn'] > span { background: var(--warning-text); }
+.qt-meter[data-tone='low'] > span { background: var(--status-failed); }
+
+[data-tone='ok'].qt-account__pct, [data-tone='ok'].qt-provider__pct { color: var(--status-running); }
+[data-tone='warn'].qt-account__pct, [data-tone='warn'].qt-provider__pct { color: var(--warning-text); }
+[data-tone='low'].qt-account__pct, [data-tone='low'].qt-provider__pct { color: var(--status-failed); }
+
+/* ── Account vault ──────────────────────────────────────── */
+.qt-vault { display: flex; flex-direction: column; gap: var(--space-3); }
+
+.qt-accounts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
+}
+
+.qt-account {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--block-stroke);
+  border-radius: var(--radius-card);
+  background: var(--block-fill);
+  min-width: 0;
+}
+.qt-account[data-active] {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--block-fill));
+}
+.qt-account__head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.qt-account__avatar {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent-fill);
+  color: var(--accent-on-fill, #fff);
+  font-weight: var(--weight-semibold, 600);
+  font-size: 14px;
+}
+.qt-account__id { min-width: 0; flex: 1; }
+.qt-account__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: var(--weight-semibold, 600);
+}
+.qt-account__name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qt-account__meta {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qt-account__plan {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: var(--weight-semibold, 600);
+}
+.qt-account__quota { display: flex; flex-direction: column; gap: 6px; }
+.qt-account__quota-row { display: flex; align-items: baseline; gap: 6px; }
+.qt-account__pct { font-size: 22px; font-weight: var(--weight-semibold, 600); font-variant-numeric: tabular-nums; }
+.qt-account__hint { color: var(--text-secondary); font-size: 11.5px; }
+.qt-account__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--separator);
+}
+
+.qt-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  padding: var(--space-5) var(--space-4);
+  border: 1px dashed var(--block-stroke);
+  border-radius: var(--radius-card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+.qt-empty strong { color: var(--text-primary); font-size: 13px; }
+
+.qt-save {
+  display: grid;
+  grid-template-columns: 1fr minmax(200px, 280px) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--block-stroke);
+  border-radius: var(--radius-card);
+  background: var(--block-fill);
+}
+.qt-save__copy h4 { margin: 0; color: var(--text-primary); font-size: 13px; font-weight: var(--weight-semibold, 600); }
+.qt-save__copy p { margin: 3px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+@media (max-width: 760px) { .qt-save { grid-template-columns: 1fr; } }
+
+.qt-howto {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-card);
+  background: var(--accent-tint);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.qt-howto summary { cursor: pointer; font-weight: var(--weight-semibold, 600); }
+.qt-howto ol { margin: var(--space-2) 0 0; padding-left: 18px; }
+.qt-howto p { margin: var(--space-2) 0 0; color: var(--text-secondary); }
+
+/* ── Providers list ─────────────────────────────────────── */
+.qt-providers { overflow: hidden; }
+.qt-provider + .qt-provider { border-top: 1px solid var(--separator); }
+.qt-provider__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) 0 0;
+}
+.qt-provider__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 52px;
+  padding: 0 0 0 var(--space-4);
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.qt-provider__main:hover { background: var(--hover-fill); }
+.qt-provider__name { font-size: 13px; font-weight: var(--weight-medium, 500); }
+.qt-provider__pct { margin-left: auto; font-size: 12.5px; font-weight: var(--weight-semibold, 600); font-variant-numeric: tabular-nums; }
+.qt-provider__chevron { margin-left: auto; color: var(--text-secondary); transition: transform 150ms ease; }
+.qt-provider__pct + .qt-provider__chevron { margin-left: var(--space-2); }
+.qt-provider[data-open] .qt-provider__chevron { transform: rotate(180deg); }
+
+.qt-provider__detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-4) + 30px);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.qt-provider__detail h4 { margin: 0; color: var(--text-primary); font-size: 13px; }
+.qt-provider__detail p { margin: 0; }
+.qt-provider__detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--space-3); margin: 0; }
+.qt-provider__detail dt { color: var(--text-secondary); }
+.qt-provider__detail dd { margin: 0; color: var(--text-primary); min-width: 0; word-break: break-word; }
+.qt-provider__detail code, .qt-cmd code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--chip-fill);
+  font-size: 11.5px;
+}
+.qt-cmd { display: flex; align-items: center; gap: var(--space-2); }
+.qt-form { display: flex; flex-direction: column; gap: var(--space-2); }
+.qt-form__actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }

@@ -1,0 +1,1193 @@
+/* DiffsView — Clean, Modern, Multi-File Git Diff Inspector */
+
+.diffs-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--pane, #0f141c);
+  color: var(--text-primary, #e2e8f0);
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* --------------------------------------------------------------------------
+   Top Zone 1: Commit Bar
+   -------------------------------------------------------------------------- */
+.diffs-commit-bar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--block-fill, rgba(255, 255, 255, 0.02));
+  border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
+}
+
+.diffs-commit-input-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.diffs-commit-textarea {
+  flex: 1;
+  min-height: 38px;
+  max-height: 120px;
+  padding: 8px 12px;
+  background: var(--pane, #0c1017);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-row, 6px);
+  color: var(--text-primary, #f1f5f9);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: none;
+  outline: none;
+  transition: border-color var(--duration-ink, 150ms) ease;
+}
+
+.diffs-commit-textarea:focus {
+  border-color: var(--accent, #6366f1);
+  box-shadow: 0 0 0 1px var(--accent, #6366f1);
+}
+
+.diffs-commit-textarea::placeholder {
+  color: var(--text-secondary, #64748b);
+}
+
+.diffs-commit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 14px;
+  background: var(--accent, #6366f1);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-row, 6px);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+
+.diffs-commit-btn:hover:not(:disabled) {
+  opacity: 0.92;
+}
+
+.diffs-commit-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.diffs-commit-subbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary, #94a3b8);
+}
+
+.diffs-staging-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diffs-text-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 150ms, background 150ms;
+}
+
+.diffs-text-btn:hover:not(:disabled) {
+  color: var(--text-primary, #ffffff);
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+}
+
+.diffs-text-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   Top Zone 2: Toolbar
+   -------------------------------------------------------------------------- */
+.diffs-toolbar {
+  flex: none;
+  height: 38px;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  background: var(--pane, #0f141c);
+  border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
+  user-select: none;
+  gap: 8px;
+}
+
+.diffs-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.diffs-filter-pill {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border: none;
+  border-radius: var(--radius-chip, 12px);
+  background: transparent;
+  color: var(--text-secondary, #94a3b8);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 120ms ease;
+}
+
+.diffs-filter-pill:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f1f5f9);
+}
+
+.diffs-filter-pill.active {
+  background: var(--chip-fill, rgba(255, 255, 255, 0.12));
+  color: var(--text-primary, #ffffff);
+  font-weight: 600;
+}
+
+.diffs-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diffs-stat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: var(--radius-chip, 10px);
+  background: var(--block-fill, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+}
+
+.diffs-stat-add {
+  color: var(--status-running, #10b981);
+  font-weight: 600;
+}
+
+.diffs-stat-del {
+  color: var(--status-failed, #f43f5e);
+  font-weight: 600;
+}
+
+.diffs-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-row, 5px);
+  color: var(--text-secondary, #94a3b8);
+  cursor: pointer;
+  transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.diffs-tool-btn:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f1f5f9);
+}
+
+.diffs-tool-btn:active {
+  transform: scale(0.92);
+}
+
+.diffs-tool-btn.active {
+  background: var(--selected-fill, rgba(99, 102, 241, 0.18));
+  color: var(--accent, #818cf8);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.diffs-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--separator, rgba(255, 255, 255, 0.1));
+  margin: 0 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Body: Flex Container with Tree & Stream
+   -------------------------------------------------------------------------- */
+.diffs-body {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* File Tree Drawer */
+.diffs-file-tree {
+  width: 220px;
+  min-width: 160px;
+  max-width: 320px;
+  border-right: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
+  background: var(--pane, #0c1017);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.diffs-file-tree-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.06));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diffs-tree-search {
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  border-radius: 4px;
+  color: var(--text-primary, #e2e8f0);
+  outline: none;
+}
+
+.diffs-tree-search:focus {
+  border-color: var(--accent, #6366f1);
+}
+
+.diffs-tree-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  list-style: none;
+  margin: 0;
+}
+
+.diffs-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary, #94a3b8);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition: all 120ms ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diffs-tree-item:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f1f5f9);
+}
+
+.diffs-tree-item.selected {
+  background: var(--selected-fill, rgba(99, 102, 241, 0.15));
+  color: var(--accent, #818cf8);
+}
+
+/* Focused Single-File Mode (Master-Detail) */
+.diffs-focused-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--pane, #0f141c);
+}
+
+.diffs-focused-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  animation: diffFileFade 140ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: opacity, transform;
+}
+
+@keyframes diffFileFade {
+  0% {
+    opacity: 0.35;
+    transform: translateY(2px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Multi-File Stream */
+.diffs-stream {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 12px;
+  gap: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Diff File Card
+   -------------------------------------------------------------------------- */
+.diff-file-card {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-height: 36px;
+  background: var(--block-fill, rgba(255, 255, 255, 0.02));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-card, 8px);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.diff-file-card:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* Discrete, GPU-accelerated card expand animation */
+.diff-file-card-content {
+  animation: diffCardExpand 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: top center;
+  will-change: opacity, transform;
+}
+
+@keyframes diffCardExpand {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@starting-style {
+  .diff-file-card-content {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* Sticky Card Header */
+.diff-file-card-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 34px;
+  padding: 0 10px;
+  background: var(--pane, #121824);
+  border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
+  user-select: none;
+  gap: 8px;
+}
+
+.diff-file-card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  flex: 1;
+}
+
+.diff-chevron-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #94a3b8);
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), color 120ms ease;
+  will-change: transform;
+}
+
+.diff-chevron-btn:hover {
+  color: var(--text-primary, #ffffff);
+}
+
+.diff-chevron-btn.collapsed {
+  transform: rotate(-90deg);
+}
+
+.diff-status-pill {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-chip, 3px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.diff-status-pill.modified {
+  background: rgba(234, 179, 8, 0.16);
+  color: #eab308;
+}
+
+.diff-status-pill.added {
+  background: rgba(16, 185, 129, 0.16);
+  color: #10b981;
+}
+
+.diff-status-pill.deleted {
+  background: rgba(244, 63, 94, 0.16);
+  color: #f43f5e;
+}
+
+.diff-status-pill.renamed {
+  background: rgba(139, 92, 246, 0.16);
+  color: #a78bfa;
+}
+
+.diff-status-pill.untracked {
+  background: rgba(148, 163, 184, 0.16);
+  color: #94a3b8;
+}
+
+.diff-file-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.diff-file-dir {
+  color: var(--text-secondary, #64748b);
+  direction: rtl;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.diff-file-name {
+  color: var(--text-primary, #f1f5f9);
+  font-weight: 600;
+  transition: color 120ms ease;
+}
+
+.diff-file-card-title-group:hover .diff-file-name {
+  color: var(--accent, #a5b4fc);
+}
+
+.diff-file-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.diff-card-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #94a3b8);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.diff-card-btn:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #ffffff);
+}
+
+.diff-card-btn:active {
+  transform: scale(0.92);
+}
+
+.diff-card-btn.danger:hover {
+  background: rgba(244, 63, 94, 0.15);
+  color: #f43f5e;
+}
+
+/* --------------------------------------------------------------------------
+   Code Viewer: Unified & Split
+   -------------------------------------------------------------------------- */
+.diff-code-container {
+  width: 100%;
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 19px;
+  background: var(--code-bg, #0b0f17);
+  overflow-x: auto;
+}
+
+.diff-code-container.wrap-enabled {
+  overflow-x: hidden;
+}
+
+.diff-table {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: max-content;
+}
+
+.diff-code-container.wrap-enabled .diff-table {
+  min-width: 100%;
+  width: 100%;
+}
+
+/* Hunk Separator Row */
+.diff-hunk-row {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  user-select: none;
+}
+
+.diff-hunk-cell {
+  padding: 4px 10px;
+  color: var(--text-secondary, #64748b);
+  font-size: 10.5px;
+  font-weight: 500;
+  user-select: none;
+}
+
+.diff-hunk-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 4px;
+  color: #a5b4fc;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Unified Diff Row (Native Chromium Compositor Virtualization) */
+.diff-row {
+  display: flex;
+  align-items: stretch;
+  min-height: 20px;
+  line-height: 20px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 20px;
+  transition: background-color 60ms ease;
+}
+
+.diff-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.diff-row.added {
+  background: rgba(16, 185, 129, 0.10);
+}
+
+.diff-row.removed {
+  background: rgba(244, 63, 94, 0.10);
+}
+
+/* Gutter Columns */
+.diff-gutter-num {
+  flex: 0 0 38px;
+  width: 38px;
+  min-width: 38px;
+  max-width: 38px;
+  padding: 0 6px;
+  color: var(--text-secondary, #475569);
+  text-align: right;
+  vertical-align: top;
+  user-select: none;
+  font-size: 10.5px;
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.diff-row.added .diff-gutter-num {
+  color: rgba(52, 211, 153, 0.85);
+}
+
+.diff-row.removed .diff-gutter-num {
+  color: rgba(251, 113, 133, 0.85);
+}
+
+/* Marker Column (+ / -) with Left Accent Bar */
+.diff-gutter-marker {
+  flex: 0 0 18px;
+  width: 18px;
+  min-width: 18px;
+  max-width: 18px;
+  text-align: center;
+  vertical-align: top;
+  user-select: none;
+  font-weight: 600;
+  position: relative;
+}
+
+.diff-row.added .diff-gutter-marker {
+  color: var(--status-running, #10b981);
+}
+
+.diff-row.added .diff-gutter-marker::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background-color: var(--status-running, #10b981);
+}
+
+.diff-row.removed .diff-gutter-marker {
+  color: var(--status-failed, #f43f5e);
+}
+
+.diff-row.removed .diff-gutter-marker::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background-color: var(--status-failed, #f43f5e);
+}
+
+/* Code Content Column */
+.diff-code-cell {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 8px;
+  vertical-align: top;
+  white-space: pre;
+  word-break: normal;
+  overflow-x: visible;
+  color: var(--text-primary, #e2e8f0);
+}
+
+.wrap-enabled .diff-code-cell {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-row.added .diff-code-cell {
+  color: #ecfdf5;
+}
+
+.diff-row.removed .diff-code-cell {
+  color: #fff1f2;
+}
+
+/* Split View Layout */
+.diff-split-table {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.diff-split-col {
+  width: 50%;
+  vertical-align: top;
+}
+
+.diff-split-row {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-height: 20px;
+  line-height: 20px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 20px;
+}
+
+.diff-split-side {
+  flex: 1 1 50%;
+  width: 50%;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  min-height: 20px;
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.diff-split-side.empty {
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.diff-split-side.added {
+  background: rgba(16, 185, 129, 0.10);
+}
+
+.diff-split-side.removed {
+  background: rgba(244, 63, 94, 0.10);
+}
+
+/* Empty State & Clean State */
+.diffs-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 32px 16px;
+  text-align: center;
+  gap: 10px;
+  color: var(--text-secondary, #94a3b8);
+}
+
+.diffs-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #f1f5f9);
+}
+
+.diffs-empty-desc {
+  font-size: 12px;
+  max-width: 320px;
+  line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive Overflow / More Actions Menu
+   -------------------------------------------------------------------------- */
+.diffs-more-menu-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Authentic UI Menu Overflow Dropdown (DevHub & RightDock Parity) */
+.ui-menu.diffs-overflow-menu,
+.diffs-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 60;
+  min-width: 210px;
+  max-width: 260px;
+  width: max-content;
+  background: var(--menu-plate, #141720);
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-card, 10px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  animation: diffsPopIn 130ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: top right;
+  will-change: transform, opacity;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+@keyframes diffsPopIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.diffs-overflow-menu .ui-menu__header {
+  padding: 5px 8px 3px;
+  display: flex;
+  align-items: center;
+}
+
+.diffs-overflow-menu .ui-menu__title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary, #ffffff);
+  letter-spacing: 0.02em;
+}
+
+.diffs-overflow-menu .ui-menu__heading {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #64748b);
+  padding: 5px 8px 2px;
+}
+
+.diffs-overflow-menu .ui-menu__rule,
+.diffs-dropdown-sep {
+  height: 1px;
+  background: var(--separator, rgba(255, 255, 255, 0.08));
+  margin: 3px 2px;
+}
+
+.diffs-overflow-menu .ui-menu__row,
+.diffs-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--radius-chip, 5px);
+  background: transparent;
+  color: var(--text-secondary, #9da2b4);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 100ms ease, color 100ms ease;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.diffs-overflow-menu .ui-menu__row:hover:not([aria-disabled="true"]),
+.diffs-dropdown-item:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #ffffff);
+}
+
+.diffs-overflow-menu .ui-menu__row.active,
+.diffs-dropdown-item.active {
+  color: var(--accent, #818cf8);
+  font-weight: 600;
+}
+
+.diffs-overflow-menu .ui-menu__row.active .ui-menu__icon {
+  color: var(--accent, #818cf8);
+}
+
+.diffs-overflow-menu .ui-menu__icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: inherit;
+  opacity: 0.85;
+}
+
+.diffs-overflow-menu .ui-menu__label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.diffs-overflow-menu .ui-menu__row-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+}
+
+.diffs-overflow-menu .ui-menu__status {
+  margin-left: auto;
+  color: var(--accent, #818cf8);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Unified Focused Header & Quick Jump Menu
+   -------------------------------------------------------------------------- */
+.diff-focused-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 10px;
+  background: var(--pane, #121824);
+  border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
+  user-select: none;
+  gap: 8px;
+}
+
+.diff-focused-header-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.diff-stepper-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.diff-stepper-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  border-radius: 4px;
+  color: var(--text-secondary, #94a3b8);
+  cursor: pointer;
+  transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.diff-stepper-btn:hover:not(:disabled) {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #ffffff);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.diff-stepper-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.diff-stepper-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.diff-focused-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.diff-counter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  color: var(--text-secondary, #94a3b8);
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.diff-counter-pill:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #ffffff);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.diff-counter-pill:active {
+  transform: scale(0.95);
+}
+
+.diff-quick-jump-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.diff-quick-jump-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  width: 280px;
+  background: var(--menu-plate, #141720);
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-card, 10px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: diffsPopIn 130ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: top right;
+  will-change: transform, opacity;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.diff-quick-jump-search {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: #f1f5f9;
+  font-size: 11px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.diff-quick-jump-search:focus {
+  border-color: var(--accent, #818cf8);
+}
+
+.diff-quick-jump-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.diff-quick-jump-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 100ms ease;
+}
+
+.diff-quick-jump-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #ffffff;
+}
+
+.diff-quick-jump-item.active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  font-weight: 600;
+}
+
+.diff-quick-jump-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+}
+
+.diff-quick-jump-dir {
+  opacity: 0.55;
+  margin-right: 2px;
+}
+
+.diff-quick-jump-name {
+  color: var(--text-primary, #ffffff);
+}
+
+/* Fallback / testing selector helper */
+.diffs-stepper-file-selector {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   Spin Animation (for refresh icon and loading states)
+   -------------------------------------------------------------------------- */
+@keyframes iconSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.icon-spin {
+  animation: iconSpin 800ms linear infinite;
+  transform-origin: center;
+}
+
+/* --------------------------------------------------------------------------
+   Accessibility: Reduced Motion
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .diff-file-card-content,
+  .diffs-focused-content,
+  .diff-chevron-btn,
+  .diffs-dropdown-menu,
+  .diff-quick-jump-popover,
+  .diff-stepper-btn,
+  .diff-card-btn,
+  .diffs-tool-btn,
+  .diff-counter-pill,
+  .diffs-filter-pill,
+  .icon-spin {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+
+

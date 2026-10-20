@@ -1,18 +1,16 @@
-use crate::persist::{last_provider, next_revision, notifications, persist, threads, workspace_path};
+use crate::persist::{notifications, persist, threads, workspace_path};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::chat::threads::{
+    chat_item, load_thread, replace_thread, sanitize_chat_text, touch, upsert_item,
+};
+use crate::chat::utils::{chat_log, clip_argv, now_ms, resolve_bin};
 
 pub struct TurnRun {
     pub revision: String,
@@ -20,8 +18,8 @@ pub struct TurnRun {
     pub next_sequence: u64,
     pub assistant_id: String,
     pub assistant_text: String,
-    pub child: Option<Arc<Mutex<std::process::Child>>>,
-    pub stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
+    pub child: Option<Arc<Mutex<crate::hidden_exec::HiddenChild>>>,
+    pub stdin: Option<Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
     pub closing: bool,
     pub finished: bool,
     pub started_at_ms: i64,
@@ -48,18 +46,7 @@ pub fn live_cv() -> &'static Condvar {
     CELL.get_or_init(Condvar::new)
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-pub(crate) fn chat_log(msg: &str) {
-    eprintln!("[Kite:Chat] {}", msg);
-}
-
-fn prune_stale_runs(live: &mut LiveTurns) {
+pub fn prune_stale_runs(live: &mut LiveTurns) {
     let now = now_ms();
     let stale_keys: Vec<String> = live
         .runs
@@ -71,632 +58,6 @@ fn prune_stale_runs(live: &mut LiveTurns) {
     for k in stale_keys {
         live.runs.remove(&k);
         live.by_thread.retain(|_, rid| rid != &k);
-    }
-}
-
-struct CachedProviderModels {
-    models: Vec<Value>,
-    cached_at: Instant,
-}
-
-static MODEL_CACHE: std::sync::OnceLock<Mutex<HashMap<String, CachedProviderModels>>> = std::sync::OnceLock::new();
-
-fn model_cache() -> &'static Mutex<HashMap<String, CachedProviderModels>> {
-    MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-const MODEL_CACHE_TTL: Duration = Duration::from_secs(900); // 15 minutes TTL
-
-fn user_home_dir() -> PathBuf {
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        PathBuf::from(profile)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-    } else {
-        PathBuf::from(".")
-    }
-}
-
-pub(crate) fn provider_models(provider: &str, force_refresh: bool) -> Value {
-    let canon = match provider {
-        "agy" => "antigravity",
-        "claude-code" => "claude",
-        "open-code" => "opencode",
-        other => other,
-    };
-
-    // 1. Check cache first unless force_refresh is requested
-    if !force_refresh {
-        if let Ok(cache) = model_cache().lock() {
-            if let Some(entry) = cache.get(canon) {
-                if entry.cached_at.elapsed() < MODEL_CACHE_TTL && !entry.models.is_empty() {
-                    return json!({
-                        "provider": canon,
-                        "models": entry.models,
-                        "cached": true,
-                    });
-                }
-            }
-        }
-    }
-
-    // 2. Fetch fresh dynamic models per provider
-    let fresh_models = match canon {
-        "antigravity" => fetch_antigravity_models_dynamic(),
-        "codex" => fetch_codex_models_dynamic(),
-        "cursor" => vec![
-            model_row("auto", "Auto", "Cursor picks a model", false),
-            model_row("composer", "Composer", "Cursor coding model", false),
-        ],
-        "grok" => vec![
-            model_row("grok-build", "Grok Build", "xAI Grok Build", true),
-            model_row("grok-code", "Grok Code", "Fast coding and terminal execution", true),
-        ],
-        "opencode" => vec![
-            model_row("auto", "Auto", "OpenCode default model", false),
-        ],
-        "claude" => vec![
-            model_row("sonnet", "Claude Sonnet 5", "Balanced daily driver", true),
-            model_row("opus", "Claude Opus (latest)", "Latest Opus release", true),
-            model_row("claude-opus-5-5", "Claude Opus 5.5", "Long-running agentic work", true),
-            model_row("fable", "Claude Fable 5.1", "Hardest problems", true),
-            model_row("haiku", "Claude Haiku 4.5", "Fastest replies", false),
-        ],
-        "gemini" => vec![
-            model_row("gemini-4-argon", "Gemini 4 Argon", "Frontier reasoning & agentic coding", true),
-            model_row("gemini-3.8-flash", "Gemini 3.8 Flash", "Ultra-fast agentic execution", true),
-        ],
-        _ => Vec::new(),
-    };
-
-    // 3. Cache the results if non-empty
-    if !fresh_models.is_empty() {
-        if let Ok(mut cache) = model_cache().lock() {
-            cache.insert(
-                canon.to_string(),
-                CachedProviderModels {
-                    models: fresh_models.clone(),
-                    cached_at: Instant::now(),
-                },
-            );
-        }
-    }
-
-    json!({
-        "provider": canon,
-        "models": fresh_models,
-        "cached": false,
-    })
-}
-
-fn fetch_antigravity_models_dynamic() -> Vec<Value> {
-    if let Some(live) = query_agy_models_cli() {
-        if !live.is_empty() {
-            return live;
-        }
-    }
-    antigravity_fallback_models()
-}
-
-fn query_agy_models_cli() -> Option<Vec<Value>> {
-    let program = resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"])?;
-    // `agy models` also boots the CLI's MCP servers. Run it inside a hidden
-    // console so those console children can never surface as terminal windows
-    // (see `crate::hidden_exec`).
-    let out = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(8)).ok()?;
-    if !out.success() {
-        return None;
-    }
-    let raw = out.stdout_lossy();
-
-    let mut parsed: Vec<Value> = Vec::new();
-    let mut seen_base_ids = std::collections::HashSet::new();
-
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("Fetching")
-            || trimmed.starts_with("Available")
-            || trimmed.starts_with('-')
-        {
-            continue;
-        }
-
-        let (raw_id, raw_name) = if let Some(idx) = trimmed.find('\t') {
-            (trimmed[..idx].trim(), trimmed[idx + 1..].trim())
-        } else if let Some(idx) = trimmed.find("  ") {
-            (trimmed[..idx].trim(), trimmed[idx..].trim())
-        } else {
-            (trimmed, trimmed)
-        };
-
-        if raw_id.is_empty() {
-            continue;
-        }
-
-        // Clean effort suffixes (-low, -medium, -high, -xhigh, -max) to get clean base model ID
-        let (base_id, has_effort_suffix) = if let Some(stripped) = raw_id.strip_suffix("-high") {
-            (stripped, true)
-        } else if let Some(stripped) = raw_id.strip_suffix("-medium") {
-            (stripped, true)
-        } else if let Some(stripped) = raw_id.strip_suffix("-low") {
-            (stripped, true)
-        } else if let Some(stripped) = raw_id.strip_suffix("-xhigh") {
-            (stripped, true)
-        } else if let Some(stripped) = raw_id.strip_suffix("-max") {
-            (stripped, true)
-        } else {
-            (raw_id, false)
-        };
-
-        if !seen_base_ids.insert(base_id.to_string()) {
-            continue;
-        }
-
-        // Clean display name by stripping effort parenthesis (e.g. "Gemini 3.8 Flash (Medium)" -> "Gemini 3.8 Flash")
-        let clean_name = raw_name
-            .replace(" (High)", "")
-            .replace(" (Medium)", "")
-            .replace(" (Low)", "")
-            .replace(" (Adaptive)", "");
-
-        let id_lower = base_id.to_lowercase();
-        let description = if id_lower.contains("gemini-4") || id_lower.contains("argon") {
-            "Frontier reasoning & agentic coding (Google DeepMind)"
-        } else if id_lower.contains("flash") {
-            "Ultra-fast, lightweight agentic execution (Google DeepMind)"
-        } else if id_lower.contains("opus") {
-            "Frontier reasoning for long-horizon agentic work (Anthropic)"
-        } else if id_lower.contains("sonnet") {
-            "Balanced high-speed coding & design (Anthropic)"
-        } else if id_lower.contains("120b") {
-            "Open-weights 120B parameter model hosted on Antigravity"
-        } else {
-            "Antigravity live model"
-        };
-
-        let supports_effort = has_effort_suffix
-            || id_lower.contains("gemini")
-            || id_lower.contains("claude")
-            || id_lower.contains("argon")
-            || id_lower.contains("flash");
-
-        parsed.push(model_row(base_id, &clean_name, description, supports_effort));
-    }
-
-    if parsed.is_empty() {
-        return None;
-    }
-
-    Some(parsed)
-}
-
-fn antigravity_fallback_models() -> Vec<Value> {
-    vec![
-        model_row("gemini-4-argon", "Gemini 4 Argon", "Frontier reasoning & agentic coding (Google DeepMind)", true),
-        model_row("gemini-3.8-flash", "Gemini 3.8 Flash", "Ultra-fast, lightweight agentic execution (Google DeepMind)", true),
-        model_row("claude-opus-5-5", "Claude Opus 5.5", "Frontier reasoning on Antigravity (Anthropic)", true),
-        model_row("claude-sonnet-5-5", "Claude Sonnet 5.5", "Balanced high-speed coding on Antigravity (Anthropic)", true),
-        model_row("gpt-oss-120b", "GPT-OSS 120B", "Open-weights 120B model hosted on Antigravity", false),
-    ]
-}
-
-fn fetch_codex_models_dynamic() -> Vec<Value> {
-    let mut models = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    let home = user_home_dir();
-    let config_path = home.join(".codex").join("config.toml");
-    if let Ok(contents) = std::fs::read_to_string(config_path) {
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("model") && trimmed.contains('=') {
-                if let Some(idx) = trimmed.find('=') {
-                    let raw_val = trimmed[idx + 1..].trim().trim_matches('"').trim_matches('\'');
-                    if !raw_val.is_empty() && seen.insert(raw_val.to_string()) {
-                        let label = format!("{} (Configured Default)", raw_val);
-                        models.push(model_row(raw_val, &label, "Configured in ~/.codex/config.toml", true));
-                    }
-                }
-            }
-        }
-    }
-
-    let default_codex = [
-        ("gpt-6.1-sol", "GPT-6.1 Sol", "Latest frontier reasoning and coding agent", true),
-        ("gpt-6-astra", "GPT-6 Astra", "Most capable for complex agentic workflows", true),
-        ("gpt-6-sol", "GPT-6 Sol", "Complex coding and agentic work", true),
-        ("gpt-6-luna", "GPT-6 Luna", "Fast, efficient work", false),
-        ("gpt-5.6-sol", "GPT-5.6 Sol", "Frontier agentic work", true),
-        ("gpt-5.6-terra", "GPT-5.6 Terra", "Balanced agentic work", true),
-        ("gpt-5.6-luna", "GPT-5.6 Luna", "Fast, efficient work", false),
-    ];
-
-    for (id, name, desc, effort) in default_codex {
-        if seen.insert(id.to_string()) {
-            models.push(model_row(id, name, desc, effort));
-        }
-    }
-
-    models
-}
-
-fn model_row(id: &str, name: &str, description: &str, supports_effort: bool) -> Value {
-    json!({
-        "id": id,
-        "name": name,
-        "description": description,
-        "supportsEffort": supports_effort,
-    })
-}
-
-fn provider_ok(provider: &str) -> bool {
-    matches!(provider, "antigravity" | "agy" | "claude" | "codex" | "cursor" | "grok" | "opencode" | "gemini")
-}
-
-fn mode_ok(provider: &str, mode: &str) -> bool {
-    match provider {
-        "codex" => matches!(mode, "acceptEdits" | "readOnly"),
-        "claude" | "cursor" | "grok" | "opencode" | "antigravity" | "agy" | "gemini" => {
-            matches!(mode, "acceptEdits" | "fullAccess" | "readOnly")
-        }
-        _ => false,
-    }
-}
-
-fn default_mode(provider: &str) -> &'static str {
-    if provider == "codex" {
-        "acceptEdits"
-    } else {
-        "fullAccess"
-    }
-}
-
-fn blank_thread(id: &str, profile_id: Option<&str>, title: &str, provider: &str, workspace_id: Option<&str>) -> Value {
-    let now = now_ms();
-    let provider = if provider_ok(provider) { provider } else { "antigravity" };
-    json!({
-        "schemaVersion": 1,
-        "revision": next_revision(),
-        "id": id,
-        "profileId": profile_id,
-        "provider": provider,
-        "providerSessionId": Value::Null,
-        "title": clip_title(title),
-        "items": [],
-        "plans": [],
-        "mode": default_mode(provider),
-        "plan": false,
-        "model": Value::Null,
-        "providerOptions": [],
-        "status": "idle",
-        "usage": { "inputTokens": 0, "outputTokens": 0, "costUsd": 0.0 },
-        "workspaceId": workspace_id,
-        "pinned": false,
-        "pendingApproval": Value::Null,
-        "createdAtUnixMs": now,
-        "updatedAtUnixMs": now
-    })
-}
-
-fn clip_title(title: &str) -> String {
-    let trimmed = title.trim();
-    let text = if trimmed.is_empty() { "Chat" } else { trimmed };
-    text.chars().take(120).collect()
-}
-
-pub(crate) fn touch(thread: &mut Value) {
-    if let Some(object) = thread.as_object_mut() {
-        object.insert("revision".into(), Value::String(next_revision()));
-        object.insert("updatedAtUnixMs".into(), json!(now_ms()));
-    }
-}
-
-pub fn create_thread(profile_id: Option<&str>, title: &str, provider: &str, workspace_id: Option<&str>) -> Value {
-    let id = Uuid::new_v4().to_string();
-    let thread = blank_thread(&id, profile_id, title, provider, workspace_id);
-    if provider_ok(provider) {
-        *last_provider().lock().unwrap() = provider.to_string();
-    }
-    threads().lock().unwrap().push(thread.clone());
-    persist();
-    thread
-}
-
-pub fn load_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Value {
-    let mut items = threads().lock().unwrap();
-    if let Some(existing) = items.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-        return existing.clone();
-    }
-    let default_provider = if let Some(pid) = profile_id {
-        let ag_list = crate::persist::agents().lock().unwrap();
-        ag_list.iter().find(|a| a.id == pid).map(|a| match a.engine.as_str() {
-            "claude" | "claude-code" => "claude",
-            "codex" => "codex",
-            "cursor" => "cursor",
-            "gemini" => "gemini",
-            "grok" => "grok",
-            "opencode" | "open-code" => "opencode",
-            _ => "antigravity",
-        }).unwrap_or("antigravity")
-    } else {
-        "antigravity"
-    };
-    let thread = blank_thread(thread_id, profile_id, title, default_provider, None);
-    items.push(thread.clone());
-    drop(items);
-    persist();
-    thread
-}
-
-pub fn rename_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Value {
-    let mut items = threads().lock().unwrap();
-    if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-        thread["title"] = json!(clip_title(title));
-        if let Some(profile_id) = profile_id {
-            thread["profileId"] = json!(profile_id);
-        }
-        touch(thread);
-        let cloned = thread.clone();
-        drop(items);
-        persist();
-        return cloned;
-    }
-    drop(items);
-    load_thread(thread_id, profile_id, title)
-}
-
-pub fn set_pinned(thread_id: &str, pinned: bool) -> Value {
-    let mut items = threads().lock().unwrap();
-    if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-        thread["pinned"] = json!(pinned);
-        touch(thread);
-        let cloned = thread.clone();
-        drop(items);
-        persist();
-        return cloned;
-    }
-    drop(items);
-    load_thread(thread_id, None, "Chat")
-}
-
-pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
-    let mut items = threads().lock().unwrap();
-    if items.iter().all(|t| t.get("id").and_then(|v| v.as_str()) != Some(thread_id)) {
-        drop(items);
-        let created = blank_thread(thread_id, None, "Chat", "antigravity", None);
-        threads().lock().unwrap().push(created);
-        items = threads().lock().unwrap();
-    }
-    if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-        let current_provider = thread.get("provider").and_then(|v| v.as_str()).unwrap_or("antigravity").to_string();
-        let provider = patch.get("provider").and_then(|v| v.as_str()).filter(|p| provider_ok(p)).unwrap_or(&current_provider).to_string();
-        let requested_mode = patch.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-        let mode = if mode_ok(&provider, requested_mode) {
-            requested_mode.to_string()
-        } else if mode_ok(&provider, thread.get("mode").and_then(|v| v.as_str()).unwrap_or("")) {
-            thread.get("mode").and_then(|v| v.as_str()).unwrap_or(default_mode(&provider)).to_string()
-        } else {
-            default_mode(&provider).to_string()
-        };
-        if let Some(plan) = patch.get("plan").and_then(|v| v.as_bool()) {
-            thread["plan"] = json!(plan);
-        }
-        if patch.get("model").is_some() {
-            thread["model"] = normalize_model(patch.get("model"));
-        }
-        if let Some(options) = patch.get("providerOptions").and_then(|v| v.as_array()) {
-            thread["providerOptions"] = Value::Array(sanitize_options(options));
-        }
-        if provider != current_provider {
-            thread["providerSessionId"] = Value::Null;
-        }
-        thread["provider"] = json!(provider);
-        thread["mode"] = json!(mode);
-        *last_provider().lock().unwrap() = thread["provider"].as_str().unwrap_or("antigravity").to_string();
-        touch(thread);
-        let cloned = thread.clone();
-        drop(items);
-        persist();
-        return cloned;
-    }
-    drop(items);
-    load_thread(thread_id, None, "Chat")
-}
-
-pub fn set_agent_model(agent_id: &str, thread_id: &str, provider: &str, model: Option<&Value>) -> Value {
-    let provider = if provider_ok(provider) { provider } else { "antigravity" };
-    let patch = json!({
-        "provider": provider,
-        "model": model.cloned().unwrap_or(Value::Null)
-    });
-    let mut thread = configure_thread(thread_id, &patch);
-    thread["profileId"] = json!(agent_id);
-    replace_thread(&thread);
-    thread
-}
-
-pub fn set_agent_plan(agent_id: &str, thread_id: &str, plan: bool) -> Value {
-    let mut thread = load_thread(thread_id, Some(agent_id), "Agent Chat");
-    thread["profileId"] = json!(agent_id);
-    thread["plan"] = json!(plan);
-    touch(&mut thread);
-    replace_thread(&thread);
-    thread
-}
-
-pub(crate) fn replace_thread(thread: &Value) {
-    let id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let mut items = threads().lock().unwrap();
-    if let Some(slot) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id)) {
-        *slot = thread.clone();
-    } else {
-        items.push(thread.clone());
-    }
-    drop(items);
-    persist();
-}
-
-fn normalize_model(model: Option<&Value>) -> Value {
-    match model {
-        Some(Value::String(text)) if model_id_ok(text) => Value::String(text.clone()),
-        _ => Value::Null,
-    }
-}
-
-fn model_id_ok(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() || chars.len() > 128 || !chars[0].is_ascii_alphanumeric() {
-        return false;
-    }
-    chars[1..]
-        .iter()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '/' | '-'))
-}
-
-fn option_id_ok(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() || chars.len() > 64 || !chars[0].is_ascii_alphabetic() {
-        return false;
-    }
-    chars[1..].iter().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-}
-
-fn option_value_ok(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() || chars.len() > 64 || !chars[0].is_ascii_alphanumeric() {
-        return false;
-    }
-    chars[1..]
-        .iter()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-}
-
-fn sanitize_options(options: &[Value]) -> Vec<Value> {
-    options
-        .iter()
-        .filter_map(|option| {
-            let id = option.get("id").and_then(|v| v.as_str())?;
-            if !option_id_ok(id) {
-                return None;
-            }
-            let value = option.get("value")?;
-            if value.as_bool().is_some() {
-                return Some(json!({ "id": id, "value": value }));
-            }
-            let text = value.as_str().filter(|text| option_value_ok(text))?;
-            Some(json!({ "id": id, "value": text }))
-        })
-        .take(16)
-        .collect()
-}
-
-pub(crate) fn archived_at_ms(thread: &Value) -> Option<i64> {
-    thread.get("archivedAtUnixMs").and_then(|value| value.as_i64())
-}
-
-pub fn history(agent_id: Option<&str>) -> Value {
-    let items = threads().lock().unwrap();
-    let summaries: Vec<Value> = items
-        .iter()
-        .filter(|thread| match agent_id {
-            Some(id) => thread.get("profileId").and_then(|v| v.as_str()) == Some(id),
-            None => thread.get("profileId").is_none() || thread.get("profileId").and_then(|v| v.as_str()).is_none() || thread["profileId"].is_null(),
-        })
-        .filter(|thread| archived_at_ms(thread).is_none())
-        .filter_map(|thread| summary_of(thread))
-        .collect();
-    let provider = last_provider().lock().unwrap().clone();
-    json!({
-        "schemaVersion": 1,
-        "summaries": summaries,
-        "lastProvider": provider,
-        "readOnly": false,
-        "skippedThreads": 0,
-        "recoveryMessage": Value::Null
-    })
-}
-
-fn summary_of(thread: &Value) -> Option<Value> {
-    Some(json!({
-        "id": thread.get("id")?,
-        "profileId": thread.get("profileId").cloned().unwrap_or(Value::Null),
-        "title": thread.get("title").cloned().unwrap_or(json!("Chat")),
-        "provider": thread.get("provider").cloned().unwrap_or(json!("antigravity")),
-        "status": thread.get("status").cloned().unwrap_or(json!("idle")),
-        "hasContent": thread.get("items").and_then(|v| v.as_array()).map(|items| !items.is_empty()).unwrap_or(false),
-        "workspaceId": thread.get("workspaceId").cloned().unwrap_or(Value::Null),
-        "pinned": thread.get("pinned").cloned().unwrap_or(json!(false)),
-        "createdAtUnixMs": thread.get("createdAtUnixMs").cloned().unwrap_or(json!(now_ms())),
-        "updatedAtUnixMs": thread.get("updatedAtUnixMs").cloned().unwrap_or(json!(now_ms()))
-    }))
-}
-
-pub fn remove_thread(thread_id: &str) -> Value {
-    threads().lock().unwrap().retain(|thread| thread.get("id").and_then(|v| v.as_str()) != Some(thread_id));
-    persist();
-    history(None)
-}
-
-fn chat_item(id: &str, kind: &str, text: &str, streaming: bool) -> Value {
-    json!({
-        "id": id,
-        "kind": kind,
-        "text": sanitize_chat_text(text),
-        "title": Value::Null,
-        "detail": Value::Null,
-        "status": Value::Null,
-        "streaming": streaming,
-        "exitCode": Value::Null,
-        "createdAtUnixMs": now_ms(),
-        "attachments": []
-    })
-}
-
-fn sanitize_chat_text(text: &str) -> String {
-    text.chars()
-        .filter(|ch| *ch == '\n' || *ch == '\r' || *ch == '\t' || (*ch as u32) >= 32)
-        .take(200_000)
-        .collect()
-}
-
-fn upsert_item(thread: &mut Value, item: &Value) {
-    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let Some(list) = thread
-        .as_object_mut()
-        .and_then(|object| object.get_mut("items"))
-        .and_then(|items| items.as_array_mut())
-    else {
-        return;
-    };
-    if let Some(slot) = list
-        .iter_mut()
-        .find(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-    {
-        *slot = item.clone();
-    } else {
-        list.push(item.clone());
-    }
-}
-
-pub use crate::chat_attachments::{
-    decode_base64, lookup_staged_attachment, parse_attachments, release_staged_attachment,
-    stage_blob_attachment, stage_dropped_path, stage_dropped_paths, StagedAttachment,
-};
-
-pub fn apply_launch_choices(thread_id: &str, req: Option<&Value>) {
-    let Some(req) = req else {
-        return;
-    };
-    let mut patch = serde_json::Map::new();
-    if let Some(provider) = req.get("provider").and_then(|v| v.as_str()) {
-        patch.insert("provider".to_string(), json!(provider));
-    }
-    if let Some(mode) = req.get("mode").and_then(|v| v.as_str()) {
-        patch.insert("mode".to_string(), json!(mode));
-    }
-    if !patch.is_empty() {
-        configure_thread(thread_id, &Value::Object(patch));
     }
 }
 
@@ -732,7 +93,13 @@ pub fn start_turn(
     touch(&mut thread);
     replace_thread(&thread);
     let run_id = Uuid::new_v4().to_string();
-    chat_log(&format!("start_turn: thread={}, run={}, provider={}, prompt_chars={}", thread_id, run_id, thread.get("provider").and_then(|v| v.as_str()).unwrap_or(""), prompt.len()));
+    chat_log(&format!(
+        "start_turn: thread={}, run={}, provider={}, prompt_chars={}",
+        thread_id,
+        run_id,
+        thread.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
+        prompt.len()
+    ));
     let user_id = format!("u{}", Uuid::new_v4().simple());
     let assistant_id = format!("a{}", Uuid::new_v4().simple());
     let revision = thread.get("revision").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -778,11 +145,11 @@ pub fn start_turn(
     })
 }
 
-fn push_event(run: &mut TurnRun, event: Value) {
+pub fn push_event(run: &mut TurnRun, event: Value) {
     append_event(run, event, false);
 }
 
-fn append_event(run: &mut TurnRun, mut event: Value, force: bool) {
+pub fn append_event(run: &mut TurnRun, mut event: Value, force: bool) {
     if run.finished || (!force && run.events.len() >= 400) {
         return;
     }
@@ -853,14 +220,11 @@ pub fn cancel_turn(thread_id: &str) {
     finish_run(&run_id, false, true, "Stopped.");
 }
 
-/// Compacts previous conversation history into a structured prompt context when native session resumption
-/// is unavailable or when anchoring context across providers.
-fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
+pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
     let Some(items) = thread.get("items").and_then(|v| v.as_array()) else {
         return current_prompt.to_string();
     };
 
-    // Filter past non-streaming items, excluding the current turn's freshly added user item and streaming assistant item
     let mut past_items: Vec<&Value> = items
         .iter()
         .filter(|it| {
@@ -870,8 +234,6 @@ fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
         })
         .collect();
 
-    // If the last past item has identical text to current_prompt and is from user, drop it from history
-    // because start_turn inserts the current user prompt before launching the provider.
     if let Some(last) = past_items.last() {
         if last.get("kind").and_then(|v| v.as_str()) == Some("user")
             && last.get("text").and_then(|v| v.as_str()) == Some(current_prompt)
@@ -884,7 +246,6 @@ fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
         return current_prompt.to_string();
     }
 
-    // Sliding window: keep the last 14 items to protect the prompt budget while preserving rich context
     if past_items.len() > 14 {
         let drain_count = past_items.len() - 14;
         past_items = past_items[drain_count..].to_vec();
@@ -933,7 +294,7 @@ fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
     context_buffer
 }
 
-fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt: &str) {
+pub fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt: &str) {
     let provider = thread.get("provider").and_then(|v| v.as_str()).unwrap_or("antigravity").to_string();
     let mode = thread.get("mode").and_then(|v| v.as_str()).unwrap_or("fullAccess").to_string();
     let model = thread.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -978,17 +339,20 @@ fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt: &s
         } else {
             assemble_thread_context(&thread_clone, &prompt)
         };
-        match build_command(&provider, &mode, model.as_deref(), effort.as_deref(), provider_session_id.as_deref(), &effective_prompt, &cwd) {
-            Ok(mut command) => match command.spawn() {
-                Ok(child) => stream_child(thread_id, run_id, assistant_id, child),
-                Err(err) => finish_run(&run_id, false, false, &format!("{provider} failed to start: {err}")),
-            },
+        match build_command(&provider, &mode, model.as_deref(), effort.as_deref(), provider_session_id.as_deref(), &effective_prompt) {
+            Ok((program, args)) => {
+                let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                match crate::hidden_exec::spawn_streaming(&program, &args_refs, Some(&cwd)) {
+                    Ok(child) => stream_child(thread_id, run_id, assistant_id, child),
+                    Err(err) => finish_run(&run_id, false, false, &format!("{provider} failed to start: {err}")),
+                }
+            }
             Err(message) => finish_run(&run_id, false, false, &message),
         }
     });
 }
 
-fn list_available_providers() -> Vec<&'static str> {
+pub fn list_available_providers() -> Vec<&'static str> {
     let mut available = Vec::new();
     if resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]).is_some() {
         available.push("Antigravity");
@@ -1017,15 +381,14 @@ fn list_available_providers() -> Vec<&'static str> {
     available
 }
 
-fn build_command(
+pub fn build_command(
     provider: &str,
     mode: &str,
     model: Option<&str>,
     effort: Option<&str>,
     session_id: Option<&str>,
     prompt: &str,
-    cwd: &Path,
-) -> Result<Command, String> {
+) -> Result<(PathBuf, Vec<String>), String> {
     let prompt = clip_argv(prompt);
     let read_only = mode == "readOnly";
     let sent = if read_only {
@@ -1152,54 +515,7 @@ fn build_command(
         }
         other => return Err(format!("{other} has no local chat command in this build.")),
     };
-    let mut command = Command::new(program);
-    command.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    Ok(command)
-}
-
-fn clip_argv(prompt: &str) -> String {
-    prompt.chars().take(12_000).collect()
-}
-
-fn resolve_bin(name: &str, fallbacks: &[&str]) -> Option<PathBuf> {
-    for fallback in fallbacks {
-        let path = PathBuf::from(fallback);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
-    let env_candidates = [
-        PathBuf::from(&local).join("agy").join("bin").join(format!("{name}.exe")),
-        PathBuf::from(&local).join("Programs").join("OpenAI").join("Codex").join("bin").join(format!("{name}.exe")),
-        PathBuf::from(&local).join("Programs").join("OpenAI").join(format!("{name}.exe")),
-        PathBuf::from(&appdata).join("npm").join(format!("{name}.cmd")),
-        PathBuf::from(&appdata).join("npm").join(format!("{name}.ps1")),
-        PathBuf::from(&home).join(".local").join("bin").join(format!("{name}.exe")),
-        PathBuf::from(&home).join(".cargo").join("bin").join(format!("{name}.exe")),
-    ];
-    for cand in env_candidates {
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    if binary_exists(name) {
-        Some(PathBuf::from(name))
-    } else {
-        None
-    }
-}
-
-fn binary_exists(name: &str) -> bool {
-    let mut command = Command::new("where");
-    command.arg(name).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.status().map(|status| status.success()).unwrap_or(false)
+    Ok((program, args))
 }
 
 pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) {
@@ -1248,7 +564,7 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
     }
 }
 
-fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut child: std::process::Child) {
+pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut child: crate::hidden_exec::HiddenChild) {
     let pid = child.id();
     chat_log(&format!("stream_child: started for run_id={}, pid={}", run_id, pid));
     let stdin = child.stdin.take().map(|s| Arc::new(Mutex::new(s)));
@@ -1287,13 +603,13 @@ fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut chi
         }
     }
     let status = shared.lock().ok().and_then(|mut child| child.wait().ok());
-    let ok = status.map(|status| status.success()).unwrap_or(false);
+    let ok = status.map(|code| code == 0).unwrap_or(false);
     chat_log(&format!("stream_child: process exited for run_id={}, pid={}, ok={}", run_id, pid, ok));
     let message = if ok { String::new() } else { "The provider command exited with an error.".into() };
     finish_run(&run_id, ok, false, &message);
 }
 
-fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str, line: &str) -> bool {
+pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str, line: &str) -> bool {
     let trimmed = line.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return false;
@@ -1485,7 +801,6 @@ fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str, li
         }
     }
 
-    // Consume known envelope lines that did not map to a specific UI item so raw JSON is never dumped into assistant prose
     if val.get("event").is_some() || val.get("jsonrpc").is_some() {
         return true;
     }
@@ -1493,7 +808,7 @@ fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str, li
     false
 }
 
-fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_id: &str) {
+pub fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_id: &str) {
     let mut pending = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -1519,7 +834,7 @@ fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_id: &
     }
 }
 
-fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str) {
+pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str) {
     let clean = sanitize_chat_text(text);
     if clean.is_empty() {
         return;
@@ -1549,7 +864,7 @@ fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str) {
     }
 }
 
-fn chars_chunks(text: &str, size: usize) -> Vec<String> {
+pub fn chars_chunks(text: &str, size: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for ch in text.chars() {
@@ -1564,7 +879,7 @@ fn chars_chunks(text: &str, size: usize) -> Vec<String> {
     chunks
 }
 
-fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
+pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     chat_log(&format!("finish_run starting: run_id={}, ok={}, stopped={}", run_id, ok, stopped));
     let (thread_id, assistant_id, assistant_text, routine_id) = {
         let mut live = live_turns().lock().unwrap();
@@ -1773,7 +1088,7 @@ fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 }
             }
         }
-        drop(items); // CRITICAL: Release threads lock before any other operations!
+        drop(items);
     }
 
     if let Some((ref pid, ref user_prompt, ref a_text)) = reflection_task {
@@ -1814,7 +1129,7 @@ fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     chat_log(&format!("finish_run: completed cleanly for run_id={}", run_id));
 }
 
-fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_id: Option<&str>, ok: bool, stopped: bool) {
+pub fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_id: Option<&str>, ok: bool, stopped: bool) {
     if Uuid::parse_str(thread_id).is_err() || Uuid::parse_str(run_id).is_err() {
         return;
     }
@@ -1872,7 +1187,6 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // 1. If an accountId was specified, perform native profile switch (abort on failure)
     if let Some(ref acc_id) = target_account_id {
         let res = crate::account_switcher::switch_account_profile_direct(target_provider.clone(), acc_id.clone());
         if res.get("success").and_then(|v| v.as_bool()) != Some(true) {
@@ -1885,7 +1199,6 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
         }
     }
 
-    // 2. Load thread and get handoff prompt
     let mut thread = {
         let items = threads().lock().unwrap();
         items.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(&thread_id)).cloned()
@@ -1901,14 +1214,12 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
         crate::handoff::build_handoff_capsule(&thread_id, from_p, "", ws_id)
     };
 
-    // 3. Clear pending offer, reset session ID, and update provider
     thread["quotaHandoffOffer"] = Value::Null;
     thread["providerSessionId"] = Value::Null;
     thread["provider"] = json!(target_provider);
     touch(&mut thread);
     replace_thread(&thread);
 
-    // 4. Start turn with handoff context
     let profile_id = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
     Ok(start_turn(&thread_id, profile_id.as_deref(), &handoff_prompt, Vec::new(), None))
 }

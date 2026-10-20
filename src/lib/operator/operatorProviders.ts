@@ -1,0 +1,666 @@
+import { invokeCommand } from '../ipc';
+import type { OperatorAction } from './operatorBrain';
+import {
+  buildZedSystemInstructions,
+  getActiveModelForProvider,
+  loadOperatorConfig,
+  operatorHttpFetch,
+  recordOperatorLatency,
+  type OperatorProviderConfig,
+  type OperatorProviderId,
+  type OperatorTaskType,
+} from './operatorConfig';
+
+export interface ProviderExecutionResult {
+  provider: OperatorProviderId;
+  model: string;
+  latencyMs: number;
+  taskType: OperatorTaskType;
+  actions: OperatorAction[];
+  reply: string;
+  usedFallbackLocal: boolean;
+  rawContent?: string;
+  error?: string;
+}
+
+export interface OperatorLLMQueryResult {
+  success: boolean;
+  text?: string;
+  error?: string;
+  provider: OperatorProviderId;
+  model: string;
+  latencyMs: number;
+}
+
+export function classifyTaskType(actions: OperatorAction[]): OperatorTaskType {
+  if (actions.length === 0) return 'chat_response';
+  if (actions.length > 1) return 'multi_action';
+  const first = actions[0];
+  switch (first.type) {
+    case 'open_terminals':
+      return 'open_terminals';
+    case 'close_terminals':
+      return 'close_terminals';
+    case 'inject_prompt':
+      return 'inject_prompt';
+    case 'spawn_subagent':
+      return 'spawn_subagent';
+    case 'open_browser':
+      return 'open_browser';
+    case 'narrate_summary':
+      return 'narrate_summary';
+    case 'verify_odd':
+      return 'verify_odd';
+    default:
+      return 'chat_response';
+  }
+}
+
+function buildOperatorSystemPrompt(
+  config: OperatorProviderConfig,
+  workspaceContext?: string
+): string {
+  const personaInstructions = buildZedSystemInstructions(config);
+  return `${personaInstructions}
+
+REGLAS CRÍTICAS DE OPERACIÓN:
+1. Responde SIEMPRE en ESPAÑOL neutro y conciso. La clave "reply" DEBE estar en español para que el usuario la entienda y escuche claramente.
+2. Analiza detenidamente la solicitud del usuario para planificar y emitir las acciones exactas requeridas.
+3. Transcripción fonética por voz (STT en español): Ten en cuenta que palabras como "sierra", "sierre", "serrar" son transcripciones fonéticas de "cierra", "cierre", "cerrar". Si el usuario dice "Sierra Orion", significa CERRAR el agente o terminal "Orion".
+4. Si el usuario pide cerrar un agente o terminal por su nombre o rol (ej. "Orion", "agente 2", "terminal codex"), usa el nombre o identificador directamente en el campo "target" de "close_terminals".
+5. Si el usuario pide abrir terminales o agentes (ej. "abre dos terminales con grok y corre los tests", "abrí 2 terminales en ellas abre grok y ejecuta los test"):
+   - Usa "open_terminals" con "count" (número de terminales a abrir), "engine" ("grok" | "claude" | "codex" | "powershell" | "antigravity" | "opencode") y "prompts" (arreglo de strings con las instrucciones o tareas que cada terminal ejecutará).
+6. Responde ÚNICAMENTE con un objeto JSON válido con este esquema exacto (sin bloques de código markdown, sin texto extra fuera del JSON):
+{
+  "reply": "Respuesta o confirmación breve en español",
+  "actions": [
+    // Tipos de acciones permitidas:
+    // { "type": "open_terminals", "count": 2, "engine": "grok" | "claude" | "codex" | "powershell" | "antigravity" | "opencode", "prompts": ["ejecuta los test"] }
+    // { "type": "close_terminals", "target": "all" | "finished" | "idle" | "active" | "last" | "<nombre_agente_o_id>" | number }
+    // { "type": "inject_prompt", "target": "<nombre_agente_o_id>" | number, "prompt": "comando o instrucción" }
+    // { "type": "spawn_subagent", "cli": "grok" | "claude" | "codex" | "agy" | "opencode", "task": "descripción de la tarea" }
+    // { "type": "open_browser", "url": "https://..." }
+    // { "type": "narrate_summary", "target": "active" | "last" | "<nombre_o_id>" }
+    // { "type": "verify_odd" }
+  ]
+}
+${workspaceContext ? `\nContexto del Espacio de Trabajo y Terminales Activas:\n${workspaceContext}` : ''}`;
+}
+
+function parseProviderJsonOutput(rawText: string): { reply: string; actions: OperatorAction[] } | null {
+  if (!rawText || !rawText.trim()) return null;
+  const cleaned = rawText
+    .trim()
+    .replace(/^```(?:json)?/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    if (parsed && Array.isArray(parsed.actions)) {
+      return {
+        reply: typeof parsed.reply === 'string' ? parsed.reply : 'Acción procesada.',
+        actions: parsed.actions as OperatorAction[],
+      };
+    }
+  } catch {
+    // ignore parse failure
+  }
+  return null;
+}
+
+async function callOpenAICompatibleEndpoint(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  userInput: string,
+  config: OperatorProviderConfig,
+  workspaceContext?: string
+): Promise<{ reply: string; actions: OperatorAction[]; rawContent: string }> {
+  const normalizedBase = baseUrl.replace(/\/+$/, '');
+  const endpoint = normalizedBase.endsWith('/chat/completions')
+    ? normalizedBase
+    : `${normalizedBase}/chat/completions`;
+
+  const response = await operatorHttpFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      max_tokens: 450,
+      messages: [
+        { role: 'system', content: buildOperatorSystemPrompt(config, workspaceContext) },
+        { role: 'user', content: userInput },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    let errorDetail = '';
+    try {
+      const errJson = await response.json();
+      errorDetail = errJson?.error?.message || errJson?.message || JSON.stringify(errJson);
+    } catch {
+      try {
+        errorDetail = await response.text();
+      } catch {
+        // ignore
+      }
+    }
+    const suffix = errorDetail ? `: ${errorDetail}` : '';
+    throw new Error(`API Gateway error HTTP ${response.status} from ${endpoint}${suffix}`);
+  }
+
+  const data = await response.json();
+  const content: string = data?.choices?.[0]?.message?.content ?? '';
+  const parsed = parseProviderJsonOutput(content);
+  if (parsed) {
+    return { ...parsed, rawContent: content };
+  }
+  return {
+    reply: content.trim() || 'Acción procesada.',
+    actions: [],
+    rawContent: content,
+  };
+}
+
+async function callCliSubscriptionProvider(
+  cliEngine: string,
+  model: string,
+  userInput: string,
+  config: OperatorProviderConfig,
+  workspaceContext?: string
+): Promise<{ reply: string; actions: OperatorAction[]; rawContent: string }> {
+  const prompt = `${buildOperatorSystemPrompt(config, workspaceContext)}\n\nUser request: ${userInput}`;
+  const res = await invokeCommand<{
+    success?: boolean;
+    stdout?: string;
+    stderr?: string;
+    exit_code?: number;
+    model?: string;
+  }>('query_operator_agent', {
+    engine: cliEngine,
+    prompt,
+    model,
+    timeoutSecs: 15,
+  });
+
+  const output = res?.stdout || '';
+  const parsed = parseProviderJsonOutput(output);
+  if (parsed) {
+    return { ...parsed, rawContent: output };
+  }
+  if (output.trim()) {
+    return {
+      reply: output.trim(),
+      actions: [],
+      rawContent: output.trim(),
+    };
+  }
+  throw new Error(`CLI subscription (${cliEngine}) did not return valid output`);
+}
+
+export async function queryOperatorLLM(
+  prompt: string,
+  providerOverride?: OperatorProviderId
+): Promise<OperatorLLMQueryResult> {
+  const config = loadOperatorConfig();
+  const provider = providerOverride ?? config.activeProvider;
+  const model = getActiveModelForProvider(config, provider);
+  const startTime = performance.now();
+
+  if (provider === 'local') {
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+    recordOperatorLatency({
+      provider: 'local',
+      model,
+      taskType: 'chat_response',
+      latencyMs,
+      success: true,
+      notes: prompt,
+    });
+    return {
+      success: true,
+      text: `Comando procesado localmente: ${prompt}`,
+      provider: 'local',
+      model,
+      latencyMs,
+    };
+  }
+
+  try {
+    if (provider === 'opencode') {
+      if (!config.opencodeApiKey.trim()) {
+        const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+        const errMsg = 'Falta la API Key de OpenCode en Configuraciones -> Asistente Zed.';
+        recordOperatorLatency({
+          provider: 'opencode',
+          model,
+          taskType: 'chat_response',
+          latencyMs,
+          success: false,
+          notes: errMsg,
+        });
+        return {
+          success: false,
+          error: errMsg,
+          provider: 'opencode',
+          model,
+          latencyMs,
+        };
+      }
+
+      const res = await callOpenAICompatibleEndpoint(
+        config.opencodeBaseUrl,
+        config.opencodeApiKey.trim(),
+        model,
+        prompt,
+        config
+      );
+      const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+      recordOperatorLatency({
+        provider: 'opencode',
+        model,
+        taskType: classifyTaskType(res.actions),
+        latencyMs,
+        success: true,
+      });
+      return {
+        success: true,
+        text: res.reply,
+        provider: 'opencode',
+        model,
+        latencyMs,
+      };
+    }
+
+    if (provider === 'vercel') {
+      if (!config.vercelApiKey.trim()) {
+        const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+        const errMsg = 'Falta la API Key de Vercel AI en Configuraciones -> Asistente Zed.';
+        recordOperatorLatency({
+          provider: 'vercel',
+          model,
+          taskType: 'chat_response',
+          latencyMs,
+          success: false,
+          notes: errMsg,
+        });
+        return {
+          success: false,
+          error: errMsg,
+          provider: 'vercel',
+          model,
+          latencyMs,
+        };
+      }
+
+      const res = await callOpenAICompatibleEndpoint(
+        config.vercelBaseUrl,
+        config.vercelApiKey.trim(),
+        model,
+        prompt,
+        config
+      );
+      const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+      recordOperatorLatency({
+        provider: 'vercel',
+        model,
+        taskType: classifyTaskType(res.actions),
+        latencyMs,
+        success: true,
+      });
+      return {
+        success: true,
+        text: res.reply,
+        provider: 'vercel',
+        model,
+        latencyMs,
+      };
+    }
+
+    if (provider === 'cloudflare') {
+      if (!config.cloudflareAccountId.trim() || !config.cloudflareApiToken.trim()) {
+        const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+        const errMsg = 'Falta el Account ID o API Token de Cloudflare en Configuraciones -> Asistente Zed.';
+        recordOperatorLatency({
+          provider: 'cloudflare',
+          model,
+          taskType: 'chat_response',
+          latencyMs,
+          success: false,
+          notes: errMsg,
+        });
+        return {
+          success: false,
+          error: errMsg,
+          provider: 'cloudflare',
+          model,
+          latencyMs,
+        };
+      }
+
+      const endpoint = config.cloudflareGatewaySlug?.trim()
+        ? `https://gateway.ai.cloudflare.com/v1/${config.cloudflareAccountId.trim()}/${config.cloudflareGatewaySlug.trim()}/workers-ai/chat/completions`
+        : `${config.cloudflareBaseUrl.replace(/\/+$/, '')}/${config.cloudflareAccountId.trim()}/ai/v1/chat/completions`;
+
+      const res = await callOpenAICompatibleEndpoint(
+        endpoint,
+        config.cloudflareApiToken.trim(),
+        model,
+        prompt,
+        config
+      );
+      const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+      recordOperatorLatency({
+        provider: 'cloudflare',
+        model,
+        taskType: classifyTaskType(res.actions),
+        latencyMs,
+        success: true,
+      });
+      return {
+        success: true,
+        text: res.reply,
+        provider: 'cloudflare',
+        model,
+        latencyMs,
+      };
+    }
+
+    if (provider === 'grok') {
+      if (config.grokApiKey.trim() && !config.grokUseCliSubscription) {
+        const res = await callOpenAICompatibleEndpoint(
+          config.grokBaseUrl,
+          config.grokApiKey.trim(),
+          model,
+          prompt,
+          config
+        );
+        const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+        recordOperatorLatency({
+          provider: 'grok',
+          model,
+          taskType: classifyTaskType(res.actions),
+          latencyMs,
+          success: true,
+        });
+        return {
+          success: true,
+          text: res.reply,
+          provider: 'grok',
+          model,
+          latencyMs,
+        };
+      }
+
+      const res = await invokeCommand<{
+        success?: boolean;
+        stdout?: string;
+        stderr?: string;
+        model?: string;
+      }>('query_operator_agent', {
+        engine: 'grok',
+        prompt,
+        model,
+        timeoutSecs: 15,
+      });
+      const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+      const text = res?.stdout?.trim() || '';
+      const ok = Boolean(res?.success !== false && text);
+      recordOperatorLatency({
+        provider: 'grok',
+        model,
+        taskType: 'chat_response',
+        latencyMs,
+        success: ok,
+      });
+      return {
+        success: ok,
+        text: ok ? text : undefined,
+        error: ok ? undefined : res?.stderr || 'Sin respuesta de Grok CLI',
+        provider: 'grok',
+        model,
+        latencyMs,
+      };
+    }
+
+    // antigravity
+    const res = await invokeCommand<{
+      success?: boolean;
+      stdout?: string;
+      stderr?: string;
+      model?: string;
+    }>('query_operator_agent', {
+      engine: 'antigravity',
+      prompt,
+      model,
+      timeoutSecs: 15,
+    });
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+    const text = res?.stdout?.trim() || '';
+    const ok = Boolean(res?.success !== false && text);
+    recordOperatorLatency({
+      provider: 'antigravity',
+      model,
+      taskType: 'chat_response',
+      latencyMs,
+      success: ok,
+    });
+    return {
+      success: ok,
+      text: ok ? text : undefined,
+      error: ok ? undefined : res?.stderr || 'Sin respuesta de Anti-Gravity CLI',
+      provider: 'antigravity',
+      model,
+      latencyMs,
+    };
+  } catch (err) {
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+    const message = err instanceof Error ? err.message : String(err);
+    recordOperatorLatency({
+      provider,
+      model,
+      taskType: 'chat_response',
+      latencyMs,
+      success: false,
+      notes: message,
+    });
+    return {
+      success: false,
+      error: message,
+      provider,
+      model,
+      latencyMs,
+    };
+  }
+}
+
+export async function probeProviderLatency(
+  providerId: OperatorProviderId,
+  config: OperatorProviderConfig = loadOperatorConfig()
+): Promise<{ ok: boolean; latencyMs: number; modelLabel: string; detail: string }> {
+  const modelLabel = getActiveModelForProvider(config, providerId);
+  const res = await queryOperatorLLM('Ping healthcheck', providerId);
+  return {
+    ok: res.success,
+    latencyMs: res.latencyMs,
+    modelLabel: res.model || modelLabel,
+    detail: res.success ? res.text || 'OK' : res.error || 'Error en prueba de latencia',
+  };
+}
+
+export async function benchmarkAllProviders(
+  prompt = 'Ping'
+): Promise<Record<OperatorProviderId, OperatorLLMQueryResult>> {
+  const providers: OperatorProviderId[] = ['local', 'opencode', 'vercel', 'cloudflare', 'antigravity', 'grok'];
+  const entries = await Promise.all(
+    providers.map(async (p) => [p, await queryOperatorLLM(prompt, p)] as const)
+  );
+  return Object.fromEntries(entries) as Record<OperatorProviderId, OperatorLLMQueryResult>;
+}
+
+export async function dispatchOperatorWithProvider(
+  userInput: string,
+  localFallbackParser: (input: string) => { actions: OperatorAction[]; reply: string },
+  workspaceContext?: string,
+  overrideConfig?: OperatorProviderConfig
+): Promise<ProviderExecutionResult> {
+  const config = overrideConfig ?? loadOperatorConfig();
+  const provider = config.activeProvider;
+  const model = getActiveModelForProvider(config, provider);
+  const startTime = performance.now();
+
+  if (provider === 'local') {
+    const localResult = localFallbackParser(userInput);
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+    const taskType = classifyTaskType(localResult.actions);
+    recordOperatorLatency({
+      provider: 'local',
+      model,
+      taskType,
+      latencyMs,
+      success: true,
+      notes: 'Instant local heuristic parser',
+    });
+    return {
+      provider: 'local',
+      model,
+      latencyMs,
+      taskType,
+      actions: localResult.actions,
+      reply: localResult.reply,
+      usedFallbackLocal: false,
+    };
+  }
+
+  try {
+    let remoteResult: { reply: string; actions: OperatorAction[]; rawContent?: string };
+
+    if (provider === 'opencode') {
+      if (!config.opencodeApiKey.trim()) {
+        throw new Error('Falta configurar la API Key de OpenCode en Configuraciones -> Asistente Zed.');
+      }
+      remoteResult = await callOpenAICompatibleEndpoint(
+        config.opencodeBaseUrl,
+        config.opencodeApiKey.trim(),
+        config.opencodeModel || 'deepseek-v4.1-flash',
+        userInput,
+        config,
+        workspaceContext
+      );
+    } else if (provider === 'vercel') {
+      if (!config.vercelApiKey.trim()) {
+        throw new Error('Falta configurar la API Key de Vercel AI en Configuraciones -> Asistente Zed.');
+      }
+      remoteResult = await callOpenAICompatibleEndpoint(
+        config.vercelBaseUrl,
+        config.vercelApiKey.trim(),
+        config.vercelModel || 'deepseek/deepseek-chat',
+        userInput,
+        config,
+        workspaceContext
+      );
+    } else if (provider === 'cloudflare') {
+      if (!config.cloudflareAccountId.trim() || !config.cloudflareApiToken.trim()) {
+        throw new Error('Falta configurar el Account ID o API Token de Cloudflare en Configuraciones -> Asistente Zed.');
+      }
+      const endpoint = config.cloudflareGatewaySlug?.trim()
+        ? `https://gateway.ai.cloudflare.com/v1/${config.cloudflareAccountId.trim()}/${config.cloudflareGatewaySlug.trim()}/workers-ai/chat/completions`
+        : `${config.cloudflareBaseUrl.replace(/\/+$/, '')}/${config.cloudflareAccountId.trim()}/ai/v1/chat/completions`;
+
+      remoteResult = await callOpenAICompatibleEndpoint(
+        endpoint,
+        config.cloudflareApiToken.trim(),
+        config.cloudflareModel || '@cf/meta/llama-3.1-8b-instruct-fp8',
+        userInput,
+        config,
+        workspaceContext
+      );
+    } else if (provider === 'grok') {
+      if (config.grokApiKey.trim() && !config.grokUseCliSubscription) {
+        remoteResult = await callOpenAICompatibleEndpoint(
+          config.grokBaseUrl,
+          config.grokApiKey.trim(),
+          config.grokModel,
+          userInput,
+          config,
+          workspaceContext
+        );
+      } else {
+        remoteResult = await callCliSubscriptionProvider(
+          'grok',
+          config.grokModel,
+          userInput,
+          config,
+          workspaceContext
+        );
+      }
+    } else {
+      remoteResult = await callCliSubscriptionProvider(
+        config.antigravityCommand || 'antigravity',
+        config.antigravityModel || 'gemini-3.8-flash',
+        userInput,
+        config,
+        workspaceContext
+      );
+    }
+
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+    const taskType = classifyTaskType(remoteResult.actions);
+
+    recordOperatorLatency({
+      provider,
+      model,
+      taskType,
+      latencyMs,
+      success: true,
+    });
+
+    return {
+      provider,
+      model,
+      latencyMs,
+      taskType,
+      actions: remoteResult.actions,
+      reply: remoteResult.reply,
+      usedFallbackLocal: false,
+      rawContent: remoteResult.rawContent,
+    };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    const localResult = localFallbackParser(userInput);
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+    const taskType = classifyTaskType(localResult.actions);
+
+    recordOperatorLatency({
+      provider,
+      model,
+      taskType,
+      latencyMs,
+      success: false,
+      notes: errorMsg,
+    });
+
+    return {
+      provider,
+      model,
+      latencyMs,
+      taskType,
+      actions: localResult.actions,
+      reply: localResult.reply,
+      usedFallbackLocal: true,
+      error: errorMsg,
+    };
+  }
+}

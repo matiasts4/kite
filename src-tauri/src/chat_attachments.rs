@@ -175,14 +175,14 @@ pub fn decode_base64(input: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     }
-    let bytes = input.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if clean.is_empty() || clean.len() % 4 != 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut out = Vec::with_capacity(clean.len() / 4 * 3);
     let mut index = 0;
-    while index < bytes.len() {
-        let (b0, b1, b2, b3) = (bytes[index], bytes[index + 1], bytes[index + 2], bytes[index + 3]);
+    while index < clean.len() {
+        let (b0, b1, b2, b3) = (clean[index], clean[index + 1], clean[index + 2], clean[index + 3]);
         if b0 == b'=' || b1 == b'=' || (b2 == b'=' && b3 != b'=') {
             return None;
         }

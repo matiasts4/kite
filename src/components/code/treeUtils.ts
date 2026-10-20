@@ -46,6 +46,23 @@ export function splitLeaf(
   newLeaf: PaneLeaf,
   axis: PaneAxis
 ): PaneNode {
+  const leaves = getAllLeaves(root);
+  if (leaves.length === 0) {
+    return newLeaf;
+  }
+  const effectiveTargetId = leaves.some((l) => l.id === targetLeafId)
+    ? targetLeafId
+    : (leaves[leaves.length - 1]?.id || targetLeafId);
+
+  return splitLeafInternal(root, effectiveTargetId, newLeaf, axis);
+}
+
+function splitLeafInternal(
+  root: PaneNode,
+  targetLeafId: string,
+  newLeaf: PaneLeaf,
+  axis: PaneAxis
+): PaneNode {
   if (root.type === 'leaf') {
     if (root.id === targetLeafId) {
       return createSplit(axis, [root, newLeaf], [0.5, 0.5]);
@@ -69,7 +86,7 @@ export function splitLeaf(
 
   return {
     ...root,
-    children: root.children.map((child) => splitLeaf(child, targetLeafId, newLeaf, axis)),
+    children: root.children.map((child) => splitLeafInternal(child, targetLeafId, newLeaf, axis)),
   };
 }
 

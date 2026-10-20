@@ -629,7 +629,7 @@ pub fn open_external_link(app: tauri::AppHandle, request: Option<Value>) -> Resu
 }
 
 #[tauri::command]
-pub fn bridge_memory_reveal(_request: Option<Value>) -> Value {
+pub fn zed_memory_reveal(_request: Option<Value>) -> Value {
     let folder = crate::persist::db_path()
         .parent()
         .map(|dir| dir.join("memory"))

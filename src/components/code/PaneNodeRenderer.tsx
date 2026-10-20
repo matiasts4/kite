@@ -160,6 +160,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
         onClick={() => onFocusLeaf(node.id)}
         data-leaf-id={node.id}
         data-occupant-kind={occupant.kind}
+        data-testid={occupant.kind === 'terminal' ? 'terminal-pane' : undefined}
         style={{ position: 'relative' }}
       >
         {isSpotlighted && <div className="code-pane-beacon" aria-hidden="true" />}

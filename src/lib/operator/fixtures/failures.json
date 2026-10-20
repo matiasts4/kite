@@ -1,0 +1,21 @@
+[
+  {
+    "id": "entender-narrate-esa-terminal-vacio",
+    "recordedAt": "2026-10-20",
+    "layer": "entender",
+    "phrase": "coméntame en pocas palabras qué es lo que había en esa terminal",
+    "expected": "Debe narrar que no hay nada en la terminal abierta, sin inyectar comandos como agy.",
+    "trace": "heuristic:narrate-esa-terminal",
+    "status": "encoded"
+  },
+  {
+    "id": "hacer-segundo-clic-no-escucha",
+    "recordedAt": "2026-10-20",
+    "layer": "hacer",
+    "phrase": "segunda instrucción después de pedirle que comente la terminal",
+    "expected": "Un toque en el orbe vuelve a abrir el micrófono y la orden siguiente se ejecuta.",
+    "trace": "unit:useOperatorTurn",
+    "observed": "Tras la primera orden el turno quedaba ocupado, el orbe seguía en pensando o en error, y el clic no mostraba la escucha ni ejecutaba la siguiente instrucción.",
+    "status": "encoded"
+  }
+]

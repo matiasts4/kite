@@ -36,6 +36,10 @@ import type {
   PaneAxis,
 } from './types';
 import '../views/workspaces.css';
+import { registerSpawnedTerminal } from '../../lib/terminalRegistry';
+import { sendUiAck, type UiBusRequestPayload } from '../../lib/operator/executor/ui-bus';
+import { startAgentInboxPolling } from '../../lib/agentInboxLoop';
+import { copyWorkspacePath } from '../../lib/ipc';
 
 function listTerminals(node: PaneNode): PaneOccupantTerminal[] {
   if (node.type === 'leaf') {
@@ -66,11 +70,8 @@ interface LaunchedTerminalSlot {
   workTitle: string | null;
 }
 
-export const AGENT_CODENAMES = [
-  'Orion', 'Nova', 'Atlas', 'Vega', 'Titan', 'Echo', 'Phoenix', 'Lyra', 'Apex', 'Zenith',
-  'Cygnus', 'Helios', 'Falcon', 'Sirius', 'Altair', 'Polaris', 'Castor', 'Pollux', 'Astra', 'Cosmo',
-  'Vortex', 'Nebula', 'Specter', 'Sol', 'Aura', 'Quantum', 'Nexus', 'Pulse', 'Ranger', 'Draco'
-];
+import { AGENT_CODENAMES, getNextAgentName, cleanAgentTitle } from '../../lib/agentNames';
+export { AGENT_CODENAMES, getNextAgentName, cleanAgentTitle };
 
 export function collectActiveAgentNames(tabs: WorkspaceTab[]): Set<string> {
   const names = new Set<string>();
@@ -90,30 +91,6 @@ export function collectActiveAgentNames(tabs: WorkspaceTab[]): Set<string> {
     }
   }
   return names;
-}
-
-export function getNextAgentName(existingNames: Set<string>): string {
-  for (const name of AGENT_CODENAMES) {
-    if (!existingNames.has(name.toLowerCase())) {
-      existingNames.add(name.toLowerCase());
-      return name;
-    }
-  }
-  let num = 2;
-  while (true) {
-    for (const name of AGENT_CODENAMES) {
-      const candidate = `${name} ${num}`;
-      if (!existingNames.has(candidate.toLowerCase())) {
-        existingNames.add(candidate.toLowerCase());
-        return candidate;
-      }
-    }
-    num += 1;
-  }
-}
-
-export function cleanAgentTitle(title: string): string {
-  return title.replace(/\s*\([^)]*\)\s*$/, '').trim() || title;
 }
 
 function sanitizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayout {
@@ -278,8 +255,44 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const latestLayoutRef = useRef<WorkspaceLayout>(layout);
+  const spawnQueueRef = useRef<Promise<void>>(Promise.resolve());
   const canvasRef = useRef<HTMLDivElement>(null);
   const headerNewBtnRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceCwdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedWorkspace?.id) {
+      workspaceCwdRef.current = null;
+      return;
+    }
+    void copyWorkspacePath(selectedWorkspace.id)
+      .then((folderPath) => {
+        if (!cancelled) workspaceCwdRef.current = folderPath;
+      })
+      .catch(() => {
+        if (!cancelled) workspaceCwdRef.current = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedWorkspace?.id]);
+
+  useEffect(() => {
+    return startAgentInboxPolling(() => workspaceCwdRef.current);
+  }, [selectedWorkspace?.id]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted = true;
+      window.dispatchEvent(new CustomEvent('kite:code-workspace-ready'));
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        (window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted = false;
+      }
+    };
+  }, []);
 
   const activeTab = layout.tabs.find((t) => t.id === layout.activeTabId) || layout.tabs[0] || null;
 
@@ -842,15 +855,35 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
   useEffect(() => {
     const onTerminate = (e: Event) => {
-      const detail = (e as CustomEvent<{ sessionId?: string; leafId?: string }>).detail;
-      if (!detail?.sessionId && !detail?.leafId) return;
+      const detail = (e as CustomEvent<{ sessionId?: string; leafId?: string; name?: string }>).detail;
+      if (!detail?.sessionId && !detail?.leafId && !detail?.name) return;
+      const targetName = detail.name?.trim().toLowerCase();
       const current = latestLayoutRef.current;
       for (const tab of current.tabs) {
-        const leaf = getAllLeaves(tab.root).find(
-          (l) =>
-            (detail.sessionId && l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.sessionId) ||
-            (detail.leafId && (l.id === detail.leafId || (l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.leafId)))
-        );
+        const leaf = getAllLeaves(tab.root).find((l) => {
+          if (detail.sessionId && l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.sessionId) {
+            return true;
+          }
+          if (
+            detail.leafId &&
+            (l.id === detail.leafId || (l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.leafId))
+          ) {
+            return true;
+          }
+          if (targetName && l.occupant.kind === 'terminal') {
+            const occ = l.occupant;
+            const matchesLabel =
+              occ.label?.toLowerCase() === targetName || occ.label?.toLowerCase().includes(targetName);
+            const matchesAgentName =
+              occ.runtime?.agentName?.toLowerCase() === targetName ||
+              occ.runtime?.agentName?.toLowerCase().includes(targetName);
+            const matchesDisplayName =
+              occ.runtime?.displayName?.toLowerCase() === targetName ||
+              occ.runtime?.displayName?.toLowerCase().includes(targetName);
+            return Boolean(matchesLabel || matchesAgentName || matchesDisplayName);
+          }
+          return false;
+        });
         if (leaf) {
           handleCloseLeaf(leaf.id);
           break;
@@ -916,15 +949,223 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       }
     };
 
+    const spawnTerminalCore = async (detail: {
+      sessionId: string;
+      engine?: string;
+      title?: string;
+      agentName?: string;
+      splitAxis?: 'vertical' | 'horizontal';
+      initialPrompt?: string;
+      autoApprove?: boolean;
+      workspaceId?: string;
+      sourceSessionId?: string;
+      sourcePaneId?: string;
+    }) => {
+      const paneId = globalThis.crypto.randomUUID();
+      const wireEngine = detail.engine || 'grok';
+      const isShell = wireEngine === 'powershell' || wireEngine === 'terminal';
+
+      let agentName = detail.agentName;
+      if (!agentName && !isShell) {
+        if (detail.title && !detail.title.startsWith('[ODD]') && !detail.title.startsWith('Agent ')) {
+          agentName = cleanAgentTitle(detail.title);
+        } else {
+          const activeNames = collectActiveAgentNames(latestLayoutRef.current.tabs);
+          agentName = getNextAgentName(activeNames);
+        }
+      }
+
+      const finalTitle = detail.title || (agentName ? `${agentName} (${wireEngine})` : `Terminal (${wireEngine})`);
+      const leafLabel = agentName || cleanAgentTitle(finalTitle);
+
+      await invokeCommand('start_terminal', {
+        sessionId: detail.sessionId,
+        engine: wireEngine,
+        workspaceId: selectedWorkspace?.id || null,
+        paneId,
+        columns: 80,
+        rows: 24,
+        confirmedByBuilder: true,
+        initialPrompt: undefined, // Let terminal start interactively; staged delivery writes prompt visibly
+        autoApprove: detail.autoApprove ?? true,
+      }).catch((err) => console.warn('[ODD] Failed to start terminal:', err));
+
+      // Immediately register in terminalRegistry so verification and active lists know it is alive
+      registerSpawnedTerminal(detail.sessionId, {
+        workspaceId: selectedWorkspace?.id || null,
+        workspaceName: selectedWorkspace?.displayName,
+        engine: wireEngine,
+        title: finalTitle,
+        who: agentName || leafLabel,
+      });
+
+      const newLeaf = createLeaf({
+        kind: 'terminal',
+        sessionId: detail.sessionId,
+        label: leafLabel,
+        engine: wireEngine,
+        runtime: {
+          engine: wireEngine,
+          displayName: leafLabel,
+          workTitle: leafLabel,
+          agentName: isShell ? undefined : (agentName || leafLabel),
+          paneId,
+        },
+      });
+
+      const current = latestLayoutRef.current;
+      const currentTab = current.tabs.find((t) => t.id === current.activeTabId) || current.tabs[0];
+
+      if (!currentTab) {
+        const newTab: WorkspaceTab = {
+          id: globalThis.crypto.randomUUID(),
+          title: leafLabel,
+          root: newLeaf,
+          focusedLeafId: newLeaf.id,
+        };
+        const nextLayout: WorkspaceLayout = {
+          ...current,
+          workspaceId: selectedWorkspace?.id || current.workspaceId,
+          tabs: [newTab],
+          activeTabId: newTab.id,
+        };
+        latestLayoutRef.current = nextLayout;
+        setFocusedLeafId(newLeaf.id);
+        await persistLayout(nextLayout);
+
+        if (detail.initialPrompt && typeof window !== 'undefined') {
+          setTimeout(() => {
+            window.dispatchEvent(
+              new CustomEvent('kite:dispatch-prompt-projectile', {
+                detail: {
+                  targetPaneId: newLeaf.id,
+                  targetSessionId: detail.sessionId,
+                  agentName: leafLabel,
+                  engine: wireEngine,
+                  prompt: detail.initialPrompt,
+                  sourceSessionId: detail.sourceSessionId,
+                  sourcePaneId: detail.sourcePaneId,
+                },
+              })
+            );
+          }, 120);
+        }
+        return;
+      }
+
+      const targetLeafId = currentTab.focusedLeafId || currentTab.root.id;
+      const splitAxis: PaneAxis = detail.splitAxis || 'vertical';
+      const updatedRoot = splitLeaf(currentTab.root, targetLeafId, newLeaf, splitAxis);
+
+      const updatedTabs = current.tabs.map((t) =>
+        t.id === currentTab.id ? { ...t, root: updatedRoot, focusedLeafId: newLeaf.id } : t
+      );
+
+      const nextLayout: WorkspaceLayout = {
+        ...current,
+        tabs: updatedTabs,
+      };
+      latestLayoutRef.current = nextLayout;
+      setFocusedLeafId(newLeaf.id);
+      await persistLayout(nextLayout);
+
+      if (detail.initialPrompt && typeof window !== 'undefined') {
+        setTimeout(() => {
+          window.dispatchEvent(
+            new CustomEvent('kite:dispatch-prompt-projectile', {
+              detail: {
+                targetPaneId: newLeaf.id,
+                targetSessionId: detail.sessionId,
+                agentName: leafLabel,
+                engine: wireEngine,
+                prompt: detail.initialPrompt,
+                sourceSessionId: detail.sourceSessionId,
+                sourcePaneId: detail.sourcePaneId,
+              },
+            })
+          );
+        }, 120);
+      }
+    };
+
+    const onSpawnAgentTerminal = (e: Event) => {
+      const customEvent = e as CustomEvent<{
+        sessionId: string;
+        engine?: string;
+        initialPrompt?: string;
+        autoApprove?: boolean;
+        title?: string;
+        agentName?: string;
+        splitAxis?: 'vertical' | 'horizontal';
+        workspaceId?: string;
+        taskSlug?: string;
+        sourceSessionId?: string;
+        sourcePaneId?: string;
+      }>;
+      const detail = customEvent.detail;
+      if (!detail) return;
+      if (detail.workspaceId && selectedWorkspace && detail.workspaceId !== selectedWorkspace.id) {
+        return;
+      }
+
+      spawnQueueRef.current = spawnQueueRef.current
+        .then(() => spawnTerminalCore(detail))
+        .catch((err) => console.error('[ODD] Error spawning terminal in queue:', err));
+    };
+
+    const onOpRequest = (e: Event) => {
+      const customEvent = e as CustomEvent<UiBusRequestPayload>;
+      if (!customEvent.detail) return;
+      if (customEvent.detail.kind === 'spawn-terminal') {
+        const payload = customEvent.detail.payload as any;
+        const reqId = customEvent.detail.reqId;
+        const sessionId =
+          payload.sessionId ||
+          `agent-term-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+        spawnQueueRef.current = spawnQueueRef.current
+          .then(async () => {
+            await spawnTerminalCore({
+              sessionId,
+              engine: payload.engine,
+              title: payload.title,
+              agentName: payload.agentName,
+              splitAxis: payload.splitAxis || 'vertical',
+              initialPrompt: payload.initialPrompt,
+              autoApprove: payload.autoApprove,
+              workspaceId: payload.workspaceId,
+            });
+            sendUiAck({
+              reqId,
+              ok: true,
+              sessionId,
+              data: { agentName: payload.agentName },
+            });
+          })
+          .catch((err) => {
+            console.error('[CodeWorkspace] Error in spawn queue:', err);
+            sendUiAck({
+              reqId,
+              ok: false,
+              reason: err?.message || 'spawn-failed',
+            });
+          });
+      }
+    };
+
     window.addEventListener('kite:terminate-agent', onTerminate);
     window.addEventListener('kite:close-workspace-tab', onCloseTabEvent);
     window.addEventListener('kite:rename-workspace-tab', onRenameTabEvent);
     window.addEventListener('kite:spotlight-pane', onSpotlight);
+    window.addEventListener('kite:spawn-agent-terminal', onSpawnAgentTerminal);
+    window.addEventListener('kite:op-request', onOpRequest);
     return () => {
       window.removeEventListener('kite:terminate-agent', onTerminate);
       window.removeEventListener('kite:close-workspace-tab', onCloseTabEvent);
       window.removeEventListener('kite:rename-workspace-tab', onRenameTabEvent);
       window.removeEventListener('kite:spotlight-pane', onSpotlight);
+      window.removeEventListener('kite:spawn-agent-terminal', onSpawnAgentTerminal);
+      window.removeEventListener('kite:op-request', onOpRequest);
       if (spotlightTimerRef.current) {
         clearTimeout(spotlightTimerRef.current);
       }

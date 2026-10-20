@@ -1,0 +1,342 @@
+[
+  {
+    "id": "spawn-num-grok",
+    "input": "Abre 3 terminales con Grok",
+    "expected": { "type": "open_terminals", "count": 3, "engine": "grok" }
+  },
+  {
+    "id": "spawn-word-codex-task",
+    "input": "Abre dos terminales con codex con la tarea refactorizar los componentes",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "codex", "prompts": ["refactorizar los componentes"] }
+  },
+  {
+    "id": "spawn-connective-y",
+    "input": "Abre una terminal y busca los errores en el proyecto",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "grok", "prompts": ["busca los errores en el proyecto"] }
+  },
+  {
+    "id": "spawn-stt-dot-subjunctive-grok-test",
+    "input": "abriera dos. Terminales, en ellas abrirá Grok y ejecute los test",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok", "prompts": ["ejecute los test"] }
+  },
+  {
+    "id": "spawn-stt-past-abri",
+    "input": "abrí dos terminales en ellas abrirá Grok y ejecute los test",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok", "prompts": ["ejecute los test"] }
+  },
+  {
+    "id": "spawn-voseo-claude",
+    "input": "abrí dos terminales con claude y corré los tests",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "claude", "prompts": ["corré los tests"] }
+  },
+  {
+    "id": "spawn-powershell",
+    "input": "levanta una consola de powershell",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "powershell" }
+  },
+  {
+    "id": "spawn-antigravity",
+    "input": "crea 2 terminales con antigravity",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "antigravity" }
+  },
+  {
+    "id": "spawn-opencode",
+    "input": "lanza una terminal con opencode",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "opencode" }
+  },
+  {
+    "id": "spawn-word-cuatro",
+    "input": "abre cuatro terminales con grok",
+    "expected": { "type": "open_terminals", "count": 4, "engine": "grok" }
+  },
+  {
+    "id": "spawn-word-cinco",
+    "input": "crear cinco terminales con claude",
+    "expected": { "type": "open_terminals", "count": 5, "engine": "claude" }
+  },
+  {
+    "id": "spawn-single-terminal",
+    "input": "abre una terminal",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "grok" }
+  },
+  {
+    "id": "spawn-default-engine",
+    "input": "abre 2 terminales",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+  },
+  {
+    "id": "spawn-abriese-subjunctive",
+    "input": "si abriese dos terminales con grok para compilar",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok", "prompts": ["compilar"] }
+  },
+  {
+    "id": "spawn-abriria-conditional",
+    "input": "abriría 3 terminales con codex y revisa el código",
+    "expected": { "type": "open_terminals", "count": 3, "engine": "codex", "prompts": ["revisa el código"] }
+  },
+  {
+    "id": "spawn-plural-abran",
+    "input": "abran una terminal con claude",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "claude" }
+  },
+  {
+    "id": "spawn-abrime-imperative",
+    "input": "abrime 2 terminales con grok",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+  },
+  {
+    "id": "spawn-crees-subjunctive",
+    "input": "quiero que crees una terminal con powershell",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "powershell" }
+  },
+  {
+    "id": "spawn-stt-dot-three",
+    "input": "abre 3. Terminales con grok",
+    "expected": { "type": "open_terminals", "count": 3, "engine": "grok" }
+  },
+  {
+    "id": "spawn-stt-dot-one",
+    "input": "abre una. Terminal y compila",
+    "expected": { "type": "open_terminals", "count": 1, "engine": "grok", "prompts": ["compila"] }
+  },
+  {
+    "id": "close-finished-direct",
+    "input": "Cierra las terminales terminadas",
+    "expected": { "type": "close_terminals", "target": "finished" }
+  },
+  {
+    "id": "close-finished-completadas",
+    "input": "cierra las terminales completadas",
+    "expected": { "type": "close_terminals", "target": "finished" }
+  },
+  {
+    "id": "close-finished-done",
+    "input": "cierra las que estén done",
+    "expected": { "type": "close_terminals", "target": "finished" }
+  },
+  {
+    "id": "close-all-direct",
+    "input": "Cierra todas las terminales",
+    "expected": { "type": "close_terminals", "target": "all" }
+  },
+  {
+    "id": "close-all-elimina",
+    "input": "elimina todas las terminales",
+    "expected": { "type": "close_terminals", "target": "all" }
+  },
+  {
+    "id": "close-all-apaga",
+    "input": "apaga todas las terminales",
+    "expected": { "type": "close_terminals", "target": "all" }
+  },
+  {
+    "id": "close-idle",
+    "input": "cierra las terminales inactivas",
+    "expected": { "type": "close_terminals", "target": "idle" }
+  },
+  {
+    "id": "close-active",
+    "input": "cierra las terminales activas",
+    "expected": { "type": "close_terminals", "target": "active" }
+  },
+  {
+    "id": "close-last",
+    "input": "cierra la última terminal",
+    "expected": { "type": "close_terminals", "target": "last" }
+  },
+  {
+    "id": "close-named-orion",
+    "input": "Cierra Orion",
+    "expected": { "type": "close_terminals", "target": "Orion" }
+  },
+  {
+    "id": "close-named-seseo-orion",
+    "input": "Sierra Orion",
+    "expected": { "type": "close_terminals", "target": "Orion" }
+  },
+  {
+    "id": "close-named-seseo-sierre",
+    "input": "Sierre Orion",
+    "expected": { "type": "close_terminals", "target": "Orion" }
+  },
+  {
+    "id": "close-named-seseo-serrar",
+    "input": "serrar Orion",
+    "expected": { "type": "close_terminals", "target": "Orion" }
+  },
+  {
+    "id": "close-named-kill-mata",
+    "input": "Mata al agente Orion",
+    "expected": { "type": "close_terminals", "target": "Orion" }
+  },
+  {
+    "id": "close-named-termina",
+    "input": "termina al agente Atlas",
+    "expected": { "type": "close_terminals", "target": "Atlas" }
+  },
+  {
+    "id": "close-index-num",
+    "input": "cierra la terminal 2",
+    "expected": { "type": "close_terminals", "target": "2" }
+  },
+  {
+    "id": "close-index-word-dos",
+    "input": "cierra la terminal dos",
+    "expected": { "type": "close_terminals", "target": "2" }
+  },
+  {
+    "id": "close-index-word-tres",
+    "input": "cierra la terminal tres",
+    "expected": { "type": "close_terminals", "target": "3" }
+  },
+  {
+    "id": "close-index-seseo",
+    "input": "serrar la terminal 2",
+    "expected": { "type": "close_terminals", "target": "2" }
+  },
+  {
+    "id": "close-index-panel-1",
+    "input": "cierra el panel 1",
+    "expected": { "type": "close_terminals", "target": "1" }
+  },
+  {
+    "id": "summarize-terminal-2",
+    "input": "Léeme el resumen de la terminal 2",
+    "expected": { "type": "narrate_summary", "target": 2 }
+  },
+  {
+    "id": "summarize-terminal-word-uno",
+    "input": "léeme el resumen de la terminal uno",
+    "expected": { "type": "narrate_summary", "target": 1 }
+  },
+  {
+    "id": "summarize-general",
+    "input": "dame un resumen",
+    "expected": { "type": "narrate_summary" }
+  },
+  {
+    "id": "summarize-cuentame",
+    "input": "cuéntame qué están haciendo",
+    "expected": { "type": "narrate_summary" }
+  },
+  {
+    "id": "summarize-read-aloud",
+    "input": "read aloud terminal 1",
+    "expected": { "type": "narrate_summary", "target": 1 }
+  },
+  {
+    "id": "browser-url-github",
+    "input": "Abre el navegador en https://github.com",
+    "expected": { "type": "open_browser", "url": "https://github.com" }
+  },
+  {
+    "id": "browser-url-domain",
+    "input": "abre el navegador en google.com",
+    "expected": { "type": "open_browser", "url": "google.com" }
+  },
+  {
+    "id": "browser-default",
+    "input": "abre el navegador web",
+    "expected": { "type": "open_browser", "url": "https://google.com" }
+  },
+  {
+    "id": "silence-silencio",
+    "input": "Silencio",
+    "expected": { "type": "stop_speaking" }
+  },
+  {
+    "id": "silence-callate",
+    "input": "cállate",
+    "expected": { "type": "stop_speaking" }
+  },
+  {
+    "id": "silence-para-de-hablar",
+    "input": "para de hablar",
+    "expected": { "type": "stop_speaking" }
+  },
+  {
+    "id": "silence-detener-voz",
+    "input": "detener voz",
+    "expected": { "type": "stop_speaking" }
+  },
+  {
+    "id": "inject-prompt-index",
+    "input": "inyecta en terminal 1: npm run build",
+    "expected": { "type": "inject_prompt", "target": 1, "prompt": "npm run build" }
+  },
+  {
+    "id": "inject-prompt-word",
+    "input": "escribe en terminal dos: git status",
+    "expected": { "type": "inject_prompt", "target": 2, "prompt": "git status" }
+  },
+  {
+    "id": "spawn-subagent-grok",
+    "input": "lanza un subagente grok para revisar la base de datos",
+    "expected": { "type": "spawn_subagent", "cli": "grok", "task": "revisar la base de datos" }
+  },
+  {
+    "id": "spawn-subagent-claude",
+    "input": "spawn subagent claude para refactorizar auth",
+    "expected": { "type": "spawn_subagent", "cli": "claude", "task": "refactorizar auth" }
+  },
+  {
+    "id": "spawn-lanza-las-dos-terminales-pedi",
+    "input": "lanza las dos terminales que le pedí",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+  },
+  {
+    "id": "spawn-lanza-las-2-terminales",
+    "input": "lanza las 2 terminales",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+  },
+  {
+    "id": "spawn-abre-las-dos-terminales",
+    "input": "abre las dos terminales",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+  },
+  {
+    "id": "negative-greeting-hola",
+    "input": "hola, ¿cómo estás?",
+    "expectNegative": true
+  },
+  {
+    "id": "negative-puerta",
+    "input": "abre la puerta de la sala",
+    "expectNegative": true
+  },
+  {
+    "id": "negative-gmail-logout",
+    "input": "cierra sesión de gmail en el navegador",
+    "expectNegative": true
+  },
+  {
+    "id": "negative-gracias",
+    "input": "muchas gracias por tu ayuda",
+    "expectNegative": true
+  },
+  {
+    "id": "negative-pregunta-codigo",
+    "input": "¿cómo funciona la arquitectura del proyecto?",
+    "expectNegative": true
+  },
+  {
+    "id": "negative-explicacion",
+    "input": "explícame qué es una corrutina",
+    "expectNegative": true
+  },
+  {
+    "id": "narrate-esa-terminal-comentame",
+    "input": "coméntame en pocas palabras qué es lo que había en esa terminal",
+    "expected": { "type": "narrate_summary", "target": "active" }
+  },
+  {
+    "id": "narrate-esa-terminal-que-hay",
+    "input": "qué hay en esa terminal",
+    "expected": { "type": "narrate_summary", "target": "active" }
+  },
+  {
+    "id": "inject-esa-terminal-grok",
+    "input": "en esa terminal abre grok",
+    "expected": { "type": "inject_prompt", "target": "active" }
+  }
+]

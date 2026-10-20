@@ -45,6 +45,88 @@ impl std::fmt::Debug for HiddenOutput {
     }
 }
 
+pub struct HiddenChild {
+    #[cfg(windows)]
+    pid: u32,
+    #[cfg(windows)]
+    h_process: *mut std::ffi::c_void,
+    #[cfg(windows)]
+    h_thread: *mut std::ffi::c_void,
+
+    #[cfg(not(windows))]
+    child: std::process::Child,
+
+    pub stdin: Option<Box<dyn std::io::Write + Send>>,
+    pub stdout: Option<Box<dyn std::io::Read + Send>>,
+    pub stderr: Option<Box<dyn std::io::Read + Send>>,
+}
+
+unsafe impl Send for HiddenChild {}
+unsafe impl Sync for HiddenChild {}
+
+impl HiddenChild {
+    pub fn id(&self) -> u32 {
+        #[cfg(windows)]
+        {
+            self.pid
+        }
+        #[cfg(not(windows))]
+        {
+            self.child.id()
+        }
+    }
+
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            if !self.h_process.is_null() && self.h_process as isize != -1 {
+                unsafe {
+                    if windows_impl::TerminateProcess(self.h_process, 1) != 0 {
+                        return Ok(());
+                    }
+                }
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            self.child.kill()
+        }
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<i32> {
+        #[cfg(windows)]
+        {
+            if self.h_process.is_null() || self.h_process as isize == -1 {
+                return Ok(0);
+            }
+            unsafe {
+                windows_impl::WaitForSingleObject(self.h_process, windows_impl::WAIT_INFINITE);
+                let mut exit_code: u32 = 0;
+                if windows_impl::GetExitCodeProcess(self.h_process, &mut exit_code) != 0 {
+                    Ok(exit_code as i32)
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let status = self.child.wait()?;
+            Ok(status.code().unwrap_or(0))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HiddenChild {
+    fn drop(&mut self) {
+        windows_impl::close(self.h_thread);
+        windows_impl::close(self.h_process);
+    }
+}
+
 /// Runs `program` with `args` for at most `timeout`, capturing its output.
 ///
 /// On Windows the process tree is attached to a hidden console; on every other
@@ -57,6 +139,23 @@ pub fn run(program: &Path, args: &[&str], timeout: Duration) -> std::io::Result<
     #[cfg(not(windows))]
     {
         portable_impl::run(program, args, timeout)
+    }
+}
+
+/// Spawns `program` with `args` attached to a hidden console on Windows,
+/// returning a streaming child process with stdin, stdout, and stderr streams.
+pub fn spawn_streaming(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+) -> std::io::Result<HiddenChild> {
+    #[cfg(windows)]
+    {
+        windows_impl::spawn_streaming(program, args, cwd)
+    }
+    #[cfg(not(windows))]
+    {
+        portable_impl::spawn_streaming(program, args, cwd)
     }
 }
 
@@ -76,9 +175,9 @@ mod windows_impl {
     const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
     const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
     const SW_HIDE: u16 = 0;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const WAIT_TIMEOUT: u32 = 0x0000_0102;
-    const WAIT_INFINITE: u32 = 0xFFFF_FFFF;
+    pub(super) const WAIT_INFINITE: u32 = 0xFFFF_FFFF;
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const FILE_SHARE_READ: u32 = 0x0000_0001;
@@ -178,9 +277,9 @@ mod windows_impl {
             startup_info: *mut StartupInfoW,
             process_information: *mut ProcessInformation,
         ) -> Bool;
-        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
-        fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> Bool;
-        fn TerminateProcess(process: Handle, exit_code: u32) -> Bool;
+        pub(super) fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+        pub(super) fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> Bool;
+        pub(super) fn TerminateProcess(process: Handle, exit_code: u32) -> Bool;
         fn ReadFile(
             file: Handle,
             buffer: *mut u8,
@@ -271,7 +370,7 @@ mod windows_impl {
         }
     }
 
-    fn close(handle: Handle) {
+    pub(super) fn close(handle: Handle) {
         if !handle.is_null() && handle as isize != -1 {
             unsafe {
                 CloseHandle(handle as isize);
@@ -284,6 +383,7 @@ mod windows_impl {
         args: &[&str],
         timeout: Duration,
     ) -> io::Result<HiddenOutput> {
+        std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
         unsafe {
             let mut attributes = SecurityAttributes {
                 n_length: std::mem::size_of::<SecurityAttributes>() as u32,
@@ -336,7 +436,7 @@ mod windows_impl {
                 null_mut(),
                 null_mut(),
                 1,
-                CREATE_NEW_CONSOLE,
+                CREATE_NO_WINDOW,
                 null_mut(),
                 null(),
                 &mut startup,
@@ -388,6 +488,105 @@ mod windows_impl {
             })
         }
     }
+
+    pub(super) fn spawn_streaming(
+        program: &Path,
+        args: &[&str],
+        cwd: Option<&Path>,
+    ) -> io::Result<super::HiddenChild> {
+        std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+        unsafe {
+            let mut attributes = SecurityAttributes {
+                n_length: std::mem::size_of::<SecurityAttributes>() as u32,
+                lp_security_descriptor: null_mut(),
+                b_inherit_handle: 1,
+            };
+
+            let (mut stdin_read, mut stdin_write): (Handle, Handle) = (null_mut(), null_mut());
+            let (mut stdout_read, mut stdout_write): (Handle, Handle) = (null_mut(), null_mut());
+            let (mut stderr_read, mut stderr_write): (Handle, Handle) = (null_mut(), null_mut());
+
+            if CreatePipe(&mut stdin_read, &mut stdin_write, &mut attributes, 0) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if CreatePipe(&mut stdout_read, &mut stdout_write, &mut attributes, 0) == 0 {
+                close(stdin_read);
+                close(stdin_write);
+                return Err(io::Error::last_os_error());
+            }
+            if CreatePipe(&mut stderr_read, &mut stderr_write, &mut attributes, 0) == 0 {
+                close(stdin_read);
+                close(stdin_write);
+                close(stdout_read);
+                close(stdout_write);
+                return Err(io::Error::last_os_error());
+            }
+
+            // Child inherits stdin_read, stdout_write, stderr_write.
+            // Parent handles must NOT be inherited.
+            SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
+
+            let mut startup = StartupInfoW::default();
+            startup.dw_flags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+            startup.w_show_window = SW_HIDE;
+            startup.h_std_input = stdin_read;
+            startup.h_std_output = stdout_write;
+            startup.h_std_error = stderr_write;
+
+            let mut line = command_line(program, args);
+            let mut process_info = ProcessInformation {
+                h_process: null_mut(),
+                h_thread: null_mut(),
+                dw_process_id: 0,
+                dw_thread_id: 0,
+            };
+
+            let cwd_wide = cwd.map(|c| wide(c.as_os_str()));
+            let cwd_ptr = cwd_wide.as_ref().map(|w| w.as_ptr()).unwrap_or(null());
+
+            let created = CreateProcessW(
+                null(),
+                line.as_mut_ptr(),
+                null_mut(),
+                null_mut(),
+                1,
+                CREATE_NO_WINDOW,
+                null_mut(),
+                cwd_ptr,
+                &mut startup,
+                &mut process_info,
+            );
+
+            // Child ends are now inherited by the child process; close parent copies.
+            close(stdin_read);
+            close(stdout_write);
+            close(stderr_write);
+
+            if created == 0 {
+                let error = io::Error::last_os_error();
+                close(stdin_write);
+                close(stdout_read);
+                close(stderr_read);
+                return Err(error);
+            }
+
+            use std::os::windows::io::{FromRawHandle, RawHandle};
+            let stdin_file = std::fs::File::from_raw_handle(stdin_write as RawHandle);
+            let stdout_file = std::fs::File::from_raw_handle(stdout_read as RawHandle);
+            let stderr_file = std::fs::File::from_raw_handle(stderr_read as RawHandle);
+
+            Ok(super::HiddenChild {
+                pid: process_info.dw_process_id,
+                h_process: process_info.h_process,
+                h_thread: process_info.h_thread,
+                stdin: Some(Box::new(stdin_file)),
+                stdout: Some(Box::new(stdout_file)),
+                stderr: Some(Box::new(stderr_file)),
+            })
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -430,6 +629,31 @@ mod portable_impl {
             stdout: output.stdout,
             stderr: output.stderr,
             timed_out,
+        })
+    }
+
+    pub(super) fn spawn_streaming(
+        program: &Path,
+        args: &[&str],
+        cwd: Option<&Path>,
+    ) -> io::Result<super::HiddenChild> {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take().map(|s| Box::new(s) as Box<dyn std::io::Write + Send>);
+        let stdout = child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+        let stderr = child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+        Ok(super::HiddenChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
         })
     }
 }
@@ -477,5 +701,24 @@ mod tests {
         .expect("hidden exec should start");
         assert!(out.timed_out);
         assert_eq!(out.code, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn streaming_child_captures_output() {
+        use std::io::Read;
+        let mut child = spawn_streaming(
+            Path::new("cmd.exe"),
+            &["/c", "echo streaming-test-ok"],
+            None,
+        )
+        .expect("streaming child should start");
+        let mut text = String::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_string(&mut text).unwrap();
+        }
+        let code = child.wait().unwrap();
+        assert_eq!(code, 0);
+        assert!(text.contains("streaming-test-ok"));
     }
 }

@@ -126,6 +126,9 @@ pub struct SpawnOptions {
     pub workspace_id: Option<String>,
     pub pane_id: Option<String>,
     pub mode: SpawnMode,
+    pub initial_prompt: Option<String>,
+    pub auto_approve: bool,
+    pub system_prompt: Option<String>,
 }
 
 impl Default for SpawnOptions {
@@ -136,6 +139,9 @@ impl Default for SpawnOptions {
             workspace_id: None,
             pane_id: None,
             mode: SpawnMode::Fresh,
+            initial_prompt: None,
+            auto_approve: false,
+            system_prompt: None,
         }
     }
 }
@@ -352,23 +358,33 @@ fn program_names(engine: &str) -> &'static [&'static str] {
 }
 
 fn where_program(name: &str) -> Option<String> {
-    let mut cmd = std::process::Command::new("where");
-    cmd.arg(name);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+    let path_var = std::env::var_os("PATH")?;
+    let path_exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string())
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| ext.to_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    for dir in std::env::split_paths(&path_var) {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            return Some(direct.to_string_lossy().to_string());
+        }
+        if cfg!(windows) {
+            for ext in &path_exts {
+                let with_ext = dir.join(format!("{}{}", name, ext));
+                if with_ext.is_file() {
+                    return Some(with_ext.to_string_lossy().to_string());
+                }
+            }
+        }
     }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()?
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
+    None
 }
 
 fn known_program_path(name: &str) -> Option<String> {
@@ -438,120 +454,225 @@ pub fn build_agent_cli_args(
     cwd: &str,
     mode: &SpawnMode,
 ) -> (Vec<String>, Option<String>) {
+    build_agent_cli_args_ext(engine, session_id, cwd, mode, None, false, None)
+}
+
+pub fn build_agent_cli_args_ext(
+    engine: &str,
+    session_id: &str,
+    cwd: &str,
+    mode: &SpawnMode,
+    initial_prompt: Option<&str>,
+    auto_approve: bool,
+    system_prompt: Option<&str>,
+) -> (Vec<String>, Option<String>) {
     let canonical = canonical_agent_engine(engine);
+    let mut args: Vec<String> = Vec::new();
+    let mut bound_id: Option<String> = None;
+
     match mode {
         SpawnMode::Fresh => {
-            if canonical == "claude-code" {
-                let target_uuid = if Uuid::parse_str(session_id).is_ok() {
-                    session_id.to_string()
-                } else {
-                    Uuid::new_v4().to_string()
-                };
-                return (
-                    vec!["--session-id".to_string(), target_uuid.clone()],
-                    Some(target_uuid),
-                );
+            match canonical.as_str() {
+                "grok" => {
+                    if auto_approve {
+                        args.push("--always-approve".to_string());
+                    }
+                    if let Some(sys) = system_prompt {
+                        args.push("--system-prompt-override".to_string());
+                        args.push(sys.to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
+                }
+                "codex" => {
+                    if auto_approve {
+                        args.push("--approve-for-me".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
+                }
+                "antigravity" => {
+                    if auto_approve {
+                        args.push("--dangerously-skip-permissions".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push("-i".to_string());
+                        args.push(prompt.to_string());
+                    }
+                }
+                "claude-code" => {
+                    let target_uuid = if Uuid::parse_str(session_id).is_ok() {
+                        session_id.to_string()
+                    } else {
+                        Uuid::new_v4().to_string()
+                    };
+                    args.push("--session-id".to_string());
+                    args.push(target_uuid.clone());
+                    bound_id = Some(target_uuid);
+
+                    if auto_approve {
+                        args.push("--permission-mode".to_string());
+                        args.push("bypassPermissions".to_string());
+                    }
+                    if let Some(sys) = system_prompt {
+                        args.push("--system-prompt".to_string());
+                        args.push(sys.to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
+                }
+                "open-code" => {
+                    if auto_approve {
+                        args.push("--auto".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push("--prompt".to_string());
+                        args.push(prompt.to_string());
+                    }
+                }
+                _ => {
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
+                }
             }
-            (Vec::new(), None)
         }
         SpawnMode::Resume {
             provider_session_id,
             allow_continue_fallback,
             ..
-        } => match canonical.as_str() {
-            "antigravity" => {
-                if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
-                    return (
-                        vec!["--conversation".to_string(), id.to_string()],
-                        Some(id.to_string()),
-                    );
+        } => {
+            match canonical.as_str() {
+                "antigravity" => {
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("--conversation".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    }
+                    if auto_approve {
+                        args.push("--dangerously-skip-permissions".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push("-i".to_string());
+                        args.push(prompt.to_string());
+                    }
                 }
-                (Vec::new(), None)
-            }
-            "codex" => {
-                if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
-                    return (
-                        vec!["resume".to_string(), id.to_string()],
-                        Some(id.to_string()),
-                    );
+                "codex" => {
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("resume".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    }
+                    if auto_approve {
+                        args.push("--approve-for-me".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
                 }
-                (Vec::new(), None)
-            }
-            "claude-code" => {
-                let candidate_id = provider_session_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        if Uuid::parse_str(session_id).is_ok() {
-                            Some(session_id)
+                "claude-code" => {
+                    let candidate_id = provider_session_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            if Uuid::parse_str(session_id).is_ok() {
+                                Some(session_id)
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(id) = candidate_id {
+                        if claude_session_file_exists(cwd, id) {
+                            args.push("--resume".to_string());
+                            args.push(id.to_string());
+                            bound_id = Some(id.to_string());
                         } else {
-                            None
+                            let fresh_uuid = candidate_id
+                                .filter(|id| Uuid::parse_str(id).is_ok())
+                                .map(str::to_string)
+                                .unwrap_or_else(|| Uuid::new_v4().to_string());
+                            args.push("--session-id".to_string());
+                            args.push(fresh_uuid.clone());
+                            bound_id = Some(fresh_uuid);
                         }
-                    });
-                if let Some(id) = candidate_id {
-                    if claude_session_file_exists(cwd, id) {
-                        return (
-                            vec!["--resume".to_string(), id.to_string()],
-                            Some(id.to_string()),
-                        );
+                    } else {
+                        let fresh_uuid = Uuid::new_v4().to_string();
+                        args.push("--session-id".to_string());
+                        args.push(fresh_uuid.clone());
+                        bound_id = Some(fresh_uuid);
+                    }
+                    if auto_approve {
+                        args.push("--permission-mode".to_string());
+                        args.push("bypassPermissions".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
                     }
                 }
-                let fresh_uuid = candidate_id
-                    .filter(|id| Uuid::parse_str(id).is_ok())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| Uuid::new_v4().to_string());
-                (
-                    vec!["--session-id".to_string(), fresh_uuid.clone()],
-                    Some(fresh_uuid),
-                )
-            }
-            "open-code" => {
-                if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
-                    return (
-                        vec!["--session".to_string(), id.to_string()],
-                        Some(id.to_string()),
-                    );
-                }
-                (Vec::new(), None)
-            }
-            "gemini" => {
-                if let Some(id_or_path) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
-                    if std::path::Path::new(id_or_path).is_file() {
-                        return (
-                            vec!["--session-file".to_string(), id_or_path.to_string()],
-                            Some(id_or_path.to_string()),
-                        );
+                "open-code" => {
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("--session".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    }
+                    if auto_approve {
+                        args.push("--auto".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push("--prompt".to_string());
+                        args.push(prompt.to_string());
                     }
                 }
-                (Vec::new(), None)
-            }
-            "kimi" => {
-                if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
-                    return (
-                        vec!["--session".to_string(), id.to_string()],
-                        Some(id.to_string()),
-                    );
+                "grok" => {
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("-r".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    }
+                    if auto_approve {
+                        args.push("--always-approve".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
                 }
-                (Vec::new(), None)
-            }
-            "cursor" | "droid" => {
-                if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
-                    return (
-                        vec!["--resume".to_string(), id.to_string()],
-                        Some(id.to_string()),
-                    );
+                "gemini" => {
+                    if let Some(id_or_path) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        if std::path::Path::new(id_or_path).is_file() {
+                            args.push("--session-file".to_string());
+                            args.push(id_or_path.to_string());
+                            bound_id = Some(id_or_path.to_string());
+                        }
+                    }
                 }
-                (Vec::new(), None)
-            }
-            "aider" => {
-                if *allow_continue_fallback || provider_session_id.is_some() {
-                    return (vec!["--restore-chat-history".to_string()], None);
+                "kimi" => {
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("--session".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    }
                 }
-                (Vec::new(), None)
+                "cursor" | "droid" => {
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("--resume".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    }
+                }
+                "aider" => {
+                    if *allow_continue_fallback || provider_session_id.is_some() {
+                        args.push("--restore-chat-history".to_string());
+                    }
+                }
+                _ => {}
             }
-            _ => (Vec::new(), None),
-        },
+        }
     }
+
+    (args, bound_id)
 }
 
 /// Scans PTY output chunks for OSC 9;9;<path>\x07 or OSC 7;file://... sequences to track live CWD.
@@ -643,8 +764,15 @@ pub fn spawn_session_with_options(
 
     let mut cmd = if let Some(ref hybrid_agent) = hybrid_agent_opt {
         // Hybrid shell resume: open PowerShell in the saved CWD and automatically invoke the agent's resume command
-        let (agent_args, bound_id) =
-            build_agent_cli_args(hybrid_agent, session_id, &target_dir_str, &options.mode);
+        let (agent_args, bound_id) = build_agent_cli_args_ext(
+            hybrid_agent,
+            session_id,
+            &target_dir_str,
+            &options.mode,
+            options.initial_prompt.as_deref(),
+            options.auto_approve,
+            options.system_prompt.as_deref(),
+        );
         initial_provider_id = bound_id;
         initial_detected_agent = Some(canonical_agent_engine(hybrid_agent));
 
@@ -672,8 +800,15 @@ pub fn spawn_session_with_options(
         }
         c
     } else if let Some(program) = resolve_engine_program(engine) {
-        let (agent_args, bound_id) =
-            build_agent_cli_args(engine, session_id, &target_dir_str, &options.mode);
+        let (agent_args, bound_id) = build_agent_cli_args_ext(
+            engine,
+            session_id,
+            &target_dir_str,
+            &options.mode,
+            options.initial_prompt.as_deref(),
+            options.auto_approve,
+            options.system_prompt.as_deref(),
+        );
         initial_provider_id = bound_id;
         let mut c = CommandBuilder::new("powershell.exe");
         c.cwd(&target_dir);
@@ -717,6 +852,7 @@ pub fn spawn_session_with_options(
 
     cmd.env("KITE_ENV", "1");
     cmd.env("KITE_SESSION_ID", session_id);
+    cmd.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
     if let Some(ref ws_id) = options.workspace_id {
         cmd.env("KITE_WORKSPACE_ID", ws_id);
     }
@@ -901,6 +1037,20 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
         }
     }
 
+    let initial_prompt = req
+        .get("initialPrompt")
+        .or_else(|| req.get("prompt"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let auto_approve = req
+        .get("autoApprove")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let system_prompt = req
+        .get("systemPrompt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     spawn_session_with_options(
         &session_id,
         &cwd,
@@ -911,6 +1061,9 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
             workspace_id,
             pane_id,
             mode: SpawnMode::Fresh,
+            initial_prompt,
+            auto_approve,
+            system_prompt,
         },
     );
 
@@ -1084,6 +1237,7 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
                 workspace_id: resolved_ws_id,
                 pane_id: resolved_pane_id,
                 mode,
+                ..Default::default()
             },
         );
 
@@ -1438,14 +1592,17 @@ pub fn snapshot_and_shutdown_all_terminals(reason: &str) {
     // 4. Terminate child process trees so no orphaned ConPTY/node/agent processes remain
     #[cfg(windows)]
     if !pids_to_kill.is_empty() {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new("taskkill");
-        cmd.args(["/F", "/T"]);
+        let mut kill_args: Vec<String> = vec!["/F".into(), "/T".into()];
         for pid in &pids_to_kill {
-            cmd.args(["/PID", &pid.to_string()]);
+            kill_args.push("/PID".into());
+            kill_args.push(pid.to_string());
         }
-        cmd.creation_flags(0x08000000);
-        let _ = cmd.output();
+        let kill_refs: Vec<&str> = kill_args.iter().map(|s| s.as_str()).collect();
+        let _ = crate::hidden_exec::run(
+            std::path::Path::new("taskkill.exe"),
+            &kill_refs,
+            std::time::Duration::from_secs(5),
+        );
     }
 
     for (_session_id, inst) in active_instances {
@@ -1482,11 +1639,12 @@ pub fn terminate_terminal(request: serde_json::Value) -> serde_json::Value {
             if let Ok(mut child) = inst.child.lock() {
                 #[cfg(windows)]
                 if let Some(pid) = child.process_id() {
-                    use std::os::windows::process::CommandExt;
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/F", "/T", "/PID", &pid.to_string()])
-                        .creation_flags(0x08000000)
-                        .output();
+                    let pid_str = pid.to_string();
+                    let _ = crate::hidden_exec::run(
+                        std::path::Path::new("taskkill.exe"),
+                        &["/F", "/T", "/PID", &pid_str],
+                        std::time::Duration::from_secs(5),
+                    );
                 }
                 let _ = child.kill();
             }
@@ -1589,6 +1747,7 @@ pub fn launch_workspace_terminals(request: serde_json::Value) -> serde_json::Val
                 workspace_id: workspace_id.clone(),
                 pane_id: Some(pane_id.clone()),
                 mode: SpawnMode::Fresh,
+                ..Default::default()
             },
         );
 
@@ -1814,12 +1973,22 @@ fn stage_clipboard_file(
     }
     let dir = std::env::temp_dir().join("kite-clipboard");
     std::fs::create_dir_all(&dir).ok()?;
+    let safe_id: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let name = format!(
         "{}-{}.{}",
-        if session_id.is_empty() {
+        if safe_id.is_empty() {
             "image"
         } else {
-            session_id
+            &safe_id
         },
         &Uuid::new_v4().to_string()[..8],
         ext
@@ -2013,6 +2182,80 @@ mod tests {
     }
 
     #[test]
+    fn test_build_agent_cli_args_fresh_with_prompt_and_auto_approve() {
+        let (grok_args, _) = build_agent_cli_args_ext(
+            "grok",
+            "sess-grok",
+            r"E:\kite",
+            &SpawnMode::Fresh,
+            Some("Desarrolla la tarea ODD"),
+            true,
+            None,
+        );
+        assert_eq!(
+            grok_args,
+            vec!["--always-approve", "Desarrolla la tarea ODD"]
+        );
+
+        let (codex_args, _) = build_agent_cli_args_ext(
+            "codex",
+            "sess-codex",
+            r"E:\kite",
+            &SpawnMode::Fresh,
+            Some("Desarrolla la tarea ODD"),
+            true,
+            None,
+        );
+        assert_eq!(
+            codex_args,
+            vec!["--approve-for-me", "Desarrolla la tarea ODD"]
+        );
+
+        let (agy_args, _) = build_agent_cli_args_ext(
+            "antigravity",
+            "sess-agy",
+            r"E:\kite",
+            &SpawnMode::Fresh,
+            Some("Desarrolla la tarea ODD"),
+            true,
+            None,
+        );
+        assert_eq!(
+            agy_args,
+            vec!["--dangerously-skip-permissions", "-i", "Desarrolla la tarea ODD"]
+        );
+
+        let (claude_args, bound_id) = build_agent_cli_args_ext(
+            "claude-code",
+            "sess-claude",
+            r"E:\kite",
+            &SpawnMode::Fresh,
+            Some("Desarrolla la tarea ODD"),
+            true,
+            None,
+        );
+        assert!(bound_id.is_some());
+        assert_eq!(claude_args[0], "--session-id");
+        assert_eq!(claude_args[2], "--permission-mode");
+        assert_eq!(claude_args[3], "bypassPermissions");
+        assert_eq!(claude_args[4], "Desarrolla la tarea ODD");
+
+        let (opencode_args, _) = build_agent_cli_args_ext(
+            "open-code",
+            "sess-oc",
+            r"E:\kite",
+            &SpawnMode::Fresh,
+            Some("Desarrolla la tarea ODD"),
+            true,
+            None,
+        );
+        assert_eq!(
+            opencode_args,
+            vec!["--auto", "--prompt", "Desarrolla la tarea ODD"]
+        );
+    }
+
+    #[test]
     fn test_terminal_session_lifecycle() {
         let session_id = format!("test-sess-{}", Uuid::new_v4());
 
@@ -2061,7 +2304,7 @@ mod tests {
 
         // 5. Read output (PTY output is asynchronous, give it a few polling iterations)
         let mut got_output = false;
-        for _ in 0..25 {
+        for _ in 0..50 {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let read_res = read_terminal_output(serde_json::json!({
                 "sessionId": session_id
@@ -2246,5 +2489,26 @@ mod tests {
             "sessionId": test_session
         }));
         assert!(read_scrollback_file(&test_session).is_none());
+    }
+
+    #[test]
+    fn test_stage_clipboard_file_and_sanitization() {
+        let fake_png_bytes = b"\x89PNG\r\n\x1a\nfakeimagebytes";
+        let b64 = to_base64(fake_png_bytes);
+
+        // Test with session_id that contains invalid filename characters
+        let dirty_session = "agent:session/test\\1?*";
+        let path = stage_clipboard_file(None, dirty_session, "png", &b64);
+        assert!(path.is_some());
+        let staged_path = path.unwrap();
+        assert!(staged_path.ends_with(".png"));
+        assert!(std::path::Path::new(&staged_path).is_file());
+
+        // Verify content matches
+        let read_bytes = std::fs::read(&staged_path).unwrap();
+        assert_eq!(read_bytes, fake_png_bytes);
+
+        // Clean up
+        let _ = std::fs::remove_file(staged_path);
     }
 }

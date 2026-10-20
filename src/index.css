@@ -365,4 +365,23 @@ button.ui-menu__row {
   color: inherit;
 }
 
+/* ==========================================================================
+   Dark Select and Option Styling for Windows WebView2 / Chromium Popups
+   ========================================================================== */
+
+select,
+option,
+optgroup {
+  color-scheme: dark !important;
+  background-color: #18181d !important;
+  color: #f4f4f6 !important;
+}
+
+select option:checked,
+select option:hover {
+  background-color: #27272a !important;
+  color: #ffffff !important;
+}
+
+
 

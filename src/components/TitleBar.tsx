@@ -14,6 +14,8 @@ export interface TitleBarProps {
   onToggleSidebar?: () => void;
   browserVisible?: boolean;
   onToggleBrowser?: () => void;
+  operatorVisible?: boolean;
+  onToggleOperator?: () => void;
   settingsOpen?: boolean;
   unreadCount?: number;
   onOpenNotifications?: (anchorRect?: DOMRect) => void;
@@ -55,6 +57,8 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   onToggleSidebar,
   browserVisible = false,
   onToggleBrowser,
+  operatorVisible = false,
+  onToggleOperator,
   settingsOpen = false,
   unreadCount = 0,
   onOpenNotifications,
@@ -297,20 +301,25 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 
       {/* Trailing Area / Status & Window Controls */}
       <div className="titlebar__trailing" data-tauri-drag-region>
-        {/* Kite Voice Orb Indicator */}
-        <div
-          className="bridge-orb"
-          style={{ '--orb-size': '16px' } as React.CSSProperties}
-          title="Kite Voice Assistant"
-          data-scale="control"
-          data-status="idle"
-          aria-hidden="true"
+        {/* Zed Operator Assistant Button */}
+        <button
+          type="button"
+          className={`chrome-button zed-toggle-button${
+            operatorVisible ? ' chrome-button--selected zed-toggle-button--active' : ''
+          }`}
+          data-testid="operator-toggle"
+          aria-label="Asistente Zed (Operador y Voz)"
+          aria-pressed={operatorVisible}
+          aria-keyshortcuts={platform === 'macos' ? 'Meta+Shift+K' : 'Control+Shift+K'}
+          title={`Asistente Zed (${platform === 'macos' ? 'Cmd+Shift+K' : 'Ctrl+Shift+K'})`}
+          onClick={onToggleOperator}
         >
-          <span className="bridge-orb__rings" aria-hidden="true" />
-          <span className="bridge-orb__sphere" aria-hidden="true">
-            <span className="bridge-orb__fallback" aria-hidden="true" />
-          </span>
-        </div>
+          <span
+            className="zed-mini-orb"
+            data-active={operatorVisible ? 'true' : 'false'}
+            aria-hidden="true"
+          />
+        </button>
 
         {/* Usage slot per production markup */}
         <span

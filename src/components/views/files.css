@@ -110,7 +110,8 @@
 }
 
 .files-editor-toolbar {
-  height: 32px;
+  height: 34px;
+  min-height: 34px;
   padding: 0 var(--space-2);
   border-bottom: 1px solid var(--separator);
   display: flex;
@@ -119,7 +120,9 @@
   background: var(--pane);
   font-size: var(--text-meta);
   color: var(--text-secondary);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .files-toolbar-btn {
@@ -231,6 +234,59 @@
   gap: var(--space-2);
   color: var(--text-secondary);
   font-size: var(--text-caption);
+}
+
+/* ==========================================================================
+   Markdown Preview Text Selection & Styling
+   ========================================================================== */
+
+.markdown-rendered-view,
+.markdown-preview-scroll-container,
+.markdown-preview-content {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
+.markdown-preview-content p,
+.markdown-preview-content h1,
+.markdown-preview-content h2,
+.markdown-preview-content h3,
+.markdown-preview-content h4,
+.markdown-preview-content h5,
+.markdown-preview-content h6,
+.markdown-preview-content li,
+.markdown-preview-content blockquote,
+.markdown-preview-content table,
+.markdown-preview-content td,
+.markdown-preview-content th,
+.markdown-preview-content pre,
+.markdown-preview-content code,
+.markdown-preview-content strong,
+.markdown-preview-content em,
+.markdown-preview-content a {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
+.markdown-preview-content pre,
+.markdown-preview-content code,
+.markdown-preview-content p,
+.markdown-preview-content td,
+.markdown-preview-content th {
+  cursor: text;
+}
+
+.markdown-preview-content ::selection {
+  background: var(--accent-tint, rgba(59, 130, 246, 0.35));
+  color: #ffffff;
+}
+
+.markdown-preview-content button,
+.markdown-preview-content input[type="checkbox"],
+.markdown-outline-sidebar,
+.markdown-outline-sidebar * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 .files-empty-state {

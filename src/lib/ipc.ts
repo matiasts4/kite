@@ -993,3 +993,64 @@ export async function listGoogleAccounts(): Promise<{ active: string | null; acc
 export async function setActiveGoogleAccount(email: string): Promise<{ success: boolean; active: string; accounts: string[] }> {
   return await invokeCommand<{ success: boolean; active: string; accounts: string[] }>('antigravity_set_active_google_account', { email });
 }
+
+export interface ProxyOperatorHttpRequest {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  bodyBase64?: string;
+  timeoutSecs?: number;
+}
+
+export interface ProxyOperatorHttpResponse {
+  success: boolean;
+  status: number;
+  body?: string;
+  error?: string;
+  latencyMs: number;
+}
+
+export async function proxyOperatorHttp(
+  req: ProxyOperatorHttpRequest
+): Promise<ProxyOperatorHttpResponse> {
+  return invokeCommand<ProxyOperatorHttpResponse>('proxy_operator_http', req as unknown as Record<string, unknown>);
+}
+
+export async function operatorDuckAudio(ratio: number = 0.20): Promise<boolean> {
+  if (!isTauriEnvironment()) return false;
+  try {
+    return await invokeCommand<boolean>('operator_duck_audio', { ratio });
+  } catch {
+    return false;
+  }
+}
+
+export async function operatorRestoreAudio(): Promise<boolean> {
+  if (!isTauriEnvironment()) return false;
+  try {
+    return await invokeCommand<boolean>('operator_restore_audio', {});
+  } catch {
+    return false;
+  }
+}
+
+export async function operatorPlayCueSound(start: boolean): Promise<boolean> {
+  if (!isTauriEnvironment()) return false;
+  try {
+    return await invokeCommand<boolean>('operator_play_cue_sound', { start });
+  } catch {
+    return false;
+  }
+}
+
+export async function operatorOnRecordingStateChange(recording: boolean): Promise<boolean> {
+  if (!isTauriEnvironment()) return false;
+  try {
+    return await invokeCommand<boolean>('operator_on_recording_state_change', { recording });
+  } catch {
+    return false;
+  }
+}
+
+

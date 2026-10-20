@@ -8,8 +8,8 @@ import { ChatView } from './components/views/ChatView';
 import { CodeWorkspace } from './components/code/CodeWorkspace';
 import { AgentsView } from './components/views/AgentsView';
 import { SettingsView } from './components/views/SettingsView';
-import { OPEN_SETTINGS_EVENT } from './lib/settingsNav';
-import { BridgeStripHost } from './components/BridgeStrip';
+import { OPEN_SETTINGS_EVENT, openSettingsTab } from './lib/settingsNav';
+import { ZedStripHost, type ZedCallState } from './components/ZedStrip';
 import { RoutinesView } from './components/views/RoutinesView';
 import { UsageDashboardModal } from './components/views/modals/UsageDashboardModal';
 import { WhatsNewModal } from './components/views/modals/WhatsNewModal';
@@ -17,6 +17,7 @@ import { ArchivedChatsModal } from './components/views/modals/ArchivedChatsModal
 import { SshWorkspaceModal } from './components/views/modals/SshWorkspaceModal';
 import { NotificationsView } from './components/views/NotificationsView';
 import { ResumeHost } from './components/modals/ResumeHost';
+import { PromptProjectileOverlay } from './components/code/PromptProjectileOverlay';
 import type { Workspace, AgentProfile, BootstrapResponse } from './types';
 import {
   getBootstrap,
@@ -38,6 +39,7 @@ import {
   getCreditsBalance,
   getAuthBootstrap,
 } from './lib/ipc';
+import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
 
 export type ShellRoute =
   | { kind: 'agent' }
@@ -215,25 +217,72 @@ export const App: React.FC = () => {
   const [isArchivedChatsOpen, setIsArchivedChatsOpen] = useState<boolean>(false);
   const [isSshModalOpen, setIsSshModalOpen] = useState<boolean>(false);
   const [routinesOpen, setRoutinesOpen] = useState<boolean>(false);
-  const [bridgeCallState, setBridgeCallState] = useState<{
-    isActive: boolean;
-    isMicrophoneMuted: boolean;
-    phase: 'idle' | 'listening' | 'thinking' | 'speaking' | 'error';
-    note?: string;
-  }>({
+  const [zedCallState, setZedCallState] = useState<ZedCallState>({
     isActive: false,
-    isMicrophoneMuted: false,
-    phase: 'idle',
+    status: 'connected',
+    orbState: 'connected',
+    muted: false,
+    speakerMuted: false,
+    toolCalls: [],
+    pendingConfirmation: null,
   });
   const [loading, setLoading] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('bmone.cached_workspaces');
+      const saved = localStorage.getItem('kite.cached_workspaces') || localStorage.getItem('bmone.cached_workspaces');
       return !saved;
     } catch {
       return true;
     }
   });
   const [error, setError] = useState<string | null>(null);
+
+  // Kite Operator Assistant Bar state (floating top bar)
+  // By default, the assistant does NOT appear as a floating pill upon application launch.
+  // The user can toggle it at any time via TitleBar or Ctrl+Shift+K / Cmd+Shift+K.
+  const [operatorOpen, setOperatorOpen] = useState<boolean>(() => {
+    try {
+      localStorage.removeItem('kite.operatorOpen');
+      const sessionSaved = sessionStorage.getItem('kite.operatorOpen');
+      return sessionSaved === 'true';
+    } catch {}
+    return false; // Default closed
+  });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('kite.operatorOpen', String(operatorOpen));
+    } catch {}
+  }, [operatorOpen]);
+
+  const toggleOperator = useCallback(() => {
+    setOperatorOpen((prev) => !prev);
+  }, []);
+
+  // Global keyboard shortcuts:
+  // - Ctrl+Shift+K or Cmd+Shift+K: Toggle Asistente Zed (abrir / cerrar)
+  // - Ctrl+Shift+V or Alt+V: Abrir Asistente Zed para dictar si está cerrado
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setOperatorOpen((prev) => !prev);
+        return;
+      }
+
+      const isVoiceShortcut =
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'v' || e.key === 'V')) ||
+        (e.altKey && (e.key === 'v' || e.key === 'V'));
+
+      if (isVoiceShortcut && !operatorOpen) {
+        e.preventDefault();
+        setOperatorOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [operatorOpen]);
 
   const bootstrappedRef = useRef(false);
 
@@ -412,10 +461,47 @@ export const App: React.FC = () => {
     };
     window.addEventListener('kite:open-right-dock-file', handleOpenFilePreview);
 
+    const handleSpawnAgentTerminal = (e: Event) => {
+      const custom = e as CustomEvent<{ workspaceId?: string | null }>;
+      setWorkMode('code');
+      setSettingsOpen(false);
+      setRoutinesOpen(false);
+      if (custom.detail?.workspaceId) {
+        setSelectedWorkspaceId(custom.detail.workspaceId);
+      }
+    };
+    window.addEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
+
+    const handleOpRequest = (e: Event) => {
+      const custom = e as CustomEvent<UiBusRequestPayload>;
+      if (!custom.detail) return;
+      if (custom.detail.kind === 'navigate') {
+        const targetMode = custom.detail.payload?.mode as WorkMode;
+        if (targetMode && ['agent', 'code', 'chat'].includes(targetMode)) {
+          setWorkMode(targetMode);
+          setSettingsOpen(false);
+          sendUiAck({
+            reqId: custom.detail.reqId,
+            ok: true,
+            data: { mode: targetMode },
+          });
+        } else {
+          sendUiAck({
+            reqId: custom.detail.reqId,
+            ok: false,
+            reason: `Modo inválido: ${targetMode}`,
+          });
+        }
+      }
+    };
+    window.addEventListener('kite:op-request', handleOpRequest);
+
     return () => {
       window.removeEventListener('kite:navigate-mode', handleNavigate);
       window.removeEventListener('kite:select-workspace', handleSelectWorkspace);
       window.removeEventListener('kite:open-right-dock-file', handleOpenFilePreview);
+      window.removeEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
+      window.removeEventListener('kite:op-request', handleOpRequest);
     };
   }, []);
 
@@ -743,6 +829,8 @@ export const App: React.FC = () => {
           onToggleSidebar={() => setSidebarVisible((v) => !v)}
           browserVisible={rightDockVisible}
           onToggleBrowser={() => setRightDockVisible((v) => !v)}
+          operatorVisible={operatorOpen}
+          onToggleOperator={toggleOperator}
           settingsOpen={settingsOpen}
           unreadCount={unreadCount}
           activeEngine={workMode === 'agent' ? agents.find((a) => a.id === selectedAgentId)?.engine : threads.find((t) => t.id === selectedThreadId)?.provider}
@@ -1168,14 +1256,28 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {/* Floating Bridge Voice & Operations Orb */}
-        <BridgeStripHost
-          state={bridgeCallState}
-          onToggleMicrophoneMute={() =>
-            setBridgeCallState((s) => ({ ...s, isMicrophoneMuted: !s.isMicrophoneMuted }))
+        {/* Floating Zed Voice & Operations Orb */}
+        <ZedStripHost
+          workspaceId={selectedWorkspaceId}
+          call={{
+            ...zedCallState,
+            isActive: operatorOpen,
+          }}
+          onToggleMute={() =>
+            setZedCallState((s) => ({ ...s, muted: !s.muted }))
           }
-          onEndCall={() => setBridgeCallState((s) => ({ ...s, isActive: false }))}
+          onToggleSpeaker={() =>
+            setZedCallState((s) => ({ ...s, speakerMuted: !s.speakerMuted }))
+          }
+          onEndCall={() => setOperatorOpen(false)}
+          onOpenSettingsZed={() => {
+            setSettingsOpen(true);
+            openSettingsTab('zed');
+          }}
         />
+
+        {/* Visual Spark Projectile Overlay for Dispatched Prompts */}
+        <PromptProjectileOverlay />
 
         {/* Startup Agent Recovery Sheet */}
         <ResumeHost />

@@ -1,5 +1,5 @@
 /**
- * Lightweight navigation bridge so any component (title-bar badge, quota
+ * Lightweight settings navigation hub so any component (title-bar badge, quota
  * popover, notifications…) can send the user straight to a Settings tab
  * without prop-drilling through App.
  */

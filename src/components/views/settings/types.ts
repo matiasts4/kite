@@ -15,7 +15,7 @@ export type SettingsTabId =
   | 'telemetry'
   | 'terminal'
   | 'notifications'
-  | 'bridge'
+  | 'zed'
   | 'agents'
   | 'plugins'
   | 'remote'

@@ -26,10 +26,7 @@ $devLockPath = "$env:LOCALAPPDATA\dev.kite.code.dev\EBWebView\Default\LOCK"
 if (Test-Path $devLockPath) {
     Remove-Item $devLockPath -Force -ErrorAction SilentlyContinue
 }
-$prodLockPath = "$env:LOCALAPPDATA\dev.kite.code\EBWebView\Default\LOCK"
-if (Test-Path $prodLockPath) {
-    Remove-Item $prodLockPath -Force -ErrorAction SilentlyContinue
-}
+
 
 # 2. Check if Vite is running on port 1420, if not start it
 Write-Host "[2/4] Verificando servidor frontend en http://127.0.0.1:1420..." -ForegroundColor Cyan

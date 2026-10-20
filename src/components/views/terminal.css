@@ -534,3 +534,11 @@
   padding: 0 10px;
 }
 
+/* Direct Terminal Prompt Reception Pulse */
+.terminal-canvas-area--receiving {
+  box-shadow: inset 0 0 28px rgba(56, 189, 248, 0.28) !important;
+  transition: box-shadow 0.25s ease-out;
+}
+
+
+

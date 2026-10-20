@@ -1,5 +1,12 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import type { DictationAvailability, DictationInputDevice, DictationSettings } from './types';
+import {
+  startMicrophoneTest,
+  startTranscriptionTestSession,
+  type MicrophoneTester,
+  type TranscriptionTestResult,
+  type TranscriptionTestSession,
+} from '../../../lib/operator/voice/zedVoice';
 
 interface VoiceTabProps {
   dictationSettings: DictationSettings;
@@ -24,6 +31,179 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
   onChooseWhisperModel,
   onRequestMicrophone,
 }) => {
+  const [grokKeyInput, setGrokKeyInput] = useState<string>(() => {
+    try {
+      return localStorage.getItem('kite_grok_transcription_api_key') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [showKey, setShowKey] = useState(false);
+  const [savedBadge, setSavedBadge] = useState(false);
+  const [isTestingMic, setIsTestingMic] = useState(false);
+  const [testMicLevel, setTestMicLevel] = useState(0);
+  const [micTestError, setMicTestError] = useState<string | null>(null);
+  const micTesterRef = useRef<MicrophoneTester | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (micTesterRef.current) {
+        micTesterRef.current.stop();
+        micTesterRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleToggleMicTest = async () => {
+    if (isTestingMic) {
+      if (micTesterRef.current) {
+        micTesterRef.current.stop();
+        micTesterRef.current = null;
+      }
+      setIsTestingMic(false);
+      setTestMicLevel(0);
+      setMicTestError(null);
+    } else {
+      setMicTestError(null);
+      try {
+        const tester = await startMicrophoneTest(
+          dictationSettings.deviceId || null,
+          (lvl) => {
+            setTestMicLevel(lvl);
+          }
+        );
+        micTesterRef.current = tester;
+        setIsTestingMic(true);
+      } catch (err: any) {
+        setMicTestError(
+          err?.message || 'No se pudo acceder al micrófono. Verifica los permisos del sistema.'
+        );
+        setIsTestingMic(false);
+        setTestMicLevel(0);
+      }
+    }
+  };
+
+  const [transcriptionTestState, setTranscriptionTestState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [transcriptionTestSeconds, setTranscriptionTestSeconds] = useState(0);
+  const [transcriptionResult, setTranscriptionResult] = useState<TranscriptionTestResult | null>(null);
+  const transcriptionSessionRef = useRef<TranscriptionTestSession | null>(null);
+  const transcriptionTimerRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (transcriptionSessionRef.current) {
+        transcriptionSessionRef.current.cancel();
+        transcriptionSessionRef.current = null;
+      }
+      if (transcriptionTimerRef.current) {
+        clearInterval(transcriptionTimerRef.current);
+        transcriptionTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleToggleTranscriptionTest = async () => {
+    if (transcriptionTestState === 'recording') {
+      if (transcriptionTimerRef.current) {
+        clearInterval(transcriptionTimerRef.current);
+        transcriptionTimerRef.current = null;
+      }
+      const session = transcriptionSessionRef.current;
+      transcriptionSessionRef.current = null;
+      setTranscriptionTestState('transcribing');
+
+      if (session) {
+        try {
+          const res = await session.stopAndTranscribe();
+          setTranscriptionResult(res);
+        } catch (err: any) {
+          setTranscriptionResult({
+            success: false,
+            error: err?.message || 'Error inesperado al transcribir.',
+            engine: 'Desconocido',
+            latencyMs: 0,
+            durationSecs: transcriptionTestSeconds,
+          });
+        } finally {
+          setTranscriptionTestState('idle');
+        }
+      } else {
+        setTranscriptionTestState('idle');
+      }
+    } else if (transcriptionTestState === 'idle') {
+      setTranscriptionResult(null);
+      setTranscriptionTestSeconds(0);
+      try {
+        const session = await startTranscriptionTestSession(dictationSettings.deviceId || null);
+        transcriptionSessionRef.current = session;
+        setTranscriptionTestState('recording');
+
+        let elapsed = 0;
+        transcriptionTimerRef.current = setInterval(async () => {
+          elapsed += 1;
+          setTranscriptionTestSeconds(elapsed);
+          if (elapsed >= 8 && transcriptionSessionRef.current) {
+            clearInterval(transcriptionTimerRef.current);
+            transcriptionTimerRef.current = null;
+            const currentSession = transcriptionSessionRef.current;
+            transcriptionSessionRef.current = null;
+            setTranscriptionTestState('transcribing');
+            try {
+              const res = await currentSession.stopAndTranscribe();
+              setTranscriptionResult(res);
+            } catch (err: any) {
+              setTranscriptionResult({
+                success: false,
+                error: err?.message || 'Error al transcribir.',
+                engine: 'Desconocido',
+                latencyMs: 0,
+                durationSecs: elapsed,
+              });
+            } finally {
+              setTranscriptionTestState('idle');
+            }
+          }
+        }, 1000);
+      } catch (err: any) {
+        setTranscriptionResult({
+          success: false,
+          error: err?.message || 'No se pudo acceder al micrófono para la prueba.',
+          engine: 'Desconocido',
+          latencyMs: 0,
+          durationSecs: 0,
+        });
+        setTranscriptionTestState('idle');
+      }
+    }
+  };
+
+
+  const [autoExecute, setAutoExecute] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('kite_zed_auto_execute') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const [ttsFeedback, setTtsFeedback] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('kite_zed_tts_enabled') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+
+  const handleSaveGrokKey = () => {
+    try {
+      localStorage.setItem('kite_grok_transcription_api_key', grokKeyInput.trim());
+      setSavedBadge(true);
+      setTimeout(() => setSavedBadge(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
+
   return (
     <>
       <section className="settings-group">
@@ -137,8 +317,8 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Audio cues</h3>
-              <p>Play a soft chime when dictation starts and stops recording.</p>
+              <h3 className="settings-row__title">Audio cues & atenuación</h3>
+              <p>Reproduce el tono Zen armónico y atenúa el volumen de fondo al iniciar y finalizar la grabación.</p>
             </div>
             <div className="settings-row__control">
               <button
@@ -159,24 +339,175 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
               <h3 className="settings-row__title">Microphone</h3>
               <p>Device names are private to this computer. Automatic chooses a safe input.</p>
             </div>
-            <div className="settings-row__control settings-row__control--menu">
+            <div className="settings-row__control settings-row__control--menu" style={{ minWidth: 200, maxWidth: 300, flex: '0 1 300px' }}>
               <select
                 aria-label="Microphone"
-                className="settings-control"
+                className="settings-control ui-button zed-settings__select"
+                style={{
+                  width: '100%',
+                  maxWidth: '280px',
+                  height: '32px',
+                  padding: '0 10px',
+                  fontSize: '12px',
+                  borderRadius: 'var(--radius-chip, 6px)',
+                  background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
+                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
+                  color: '#f4f4f6',
+                  colorScheme: 'dark',
+                  textOverflow: 'ellipsis',
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                }}
                 onChange={(event) =>
                   onSelectDevice(event.target.value === 'automatic' ? null : event.target.value)
                 }
                 value={dictationSettings.deviceId ?? 'automatic'}
               >
-                <option value="automatic">Automatic</option>
+                <option value="automatic" style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
+                  Automatic
+                </option>
                 {dictationDevices.map((device) => (
-                  <option key={device.id} value={device.id}>
+                  <option
+                    key={device.id}
+                    value={device.id}
+                    style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
+                  >
                     {device.name}
                   </option>
                 ))}
               </select>
             </div>
           </div>
+
+          {/* Live Mic Test in VoiceTab */}
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Prueba de audio en vivo (VU Meter)</h3>
+              <p>
+                {isTestingMic
+                  ? testMicLevel > 0.08
+                    ? `Voz detectada (${Math.round(testMicLevel * 100)}%)`
+                    : 'En silencio — habla al micrófono'
+                  : 'Comprueba que el micrófono captura sonido en tiempo real.'}
+              </p>
+            </div>
+            <div className="settings-row__control" style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 220 }}>
+              <div
+                style={{
+                  flex: 1,
+                  height: 8,
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  borderRadius: 4,
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    height: '100%',
+                    width: `${Math.round(testMicLevel * 100)}%`,
+                    background: testMicLevel > 0.7 ? '#fbbf24' : '#10b981',
+                    transition: 'width 0.08s ease-out',
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                className={`settings-control ui-button ${isTestingMic ? 'ui-button--danger' : ''}`}
+                onClick={handleToggleMicTest}
+                style={{ minWidth: 80, fontSize: 12 }}
+              >
+                {isTestingMic ? 'Detener' : 'Probar'}
+              </button>
+            </div>
+          </div>
+          {micTestError && (
+            <div className="ui-card__row" style={{ color: '#f87171', fontSize: 12, padding: '8px 20px' }}>
+              {micTestError}
+            </div>
+          )}
+
+          {/* Live Transcription Test in VoiceTab */}
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Prueba de transcripción (Speech-to-Text)</h3>
+              <p>
+                {transcriptionTestState === 'idle'
+                  ? 'Prueba si el modelo de IA en la nube transcribe lo que dices.'
+                  : transcriptionTestState === 'recording'
+                  ? `Grabando tu voz… habla al micrófono (${transcriptionTestSeconds}s / máx 8s)`
+                  : 'Transcribiendo audio en la nube con IA… por favor espera.'}
+              </p>
+            </div>
+            <div className="settings-row__control" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                type="button"
+                className={`settings-control ui-button ${transcriptionTestState === 'recording' ? 'ui-button--danger' : ''}`}
+                onClick={handleToggleTranscriptionTest}
+                disabled={transcriptionTestState === 'transcribing'}
+                style={{ minWidth: 150, fontSize: 12 }}
+              >
+                {transcriptionTestState === 'recording'
+                  ? 'Detener y Transcribir'
+                  : transcriptionTestState === 'transcribing'
+                  ? 'Transcribiendo…'
+                  : 'Probar transcripción'}
+              </button>
+            </div>
+          </div>
+          {transcriptionResult && (
+            <div
+              className="ui-card__row"
+              style={{
+                flexDirection: 'column',
+                gap: 8,
+                padding: '12px 20px',
+                background: transcriptionResult.success ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)',
+                borderTop: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.06))',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span
+                    className="settings-badge"
+                    data-tone={transcriptionResult.success ? 'running' : 'warning'}
+                  >
+                    {transcriptionResult.success ? `✓ ${transcriptionResult.engine}` : 'Fallo en la transcripción'}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted, #9ca3af)' }}>
+                    Grabación: {transcriptionResult.durationSecs.toFixed(1)}s • Latencia: {transcriptionResult.latencyMs}ms
+                  </span>
+                </div>
+              </div>
+              {transcriptionResult.success ? (
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: '#f4f4f6',
+                    background: 'rgba(0, 0, 0, 0.35)',
+                    padding: '8px 12px',
+                    borderRadius: 6,
+                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    fontStyle: transcriptionResult.text ? 'normal' : 'italic',
+                  }}
+                >
+                  {transcriptionResult.text ? `"${transcriptionResult.text}"` : '(Sin palabras detectadas — audio en silencio)'}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: '#f87171',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    padding: '8px 12px',
+                    borderRadius: 6,
+                    border: '1px solid rgba(239, 68, 68, 0.2)',
+                  }}
+                >
+                  {transcriptionResult.error}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
@@ -209,6 +540,122 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
               >
                 Reset
               </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Seccion Asistente Zed (Voz en la Nube con Grok) ─────────── */}
+      <section className="settings-group">
+        <h2 className="settings-group__title">Asistente Zed (Voz en la Nube con Grok)</h2>
+        <div className="ui-card">
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Modo de Transcripción</h3>
+              <p>
+                El Asistente utiliza transcripción de voz en la nube mediante los modelos de alta precisión de xAI Grok.
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <span className="settings-badge" data-tone={grokKeyInput.trim() ? 'running' : 'idle'}>
+                {grokKeyInput.trim() ? 'Nube (xAI Grok Whisper)' : 'Nativo del Navegador'}
+              </span>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Grok API Key (Transcripción en la Nube)</h3>
+              <p>
+                Clave de API de xAI (Grok) para enviar el audio directamente a la nube sin consumir recursos locales.
+              </p>
+            </div>
+            <div className="settings-row__control" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <input
+                type={showKey ? 'text' : 'password'}
+                className="settings-control ui-input"
+                style={{ width: '220px', fontFamily: 'monospace', fontSize: '12px' }}
+                placeholder="xai-..."
+                value={grokKeyInput}
+                onChange={(e) => setGrokKeyInput(e.target.value)}
+              />
+              <button
+                type="button"
+                className="settings-control ui-button"
+                onClick={() => setShowKey(!showKey)}
+                title={showKey ? 'Ocultar clave' : 'Mostrar clave'}
+              >
+                {showKey ? 'Ocultar' : 'Ver'}
+              </button>
+              <button
+                type="button"
+                className="settings-control ui-button ui-button--primary"
+                onClick={handleSaveGrokKey}
+              >
+                {savedBadge ? 'Guardado ✓' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Auto-ejecución por voz</h3>
+              <p>
+                Al terminar de hablar con el Asistente, despacha y verifica automáticamente el comando sin
+                necesidad de pulsar botones ni escribir.
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <button
+                aria-checked={autoExecute}
+                aria-label="Auto-ejecución por voz"
+                className="ui-switch"
+                role="switch"
+                type="button"
+                onClick={() => {
+                  const next = !autoExecute;
+                  setAutoExecute(next);
+                  localStorage.setItem('kite_zed_auto_execute', String(next));
+                }}
+              >
+                <span aria-hidden="true" className="ui-switch__knob" />
+              </button>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Respuesta por voz (TTS)</h3>
+              <p>
+                El Asistente narra en español el resultado verificado de las acciones realizadas a través
+                de la síntesis de voz del sistema.
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <button
+                aria-checked={ttsFeedback}
+                aria-label="Respuesta por voz"
+                className="ui-switch"
+                role="switch"
+                type="button"
+                onClick={() => {
+                  const next = !ttsFeedback;
+                  setTtsFeedback(next);
+                  localStorage.setItem('kite_zed_tts_enabled', String(next));
+                }}
+              >
+                <span aria-hidden="true" className="ui-switch__knob" />
+              </button>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Idioma del Asistente</h3>
+              <p>El Asistente opera y sintetiza respuestas estrictamente en español.</p>
+            </div>
+            <div className="settings-row__control">
+              <span className="settings-badge">Español (es-ES / es-Latam)</span>
             </div>
           </div>
         </div>

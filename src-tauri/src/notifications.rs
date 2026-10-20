@@ -243,10 +243,23 @@ pub fn notifications_set_preferences(request: Option<Value>) -> Value {
 pub fn notifications_open_system_settings(_request: Option<Value>) -> Value {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.creation_flags(0x08000000);
-        let _ = cmd.args(["/C", "start", "", "ms-settings:notifications"]).spawn();
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                lpOperation: *const u16,
+                lpFile: *const u16,
+                lpParameters: *const u16,
+                lpDirectory: *const u16,
+                nShowCmd: i32,
+            ) -> isize;
+        }
+        use std::os::windows::ffi::OsStrExt;
+        let op: Vec<u16> = std::ffi::OsStr::new("open").encode_wide().chain(Some(0)).collect();
+        let file: Vec<u16> = std::ffi::OsStr::new("ms-settings:notifications").encode_wide().chain(Some(0)).collect();
+        unsafe {
+            ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1);
+        }
     }
     Value::Null
 }
@@ -255,17 +268,14 @@ pub fn notifications_open_system_settings(_request: Option<Value>) -> Value {
 pub fn notifications_play_sample(_request: Option<Value>) -> Value {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new("powershell");
-        cmd.creation_flags(0x08000000);
-        let _ = cmd
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[System.Media.SystemSounds]::Asterisk.Play()",
-            ])
-            .spawn();
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBeep(uType: u32) -> i32;
+        }
+        const MB_ICONASTERISK: u32 = 0x0000_0040;
+        unsafe {
+            MessageBeep(MB_ICONASTERISK);
+        }
     }
     Value::Null
 }

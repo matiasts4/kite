@@ -520,6 +520,44 @@ export function recordTerminalOutput(
   }
 }
 
+export function registerSpawnedTerminal(
+  sessionId: string,
+  meta?: {
+    workspaceId?: string | null;
+    workspaceName?: string;
+    engine?: string;
+    title?: string;
+    who?: string | null;
+  }
+): ActiveAgentTerminal {
+  if (!sessionId) {
+    throw new Error('registerSpawnedTerminal requires a valid sessionId');
+  }
+  resetTerminalExitStatus(sessionId);
+
+  const now = Date.now();
+  const authoritativeEngine = meta?.engine ? normalizeTerminalEngine(meta.engine) : 'grok';
+  const folder = meta?.workspaceName || meta?.workspaceId || 'Workspace';
+  const title = meta?.title || `[ODD] ${authoritativeEngine}`;
+  const who = meta?.who || authoritativeEngine;
+
+  const spawnedTerminal: ActiveAgentTerminal = {
+    sessionId,
+    workspaceId: meta?.workspaceId ?? null,
+    workspaceName: folder,
+    engine: authoritativeEngine,
+    title,
+    who,
+    state: 'working',
+    latestLine: `Iniciando ${authoritativeEngine}…`,
+    updatedAt: now,
+  };
+
+  terminalsMap.set(sessionId, spawnedTerminal);
+  notifyTerminalUpdate(spawnedTerminal);
+  return spawnedTerminal;
+}
+
 export function markTerminalExited(sessionId: string) {
   if (!sessionId) return;
   exitedSessionIds.add(sessionId);
@@ -564,3 +602,8 @@ export function getActiveAgentTerminals(): ActiveAgentTerminal[] {
 
   return [];
 }
+
+export function getTerminalRollingBuffer(sessionId: string): string | undefined {
+  return sessionStates.get(sessionId)?.rollingBuffer;
+}
+

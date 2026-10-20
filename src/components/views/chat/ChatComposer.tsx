@@ -488,8 +488,22 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           value={prompt}
           disabled={running}
           onPaste={(event) => {
-            const files = Array.from(event.clipboardData?.files ?? []);
-            if (running || files.length === 0) return;
+            if (running) return;
+            const dt = event.clipboardData;
+            if (!dt) return;
+
+            let files: File[] = Array.from(dt.files ?? []);
+            if (files.length === 0 && dt.items) {
+              const itemFiles = Array.from(dt.items)
+                .filter((item) => item.kind === 'file' || item.type.startsWith('image/'))
+                .map((item) => item.getAsFile())
+                .filter((f): f is File => f !== null);
+              if (itemFiles.length > 0) {
+                files = itemFiles;
+              }
+            }
+
+            if (files.length === 0) return;
             event.preventDefault();
             onStageFiles(files);
           }}

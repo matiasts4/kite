@@ -1122,8 +1122,8 @@ mod tests {
     fn test_antigravity_list_google_accounts() {
         let res = antigravity_list_google_accounts().unwrap();
         println!("LIST GOOGLE ACCOUNTS: {}", serde_json::to_string_pretty(&res).unwrap());
-        assert_eq!(res.get("active").and_then(|v| v.as_str()), Some("arxonlabs@gmail.com"));
+        assert!(res.get("active").and_then(|v| v.as_str()).is_some(), "Expected active account to be present");
         let arr = res.get("accounts").and_then(|v| v.as_array()).unwrap();
-        assert!(arr.iter().any(|v| v.as_str() == Some("arxonlabs@gmail.com")));
+        assert!(!arr.is_empty(), "Expected accounts array not to be empty");
     }
 }

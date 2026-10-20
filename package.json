@@ -1,6 +1,6 @@
 {
   "name": "kite-code",
-  "version": "0.1.14",
+  "version": "0.1.22",
   "description": "Kite Code — Autonomous agentic development environment and native multi-model terminal desktop application",
   "main": "server/server.mjs",
   "type": "module",
@@ -22,7 +22,8 @@
     "release:fast": "node scripts/release.mjs patch --fast",
     "release:dry": "node scripts/release.mjs patch --dry-run",
     "install:local": "powershell -ExecutionPolicy Bypass -File ./update-and-launch.ps1",
-    "feed": "node scripts/feed-server.mjs --serve"
+    "feed": "node scripts/feed-server.mjs --serve",
+    "verify:operator:e2e": "vite-node scripts/verify-operator-e2e.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",
@@ -30,6 +31,7 @@
     "@tauri-apps/plugin-updater": "^2.14.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "ai": "^7.0.143",
     "clsx": "^2.1.1",
     "express": "^4.21.2",
     "react": "^18.3.1",
@@ -48,6 +50,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.6.1",
     "jsdom": "^29.1.1",
+    "playwright-core": "^1.64.1",
     "postcss": "^8.5.30",
     "tailwindcss": "^3.4.19",
     "typescript": "^7.0.2",

@@ -52,7 +52,8 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
   useEffect(() => {
     mountedRef.current = true;
     // Defer initial poll so startup frames render instantly without process table scanning (0ms in tests)
-    const initialDelay = typeof process !== 'undefined' && process.env.NODE_ENV === 'test' ? 0 : 2500;
+    const isTest = typeof globalThis !== 'undefined' && (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env?.NODE_ENV === 'test';
+    const initialDelay = isTest ? 0 : 2500;
     const initialTimer = window.setTimeout(() => {
       if (mountedRef.current) {
         pollMetrics(false);
@@ -60,15 +61,27 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
     }, initialDelay);
 
     const intervalId = window.setInterval(() => {
-      if (mountedRef.current) {
+      if (mountedRef.current && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
         pollMetrics(false);
       }
     }, prefs.refreshIntervalMs);
+
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible' && mountedRef.current) {
+        pollMetrics(false);
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
 
     return () => {
       mountedRef.current = false;
       window.clearTimeout(initialTimer);
       window.clearInterval(intervalId);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+      }
     };
   }, [prefs.refreshIntervalMs, pollMetrics]);
 

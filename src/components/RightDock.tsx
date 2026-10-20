@@ -27,7 +27,7 @@ import {
   FlameGlyph,
 } from './dockIcons';
 
-export type SidePanelAppId = 'focusTimer' | 'scratchpad' | 'bombSprint' | 'bridgeVerse';
+export type SidePanelAppId = 'focusTimer' | 'scratchpad' | 'bombSprint' | 'kiteVerse';
 
 export type RightDockTabKind =
   | 'dashboard'
@@ -365,7 +365,7 @@ const TAB_CONFIGS: Record<string, TabResolvedDef> = {
   'app:focusTimer': { label: 'Focus timer', tooltip: 'Focus timer', closable: true, renderIcon: () => <TimerGlyph /> },
   'app:scratchpad': { label: 'Scratchpad', tooltip: 'Scratchpad', closable: true, renderIcon: () => <NotebookPenGlyph /> },
   'app:bombSprint': { label: 'Bomb Sprint', tooltip: 'Bomb Sprint', closable: true, renderIcon: () => <FlameGlyph /> },
-  'app:bridgeVerse': { label: 'KiteVerse', tooltip: 'KiteVerse', closable: true, renderIcon: () => <SparklesGlyph /> },
+  'app:kiteVerse': { label: 'KiteVerse', tooltip: 'KiteVerse', closable: true, renderIcon: () => <SparklesGlyph /> },
 };
 
 function resolveTabDef(tab: DockTabItem): TabResolvedDef {
@@ -385,7 +385,7 @@ const APP_MENU_TABS: Array<{ appId: SidePanelAppId; label: string; icon: React.R
   { appId: 'focusTimer', label: 'Focus timer', icon: <TimerGlyph /> },
   { appId: 'scratchpad', label: 'Scratchpad', icon: <NotebookPenGlyph /> },
   { appId: 'bombSprint', label: 'Bomb Sprint', icon: <FlameGlyph /> },
-  { appId: 'bridgeVerse', label: 'KiteVerse', icon: <SparklesGlyph /> },
+  { appId: 'kiteVerse', label: 'KiteVerse', icon: <SparklesGlyph /> },
 ];
 
 /* ==========================================================================

@@ -2,15 +2,15 @@ import React from 'react';
 import { FocusTimerApp } from './apps/FocusTimerApp';
 import { ScratchpadApp } from './apps/ScratchpadApp';
 import { BombSprintApp } from './apps/BombSprintApp';
-import { BridgeVerseApp } from './apps/BridgeVerseApp';
+import { KiteVerseApp } from './apps/KiteVerseApp';
 
-export type SidePanelAppId = 'focusTimer' | 'scratchpad' | 'bombSprint' | 'bridgeVerse';
+export type SidePanelAppId = 'focusTimer' | 'scratchpad' | 'bombSprint' | 'kiteVerse';
 
 export const APP_TITLES: Record<SidePanelAppId, string> = {
   focusTimer: 'Focus Timer',
   scratchpad: 'Scratchpad',
   bombSprint: 'Bomb Sprint',
-  bridgeVerse: 'KiteVerse',
+  kiteVerse: 'KiteVerse',
 };
 
 export interface SidePanelAppsViewProps {
@@ -26,8 +26,8 @@ function renderAppContent(app: SidePanelAppId): React.ReactElement | null {
       return <ScratchpadApp />;
     case 'bombSprint':
       return <BombSprintApp />;
-    case 'bridgeVerse':
-      return <BridgeVerseApp />;
+    case 'kiteVerse':
+      return <KiteVerseApp />;
     default:
       return null;
   }

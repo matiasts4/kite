@@ -1,0 +1,3 @@
+fix: Inyección estricta de AGY_CLI_DISABLE_AUTO_UPDATE=true en Rust (main, quota, chat, terminal, hidden_exec) para suprimir el demonio en segundo plano de agy.
+fix: Aislamiento total de ventanas de consola en Windows 11 impidiendo la delegación a WindowsTerminal.exe.
+security: Configuración persistente a nivel de usuario en Windows para evitar ejecuciones huérfanas de background updater.

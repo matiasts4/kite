@@ -6,13 +6,15 @@ import {
   ChatProvider,
   ChatMode,
   ExtendedChatThread,
-  ChatAttachment,
-  ModelOption,
   LiveChatRun,
   PROVIDER_CATALOG,
   engineToChatProvider,
 } from './types';
 import type { PlanActionPayload } from './ChatPlanPanel';
+import { withTimeout } from './chatSessionUtils';
+import { useChatAttachments } from './hooks/useChatAttachments';
+import { useChatModels } from './hooks/useChatModels';
+import { pollTurnUpdates } from './turnPolling';
 
 export interface UseChatSessionProps {
   workspaceId: string | null;
@@ -63,16 +65,27 @@ export function useChatSession({
 
   // Composer inputs per thread
   const [promptMap, setPromptMap] = useState<Record<string, string>>({});
-  const [attachmentsMap, setAttachmentsMap] = useState<Record<string, ChatAttachment[]>>({});
-  const [dynamicModelsMap, setDynamicModelsMap] = useState<Record<string, ModelOption[]>>({});
-  const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
+
+  const {
+    attachmentsMap,
+    attachmentsMapRef,
+    writeAttachments,
+    handlePickAttachments,
+    handleStageFiles,
+    stageDroppedAttachments,
+    handleRemoveAttachment,
+  } = useChatAttachments();
+
+  const {
+    dynamicModelsMap,
+    isRefreshingModels,
+    fetchDynamicModels,
+    refreshModels,
+  } = useChatModels();
 
   const isMountedRef = useRef(true);
   const activePollRunsRef = useRef<Set<string>>(new Set());
-  const attachmentsMapRef = useRef(attachmentsMap);
   const focusedThreadIdRef = useRef(focusedThreadId);
-  const stageDroppedRef = useRef<(threadId: string, paths: string[]) => void>(() => {});
-  attachmentsMapRef.current = attachmentsMap;
   focusedThreadIdRef.current = focusedThreadId;
 
   useEffect(() => {
@@ -80,11 +93,6 @@ export function useChatSession({
     return () => {
       isMountedRef.current = false;
       activePollRunsRef.current.clear();
-      for (const [threadId, items] of Object.entries(attachmentsMapRef.current)) {
-        for (const item of items) {
-          void invokeCommand('release_chat_attachment', { threadId, resourceId: item.resourceId });
-        }
-      }
     };
   }, []);
 
@@ -98,7 +106,7 @@ export function useChatSession({
         if (payload.paths.length === 0) return;
         const threadId = focusedThreadIdRef.current;
         if (!threadId) return;
-        void stageDroppedRef.current(threadId, payload.paths);
+        void stageDroppedAttachments(threadId, payload.paths);
       })
       .then((stop) => {
         if (cancelled) stop();
@@ -109,7 +117,7 @@ export function useChatSession({
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [stageDroppedAttachments]);
 
   // Initial Load
   useEffect(() => {
@@ -543,9 +551,7 @@ export function useChatSession({
     for (const item of attachmentsMapRef.current[threadId] || []) {
       void invokeCommand('release_chat_attachment', { threadId, resourceId: item.resourceId });
     }
-    const cleared = { ...attachmentsMapRef.current, [threadId]: [] as ChatAttachment[] };
-    attachmentsMapRef.current = cleared;
-    setAttachmentsMap(cleared);
+    writeAttachments(threadId, []);
     const remaining = gridThreadIds.filter((id) => id !== threadId);
     setGridThreadIds(remaining);
     const nextFocused = remaining.length > 0 ? (focusedThreadId === threadId ? remaining[0] : focusedThreadId) : null;
@@ -672,31 +678,6 @@ export function useChatSession({
     }
   };
 
-  const fetchDynamicModels = async (provider: ChatProvider, forceRefresh = false) => {
-    try {
-      const res = await invokeCommand<{ models: ModelOption[]; cached?: boolean }>('list_chat_provider_models', {
-        provider,
-        forceRefresh,
-      });
-      if (isMountedRef.current && res && Array.isArray(res.models) && res.models.length > 0) {
-        setDynamicModelsMap((prev) => ({ ...prev, [provider]: res.models }));
-      }
-    } catch (err) {
-      console.warn('[ChatView] list_chat_provider_models notice:', err);
-    }
-  };
-
-  const refreshModels = async (provider: ChatProvider) => {
-    setIsRefreshingModels(true);
-    try {
-      await fetchDynamicModels(provider, true);
-    } finally {
-      if (isMountedRef.current) {
-        setIsRefreshingModels(false);
-      }
-    }
-  };
-
   const handleApproval = async (
     threadId: string,
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
@@ -733,86 +714,6 @@ export function useChatSession({
     } catch (err) {
       console.error('[ChatView] cancel_chat_turn error:', err);
     }
-  };
-
-  const writeAttachments = (threadId: string, items: ChatAttachment[]) => {
-    const next = { ...attachmentsMapRef.current, [threadId]: items };
-    attachmentsMapRef.current = next;
-    setAttachmentsMap(next);
-  };
-
-  const acceptAttachments = (threadId: string, incoming: ChatAttachment[]) => {
-    const valid = incoming.filter((item) => item && item.resourceId);
-    if (valid.length === 0) return;
-    const current = attachmentsMapRef.current[threadId] || [];
-    const room = Math.max(0, 16 - current.length);
-    for (const extra of valid.slice(room)) {
-      void invokeCommand('release_chat_attachment', { threadId, resourceId: extra.resourceId });
-    }
-    writeAttachments(threadId, [...current, ...valid.slice(0, room)]);
-  };
-
-  const handlePickAttachments = async (threadId: string, kind: 'files' | 'folder' = 'files') => {
-    try {
-      const picked = await invokeCommand<ChatAttachment[]>('pick_chat_attachments', {
-        threadId,
-        kind,
-      });
-      if (!isMountedRef.current || !Array.isArray(picked)) return;
-      acceptAttachments(threadId, picked);
-    } catch (err) {
-      console.error('[ChatView] pick_chat_attachments failed:', err);
-    }
-  };
-
-  const handleStageFiles = async (threadId: string, files: File[]) => {
-    const staged: ChatAttachment[] = [];
-    for (const file of files.slice(0, 16)) {
-      if (file.size > 10 * 1024 * 1024) continue;
-      try {
-        const dataBase64 = await fileToBase64(file);
-        const item = await invokeCommand<ChatAttachment | null>('stage_chat_blob', {
-          threadId,
-          displayName: file.name || 'attachment',
-          mimeType: (file.type || 'application/octet-stream').slice(0, 127),
-          dataBase64,
-        });
-        if (item?.resourceId) staged.push(item);
-      } catch (err) {
-        console.error('[ChatView] stage_chat_blob failed:', err);
-      }
-    }
-    if (isMountedRef.current) acceptAttachments(threadId, staged);
-  };
-
-  const stageDroppedAttachments = async (threadId: string, paths: string[]) => {
-    const usable = paths.filter((path) => path.length > 0 && path.length <= 4096).slice(0, 16);
-    if (usable.length === 0) return;
-    try {
-      const staged = await invokeCommand<ChatAttachment[]>('stage_dropped_chat_attachments', {
-        threadId,
-        paths: usable,
-      });
-      if (!isMountedRef.current || !Array.isArray(staged)) return;
-      acceptAttachments(threadId, staged);
-    } catch (err) {
-      console.error('[ChatView] stage_dropped_chat_attachments failed:', err);
-    }
-  };
-  stageDroppedRef.current = stageDroppedAttachments;
-
-  const handleRemoveAttachment = async (threadId: string, resourceId: string) => {
-    try {
-      await invokeCommand('release_chat_attachment', { threadId, resourceId });
-    } catch (err) {
-      console.error('[ChatView] release_chat_attachment failed:', err);
-      return;
-    }
-    if (!isMountedRef.current) return;
-    writeAttachments(
-      threadId,
-      (attachmentsMapRef.current[threadId] || []).filter((item) => item.resourceId !== resourceId)
-    );
   };
 
   const handleSendPrompt = async (
@@ -877,7 +778,17 @@ export function useChatSession({
       activePollRunsRef.current.add(res.runId);
       setThreadsMap((prev) => ({ ...prev, [threadId]: res.thread }));
       notifyThreadsChanged();
-      void pollTurnUpdates(res.runId, threadId, 0);
+      void pollTurnUpdates({
+        runId: res.runId,
+        threadId,
+        afterSeq: 0,
+        agentId,
+        isMountedRef,
+        activePollRunsRef,
+        setThreadsMap,
+        setIsRunning,
+        notifyThreadsChanged,
+      });
       return true;
     } catch (err: any) {
       for (const item of currentAttachments) {
@@ -903,153 +814,6 @@ export function useChatSession({
         return t ? { ...prev, [threadId]: { ...t, items: [...t.items, errItem], status: 'error' } } : prev;
       });
       return false;
-    }
-  };
-
-  const pollTurnUpdates = async (runId: string, threadId: string, afterSeq: number) => {
-    if (!isMountedRef.current || !activePollRunsRef.current.has(runId)) return;
-    try {
-      const pollPromise = invokeCommand<{
-        schemaVersion: number;
-        runId: string;
-        nextSequence: number;
-        events: Array<{
-          sequence: number;
-          kind: 'status' | 'upsert' | 'delta' | 'finished' | 'approvalOpened' | 'approvalResolved';
-          status?: 'idle' | 'running' | 'waiting' | 'error';
-          item?: ChatItem;
-          itemId?: string;
-          text?: string;
-          ok?: boolean;
-          stoppedByBuilder?: boolean;
-          approval?: any;
-          requestId?: string;
-        }>;
-      }>(agentId ? 'read_agent_chat_turn_updates' : 'read_chat_turn_updates', agentId
-        ? {
-            agentId,
-            threadId,
-            runId,
-            afterSequence: afterSeq,
-            waitMs: 350,
-          }
-        : {
-            runId,
-            threadId,
-            afterSequence: afterSeq,
-            waitMs: 350,
-          });
-
-      const res = await withTimeout(pollPromise, 8000, `pollTurnUpdates(${runId})`);
-
-      if (!isMountedRef.current || !activePollRunsRef.current.has(runId)) return;
-
-      if (res && res.events) {
-        let isDone = false;
-        if (res.events.length > 0) {
-          console.debug(`[ChatSession] Run ${runId} received ${res.events.length} events (nextSeq=${res.nextSequence})`);
-        }
-
-        setThreadsMap((prevMap) => {
-          const target = prevMap[threadId];
-          if (!target) return prevMap;
-          let items = [...target.items];
-          let status = target.status;
-          let pendingApproval = target.pendingApproval;
-
-          for (const ev of res.events) {
-            if (ev.kind === 'status' && ev.status) {
-              status = ev.status;
-            } else if (ev.kind === 'upsert' && ev.item) {
-              const idx = items.findIndex((it) => it.id === ev.item!.id);
-              if (idx >= 0) {
-                items[idx] = ev.item;
-              } else {
-                items.push(ev.item);
-              }
-            } else if (ev.kind === 'delta' && ev.itemId && ev.text) {
-              const idx = items.findIndex((it) => it.id === ev.itemId);
-              if (idx >= 0) {
-                items[idx] = {
-                  ...items[idx],
-                  text: items[idx].text + ev.text,
-                  streaming: true,
-                };
-              } else {
-                items.push({
-                  id: ev.itemId,
-                  kind: 'assistant',
-                  text: ev.text,
-                  title: null,
-                  detail: null,
-                  status: 'inProgress',
-                  streaming: true,
-                  exitCode: null,
-                  createdAtUnixMs: Date.now(),
-                  attachments: [],
-                });
-              }
-            } else if (ev.kind === 'approvalOpened' && ev.approval) {
-              pendingApproval = ev.approval;
-              status = 'waiting';
-            } else if (ev.kind === 'approvalResolved') {
-              pendingApproval = null;
-            } else if (ev.kind === 'finished') {
-              isDone = true;
-              status = 'idle';
-              items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
-            }
-          }
-
-          return {
-            ...prevMap,
-            [threadId]: {
-              ...target,
-              items,
-              status,
-              pendingApproval,
-            },
-          };
-        });
-
-        if (isDone) {
-          console.log(`[ChatSession] Run ${runId} completed. Removing poller.`);
-          activePollRunsRef.current.delete(runId);
-          setIsRunning((prev) => ({ ...prev, [threadId]: false }));
-          notifyThreadsChanged();
-        } else {
-          setTimeout(() => {
-            if (isMountedRef.current && activePollRunsRef.current.has(runId)) {
-              void pollTurnUpdates(runId, threadId, res.nextSequence);
-            }
-          }, 400);
-        }
-      } else {
-        setTimeout(() => {
-          if (isMountedRef.current && activePollRunsRef.current.has(runId)) {
-            void pollTurnUpdates(runId, threadId, afterSeq);
-          }
-        }, 500);
-      }
-    } catch (err) {
-      console.warn('[ChatView] Polling updates finished or cancelled:', err);
-      activePollRunsRef.current.delete(runId);
-      if (isMountedRef.current) {
-        setIsRunning((prev) => ({ ...prev, [threadId]: false }));
-        setThreadsMap((prev) => {
-          const t = prev[threadId];
-          if (!t) return prev;
-          const cleanedItems = t.items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
-          return {
-            ...prev,
-            [threadId]: {
-              ...t,
-              items: cleanedItems,
-              status: t.status === 'running' ? 'idle' : t.status,
-            },
-          };
-        });
-      }
     }
   };
 
@@ -1098,31 +862,4 @@ export function useChatSession({
     setKnownThreadsList,
     persistAgentTabOrder,
   };
-}
-
-async function fileToBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = '';
-  const chunk = 0x4000;
-  for (let index = 0; index < bytes.length; index += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
-  }
-  return btoa(binary);
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Timeout: ${label} exceeded ${ms}ms`));
-    }, ms);
-    promise
-      .then((res) => {
-        clearTimeout(timer);
-        resolve(res);
-      })
-      .catch((err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-  });
 }

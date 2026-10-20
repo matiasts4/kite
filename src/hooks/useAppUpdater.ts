@@ -136,12 +136,19 @@ function initTauriListeners() {
   });
 
   if (typeof window !== 'undefined') {
-    window.addEventListener('focus', () => {
-      checkSilently();
-    });
+    let focusTimer: any = null;
+    const scheduleFocusCheck = () => {
+      if (focusTimer) clearTimeout(focusTimer);
+      // Defer focus check by 2.5s so window activation, rendering and memory unpaging complete smoothly
+      focusTimer = setTimeout(() => {
+        checkSilently();
+      }, 2500);
+    };
+
+    window.addEventListener('focus', scheduleFocusCheck);
     window.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        checkSilently();
+        scheduleFocusCheck();
       }
     });
   }

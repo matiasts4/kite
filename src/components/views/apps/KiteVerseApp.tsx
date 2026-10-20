@@ -91,11 +91,11 @@ const ROOMS: Array<VerseAgent['room']> = [
   'Coffee Bar',
 ];
 
-export interface BridgeVerseAppProps {
+export interface KiteVerseAppProps {
   embedded?: boolean;
 }
 
-export const BridgeVerseApp: React.FC<BridgeVerseAppProps> = ({ embedded = false }) => {
+export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) => {
   const [agents, setAgents] = useState<VerseAgent[]>(INITIAL_VERSE_AGENTS);
   const [selectedAgentId, setSelectedAgentId] = useState<string>('claude');
   const [newTaskInput, setNewTaskInput] = useState('');

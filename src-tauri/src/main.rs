@@ -40,11 +40,19 @@ pub mod account_switcher;
 pub mod handoff;
 pub mod system_metrics;
 pub mod acp;
+pub mod odd_tasks;
+pub mod operator_runtime;
+pub mod audio_ducking;
+pub mod agent_inbox;
 
 use logger::log_trace;
 use tauri::Manager;
 
 use acp::*;
+use odd_tasks::*;
+use operator_runtime::*;
+use audio_ducking::*;
+use agent_inbox::*;
 
 use account_switcher::*;
 use agents::*;
@@ -91,6 +99,21 @@ fn register_windows_shutdown_handler() {
 }
 
 fn main() {
+    // Suppress background auto-updater in Antigravity CLI (`agy.exe`).
+    //
+    // Root cause analysis (2026-10-18):
+    // When `agy` runs (quota check `/usage`, model discovery, etc.), it forks a
+    // detached background daemon: `agy.exe --bg-updater`. That daemon in turn calls
+    // `agy.exe --version` via standard Go `exec.Command` without `CREATE_NO_WINDOW`
+    // (0x08000000). On Windows 11 (22H2+), launching a console subsystem binary from a
+    // detached daemon triggers Windows Console Delegation, causing visible terminal/OpenConsole
+    // windows to flash on screen.
+    //
+    // Setting `AGY_CLI_DISABLE_AUTO_UPDATE=true` instructs `agy` to completely bypass
+    // the auto-updater check (Go compares `os.Getenv("AGY_CLI_DISABLE_AUTO_UPDATE") == "true"`),
+    // eliminating `--bg-updater` and `agy.exe --version` invocations.
+    std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && (args[1] == "mcp" || args[1] == "mcp-tasks" || args[1] == "kite-tasks") {
         crate::tickets::run_mcp_server(&args[1..]);
@@ -111,26 +134,60 @@ fn main() {
     #[cfg(windows)]
     register_windows_shutdown_handler();
 
-    log_trace(if cfg!(debug_assertions) {
-        "Kite Code (Dev) main starting"
-    } else {
-        "Kite Code main starting"
-    });
+    let pid = std::process::id();
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    log_trace(&format!(
+        "{} (PID: {}, EXE: {}) main starting",
+        if cfg!(debug_assertions) { "Kite Code (Dev)" } else { "Kite Code" },
+        pid,
+        exe
+    ));
 
-    // Clean up stale WebView2 lock if present from an abruptly terminated session
+    // Ensure dev and release instances NEVER collide on the same WebView2 user data folder
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         let identifier = if cfg!(debug_assertions) {
             "dev.kite.code.dev"
         } else {
             "dev.kite.code"
         };
-        let lock_path = std::path::PathBuf::from(local_app_data)
+        let webview_dir = std::path::PathBuf::from(&local_app_data)
             .join(identifier)
-            .join("EBWebView")
-            .join("Default")
-            .join("LOCK");
+            .join("EBWebView");
+
+        // Explicitly isolate WebView2 User Data Folder so Dev and Installed never freeze or conflict
+        if std::env::var("WEBVIEW2_USER_DATA_FOLDER").is_err() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_dir);
+        }
+        log_trace(&format!(
+            "[PID {}] WEBVIEW2_USER_DATA_FOLDER = {:?}",
+            pid,
+            std::env::var("WEBVIEW2_USER_DATA_FOLDER").unwrap_or_default()
+        ));
+
+        // Prevent aggressive Chromium background suspension, timer throttling, and occlusion sleeping
+        // which causes UI freeze (10s+) when switching back to Kite Code after 3+ minutes in background.
+        let base_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        let anti_freeze_args = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
+        if !base_args.contains("--disable-background-timer-throttling") {
+            let merged_args = if base_args.is_empty() {
+                anti_freeze_args.to_string()
+            } else {
+                format!("{base_args} {anti_freeze_args}")
+            };
+            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &merged_args);
+            log_trace(&format!("[PID {}] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = {:?}", pid, merged_args));
+        }
+
+        let lock_path = webview_dir.join("Default").join("LOCK");
         if lock_path.exists() {
-            let _ = std::fs::remove_file(&lock_path);
+            // Attempt to remove stale lock only if not held by an active running process
+            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&lock_path) {
+                drop(file);
+                let res = std::fs::remove_file(&lock_path);
+                log_trace(&format!("[PID {}] Removed stale lock {:?}: {:?}", pid, lock_path, res));
+            } else {
+                log_trace(&format!("[PID {}] Lock {:?} is actively held by a running process", pid, lock_path));
+            }
         }
     }
 
@@ -181,6 +238,7 @@ fn main() {
                     tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
                 ) {
                     crate::terminal::snapshot_and_shutdown_all_terminals("main_window_close");
+                    crate::audio_ducking::restore_audio_immediate();
                 }
             }
         })
@@ -228,7 +286,7 @@ fn main() {
             auth_snapshot,
             autopilot_next,
             bootstrap,
-            bridge_memory_reveal,
+            zed_memory_reveal,
             cancel_agent_chat_turn,
             cancel_agent_draft,
             cancel_agent_voice_create,
@@ -238,6 +296,7 @@ fn main() {
             cancel_transcript_search,
             close_browser_surface,
             close_files_resource,
+            complete_agent_inbox,
             complete_agent_install,
             commit_workspace_changes,
             connect_ssh_workspace,
@@ -307,6 +366,7 @@ fn main() {
             open_external_link,
             pick_chat_attachments,
             preview_voice_import,
+            poll_agent_inbox,
             probe_agent_availability,
             purge_archived_chat,
             pull_workspace_changes,
@@ -316,6 +376,7 @@ fn main() {
             read_agent_voice_input_availability,
             read_browser_surface,
             read_chat_turn_updates,
+            read_cwd_relative_text,
             read_dictation,
             read_dictation_availability,
             read_dictation_settings,
@@ -427,17 +488,34 @@ fn main() {
             get_handoff_preview,
             get_system_metrics,
             continue_turn_with_handoff,
+            create_odd_task_file,
+            list_odd_task_files,
+            update_odd_task_status,
+            get_odd_task_content,
+            query_operator_agent,
+            proxy_operator_http,
+            operator_trace_path,
+            operator_trace_append,
+            operator_duck_audio,
+            operator_restore_audio,
+            operator_play_cue_sound,
+            operator_on_recording_state_change,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
             context.config_mut().identifier = "dev.kite.code.dev".to_string();
         }
+        log_trace(&format!(
+            "[PID {}] Building Tauri context with identifier = {}",
+            pid,
+            context.config().identifier
+        ));
 
         let app = builder
             .build(context)
             .expect("error while building Kite Code application");
 
-    log_trace("Tauri application built successfully, running event loop");
+    log_trace(&format!("[PID {}] Tauri application built successfully, running event loop", pid));
 
     app.run(|_app_handle, event| {
         match event {
@@ -448,6 +526,10 @@ fn main() {
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, ensuring all terminals are snapshotted");
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit");
+            }
+            tauri::RunEvent::MainEventsCleared => {
+                // Do NOT log MainEventsCleared. It triggers dozens of times per second,
+                // and writing synchronously to app.log on disk blocks the main UI message pump.
             }
             other => {
                 log_trace(&format!("RunEvent: {:?}", other));

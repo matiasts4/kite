@@ -16,6 +16,7 @@ import {
 } from './settings/icons';
 import { invokeCommand } from '../../lib/ipc';
 import { OPEN_SETTINGS_EVENT, type OpenSettingsDetail } from '../../lib/settingsNav';
+import { normalizeLegacySettingsTabId } from '../../lib/kiteLegacyIds';
 import {
   SettingsTabId,
   SettingsTabConfig,
@@ -37,8 +38,10 @@ import { TelemetryTab } from './settings/TelemetryTab';
 import { ChangelogTab } from './settings/ChangelogTab';
 import { AccountTab } from './settings/AccountTab';
 import { QuotasTab } from './settings/QuotasTab';
+import { ZedTab } from './settings/ZedTab';
 import { PluginsView } from './PluginsView';
 import { RoutinesView } from './RoutinesView';
+import { listAudioInputDevices } from '../../lib/operator/voice/zedVoice';
 import { useFilesAutoSavePreference } from '../../lib/filesAutoSavePreference';
 import { useAppUpdater } from '../../hooks/useAppUpdater';
 import './settings.css';
@@ -79,7 +82,7 @@ const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'terminal', label: 'Terminal', blurb: 'Sesiones de fondo y comportamiento de terminal.', icon: SquareTerminalIcon },
   { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
   { id: 'voice', label: 'Voice', blurb: 'Transcripción de voz a texto y dictado.', icon: MicIcon, hasDividerBefore: true },
-  { id: 'bridge', label: 'Memory', blurb: 'Memoria persistente y contexto del asistente.', icon: AudioWaveformIcon },
+  { id: 'zed', label: 'Asistente Zed', blurb: 'Asistente esférico Zed, pasarela OpenCode multi-modelo, Grok Cloud, persona y latencia.', icon: AudioWaveformIcon },
   { id: 'agents', label: 'Agents & Models', blurb: 'Modelos predeterminados y razonamiento.', icon: UsersIcon },
   { id: 'quotas', label: 'Cuotas y cuentas', blurb: 'Suscripciones de IA, rotación de cuentas y proveedores monitoreados.', icon: GaugeIcon },
   { id: 'plugins', label: 'Plugins', blurb: 'Herramientas y servicios para los agentes.', icon: PuzzleIcon },
@@ -252,8 +255,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const savedTheme = localStorage.getItem('bmone.theme') as 'dark' | 'light' | null;
       if (savedTheme) setLocalMode(savedTheme);
 
-      const savedTab = localStorage.getItem('bmone.settingsTab') as SettingsTabId | null;
-      if (savedTab) setActiveTab(savedTab);
+      const savedTabRaw = localStorage.getItem('bmone.settingsTab');
+      const savedTab = normalizeLegacySettingsTabId(savedTabRaw);
+      if (savedTab && SETTINGS_TABS.some((t) => t.id === savedTab)) {
+        setActiveTab(savedTab as SettingsTabId);
+      }
     } catch {
       // Ignore localStorage errors
     }
@@ -291,10 +297,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         const devices = await invokeCommand<DictationDeviceList>('list_dictation_input_devices', {
           supportedSchemaVersion: 1,
         });
-        if (isMounted && devices) {
-          setDictationDevices(devices.devices || []);
+        if (isMounted && devices && devices.devices && devices.devices.length > 0) {
+          setDictationDevices(devices.devices);
           if (devices.selectedId) {
             setDictationSettings((current) => ({ ...current, deviceId: devices.selectedId }));
+          }
+        } else {
+          const browserDevices = await listAudioInputDevices();
+          if (isMounted && browserDevices.length > 0) {
+            setDictationDevices(
+              browserDevices.map((d) => ({
+                id: d.deviceId,
+                name: d.label,
+                isBluetooth: /bluetooth/i.test(d.label),
+              }))
+            );
+            const savedMic = localStorage.getItem('kite_selected_mic_device_id');
+            if (savedMic && savedMic !== 'automatic') {
+              setDictationSettings((current) => ({ ...current, deviceId: savedMic }));
+            }
           }
         }
       } catch (err) {
@@ -439,12 +460,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleSelectDictationDevice = async (deviceId: string | null) => {
+    try {
+      localStorage.setItem('kite_selected_mic_device_id', deviceId || 'automatic');
+    } catch {}
     await saveDictationSettings({ ...dictationSettings, deviceId });
     try {
       const devices = await invokeCommand<DictationDeviceList>('list_dictation_input_devices', {
         supportedSchemaVersion: 1,
       });
-      if (devices) setDictationDevices(devices.devices || []);
+      if (devices && devices.devices && devices.devices.length > 0) {
+        setDictationDevices(devices.devices);
+      }
     } catch (err) {
       console.warn('[SettingsView] Failed to refresh dictation devices:', err);
     }
@@ -808,42 +834,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </section>
             )}
 
-            {activeTab === 'bridge' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">Assistant</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Shared memory</h3>
-                      <p>Shared context and memory bank preserved across project workspaces.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        title="persona.json, USER.md, MEMORY.md and journal.json — plain files in the app's memory folder."
-                        onClick={() => {
-                          void invokeCommand('bridge_memory_reveal').catch((err) => {
-                            console.error('[SettingsView] bridge_memory_reveal failed:', err);
-                          });
-                        }}
-                      >
-                        Reveal folder
-                      </button>
-                    </div>
-                  </div>
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Persona</h3>
-                      <p>Concise, technical pair-programming assistant tuned for developer productivity.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <span className="settings-badge">Default</span>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
+            {activeTab === 'zed' && <ZedTab />}
 
             {(activeTab === 'plugins' || (activeTab as string) === 'integrations') && (
               <section className="settings-group">

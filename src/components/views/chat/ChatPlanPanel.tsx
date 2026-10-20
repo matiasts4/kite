@@ -1,6 +1,11 @@
 import React, { useState, useId } from 'react';
 import { FileCodeIcon } from './ChatIcons';
 import { MarkdownMessage } from './MarkdownMessage';
+import {
+  dispatchPlanToSubagentTerminal,
+  parseMarkdownPlanToOdd,
+  buildVerificationPrompt,
+} from '../../../lib/subagentDispatcher';
 
 export type PlanStatus = 'ready' | 'revising' | 'implementing' | 'completed' | 'interrupted' | 'failed';
 
@@ -50,6 +55,8 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
   const [inputText, setInputText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [showSubagentMenu, setShowSubagentMenu] = useState(false);
+  const [delegatedTask, setDelegatedTask] = useState<{ slug: string; relativePath: string } | null>(null);
 
   const contentId = useId();
   const inputId = useId();
@@ -112,7 +119,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
         </div>
       )}
 
-      <div className="chat-plan-panel__actions">
+      <div className="chat-plan-panel__actions" style={{ position: 'relative' }}>
         <button
           type="button"
           className="secondary-button action-button--row chat-plan-panel__action"
@@ -136,6 +143,96 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
         >
           New plan
         </button>
+
+        {/* ODD Subagent Delegation Dropdown */}
+        <div style={{ position: 'relative', display: 'inline-block' }}>
+          <button
+            type="button"
+            className="secondary-button action-button--row chat-plan-panel__action"
+            disabled={isBusy}
+            title="Delegar la especificación técnica a un subagente en terminal sin Git worktrees"
+            onClick={() => setShowSubagentMenu((v) => !v)}
+          >
+            Delegar ODD ▾
+          </button>
+          {showSubagentMenu && (
+            <div
+              style={{
+                position: 'absolute',
+                right: 0,
+                bottom: '100%',
+                marginBottom: '4px',
+                width: '180px',
+                background: 'var(--surface-bg, #1e1e1e)',
+                border: '1px solid var(--border-subtle, #333)',
+                borderRadius: '6px',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                zIndex: 100,
+                padding: '4px 0',
+                fontSize: '12px',
+              }}
+            >
+              <div
+                style={{
+                  padding: '4px 10px',
+                  fontWeight: 600,
+                  color: 'var(--text-muted, #888)',
+                  borderBottom: '1px solid var(--border-subtle, #333)',
+                }}
+              >
+                Elegir subagente
+              </div>
+              {[
+                { id: 'grok', name: 'Grok Build' },
+                { id: 'codex', name: 'Codex' },
+                { id: 'claude-code', name: 'Claude Code' },
+                { id: 'antigravity', name: 'Antigravity' },
+                { id: 'open-code', name: 'OpenCode' },
+              ].map((agent) => (
+                <button
+                  key={agent.id}
+                  type="button"
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 10px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover, #2a2a2a)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                  onClick={async () => {
+                    setShowSubagentMenu(false);
+                    const parsed = parseMarkdownPlanToOdd(plan.markdown);
+                    const res = await dispatchPlanToSubagentTerminal({
+                      title: parsed.title,
+                      engine: agent.id,
+                      objective: parsed.objective,
+                      spec: parsed.spec,
+                      constraints: parsed.constraints,
+                      verificationSteps: parsed.verificationSteps,
+                      acceptanceCriteria: parsed.acceptanceCriteria,
+                      autoApprove: true,
+                    });
+                    if (res.success) {
+                      setDelegatedTask({ slug: res.slug, relativePath: res.relativePath });
+                      setStatusMessage(`Delegado a ${agent.name} (${res.relativePath})`);
+                    }
+                  }}
+                >
+                  <span>{agent.name}</span>
+                  <span style={{ fontSize: '10px', opacity: 0.6, fontFamily: 'monospace' }}>{agent.id}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <button
           type="button"
           className="secondary-button action-button--row chat-plan-panel__action"
@@ -152,6 +249,37 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
           {isSubmitting ? 'Starting…' : 'Implement'}
         </button>
       </div>
+
+      {delegatedTask && (
+        <div
+          style={{
+            margin: '8px 0 4px 0',
+            padding: '6px 10px',
+            background: 'var(--surface-secondary, rgba(255,255,255,0.04))',
+            borderRadius: '6px',
+            border: '1px solid var(--border-subtle, #333)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: '12px',
+          }}
+        >
+          <span>
+            📋 Tarea ODD: <code>{delegatedTask.relativePath}</code>
+          </span>
+          <button
+            type="button"
+            className="primary-button action-button--row"
+            style={{ fontSize: '11px', padding: '3px 8px' }}
+            onClick={() => {
+              const prompt = buildVerificationPrompt(delegatedTask.relativePath);
+              void executeSend(prompt, { kind: 'new' });
+            }}
+          >
+            Verificar con Orquestador
+          </button>
+        </div>
+      )}
 
       <span role="status" className="sr-only">
         {statusMessage}

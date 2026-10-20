@@ -1,0 +1,132 @@
+[
+  {
+    "id": "E1",
+    "name": "Abrir 2 terminales con Grok y prompt de tests desde modo chat",
+    "initialMode": "chat",
+    "input": "abre dos terminales con grok y ejecuta los test",
+    "providerType": "local",
+    "expected": {
+      "strategy": "heuristic",
+      "panesAdded": 2,
+      "targetMode": "code",
+      "engine": "grok",
+      "prompts": ["ejecuta los test"]
+    }
+  },
+  {
+    "id": "E2",
+    "name": "Voz STT con punto y subjuntivo: abriera dos. Terminales...",
+    "initialMode": "chat",
+    "input": "abriera dos. Terminales, en ellas abrirá Grok y ejecute los test",
+    "providerType": "local",
+    "expected": {
+      "strategy": "heuristic",
+      "panesAdded": 2,
+      "targetMode": "code",
+      "engine": "grok"
+    }
+  },
+  {
+    "id": "E3",
+    "name": "Proveedor LLM con JSON válido",
+    "initialMode": "agent",
+    "input": "abre una terminal con claude",
+    "providerType": "fake-json",
+    "expected": {
+      "strategy": "llm",
+      "panesAdded": 1,
+      "targetMode": "code",
+      "engine": "claude"
+    }
+  },
+  {
+    "id": "E4",
+    "name": "Cerrar terminal por índice (terminal 2)",
+    "initialMode": "code",
+    "input": "cierra la terminal 2",
+    "providerType": "local",
+    "expected": {
+      "strategy": "heuristic",
+      "actionType": "close_terminals",
+      "target": 2
+    }
+  },
+  {
+    "id": "E5",
+    "name": "Cerrar agente por nombre fonético seseo: Sierra Orion",
+    "initialMode": "code",
+    "input": "Sierra Orion",
+    "providerType": "local",
+    "expected": {
+      "strategy": "heuristic",
+      "actionType": "close_terminals",
+      "target": "Orion"
+    }
+  },
+  {
+    "id": "E6",
+    "name": "Detección y rechazo de eco del system prompt",
+    "initialMode": "chat",
+    "input": "abre dos terminales",
+    "providerType": "fake-echo",
+    "expected": {
+      "strategy": "heuristic-fallback",
+      "noLeak": true,
+      "panesAdded": 2
+    }
+  },
+  {
+    "id": "E7",
+    "name": "Detección y rechazo de salida predominantemente en inglés",
+    "initialMode": "chat",
+    "input": "abre 1 terminal",
+    "providerType": "fake-english",
+    "expected": {
+      "strategy": "heuristic-fallback",
+      "spanishReply": true
+    }
+  },
+  {
+    "id": "E8",
+    "name": "Resiliencia ante timeout del proveedor LLM",
+    "initialMode": "chat",
+    "input": "cierra todas las terminales",
+    "providerType": "fake-timeout",
+    "expected": {
+      "strategy": "heuristic-fallback",
+      "fallbackReasonContains": "timeout"
+    }
+  },
+  {
+    "id": "E9",
+    "name": "Pregunta conversacional sin acciones en la UI",
+    "initialMode": "chat",
+    "input": "hola, ¿cómo estás?",
+    "providerType": "fake-answer",
+    "expected": {
+      "actionsCount": 0,
+      "panesAdded": 0
+    }
+  },
+  {
+    "id": "E10",
+    "name": "Spawns concurrentes rápidos sin sobrescritura de layout",
+    "initialMode": "code",
+    "input": "abre 3 terminales con grok",
+    "repeatCount": 2,
+    "providerType": "local",
+    "expected": {
+      "panesAdded": 6
+    }
+  },
+  {
+    "id": "E11",
+    "name": "Comando en workspace sin proyecto seleccionado genera error honesto",
+    "initialMode": "chat",
+    "input": "ejecuta las pruebas",
+    "providerType": "local",
+    "expected": {
+      "honestReply": true
+    }
+  }
+]

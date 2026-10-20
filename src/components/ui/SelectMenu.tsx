@@ -41,6 +41,16 @@ export interface SelectMenuProps {
   panelEngine?: string;
   panelIcon?: React.ReactNode;
   className?: string;
+  searchPlaceholder?: string;
+  searchLabel?: string;
+  emptyLabel?: string;
+}
+
+function rowMatchesQuery(row: SelectMenuRow, raw: string): boolean {
+  const q = raw.trim().toLocaleLowerCase();
+  if (!q) return true;
+  const hay = `${row.title} ${row.detail ?? ''} ${row.id}`.toLocaleLowerCase();
+  return q.split(/\s+/).filter(Boolean).every((token) => hay.includes(token));
 }
 
 const ChevronDownIcon: React.FC<{ size?: number; className?: string }> = ({ size = 10, className = '' }) => (
@@ -156,6 +166,9 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   panelEngine,
   panelIcon,
   className = '',
+  searchPlaceholder = 'Search models…',
+  searchLabel = 'Search models',
+  emptyLabel = 'No items match your search.',
 }) => {
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
@@ -178,16 +191,10 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   const maxRowsHeightRef = useRef(maxRowsHeight);
   maxRowsHeightRef.current = maxRowsHeight;
 
-  const filteredRows = useMemo(() => {
-    const q = query.trim().toLocaleLowerCase();
-    if (!q) return rows;
-    const tokens = q.split(/\s+/).filter(Boolean);
-    return rows.filter((r) =>
-      tokens.every((tok) =>
-        `${r.title} ${r.detail ?? ''} ${r.id}`.toLocaleLowerCase().includes(tok)
-      )
-    );
-  }, [query, rows]);
+  const filteredRows = useMemo(
+    () => rows.filter((row) => rowMatchesQuery(row, query)),
+    [query, rows]
+  );
 
   const enabledRows = useMemo(() => filteredRows.filter((r) => !r.disabled), [filteredRows]);
 
@@ -490,16 +497,14 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
                 role="combobox"
                 aria-autocomplete="list"
                 aria-expanded="true"
-                aria-label="Search models"
-                placeholder="Search models…"
+                aria-label={searchLabel}
+                placeholder={searchPlaceholder}
                 value={query}
                 onChange={(e) => {
                   const val = e.currentTarget.value;
                   setQuery(val);
                   const firstMatch = rows.find(
-                    (r) =>
-                      !r.disabled &&
-                      r.title.toLowerCase().includes(val.trim().toLowerCase())
+                    (row) => !row.disabled && rowMatchesQuery(row, val)
                   );
                   setHighlightedId(firstMatch ? firstMatch.id : null);
                 }}
@@ -509,7 +514,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 
             {filteredRows.length === 0 ? (
               <div className="select-menu__empty" role="status">
-                No items match your search.
+                {emptyLabel}
               </div>
             ) : null}
 

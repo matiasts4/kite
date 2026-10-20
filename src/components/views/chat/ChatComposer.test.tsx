@@ -168,4 +168,48 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(dictationBtn).toBeInTheDocument();
     await user.click(dictationBtn);
   });
+
+  it('stages pasted image files from clipboardData.files', () => {
+    const onStageFiles = vi.fn();
+    render(<ChatComposer {...defaultProps} prompt="" onStageFiles={onStageFiles} />);
+
+    const textarea = screen.getByRole('textbox');
+    const fakeFile = new File(['fake-png-content'], 'screenshot.png', { type: 'image/png' });
+
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: {
+        files: [fakeFile],
+        items: [],
+      },
+    });
+
+    textarea.dispatchEvent(pasteEvent);
+    expect(onStageFiles).toHaveBeenCalledWith([fakeFile]);
+  });
+
+  it('stages pasted image files from clipboardData.items when files array is empty', () => {
+    const onStageFiles = vi.fn();
+    render(<ChatComposer {...defaultProps} prompt="" onStageFiles={onStageFiles} />);
+
+    const textarea = screen.getByRole('textbox');
+    const fakeFile = new File(['fake-screenshot'], 'image.png', { type: 'image/png' });
+
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: {
+        files: [],
+        items: [
+          {
+            kind: 'file',
+            type: 'image/png',
+            getAsFile: () => fakeFile,
+          },
+        ],
+      },
+    });
+
+    textarea.dispatchEvent(pasteEvent);
+    expect(onStageFiles).toHaveBeenCalledWith([fakeFile]);
+  });
 });

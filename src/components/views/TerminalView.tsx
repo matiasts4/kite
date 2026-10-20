@@ -185,12 +185,39 @@ function terminalOwner(workspaceId: string | null | undefined, paneId: string, a
   return { kind: 'agent' as const, agentId, paneId };
 }
 
-function clipboardImageFormat(mime: string): 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | null {
-  if (mime === 'image/png') return 'png';
-  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpeg';
-  if (mime === 'image/gif') return 'gif';
-  if (mime === 'image/webp') return 'webp';
-  if (mime === 'image/bmp') return 'bmp';
+export function clipboardImageFormat(mime: string, fileName?: string): 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | null {
+  const cleanMime = (mime || '').toLowerCase().split(';')[0].trim();
+  if (cleanMime === 'image/png') return 'png';
+  if (cleanMime === 'image/jpeg' || cleanMime === 'image/jpg') return 'jpeg';
+  if (cleanMime === 'image/gif') return 'gif';
+  if (cleanMime === 'image/webp') return 'webp';
+  if (cleanMime === 'image/bmp') return 'bmp';
+  if (fileName) {
+    const ext = fileName.toLowerCase().split('.').pop();
+    if (ext === 'png') return 'png';
+    if (ext === 'jpg' || ext === 'jpeg') return 'jpeg';
+    if (ext === 'gif') return 'gif';
+    if (ext === 'webp') return 'webp';
+    if (ext === 'bmp') return 'bmp';
+  }
+  return null;
+}
+
+export function extractClipboardImage(clipboardData: DataTransfer | null): { file: File; format: 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' } | null {
+  if (!clipboardData) return null;
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (item.kind === 'file' || item.type.toLowerCase().startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        const format = clipboardImageFormat(file.type || item.type, file.name);
+        if (format) return { file, format };
+      }
+    }
+  }
+  for (const file of Array.from(clipboardData.files ?? [])) {
+    const format = clipboardImageFormat(file.type, file.name);
+    if (format) return { file, format };
+  }
   return null;
 }
 
@@ -241,6 +268,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [engine, setEngine] = useState<string>(initialEngine);
   const [status, setStatus] = useState<'idle' | 'connecting' | 'running' | 'exited' | 'terminated'>('idle');
   const [exitCode, setExitCode] = useState<number | null>(null);
+  const [isReceivingPrompt, setIsReceivingPrompt] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -291,6 +319,33 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, []);
 
+  const stageClipboardBlob = useCallback((blob: Blob, mimeType: string, fileName?: string) => {
+    const session = sessionIdRef.current;
+    if (!session) return false;
+    const format = clipboardImageFormat(mimeType, fileName);
+    if (!format) return false;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const bytesBase64 = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
+      if (!bytesBase64) return;
+      void invokeCommand('stage_terminal_clipboard_image', {
+        sessionId: sessionIdRef.current || session,
+        owner: terminalOwner(workspaceIdRef.current, paneIdRef.current, agentIdRef.current),
+        format,
+        bytesBase64,
+      }).catch(() => {});
+    };
+    reader.readAsDataURL(blob);
+    return true;
+  }, []);
+  const stageClipboardBlobRef = useRef(stageClipboardBlob);
+  stageClipboardBlobRef.current = stageClipboardBlob;
+
+  const lastUserInputTimeRef = useRef<number>(0);
+  const isWindowFocusedRef = useRef<boolean>(true);
+  const triggerImmediatePollRef = useRef<() => void>(() => {});
+
   const enqueueWrite = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
     const next = writeQueueRef.current.then(
       () =>
@@ -301,14 +356,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             resolve();
             return;
           }
-          try {
-            term.write(data, () => {
+          let finished = false;
+          const done = () => {
+            if (!finished) {
+              finished = true;
               onFlushed?.();
               resolve();
+            }
+          };
+          // Hard safety timeout: never allow an unrendered, hidden, or resizing xterm
+          // to block the write queue or deadlock the polling tick.
+          const timer = setTimeout(done, 100);
+          try {
+            term.write(data, () => {
+              clearTimeout(timer);
+              done();
             });
           } catch {
-            onFlushed?.();
-            resolve();
+            clearTimeout(timer);
+            done();
           }
         })
     );
@@ -611,6 +677,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
 
+      let nextDelay = 40;
       try {
         const res: any = await invokeCommand('read_terminal_output', {
           sessionId: id,
@@ -621,7 +688,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           return;
         }
 
+        const now = Date.now();
+        const hasRecentUserInput = now - lastUserInputTimeRef.current < 4000;
+        const isDocHidden =
+          typeof document !== 'undefined' &&
+          document.visibilityState === 'hidden' &&
+          !isWindowFocusedRef.current;
         if (res?.kind === 'output' && res.bytesBase64) {
+          nextDelay = 35;
           const bytes = base64ToUint8Array(res.bytesBase64);
           await enqueueWrite(bytes);
           try {
@@ -642,15 +716,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           setExitCode(code);
           await enqueueWrite(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`);
           return;
+        } else {
+          // Idle state (no new output):
+          if (isDocHidden) {
+            nextDelay = 800;
+          } else if (hasRecentUserInput) {
+            nextDelay = 40;
+          } else {
+            nextDelay = 90;
+          }
         }
-      } catch {}
+      } catch {
+        nextDelay = 300;
+      }
 
       if (isMountedRef.current && sessionIdRef.current === id) {
-        pollingRef.current = window.setTimeout(tick, 45);
+        pollingRef.current = window.setTimeout(tick, nextDelay);
       }
     };
 
-    pollingRef.current = window.setTimeout(tick, 45);
+    triggerImmediatePollRef.current = () => {
+      if (!isMountedRef.current || sessionIdRef.current !== id) return;
+      if (pollingRef.current !== null) {
+        clearTimeout(pollingRef.current);
+        pollingRef.current = null;
+      }
+      pollingRef.current = window.setTimeout(tick, 5);
+    };
+
+    pollingRef.current = window.setTimeout(tick, 40);
   }, [stopPolling, enqueueWrite, workspaceId, initialEngine, customTitle]);
 
   const startSession = useCallback(async (selectedEngine?: string, opts?: { restart?: boolean }) => {
@@ -729,13 +823,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (term) {
       onDataDisposableRef.current?.dispose();
       onDataDisposableRef.current = term.onData((data: string) => {
+        lastUserInputTimeRef.current = Date.now();
+        const activeId = sessionIdRef.current || newSessionId;
+        if (!activeId) return;
         invokeCommand('write_terminal', {
-          sessionId: newSessionId,
+          sessionId: activeId,
           owner: 'user',
           input: data,
-        }).catch((err) => {
-          console.error('Failed to write to terminal:', err);
-        });
+        })
+          .then(() => {
+            // Wake up poller immediately to fetch echoed keystrokes with 0ms perceived lag
+            triggerImmediatePollRef.current();
+          })
+          .catch((err) => {
+            console.error('Failed to write to terminal:', err);
+          });
       });
 
       term.attachCustomKeyEventHandler((event) => {
@@ -749,11 +851,37 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }
           if (event.key.toLowerCase() === 'v') {
             event.preventDefault();
-            navigator.clipboard.readText().then((text) => {
-              if (text && sessionIdRef.current) {
-                term?.paste(text);
-              }
-            }).catch(() => {});
+            const session = sessionIdRef.current;
+            if (!session) return false;
+
+            const pasteTextFallback = () => {
+              navigator.clipboard?.readText?.().then((text) => {
+                if (text && sessionIdRef.current) {
+                  term?.paste(text);
+                }
+              }).catch(() => {});
+            };
+
+            if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+              navigator.clipboard.read().then(async (items) => {
+                for (const item of items) {
+                  const imageType = item.types.find((t) => t.toLowerCase().startsWith('image/'));
+                  if (imageType) {
+                    try {
+                      const blob = await item.getType(imageType);
+                      if (blob && stageClipboardBlobRef.current(blob, imageType)) {
+                        return;
+                      }
+                    } catch {}
+                  }
+                }
+                pasteTextFallback();
+              }).catch(() => {
+                pasteTextFallback();
+              });
+            } else {
+              pasteTextFallback();
+            }
             return false;
           }
         }
@@ -884,13 +1012,95 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [initialEngine]);
 
+  // ── Direct In-Terminal Prompt Delivery (No intermediate popup window) ──
+  useEffect(() => {
+    let cancelled = false;
+
+    const handleStagedPrompt = async (e: Event) => {
+      const detail = (e as CustomEvent<{
+        sessionId?: string;
+        paneId?: string;
+        prompt: string;
+        agentName?: string;
+        engine?: string;
+      }>).detail;
+      if (!detail?.prompt) return;
+
+      const currentSid = sessionIdRef.current || propSessionId;
+      const currentPid = paneIdRef.current;
+      const matchesSession =
+        detail.sessionId &&
+        (detail.sessionId === currentSid ||
+          detail.sessionId === propSessionId ||
+          restartedSessions.get(detail.sessionId) === currentSid);
+      const matchesPane = detail.paneId && detail.paneId === currentPid;
+
+      if (!matchesSession && !matchesPane) return;
+
+      setIsReceivingPrompt(true);
+
+      // Wait until terminal is ready / running
+      let checks = 0;
+      while (status === 'connecting' && checks < 25 && !cancelled) {
+        await new Promise((r) => setTimeout(r, 80));
+        checks++;
+      }
+
+      if (cancelled) return;
+
+      const sid = sessionIdRef.current || propSessionId;
+      if (!sid) return;
+
+      // Stream text directly into PTY stdin in fast natural chunks so it appears typed at the CLI prompt
+      const text = detail.prompt;
+      const chunkSize = Math.max(3, Math.ceil(text.length / 24));
+      for (let i = 0; i < text.length; i += chunkSize) {
+        if (cancelled) return;
+        const chunk = text.slice(i, i + chunkSize);
+        await invokeCommand('write_terminal', {
+          sessionId: sid,
+          input: chunk,
+          owner: 'user',
+        }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      if (cancelled) return;
+
+      // Send Enter key to submit instruction
+      await new Promise((r) => setTimeout(r, 120));
+      await invokeCommand('write_terminal', {
+        sessionId: sid,
+        input: '\r\n',
+        owner: 'user',
+      }).catch(() => {});
+
+      setTimeout(() => {
+        if (!cancelled) {
+          setIsReceivingPrompt(false);
+          termRef.current?.focus();
+        }
+      }, 500);
+    };
+
+    window.addEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
+    };
+  }, [propSessionId, status]);
+
   useEffect(() => {
     isMountedRef.current = true;
     liveSessionRef.current = propSessionId || liveSessionRef.current;
     void startSession();
 
-    const ro = new ResizeObserver(() => {
-      fitTerminal();
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+          fitTerminal();
+        }
+      }
     });
 
     if (containerRef.current) {
@@ -902,12 +1112,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
     window.addEventListener('resize', handleWindowResize);
 
-    const fitTimer = setTimeout(() => {
-      fitTerminal(true);
-    }, 150);
+    const fitTimers = [
+      setTimeout(() => fitTerminal(true), 50),
+      setTimeout(() => fitTerminal(true), 150),
+      setTimeout(() => fitTerminal(true), 400),
+      setTimeout(() => fitTerminal(true), 900),
+    ];
 
     return () => {
-      clearTimeout(fitTimer);
+      fitTimers.forEach(clearTimeout);
       isMountedRef.current = false;
       window.removeEventListener('resize', handleWindowResize);
       ro.disconnect();
@@ -963,6 +1176,36 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
   }, [workspaceId]);
 
+  // Instant wake-up when app is foregrounded or focused again
+  useEffect(() => {
+    const handleFocus = () => {
+      isWindowFocusedRef.current = true;
+      if (sessionIdRef.current) {
+        triggerImmediatePollRef.current();
+      }
+    };
+    const handleBlur = () => {
+      isWindowFocusedRef.current = false;
+    };
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        isWindowFocusedRef.current = true;
+        if (sessionIdRef.current) {
+          triggerImmediatePollRef.current();
+        }
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
+
   return (
     <div
       ref={surfaceRef}
@@ -996,26 +1239,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }}
       onPasteCapture={(event) => {
         const session = sessionIdRef.current;
-        const image = Array.from(event.clipboardData?.items ?? []).find((item) => item.type.startsWith('image/'));
-        if (!session || !image) return;
-        const format = clipboardImageFormat(image.type);
-        const file = image.getAsFile();
-        if (!format || !file) return;
+        if (!session) return;
+        const img = extractClipboardImage(event.clipboardData);
+        if (!img) return;
         event.preventDefault();
         event.stopPropagation();
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = typeof reader.result === 'string' ? reader.result : '';
-          const bytesBase64 = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
-          if (!bytesBase64) return;
-          void invokeCommand('stage_terminal_clipboard_image', {
-            sessionId: sessionIdRef.current || session,
-            owner: terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current),
-            format,
-            bytesBase64,
-          }).catch(() => {});
-        };
-        reader.readAsDataURL(file);
+        stageClipboardBlobRef.current(img.file, img.file.type, img.file.name);
       }}
     >
       {chrome === 'pane' ? null : (
@@ -1134,7 +1363,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       {/* Terminal Canvas Host */}
       <div
-        className="terminal-canvas-area"
+        className={`terminal-canvas-area ${isReceivingPrompt ? 'terminal-canvas-area--receiving' : ''}`}
         onClick={() => termRef.current?.focus()}
       >
         <div ref={containerRef} className="terminal-surface-host" />

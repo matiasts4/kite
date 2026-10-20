@@ -270,9 +270,9 @@
 
 .settings-row__copy {
   flex-direction: column;
-  flex: 1;
+  flex: 1 1 200px;
   gap: 3px;
-  min-width: 0;
+  min-width: 180px;
   display: flex;
 }
 
@@ -292,7 +292,8 @@
   color: var(--text-secondary, #a3a3a3);
   font-size: var(--text-row, 13px);
   line-height: var(--leading-row, 18px);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
   margin: 0;
 }
 
@@ -306,6 +307,7 @@
 
 .settings-row__control {
   min-width: var(--control-settings-slot, 120px);
+  max-width: 55%;
   justify-content: flex-end;
   align-items: center;
   gap: var(--space-2, 8px);
@@ -314,7 +316,17 @@
 }
 
 .settings-row__control--menu {
-  min-width: 180px;
+  min-width: 160px;
+  max-width: 320px;
+}
+
+.settings-row__control--menu select,
+.settings-row__control select,
+select.settings-control {
+  max-width: 100%;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .settings-row--stacked {
@@ -946,3 +958,123 @@
   min-width: 60px;
   display: inline-block;
 }
+
+/* ==========================================================================
+   Zed tab — dedicated dark form controls & typography
+   ========================================================================== */
+
+.zed-settings__select {
+  height: 28px;
+  padding: 0 var(--space-2, 8px);
+  border-radius: var(--radius-chip, 6px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.1));
+  background-color: #18181d !important;
+  color: var(--text-primary, #fafafa) !important;
+  font-size: 12px;
+  font-family: inherit;
+  color-scheme: dark !important;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.zed-settings__select:focus {
+  border-color: var(--accent, #5c8fff);
+}
+
+.zed-settings__select option,
+.zed-settings__select optgroup {
+  background-color: #18181d !important;
+  color: #f4f4f6 !important;
+  color-scheme: dark !important;
+}
+
+.zed-settings__select option:checked,
+.zed-settings__select option:hover {
+  background-color: #27272a !important;
+  color: #ffffff !important;
+}
+
+.zed-settings__input {
+  height: 28px;
+  padding: 0 var(--space-2, 8px);
+  border-radius: var(--radius-chip, 6px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary, #fafafa);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.zed-settings__input:focus {
+  border-color: var(--accent, #5c8fff);
+}
+
+.zed-settings__textarea {
+  padding: var(--space-2, 8px);
+  border-radius: var(--radius-chip, 6px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary, #fafafa);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+  line-height: 1.5;
+  transition: border-color 0.15s ease;
+}
+
+.zed-settings__textarea:focus {
+  border-color: var(--accent, #5c8fff);
+}
+
+.zed-settings__label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary, #a3a3a3);
+  user-select: none;
+}
+
+.zed-settings__counter {
+  font-size: 11px;
+  color: var(--text-faint, #6e6e6e);
+  font-variant-numeric: tabular-nums;
+}
+
+.zed-model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.zed-model-picker__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.zed-model-picker__stamp {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-faint, #6e6e6e);
+  text-align: right;
+}
+
+.zed-model-picker__trigger {
+  width: 100%;
+  max-width: 100%;
+  min-height: 28px;
+  height: auto;
+  justify-content: space-between;
+  padding: 4px 8px;
+}
+
+.zed-model-picker__trigger .select-menu-trigger__label {
+  max-width: none;
+  flex: 1;
+  text-align: left;
+}
+

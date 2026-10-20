@@ -8,6 +8,7 @@ import {
   EyeIcon,
   PencilIcon,
   CodeIcon,
+  ListTreeIcon,
 } from './FileIcons';
 import { tokenizeLine } from './syntax';
 import { MarkdownPreviewPane } from './MarkdownPreviewPane';
@@ -81,18 +82,28 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
 
   // Local state for Markdown view mode: 'preview' (rendered) vs 'code' (raw tokenized)
   const [mdViewMode, setMdViewMode] = React.useState<'preview' | 'code'>('preview');
+  // State for toggling document outline (table of contents) in preview mode
+  const [showOutline, setShowOutline] = React.useState<boolean>(false);
 
-  // Scroll to target line when provided; if markdown and targetLine is set, switch to code view
+  // Set view mode and scroll based on targetLine:
+  // If targetLine is provided (> 0), switch to 'code' (source) view and scroll to the line.
+  // If targetLine is null / not provided, default markdown to 'preview' (rendered) view.
   useEffect(() => {
-    if (targetLine && targetLine > 0) {
-      if (isMarkdown) {
+    if (isMarkdown) {
+      if (targetLine && targetLine > 0) {
         setMdViewMode('code');
-      }
-      if (activeLineRef.current) {
-        activeLineRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } else {
+        setMdViewMode('preview');
       }
     }
   }, [targetLine, activeTab?.entryId, isMarkdown]);
+
+  // When targetLine is set and in code view, scroll to target line smoothly
+  useEffect(() => {
+    if (targetLine && targetLine > 0 && mdViewMode === 'code' && activeLineRef.current) {
+      activeLineRef.current.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    }
+  }, [targetLine, mdViewMode, activeTab?.entryId]);
 
   const handleTextareaScroll = () => {
     if (gutterRef.current && textareaRef.current) {
@@ -136,6 +147,8 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
+                  flexShrink: 1,
+                  minWidth: '50px',
                   fontStyle: activeTab.isPreview ? 'italic' : undefined,
                 }}
               >
@@ -156,11 +169,12 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                   alignItems: 'center',
                   justifyContent: 'center',
                   cursor: 'pointer',
+                  flexShrink: 0,
                 }}
               >
                 <CloseIcon size={10} />
               </button>
-              <span className="files-doc-status" style={{ fontSize: '11px', color: 'var(--text-muted, #888)', whiteSpace: 'nowrap', marginLeft: '2px' }}>
+              <span className="files-doc-status" style={{ fontSize: '11px', color: 'var(--text-muted, #888)', whiteSpace: 'nowrap', marginLeft: '2px', flexShrink: 0 }}>
                 {activeTab.previewData
                   ? activeTab.previewData.mime.startsWith('image/')
                     ? `Image (${activeTab.previewData.mime.replace('image/', '').replace('+xml', '').toUpperCase()})`
@@ -220,6 +234,29 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                 </div>
               )}
 
+              {isMarkdown && mdViewMode === 'preview' && (
+                <button
+                  type="button"
+                  onClick={() => setShowOutline((prev) => !prev)}
+                  className={`files-toolbar-btn ${showOutline ? 'active' : ''}`}
+                  title={showOutline ? 'Hide document outline' : 'Show document outline (Table of Contents)'}
+                  style={{
+                    height: '24px',
+                    padding: '0 8px',
+                    fontSize: '11px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    background: showOutline ? 'var(--selected-fill, rgba(59, 130, 246, 0.2))' : 'transparent',
+                    borderColor: showOutline ? 'var(--accent, #3b82f6)' : undefined,
+                    color: showOutline ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  }}
+                >
+                  <ListTreeIcon size={12} />
+                  <span>Outline</span>
+                </button>
+              )}
+
               {!activeTab.previewData && (
                 <button
                   type="button"
@@ -227,8 +264,8 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                   className="files-toolbar-btn"
                   title="Edit this file"
                   style={{
-                    height: '26px',
-                    padding: '0 10px',
+                    height: '24px',
+                    padding: '0 9px',
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '5px',
@@ -236,6 +273,7 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                     color: 'var(--accent, #3b82f6)',
                     borderRadius: 'var(--radius-chip, 4px)',
                     fontWeight: '500',
+                    fontSize: '11px',
                   }}
                 >
                   <PencilIcon size={11} />
@@ -388,6 +426,8 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
           relativePath={activeTab.relativePath}
           workspaceId={workspaceId}
           onNavigateInternalFile={onNavigateInternalFile}
+          showOutline={showOutline}
+          onToggleOutline={() => setShowOutline((prev) => !prev)}
         />
       ) : (
         <div className="files-code-scroll">

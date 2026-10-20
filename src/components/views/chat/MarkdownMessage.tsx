@@ -116,19 +116,17 @@ export const MarkdownMessage: React.FC<{ text: string; workspaceId?: string | nu
             return (
               <a
                 href={href}
-                title={isFile ? 'Ctrl + Click para previsualizar archivo' : undefined}
+                title={isFile ? 'Click para previsualizar archivo' : undefined}
                 target={isFile ? undefined : '_blank'}
                 rel="noreferrer noopener"
                 onClick={(e) => {
                   if (isFile) {
                     e.preventDefault();
-                    if (e.ctrlKey || e.metaKey) {
-                      openFileInRightDock({
-                        candidate: href,
-                        workspaceId: workspaceId || null,
-                        collapseTree: true,
-                      });
-                    }
+                    openFileInRightDock({
+                      candidate: href,
+                      workspaceId: workspaceId || null,
+                      collapseTree: true,
+                    });
                   }
                 }}
               >

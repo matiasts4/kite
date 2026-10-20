@@ -1,9 +1,13 @@
-// Kite Code - Tauri 2.0 Web IPC Compatibility Bridge
-// Automatically injected to allow the full React desktop application to run seamlessly
+// Kite Code — Tauri 2.0 web IPC compatibility shim
+// Injected in browser dev mode so the desktop React app can call invoke() over HTTP.
 
 (function () {
   // If native Tauri IPC already exists (inside desktop app), install resilience wrapper
-  if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function" && !window.__TAURI_INTERNALS__.__is_web_bridge__) {
+  if (
+    window.__TAURI_INTERNALS__ &&
+    typeof window.__TAURI_INTERNALS__.invoke === "function" &&
+    !window.__TAURI_INTERNALS__.__is_web_ipc_shim__
+  ) {
     console.log("%c[Kite Code] Native Tauri IPC detected, installing resilience wrapper.", "color: #4ade80; font-weight: bold; font-size: 14px;");
     const nativeInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
     window.__TAURI_INTERNALS__.invoke = async function (cmd, args = {}, ...rest) {
@@ -43,13 +47,11 @@
 
       try {
         const res = await nativeInvoke(cmd, args, ...rest);
-        // Ensure settings save returns null/void per Zod schema L
         if (cmd === "save_shell_state" || cmd === "save_workspace_layout" || cmd === "save_thread_grid" || cmd === "set_app_menu_state") {
           return null;
         }
         return res;
       } catch (err) {
-        // If native handler returned 'not found', provide graceful fallback instead of crashing
         if (err && String(err).toLowerCase().includes("not found")) {
           console.warn(`[Kite Code] Graceful fallback for unhandled command ${cmd}:`, err);
           if (cmd.startsWith("list_")) return [];
@@ -63,7 +65,7 @@
     return;
   }
 
-  console.log("%c[Kite Code] Initializing Tauri 2.0 Web Bridge...", "color: #38bdf8; font-weight: bold; font-size: 14px;");
+  console.log("%c[Kite Code] Initializing Tauri 2.0 web IPC shim...", "color: #38bdf8; font-weight: bold; font-size: 14px;");
 
   const callbacks = new Map();
   let callbackSeq = 1;
@@ -83,7 +85,6 @@
   }
 
   async function invoke(cmd, args = {}) {
-    // Handle plugin:window client-side
     if (cmd && cmd.startsWith("plugin:window|")) {
       switch (cmd) {
         case "plugin:window|is_maximized":
@@ -114,7 +115,6 @@
       }
     }
 
-    // Handle plugin:event client-side
     if (cmd === "plugin:event|listen") {
       const eventName = args.event;
       const handlerId = args.handler;
@@ -156,7 +156,7 @@
   }
 
   window.__TAURI_INTERNALS__ = {
-    __is_web_bridge__: true,
+    __is_web_ipc_shim__: true,
     invoke,
     transformCallback,
     unregisterCallback,
@@ -188,7 +188,6 @@
     }
   });
 
-  // Background polling for server events
   setInterval(async () => {
     try {
       const res = await fetch("/api/tauri/events");
@@ -206,5 +205,5 @@
     } catch (_) {}
   }, 1000);
 
-  console.log("%c[Kite Code] Tauri Bridge Ready!", "color: #4ade80; font-weight: bold;");
+  console.log("%c[Kite Code] Tauri web IPC shim ready.", "color: #4ade80; font-weight: bold;");
 })();

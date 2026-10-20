@@ -226,15 +226,15 @@ class TerminalSession {
 const activeTerminalSessions = new Map();
 let queuedEvents = [];
 
-// Serve index.html with tauri-bridge.js injected
+// Serve index.html with tauri-web-ipc.js injected
 app.get(["/", "/index.html"], (req, res) => {
   const indexPath = path.join(FRONTEND_DIR, "index.html");
   if (!fs.existsSync(indexPath)) {
     return res.status(404).send("Frontend assets not found.");
   }
   let html = fs.readFileSync(indexPath, "utf8");
-  if (!html.includes("/tauri-bridge.js")) {
-    html = html.replace("<head>", `<head>\n    <script src="/tauri-bridge.js"></script>`);
+  if (!html.includes("/tauri-web-ipc.js")) {
+    html = html.replace("<head>", `<head>\n    <script src="/tauri-web-ipc.js"></script>`);
   }
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
@@ -901,9 +901,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
       }
 
       case "apply_voice_import":
-      case "preview_voice_import":
-      case "apply_bridgevoice_import":
-      case "preview_bridgevoice_import": {
+      case "preview_voice_import": {
         return res.json({ ok: true });
       }
 
@@ -975,8 +973,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
         return res.json(true);
       }
 
-      case "voice_assistant_prompt":
-      case "voice_bridge_prompt": {
+      case "voice_assistant_prompt": {
         return res.json({
           ok: true,
           prompt: "Instrucción de voz recibida."

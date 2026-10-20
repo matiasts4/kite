@@ -105,4 +105,33 @@ describe('treeUtils - Code Workspace Split Tree Operations', () => {
     expect(swapped.children[0].id).toBe(l2.id);
     expect(swapped.children[1].id).toBe(l1.id);
   });
+
+  it('safely inserts new leaf when targetLeafId is a split container ID instead of a leaf', () => {
+    const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' });
+    const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' });
+    const rootSplit = createSplit('vertical', [l1, l2]);
+    const newLeaf = createLeaf({ kind: 'terminal', sessionId: 's-3' });
+
+    // Target the root split container directly (e.g. currentTab.root.id when focusedLeafId is null)
+    const result = splitLeaf(rootSplit, rootSplit.id, newLeaf, 'horizontal');
+    const allLeaves = getAllLeaves(result);
+
+    expect(allLeaves.some((l) => l.id === newLeaf.id)).toBe(true);
+    expect(allLeaves).toHaveLength(3);
+  });
+
+  it('appends adjacent side-by-side columns when splitting along vertical axis', () => {
+    const leaf1 = createLeaf({ kind: 'terminal', sessionId: 's-1', label: 'Orion' });
+    const leaf2 = createLeaf({ kind: 'terminal', sessionId: 's-2', label: 'Nova' });
+    const leaf3 = createLeaf({ kind: 'terminal', sessionId: 's-3', label: 'Atlas' });
+
+    const root2 = splitLeaf(leaf1, leaf1.id, leaf2, 'vertical') as PaneSplit;
+    expect(root2.axis).toBe('vertical');
+    expect(root2.children).toHaveLength(2);
+
+    const root3 = splitLeaf(root2, leaf2.id, leaf3, 'vertical') as PaneSplit;
+    expect(root3.axis).toBe('vertical');
+    expect(root3.children).toHaveLength(3);
+    expect(root3.ratios).toEqual([1 / 3, 1 / 3, 1 / 3]);
+  });
 });

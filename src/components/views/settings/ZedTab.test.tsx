@@ -10,6 +10,7 @@ vi.mock('../../../lib/operator/voice/zedVoice', () => ({
   listAudioInputDevices: vi.fn().mockResolvedValue([]),
   startMicrophoneTest: vi.fn(),
   startTranscriptionTestSession: vi.fn(),
+  releaseOperatorCapture: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../../lib/operator/ttsNarrator', () => ({

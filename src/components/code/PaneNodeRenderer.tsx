@@ -156,7 +156,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
       <section
         key={node.id}
         aria-label={`${displayName} pane`}
-        className={`code-pane-panel${isFocused ? ' code-pane-panel--focused' : ''}${isSpotlighted ? ' code-pane-panel--beacon-a' : ''}`}
+        className={`code-pane-panel${isFocused ? ' code-pane-panel--focused' : ''}${isSpotlighted ? ' code-pane-panel--beacon-a' : ''}${occupant.kind === 'terminal' ? ' motion-terminal-in' : ''}`}
         onClick={() => onFocusLeaf(node.id)}
         data-leaf-id={node.id}
         data-occupant-kind={occupant.kind}

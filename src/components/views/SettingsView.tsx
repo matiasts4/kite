@@ -44,6 +44,12 @@ import { RoutinesView } from './RoutinesView';
 import { listAudioInputDevices } from '../../lib/operator/voice/zedVoice';
 import { useFilesAutoSavePreference } from '../../lib/filesAutoSavePreference';
 import { useAppUpdater } from '../../hooks/useAppUpdater';
+import {
+  getTerminalWebLinksTarget,
+  setTerminalWebLinksTarget,
+  TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
+  type TerminalWebLinksTarget,
+} from '../../lib/terminalLinkNav';
 import './settings.css';
 
 interface NotificationCenterSnapshot {
@@ -148,6 +154,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     'Modo autónomo local activo con tus suscripciones de IA conectadas.'
   );
   const [creditsLoading, setCreditsLoading] = useState<boolean>(false);
+  const [terminalWebLinksTarget, setTerminalWebLinksTargetState] = useState<TerminalWebLinksTarget>(() =>
+    getTerminalWebLinksTarget()
+  );
+
+  useEffect(() => {
+    const handleTargetChanged = (e: Event) => {
+      const custom = e as CustomEvent<TerminalWebLinksTarget>;
+      if (custom.detail) {
+        setTerminalWebLinksTargetState(custom.detail);
+      }
+    };
+    window.addEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
+    return () =>
+      window.removeEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
+  }, []);
 
   const handleRetryCredits = useCallback(async () => {
     setCreditsLoading(true);
@@ -710,20 +731,60 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
 
             {activeTab === 'terminal' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">Sessions</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Terminal host runtime</h3>
-                      <p>Integrated native daemon managing active shell sessions and scrollback.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <span className="settings-badge" data-tone="running">Online</span>
+              <>
+                <section className="settings-group">
+                  <h2 className="settings-group__title">Sessions</h2>
+                  <div className="ui-card">
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Terminal host runtime</h3>
+                        <p>Integrated native daemon managing active shell sessions and scrollback.</p>
+                      </div>
+                      <div className="settings-row__control">
+                        <span className="settings-badge" data-tone="running">Online</span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </section>
+                </section>
+
+                <section className="settings-group">
+                  <h2 className="settings-group__title">Enlaces y Navegación Web</h2>
+                  <div className="ui-card">
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Destino de enlaces web (URLs)</h3>
+                        <p>Elige dónde abrir los enlaces web (http/https) al hacer clic en la terminal.</p>
+                      </div>
+                      <div className="settings-row__control">
+                        <fieldset aria-label="Destino de enlaces web" className="ui-segmented">
+                          <button
+                            aria-pressed={terminalWebLinksTarget === 'internal'}
+                            className="ui-segmented__item"
+                            onClick={() => {
+                              setTerminalWebLinksTargetState('internal');
+                              setTerminalWebLinksTarget('internal');
+                            }}
+                            type="button"
+                          >
+                            <span>Navegador integrado</span>
+                          </button>
+                          <button
+                            aria-pressed={terminalWebLinksTarget === 'external'}
+                            className="ui-segmented__item"
+                            onClick={() => {
+                              setTerminalWebLinksTargetState('external');
+                              setTerminalWebLinksTarget('external');
+                            }}
+                            type="button"
+                          >
+                            <span>Navegador externo</span>
+                          </button>
+                        </fieldset>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </>
             )}
 
             {activeTab === 'notifications' && (

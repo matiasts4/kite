@@ -3,6 +3,7 @@ import type { DictationAvailability, DictationInputDevice, DictationSettings } f
 import {
   startMicrophoneTest,
   startTranscriptionTestSession,
+  releaseOperatorCapture,
   type MicrophoneTester,
   type TranscriptionTestResult,
   type TranscriptionTestSession,
@@ -66,6 +67,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
     } else {
       setMicTestError(null);
       try {
+        await releaseOperatorCapture();
         const tester = await startMicrophoneTest(
           dictationSettings.deviceId || null,
           (lvl) => {
@@ -135,6 +137,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
       setTranscriptionResult(null);
       setTranscriptionTestSeconds(0);
       try {
+        await releaseOperatorCapture();
         const session = await startTranscriptionTestSession(dictationSettings.deviceId || null);
         transcriptionSessionRef.current = session;
         setTranscriptionTestState('recording');
@@ -474,7 +477,8 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                     {transcriptionResult.success ? `✓ ${transcriptionResult.engine}` : 'Fallo en la transcripción'}
                   </span>
                   <span style={{ fontSize: 11, color: 'var(--text-muted, #9ca3af)' }}>
-                    Grabación: {transcriptionResult.durationSecs.toFixed(1)}s • Latencia: {transcriptionResult.latencyMs}ms
+                    Grabación: {transcriptionResult.durationSecs.toFixed(1)}s • Latencia:{' '}
+                    {transcriptionResult.latencyMs}ms
                   </span>
                 </div>
               </div>

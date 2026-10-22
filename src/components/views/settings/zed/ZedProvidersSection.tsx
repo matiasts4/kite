@@ -177,6 +177,15 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                   {showApiKeys.opencode ? 'Ocultar' : 'Ver'}
                 </button>
               </div>
+              {config.opencodeApiKey ? (
+                <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                  Guardada en Bóveda Local SQLite
+                </span>
+              ) : (
+                <span style={{ fontSize: '11px', color: 'var(--text-muted, #94a3b8)', marginTop: '4px', display: 'block' }}>
+                  Opcional: si está vacía, se resolverá OPENCODE_API_KEY desde .env
+                </span>
+              )}
             </div>
 
             <div>
@@ -568,28 +577,72 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
 
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
-            <h3 className="settings-row__title">Suscripción Grok (xAI Fast)</h3>
+            <h3 className="settings-row__title">Grok / xAI (API o CLI local)</h3>
             <p>
-              Usa API Key de xAI o tu suscripción CLI local de Grok para respuestas rápidas.
+              Con API Key se usa <strong>api.x.ai</strong> (clave desde{' '}
+              <a href="https://console.x.ai" target="_blank" rel="noreferrer">
+                console.x.ai
+              </a>
+              , formato <code>xai-…</code>). Sin clave, opcionalmente el CLI <code>grok</code> en PATH.
+              Composer 2.5 Fast es de Cursor, no de la API pública de xAI.
             </p>
           </div>
-          <div className="settings-row__control" style={{ display: 'flex', gap: 8 }}>
-            <input
-              type={showApiKeys.grok ? 'text' : 'password'}
-              className="zed-settings__input"
-              value={config.grokApiKey}
-              onChange={(e) => onFieldChange('grokApiKey', e.target.value)}
-              placeholder="xai-... (opcional si usas CLI)"
-              style={{ width: 190 }}
-            />
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={testingProvider !== null}
-              onClick={() => void onRunProbe('grok')}
-            >
-              {testingProvider === 'grok' ? 'Probando...' : 'Test'}
-            </button>
+          <div className="settings-row__control" style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: 6, flex: '1 1 200px', minWidth: 180 }}>
+                <input
+                  type={showApiKeys.grok ? 'text' : 'password'}
+                  className="zed-settings__input"
+                  value={config.grokApiKey}
+                  onChange={(e) => onFieldChange('grokApiKey', e.target.value)}
+                  placeholder="xai-… (API Key de console.x.ai)"
+                  style={{ flex: 1 }}
+                />
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => onToggleApiKey('grok')}
+                  title={showApiKeys.grok ? 'Ocultar API Key' : 'Mostrar API Key'}
+                >
+                  {showApiKeys.grok ? 'Ocultar' : 'Ver'}
+                </button>
+              </div>
+              <input
+                type="text"
+                className="zed-settings__input"
+                value={config.grokModel}
+                onChange={(e) => onFieldChange('grokModel', e.target.value)}
+                placeholder="grok-4.7"
+                title="Modelo chat xAI (p. ej. grok-4.7, grok-4.6)"
+                style={{ width: 140 }}
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={testingProvider !== null}
+                onClick={() => void onRunProbe('grok')}
+              >
+                {testingProvider === 'grok' ? 'Probando...' : 'Test'}
+              </button>
+            </div>
+            {config.grokApiKey ? (
+              <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                Protegida en Bóveda Local SQLite
+              </span>
+            ) : (
+              <span style={{ fontSize: '11px', color: 'var(--text-muted, #94a3b8)' }}>
+                Si no defines una clave aquí, Kite resolverá GROK_API_KEY desde .env o el CLI grok en PATH.
+              </span>
+            )}
+            <label className="settings-row__hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={config.grokUseCliSubscription}
+                disabled={Boolean(config.grokApiKey?.trim())}
+                onChange={(e) => onFieldChange('grokUseCliSubscription', e.target.checked)}
+              />
+              Usar suscripción CLI local (solo si no hay API Key)
+            </label>
           </div>
         </div>
       </div>

@@ -51,7 +51,7 @@ const PROJECTS_STORAGE_KEY = 'KITE_STORAGE_TICKETS_PROJECTS';
 const CONNECTIONS_STORAGE_KEY = 'KITE_STORAGE_TICKETS_CONNECTIONS';
 const VIEW_STORAGE_KEY = 'kite-code.tasks-view.v1';
 
-// Authentic Lucide Icons matching TicketsPane-DO5xx3h1.js
+// Ticket icons
 const ArchiveGlyph: React.FC<{ size?: number }> = ({ size = 14 }) => (
   <svg
     width={size}

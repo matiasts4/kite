@@ -67,11 +67,29 @@ export function getVoiceEngineStatus(): VoiceEngineStatus {
     };
   }
 
+  let hasCloudflare = false;
+  try {
+    const config = loadOperatorConfig();
+    hasCloudflare = Boolean(config.cloudflareAccountId?.trim() && config.cloudflareApiToken?.trim());
+  } catch {
+    hasCloudflare = false;
+  }
+
+  if (hasCloudflare) {
+    return {
+      available: true,
+      engine: 'cloudflare-cloud',
+      label: 'Cloud Whisper (Cloudflare)',
+      detail: 'Transcripción en la nube con la cuenta de Cloudflare guardada en Ajustes.',
+      hasGrokApiKey: false,
+    };
+  }
+
   return {
-    available: true,
-    engine: 'cloudflare-cloud',
-    label: 'Cloud Whisper (Zero-Config / Nube)',
-    detail: 'Transcripción en la nube de alta fidelidad lista para usar.',
+    available: false,
+    engine: 'none',
+    label: 'Sin clave de transcripción',
+    detail: 'Falta el token de Cloudflare o la clave de Grok en Ajustes de Zed. No hay una clave escrita en el programa.',
     hasGrokApiKey: false,
   };
 }
@@ -260,7 +278,7 @@ const CJK_REGEX = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\
 
 /**
  * Cleans Whisper / STT silence and non-speech hallucinations
- * (matching Veloce audio engine cleanup).
+ * so short silence does not become a fake phrase.
  */
 export function cleanTranscriptionText(text: string, durationSecs: number = 0): string {
   let normalized = (text || '').replace(/\s+/g, ' ').trim();
@@ -333,8 +351,7 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 
 /**
  * Encodes an array of Float32 PCM sample chunks into a valid standard 16-bit PCM WAV Blob.
- * Includes DC offset removal, peak normalization, and 16kHz mono linear downsampling
- * identical to Velocity (Veloce) audio engine standards.
+ * Includes DC offset removal, peak normalization, and 16 kHz mono linear downsampling.
  */
 export function encodeWavBlob(
   samples: Float32Array[],
@@ -370,7 +387,7 @@ export function encodeWavBlob(
     finalRate = targetRate;
   }
 
-  // Velocity-parity pre-processing:
+  // Pre-processing:
   // 1. Remove DC offset
   let sum = 0;
   for (let i = 0; i < pcmData.length; i++) {
@@ -546,6 +563,11 @@ export async function transcribeWithCloudflareWhisper(
   accountId: string = '',
   apiToken: string = ''
 ): Promise<string> {
+  if (!accountId.trim() || !apiToken.trim()) {
+    throw new Error(
+      'Falta la cuenta o el token de Cloudflare en Ajustes de Zed. No hay una clave guardada en el programa.'
+    );
+  }
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/openai/whisper`;
 
   if (isTauriEnvironment()) {
@@ -596,6 +618,63 @@ export async function transcribeWithCloudflareWhisper(
   return json.result?.text || '';
 }
 
+const capturedStreams = new Set<MediaStream>();
+
+function rememberStream(stream: MediaStream): MediaStream {
+  capturedStreams.add(stream);
+  return stream;
+}
+
+function stopCapturedStreams(): void {
+  for (const stream of capturedStreams) {
+    try {
+      stream.getTracks().forEach((track) => track.stop());
+    } catch {
+      // ignore
+    }
+  }
+  capturedStreams.clear();
+}
+
+export function describeMicrophoneError(err: unknown): string {
+  const name = (err as { name?: string } | null)?.name || '';
+  const message = String((err as { message?: string } | null)?.message || err || '');
+  if (name === 'NotAllowedError' || /permission|denied|permiso/i.test(message)) {
+    return 'Permiso de micrófono denegado en Windows.';
+  }
+  if (name === 'NotFoundError') {
+    return 'No se detectó ningún micrófono conectado.';
+  }
+  if (
+    name === 'NotReadableError' ||
+    /device in use|in use|busy|could not start audio/i.test(message)
+  ) {
+    return 'El micrófono está ocupado. Solté la captura de Zed; si sigue así, cierra la otra ventana de Kite que lo tenga abierto.';
+  }
+  return 'No pude abrir el micrófono.';
+}
+
+function isDeviceInUse(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name || '';
+  const message = String((err as { message?: string } | null)?.message || err || '');
+  return name === 'NotReadableError' || /device in use|in use|could not start audio/i.test(message);
+}
+
+async function openMicrophone(constraints: MediaStreamConstraints): Promise<MediaStream> {
+  try {
+    return rememberStream(await navigator.mediaDevices.getUserMedia(constraints));
+  } catch (err) {
+    if (!isDeviceInUse(err)) throw err;
+    stopCapturedStreams();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    try {
+      return rememberStream(await navigator.mediaDevices.getUserMedia(constraints));
+    } catch (retryErr) {
+      throw new Error(describeMicrophoneError(retryErr));
+    }
+  }
+}
+
 /**
  * Gets audio input stream with default microphone auto-detection.
  */
@@ -614,7 +693,7 @@ export async function getAudioInputStream(preferredDeviceId?: string | null): Pr
   // 1. Try with preferred deviceId if provided
   if (deviceIdToUse && deviceIdToUse !== 'automatic' && deviceIdToUse !== 'default') {
     try {
-      return await navigator.mediaDevices.getUserMedia({
+      return await openMicrophone({
         audio: {
           deviceId: { ideal: deviceIdToUse },
           echoCancellation: true,
@@ -629,7 +708,7 @@ export async function getAudioInputStream(preferredDeviceId?: string | null): Pr
 
   // 2. Default system microphone with clean voice processing
   try {
-    return await navigator.mediaDevices.getUserMedia({
+    return await openMicrophone({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
@@ -637,8 +716,10 @@ export async function getAudioInputStream(preferredDeviceId?: string | null): Pr
       },
     });
   } catch (e) {
-    // 3. Fallback to basic audio
-    return await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (isDeviceInUse(e) || (e instanceof Error && /micrófono está ocupado/i.test(e.message))) {
+      throw e instanceof Error ? e : new Error(describeMicrophoneError(e));
+    }
+    return await openMicrophone({ audio: true });
   }
 }
 
@@ -647,6 +728,33 @@ let recordingStartTime = 0;
 let silenceTimer: any = null;
 let hasDetectedSpeech = false;
 let lastInterimTranscript = '';
+async function transcribeOperatorAudioBlob(audioBlob: Blob): Promise<string> {
+  let grokKey = '';
+  let grokBaseUrl = 'https://api.x.ai/v1';
+  let grokModel = 'grok-voice-transcribe-2.0';
+  try {
+    const config = loadOperatorConfig();
+    grokKey = config.grokTranscriptionApiKey || config.grokApiKey || '';
+    grokBaseUrl = config.grokTranscriptionBaseUrl || config.grokBaseUrl || 'https://api.x.ai/v1';
+    grokModel = config.grokTranscriptionModel || 'grok-voice-transcribe-2.0';
+    if (!grokKey && typeof localStorage !== 'undefined') {
+      grokKey = localStorage.getItem('kite_grok_transcription_api_key') || '';
+    }
+  } catch {}
+
+  if (grokKey && audioBlob.size > 200) {
+    try {
+      return await transcribeWithGrokCloud(audioBlob, grokKey, grokBaseUrl, grokModel);
+    } catch (err) {
+      console.warn('[ZedVoice] Grok Cloud avisó error, usando Cloudflare Whisper:', err);
+    }
+  }
+
+  const config = loadOperatorConfig();
+  const cfAccount = config.cloudflareAccountId || '';
+  const cfToken = config.cloudflareApiToken || '';
+  return transcribeWithCloudflareWhisper(audioBlob, cfAccount, cfToken);
+}
 
 function resetSilenceTimer(): void {
   if (silenceTimer) {
@@ -677,8 +785,8 @@ export async function startOperatorListening(
     return Promise.reject(new Error(msg));
   }
 
-  // Clean up any stale sessions
-  await stopOperatorListening();
+  // Drop a stale capture without transcribing it or flipping the orb to "thinking".
+  await stopOperatorListening({ discard: true });
 
   currentOptions = options;
   currentRecordedChunks = [];
@@ -693,9 +801,6 @@ export async function startOperatorListening(
   isSessionActive = true;
   recordingStartTime = Date.now();
 
-  // Play Zen start chime and duck system audio (Veloce parity)
-  void startAudioDucking();
-
   startingPromise = (async () => {
     // 1. Get default microphone stream
     if (typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getUserMedia === 'function') {
@@ -706,6 +811,7 @@ export async function startOperatorListening(
           return;
         }
         activeMediaStream = stream;
+        await startAudioDucking();
 
         const AudioContextClass =
           window.AudioContext || (window as any).webkitAudioContext;
@@ -762,12 +868,13 @@ export async function startOperatorListening(
         }
       } catch (err: any) {
         console.error('[ZedVoice] getUserMedia error:', err);
-        const userMsg = err?.name === 'NotAllowedError'
-          ? 'Permiso de micrófono denegado en Windows / Sistema.'
-          : err?.name === 'NotFoundError'
-          ? 'No se detectó ningún micrófono conectado.'
-          : 'Error al conectar con el micrófono predeterminado.';
+        const userMsg =
+          err instanceof Error && /micrófono|Permiso|No se detectó|ocupado/i.test(err.message)
+            ? err.message
+            : describeMicrophoneError(err);
         options.onError?.(userMsg);
+        await releaseOperatorCapture();
+        throw new Error(userMsg);
       }
     }
 
@@ -839,7 +946,8 @@ export async function startOperatorListening(
  * Stops capturing audio, finalizes transcription (Grok Cloud or Cloudflare Whisper Cloud),
  * and resolves the pending startOperatorListening() Promise.
  */
-export async function stopOperatorListening(): Promise<string> {
+export async function stopOperatorListening(options?: { discard?: boolean }): Promise<string> {
+  const discard = options?.discard === true;
   if (silenceTimer) {
     clearTimeout(silenceTimer);
     silenceTimer = null;
@@ -852,9 +960,11 @@ export async function stopOperatorListening(): Promise<string> {
     } catch {}
   }
 
+  const wasRecording = isSessionActive;
+
   // Ensure at least 300ms has elapsed so audio buffers are flushed and populated
   const elapsed = Date.now() - recordingStartTime;
-  if (elapsed < 300 && isSessionActive) {
+  if (!discard && elapsed < 300 && wasRecording) {
     await new Promise((r) => setTimeout(r, 300 - elapsed));
   }
 
@@ -862,10 +972,39 @@ export async function stopOperatorListening(): Promise<string> {
   const promise = currentSessionPromise;
   currentSessionPromise = null;
 
-  // Notify UI immediately that recording has finished and processing/transcription is underway
-  currentOptions.onTranscribing?.();
+  if (discard) {
+    currentOptions = {};
+    if (activeRecognition) {
+      try {
+        activeRecognition.onend = null;
+        activeRecognition.stop();
+      } catch {
+        // ignore
+      }
+      activeRecognition = null;
+    }
+    if (activeMediaRecorder && activeMediaRecorder.state !== 'inactive') {
+      try {
+        activeMediaRecorder.stop();
+      } catch {
+        // ignore
+      }
+    }
+    activeMediaRecorder = null;
+    stopAudioAnalysis();
+    void stopAudioDucking();
+    rawPcmChunks = [];
+    currentRecordedChunks = [];
+    if (promise) promise.resolve('');
+    return '';
+  }
 
-  // Restore Windows system audio and play Zen stop chime after 60ms (Veloce parity)
+  // Only a real stop of an open mic should leave "listening" and show transcription.
+  if (wasRecording) {
+    currentOptions.onTranscribing?.();
+  }
+
+  // Restore Windows system audio and play the Zen stop chime after 60ms
   void stopAudioDucking();
 
   // 1. Stop SpeechRecognition
@@ -926,45 +1065,17 @@ export async function stopOperatorListening(): Promise<string> {
   // 4. Stop audio stream & analyser
   stopAudioAnalysis();
 
-  // 5. Resolve transcription
-  let grokKey = '';
-  let grokBaseUrl = 'https://api.x.ai/v1';
-  let grokModel = 'grok-voice-transcribe-2.0';
-  try {
-    const config = loadOperatorConfig();
-    grokKey = config.grokTranscriptionApiKey || config.grokApiKey || '';
-    grokBaseUrl = config.grokTranscriptionBaseUrl || config.grokBaseUrl || 'https://api.x.ai/v1';
-    grokModel = config.grokTranscriptionModel || 'grok-voice-transcribe-2.0';
-    if (!grokKey && typeof localStorage !== 'undefined') {
-      grokKey = localStorage.getItem('kite_grok_transcription_api_key') || '';
-    }
-  } catch {}
-
+  // 5. Resolve transcription (single cloud request — lowest latency for Zed turns)
   let finalText = '';
   let lastError = '';
   const durationSecs = Math.max(0.5, (Date.now() - recordingStartTime) / 1000);
 
-  // Priority 1: Grok Cloud transcription if API Key is configured
-  if (grokKey && audioBlob && audioBlob.size > 200) {
+  if (audioBlob && audioBlob.size > 200) {
     try {
-      finalText = await transcribeWithGrokCloud(audioBlob, grokKey, grokBaseUrl, grokModel);
+      finalText = await transcribeOperatorAudioBlob(audioBlob);
     } catch (err: any) {
-      console.warn('[ZedVoice] Grok Cloud avisó error, usando Cloudflare Whisper automáticamente:', err);
-      // Don't pollute lastError so Cloudflare Whisper starts with a clean slate
-    }
-  }
-
-  // Priority 2: Cloudflare Whisper Cloud (built-in, zero configuration required)
-  // Always runs if Grok was not configured OR if Grok failed!
-  if (!finalText && audioBlob && audioBlob.size > 200) {
-    try {
-      const config = loadOperatorConfig();
-      const cfAccount = config.cloudflareAccountId || '';
-      const cfToken = config.cloudflareApiToken || '';
-      finalText = await transcribeWithCloudflareWhisper(audioBlob, cfAccount, cfToken);
-    } catch (err: any) {
-      lastError = err?.message || 'Error en Cloudflare Whisper';
-      console.warn('[ZedVoice] Cloudflare Whisper error:', err);
+      lastError = err?.message || 'Error en transcripción';
+      console.warn('[ZedVoice] Transcripción cloud error:', err);
     }
   }
 
@@ -973,7 +1084,7 @@ export async function stopOperatorListening(): Promise<string> {
     finalText = (currentSpeechTranscript || lastInterimTranscript).trim();
   }
 
-  // Clean hallucinated phrases (matching Veloce's cleanup_transcription_text)
+  // Drop hallucinated phrases from silence
   if (finalText) {
     finalText = cleanTranscriptionText(finalText, durationSecs);
   }
@@ -984,6 +1095,10 @@ export async function stopOperatorListening(): Promise<string> {
       console.log('[ZedVoice] Grabación vacía o de duración mínima, volviendo a reposo limpiamente.');
     } else if (lastError && !(currentSpeechTranscript || lastInterimTranscript)) {
       currentOptions.onError?.(`Fallo al transcribir: ${lastError}`);
+    } else if (audioBlob && audioBlob.size > 200) {
+      currentOptions.onError?.(
+        'No se entendió lo que dijiste. Prueba hablar más claro o más cerca del micrófono.'
+      );
     }
   }
 
@@ -1018,6 +1133,42 @@ function stopAudioAnalysis(): void {
   activeAnalyser = null;
   audioLevel = 0;
   rawPcmChunks = [];
+  stopCapturedStreams();
+}
+
+/**
+ * Drops any microphone capture Zed still holds and restores ducked volume.
+ * Used when listening fails, and when the assistant is closed or minimized.
+ */
+export async function releaseOperatorCapture(): Promise<void> {
+  isSessionActive = false;
+  hasDetectedSpeech = false;
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+    silenceTimer = null;
+  }
+  if (activeRecognition) {
+    try {
+      activeRecognition.onend = null;
+      activeRecognition.stop();
+    } catch {
+      // ignore
+    }
+    activeRecognition = null;
+  }
+  if (activeMediaRecorder && activeMediaRecorder.state !== 'inactive') {
+    try {
+      activeMediaRecorder.stop();
+    } catch {
+      // ignore
+    }
+  }
+  activeMediaRecorder = null;
+  stopAudioAnalysis();
+  const pending = currentSessionPromise;
+  currentSessionPromise = null;
+  if (pending) pending.resolve('');
+  await stopAudioDucking();
 }
 
 export interface TranscriptionTestResult {
@@ -1163,7 +1314,6 @@ export async function startTranscriptionTestSession(
             };
           } catch (grokErr: any) {
             console.warn('[ZedVoice] Fallo Grok en test, probando Cloudflare Whisper:', grokErr);
-            // Automatic fallback to Cloudflare Whisper so user gets working transcription
             const cfAccount = config.cloudflareAccountId || '';
             const cfToken = config.cloudflareApiToken || '';
             const rawText = await transcribeWithCloudflareWhisper(wavBlob, cfAccount, cfToken);
@@ -1171,7 +1321,7 @@ export async function startTranscriptionTestSession(
             return {
               success: true,
               text: text.trim(),
-              engine: `Cloud Whisper (Respaldo por aviso en Grok)`,
+              engine: 'Cloud Whisper (Respaldo por aviso en Grok)',
               latencyMs: Date.now() - t0,
               durationSecs,
             };
@@ -1185,7 +1335,7 @@ export async function startTranscriptionTestSession(
           return {
             success: true,
             text: text.trim(),
-            engine: 'Cloud Whisper (Zero-Config)',
+            engine: 'Cloud Whisper (Cloudflare)',
             latencyMs: Date.now() - t0,
             durationSecs,
           };

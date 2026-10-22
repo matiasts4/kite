@@ -9,6 +9,8 @@ import React, {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { BrandLogo } from '../views/agents/engineMetadata';
+import { usePresence } from '../../motion/usePresence';
+import { motionSurfaceClass } from '../../motion/surface';
 
 export interface SelectMenuRow {
   id: string;
@@ -172,6 +174,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 }) => {
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
+  const menuPresence = usePresence(isOpen);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [coords, setCoords] = useState<{
     left: number;
@@ -200,12 +203,17 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 
   const closeMenu = useCallback((restoreFocus = true) => {
     setIsOpen(false);
-    setCoords(null);
-    setPanelEl(null);
     if (restoreFocus) {
       triggerRef.current?.focus({ preventScroll: true });
     }
   }, []);
+
+  useEffect(() => {
+    if (!menuPresence.mounted) {
+      setCoords(null);
+      setPanelEl(null);
+    }
+  }, [menuPresence.mounted]);
 
   const openMenu = useCallback(() => {
     if (disabled) return;
@@ -400,6 +408,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   const portalHost = triggerRef.current ? getAnchoredGeometry(triggerRef.current).portalHost : document.body;
 
   const effectiveMaxRowsHeight = coords ? Math.min(maxRowsHeight, coords.room) : maxRowsHeight;
+  const panelMotion = motionSurfaceClass(menuPresence.phase, 'popover');
 
   return (
     <>
@@ -442,7 +451,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
         )}
       </button>
 
-      {isOpen && coords &&
+      {menuPresence.mounted && coords &&
         createPortal(
           <div
             id={menuId}
@@ -457,7 +466,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
             onKeyDown={handlePanelKeyDown}
             className={`select-menu select-menu--from-${coords.origin}${
               searchable ? ' select-menu--searchable' : ''
-            }`}
+            }${panelMotion ? ` ${panelMotion}` : ''}`}
             style={{
               position: 'fixed',
               left: `${coords.left}px`,

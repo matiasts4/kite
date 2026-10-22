@@ -2,6 +2,7 @@
 
 import { appOperatorController } from '../../appOperatorController';
 import { getActiveAgentTerminals } from '../../../terminalRegistry';
+import { cleanAgentTitle } from '../../../agentNames';
 import type { ActionReceipt } from '../../contract';
 
 export async function executeInjectPromptAction(
@@ -23,6 +24,7 @@ export async function executeInjectPromptAction(
         (t) =>
           t.sessionId === args.target ||
           t.who?.toLowerCase() === norm ||
+          (t.title && cleanAgentTitle(t.title).toLowerCase() === norm) ||
           t.title?.toLowerCase().includes(norm)
       );
       targetSessionId = match?.sessionId;

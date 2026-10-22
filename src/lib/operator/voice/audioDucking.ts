@@ -1,6 +1,5 @@
 /**
  * Kite Code — Audio Ducking & Zen Earcon Sound Cues
- * Parity with Veloce audio engine:
  *  - Ethereal singing bowl Zen chord on recording start and stop (synthesized via Web Audio API)
  *  - Windows Core Audio master volume ducking to 20% on start, smooth restoration on stop
  *  - Strictly the 'zen' sound cue only (no other themes or selectors).
@@ -95,10 +94,11 @@ export async function startAudioDucking(): Promise<void> {
  * waits 60ms for the curve to initialize, and plays the Zen stop chime.
  */
 export async function stopAudioDucking(): Promise<void> {
-  if (!isCurrentlyDucked) return;
+  const wasDucked = isCurrentlyDucked;
   isCurrentlyDucked = false;
 
-  // 1. Restore native Windows volume
+  // Always ask Windows to restore. A failed listen can duck and then clear the
+  // JS flag before the native fade saved the original level.
   if (isTauriEnvironment()) {
     try {
       await operatorRestoreAudio();
@@ -107,7 +107,8 @@ export async function stopAudioDucking(): Promise<void> {
     }
   }
 
-  // 2. Short 60ms acoustic delay matching Veloce so volume return has begun
+  if (!wasDucked) return;
+
   setTimeout(() => {
     playZenCue(false);
   }, 60);

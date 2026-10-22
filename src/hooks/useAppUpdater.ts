@@ -211,7 +211,7 @@ export function useAppUpdater() {
 
   const restart = useCallback(() => invoke('updater_restart'), []);
 
-  /** One-click update: downloads, installs and reloads the app like Cursor/DevHub. */
+  /** One-click update: downloads, installs, and reloads the app. */
   const updateAndRestart = useCallback(async () => {
     setGlobalState({ status: 'downloading', percent: null });
     try {

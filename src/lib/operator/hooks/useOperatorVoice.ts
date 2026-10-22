@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   startOperatorListening,
   stopOperatorListening,
+  releaseOperatorCapture,
   getCurrentAudioLevel,
   isVoiceRecognitionSupported,
   getVoiceEngineStatus,
@@ -15,6 +16,7 @@ export interface UseOperatorVoiceOptions {
 
 export interface UseOperatorVoiceResult {
   isListening: boolean;
+  isTranscribing: boolean;
   transcript: string;
   interimTranscript: string;
   audioLevel: number;
@@ -32,6 +34,7 @@ export function useOperatorVoice({
   language = 'es-ES',
 }: UseOperatorVoiceOptions = {}): UseOperatorVoiceResult {
   const [isListening, setIsListening] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [audioLevel, setAudioLevel] = useState(0);
@@ -39,6 +42,7 @@ export function useOperatorVoice({
 
   const levelRafRef = useRef<number | null>(null);
   const isListeningRef = useRef(false);
+  const listenEpochRef = useRef(0);
   const errorTimerRef = useRef<number | null>(null);
   const onFinalTranscriptRef = useRef(onFinalTranscript);
   onFinalTranscriptRef.current = onFinalTranscript;
@@ -92,9 +96,11 @@ export function useOperatorVoice({
       return;
     }
 
+    const epoch = ++listenEpochRef.current;
     clearError();
     setTranscript('');
     setInterimTranscript('');
+    setIsTranscribing(false);
     setIsListening(true);
     isListeningRef.current = true;
 
@@ -108,8 +114,10 @@ export function useOperatorVoice({
           setInterimTranscript(partial);
         },
         onTranscribing: () => {
+          if (epoch !== listenEpochRef.current) return;
           setIsListening(false);
           isListeningRef.current = false;
+          setIsTranscribing(true);
           if (levelRafRef.current) {
             cancelAnimationFrame(levelRafRef.current);
             levelRafRef.current = null;
@@ -121,10 +129,13 @@ export function useOperatorVoice({
         },
       });
 
+      if (epoch !== listenEpochRef.current) return;
+
       setTranscript(finalResult);
       setInterimTranscript('');
       setIsListening(false);
       isListeningRef.current = false;
+      setIsTranscribing(false);
 
       if (levelRafRef.current) {
         cancelAnimationFrame(levelRafRef.current);
@@ -132,14 +143,27 @@ export function useOperatorVoice({
       }
       setAudioLevel(0);
 
-      if (finalResult && finalResult.trim().length > 0) {
-        onFinalTranscriptRef.current?.(finalResult.trim());
+      const trimmed = finalResult?.trim() || '';
+      if (trimmed.length > 0) {
+        try {
+          await onFinalTranscriptRef.current?.(trimmed);
+        } catch (err: unknown) {
+          const message =
+            err instanceof Error ? err.message : 'No se pudo ejecutar la orden de voz.';
+          setErrorWithAutoClear(message);
+        }
+      } else {
+        setErrorWithAutoClear(
+          'No te entendí o el audio quedó en silencio. Habla un poco más cerca del micrófono e inténtalo de nuevo.'
+        );
       }
     } catch (err: any) {
+      if (epoch !== listenEpochRef.current) return;
       console.warn('[useOperatorVoice] Error capturando voz:', err);
       setErrorWithAutoClear(err?.message || 'Error al capturar voz');
       setIsListening(false);
       isListeningRef.current = false;
+      setIsTranscribing(false);
       if (levelRafRef.current) {
         cancelAnimationFrame(levelRafRef.current);
         levelRafRef.current = null;
@@ -169,12 +193,13 @@ export function useOperatorVoice({
       if (errorTimerRef.current) {
         window.clearTimeout(errorTimerRef.current);
       }
-      stopOperatorListening();
+      void releaseOperatorCapture();
     };
   }, []);
 
   return {
     isListening,
+    isTranscribing,
     transcript,
     interimTranscript,
     audioLevel,

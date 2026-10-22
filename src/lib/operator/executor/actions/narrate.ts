@@ -47,12 +47,16 @@ export async function executeNarrateAction(
       );
       targetSessionId = match?.sessionId;
       if (!targetSessionId) {
+        const summaryEs =
+          terminals.length === 0
+            ? 'No hay ninguna terminal abierta.'
+            : `No encontré ningún agente ni terminal con el nombre «${args.target}». Hay ${terminals.length} terminales activas.`;
         return {
           actionIdx,
           type: 'narrate_summary',
-          ok: false,
-          summaryEs: `No encontré ningún agente ni terminal con el nombre «${args.target}». Hay ${terminals.length} terminales activas.`,
-          error: 'target-not-found',
+          ok: terminals.length === 0,
+          summaryEs,
+          error: terminals.length === 0 ? undefined : 'target-not-found',
         };
       }
     }
@@ -64,9 +68,7 @@ export async function executeNarrateAction(
     actionIdx,
     type: 'narrate_summary',
     ok: res.success,
-    summaryEs: res.success
-      ? (args.target ? `Leí el resumen del agente o terminal «${args.target}».` : 'Leí el resumen de las terminales activas.')
-      : `No pude leer el resumen: ${res.message}`,
+    summaryEs: res.message,
     error: res.success ? undefined : res.message,
   };
 }

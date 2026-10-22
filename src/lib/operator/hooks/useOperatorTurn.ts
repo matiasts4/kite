@@ -243,6 +243,9 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
   );
 
   const resetStage = useCallback((): void => {
+    generationRef.current += 1;
+    busyRef.current = false;
+    setBusy(false);
     if (resetTimerRef.current) {
       window.clearTimeout(resetTimerRef.current);
       resetTimerRef.current = null;

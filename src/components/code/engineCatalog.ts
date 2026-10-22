@@ -1,6 +1,6 @@
 import type { AgentEngineDescriptor } from './types';
 
-/** Launch grid order from the original Code empty state. */
+/** Launch grid order for the Code empty state. */
 export const CODE_LAUNCH_ENGINES: AgentEngineDescriptor[] = [
   { wireId: 'claude-code', displayName: 'Claude Code', shortDisplayName: 'Claude', vendor: 'Anthropic', installed: true },
   { wireId: 'codex', displayName: 'Codex', shortDisplayName: 'Codex', vendor: 'OpenAI', installed: true },
@@ -14,6 +14,7 @@ export const CODE_LAUNCH_ENGINES: AgentEngineDescriptor[] = [
   { wireId: 'kimi', displayName: 'Kimi Code', shortDisplayName: 'Kimi', vendor: 'Moonshot', installed: true },
   { wireId: 'amp', displayName: 'Amp', shortDisplayName: 'Amp', vendor: 'Sourcegraph', installed: true },
   { wireId: 'antigravity', displayName: 'Antigravity', shortDisplayName: 'Antigravity', vendor: 'Antigravity', installed: true },
+  { wireId: 'gentle-shell', displayName: 'Gentle Shell', shortDisplayName: 'Gentle', vendor: 'Gentle AI', installed: true },
   { wireId: 'aider', displayName: 'Aider', shortDisplayName: 'Aider', vendor: 'Aider', installed: true },
   { wireId: 'muse', displayName: 'Muse Code', shortDisplayName: 'Muse', vendor: 'Muse', installed: true },
 ];
@@ -31,6 +32,7 @@ const LOGO_BY_ENGINE: Record<string, string> = {
   kimi: '/assets/logos/agent-kimi-onDark.png',
   amp: '/assets/logos/agent-amp.png',
   antigravity: '/assets/logos/agent-antigravity.png',
+  'gentle-shell': '/assets/logos/agent-gentle-shell.png',
   aider: '/assets/logos/agent-aider-onDark.png',
 };
 

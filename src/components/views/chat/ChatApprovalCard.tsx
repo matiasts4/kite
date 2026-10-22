@@ -39,7 +39,7 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
 
   return (
     <section
-      className="chat-approval-card"
+      className="chat-approval-card motion-row-in"
       role="alert"
       aria-busy={busy || undefined}
       aria-label={`Approval needed for ${approval.title || approval.toolName}`}

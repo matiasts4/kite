@@ -90,6 +90,74 @@ const workspacePaths = new Map([
   ["b2222222-2222-4222-8222-222222222222", "E:\\Kite"]
 ]);
 
+const browserTestLane = process.env.KITE_BROWSER_TEST === "1";
+const ANTIGRAVITY_AGENT_ID = "c3333333-3333-4333-8333-333333333333";
+
+/** In-memory agent chat for browser test lane (Antigravity only). */
+const agentChatThreads = new Map();
+const agentChatRuns = new Map();
+
+function agentsForLane() {
+  if (browserTestLane) {
+    return activeAgents.filter((a) => a.engine === "antigravity");
+  }
+  return activeAgents;
+}
+
+function makeEmptyThread(agentId, mode = "acceptEdits", model = null) {
+  const threadId = randomUUID();
+  const now = Date.now();
+  return {
+    schemaVersion: 1,
+    revision: randomUUID().replace(/-/g, ""),
+    id: threadId,
+    profileId: agentId,
+    provider: "antigravity",
+    providerSessionId: null,
+    title: "New Chat",
+    items: [],
+    mode,
+    plan: false,
+    model,
+    status: "idle",
+    usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+    workspaceId: null,
+    pinned: false,
+    createdAtUnixMs: now,
+    updatedAtUnixMs: now,
+  };
+}
+
+function makeUserItem(text) {
+  return {
+    id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    kind: "user",
+    text,
+    title: null,
+    detail: null,
+    status: "completed",
+    streaming: false,
+    exitCode: null,
+    createdAtUnixMs: Date.now(),
+    attachments: [],
+  };
+}
+
+function makeAssistantItem(text) {
+  return {
+    id: `a-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    kind: "assistant",
+    text,
+    title: null,
+    detail: null,
+    status: "completed",
+    streaming: false,
+    exitCode: null,
+    createdAtUnixMs: Date.now(),
+    attachments: [],
+  };
+}
+
 let activeAgents = [
   {
     id: "c3333333-3333-4333-8333-333333333333",
@@ -123,6 +191,98 @@ let activeAgents = [
   }
 ];
 
+function stubAgentScript(meta = {}) {
+  const agentName = meta.agentName || meta.displayName || "Agent";
+  const engine = meta.engine || "antigravity";
+  const task =
+    meta.task ||
+    "Refactorizar ipc.ts: separar shim web, carril navegador y comandos nativos.";
+  return [
+    `[${agentName}] ${engine} CLI — accept-edits mode`,
+    `Task: ${task}`,
+    `[${agentName}] Revisé src/lib/ipc.ts y el mock en server.mjs.`,
+    `[${agentName}] Propuse extraer isBrowserTestLane y endurecer read_terminal_output simulado.`,
+    `[${agentName}] Quedó esperando tu confirmación antes de editar archivos.`,
+    "What would you like to do next?",
+  ].join("\r\n");
+}
+
+function createStubTerminal(sessionId, meta = {}) {
+  const session = new StubTerminalSession(sessionId, meta);
+  return session;
+}
+
+/** Simulated PTY for browser test lane (no powershell spawn — avoids crashing the mock server). */
+class StubTerminalSession {
+  constructor(sessionId, meta = {}) {
+    this.sessionId = sessionId;
+    this.sequence = 0;
+    this.meta = meta;
+    this.outputBuffer = [Buffer.from(`${stubAgentScript(meta)}\r\n`)];
+    this.waiters = [];
+    this.exited = false;
+    this.exitCode = 0;
+    this.proc = null;
+  }
+
+  notifyWaiters() {
+    while (this.waiters.length > 0) {
+      const resolve = this.waiters.shift();
+      resolve();
+    }
+  }
+
+  async readOutput(timeoutMs = 5000) {
+    if (this.outputBuffer.length === 0 && !this.exited) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          const idx = this.waiters.indexOf(resolve);
+          if (idx !== -1) this.waiters.splice(idx, 1);
+          resolve();
+        }, timeoutMs);
+
+        this.waiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+
+    if (this.outputBuffer.length > 0) {
+      const combined = Buffer.concat(this.outputBuffer);
+      this.outputBuffer = [];
+      return {
+        kind: "output",
+        sequence: this.sequence++,
+        bytesBase64: combined.toString("base64"),
+        turnStartedAtUnixMs: Date.now(),
+        waitingForInput: false,
+      };
+    }
+
+    if (this.exited) {
+      return { kind: "exited", exitCode: this.exitCode ?? 0 };
+    }
+
+    return {
+      kind: "idle",
+      turnStartedAtUnixMs: Date.now(),
+      waitingForInput: true,
+    };
+  }
+
+  write(data) {
+    this.outputBuffer.push(Buffer.from(String(data)));
+    this.notifyWaiters();
+  }
+
+  terminate() {
+    this.exited = true;
+    this.exitCode = 0;
+    this.notifyWaiters();
+  }
+}
+
 // Interactive Terminal Session Class with Base64 output streaming
 class TerminalSession {
   constructor(sessionId, cwd) {
@@ -132,11 +292,22 @@ class TerminalSession {
     this.waiters = [];
     this.exited = false;
     this.exitCode = null;
+    this.proc = null;
 
     try {
       this.proc = spawn("powershell.exe", ["-NoLogo"], {
         cwd: cwd || "E:\\Workspace",
         env: process.env
+      });
+
+      this.proc.on("error", (err) => {
+        console.error(`Terminal spawn error for ${sessionId}:`, err.message);
+        this.exited = true;
+        this.exitCode = 1;
+        this.outputBuffer.push(
+          Buffer.from(`[terminal] No se pudo iniciar powershell: ${err.message}\r\n`)
+        );
+        this.notifyWaiters();
       });
 
       this.proc.stdout.on("data", (chunk) => {
@@ -280,6 +451,21 @@ async function getLiveQuotas(force = false) {
   if (!force && quotaCache && Date.now() - quotaCacheTime < 30000) {
     return quotaCache;
   }
+  if (browserTestLane) {
+    quotaCache = {
+      antigravity: {
+        providerId: "antigravity",
+        displayName: "Antigravity",
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 12,
+        primaryRemainingPercent: 88,
+        windows: [],
+      },
+    };
+    quotaCacheTime = Date.now();
+    return quotaCache;
+  }
   const result = {};
   try {
     const devhubBase = "file:///D:/devhub/src/lib/quota/server";
@@ -381,6 +567,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
       // 2. Application Bootstrap
       case "bootstrap": {
         const token = randomUUID();
+        const laneAgents = agentsForLane();
         return res.json({
           browserDocumentToken: token,
           schemaVersion: 1,
@@ -388,10 +575,12 @@ app.post("/api/tauri/invoke", async (req, res) => {
           recoveryNotices: [],
           preferences: {
             schemaVersion: 1,
-            workMode: "code",
-            route: { kind: "code" },
+            workMode: browserTestLane ? "agent" : "code",
+            route: browserTestLane ? { kind: "agent" } : { kind: "code" },
             selectedWorkspaceId: activeWorkspaces[0]?.id || null,
-            selectedAgentId: activeAgents[0]?.id || null,
+            selectedAgentId: browserTestLane
+              ? laneAgents[0]?.id || ANTIGRAVITY_AGENT_ID
+              : laneAgents[0]?.id || null,
             sidebarVisible: true,
             appearance: "dark",
             zoomPercent: 100,
@@ -402,7 +591,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
             quitBehavior: "keepSessionsRunning"
           },
           workspaces: activeWorkspaces,
-          agents: activeAgents
+          agents: laneAgents
         });
       }
 
@@ -482,7 +671,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
       }
 
       case "list_agent_profiles": {
-        return res.json(activeAgents);
+        return res.json(agentsForLane());
       }
 
       case "load_agent_profile": {
@@ -702,7 +891,18 @@ app.post("/api/tauri/invoke", async (req, res) => {
       case "start_terminal": {
         const sessionId = reqData.sessionId || randomUUID();
         const wsDir = workspacePaths.get(reqData.owner?.workspaceId) || "E:\\Workspace";
-        activeTerminalSessions.set(sessionId, new TerminalSession(sessionId, wsDir));
+        if (browserTestLane) {
+          activeTerminalSessions.set(
+            sessionId,
+            createStubTerminal(sessionId, {
+              engine: reqData.engine || "antigravity",
+              agentName: reqData.agentName || reqData.displayName,
+              displayName: reqData.displayName || reqData.agentName,
+            })
+          );
+        } else {
+          activeTerminalSessions.set(sessionId, new TerminalSession(sessionId, wsDir));
+        }
         return res.json({
           sessionId,
           attachedToExisting: false,
@@ -715,7 +915,11 @@ app.post("/api/tauri/invoke", async (req, res) => {
         const sessionId = reqData.sessionId || randomUUID();
         if (!activeTerminalSessions.has(sessionId)) {
           const wsDir = workspacePaths.get(reqData.owner?.workspaceId) || "E:\\Workspace";
-          activeTerminalSessions.set(sessionId, new TerminalSession(sessionId, wsDir));
+          if (browserTestLane) {
+            activeTerminalSessions.set(sessionId, createStubTerminal(sessionId, {}));
+          } else {
+            activeTerminalSessions.set(sessionId, new TerminalSession(sessionId, wsDir));
+          }
         }
         return res.json({
           sessionId,
@@ -766,10 +970,21 @@ app.post("/api/tauri/invoke", async (req, res) => {
         if (typeof globalThis._serverCodenameIndex !== "number") globalThis._serverCodenameIndex = 0;
         const slots = seats.map((seat, idx) => {
           const termId = randomUUID();
-          activeTerminalSessions.set(termId, new TerminalSession(termId, wsDir));
           const engine = seat.engine || "terminal";
           const isTerm = engine === "terminal" || engine === "powershell";
           const codename = seat.agentName || (isTerm ? null : AGENT_CODENAMES[globalThis._serverCodenameIndex++ % AGENT_CODENAMES.length]);
+          if (browserTestLane) {
+            activeTerminalSessions.set(
+              termId,
+              createStubTerminal(termId, {
+                agentName: codename,
+                displayName: codename,
+                engine: isTerm ? "terminal" : engine,
+              })
+            );
+          } else {
+            activeTerminalSessions.set(termId, new TerminalSession(termId, wsDir));
+          }
           const name = isTerm ? (seat.label || `Terminal ${idx + 1}`) : (codename || "Agent");
           return {
             index: idx,
@@ -1029,44 +1244,180 @@ app.post("/api/tauri/invoke", async (req, res) => {
       case "list_chat_summaries":
       case "list_agent_chat_summaries":
       case "list_live_chat_runs": {
+        if (browserTestLane && cmd === "list_agent_chat_summaries") {
+          const agentId = reqData.agentId;
+          const summaries = [...agentChatThreads.values()]
+            .filter((t) => !agentId || t.profileId === agentId)
+            .map((t) => ({
+              id: t.id,
+              title: t.title,
+              profileId: t.profileId,
+              workspaceId: t.workspaceId,
+              provider: t.provider,
+              status: t.status,
+              updatedAtUnixMs: t.updatedAtUnixMs,
+              pinned: t.pinned,
+            }));
+          return res.json(summaries);
+        }
         return res.json([]);
       }
 
-      case "create_general_chat":
+      case "create_general_chat": {
+        const thread = makeEmptyThread(null, reqData.mode || "acceptEdits", reqData.model || null);
+        thread.provider = reqData.provider || "antigravity";
+        thread.workspaceId = reqData.workspaceId || null;
+        agentChatThreads.set(thread.id, thread);
+        return res.json(thread);
+      }
+
       case "create_agent_chat": {
-        const threadId = randomUUID();
-        return res.json({
-          threadId,
-          messages: [
-            {
-              id: randomUUID(),
-              role: "assistant",
-              content: "Kite Code está activo. Los agentes autónomos y las terminales PowerShell están listas.",
-              timestamp: Date.now()
-            }
-          ]
-        });
+        const agentId = reqData.agentId || ANTIGRAVITY_AGENT_ID;
+        if (browserTestLane) {
+          const profile = agentsForLane().find((a) => a.id === agentId);
+          if (!profile || profile.engine !== "antigravity") {
+            return res.status(400).json({
+              code: "browser_lane_agent_only",
+              message: "Browser test lane supports Antigravity agent only.",
+            });
+          }
+        }
+        const thread = makeEmptyThread(agentId, reqData.mode || "acceptEdits", reqData.model || null);
+        agentChatThreads.set(thread.id, thread);
+        return res.json(thread);
       }
 
       case "load_agent_chat_thread":
       case "load_chat_thread": {
+        const tid = reqData.threadId;
+        const existing = tid ? agentChatThreads.get(tid) : null;
+        if (existing) {
+          return res.json(existing);
+        }
+        const fallback = makeEmptyThread(reqData.agentId || null);
+        if (tid) {
+          fallback.id = tid;
+          agentChatThreads.set(tid, fallback);
+        }
+        return res.json(fallback);
+      }
+
+      case "start_agent_chat_turn": {
+        const threadId = reqData.threadId;
+        let thread = agentChatThreads.get(threadId);
+        if (!thread) {
+          thread = makeEmptyThread(reqData.agentId || ANTIGRAVITY_AGENT_ID);
+          thread.id = threadId;
+          agentChatThreads.set(threadId, thread);
+        }
+        const promptText = String(reqData.prompt || reqData.text || "").trim();
+        const replyText = `[Antigravity] ${promptText || "Listo."} (carril navegador — respuesta simulada.)`;
+        const newItems = [];
+        if (promptText) {
+          newItems.push(makeUserItem(promptText));
+        }
+        const assistantItem = makeAssistantItem(replyText);
+        newItems.push(assistantItem);
+        thread.items = [...(thread.items || []), ...newItems];
+        thread.status = "idle";
+        thread.updatedAtUnixMs = Date.now();
+        if (promptText && thread.title === "New Chat") {
+          thread.title = promptText.slice(0, 48);
+        }
+        agentChatThreads.set(threadId, thread);
+        const runId = randomUUID();
+        agentChatRuns.set(runId, {
+          threadId,
+          nextSequence: 2,
+          events: [
+            { sequence: 1, kind: "upsert", item: assistantItem },
+            { sequence: 2, kind: "finished", ok: true },
+          ],
+        });
+        return res.json({ schemaVersion: 1, runId, thread });
+      }
+
+      case "start_chat_turn": {
+        const threadId = reqData.threadId;
+        let thread = agentChatThreads.get(threadId);
+        if (!thread) {
+          thread = makeEmptyThread(null);
+          thread.id = threadId;
+          agentChatThreads.set(threadId, thread);
+        }
+        const promptText = String(reqData.prompt || "").trim();
+        const assistantItem = makeAssistantItem(`Echo: ${promptText || "…"}`);
+        thread.items = [...(thread.items || []), assistantItem];
+        thread.status = "idle";
+        thread.updatedAtUnixMs = Date.now();
+        const runId = randomUUID();
+        agentChatRuns.set(runId, {
+          threadId,
+          nextSequence: 2,
+          events: [
+            { sequence: 1, kind: "upsert", item: assistantItem },
+            { sequence: 2, kind: "finished", ok: true },
+          ],
+        });
+        return res.json({ schemaVersion: 1, runId, thread });
+      }
+
+      case "read_agent_chat_turn_updates":
+      case "read_chat_turn_updates": {
+        const runId = reqData.runId;
+        const afterSequence = Number(reqData.afterSequence || 0);
+        const run = agentChatRuns.get(runId);
+        if (!run) {
+          return res.json({ schemaVersion: 1, runId, nextSequence: afterSequence, events: [] });
+        }
+        const events = run.events.filter((ev) => ev.sequence > afterSequence);
         return res.json({
-          threadId: reqData.threadId || randomUUID(),
-          messages: []
+          schemaVersion: 1,
+          runId,
+          nextSequence: run.nextSequence,
+          events,
         });
       }
 
-      case "start_agent_chat_turn":
-      case "start_chat_turn": {
-        const turnId = randomUUID();
-        const runId = randomUUID();
-        const text = reqData.prompt || reqData.text || "Hello";
-        return res.json({
-          turnId,
-          runId,
-          status: "completed",
-          reply: `Antigravity en Kite Code: Procesando tu instrucción "${text}" en workspace E:\\Workspace.`
-        });
+      case "operator_trace_append":
+      case "operator_trace_path":
+      case "show_in_folder": {
+        return res.json(cmd === "operator_trace_path" ? "" : true);
+      }
+
+      case "proxy_operator_http": {
+        const url = reqData.url;
+        const method = (reqData.method || "GET").toUpperCase();
+        const headers = reqData.headers || {};
+        const body = reqData.body ?? null;
+        const started = Date.now();
+        try {
+          const upstream = await fetch(url, { method, headers, body: body || undefined });
+          const text = await upstream.text();
+          return res.json({
+            success: upstream.ok,
+            status: upstream.status,
+            body: text,
+            latency_ms: Date.now() - started,
+            error: upstream.ok ? null : upstream.statusText,
+          });
+        } catch (err) {
+          return res.json({
+            success: false,
+            status: 0,
+            body: "",
+            latency_ms: Date.now() - started,
+            error: err.message,
+          });
+        }
+      }
+
+      case "agent_message_inbox": {
+        return res.json({ schemaVersion: 1, profileId: reqData.profileId, messages: [], nextCursor: null });
+      }
+
+      case "agent_messaging_preference": {
+        return res.json({ schemaVersion: 1, enabled: false, readOnly: true, revision: "browser-lane" });
       }
 
       case "open_external_link": {
@@ -1171,6 +1522,22 @@ app.post("/api/tauri/invoke", async (req, res) => {
       }
 
       default: {
+        if (browserTestLane) {
+          if (cmd.startsWith("list_")) return res.json([]);
+          if (
+            cmd.startsWith("save_") ||
+            cmd.startsWith("set_") ||
+            cmd.startsWith("cancel_") ||
+            cmd.startsWith("delete_") ||
+            cmd.startsWith("update_") ||
+            cmd.startsWith("remove_") ||
+            cmd.startsWith("release_")
+          ) {
+            return res.json(null);
+          }
+          console.warn(`[Browser lane unhandled] ${cmd}`);
+          return res.json(null);
+        }
         console.log(`[Tauri Mock Unhandled] ${cmd}`);
         return res.json({});
       }

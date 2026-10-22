@@ -7,7 +7,7 @@ import {
   formatRelativeAge,
 } from './types';
 
-// Clean inline SVG icons matching bundle geometry
+// Inline SVG icons
 const FileTextSvg: React.FC<{ size?: number; className?: string }> = ({ size = 14, className }) => (
   <svg
     width={size}

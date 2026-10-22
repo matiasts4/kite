@@ -44,6 +44,7 @@ pub mod odd_tasks;
 pub mod operator_runtime;
 pub mod audio_ducking;
 pub mod agent_inbox;
+pub mod credentials;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -53,6 +54,7 @@ use odd_tasks::*;
 use operator_runtime::*;
 use audio_ducking::*;
 use agent_inbox::*;
+use credentials::*;
 
 use account_switcher::*;
 use agents::*;
@@ -99,6 +101,9 @@ fn register_windows_shutdown_handler() {
 }
 
 fn main() {
+    // Load local .env file in development if present
+    dotenvy::dotenv().ok();
+
     // Suppress background auto-updater in Antigravity CLI (`agy.exe`).
     //
     // Root cause analysis (2026-10-18):
@@ -500,6 +505,11 @@ fn main() {
             operator_restore_audio,
             operator_play_cue_sound,
             operator_on_recording_state_change,
+            get_provider_credentials,
+            get_active_provider_key,
+            save_provider_credential,
+            delete_provider_credential,
+            migrate_localstorage_credentials,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
@@ -521,10 +531,12 @@ fn main() {
         match event {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
+                crate::audio_ducking::restore_audio_immediate();
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit_requested");
             }
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, ensuring all terminals are snapshotted");
+                crate::audio_ducking::restore_audio_immediate();
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit");
             }
             tauri::RunEvent::MainEventsCleared => {

@@ -45,6 +45,19 @@ describe('useOperatorTurn logic', () => {
         })
       ).toBe('thinking');
     });
+
+    it('shows thinking while cloud transcription runs after mic stops', () => {
+      expect(
+        resolveZedOrbState({
+          turnStage: 'idle',
+          voiceError: null,
+          turnBusy: false,
+          isListening: false,
+          isTranscribing: true,
+          speakingTts: false,
+        })
+      ).toBe('thinking');
+    });
   });
 
   describe('withTurnTimeout', () => {

@@ -1,5 +1,7 @@
 import React, { useRef, useId, useEffect, useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePresence } from '../../motion/usePresence';
+import { motionSurfaceClass } from '../../motion/surface';
 
 export interface SheetButtonProps {
   label: string;
@@ -46,6 +48,7 @@ export const Sheet: React.FC<SheetProps> = ({
   initialFocus = 'first',
 }) => {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const sheetPresence = usePresence(open);
   const [scale, setScale] = useState(1);
   const titleId = useId();
   const descId = useId();
@@ -54,7 +57,7 @@ export const Sheet: React.FC<SheetProps> = ({
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
-    if (!open || !dialog) return;
+    if (!open || !sheetPresence.mounted || !dialog) return;
 
     setScale(getUiScale(dialog));
     if (!dialog.open) {
@@ -63,13 +66,13 @@ export const Sheet: React.FC<SheetProps> = ({
         dialog.querySelector<HTMLButtonElement>('.ui-sheet__footer button[type="submit"]:not(:disabled)')?.focus({ preventScroll: true });
       }
     }
+  }, [open, sheetPresence.mounted, initialFocus]);
 
-    return () => {
-      if (dialog && dialog.open) {
-        dialog.close();
-      }
-    };
-  }, [open, initialFocus]);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (sheetPresence.mounted || !dialog?.open) return;
+    dialog.close();
+  }, [sheetPresence.mounted]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -86,7 +89,9 @@ export const Sheet: React.FC<SheetProps> = ({
     };
   }, []);
 
-  if (!open) return null;
+  if (!sheetPresence.mounted) return null;
+
+  const sheetMotion = motionSurfaceClass(sheetPresence.phase, 'modal');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,7 +109,11 @@ export const Sheet: React.FC<SheetProps> = ({
   const content = (
     <dialog
       ref={dialogRef}
-      className={className ? `ui-sheet ${className}` : 'ui-sheet'}
+      className={
+        className
+          ? `ui-sheet ${className}${sheetMotion ? ` ${sheetMotion}` : ''}`
+          : `ui-sheet${sheetMotion ? ` ${sheetMotion}` : ''}`
+      }
       style={style}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabel ? undefined : titleId}

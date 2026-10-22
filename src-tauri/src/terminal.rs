@@ -351,6 +351,7 @@ fn program_names(engine: &str) -> &'static [&'static str] {
         "kimi" => &["kimi"],
         "amp" => &["amp"],
         "antigravity" | "agy" => &["agy"],
+        "gentle-shell" | "gentleshell" | "gentle" | "gentle-pi" => &["gentle-shell", "pi"],
         "aider" => &["aider"],
         "muse" => &["muse"],
         _ => &[],
@@ -533,6 +534,16 @@ pub fn build_agent_cli_args_ext(
                         args.push(prompt.to_string());
                     }
                 }
+                "gentle-shell" => {
+                    args.push("--tui-mode".to_string());
+                    args.push("regular".to_string());
+                    if auto_approve {
+                        args.push("--approve".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
+                    }
+                }
                 _ => {
                     if let Some(prompt) = initial_prompt {
                         args.push(prompt.to_string());
@@ -665,6 +676,23 @@ pub fn build_agent_cli_args_ext(
                 "aider" => {
                     if *allow_continue_fallback || provider_session_id.is_some() {
                         args.push("--restore-chat-history".to_string());
+                    }
+                }
+                "gentle-shell" => {
+                    args.push("--tui-mode".to_string());
+                    args.push("regular".to_string());
+                    if let Some(id) = provider_session_id.as_deref().filter(|s| !s.is_empty()) {
+                        args.push("--session".to_string());
+                        args.push(id.to_string());
+                        bound_id = Some(id.to_string());
+                    } else if *allow_continue_fallback {
+                        args.push("--continue".to_string());
+                    }
+                    if auto_approve {
+                        args.push("--approve".to_string());
+                    }
+                    if let Some(prompt) = initial_prompt {
+                        args.push(prompt.to_string());
                     }
                 }
                 _ => {}

@@ -122,6 +122,36 @@ describe('Heuristic Planner — Fixtures & Utterances', () => {
     expect((plan3.actions[0] as any).prompt).toBe('npm test');
   });
 
+  it('closes all terminals when user says cierra las terminales', () => {
+    const plan = planTurnHeuristic('cierra las terminales');
+    expect(plan.actions[0].type).toBe('close_terminals');
+    expect((plan.actions[0] as any).target).toBe('all');
+  });
+
+  it('narrates a named agent when user asks what Nova said', () => {
+    const plan = planTurnHeuristic('resume qué dijo Nova');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('narrate_summary');
+    expect((plan.actions[0] as any).target).toBe('Nova');
+  });
+
+  it('injects into Orion when user names the agent terminal', () => {
+    const plan = planTurnHeuristic(
+      'en la terminal de Orion escribe: lista los archivos de src/lib'
+    );
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('inject_prompt');
+    expect((plan.actions[0] as any).target).toBe('Orion');
+    expect((plan.actions[0] as any).prompt).toMatch(/lista los archivos/i);
+  });
+
+  it('treats resumir la tarea as narrate, not open grok terminal', () => {
+    const plan = planTurnHeuristic('resumir la tarea en la terminal abierta');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('narrate_summary');
+    expect(plan.actions[0].type).not.toBe('open_terminals');
+  });
+
   it('narrates terminal content instead of injecting when user asks what was in esa terminal', () => {
     const commentPhrase =
       'coméntame en pocas palabras qué es lo que había en esa terminal';

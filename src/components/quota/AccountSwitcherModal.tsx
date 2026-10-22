@@ -6,6 +6,8 @@ import {
   switchAccountProfile,
   deleteAccountProfile,
 } from '../../lib/ipc';
+import { usePresence } from '../../motion/usePresence';
+import { motionSurfaceClass } from '../../motion/surface';
 
 export interface AccountSwitcherModalProps {
   provider: string;
@@ -110,10 +112,15 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     }
   };
 
-  if (!isOpen) return null;
+  const layerPresence = usePresence(isOpen);
+  if (!layerPresence.mounted) return null;
+
+  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
+  const panelMotion = motionSurfaceClass(layerPresence.phase, 'modal');
 
   return (
     <div
+      className={scrimMotion || undefined}
       style={{
         position: 'fixed',
         inset: 0,
@@ -128,6 +135,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       onClick={onClose}
     >
       <div
+        className={panelMotion || undefined}
         style={{
           width: '100%',
           maxWidth: '480px',

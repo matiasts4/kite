@@ -5,7 +5,9 @@ import { ttsNarrator } from '../lib/operator/ttsNarrator';
 import { loadOperatorConfig } from '../lib/operator/operatorConfig';
 import { useOperatorTurn } from '../lib/operator/hooks/useOperatorTurn';
 import { resolveZedOrbState } from '../lib/operator/hooks/useOperatorTurnLogic';
+import { isBrowserTestLane } from '../lib/browserTestLane';
 import { useOperatorVoice } from '../lib/operator/hooks/useOperatorVoice';
+import { releaseOperatorCapture } from '../lib/operator/voice/zedVoice';
 import './zedFloat.css';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -126,11 +128,28 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   const [hovering, setHovering] = useState(false);
   const [manualInputValue, setManualInputValue] = useState('');
   const [speakingTts, setSpeakingTts] = useState(false);
+  const [orbAck, setOrbAck] = useState(false);
+
+  useEffect(() => {
+    let timer = 0;
+    const onAck = () => {
+      setOrbAck(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setOrbAck(false), 180);
+    };
+    window.addEventListener('kite:zed-orb-ack', onAck);
+    return () => {
+      window.removeEventListener('kite:zed-orb-ack', onAck);
+      window.clearTimeout(timer);
+    };
+  }, []);
   const [manualCommandResult, setManualCommandResult] = useState<{
     reply: string;
     latencyMs?: number;
     ok?: boolean;
   } | null>(null);
+
+  const browserTestUi = isBrowserTestLane();
 
   // Hook for unified turn execution & lifecycle
   const turn = useOperatorTurn(workspaceId ?? null);
@@ -288,7 +307,8 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       } else if (isHoldingToTalk) {
         isHoldingToTalk = false;
         const elapsed = Date.now() - pressStartTime;
-        if (elapsed > 450) {
+        // A short press starts listening and stays open. Only a real hold sends.
+        if (elapsed > 900) {
           voice.stopListening();
         }
       } else if (isOrbHandle) {
@@ -314,9 +334,8 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       if (e.key === 'Escape') {
         e.preventDefault();
         ttsNarrator.stop();
-        if (voice.isListening) {
-          voice.stopListening();
-        }
+        voice.stopListening();
+        void releaseOperatorCapture();
         onEndCall?.();
         return;
       }
@@ -350,6 +369,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     voiceError: voice.error,
     turnBusy: turn.busy,
     isListening: voice.isListening,
+    isTranscribing: voice.isTranscribing,
     speakingTts,
     callOrbState: call.orbState,
     callMuted: call.muted,
@@ -374,6 +394,9 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       return voice.interimTranscript
         ? `«${voice.interimTranscript}»`
         : '🎙️ Escuchando tu voz… (habla y espera o haz clic para enviar)';
+    }
+    if (voice.isTranscribing) {
+      return 'Transcribiendo tu voz en la nube…';
     }
     if (turn.busy) {
       return turn.stageLabel || 'Procesando…';
@@ -417,7 +440,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   return (
     <aside
       ref={rootRef}
-      className={`zed-float ${isDragging ? 'zed-float--dragging' : ''} ${hovering ? 'zed-float--hovering' : ''}`}
+      className={`zed-float ${isDragging ? 'zed-float--dragging' : ''} ${hovering ? 'zed-float--hovering' : ''}${browserTestUi ? ' zed-float--browser-test' : ''}`}
       data-testid="zed-card"
       style={{ left: `${point.x}px`, top: `${point.y}px` }}
       onMouseEnter={() => setHovering(true)}
@@ -425,7 +448,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     >
       {/* 1. Pure 72px Spherical Orb Container (Mathematically Centered) */}
       <div className="zed-float__orb-container">
-        <div className="zed-float__orb">
+        <div className={`zed-float__orb${orbAck ? ' motion-orb-ack' : ''}`}>
           <ZedOrb
             state={effectiveOrbState}
             size={72}
@@ -441,9 +464,11 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
           role="button"
           tabIndex={0}
           title={
-            voice.isListening
-              ? 'Escuchando voz… Suelta o haz clic para enviar (Ctrl+Shift+V)'
-              : 'Mantén presionado para hablar, haz clic o arrastra (Ctrl+Shift+V)'
+            voice.error
+              ? voice.error
+              : voice.isListening
+                ? 'Escuchando voz… Suelta o haz clic para enviar (Ctrl+Shift+V)'
+                : 'Mantén presionado para hablar, haz clic o arrastra (Ctrl+Shift+V)'
           }
           aria-label={
             voice.isListening
@@ -521,9 +546,8 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
           className="zed-float__control zed-float__control--end"
           onClick={() => {
             ttsNarrator.stop();
-            if (voice.isListening) {
-              voice.stopListening();
-            }
+            voice.stopListening();
+            void releaseOperatorCapture();
             onEndCall?.();
           }}
           title="Cerrar Asistente (Esc)"
@@ -537,14 +561,16 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       </div>
 
       {/* 3. Accessible Status Note (Screen readers & tests — NO visual bottom bar/pill below buttons) */}
-      {displayedNote && (
+      {(displayedNote || (browserTestUi && turn.stageLabel)) && (
         <div
-          className="sr-only"
+          className={browserTestUi ? 'zed-float__browser-status' : 'sr-only'}
           data-testid="zed-status"
           role="status"
           aria-live="polite"
         >
-          <span className="zed-float__note-text">{displayedNote}</span>
+          <span className="zed-float__note-text">
+            {displayedNote || turn.stageLabel}
+          </span>
           {typeof displayedLatency === 'number' && displayedLatency > 0 && (
             <span className="zed-float__latency-badge">{displayedLatency}ms</span>
           )}
@@ -572,7 +598,11 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       )}
 
       {/* Accessible Command Form (Always available for programmatic input, tests, and assistive tech) */}
-      <form onSubmit={handleFormSubmit} className="zed-float__accessible-form" aria-hidden="true">
+      <form
+        onSubmit={handleFormSubmit}
+        className={`zed-float__accessible-form${browserTestUi ? ' zed-float__accessible-form--visible' : ''}`}
+        aria-hidden={browserTestUi ? undefined : true}
+      >
         <input
           type="text"
           className="zed-float__accessible-input"
@@ -581,14 +611,14 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
           value={manualInputValue}
           onChange={(e) => setManualInputValue(e.target.value)}
           aria-label="Comando de texto para el Asistente"
-          tabIndex={-1}
+          tabIndex={browserTestUi ? 0 : -1}
         />
         <button
           type="submit"
           className="zed-float__accessible-send"
           data-testid="zed-send"
           aria-label="Enviar comando accesible"
-          tabIndex={-1}
+          tabIndex={browserTestUi ? 0 : -1}
         >
           Enviar
         </button>

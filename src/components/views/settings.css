@@ -1,6 +1,6 @@
-/* Kite Code - Settings View CSS Replica
+/* Kite Code - Settings view
    Target resolution: 1400x900, dark theme (data-theme="dark", data-palette="kite-dark")
-   Identical to production bundle: SettingsSidebar, settings-row, ui-segmented, ui-switch, etc. */
+   Classes: SettingsSidebar, settings-row, ui-segmented, ui-switch, etc. */
 
 /* Container Layout */
 .settings-view {
@@ -15,7 +15,7 @@
   position: relative;
 }
 
-/* Settings Sidebar Replica */
+/* Settings sidebar */
 .sidebar--settings {
   width: var(--sidebar-width, 220px);
   min-width: 200px;

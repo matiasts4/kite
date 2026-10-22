@@ -1,6 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { SunIcon, MoonIcon, RefreshCwIcon, SquareTerminalIcon } from './icons';
 import type { UpdateCheckResult, TelemetryPrefs } from './types';
+import {
+  getTerminalWebLinksTarget,
+  setTerminalWebLinksTarget,
+  TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
+  type TerminalWebLinksTarget,
+} from '../../../lib/terminalLinkNav';
 
 import { CURRENT_APP_VERSION } from '../../../hooks/useAppUpdater';
 
@@ -45,11 +51,32 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
     }
   });
 
+  const [webLinksTarget, setWebLinksTarget] = useState<TerminalWebLinksTarget>(() =>
+    getTerminalWebLinksTarget()
+  );
+
+  useEffect(() => {
+    const handleTargetChanged = (e: Event) => {
+      const custom = e as CustomEvent<TerminalWebLinksTarget>;
+      if (custom.detail) {
+        setWebLinksTarget(custom.detail);
+      }
+    };
+    window.addEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
+    return () =>
+      window.removeEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
+  }, []);
+
   const handleTerminalShellChange = (value: string) => {
     setTerminalShell(value);
     try {
       localStorage.setItem('bmone.terminalShell', value);
     } catch {}
+  };
+
+  const handleWebLinksTargetChange = (value: TerminalWebLinksTarget) => {
+    setWebLinksTarget(value);
+    setTerminalWebLinksTarget(value);
   };
 
   return (
@@ -122,6 +149,33 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   <option value="wsl">WSL · Linux</option>
                 </select>
               </div>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Destino de enlaces web (URLs)</h3>
+              <p>Abre los enlaces web (http/https) de la terminal en el navegador integrado o en tu navegador predeterminado del sistema.</p>
+            </div>
+            <div className="settings-row__control">
+              <fieldset aria-label="Destino de enlaces web" className="ui-segmented">
+                <button
+                  aria-pressed={webLinksTarget === 'internal'}
+                  className="ui-segmented__item"
+                  onClick={() => handleWebLinksTargetChange('internal')}
+                  type="button"
+                >
+                  <span>Integrado</span>
+                </button>
+                <button
+                  aria-pressed={webLinksTarget === 'external'}
+                  className="ui-segmented__item"
+                  onClick={() => handleWebLinksTargetChange('external')}
+                  type="button"
+                >
+                  <span>Externo</span>
+                </button>
+              </fieldset>
             </div>
           </div>
         </div>

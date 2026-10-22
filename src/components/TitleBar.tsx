@@ -26,7 +26,7 @@ export interface TitleBarProps {
 }
 
 /**
- * Authentic Mode metadata extracted from production Kite bundle:
+ * Mode labels and descriptions:
  * qr = { agent: 'Agent', code: 'Code', chat: 'Thread' }
  * Jr = {
  *   agent: 'Agent mode â€” hand work to agents that remember and improve',
@@ -250,7 +250,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
             aria-label={sidebarVisible ? 'Hide sidebar' : 'Show sidebar'}
             type="button"
           >
-            {/* SVG official panel-left from production bundle */}
+            {/* Panel-left icon */}
             <svg
               width="14"
               height="14"
@@ -377,7 +377,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
           aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}
           aria-haspopup="dialog"
         >
-          {/* SVG official bell from production bundle */}
+          {/* Bell icon */}
           <svg
             width="14"
             height="14"
@@ -412,7 +412,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
             title={`Side panel (${platform === 'macos' ? 'âŒ˜â‡§B' : 'Ctrl+Shift+B'})`}
             type="button"
           >
-            {/* SVG official panel-right from production bundle */}
+            {/* Panel-right icon */}
             <svg
               width="14"
               height="14"

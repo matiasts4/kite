@@ -154,7 +154,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
   const pinnedWorkspaces = orderedWorkspaces.filter((w) => w.pinned);
   const unpinnedWorkspaces = orderedWorkspaces.filter((w) => !w.pinned);
 
-  // Platform-aware reveal title matching WorkspaceRoster-D8NyaEmX.js k()
+  // Platform-aware reveal title
   const getRevealTitle = () => {
     const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
     if (/Windows/i.test(ua)) return 'Reveal in File Explorer';

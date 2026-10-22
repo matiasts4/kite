@@ -18,6 +18,7 @@ const TEAMMATE_ENGINES: &[&str] = &[
     "kimi",
     "amp",
     "antigravity",
+    "gentle-shell",
     "aider",
     "muse",
 ];

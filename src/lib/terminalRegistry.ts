@@ -4,6 +4,25 @@
  */
 
 import { invokeCommand } from './ipc';
+import { AGENT_CODENAMES, cleanAgentTitle } from './agentNames';
+
+function agentCodenameFromLabel(label?: string | null): string | null {
+  if (!label) return null;
+  const head = cleanAgentTitle(String(label).split('·')[0].trim());
+  return AGENT_CODENAMES.find((c) => c.toLowerCase() === head.toLowerCase()) || null;
+}
+
+/** Prefer Orion/Nova codenames over generic engine branding (Google Antigravity). */
+function preferAgentWho(...candidates: (string | null | undefined)[]): string | null {
+  for (const c of candidates) {
+    const codename = agentCodenameFromLabel(c);
+    if (codename) return codename;
+  }
+  for (const c of candidates) {
+    if (c?.trim()) return c.trim();
+  }
+  return null;
+}
 
 export interface ActiveAgentTerminal {
   sessionId: string;
@@ -374,6 +393,7 @@ export function recordTerminalOutput(
 
   const now = Date.now();
   let tracker = sessionStates.get(sessionId);
+  const registeredWho = terminalsMap.get(sessionId)?.who;
 
   // If engine was provided in meta and is known, keep it authoritative
   const authoritativeEngine = meta?.engine && meta.engine !== 'terminal' && meta.engine !== 'powershell'
@@ -383,9 +403,11 @@ export function recordTerminalOutput(
   if (!tracker) {
     const { engine, who, title: detectedTitle } = detectEngineFromText(clean, authoritativeEngine || meta?.engine);
     const resolvedTitle = meta?.title || meta?.agentName || detectedTitle;
-    const resolvedWho = meta?.agentName && !who?.toLowerCase().includes(meta.agentName.toLowerCase())
-      ? `${meta.agentName} · ${who}`
-      : who;
+    const resolvedWho =
+      preferAgentWho(registeredWho, meta?.agentName) ||
+      (meta?.agentName && !who?.toLowerCase().includes(meta.agentName.toLowerCase())
+        ? `${meta.agentName} · ${who}`
+        : who);
 
     tracker = {
       sessionId,
@@ -414,19 +436,25 @@ export function recordTerminalOutput(
       }).catch(() => {});
     }
   } else if (tracker.engine === 'antigravity') {
-    // Detect model update without touching engine
-    const lower = clean.toLowerCase();
-    let modelHint = '';
-    if (lower.includes('gemini 3.8 flash')) modelHint = 'Gemini 3.8 Flash';
-    else if (lower.includes('gemini 3.0')) modelHint = 'Gemini 3.0 Flash';
-    else if (lower.includes('gemini 2.5 pro')) modelHint = 'Gemini 2.5 Pro';
-    else if (lower.includes('gemini 2.0 flash')) modelHint = 'Gemini 2.0 Flash';
-    else if (lower.includes('gemini 1.5 pro')) modelHint = 'Gemini 1.5 Pro';
-    if (modelHint) {
-      const baseWho = `Google Antigravity · ${modelHint}`;
-      tracker.who = meta?.agentName && !baseWho.toLowerCase().includes(meta.agentName.toLowerCase())
-        ? `${meta.agentName} · ${baseWho}`
-        : baseWho;
+    const codename = preferAgentWho(registeredWho, meta?.agentName, tracker.who);
+    if (codename) {
+      tracker.who = codename;
+    } else {
+      // Detect model update without touching engine
+      const lower = clean.toLowerCase();
+      let modelHint = '';
+      if (lower.includes('gemini 3.8 flash')) modelHint = 'Gemini 3.8 Flash';
+      else if (lower.includes('gemini 3.0')) modelHint = 'Gemini 3.0 Flash';
+      else if (lower.includes('gemini 2.5 pro')) modelHint = 'Gemini 2.5 Pro';
+      else if (lower.includes('gemini 2.0 flash')) modelHint = 'Gemini 2.0 Flash';
+      else if (lower.includes('gemini 1.5 pro')) modelHint = 'Gemini 1.5 Pro';
+      if (modelHint) {
+        const baseWho = `Google Antigravity · ${modelHint}`;
+        tracker.who =
+          meta?.agentName && !baseWho.toLowerCase().includes(meta.agentName.toLowerCase())
+            ? `${meta.agentName} · ${baseWho}`
+            : baseWho;
+      }
     }
   }
 
@@ -501,13 +529,16 @@ export function recordTerminalOutput(
     }, SETTLE_DELAY_MS);
   }
 
+  const whoForRegistry =
+    preferAgentWho(registeredWho, meta?.agentName, tracker.who) || tracker.who;
+
   const currentTerminal: ActiveAgentTerminal = {
     sessionId,
     workspaceId: meta?.workspaceId ?? null,
     workspaceName: folder,
     engine: tracker.engine,
     title: tracker.title,
-    who: tracker.who,
+    who: whoForRegistry,
     state: tracker.state,
     latestLine: tracker.latestLine,
     updatedAt: now,

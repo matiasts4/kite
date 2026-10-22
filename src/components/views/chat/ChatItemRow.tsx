@@ -206,9 +206,15 @@ function getToolIcon(title: string | null, toolKind?: string | null, serverName?
   return <WrenchIcon size={12} />;
 }
 
-export const ChatWorkEntry: React.FC<{ item: ChatItem; running?: boolean; stepIndex?: number }> = ({
+export const ChatWorkEntry: React.FC<{
+  item: ChatItem;
+  running?: boolean;
+  stepIndex?: number;
+  motionClass?: string;
+}> = ({
   item,
   running,
+  motionClass,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -247,6 +253,7 @@ export const ChatWorkEntry: React.FC<{ item: ChatItem; running?: boolean; stepIn
     isRunning ? 'chat-work-entry--running' : '',
     isCompleted ? 'chat-work-entry--completed' : '',
     isFailed ? 'chat-work-entry--failed' : '',
+    motionClass,
   ]
     .filter(Boolean)
     .join(' ');
@@ -402,7 +409,11 @@ export const ChatWorkEntry: React.FC<{ item: ChatItem; running?: boolean; stepIn
   );
 };
 
-export const ChatWorkGroup: React.FC<{ items: ChatItem[]; running?: boolean }> = ({ items, running }) => {
+export const ChatWorkGroup: React.FC<{
+  items: ChatItem[];
+  running?: boolean;
+  motionClassFor?: (id: string) => string;
+}> = ({ items, running, motionClassFor }) => {
   const [expanded, setExpanded] = useState(false);
   const hiddenCount = Math.max(0, items.length - 1);
   const visibleItems = expanded ? items : items.slice(-1);
@@ -461,14 +472,24 @@ export const ChatWorkGroup: React.FC<{ items: ChatItem[]; running?: boolean }> =
       )}
       <div className="chat-work-group__items">
         {visibleItems.map((item, idx) => (
-          <ChatWorkEntry key={item.id} item={item} running={(running && item.streaming) || item.streaming} stepIndex={idx} />
+          <ChatWorkEntry
+            key={item.id}
+            item={item}
+            running={(running && item.streaming) || item.streaming}
+            stepIndex={idx}
+            motionClass={motionClassFor?.(item.id)}
+          />
         ))}
       </div>
     </div>
   );
 };
 
-export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string }> = ({ item, threadId }) => {
+export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionClass?: string }> = ({
+  item,
+  threadId,
+  motionClass = '',
+}) => {
   const [folded, setFolded] = useState(false);
   const [expandedReasoning, setExpandedReasoning] = useState(false);
   const reasoningDuration = useLiveDuration(
@@ -477,11 +498,15 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string }> = ({ i
     item.durationSeconds
   );
 
-  // User Row: no "You" or timestamp header per kn in ChatPane-_DfdifWx.js
+  // User row: no "You" or timestamp header
   if (item.kind === 'user') {
     const isLong = item.text.length > 500;
     return (
-      <article className={`chat-turn chat-turn--user chat-user-row ${folded ? 'chat-user-row--folded' : ''}`}>
+      <article
+        className={`chat-turn chat-turn--user chat-user-row ${folded ? 'chat-user-row--folded' : ''}${
+          motionClass ? ` ${motionClass}` : ''
+        }`}
+      >
         {/* User Attachments */}
         {item.attachments && item.attachments.length > 0 && (
           <ul className="chat-attachments">
@@ -509,13 +534,17 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string }> = ({ i
     );
   }
 
-  // Assistant Row: no "Kite Assistant" or timestamp header per An in ChatPane-_DfdifWx.js
+  // Assistant row: no assistant label or timestamp header
   if (item.kind === 'assistant') {
     const cleanText = item.text.includes('<proposed_plan>') && item.text.includes('</proposed_plan>')
       ? item.text.replace('<proposed_plan>', '\n').replace('</proposed_plan>', '\n')
       : item.text;
     return (
-      <div className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}`}>
+      <div
+        className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}${
+          motionClass ? ` ${motionClass}` : ''
+        }`}
+      >
         <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
         {item.streaming && (
           <span className="chat-turn__streaming-cursor" title="Streaming response…" />
@@ -528,7 +557,11 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string }> = ({ i
   if (item.kind === 'reasoning') {
     const thoughtSummary = liveThoughtLine(item.text);
     return (
-      <div className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}`}>
+      <div
+        className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}${
+          motionClass ? ` ${motionClass}` : ''
+        }`}
+      >
         <button
           type="button"
           onClick={() => setExpandedReasoning((v) => !v)}

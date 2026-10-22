@@ -116,7 +116,7 @@ const AlertIcon: React.FC<{ size?: number; className?: string }> = ({ size = 12,
 );
 
 // ============================================================================
-// Circular Update Button (Cursor-Style)
+// Circular update button
 // ============================================================================
 
 export interface UpdateCircularButtonProps {
@@ -126,7 +126,7 @@ export interface UpdateCircularButtonProps {
 
 /**
  * Circular update button rendered in the bottom row alongside Theme and Settings.
- * Styled after Cursor IDE's circular indicator:
+ * Circular update button in the bottom row, next to Theme and Settings.
  * - 26px x 26px circle
  * - Breathing pulse dot indicator
  * - Animated circular progress ring when downloading

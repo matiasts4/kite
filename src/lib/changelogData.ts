@@ -33,6 +33,54 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.24',
+    tag: 'v0.1.24',
+    date: 'Oct 22, 2026',
+    title: 'Soporte oficial para Gentle Shell',
+    items: [
+      {
+        kind: 'added',
+        description: 'Integración oficial de Gentle Shell en el catálogo de agentes y nueva sesión',
+      },
+      {
+        kind: 'fixed',
+        description: 'Soporte para scroll nativo fluido en terminales de Gentle Shell evitando bloqueo de pantalla alterna',
+      },
+      {
+        kind: 'added',
+        description: 'Detección y ciclo de vida de procesos de Gentle Shell en el backend',
+      },
+    ],
+  },
+  {
+    version: '0.1.23',
+    tag: 'v0.1.23',
+    date: 'Oct 20, 2026',
+    title: 'Zed suelta el microfono y devuelve el volumen',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Pedir qué hay en una terminal ahora la narra, y si está vacía dice que no hay nada, en lugar de inyectar un comando.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Después de una orden, un toque en Zed vuelve a abrir el micrófono y la siguiente instrucción no se pierde.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Si el micrófono está ocupado, Zed suelta su propia captura y lo explica en español.',
+      },
+      {
+        kind: 'fixed',
+        description: 'El volumen de las otras apps vuelve al cerrar o minimizar Zed, si la escucha falla, y al salir de Kite.',
+      },
+      {
+        kind: 'changed',
+        description: 'La transcripción ya no depende de una clave escrita en el programa; si falta la de Cloudflare o Grok, Ajustes lo dice.',
+      },
+    ],
+  },
+  {
     version: '0.1.22',
     tag: 'v0.1.22',
     date: 'Oct 19, 2026',

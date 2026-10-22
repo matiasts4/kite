@@ -1,6 +1,6 @@
 /* Kite Code - Agents View CSS
-   Exact Visual Replica for 1400x900 Dark Theme (data-theme="dark", data-palette="kite-dark")
-   Classes identical to production bundle: MainSurfaces, agent-pane, agent-face-tabs, agent-mind-column, agent-memory, agent-skills
+   Agents view for the 1400x900 dark theme (data-theme="dark", data-palette="kite-dark")
+   Classes: MainSurfaces, agent-pane, agent-face-tabs, agent-mind-column, agent-memory, agent-skills
 */
 
 @import './agents-memory.css';
@@ -394,7 +394,7 @@
 }
 
 /* ==========================================================================
-   Agent Terminal Surface Styles (matches AgentTerminalSurface-C4J3lhMJ.css)
+   Agent terminal surface
    ========================================================================== */
 .agent-terminal {
   background: var(--pane, #0d1117);

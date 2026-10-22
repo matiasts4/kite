@@ -2,13 +2,30 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig({
+const BROWSER_LANE_API = process.env.KITE_BROWSER_API_URL || 'http://127.0.0.1:1421';
+
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   clearScreen: false,
+  define:
+    mode === 'browser'
+      ? {
+          'import.meta.env.VITE_KITE_BROWSER_TEST': JSON.stringify('1'),
+        }
+      : {},
   server: {
     host: true,
-    port: 1420,
+    port: mode === 'browser' ? 1430 : 1420,
     strictPort: true,
+    proxy:
+      mode === 'browser'
+        ? {
+            '/api': {
+              target: BROWSER_LANE_API,
+              changeOrigin: true,
+            },
+          }
+        : undefined,
   },
   build: {
     outDir: 'dist',
@@ -28,6 +45,6 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
-    exclude: ['**/node_modules/**', '**/dist/**', '**/scratch/**'],
+    exclude: ['**/node_modules/**', '**/dist/**', '**/scratch/**', '**/scripts/**'],
   },
-});
+}));

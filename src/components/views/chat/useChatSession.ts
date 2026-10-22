@@ -777,6 +777,9 @@ export function useChatSession({
       if (!isMountedRef.current) return true;
       activePollRunsRef.current.add(res.runId);
       setThreadsMap((prev) => ({ ...prev, [threadId]: res.thread }));
+      if (res.thread?.status === 'idle') {
+        setIsRunning((prev) => ({ ...prev, [threadId]: false }));
+      }
       notifyThreadsChanged();
       void pollTurnUpdates({
         runId: res.runId,

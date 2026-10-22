@@ -59,7 +59,7 @@ pub fn fetch_copilot_quota() -> ProviderQuotaStatus {
 }
 
 pub fn fetch_deepseek_quota() -> ProviderQuotaStatus {
-    let key = std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.trim().is_empty());
+    let key = crate::credentials::resolve_provider_key("deepseek");
     let mut status = ProviderQuotaStatus {
         provider_id: "deepseek".to_string(),
         display_name: "DeepSeek".to_string(),
@@ -81,7 +81,7 @@ pub fn fetch_deepseek_quota() -> ProviderQuotaStatus {
             return status;
         }
     };
-    status.metadata.insert("source".to_string(), json!("DEEPSEEK_API_KEY"));
+    status.metadata.insert("source".to_string(), json!("Bóveda / Entorno"));
     let mut cmd = silent_command("curl.exe");
     cmd.args([
         "-s",
@@ -172,7 +172,7 @@ pub fn fetch_kimi_quota() -> ProviderQuotaStatus {
     let (cred_path, mut cred_json) = match (found_cred_file, cred_data) {
         (Some(p), Some(d)) => (p, d),
         _ => {
-            let api_key = std::env::var("KIMI_API_KEY").or_else(|_| std::env::var("MOONSHOT_API_KEY")).ok();
+            let api_key = crate::credentials::resolve_provider_key("kimi");
             if let Some(key) = api_key {
                 status.is_available = true;
                 return fetch_moonshot_balance(&key, status);

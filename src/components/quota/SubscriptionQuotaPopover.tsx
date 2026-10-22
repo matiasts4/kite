@@ -23,6 +23,7 @@ export interface SubscriptionQuotaPopoverProps {
   onOpenTokenUsage?: () => void;
   prefs: QuotaPreferences;
   anchorRect?: DOMRect | null;
+  phase?: 'in' | 'out';
 }
 
 export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> = ({
@@ -35,6 +36,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   onOpenTokenUsage,
   prefs,
   anchorRect,
+  phase = 'in',
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -84,7 +86,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
       ref={popoverRef}
       role="dialog"
       aria-label="Cuotas de suscripción IA"
-      className="subscription-quota-popover"
+      className={`subscription-quota-popover ${phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
       style={{
         position: 'fixed',
         top: `${position.top}px`,
@@ -105,7 +107,6 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        animation: 'quota-popover-in 140ms ease-out',
       }}
       onClick={(e) => e.stopPropagation()}
     >

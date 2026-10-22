@@ -1,5 +1,4 @@
 //! Audio ducking and Zen sound cues for Kite Code Assistant.
-//! Parity with Veloce audio engine:
 //! - Smooth Windows master audio ducking via WASAPI (Core Audio Endpoints) to 20%
 //! - Ethereal singing bowl Zen chime on recording start and end via PlaySoundW
 
@@ -65,7 +64,7 @@ fn pcm_to_wav(pcm_samples: &[i16], sample_rate: u32) -> Vec<u8> {
     wav
 }
 
-/// Generates the ethereal singing bowl "Zen" sound cues (Veloce parity).
+/// Generates the ethereal singing bowl "Zen" sound cues.
 /// Start cue: F4 (349.23 Hz) + C5 (523.25 Hz)
 /// Stop cue: G4 (392.00 Hz) + D5 (587.33 Hz)
 pub fn generate_zen_wav(start_cue: bool) -> Vec<u8> {
@@ -164,21 +163,39 @@ pub fn duck_audio(target_ratio: f32) {
                     }
                 };
 
-                // If volume is already very low, don't duck
-                if current_vol <= 0.05 {
+                let stored_now = {
+                    let mut orig_lock = ORIGINAL_VOLUME.lock().unwrap();
+                    if orig_lock.is_none() {
+                        // Already near silence and we never saved a level: don't invent one.
+                        if current_vol <= 0.05 {
+                            return;
+                        }
+                        *orig_lock = Some(current_vol);
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                // A restore can win before we write a lower volume. Abort without ducking.
+                if TRANSITION_GEN.load(Ordering::SeqCst) != gen {
+                    if stored_now {
+                        let mut orig_lock = ORIGINAL_VOLUME.lock().unwrap();
+                        if *orig_lock == Some(current_vol) {
+                            *orig_lock = None;
+                        }
+                    }
                     return;
                 }
 
-                {
-                    let mut orig_lock = ORIGINAL_VOLUME.lock().unwrap();
-                    if orig_lock.is_none() {
-                        *orig_lock = Some(current_vol);
-                    }
-                }
+                let base_vol = {
+                    let orig_lock = ORIGINAL_VOLUME.lock().unwrap();
+                    orig_lock.unwrap_or(current_vol)
+                };
 
                 IS_DUCKED.store(true, Ordering::SeqCst);
 
-                let target_vol = (current_vol * target_ratio).clamp(0.0, 1.0);
+                let target_vol = (base_vol * target_ratio).clamp(0.0, 1.0);
                 let steps = 6;
                 let step_delay = Duration::from_millis(15);
 

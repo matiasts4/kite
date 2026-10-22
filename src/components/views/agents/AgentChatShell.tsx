@@ -12,6 +12,7 @@ import { ChatComposer } from '../chat/ChatComposer';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { invokeCommand } from '../../../lib/ipc';
+import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 import type {
   ExtendedChatThread,
   ChatAttachment,
@@ -194,14 +195,12 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   }, [contextMenu]);
 
   const atLiveEdgeRef = useRef(true);
-
-  // Auto-scroll transcript on new items or streaming
-  useEffect(() => {
-    const scroller = transcriptRef.current;
-    if (scroller && atLiveEdgeRef.current) {
-      scroller.scrollTop = scroller.scrollHeight;
-    }
-  }, [activeThread?.items.length, activeThread?.items[activeThread.items.length - 1]?.text]);
+  const threadId = activeThread?.id ?? null;
+  const motionClassFor = useTranscriptMotion(
+    threadId,
+    (activeThread?.items ?? []).map((item) => item.id),
+  );
+  useTranscriptLiveEdge(transcriptRef, threadId, atLiveEdgeRef);
 
   const handleStartRename = (id: string, currentTitle: string) => {
     setEditingId(id);
@@ -218,7 +217,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   };
 
   return (
-    <div className="_surface_85ff1_11">
+    <div className="_surface_85ff1_11 agent-chat-surface">
       {/* Agent Chat Rail */}
       <aside aria-label={`${agentName} chat history`} className="_rail_33zx5_27">
         {tabs.length === 0 ? (
@@ -401,7 +400,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
         </button>
       </aside>
 
-      {/* Main Agent Chat Body — Direct layout matching Se in AgentChatSurface-BBtggayP.js */}
+      {/* Main agent chat body */}
       <section aria-label={`${agentName} chat`} className="_body_85ff1_45">
         {/* 1. Collapsible Teammate inbox strip */}
         <details className="agent-inbox-strip" onToggle={(e) => e.currentTarget.open && void fetchInbox()}>
@@ -490,9 +489,19 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                 <div className="chat-transcript__column">
                   {groupTranscriptRows(activeThread.items).map((row) =>
                     row.kind === 'work' ? (
-                      <ChatWorkGroup key={row.id} items={row.items} running={running} />
+                      <ChatWorkGroup
+                        key={row.id}
+                        items={row.items}
+                        running={running}
+                        motionClassFor={motionClassFor}
+                      />
                     ) : (
-                      <ChatItemRow key={row.item.id} item={row.item} threadId={activeThread.id} />
+                      <ChatItemRow
+                        key={row.item.id}
+                        item={row.item}
+                        threadId={activeThread.id}
+                        motionClass={motionClassFor(row.item.id)}
+                      />
                     )
                   )}
 
@@ -511,7 +520,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                           ? 'Generating response…'
                           : 'Thinking…';
                     return (
-                      <div className={`chat-working-row ${activeThread.pendingApproval ? 'chat-working-row--waiting' : ''}`}>
+                      <div className={`chat-working-row motion-row-in ${activeThread.pendingApproval ? 'chat-working-row--waiting' : ''}`}>
                         <span className="chat-working-row__dots">
                           <i />
                           <i />

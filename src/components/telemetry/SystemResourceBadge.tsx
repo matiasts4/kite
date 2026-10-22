@@ -9,6 +9,7 @@ import {
   SYSTEM_METRICS_PREFS_EVENT,
 } from '../../lib/systemMetrics';
 import { SystemResourcePopover } from './SystemResourcePopover';
+import { usePresence } from '../../motion/usePresence';
 
 export interface SystemResourceBadgeProps {
   className?: string;
@@ -21,6 +22,7 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
   const [history, setHistory] = useState<SystemMetricsHistoryPoint[]>([]);
   const [prefs, setPrefs] = useState(() => readSystemMetricsPreferences());
   const [isOpen, setIsOpen] = useState(false);
+  const popoverPresence = usePresence(isOpen);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -271,7 +273,7 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
         )}
       </button>
 
-      {isOpen && snapshot && (
+      {popoverPresence.mounted && snapshot && (
         <SystemResourcePopover
           snapshot={snapshot}
           history={history}
@@ -280,6 +282,7 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
           onRefresh={() => pollMetrics(true)}
           onClose={() => setIsOpen(false)}
           anchorRect={anchorRect}
+          phase={popoverPresence.phase}
         />
       )}
     </div>

@@ -9,7 +9,9 @@ import { CodeWorkspace } from './components/code/CodeWorkspace';
 import { AgentsView } from './components/views/AgentsView';
 import { SettingsView } from './components/views/SettingsView';
 import { OPEN_SETTINGS_EVENT, openSettingsTab } from './lib/settingsNav';
+import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from './lib/terminalLinkNav';
 import { ZedStripHost, type ZedCallState } from './components/ZedStrip';
+import { releaseOperatorCapture } from './lib/operator/voice/zedVoice';
 import { RoutinesView } from './components/views/RoutinesView';
 import { UsageDashboardModal } from './components/views/modals/UsageDashboardModal';
 import { WhatsNewModal } from './components/views/modals/WhatsNewModal';
@@ -39,7 +41,12 @@ import {
   getCreditsBalance,
   getAuthBootstrap,
 } from './lib/ipc';
+import { isBrowserTestLane } from './lib/browserTestLane';
+import { loadOperatorConfig, saveOperatorConfig } from './lib/operator/operatorConfig';
 import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
+import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
+import { usePresence } from './motion/usePresence';
+import { AppIntro } from './motion/AppIntro';
 
 export type ShellRoute =
   | { kind: 'agent' }
@@ -64,8 +71,18 @@ export const App: React.FC = () => {
     } catch {}
   }, [workMode]);
 
+  const skipModeAckRef = useRef(true);
+  useEffect(() => {
+    if (skipModeAckRef.current) {
+      skipModeAckRef.current = false;
+      return;
+    }
+    pulseZedOrb();
+  }, [workMode]);
+
   const [newSessionRequest, setNewSessionRequest] = useState(0);
   const [sidebarVisible, setSidebarVisible] = useState<boolean>(true);
+  const [sidebarRailMounted, setSidebarRailMounted] = useState<boolean>(true);
   const [rightDockVisible, setRightDockVisible] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('kite-code.side-panel.visible.v1');
@@ -185,6 +202,7 @@ export const App: React.FC = () => {
   const [_route, _setRoute] = useState<ShellRoute>({ kind: 'agent' });
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
+  const notificationsPresence = usePresence(isNotificationsOpen);
   const [notificationsAnchor, setNotificationsAnchor] = useState<DOMRect | null>(null);
   const [workspaceSessions, setWorkspaceSessions] = useState<Record<string, WorkspaceSessionTab[]>>({});
   const [requestedCodeTabId, setRequestedCodeTabId] = useState<string | null>(null);
@@ -235,12 +253,25 @@ export const App: React.FC = () => {
     }
   });
   const [error, setError] = useState<string | null>(null);
+  const introStartRef = useRef(Date.now());
+  const [introDismissed, setIntroDismissed] = useState(() => isBrowserTestLane());
+  const bootReady = !loading || error != null;
+
+  useEffect(() => {
+    if (isBrowserTestLane()) return;
+    if (introDismissed || !bootReady) return;
+    const elapsed = Date.now() - introStartRef.current;
+    const wait = Math.max(0, APP_INTRO_MIN_MS - elapsed);
+    const timer = window.setTimeout(() => setIntroDismissed(true), wait);
+    return () => window.clearTimeout(timer);
+  }, [bootReady, introDismissed]);
 
   // Kite Operator Assistant Bar state (floating top bar)
   // By default, the assistant does NOT appear as a floating pill upon application launch.
   // The user can toggle it at any time via TitleBar or Ctrl+Shift+K / Cmd+Shift+K.
   const [operatorOpen, setOperatorOpen] = useState<boolean>(() => {
     try {
+      if (isBrowserTestLane()) return true;
       localStorage.removeItem('kite.operatorOpen');
       const sessionSaved = sessionStorage.getItem('kite.operatorOpen');
       return sessionSaved === 'true';
@@ -252,6 +283,9 @@ export const App: React.FC = () => {
     try {
       sessionStorage.setItem('kite.operatorOpen', String(operatorOpen));
     } catch {}
+    if (!operatorOpen) {
+      void releaseOperatorCapture();
+    }
   }, [operatorOpen]);
 
   const toggleOperator = useCallback(() => {
@@ -298,6 +332,20 @@ export const App: React.FC = () => {
       console.warn('Failed to load chat summaries:', err);
     }
   }, []);
+
+  useEffect(() => {
+    if (!isBrowserTestLane()) return;
+    setWorkMode('agent');
+    setOperatorOpen(true);
+    const antigravity = agents.find((a) => a.engine === 'antigravity');
+    if (antigravity) {
+      setSelectedAgentId(antigravity.id);
+    }
+    const opCfg = loadOperatorConfig();
+    if (opCfg.activeProvider !== 'local') {
+      saveOperatorConfig({ ...opCfg, activeProvider: 'local' });
+    }
+  }, [agents]);
 
   const loadBootstrap = useCallback(async () => {
     if (!isTauriEnvironment()) {
@@ -461,6 +509,15 @@ export const App: React.FC = () => {
     };
     window.addEventListener('kite:open-right-dock-file', handleOpenFilePreview);
 
+    const handleOpenBrowserInDock = (e: Event) => {
+      const custom = e as CustomEvent<{ workspaceId?: string | null; url?: string }>;
+      setRightDockVisible(true);
+      if (custom.detail?.workspaceId) {
+        setSelectedWorkspaceId(custom.detail.workspaceId);
+      }
+    };
+    window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
+
     const handleSpawnAgentTerminal = (e: Event) => {
       const custom = e as CustomEvent<{ workspaceId?: string | null }>;
       setWorkMode('code');
@@ -500,6 +557,7 @@ export const App: React.FC = () => {
       window.removeEventListener('kite:navigate-mode', handleNavigate);
       window.removeEventListener('kite:select-workspace', handleSelectWorkspace);
       window.removeEventListener('kite:open-right-dock-file', handleOpenFilePreview);
+      window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
       window.removeEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
       window.removeEventListener('kite:op-request', handleOpRequest);
     };
@@ -851,13 +909,14 @@ export const App: React.FC = () => {
         {/* Main Workspace Shell */}
         <div
           className={`workspace-shell ${
-            sidebarVisible ? '' : 'workspace-shell--sidebar-hidden'
+            sidebarVisible || sidebarRailMounted ? '' : 'workspace-shell--sidebar-hidden'
           }`}
         >
           {/* Authentic Left Rail Sidebar */}
           {!settingsOpen && (
             <Sidebar
               hidden={!sidebarVisible}
+              onRailPresenceChange={setSidebarRailMounted}
               mode={workMode}
               workspaces={workspaces}
               agents={agents}
@@ -1182,7 +1241,7 @@ export const App: React.FC = () => {
         />
 
         {/* Notifications Popover. Render only while open */}
-        {isNotificationsOpen && (
+        {notificationsPresence.mounted && (
           <div
             className="notification-popover-overlay"
             onClick={() => {
@@ -1216,7 +1275,7 @@ export const App: React.FC = () => {
 
               return (
                 <div
-                  className="notification-popover-anchor"
+                  className={`notification-popover-anchor ${notificationsPresence.phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
                   style={{
                     top,
                     right,
@@ -1281,6 +1340,8 @@ export const App: React.FC = () => {
 
         {/* Startup Agent Recovery Sheet */}
         <ResumeHost />
+
+        <AppIntro open={!introDismissed} />
       </div>
     </div>
   );

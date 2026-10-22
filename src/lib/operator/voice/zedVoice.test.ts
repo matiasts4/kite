@@ -8,6 +8,7 @@ import {
   encodeWavBlob,
   blobToBase64,
   cleanTranscriptionText,
+  describeMicrophoneError,
   startTranscriptionTestSession,
 } from './zedVoice';
 
@@ -47,6 +48,11 @@ describe('ZedVoice — Speech Recognition Engine', () => {
     await expect(startOperatorListening()).rejects.toThrow(/no está soportado/i);
   });
 
+  it('explains a busy microphone in Spanish', () => {
+    const err = Object.assign(new Error('Device in use'), { name: 'NotReadableError' });
+    expect(describeMicrophoneError(err)).toMatch(/ocupado/i);
+  });
+
   it('stops listening cleanly when stopOperatorListening is invoked', () => {
     expect(() => stopOperatorListening()).not.toThrow();
   });
@@ -64,7 +70,7 @@ describe('ZedVoice — Speech Recognition Engine', () => {
     expect(b64).toBe(btoa('Hello'));
   });
 
-  it('filters Whisper silence hallucinations like Velocity audio engine', () => {
+  it('filters Whisper silence hallucinations', () => {
     // Gratitude / apology hallucination on short audio (<= 4.5s) should be dropped
     expect(cleanTranscriptionText('Gracias.', 2.1)).toBe('');
     expect(cleanTranscriptionText('Muchas gracias', 3.0)).toBe('');

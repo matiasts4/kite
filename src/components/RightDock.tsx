@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { BrowserView } from './views/BrowserView';
-import { closeBrowserSurfaceSession } from './views/browser/browserSurfaceRegistry';
+import { closeBrowserSurfaceSession, getBrowserSurfaceSession } from './views/browser/browserSurfaceRegistry';
+import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../lib/terminalLinkNav';
 import { FilesView } from './views/FilesView';
 import { DiffsView } from './views/diffs/DiffsView';
 import { TicketsView } from './views/TicketsView';
@@ -9,6 +10,7 @@ import { SidePanelAppsView } from './views/SidePanelAppsView';
 import { AgentDashboardView } from './views/apps/AgentDashboardView';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { getActiveAgentTerminals } from '../lib/terminalRegistry';
+import { usePresence } from '../motion/usePresence';
 import type { Workspace } from '../types';
 import {
   LayoutGridGlyph,
@@ -151,7 +153,7 @@ function persistWidth(width: number) {
 }
 
 /* ==========================================================================
-   Tab Reordering & Midpoint Slot Algorithms (Ye, $e, Xe, et from bundle)
+   Tab reordering and midpoint slot algorithms
    ========================================================================== */
 
 interface TabBox {
@@ -504,6 +506,27 @@ export const RightDock: React.FC<RightDockProps> = ({
     return () => window.removeEventListener('kite:open-right-dock-file', handleOpenFile);
   }, []);
 
+  // Listen for open-right-dock-browser event to switch to or open the browser tab and load URL
+  useEffect(() => {
+    const handleOpenBrowser = (e: Event) => {
+      const custom = e as CustomEvent<{ url?: string; workspaceId?: string | null }>;
+      setTabs((prev) => {
+        if (!prev.some((t) => t.id === 'browser')) {
+          return [...prev, { id: 'browser', kind: 'browser' }];
+        }
+        return prev;
+      });
+      setActiveTabId('browser');
+
+      if (custom.detail?.url) {
+        const session = getBrowserSurfaceSession(effectiveWorkspaceId);
+        void session.openAddress(custom.detail.url);
+      }
+    };
+    window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowser);
+    return () => window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowser);
+  }, [effectiveWorkspaceId]);
+
   // Listen for open-right-dock-diffs event to switch to or open diffs tab
   useEffect(() => {
     const handleOpenDiffs = () => {
@@ -809,7 +832,9 @@ export const RightDock: React.FC<RightDockProps> = ({
     window.addEventListener('pointercancel', onUp);
   };
 
-  if (!visible) return null;
+  const dockPresence = usePresence(visible);
+  if (!dockPresence.mounted) return null;
+  const panelMotion = dockPresence.phase === 'out' ? ' motion-panel-out' : ' motion-panel-in';
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
@@ -837,7 +862,7 @@ export const RightDock: React.FC<RightDockProps> = ({
       )}
       <aside
         ref={asideRef}
-        className={`app-browser-sidebar ${isFullScreen ? 'app-browser-sidebar--fullscreen' : ''}${dragging ? ' app-browser-sidebar--resizing' : ''}`}
+        className={`app-browser-sidebar ${isFullScreen ? 'app-browser-sidebar--fullscreen' : ''}${dragging ? ' app-browser-sidebar--resizing' : ''}${panelMotion}`}
         data-testid="app-browser-sidebar"
         style={isFullScreen ? undefined : ({ '--app-browser-width': `${panelWidth}px`, width: panelWidth, minWidth: panelWidth, flex: 'none' } as React.CSSProperties)}
       >

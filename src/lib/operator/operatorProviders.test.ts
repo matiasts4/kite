@@ -33,7 +33,7 @@ describe('Operator Providers & Latency Benchmarks', () => {
       expect(config.activeProvider).toBe(DEFAULT_OPERATOR_CONFIG.activeProvider);
       expect(config.opencodeModel).toBe('deepseek-v4.1-flash');
       expect(config.antigravityModel).toBe('gemini-3.8-flash');
-      expect(config.grokModel).toBe('grok-3-mini-fast');
+      expect(config.grokModel).toBe('grok-4.7');
     });
 
     it('saves updated configuration and dispatches change event', () => {
@@ -207,16 +207,18 @@ describe('Operator Providers & Latency Benchmarks', () => {
       });
     });
 
-    it('queries Grok via Tauri IPC', async () => {
+    it('queries Grok via Tauri IPC when CLI subscription is enabled', async () => {
       saveOperatorConfig({
         activeProvider: 'grok',
-        grokModel: 'grok-3-mini-fast',
+        grokModel: 'grok-4.7',
+        grokApiKey: '',
+        grokUseCliSubscription: true,
       });
 
       const mockedInvoke = vi.mocked(invokeCommand).mockResolvedValueOnce({
         success: true,
         stdout: 'Respuesta generada por Grok xAI.',
-        model: 'grok-3-mini-fast',
+        model: 'grok-4.7',
       });
 
       const res = await queryOperatorLLM('Dame estado', 'grok');
@@ -226,9 +228,33 @@ describe('Operator Providers & Latency Benchmarks', () => {
       expect(mockedInvoke).toHaveBeenCalledWith('query_operator_agent', {
         engine: 'grok',
         prompt: 'Dame estado',
-        model: 'grok-3-mini-fast',
+        model: 'grok-4.7',
         timeoutSecs: 15,
       });
+    });
+
+    it('prefers Grok HTTP API when an API key is set (probe config override)', async () => {
+      const draftConfig = {
+        ...getOperatorConfig(),
+        activeProvider: 'grok' as const,
+        grokApiKey: 'xai-test-key',
+        grokModel: 'grok-4.7',
+        grokUseCliSubscription: true,
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: 'OK desde API' } }],
+        }),
+      } as Response);
+
+      const res = await queryOperatorLLM('Ping', 'grok', draftConfig);
+
+      expect(res.success).toBe(true);
+      expect(res.text).toContain('OK desde API');
+      expect(fetchSpy).toHaveBeenCalled();
+      expect(invokeCommand).not.toHaveBeenCalled();
     });
     it('queries Vercel AI Gateway successfully', async () => {
       saveOperatorConfig({
@@ -356,6 +382,8 @@ describe('Operator Providers & Latency Benchmarks', () => {
         vercelApiKey: 'vck-test',
         cloudflareAccountId: 'cf-acc-123',
         cloudflareApiToken: 'cf-tok-456',
+        grokApiKey: 'xai-test',
+        grokModel: 'grok-4.7',
       });
 
       vi.spyOn(globalThis, 'fetch')
@@ -379,11 +407,20 @@ describe('Operator Providers & Latency Benchmarks', () => {
             choices: [{ message: { content: 'OK Cloudflare' } }],
             model: '@cf/meta/llama-3.1-8b-instruct',
           }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'OK Grok' } }],
+            model: 'grok-4.7',
+          }),
         } as Response);
 
-      vi.mocked(invokeCommand)
-        .mockResolvedValueOnce({ success: true, stdout: 'OK', model: 'gemini-3.8-flash' }) // antigravity
-        .mockResolvedValueOnce({ success: true, stdout: 'OK', model: 'grok-3-mini-fast' }); // grok
+      vi.mocked(invokeCommand).mockResolvedValueOnce({
+        success: true,
+        stdout: 'OK',
+        model: 'gemini-3.8-flash',
+      }); // antigravity
 
       const results = await benchmarkAllProviders('Ping');
 

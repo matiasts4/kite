@@ -22,7 +22,7 @@ export interface CreateTicketModalProps {
   error?: string | null;
 }
 
-// Authentic Lucide Tag Glyph matching decompiled He icon
+// Tag icon
 const TagGlyph: React.FC<{ size?: number; className?: string; strokeWidth?: number }> = ({
   size = 11,
   className,

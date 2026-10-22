@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { invokeCommand } from '../../../lib/ipc';
+import { usePresence } from '../../../motion/usePresence';
+import { motionSurfaceClass } from '../../../motion/surface';
 import './usageDashboard.css';
 
 export interface UsageDashboardModalProps {
@@ -52,7 +54,7 @@ const ENGINE_LABELS: Record<string, string> = {
   cursor: 'Cursor',
 };
 
-// Compact token label matching compactTokenLabel-42-kwOSl.js
+// Compact token label
 function compactTokenLabel(val: number): string {
   const n = Math.max(0, val);
   const units: [number, string][] = [
@@ -161,6 +163,7 @@ const EngineLogo: React.FC<{ engine: string; size?: number }> = ({ engine, size 
 };
 
 export const UsageDashboardModal: React.FC<UsageDashboardModalProps> = ({ isOpen, onClose }) => {
+  const layerPresence = usePresence(isOpen);
   const [snapshot, setSnapshot] = useState<AgentUsageSnapshot | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [scanning, setScanning] = useState<boolean>(false);
@@ -320,18 +323,21 @@ export const UsageDashboardModal: React.FC<UsageDashboardModalProps> = ({ isOpen
     return Math.max(1, lifetimeTotal);
   }, [lifetimeTotal]);
 
-  if (!isOpen) return null;
+  if (!layerPresence.mounted) return null;
+
+  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
+  const modalMotion = motionSurfaceClass(layerPresence.phase, 'modal');
 
   const modalContent = (
     <div
-      className="usage-dash-portal-backdrop"
+      className={`usage-dash-portal-backdrop${scrimMotion ? ` ${scrimMotion}` : ''}`}
       onClick={onClose}
       role="presentation"
     >
       <dialog
         aria-describedby="usage-dash-desc"
         aria-labelledby="usage-dash-title"
-        className="ui-sheet usage-dash"
+        className={`ui-sheet usage-dash${modalMotion ? ` ${modalMotion}` : ''}`}
         onClick={(e) => e.stopPropagation()}
         open
       >

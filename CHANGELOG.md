@@ -6,6 +6,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.24] - 2026-10-22
+
+> Soporte oficial para Gentle Shell
+
+### Added
+- Integración oficial de Gentle Shell en el catálogo de agentes y nueva sesión
+- Detección y ciclo de vida de procesos de Gentle Shell en el backend
+
+### Fixed
+- Soporte para scroll nativo fluido en terminales de Gentle Shell evitando bloqueo de pantalla alterna
+
+---
+
+## [0.1.23] - 2026-10-20
+
+> Zed suelta el microfono y devuelve el volumen
+
+### Changed
+- La transcripción ya no depende de una clave escrita en el programa; si falta la de Cloudflare o Grok, Ajustes lo dice.
+
+### Fixed
+- Pedir qué hay en una terminal ahora la narra, y si está vacía dice que no hay nada, en lugar de inyectar un comando.
+- Después de una orden, un toque en Zed vuelve a abrir el micrófono y la siguiente instrucción no se pierde.
+- Si el micrófono está ocupado, Zed suelta su propia captura y lo explica en español.
+- El volumen de las otras apps vuelve al cerrar o minimizar Zed, si la escucha falla, y al salir de Kite.
+
+---
+
 ## [0.1.22] - 2026-10-20
 
 > Supresion de demonios huerfanos de Antigravity y aislamiento de procesos

@@ -32,6 +32,7 @@ import {
 import { RefreshIcon } from '../../code/codeIcons';
 import { SpinnerIcon } from '../chat/ChatIcons';
 import './diffs.css';
+import { useDiffsMenuPresence } from './diffsMotion';
 
 export interface DiffsViewProps {
   workspaceId: string | null;
@@ -79,6 +80,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   }, [currentWsId]);
 
   const [isFolderMenuOpen, setIsFolderMenuOpen] = useState<boolean>(false);
+  const folderMenuPresence = useDiffsMenuPresence(isFolderMenuOpen);
   const activeWorkspaceName = useMemo(() => {
     if (!currentWsId) return null;
     const found = workspaces?.find((w) => w.id === currentWsId);
@@ -152,7 +154,9 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const quickJumpRef = useRef<HTMLDivElement>(null);
   const [isNarrow, setIsNarrow] = useState<boolean>(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState<boolean>(false);
+  const moreMenuPresence = useDiffsMenuPresence(moreMenuOpen);
   const [quickJumpOpen, setQuickJumpOpen] = useState<boolean>(false);
+  const quickJumpPresence = useDiffsMenuPresence(quickJumpOpen);
   const [quickJumpFilter, setQuickJumpFilter] = useState<string>('');
 
   useEffect(() => {
@@ -600,7 +604,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                 <ChevronDownIcon size={10} style={{ opacity: 0.6, flexShrink: 0 }} />
               </button>
 
-              {isFolderMenuOpen && (
+              {folderMenuPresence.mounted && (
                 <>
                   <div
                     style={{ position: 'fixed', inset: 0, zIndex: 49 }}
@@ -609,19 +613,15 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                   <div
                     role="menu"
                     aria-label="Select workspace folder"
-                    className="ui-menu"
+                    className={`ui-menu diffs-overflow-menu diffs-overflow-menu--anchor-left scroll-quiet${
+                      folderMenuPresence.motionClass ? ` ${folderMenuPresence.motionClass}` : ''
+                    }`}
                     style={{
                       position: 'absolute',
-                      top: '100%',
-                      left: 0,
-                      marginTop: '4px',
+                      top: 'calc(100% + 4px)',
+                      marginTop: 0,
                       zIndex: 50,
                       minWidth: '200px',
-                      background: 'var(--pane, #161b22)',
-                      border: '1px solid var(--separator, rgba(255, 255, 255, 0.1))',
-                      borderRadius: 'var(--radius-panel, 8px)',
-                      boxShadow: 'var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5))',
-                      padding: '4px 0',
                     }}
                   >
                     <div className="ui-menu__header" style={{ padding: '6px 10px' }}>
@@ -808,11 +808,13 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                 <MoreHorizontalIcon size={13} />
               </button>
 
-              {moreMenuOpen && (
+              {moreMenuPresence.mounted && (
                 <div
                   role="menu"
                   aria-label="Diff display options"
-                  className="ui-menu diffs-overflow-menu scroll-quiet"
+                  className={`ui-menu diffs-overflow-menu scroll-quiet${
+                    moreMenuPresence.motionClass ? ` ${moreMenuPresence.motionClass}` : ''
+                  }`}
                 >
                   <div className="ui-menu__header" role="presentation">
                     <span className="ui-menu__title">Diff options</span>
@@ -1108,8 +1110,12 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                           ))}
                         </select>
 
-                        {quickJumpOpen && (
-                          <div className="diff-quick-jump-popover">
+                        {quickJumpPresence.mounted && (
+                          <div
+                            className={`diff-quick-jump-popover${
+                              quickJumpPresence.motionClass ? ` ${quickJumpPresence.motionClass}` : ''
+                            }`}
+                          >
                             <input
                               type="text"
                               className="diff-quick-jump-search"

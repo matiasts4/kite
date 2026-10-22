@@ -389,8 +389,8 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   antigravityCommand: 'agy',
   grokApiKey: '',
   grokBaseUrl: 'https://api.x.ai/v1',
-  grokModel: 'grok-3-mini-fast',
-  grokUseCliSubscription: true,
+  grokModel: 'grok-4.7',
+  grokUseCliSubscription: false,
   grokTranscriptionApiKey: '',
   grokTranscriptionBaseUrl: 'https://api.x.ai/v1',
   grokTranscriptionModel: 'grok-voice-transcribe-2.0',
@@ -401,6 +401,24 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
 };
 
 const SEED_VERSION_KEY = 'kite_operator_seed_v4';
+
+/** xAI chat models for the operator (see https://docs.x.ai/developers/models). */
+export const GROK_CHAT_MODEL_OPTIONS = [
+  { id: 'grok-4.7', label: 'Grok 4.7 (flagship)' },
+  { id: 'grok-4.6', label: 'Grok 4.6' },
+  { id: 'grok-4.5', label: 'Grok 4.5' },
+  { id: 'grok-3-mini-fast', label: 'Grok 3 Mini Fast (legacy)' },
+] as const;
+
+/** Prefer HTTP API when an xAI API key is configured. */
+export function shouldUseGrokHttpApi(config: OperatorProviderConfig): boolean {
+  return Boolean(config.grokApiKey?.trim());
+}
+
+/** Local Grok CLI subscription (no API key). */
+export function shouldUseGrokCli(config: OperatorProviderConfig): boolean {
+  return !shouldUseGrokHttpApi(config) && config.grokUseCliSubscription;
+}
 
 export function loadOperatorConfig(): OperatorProviderConfig {
   try {
@@ -484,6 +502,22 @@ export function saveOperatorConfig(
   try {
     localStorage.setItem(SEED_VERSION_KEY, '1');
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(merged));
+
+    // Synchronize keys with native SQLite vault if running inside Tauri
+    if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__)) {
+      const saveCred = (provider: string, key?: string) => {
+        if (key !== undefined) {
+          void invokeCommand('save_provider_credential', { provider, key }).catch(() => undefined);
+        }
+      };
+      saveCred('opencode', partialOrFull.opencodeApiKey);
+      saveCred('grok', partialOrFull.grokApiKey);
+      saveCred('grok_transcription', partialOrFull.grokTranscriptionApiKey);
+      saveCred('vercel', partialOrFull.vercelApiKey);
+      saveCred('cloudflare', partialOrFull.cloudflareApiToken);
+      saveCred('cloudflare_account_id', partialOrFull.cloudflareAccountId);
+    }
+
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('kite:operator-config-updated', { detail: merged }));
       window.dispatchEvent(new CustomEvent('kite:operator-config-changed', { detail: merged }));
@@ -492,6 +526,41 @@ export function saveOperatorConfig(
     // ignore storage errors
   }
   return merged;
+}
+
+/**
+ * One-time synchronization of legacy localStorage API keys to the native SQLite vault.
+ */
+export async function syncNativeCredentialsWithVault(): Promise<void> {
+  const isTauri = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
+  if (!isTauri) return;
+
+  try {
+    const cfg = loadOperatorConfig();
+    const records: Record<string, string> = {};
+    if (cfg.opencodeApiKey) records['opencode'] = cfg.opencodeApiKey;
+    if (cfg.grokApiKey) records['grok'] = cfg.grokApiKey;
+    if (cfg.grokTranscriptionApiKey) records['grok_transcription'] = cfg.grokTranscriptionApiKey;
+    if (cfg.vercelApiKey) records['vercel'] = cfg.vercelApiKey;
+    if (cfg.cloudflareApiToken) records['cloudflare'] = cfg.cloudflareApiToken;
+    if (cfg.cloudflareAccountId) records['cloudflare_account_id'] = cfg.cloudflareAccountId;
+
+    const extraGrokTrans = localStorage.getItem('kite_grok_transcription_api_key');
+    if (extraGrokTrans && !records['grok_transcription']) {
+      records['grok_transcription'] = extraGrokTrans;
+    }
+
+    if (Object.keys(records).length > 0) {
+      await invokeCommand('migrate_localstorage_credentials', { records }).catch(() => undefined);
+    }
+  } catch {
+    // ignore migration errors
+  }
+}
+
+// Automatically trigger migration when running in Tauri
+if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__)) {
+  void syncNativeCredentialsWithVault();
 }
 
 export function loadZedMemoryNotes(): ZedMemoryNote[] {
@@ -715,7 +784,7 @@ export function getActiveModelForProvider(
     case 'antigravity':
       return config.antigravityModel || 'gemini-3.8-flash';
     case 'grok':
-      return config.grokModel || 'grok-3-mini-fast';
+      return config.grokModel || 'grok-4.7';
     case 'local':
       return 'local-heuristic-v1';
   }

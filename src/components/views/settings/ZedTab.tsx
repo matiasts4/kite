@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   listAudioInputDevices,
   startMicrophoneTest,
+  releaseOperatorCapture,
   startTranscriptionTestSession,
   type AudioInputDeviceInfo,
   type MicrophoneTester,
@@ -275,6 +276,7 @@ export const ZedTab: React.FC = () => {
     } else {
       setMicTestStatus(null);
       try {
+        await releaseOperatorCapture();
         const tester = await startMicrophoneTest(
           selectedMicId === 'automatic' ? null : selectedMicId,
           (lvl) => {
@@ -353,6 +355,7 @@ export const ZedTab: React.FC = () => {
       setTranscriptionResult(null);
       setTranscriptionTestSeconds(0);
       try {
+        await releaseOperatorCapture();
         const session = await startTranscriptionTestSession(
           selectedMicId === 'automatic' ? null : selectedMicId
         );

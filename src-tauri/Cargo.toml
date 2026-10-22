@@ -1,6 +1,6 @@
 [package]
 name = "kite-code"
-version = "0.1.22"
+version = "0.1.24"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
@@ -20,6 +20,7 @@ portable-pty = "0.9.0"
 sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json"] }
+dotenvy = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

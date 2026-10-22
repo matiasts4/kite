@@ -11,6 +11,7 @@ import {
 import { useResetCountdownClock } from '../../lib/quota/useResetCountdownClock';
 import { type ProviderQuotaStatus, PROVIDER_LABELS } from '../../lib/quota/types';
 import { BrandLogo } from '../views/agents/engineMetadata';
+import { usePresence } from '../../motion/usePresence';
 
 export interface SubscriptionQuotaBadgeProps {
   activeSessionTitle?: string | null;
@@ -29,6 +30,7 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
   const [prefs, setPrefs] = useState(() => readQuotaPreferences());
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
+  const popoverPresence = usePresence(isOpen);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -205,7 +207,7 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
         )}
       </button>
 
-      {isOpen && (
+      {popoverPresence.mounted && (
         <SubscriptionQuotaPopover
           allQuotas={quotas}
           selectedProvider={displayProvider}
@@ -216,6 +218,7 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
           onOpenTokenUsage={onOpenTokenUsage}
           prefs={prefs}
           anchorRect={anchorRect}
+          phase={popoverPresence.phase}
         />
       )}
     </div>

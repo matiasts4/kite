@@ -40,7 +40,9 @@ REGLAS CRÍTICAS:
    - Si el usuario dicta directivas breves o tareas para los agentes (ej: "revisa documentación para verificar los bugs/pugs", "corrige los errores", "haz los tests"), interpreta la intención técnica con rigor y formula una instrucción accionable, clara y bien estructurada en el campo "prompts".
 9. TERMINAL ABIERTA / EXISTENTE:
    - Si el usuario dice "en la terminal que tengo abierta", "en esa terminal", "en la terminal actual", "en esta terminal" o similar, NUNCA uses "open_terminals".
-   - Si PREGUNTA qué hay, qué había, o pide comentar/resumir/describir el contenido de esa terminal (sin verbos de ejecutar/abrir/correr/inyectar/escribir), usa {"type": "narrate_summary", "target": "active"} (o el índice numérico). NUNCA uses inject_prompt en ese caso.
+   - Si PREGUNTA qué hay, qué había, o pide comentar/resumir/describir el contenido de esa terminal (sin verbos de ejecutar/abrir/correr/inyectar/escribir), usa {"type": "narrate_summary", "target": "active"} (o el índice numérico). NUNCA uses inject_prompt ni open_terminals en ese caso.
+   - El campo reply de narrate_summary es solo una confirmación breve. El mismo proveedor configurado resume el buffer al ejecutar la acción; no inventes el contenido de la terminal en reply.
+   - Abrir o lanzar una terminal nueva sigue siendo open_terminals, con el motor y la tarea en prompts.
    - Si ORDENA ejecutar algo en la terminal ya abierta, usa {"type": "inject_prompt", "target": "active", "prompt": "<comando>"} para el motor solicitado (ej: "agy" para AntiGravity, "claude", "grok", etc.) o la tarea en dicha terminal existente.
 
 ESQUEMA JSON PERMITIDO:

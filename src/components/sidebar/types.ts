@@ -26,6 +26,8 @@ export interface WorkspaceSessionTab {
 
 export interface SidebarProps {
   hidden?: boolean;
+  /** Fired when the rail finishes mount/unmount (includes exit animation). */
+  onRailPresenceChange?: (mounted: boolean) => void;
   mode: WorkMode;
   workspaces: Workspace[];
   agents: AgentProfile[];

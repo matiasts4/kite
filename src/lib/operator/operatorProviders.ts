@@ -1,11 +1,14 @@
 import { invokeCommand } from '../ipc';
 import type { OperatorAction } from './operatorBrain';
+import { resolveVerifiedModel } from './providers/resolvePlanner';
 import {
   buildZedSystemInstructions,
   getActiveModelForProvider,
   loadOperatorConfig,
   operatorHttpFetch,
   recordOperatorLatency,
+  shouldUseGrokCli,
+  shouldUseGrokHttpApi,
   type OperatorProviderConfig,
   type OperatorProviderId,
   type OperatorTaskType,
@@ -212,9 +215,10 @@ async function callCliSubscriptionProvider(
 
 export async function queryOperatorLLM(
   prompt: string,
-  providerOverride?: OperatorProviderId
+  providerOverride?: OperatorProviderId,
+  configOverride?: OperatorProviderConfig
 ): Promise<OperatorLLMQueryResult> {
-  const config = loadOperatorConfig();
+  const config = configOverride ?? loadOperatorConfig();
   const provider = providerOverride ?? config.activeProvider;
   const model = getActiveModelForProvider(config, provider);
   const startTime = performance.now();
@@ -379,25 +383,67 @@ export async function queryOperatorLLM(
     }
 
     if (provider === 'grok') {
-      if (config.grokApiKey.trim() && !config.grokUseCliSubscription) {
-        const res = await callOpenAICompatibleEndpoint(
-          config.grokBaseUrl,
-          config.grokApiKey.trim(),
-          model,
-          prompt,
-          config
-        );
+      if (shouldUseGrokHttpApi(config)) {
+        try {
+          const res = await callOpenAICompatibleEndpoint(
+            config.grokBaseUrl,
+            config.grokApiKey.trim(),
+            model,
+            prompt,
+            config
+          );
+          const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+          recordOperatorLatency({
+            provider: 'grok',
+            model,
+            taskType: classifyTaskType(res.actions),
+            latencyMs,
+            success: true,
+          });
+          return {
+            success: true,
+            text: res.reply,
+            provider: 'grok',
+            model,
+            latencyMs,
+          };
+        } catch (err) {
+          const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+          const message =
+            err instanceof Error ? err.message : 'Error al consultar la API de xAI.';
+          recordOperatorLatency({
+            provider: 'grok',
+            model,
+            taskType: 'chat_response',
+            latencyMs,
+            success: false,
+            notes: message,
+          });
+          return {
+            success: false,
+            error: message,
+            provider: 'grok',
+            model,
+            latencyMs,
+          };
+        }
+      }
+
+      if (!shouldUseGrokCli(config)) {
         const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+        const errMsg =
+          'Falta la API Key de xAI (console.x.ai) o activa la suscripción CLI local de Grok.';
         recordOperatorLatency({
           provider: 'grok',
           model,
-          taskType: classifyTaskType(res.actions),
+          taskType: 'chat_response',
           latencyMs,
-          success: true,
+          success: false,
+          notes: errMsg,
         });
         return {
-          success: true,
-          text: res.reply,
+          success: false,
+          error: errMsg,
           provider: 'grok',
           model,
           latencyMs,
@@ -491,7 +537,7 @@ export async function probeProviderLatency(
   config: OperatorProviderConfig = loadOperatorConfig()
 ): Promise<{ ok: boolean; latencyMs: number; modelLabel: string; detail: string }> {
   const modelLabel = getActiveModelForProvider(config, providerId);
-  const res = await queryOperatorLLM('Ping healthcheck', providerId);
+  const res = await queryOperatorLLM('Responde solo: OK', providerId, config);
   return {
     ok: res.success,
     latencyMs: res.latencyMs,
@@ -518,24 +564,27 @@ export async function dispatchOperatorWithProvider(
 ): Promise<ProviderExecutionResult> {
   const config = overrideConfig ?? loadOperatorConfig();
   const provider = config.activeProvider;
-  const model = getActiveModelForProvider(config, provider);
+  const rawModel = getActiveModelForProvider(config, provider);
+  const model = resolveVerifiedModel(provider, rawModel, 'fast');
   const startTime = performance.now();
 
-  if (provider === 'local') {
-    const localResult = localFallbackParser(userInput);
+  const localResult = localFallbackParser(userInput);
+  const isDeterministic = localResult.actions.length > 0;
+
+  if (provider === 'local' || isDeterministic) {
     const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
     const taskType = classifyTaskType(localResult.actions);
     recordOperatorLatency({
       provider: 'local',
-      model,
+      model: 'deterministic-heuristic',
       taskType,
       latencyMs,
       success: true,
-      notes: 'Instant local heuristic parser',
+      notes: 'Instant local deterministic controller',
     });
     return {
       provider: 'local',
-      model,
+      model: 'deterministic-heuristic',
       latencyMs,
       taskType,
       actions: localResult.actions,
@@ -551,10 +600,11 @@ export async function dispatchOperatorWithProvider(
       if (!config.opencodeApiKey.trim()) {
         throw new Error('Falta configurar la API Key de OpenCode en Configuraciones -> Asistente Zed.');
       }
+      const verifiedModel = resolveVerifiedModel('opencode', config.opencodeModel, 'fast');
       remoteResult = await callOpenAICompatibleEndpoint(
         config.opencodeBaseUrl,
         config.opencodeApiKey.trim(),
-        config.opencodeModel || 'deepseek-v4.1-flash',
+        verifiedModel,
         userInput,
         config,
         workspaceContext
@@ -563,10 +613,11 @@ export async function dispatchOperatorWithProvider(
       if (!config.vercelApiKey.trim()) {
         throw new Error('Falta configurar la API Key de Vercel AI en Configuraciones -> Asistente Zed.');
       }
+      const verifiedModel = resolveVerifiedModel('vercel', config.vercelModel, 'fast');
       remoteResult = await callOpenAICompatibleEndpoint(
         config.vercelBaseUrl,
         config.vercelApiKey.trim(),
-        config.vercelModel || 'deepseek/deepseek-chat',
+        verifiedModel,
         userInput,
         config,
         workspaceContext
@@ -579,37 +630,44 @@ export async function dispatchOperatorWithProvider(
         ? `https://gateway.ai.cloudflare.com/v1/${config.cloudflareAccountId.trim()}/${config.cloudflareGatewaySlug.trim()}/workers-ai/chat/completions`
         : `${config.cloudflareBaseUrl.replace(/\/+$/, '')}/${config.cloudflareAccountId.trim()}/ai/v1/chat/completions`;
 
+      const verifiedModel = resolveVerifiedModel('cloudflare', config.cloudflareModel, 'fast');
       remoteResult = await callOpenAICompatibleEndpoint(
         endpoint,
         config.cloudflareApiToken.trim(),
-        config.cloudflareModel || '@cf/meta/llama-3.1-8b-instruct-fp8',
+        verifiedModel,
         userInput,
         config,
         workspaceContext
       );
     } else if (provider === 'grok') {
-      if (config.grokApiKey.trim() && !config.grokUseCliSubscription) {
+      const verifiedModel = resolveVerifiedModel('grok', config.grokModel, 'fast');
+      if (shouldUseGrokHttpApi(config)) {
         remoteResult = await callOpenAICompatibleEndpoint(
           config.grokBaseUrl,
           config.grokApiKey.trim(),
-          config.grokModel,
+          verifiedModel,
+          userInput,
+          config,
+          workspaceContext
+        );
+      } else if (shouldUseGrokCli(config)) {
+        remoteResult = await callCliSubscriptionProvider(
+          'grok',
+          verifiedModel,
           userInput,
           config,
           workspaceContext
         );
       } else {
-        remoteResult = await callCliSubscriptionProvider(
-          'grok',
-          config.grokModel,
-          userInput,
-          config,
-          workspaceContext
+        throw new Error(
+          'Falta la API Key de xAI (console.x.ai) o activa la suscripción CLI local de Grok.'
         );
       }
     } else {
+      const verifiedModel = resolveVerifiedModel('antigravity', config.antigravityModel, 'fast');
       remoteResult = await callCliSubscriptionProvider(
         config.antigravityCommand || 'antigravity',
-        config.antigravityModel || 'gemini-3.8-flash',
+        verifiedModel,
         userInput,
         config,
         workspaceContext

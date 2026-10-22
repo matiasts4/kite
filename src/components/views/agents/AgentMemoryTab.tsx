@@ -8,7 +8,7 @@ import {
 } from './types';
 import { loadAgentMind, writeAgentMemory } from '../../../lib/ipc';
 
-// Constants matching production bundle thresholds (agents-DucYuCae.js & AgentMemoryPane-DXRddL2v.js)
+// Memory list thresholds
 const USER_MEMORY_BUDGET = 1375;
 const DEFAULT_AGENT_MEMORY_BUDGET = 2200;
 const MAX_RAW_BYTE_SIZE = 262144; // 256 KB hard renderer boundary
@@ -205,7 +205,7 @@ export interface AgentMemoryTabProps {
   onSaveInlineEntry?: (index: number, draft: string) => Promise<void>;
   onDeleteEntry?: (index: number, text: string) => Promise<void>;
   onUndoDeleteEntry?: () => Promise<void>;
-  // Bundle parity props
+  // Optional memory controls
   profile?: { id: string; name: string; memoryBudget?: number | null };
   readOnly?: boolean;
   saving?: boolean;

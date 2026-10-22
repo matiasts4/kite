@@ -25,10 +25,10 @@
 }
 
 /* -------------------------------------------------------------------------
-   Notification Center Component (Matching Production Bundle Specs)
+   Notification center
    ------------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------
-   Notification Center Component (Floating Popover matching Production Specs)
+   Notification popover
    ------------------------------------------------------------------------- */
 .notification-popover-overlay {
   position: fixed;

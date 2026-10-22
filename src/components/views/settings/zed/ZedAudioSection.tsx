@@ -286,7 +286,8 @@ export const ZedAudioSection: React.FC<ZedAudioSectionProps> = ({
                   {transcriptionResult.success ? `✓ ${transcriptionResult.engine}` : 'Fallo en la transcripción'}
                 </span>
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Grabación: {transcriptionResult.durationSecs.toFixed(1)}s • Latencia: {transcriptionResult.latencyMs}ms
+                  Grabación: {transcriptionResult.durationSecs.toFixed(1)}s • Latencia:{' '}
+                  {transcriptionResult.latencyMs}ms
                 </span>
               </div>
               {transcriptionResult.success ? (
@@ -358,7 +359,7 @@ export const ZedAudioSection: React.FC<ZedAudioSectionProps> = ({
           </div>
         </div>
 
-        {/* Atenuación de Sonido y Tonos Zen (Veloce Parity) */}
+        {/* Atenuación de Sonido y Tonos Zen */}
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
             <h3 className="settings-row__title">Atenuación de Sonido y Tonos Zen</h3>

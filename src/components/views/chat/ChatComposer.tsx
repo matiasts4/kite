@@ -425,7 +425,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     >
       {/* Approval Card integrated into Composer */}
       {pendingApproval && onApprovalDecision && (
-        <div style={{ width: '100%', maxWidth: '720px', margin: '0 auto 10px' }}>
+        <div style={{ width: '100%', maxWidth: 'var(--chat-column, 720px)', margin: '0 auto 10px' }}>
           <ChatApprovalCard
             approval={pendingApproval}
             onDecision={onApprovalDecision}
@@ -435,7 +435,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
       <div
         className="chat-composer composer"
-        style={{ width: '100%', maxWidth: '720px', margin: '0 auto', boxSizing: 'border-box' }}
+        style={{ width: '100%', maxWidth: 'var(--chat-column, 720px)', margin: '0 auto', boxSizing: 'border-box' }}
         data-drop={dropKind ?? undefined}
         onDragLeave={(e) => {
           const rel = e.relatedTarget;
@@ -484,6 +484,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         {/* Input textarea */}
         <textarea
           ref={textareaRef}
+          data-testid={agentName ? 'agent-chat-input' : undefined}
           data-drop-targeted={dropKind !== null ? true : undefined}
           value={prompt}
           disabled={running}
@@ -540,7 +541,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           </span>
         )}
 
-        {/* Composer Footer faithfully matching Xt in ChatPane-_DfdifWx.js */}
+        {/* Composer footer */}
         <div className="chat-composer__footer" ref={footerRef}>
           <div className="chat-composer__controls">
             {/* Attach button: fits strictly in 28px (:first-child > .select-menu-trigger--toolbar) */}
@@ -731,6 +732,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
               disabled={!canSend}
               className="chat-composer__send"
+              data-testid={agentName ? 'agent-chat-send' : undefined}
               onClick={onSend}
             >
               <ArrowUpIcon size={16} />

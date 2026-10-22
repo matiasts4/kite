@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useId, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { usePresence } from '../../../motion/usePresence';
+import { motionSurfaceClass } from '../../../motion/surface';
 
 export interface WhatsNewModalProps {
   isOpen: boolean;
@@ -118,6 +120,7 @@ function getUiScale(el: HTMLElement | null): number {
 }
 
 export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ isOpen, onClose }) => {
+  const layerPresence = usePresence(isOpen);
   const headingId = useId();
   const modalRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
@@ -225,7 +228,10 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ isOpen, onClose })
     onClose();
   };
 
-  if (!isOpen) return null;
+  if (!layerPresence.mounted) return null;
+
+  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
+  const modalMotion = motionSurfaceClass(layerPresence.phase, 'modal');
 
   const activeRelease = releases.find((r) => r.version === selectedVersion) || currentRelease;
 
@@ -259,13 +265,13 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ isOpen, onClose })
     >
       <div
         aria-hidden="true"
-        className="whats-new-layer__scrim"
+        className={`whats-new-layer__scrim${scrimMotion ? ` ${scrimMotion}` : ''}`}
         onClick={handleDismiss}
       />
       <section
         aria-labelledby={headingId}
         aria-modal="true"
-        className="whats-new"
+        className={`whats-new${modalMotion ? ` ${modalMotion}` : ''}`}
         role="dialog"
       >
         {/* Hero Section */}

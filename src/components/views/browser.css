@@ -1,9 +1,9 @@
 /* ==========================================================================
    Kite Code - Browser View Styles
-   Exact replica matching AppBrowserSidebar bundle and design token system
+   Browser view styles and design tokens
    ========================================================================== */
 
-/* Browser view styles: AppBrowserSidebar shell styles are defined authentically in chunks.css */
+/* Browser shell styles live in chunks.css */
 
 .ticket-board__add {
   width: 22px;
@@ -227,8 +227,9 @@
   animation: spin calc(var(--duration-gate, 0.3s) * 3) linear infinite;
 }
 
-/* Design mode toggle */
-.browser-design-mode {
+/* Design mode toggle and External browser button */
+.browser-design-mode,
+.browser-external-open {
   border-radius: var(--radius-chip, 6px);
   min-width: 22px;
   height: 22px;
@@ -244,14 +245,16 @@
   display: inline-flex;
 }
 
-.browser-design-mode[data-variant="pane"] {
+.browser-design-mode[data-variant="pane"],
+.browser-external-open[data-variant="pane"] {
   min-width: var(--control-pane-header, 22px);
   height: var(--control-pane-header, 22px);
   color: var(--text-faint, #6e6e6e);
   padding: 0;
 }
 
-.browser-design-mode:hover:not(:disabled) {
+.browser-design-mode:hover:not(:disabled),
+.browser-external-open:hover:not(:disabled) {
   background: var(--hover-fill, rgba(255, 255, 255, 0.05));
   color: var(--text-primary, #fafafa);
 }
@@ -262,12 +265,14 @@
   color: var(--accent, #5c8fff);
 }
 
-.browser-design-mode:focus-visible {
+.browser-design-mode:focus-visible,
+.browser-external-open:focus-visible {
   outline: 2px solid var(--accent, #5c8fff);
   outline-offset: -2px;
 }
 
-.browser-design-mode:disabled {
+.browser-design-mode:disabled,
+.browser-external-open:disabled {
   color: var(--text-faint, #6e6e6e);
   cursor: default;
   opacity: .55;

@@ -1,6 +1,7 @@
 // Kite Code — App Operator Controller
 // Fast deterministic execution controller for the Kite Operator Assistant.
-// Handles multi-terminal spawning, prompt injection, terminal closing, browser launch, and context summarization.
+// Handles multi-terminal spawning, prompt injection, terminal closing, browser launch, and context summarization
+// with zero LLM round trip for deterministic actions, and full run ledger correlation.
 
 import { invokeCommand } from '../ipc';
 import { getActiveAgentTerminals, markTerminalExited } from '../terminalRegistry';
@@ -8,11 +9,16 @@ import { getNextAgentName, cleanAgentTitle } from '../agentNames';
 import {
   getAllTerminalsSummary,
   getTerminalSummary,
-  formatSummaryForSpeech,
   type TerminalContextSummary,
 } from './sessionContextHub';
+import { getTerminalRollingBuffer } from '../terminalRegistry';
+import { loadOperatorConfig } from './operatorConfig';
+import { resolvePlannerProvider } from './providers/resolvePlanner';
+import { summarizeTerminalsWithProvider } from './planner/terminalSummary';
 import { ttsNarrator } from './ttsNarrator';
 import { interpretAndEnrichPrompt } from './planner/promptInterpreter';
+import { runLedger } from './runLedger';
+import { planTurnHeuristic } from './planner/heuristic';
 
 export interface SpawnTerminalsOptions {
   count: number;
@@ -21,6 +27,7 @@ export interface SpawnTerminalsOptions {
   autoApprove?: boolean;
   workspaceId?: string;
   titlePrefix?: string;
+  runId?: string;
 }
 
 export interface OperatorExecutionResult {
@@ -31,15 +38,75 @@ export interface OperatorExecutionResult {
 
 class AppOperatorController {
   /**
+   * Determines whether an input can be executed deterministically without an LLM round trip.
+   */
+  public isDeterministic(input: string): boolean {
+    if (!input || !input.trim()) return false;
+    const norm = input.trim().toLowerCase();
+
+    // Stop speaking
+    if (
+      norm === 'para' ||
+      norm === 'cállate' ||
+      norm === 'callate' ||
+      norm === 'silencio' ||
+      /^(?:para|det[eé]n|stop)\s+(?:de\s+)?(?:hablar|voz|tts|audio)/i.test(norm)
+    ) {
+      return true;
+    }
+
+    // Inspect status / summary
+    if (
+      /^(?:estado|status|qu[eé]\s+hay|qu[eé]\s+est[aá]n\s+haciendo|c[oó]mo\s+van|resumen(?:\s+de\s+terminales)?)$/i.test(norm)
+    ) {
+      return true;
+    }
+
+    // Close terminals
+    if (
+      /^(?:cierra|cerrar|cierre|cierren|sierra|sierre|kill|mata|matar|termina|terminar|elimina|apaga)\b/i.test(norm)
+    ) {
+      return true;
+    }
+
+    // Open terminals
+    if (
+      /^(?:abre|abrir|abr[ií]|lanza|lanzar|crea|crear|inicia|iniciar|spawn)\s+(?:\d+|un|una|uno|dos|tres|cuatro|cinco|\w+\s+)?(?:terminal|terminales|agente|agentes)\b/i.test(norm)
+    ) {
+      return true;
+    }
+
+    // Inject prompt
+    if (
+      /^(?:inyecta|inyectar|escribe|escribir|manda|mandar|corre|correr|ejecuta|ejecutar)\s+.+\s+en\s+(?:la\s+)?(?:terminal|agente)\b/i.test(norm)
+    ) {
+      return true;
+    }
+
+    // Browser
+    if (/^(?:abre|abrir|navega|navegar)\s+(?:a\s+)?(?:https?:\/\/|\w+\.\w+)/i.test(norm)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Spawns N terminals with the selected engine and optional prompt injections.
    */
   public async spawnTerminals(options: SpawnTerminalsOptions): Promise<OperatorExecutionResult> {
+    const startTime = Date.now();
     const count = Math.max(1, Math.min(options.count || 1, 10));
     const engine = options.engine || 'grok';
     const autoApprove = options.autoApprove ?? true;
     const isShell = engine === 'powershell' || engine === 'terminal';
     const spawnedIds: string[] = [];
     const assignedNames: string[] = [];
+    const runId = options.runId;
+
+    if (runId) {
+      runLedger.recordToolStart(runId, { name: 'open_terminals', actionIdx: 0 });
+    }
 
     // Ensure CodeWorkspace is mounted and listening before dispatching spawn events
     if (typeof window !== 'undefined') {
@@ -103,9 +170,27 @@ class AppOperatorController {
 
       spawnedIds.push(sessionId);
 
+      if (runId) {
+        runLedger.recordTerminalExec(runId, {
+          terminalId: sessionId,
+          command: engine,
+          exitCode: 0,
+        });
+      }
+
       if (i < count - 1) {
         await new Promise((r) => setTimeout(r, 120));
       }
+    }
+
+    const durationMs = Date.now() - startTime;
+    if (runId) {
+      runLedger.recordToolEnd(runId, {
+        name: 'open_terminals',
+        ok: true,
+        durationMs,
+        exitCode: 0,
+      });
     }
 
     const namesDesc = assignedNames.length > 0 ? ` (agente${assignedNames.length === 1 ? '' : 's'} ${assignedNames.join(' y ')})` : '';
@@ -119,9 +204,21 @@ class AppOperatorController {
   /**
    * Injects a prompt into a running terminal via PTY write.
    */
-  public async injectPrompt(sessionId: string, prompt: string): Promise<OperatorExecutionResult> {
+  public async injectPrompt(sessionId: string, prompt: string, runId?: string): Promise<OperatorExecutionResult> {
     if (!sessionId || !prompt) {
+      if (runId) {
+        runLedger.recordToolEnd(runId, {
+          name: 'inject_prompt',
+          ok: false,
+          error: 'Falta sessionId o texto de prompt',
+          errorCategory: 'missing_argument',
+        });
+      }
       return { success: false, message: 'Falta sessionId o texto de prompt para inyectar.' };
+    }
+
+    if (runId) {
+      runLedger.recordToolStart(runId, { name: 'inject_prompt' });
     }
 
     const input = prompt.endsWith('\r') || prompt.endsWith('\n') ? prompt : `${prompt}\r\n`;
@@ -132,11 +229,32 @@ class AppOperatorController {
         input,
       });
 
+      if (runId) {
+        runLedger.recordTerminalExec(runId, {
+          terminalId: sessionId,
+          command: prompt,
+          exitCode: 0,
+        });
+        runLedger.recordToolEnd(runId, {
+          name: 'inject_prompt',
+          ok: true,
+          exitCode: 0,
+        });
+      }
+
       return {
         success: true,
         message: `Prompt inyectado en terminal ${sessionId}.`,
       };
     } catch (err: any) {
+      if (runId) {
+        runLedger.recordToolEnd(runId, {
+          name: 'inject_prompt',
+          ok: false,
+          error: err?.message || String(err),
+          errorCategory: 'pty_write_error',
+        });
+      }
       return {
         success: false,
         message: `Error inyectando prompt: ${err?.message || String(err)}`,
@@ -148,8 +266,13 @@ class AppOperatorController {
    * Closes terminals matching a target ('finished', 'idle', 'all', 'active', 'last', an agent name, session ID, 1-based index, or an array of targets).
    */
   public async closeTerminals(
-    target: 'finished' | 'idle' | 'all' | 'active' | 'last' | string | string[] | number
+    target: 'finished' | 'idle' | 'all' | 'active' | 'last' | string | string[] | number,
+    runId?: string
   ): Promise<OperatorExecutionResult> {
+    if (runId) {
+      runLedger.recordToolStart(runId, { name: 'close_terminals' });
+    }
+
     const terminals = getActiveAgentTerminals();
     let toClose: string[] = [];
 
@@ -208,7 +331,7 @@ class AppOperatorController {
       );
       if (partialMatch) return [partialMatch.sessionId];
 
-      // Fallback: if it looks like a raw session ID (e.g. term-* or UUID), return it anyway
+      // Fallback: if it looks like a raw session ID
       if (trimmed.startsWith('term-') || trimmed.includes('-')) {
         return [trimmed];
       }
@@ -244,6 +367,9 @@ class AppOperatorController {
           }
         }
       }
+      if (runId) {
+        runLedger.recordToolEnd(runId, { name: 'close_terminals', ok: true });
+      }
       if (dispatchedAny) {
         return {
           success: true,
@@ -263,6 +389,13 @@ class AppOperatorController {
         sessionId: id,
         owner: 'operator',
       }).catch(() => {});
+      if (runId) {
+        runLedger.recordTerminalExec(runId, {
+          terminalId: id,
+          command: 'terminate_terminal',
+          exitCode: 0,
+        });
+      }
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
           new CustomEvent('kite:terminate-agent', {
@@ -270,6 +403,14 @@ class AppOperatorController {
           })
         );
       }
+    }
+
+    if (runId) {
+      runLedger.recordToolEnd(runId, {
+        name: 'close_terminals',
+        ok: true,
+        exitCode: 0,
+      });
     }
 
     return {
@@ -282,7 +423,10 @@ class AppOperatorController {
   /**
    * Opens a URL in the browser surface.
    */
-  public async openBrowser(url: string): Promise<OperatorExecutionResult> {
+  public async openBrowser(url: string, runId?: string): Promise<OperatorExecutionResult> {
+    if (runId) {
+      runLedger.recordToolStart(runId, { name: 'open_browser' });
+    }
     const formattedUrl = /^https?:\/\//i.test(url) ? url : `https://${url}`;
 
     try {
@@ -292,11 +436,23 @@ class AppOperatorController {
         }
       });
 
+      if (runId) {
+        runLedger.recordToolEnd(runId, { name: 'open_browser', ok: true });
+      }
+
       return {
         success: true,
         message: `Navegador abierto en ${formattedUrl}.`,
       };
     } catch (err: any) {
+      if (runId) {
+        runLedger.recordToolEnd(runId, {
+          name: 'open_browser',
+          ok: false,
+          error: err?.message || String(err),
+          errorCategory: 'browser_launch_error',
+        });
+      }
       return {
         success: false,
         message: `Error abriendo navegador: ${err?.message || String(err)}`,
@@ -318,19 +474,52 @@ class AppOperatorController {
   /**
    * Narrates the active terminal context aloud using TTS.
    */
-  public async narrateSummary(sessionId?: string, lang: 'es' | 'en' = 'es'): Promise<OperatorExecutionResult> {
+  public async narrateSummary(sessionId?: string, _lang: 'es' | 'en' = 'es'): Promise<OperatorExecutionResult> {
     const summaries = this.getTerminalContext(sessionId);
-    const spokenText = formatSummaryForSpeech(summaries, lang);
+    if (summaries.length === 0) {
+      return {
+        success: true,
+        message: 'No hay ninguna terminal abierta.',
+        data: { summaries },
+      };
+    }
 
-    await ttsNarrator.speak(spokenText, {
-      lang: lang === 'es' ? 'es-ES' : 'en-US',
-    });
+    const terminals = summaries.map((summary) => ({
+      label:
+        summary.agentName ||
+        cleanAgentTitle(summary.title) ||
+        summary.title ||
+        summary.engine,
+      engine: summary.engine,
+      state: summary.state,
+      buffer: getTerminalRollingBuffer(summary.sessionId) || summary.latestLine || '',
+    }));
 
-    return {
-      success: true,
-      message: spokenText,
-      data: { summaries },
-    };
+    const hasContent = terminals.some((term) => term.buffer.trim().length > 0);
+    if (!hasContent) {
+      return {
+        success: true,
+        message: 'No hay nada en esa terminal.',
+        data: { summaries },
+      };
+    }
+
+    try {
+      const provider = resolvePlannerProvider(loadOperatorConfig());
+      const spokenText = await summarizeTerminalsWithProvider(provider, terminals);
+      return {
+        success: true,
+        message: spokenText,
+        data: { summaries, providerId: provider.id },
+      };
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        message: `No pude resumir la terminal con el modelo configurado: ${detail}`,
+        data: { summaries },
+      };
+    }
   }
 
   /**
@@ -343,20 +532,124 @@ class AppOperatorController {
   /**
    * Spawns a dedicated subagent session.
    */
-  public async spawnSubagent(cli: string, task: string): Promise<OperatorExecutionResult> {
+  public async spawnSubagent(cli: string, task: string, runId?: string): Promise<OperatorExecutionResult> {
     return this.spawnTerminals({
       count: 1,
       engine: cli,
       prompts: [task],
       titlePrefix: `Subagent (${cli})`,
+      runId,
     });
   }
 
   /**
    * Halts any ongoing speech synthesis.
    */
-  public stopSpeaking(): void {
+  public stopSpeaking(runId?: string): void {
+    if (runId) {
+      runLedger.recordToolStart(runId, { name: 'stop_speaking' });
+    }
     ttsNarrator.stop();
+    if (runId) {
+      runLedger.recordToolEnd(runId, { name: 'stop_speaking', ok: true });
+    }
+  }
+
+  /**
+   * Directly executes a deterministic request without an LLM round trip.
+   */
+  public async executeDeterministic(
+    input: string,
+    options?: { runId?: string; workspaceId?: string }
+  ): Promise<OperatorExecutionResult> {
+    const runId = options?.runId || runLedger.startRun(input, { taskType: 'deterministic' });
+    const norm = input.trim().toLowerCase();
+
+    // Stop speaking
+    if (
+      norm === 'para' ||
+      norm === 'cállate' ||
+      norm === 'callate' ||
+      norm === 'silencio' ||
+      /^(?:para|det[eé]n|stop)\s+(?:de\s+)?(?:hablar|voz|tts|audio)/i.test(norm)
+    ) {
+      this.stopSpeaking(runId);
+      runLedger.completeRun(runId, {
+        reply: 'Voz detenida.',
+        outcome: 'success',
+      });
+      return { success: true, message: 'Voz detenida.' };
+    }
+
+    // Inspect status
+    if (
+      /^(?:estado|status|qu[eé]\s+hay|qu[eé]\s+est[aá]n\s+haciendo|c[oó]mo\s+van|resumen(?:\s+de\s+terminales)?)$/i.test(norm)
+    ) {
+      const summaries = this.getTerminalContext();
+      const count = summaries.length;
+      const message = count === 0 ? 'No hay terminales activas.' : `Hay ${count} terminales activas en el sistema.`;
+      runLedger.completeRun(runId, { reply: message, outcome: 'success' });
+      return { success: true, message, data: summaries };
+    }
+
+    // Fast-path heuristic plan
+    const fastPlan = planTurnHeuristic(input);
+    if (fastPlan.actions.length === 0) {
+      runLedger.completeRun(runId, {
+        reply: fastPlan.reply || 'No se reconoció una acción determinista.',
+        outcome: 'failure',
+      });
+      return { success: false, message: fastPlan.reply || 'No se reconoció una acción determinista.' };
+    }
+
+    let overallSuccess = true;
+    const messages: string[] = [];
+
+    for (const action of fastPlan.actions) {
+      runLedger.recordToolEmission(runId, {
+        name: action.type,
+        arguments: action as unknown as Record<string, unknown>,
+      });
+
+      if (action.type === 'open_terminals') {
+        const res = await this.spawnTerminals({
+          count: action.count,
+          engine: action.engine,
+          prompts: action.prompts,
+          workspaceId: options?.workspaceId,
+          runId,
+        });
+        overallSuccess = overallSuccess && res.success;
+        messages.push(res.message);
+      } else if (action.type === 'close_terminals') {
+        const res = await this.closeTerminals(action.target, runId);
+        overallSuccess = overallSuccess && res.success;
+        messages.push(res.message);
+      } else if (action.type === 'inject_prompt') {
+        const res = await this.injectPrompt(String(action.target), action.prompt, runId);
+        overallSuccess = overallSuccess && res.success;
+        messages.push(res.message);
+      } else if (action.type === 'open_browser') {
+        const res = await this.openBrowser(action.url, runId);
+        overallSuccess = overallSuccess && res.success;
+        messages.push(res.message);
+      } else if (action.type === 'stop_speaking') {
+        this.stopSpeaking(runId);
+        messages.push('Audio detenido.');
+      }
+    }
+
+    const finalMessage = messages.join(' ') || fastPlan.reply || 'Acciones ejecutadas.';
+    runLedger.completeRun(runId, {
+      reply: finalMessage,
+      outcome: overallSuccess ? 'success' : 'failure',
+    });
+
+    return {
+      success: overallSuccess,
+      message: finalMessage,
+      data: fastPlan.actions,
+    };
   }
 }
 

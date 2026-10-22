@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { BrowserControlAction } from '../../lib/ipc';
 import { isTauriEnvironment } from '../../lib/ipc';
+import { openExternalLink } from '../../lib/terminalLinkNav';
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -10,6 +11,7 @@ import {
   LockKeyholeIcon,
   TriangleAlertIcon,
   SquareMousePointerIcon,
+  ExternalLinkIcon,
   MonitorIcon,
   SmartphoneIcon,
   TabletIcon,
@@ -253,6 +255,24 @@ export const BrowserView: React.FC<BrowserViewProps> = ({ workspaceId, isOcclude
           type="button"
         >
           <SquareMousePointerIcon size={12} />
+        </button>
+
+        {/* Abrir en navegador externo */}
+        <button
+          aria-label="Abrir en navegador externo"
+          className="browser-external-open"
+          data-variant="toolbar"
+          disabled={!view?.displayUrl && !addressInput}
+          onClick={() => {
+            const currentUrl = view?.displayUrl || addressInput;
+            if (currentUrl) {
+              openExternalLink(currentUrl);
+            }
+          }}
+          title="Abrir en navegador externo"
+          type="button"
+        >
+          <ExternalLinkIcon size={12} />
         </button>
 
         {/* Device Viewport Toolbar (Responsive preview: Desktop, Phone, Tablet, Rotate) */}

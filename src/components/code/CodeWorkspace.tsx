@@ -38,6 +38,7 @@ import type {
 import '../views/workspaces.css';
 import { registerSpawnedTerminal } from '../../lib/terminalRegistry';
 import { sendUiAck, type UiBusRequestPayload } from '../../lib/operator/executor/ui-bus';
+import { dispatchPromptWhenPaneReady, pulseZedOrb } from '../../motion/contract';
 import { startAgentInboxPolling } from '../../lib/agentInboxLoop';
 import { copyWorkspacePath } from '../../lib/ipc';
 
@@ -818,13 +819,16 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     const targetTab = current.tabs.find((t) => findLeaf(t.root, targetLeafId) !== null) || activeTab;
     if (!targetTab) return;
 
-    releasePaneTerminals(findPane(targetTab.root, targetLeafId));
+    const pane = findPane(targetTab.root, targetLeafId);
+    const hadTerminal = pane ? listTerminals(pane).length > 0 : false;
+    releasePaneTerminals(pane);
     const updatedRoot = removeLeaf(targetTab.root, targetLeafId);
 
     if (!updatedRoot) {
       handleCloseTab(targetTab.id);
       return;
     }
+    if (hadTerminal) pulseZedOrb();
 
     const updatedTabs = current.tabs.map((t) =>
       t.id === targetTab.id ? { ...t, root: updatedRoot } : t
@@ -840,7 +844,9 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   const handleCloseTab = (tabId: string) => {
     const current = latestLayoutRef.current;
     const closing = current.tabs.find((t) => t.id === tabId);
+    const hadTerminal = closing ? listTerminals(closing.root).length > 0 : false;
     releasePaneTerminals(closing?.root);
+    if (hadTerminal) pulseZedOrb();
     const remainingTabs = current.tabs.filter((t) => t.id !== tabId);
     const nextActiveId =
       current.activeTabId === tabId ? remainingTabs[0]?.id || null : current.activeTabId;
@@ -986,6 +992,8 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         columns: 80,
         rows: 24,
         confirmedByBuilder: true,
+        agentName: agentName || undefined,
+        displayName: leafLabel,
         initialPrompt: undefined, // Let terminal start interactively; staged delivery writes prompt visibly
         autoApprove: detail.autoApprove ?? true,
       }).catch((err) => console.warn('[ODD] Failed to start terminal:', err));
@@ -1033,22 +1041,16 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         setFocusedLeafId(newLeaf.id);
         await persistLayout(nextLayout);
 
-        if (detail.initialPrompt && typeof window !== 'undefined') {
-          setTimeout(() => {
-            window.dispatchEvent(
-              new CustomEvent('kite:dispatch-prompt-projectile', {
-                detail: {
-                  targetPaneId: newLeaf.id,
-                  targetSessionId: detail.sessionId,
-                  agentName: leafLabel,
-                  engine: wireEngine,
-                  prompt: detail.initialPrompt,
-                  sourceSessionId: detail.sourceSessionId,
-                  sourcePaneId: detail.sourcePaneId,
-                },
-              })
-            );
-          }, 120);
+        if (detail.initialPrompt) {
+          dispatchPromptWhenPaneReady({
+            targetPaneId: newLeaf.id,
+            targetSessionId: detail.sessionId,
+            agentName: leafLabel,
+            engine: wireEngine,
+            prompt: detail.initialPrompt,
+            sourceSessionId: detail.sourceSessionId,
+            sourcePaneId: detail.sourcePaneId,
+          });
         }
         return;
       }
@@ -1069,22 +1071,16 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       setFocusedLeafId(newLeaf.id);
       await persistLayout(nextLayout);
 
-      if (detail.initialPrompt && typeof window !== 'undefined') {
-        setTimeout(() => {
-          window.dispatchEvent(
-            new CustomEvent('kite:dispatch-prompt-projectile', {
-              detail: {
-                targetPaneId: newLeaf.id,
-                targetSessionId: detail.sessionId,
-                agentName: leafLabel,
-                engine: wireEngine,
-                prompt: detail.initialPrompt,
-                sourceSessionId: detail.sourceSessionId,
-                sourcePaneId: detail.sourcePaneId,
-              },
-            })
-          );
-        }, 120);
+      if (detail.initialPrompt) {
+        dispatchPromptWhenPaneReady({
+          targetPaneId: newLeaf.id,
+          targetSessionId: detail.sessionId,
+          agentName: leafLabel,
+          engine: wireEngine,
+          prompt: detail.initialPrompt,
+          sourceSessionId: detail.sourceSessionId,
+          sourcePaneId: detail.sourcePaneId,
+        });
       }
     };
 

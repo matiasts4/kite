@@ -67,9 +67,8 @@ describe('PromptProjectileOverlay', () => {
 
     const overlay = container.querySelector('.prompt-projectile-overlay');
     expect(overlay).not.toBeNull();
-    const slip = container.querySelector('.prompt-injection-slip');
-    expect(slip).not.toBeNull();
-    expect(slip?.querySelector('.prompt-injection-slip__engine')?.textContent).toBe('grok');
+    expect(container.querySelector('.prompt-injection-dot')).not.toBeNull();
+    expect(container.querySelector('.prompt-injection-slip')).toBeNull();
   });
 
   it('dispatches kite:terminal-staged-prompt upon arrival at destination', async () => {
@@ -144,7 +143,7 @@ describe('PromptProjectileOverlay', () => {
       vi.advanceTimersByTime(60);
     });
 
-    expect(container.querySelector('.prompt-injection-slip')).not.toBeNull();
+    expect(container.querySelector('.prompt-injection-dot')).not.toBeNull();
   });
 
   it('dispatches staged prompt immediately with reduced motion and no slip', () => {
@@ -184,7 +183,7 @@ describe('PromptProjectileOverlay', () => {
 
     expect(stagedPromptListener).toHaveBeenCalledTimes(1);
     expect(stagedPromptListener.mock.calls[0][0].detail.sessionId).toBe('term-instant');
-    expect(container.querySelector('.prompt-injection-slip')).toBeNull();
+    expect(container.querySelector('.prompt-injection-dot')).toBeNull();
 
     window.removeEventListener('kite:terminal-staged-prompt', stagedPromptListener);
   });

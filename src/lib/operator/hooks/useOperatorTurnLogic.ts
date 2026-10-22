@@ -8,6 +8,8 @@ export type TurnStage =
   | 'error';
 
 export type ZedStripOrbState =
+  | 'idle'
+  | 'connecting'
   | 'connected'
   | 'thinking'
   | 'speaking'
@@ -15,7 +17,8 @@ export type ZedStripOrbState =
   | 'error'
   | 'muted';
 
-export const OPERATOR_TURN_TIMEOUT_MS = 15_000;
+/** Llama/Cloudflare can take longer than a short UI beat; 15s aborted the call before it returned. */
+export const OPERATOR_TURN_TIMEOUT_MS = 45_000;
 
 export const OPERATOR_TURN_TIMEOUT_MESSAGE = 'La orden no terminó a tiempo.';
 
@@ -56,6 +59,7 @@ export function resolveZedOrbState(args: {
   voiceError: string | null;
   turnBusy: boolean;
   isListening: boolean;
+  isTranscribing?: boolean;
   speakingTts: boolean;
   callOrbState?: ZedStripOrbState;
   callMuted?: boolean;
@@ -70,6 +74,7 @@ export function resolveZedOrbState(args: {
     return 'error';
   }
   if (
+    args.isTranscribing ||
     args.turnBusy ||
     args.turnStage === 'planning' ||
     args.turnStage === 'executing' ||

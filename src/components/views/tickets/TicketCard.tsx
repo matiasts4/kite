@@ -2,7 +2,7 @@ import React from 'react';
 import { TicketIssue, TaskExecutionRun, getLabelColor } from './types';
 
 
-// Clean SVG Priority Glyph matching bundle
+// Priority icon
 export const PriorityGlyph: React.FC<{ priority: number | string; size?: number }> = ({
   priority,
   size = 14,
@@ -97,7 +97,7 @@ export const PriorityGlyph: React.FC<{ priority: number | string; size?: number 
   );
 };
 
-// Clean SVG State Glyph matching bundle
+// State icon
 export const StateGlyph: React.FC<{ state: string; size?: number }> = ({ state, size = 14 }) => {
   let normalized = 'todo';
   switch (state) {

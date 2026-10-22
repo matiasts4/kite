@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { usePresence } from '../../motion/usePresence';
+import { motionSurfaceClass } from '../../motion/surface';
 import { SunIcon, MoonIcon, SettingsIcon } from './sidebarIcons';
 import type { ContextMenuState } from './types';
 import { UpdateDetailCard, UpdateCircularButton } from './UpdatePill';
@@ -69,7 +71,7 @@ export const SidebarFooter: React.FC<SidebarFooterProps> = ({
           </span>
         </button>
 
-        {/* Cursor-style Circular Update Button */}
+        {/* Circular update button */}
         <UpdateCircularButton
           onToggleDetails={() => setShowUpdateDetails((prev) => !prev)}
           isDetailsOpen={showUpdateDetails}
@@ -105,16 +107,24 @@ export interface SidebarContextMenuProps {
 }
 
 export const SidebarContextMenu: React.FC<SidebarContextMenuProps> = ({ contextMenu, onClose }) => {
-  if (!contextMenu) return null;
+  const [heldMenu, setHeldMenu] = useState<ContextMenuState | null>(null);
+  const menuPresence = usePresence(Boolean(contextMenu));
+
+  useEffect(() => {
+    if (contextMenu) setHeldMenu(contextMenu);
+  }, [contextMenu]);
+
+  if (!menuPresence.mounted || !heldMenu) return null;
 
   const menuWidth = 220;
   const menuEstimatedHeight = 280;
-  const x = Math.min(Math.max(contextMenu.x, 8), window.innerWidth - menuWidth - 8);
-  const y = Math.min(Math.max(contextMenu.y, 8), window.innerHeight - menuEstimatedHeight - 8);
+  const x = Math.min(Math.max(heldMenu.x, 8), window.innerWidth - menuWidth - 8);
+  const y = Math.min(Math.max(heldMenu.y, 8), window.innerHeight - menuEstimatedHeight - 8);
+  const menuMotion = motionSurfaceClass(menuPresence.phase, 'popover');
 
   const menuElement = (
     <div
-      className="ui-menu scroll-quiet"
+      className={`ui-menu scroll-quiet${menuMotion ? ` ${menuMotion}` : ''}`}
       role="menu"
       style={
         {
@@ -126,19 +136,19 @@ export const SidebarContextMenu: React.FC<SidebarContextMenuProps> = ({ contextM
         } as React.CSSProperties
       }
     >
-      {contextMenu.header && (
+      {heldMenu.header && (
         <>
           <div className="ui-menu__header" role="presentation">
-            <span className="ui-menu__title">{contextMenu.header.title}</span>
-            {contextMenu.header.subtitle && (
-              <span className="ui-menu__subtitle">{contextMenu.header.subtitle}</span>
+            <span className="ui-menu__title">{heldMenu.header.title}</span>
+            {heldMenu.header.subtitle && (
+              <span className="ui-menu__subtitle">{heldMenu.header.subtitle}</span>
             )}
           </div>
           <div aria-hidden="true" className="ui-menu__rule" />
         </>
       )}
 
-      {contextMenu.sections.map((section, secIdx) => (
+      {heldMenu.sections.map((section, secIdx) => (
         <React.Fragment key={secIdx}>
           {secIdx > 0 && <div aria-hidden="true" className="ui-menu__rule" />}
           {section.map((item) => (

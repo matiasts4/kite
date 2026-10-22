@@ -1,0 +1,491 @@
+.motion-lab {
+  height: 100%;
+  overflow: auto;
+  background: var(--background, #0a0a0a);
+  color: var(--text-primary, #fafafa);
+}
+
+.motion-lab__inner {
+  width: min(1080px, 100%);
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.motion-lab__header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.motion-lab__header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.motion-lab__header p {
+  margin: 0;
+  color: var(--text-secondary, #a1a1a1);
+  font-size: 13px;
+}
+
+.motion-lab__section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.motion-lab__section h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.motion-lab__note {
+  margin: 0;
+  color: var(--text-secondary, #a1a1a1);
+  font-size: 12px;
+}
+
+.motion-lab__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.motion-lab__button {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-chip, 6px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary, #fafafa);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.motion-lab__button:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+}
+
+.motion-lab__stage {
+  position: relative;
+  min-height: 220px;
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-card, 10px);
+  background: var(--pane, #141414);
+  overflow: hidden;
+}
+
+.motion-lab__badge {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.motion-lab__popover {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  width: 280px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--menu-glass, #161618);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+.motion-lab__popover strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.motion-lab__popover p {
+  margin: 0;
+  color: var(--text-secondary, #a1a1a1);
+  font-size: 12px;
+}
+
+.motion-lab__dock-stage {
+  display: flex;
+  min-height: 200px;
+}
+
+.motion-lab__dock-main {
+  flex: 1;
+  padding: 16px;
+  color: var(--text-secondary, #a1a1a1);
+  font-size: 13px;
+}
+
+.motion-lab__dock {
+  width: 240px;
+  flex: none;
+  border-left: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  padding: 14px;
+}
+
+.motion-lab__left-rail {
+  width: 200px;
+  flex: none;
+  border-right: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  padding: 14px;
+  font-size: 13px;
+  color: var(--text-secondary, #a1a1a1);
+}
+
+.motion-lab__menu {
+  position: absolute;
+  left: 120px;
+  top: 48px;
+  width: 180px;
+  border-radius: var(--radius-panel, 14px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--block-fill, rgba(20, 20, 20, 0.96));
+  padding: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.motion-lab__menu-row {
+  padding: 8px 10px;
+  border-radius: var(--radius-row, 7px);
+  font-size: 13px;
+}
+
+.motion-lab__menu-row:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+}
+
+/* --- Diffs (preview before diffs.css) --- */
+@keyframes motion-lab-diff-file-fade {
+  from {
+    opacity: 0.35;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-lab-diff-card-expand {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-lab-diffs-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-lab-diffs-pop-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97) translateY(-3px);
+  }
+}
+
+.motion-lab__diff-file-fade {
+  animation: motion-lab-diff-file-fade var(--motion-exit, 140ms) var(--motion-ease) both;
+}
+
+.motion-lab__diff-card-expand {
+  animation: motion-lab-diff-card-expand var(--motion-enter, 180ms) var(--motion-ease) both;
+  transform-origin: top center;
+}
+
+.motion-lab__diffs-pop-in {
+  animation: motion-lab-diffs-pop-in var(--motion-enter, 180ms) var(--motion-ease) both;
+  transform-origin: top right;
+}
+
+.motion-lab__diffs-pop-out {
+  animation: motion-lab-diffs-pop-out var(--motion-exit, 140ms) var(--motion-ease) both;
+  transform-origin: top right;
+}
+
+.motion-lab__diffs-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 280px;
+  padding: 12px;
+}
+
+.motion-lab__diffs-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.motion-lab__diffs-folder,
+.motion-lab__diffs-pill {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius-chip, 6px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+}
+
+.motion-lab__diffs-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+.motion-lab__diff-card {
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-card, 10px);
+  overflow: hidden;
+  align-self: start;
+}
+
+.motion-lab__diff-card-head {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.motion-lab__diff-stats {
+  color: var(--text-secondary, #a1a1a1);
+  font-size: 11px;
+}
+
+.motion-lab__diff-card-body {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-secondary, #a1a1a1);
+}
+
+.motion-lab__diff-card-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.motion-lab__diff-focused {
+  padding: 12px;
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-card, 10px);
+  font-size: 12px;
+}
+
+.motion-lab__diffs-menu-anchor {
+  position: relative;
+  min-height: 8px;
+}
+
+.motion-lab__diffs-menu-prod {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  min-width: 200px;
+}
+
+/* --- Tasks preview --- */
+.motion-lab__tasks-board {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  min-height: 160px;
+}
+
+.motion-lab__tasks-col {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+  border-radius: var(--radius-card, 10px);
+  border: 1px dashed var(--block-stroke, rgba(255, 255, 255, 0.15));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary, #a1a1a1);
+}
+
+.motion-lab__task-card {
+  padding: 8px 10px;
+  border-radius: var(--radius-row, 7px);
+  background: var(--block-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #fafafa);
+  font-size: 12px;
+}
+
+/* --- Modals preview --- */
+.motion-lab__modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.motion-lab__modal-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.motion-lab__modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(400px, 100%);
+  padding: 20px;
+  border-radius: var(--radius-panel, 14px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--pane, #141414);
+}
+
+.motion-lab__modal-panel h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.motion-lab__modal-panel p {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-secondary, #a1a1a1);
+}
+
+html[data-motion='reduce'] .motion-lab__diff-file-fade,
+html[data-motion='reduce'] .motion-lab__diff-card-expand,
+html[data-motion='reduce'] .motion-lab__diffs-pop-in,
+html[data-motion='reduce'] .motion-lab__diffs-pop-out {
+  animation: none !important;
+}
+
+.motion-lab__transcript {
+  height: 280px;
+  overflow: auto;
+  padding: 8px 0 16px;
+}
+
+.motion-lab__column {
+  width: min(880px, 100%);
+  margin: 0 auto;
+  padding: 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.motion-lab__user,
+.motion-lab__assistant,
+.motion-lab__action,
+.motion-lab__approval {
+  border-radius: var(--radius-card, 10px);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.motion-lab__user {
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06));
+}
+
+.motion-lab__assistant {
+  color: var(--text-primary, #fafafa);
+}
+
+.motion-lab__action,
+.motion-lab__approval {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+}
+
+.motion-lab__approval {
+  border-color: color-mix(in srgb, var(--warning, #fbbf24) 45%, transparent);
+}
+
+.motion-lab__zed {
+  position: relative;
+  min-height: 320px;
+}
+
+.motion-lab__zed-orb {
+  position: absolute;
+  left: 22%;
+  top: 42%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.motion-lab__button[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--accent, #6366f1) 55%, transparent);
+  background: color-mix(in srgb, var(--accent, #6366f1) 18%, transparent);
+}
+
+.motion-lab__zed-state {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary, #a1a1a1);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.motion-lab__terminal .motion-row-in {
+  color: var(--text-primary, #fafafa);
+}
+
+.motion-lab__terminal {
+  position: absolute;
+  right: 24px;
+  top: 36px;
+  width: min(340px, 46%);
+  min-height: 180px;
+  border-radius: var(--radius-card, 10px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--terminal-canvas, #0c0c0e);
+  padding: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--text-secondary, #a1a1a1);
+}
+
+.motion-lab__switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary, #a1a1a1);
+}

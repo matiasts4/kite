@@ -11,7 +11,7 @@ type BombPhase = 'idle' | 'running' | 'danger' | 'exploded';
 
 const PRESET_MINUTES = [5, 10, 15, 25];
 
-// --- 7-Segment LED Geometry (from official bundle specifications) ---
+// --- 7-segment LED geometry ---
 const SEG_G = 7;
 const SEG_AE = 32;
 const SEG_K = 58;

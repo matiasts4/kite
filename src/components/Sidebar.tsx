@@ -25,6 +25,8 @@ import {
   NetworkIcon,
 } from './sidebar/sidebarIcons';
 import { invokeCommand } from '../lib/ipc';
+import { usePresence } from '../motion/usePresence';
+import { motionSurfaceClass } from '../motion/surface';
 
 // ---------------------------------------------------------------------------
 // Main Sidebar Component
@@ -32,6 +34,7 @@ import { invokeCommand } from '../lib/ipc';
 
 export const Sidebar: React.FC<SidebarProps> = ({
   hidden = false,
+  onRailPresenceChange,
   mode,
   workspaces,
   agents,
@@ -84,6 +87,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [probedAvailability, setProbedAvailability] = useState<SidebarProps['availability']>();
   const [railActivity, setRailActivity] = useState<NonNullable<SidebarProps['agentActivity']>>({});
   const addBtnRef = useRef<HTMLButtonElement | null>(null);
+  const railPresence = usePresence(!hidden);
+
+  useEffect(() => {
+    onRailPresenceChange?.(railPresence.mounted);
+  }, [railPresence.mounted, onRailPresenceChange]);
 
   // Listen for agent creation events
   useEffect(() => {
@@ -297,12 +305,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
+  if (!railPresence.mounted) return null;
+
+  const railMotion = motionSurfaceClass(railPresence.phase, 'panel-left');
+
   return (
     <aside
-      className="sidebar"
+      className={`sidebar${railMotion ? ` ${railMotion}` : ''}`}
       data-testid="sidebar"
-      hidden={hidden}
-      style={hidden ? { display: 'none' } : { width: 'var(--sidebar-width, 232px)' }}
+      style={{ width: 'var(--sidebar-width, 232px)' }}
     >
       {/* Primary Rail Section */}
       <section aria-labelledby="rail-heading" className="sidebar__primary">

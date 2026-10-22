@@ -1,0 +1,5 @@
+fix: Pedir qué hay en una terminal ahora la narra, y si está vacía dice que no hay nada, en lugar de inyectar un comando.
+fix: Después de una orden, un toque en Zed vuelve a abrir el micrófono y la siguiente instrucción no se pierde.
+fix: Si el micrófono está ocupado, Zed suelta su propia captura y lo explica en español.
+fix: El volumen de las otras apps vuelve al cerrar o minimizar Zed, si la escucha falla, y al salir de Kite.
+change: La transcripción ya no depende de una clave escrita en el programa; si falta la de Cloudflare o Grok, Ajustes lo dice.

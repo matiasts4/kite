@@ -4,6 +4,7 @@ import { DiffsView } from './DiffsView';
 import { DiffCodeViewer } from './DiffCodeViewer';
 import type { WorkspaceChanges } from '../files/gitTypes';
 import type { DiffData } from '../chat/types';
+import { MOTION_EXIT_MS } from '../../../motion/contract';
 
 // Mock git service
 const mockChanges: WorkspaceChanges = {
@@ -190,9 +191,14 @@ describe('DiffsView Component Tests', () => {
       expect(row.querySelector('.ui-menu__row-title')).toBeInTheDocument();
     });
 
-    // Test Escape to close
+    vi.useFakeTimers();
     fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('menu', { name: /diff display options/i })).toHaveClass('diffs-pop-out');
+    act(() => {
+      vi.advanceTimersByTime(MOTION_EXIT_MS);
+    });
     expect(screen.queryByRole('menu', { name: /diff display options/i })).not.toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it('renders workspace folder picker and switches workspaces on click', () => {

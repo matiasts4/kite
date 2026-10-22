@@ -461,7 +461,7 @@ pub fn fetch_antigravity_quota() -> ProviderQuotaStatus {
         error: None,
     };
 
-    // 1. Primary Strategy: Antigravity CLI print-mode slash command (matching DevHub/Orca)
+    // 1. Primary strategy: Antigravity CLI print-mode slash command
     // Runs `agy -p /usage --output-format json --print-timeout 12s`
     //
     // The probe runs inside a *hidden* console (`crate::hidden_exec`). `agy`

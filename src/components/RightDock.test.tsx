@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { RightDock } from './RightDock';
+import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../lib/terminalLinkNav';
 
 // Mock sub-views to avoid canvas / native / network dependencies in jsdom
 vi.mock('./views/BrowserView', () => ({
@@ -177,6 +178,26 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     // Press Escape to close menu
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('menu', { name: 'New tab' })).toBeNull();
+  });
+
+  it('opens and switches to Browser tab when OPEN_RIGHT_DOCK_BROWSER_EVENT is fired', () => {
+    render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+      />
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_RIGHT_DOCK_BROWSER_EVENT, {
+          detail: { url: 'https://example.com' },
+        })
+      );
+    });
+
+    expect(screen.getByTestId('mock-browser-view')).toBeInTheDocument();
   });
 });
 

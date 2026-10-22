@@ -1,9 +1,11 @@
 @import "./boot.css";
 @import "./bundle.css";
 @import "./chunks.css";
+@import "./motion/motion.css";
+@import "./motion/appIntro.css";
 
 
-/* Root Theme Presets Matching Production Bundle */
+/* Root theme presets */
 :root {
   --sidebar-width: 232px;
   color-scheme: dark;
@@ -109,7 +111,7 @@ html, body, #root {
   font-family: var(--font-sans, "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif);
 }
 
-/* Custom scrollbars matching bundle density */
+/* Custom scrollbars */
 * {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
@@ -271,7 +273,7 @@ html, body, #root {
 }
 
 /* ==========================================================================
-   RightDock & UI Menu Authentic Styling (DevHub Parity)
+   Right dock and menu styling
    ========================================================================== */
 
 .ui-menu.side-panel-add-menu {

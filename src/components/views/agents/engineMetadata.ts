@@ -97,6 +97,27 @@ export const ENGINE_METADATA: Record<string, EngineMeta> = {
     logoVariant: { file: 'agent-antigravity' },
     supportsChat: true,
   },
+  'gentle-shell': {
+    displayName: 'Gentle Shell',
+    vendor: 'Gentle AI',
+    installHint: 'npm install -g gentle-pi',
+    logoVariant: { file: 'agent-gentle-shell' },
+    supportsChat: false,
+  },
+  gentle: {
+    displayName: 'Gentle Shell',
+    vendor: 'Gentle AI',
+    installHint: 'npm install -g gentle-pi',
+    logoVariant: { file: 'agent-gentle-shell' },
+    supportsChat: false,
+  },
+  gentleshell: {
+    displayName: 'Gentle Shell',
+    vendor: 'Gentle AI',
+    installHint: 'npm install -g gentle-pi',
+    logoVariant: { file: 'agent-gentle-shell' },
+    supportsChat: false,
+  },
   aider: {
     displayName: 'Aider',
     vendor: 'Aider',
@@ -175,6 +196,7 @@ export const TEAMMATE_ENGINE_IDS = [
   'kimi',
   'amp',
   'antigravity',
+  'gentle-shell',
   'qoder',
   'aider',
   'muse',
@@ -188,6 +210,9 @@ export function normalizeEngineKey(engine?: string | null): string {
     copilot: 'github-copilot',
     opencode: 'open-code',
     deepseek: 'deep-seek',
+    gentle: 'gentle-shell',
+    gentleshell: 'gentle-shell',
+    'gentle-pi': 'gentle-shell',
   };
   return aliasMap[raw] || raw;
 }

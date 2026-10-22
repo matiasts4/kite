@@ -11,12 +11,12 @@ import { planTurnHeuristic } from './planner/heuristic';
 import { planTurnLLM } from './planner/llm';
 import { executePlan, composeReplyFromReceipts } from './executor';
 import { ttsNarrator } from './ttsNarrator';
-import { loadOperatorConfig, type OperatorProviderConfig } from './operatorConfig';
+import { loadOperatorConfig } from './operatorConfig';
 import { getActiveAgentTerminals } from '../terminalRegistry';
 import type { PlannerProvider } from './providers/types';
-import { LocalPlannerProvider } from './providers/local';
-import { OpenAiCompatPlannerProvider } from './providers/openaiCompat';
-import { CliPlannerProvider } from './providers/cli';
+import { resolvePlannerProvider } from './providers/resolvePlanner';
+
+export { resolvePlannerProvider } from './providers/resolvePlanner';
 
 export * from './contract';
 export * from './trace/types';
@@ -54,67 +54,6 @@ export interface OperatorTurnResult {
   providerId?: string;
   model?: string;
   fallbackReason?: string;
-}
-
-export function resolvePlannerProvider(config: OperatorProviderConfig): PlannerProvider {
-  if (config.activeProvider === 'local') {
-    return new LocalPlannerProvider();
-  }
-  if (config.activeProvider === 'opencode') {
-    return new OpenAiCompatPlannerProvider({
-      id: 'opencode',
-      baseUrl: config.opencodeBaseUrl || 'https://opencode.ai/inference/v1',
-      apiKey: config.opencodeApiKey || '',
-      model: config.opencodeModel || 'deepseek-v4.1-flash',
-    });
-  }
-  if (config.activeProvider === 'vercel') {
-    return new OpenAiCompatPlannerProvider({
-      id: 'vercel',
-      baseUrl: config.vercelBaseUrl || 'https://ai-gateway.vercel.app/v1',
-      apiKey: config.vercelApiKey || '',
-      model: config.vercelModel || 'deepseek/deepseek-chat',
-    });
-  }
-  if (config.activeProvider === 'cloudflare') {
-    let cfBase = config.cloudflareBaseUrl || 'https://api.cloudflare.com/client/v4/accounts';
-    const accountId = (config.cloudflareAccountId || '').trim();
-    const gatewaySlug = (config.cloudflareGatewaySlug || '').trim();
-
-    if (gatewaySlug && accountId) {
-      cfBase = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewaySlug}/workers-ai`;
-    } else if (accountId && !cfBase.includes(accountId)) {
-      cfBase = `${cfBase.replace(/\/+$/, '')}/${accountId}/ai/v1`;
-    }
-
-    return new OpenAiCompatPlannerProvider({
-      id: 'cloudflare',
-      baseUrl: cfBase,
-      apiKey: config.cloudflareApiToken || '',
-      model: config.cloudflareModel || '@cf/meta/llama-3.1-8b-instruct-fp8',
-    });
-  }
-  if (config.activeProvider === 'grok') {
-    if (config.grokApiKey && !config.grokUseCliSubscription) {
-      return new OpenAiCompatPlannerProvider({
-        id: 'grok',
-        baseUrl: config.grokBaseUrl || 'https://api.x.ai/v1',
-        apiKey: config.grokApiKey,
-        model: config.grokModel || 'grok-3-mini-fast',
-      });
-    }
-    return new CliPlannerProvider({
-      engine: 'grok',
-      model: config.grokModel,
-    });
-  }
-  if (config.activeProvider === 'antigravity') {
-    return new CliPlannerProvider({
-      engine: 'antigravity',
-      model: config.antigravityModel,
-    });
-  }
-  return new LocalPlannerProvider();
 }
 
 export function captureCurrentTurnContext(mode?: string, workspaceId?: string | null): TurnContext {
@@ -162,12 +101,32 @@ export async function runOperatorTurn(
     // 1. Plan turn with Fast-Path Heuristic (< 2ms)
     // If the heuristic detects deterministic action intent, execute immediately without 3-4s cloud delay
     let plan: OperatorPlan;
-    const fastPlan = planTurnHeuristic(input);
+    let fastPlan = planTurnHeuristic(input);
     const hasDeterministicActions =
       fastPlan.strategy === 'heuristic' &&
       fastPlan.actions.length > 0;
 
-    if (provider.id === 'local' || hasDeterministicActions) {
+    // Avoid LLM mis-plans (p. ej. abrir Grok) cuando claramente pidieron narrar/resumir.
+    if (
+      !hasDeterministicActions &&
+      /resum(?:e|ir|en|o|a|i)\b|resumen\b|\bnarr(?:a|ame|ar)\b|com[eé]ntame|cu[eé]ntame|qu[eé]\s+hay|qu[eé]\s+hab[ií]a/i.test(
+        input
+      ) &&
+      !/(?:abre|abrir|lanza|crea|inicia|pon|spawn)\s+(?:\d+|un|una|uno|dos|tres|\w+\s+)?(?:terminal|terminales|agente|agentes)\b/i.test(
+        input.toLowerCase()
+      )
+    ) {
+      fastPlan = {
+        strategy: 'heuristic',
+        actions: [{ type: 'narrate_summary', target: 'active' }],
+        reply: 'Leyendo resumen de la terminal abierta.',
+      };
+    }
+
+    const useFastPlan =
+      fastPlan.strategy === 'heuristic' && fastPlan.actions.length > 0;
+
+    if (provider.id === 'local' || useFastPlan) {
       plan = fastPlan;
       emitTrace({
         turnId,

@@ -1,0 +1,243 @@
+:root {
+  --motion-enter: 180ms;
+  --motion-exit: 140ms;
+  --motion-ease: var(--ease-snappy, cubic-bezier(0.16, 1, 0.3, 1));
+  --chat-column-agent: 880px;
+}
+
+@keyframes quota-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-popover-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes motion-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-panel-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+@keyframes motion-panel-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-panel-out-left {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+}
+
+@keyframes motion-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes motion-scrim-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes motion-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-modal-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+@keyframes motion-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-terminal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-orb-ack {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 0.7;
+    transform: translateY(-3px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.motion-popover-in {
+  animation: quota-popover-in var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-popover-out {
+  animation: motion-popover-out var(--motion-exit) var(--motion-ease) both;
+}
+
+.motion-panel-in {
+  animation: motion-panel-in var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-panel-out {
+  animation: motion-panel-out var(--motion-exit) var(--motion-ease) both;
+}
+
+.motion-panel-in-left {
+  animation: motion-panel-in-left var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-panel-out-left {
+  animation: motion-panel-out-left var(--motion-exit) var(--motion-ease) both;
+}
+
+.motion-scrim-in {
+  animation: motion-scrim-in var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-scrim-out {
+  animation: motion-scrim-out var(--motion-exit) var(--motion-ease) both;
+}
+
+.motion-modal-in {
+  animation: motion-modal-in var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-modal-out {
+  animation: motion-modal-out var(--motion-exit) var(--motion-ease) both;
+}
+
+.motion-row-in {
+  animation: motion-row-in var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-terminal-in {
+  animation: motion-terminal-in var(--motion-enter) var(--motion-ease) both;
+}
+
+.motion-orb-ack {
+  animation: motion-orb-ack var(--motion-enter) var(--motion-ease);
+}
+
+.agent-chat-surface {
+  --chat-column: var(--chat-column-agent);
+}
+
+.agent-chat-surface .chat-transcript__column {
+  width: min(var(--chat-column-agent), 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-popover-in,
+  .motion-popover-out,
+  .motion-panel-in,
+  .motion-panel-out,
+  .motion-panel-in-left,
+  .motion-panel-out-left,
+  .motion-scrim-in,
+  .motion-scrim-out,
+  .motion-modal-in,
+  .motion-modal-out,
+  .motion-row-in,
+  .motion-terminal-in,
+  .motion-orb-ack {
+    animation: none !important;
+  }
+}
+
+html[data-motion='reduce'] .motion-popover-in,
+html[data-motion='reduce'] .motion-popover-out,
+html[data-motion='reduce'] .motion-panel-in,
+html[data-motion='reduce'] .motion-panel-out,
+html[data-motion='reduce'] .motion-panel-in-left,
+html[data-motion='reduce'] .motion-panel-out-left,
+html[data-motion='reduce'] .motion-scrim-in,
+html[data-motion='reduce'] .motion-scrim-out,
+html[data-motion='reduce'] .motion-modal-in,
+html[data-motion='reduce'] .motion-modal-out,
+html[data-motion='reduce'] .motion-row-in,
+html[data-motion='reduce'] .motion-terminal-in,
+html[data-motion='reduce'] .motion-orb-ack {
+  animation: none !important;
+}

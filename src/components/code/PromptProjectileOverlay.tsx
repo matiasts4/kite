@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { prefersReducedMotion } from '../../motion/contract';
 import './promptProjectile.css';
 
 export interface PromptProjectileDetail {
@@ -35,17 +36,6 @@ export function computeInjectionPoint(
   };
 }
 
-export function slipEngineLabel(engine?: string): string {
-  const trimmed = engine?.trim();
-  return trimmed ? trimmed : 'Prompt';
-}
-
-export function slipPromptPreview(prompt: string, maxLen = 42): string {
-  const line = prompt.split('\n')[0]?.trim() ?? '';
-  if (line.length <= maxLen) return line;
-  return `${line.slice(0, maxLen - 1)}…`;
-}
-
 export function dispatchTerminalStagedPrompt(detail: PromptProjectileDetail): void {
   window.dispatchEvent(
     new CustomEvent('kite:terminal-staged-prompt', {
@@ -60,11 +50,6 @@ export function dispatchTerminalStagedPrompt(detail: PromptProjectileDetail): vo
   );
 }
 
-function prefersReducedMotion(): boolean {
-  if (typeof window === 'undefined' || !window.matchMedia) return false;
-  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-}
-
 function centerOf(el: Element): { x: number; y: number } {
   const rect = el.getBoundingClientRect();
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
@@ -77,7 +62,8 @@ export function resolveSourcePosition(detail: PromptProjectileDetail): { startX:
   if (detail.sourcePaneId) {
     const paneEl = document.querySelector(`[data-leaf-id="${detail.sourcePaneId}"]`);
     if (paneEl) {
-      return centerOf(paneEl);
+      const c = centerOf(paneEl);
+      return { startX: c.x, startY: c.y };
     }
   }
 
@@ -86,7 +72,8 @@ export function resolveSourcePosition(detail: PromptProjectileDetail): { startX:
       document.querySelector(`[data-session-id="${detail.sourceSessionId}"]`) ||
       document.querySelector(`[data-leaf-session="${detail.sourceSessionId}"]`);
     if (sessionEl) {
-      return centerOf(sessionEl);
+      const c = centerOf(sessionEl);
+      return { startX: c.x, startY: c.y };
     }
   }
 
@@ -96,7 +83,8 @@ export function resolveSourcePosition(detail: PromptProjectileDetail): { startX:
     document.querySelector('.zed-orb');
 
   if (orbEl) {
-    return centerOf(orbEl);
+    const c = centerOf(orbEl);
+    return { startX: c.x, startY: c.y };
   }
 
   return { startX, startY };
@@ -133,10 +121,15 @@ export function resolveTargetPosition(detail: PromptProjectileDetail): { targetX
   return { targetX, targetY };
 }
 
+const TRAIL_LENGTH = 18;
+
 interface FlightUi {
   id: string;
-  engineLabel: string;
-  preview: string;
+}
+
+interface TrailPoint {
+  x: number;
+  y: number;
 }
 
 interface ActiveFlight {
@@ -148,6 +141,45 @@ interface ActiveFlight {
   targetY: number;
   startTime: number;
   el: HTMLElement | null;
+  samples: TrailPoint[];
+}
+
+function trailColor(): string {
+  if (typeof document === 'undefined') return '#8eb6ff';
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+  return raw || '#8eb6ff';
+}
+
+function paintTrail(canvas: HTMLCanvasElement | null, flights: Iterable<ActiveFlight>): void {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = trailColor();
+  for (const flight of flights) {
+    const points = flight.samples;
+    for (let i = 1; i < points.length; i += 1) {
+      const fade = i / (points.length - 1);
+      ctx.globalAlpha = fade * 0.85;
+      ctx.lineWidth = 1 + fade * 1.6;
+      ctx.beginPath();
+      ctx.moveTo(points[i - 1].x, points[i - 1].y);
+      ctx.lineTo(points[i].x, points[i].y);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
 }
 
 interface ArrivalRing {
@@ -161,6 +193,7 @@ export const PromptProjectileOverlay: React.FC = () => {
   const [rings, setRings] = useState<ArrivalRing[]>([]);
 
   const flightsRef = useRef<Map<string, ActiveFlight>>(new Map());
+  const trailRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const loopActiveRef = useRef(false);
 
@@ -190,6 +223,7 @@ export const PromptProjectileOverlay: React.FC = () => {
     const tick = () => {
       const now = Date.now();
       let hasActive = false;
+      const finished: ActiveFlight[] = [];
 
       for (const flight of flightsRef.current.values()) {
         if (!flight.el) {
@@ -207,14 +241,16 @@ export const PromptProjectileOverlay: React.FC = () => {
           rawT
         );
 
-        if (done) {
-          flight.el.style.transform = `translate3d(${flight.targetX}px, ${flight.targetY}px, 0) translate(-50%, -50%)`;
-          completeFlight(flight);
-        } else {
-          flight.el.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
-          hasActive = true;
-        }
+        flight.samples.push({ x: done ? flight.targetX : x, y: done ? flight.targetY : y });
+        if (flight.samples.length > TRAIL_LENGTH) flight.samples.shift();
+        flight.el.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+
+        if (done) finished.push(flight);
+        else hasActive = true;
       }
+
+      paintTrail(trailRef.current, flightsRef.current.values());
+      for (const flight of finished) completeFlight(flight);
 
       if (hasActive && flightsRef.current.size > 0) {
         rafRef.current = requestAnimationFrame(tick);
@@ -247,16 +283,10 @@ export const PromptProjectileOverlay: React.FC = () => {
         targetY,
         startTime: Date.now(),
         el: null,
+        samples: [],
       });
 
-      setFlights((prev) => [
-        ...prev,
-        {
-          id,
-          engineLabel: slipEngineLabel(detail.engine),
-          preview: slipPromptPreview(detail.prompt),
-        },
-      ]);
+      setFlights((prev) => [...prev, { id }]);
 
       runLoop();
     },
@@ -300,15 +330,13 @@ export const PromptProjectileOverlay: React.FC = () => {
 
   return (
     <div className="prompt-projectile-overlay" aria-hidden="true">
+      <canvas ref={trailRef} className="prompt-injection-trail" />
       {flights.map((flight) => (
         <div
           key={flight.id}
           ref={attachSlipRef(flight.id)}
-          className="prompt-injection-slip"
-        >
-          <span className="prompt-injection-slip__engine">{flight.engineLabel}</span>
-          <span className="prompt-injection-slip__preview">{flight.preview}</span>
-        </div>
+          className="prompt-injection-dot"
+        />
       ))}
 
       {rings.map((ring) => (

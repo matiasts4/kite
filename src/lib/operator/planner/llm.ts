@@ -1,5 +1,6 @@
 // Kite Code — LLM Turn Planner
-// Validates model output with Zod, handles 1 correction retry, detects echo, and falls back gracefully with explicit reasons.
+// Validates model output with Zod, handles 1 correction retry, detects echo, supports native tool calls,
+// emits durable run ledger events, and falls back gracefully with explicit reasons.
 
 import { buildOperatorSystemPrompt } from './prompt';
 import { planTurnHeuristic } from './heuristic';
@@ -7,6 +8,7 @@ import { detectPromptEcho, isPredominantlyEnglish, sanitizeReply } from './sanit
 import { ActionSchema, type OperatorPlan, type TurnContext, type OperatorContractAction } from '../contract';
 import type { PlannerProvider, ProviderMessage } from '../providers/types';
 import { emitTrace } from '../trace/trace';
+import { runLedger } from '../runLedger';
 
 function extractJsonFromModelOutput(raw: string): any {
   if (!raw || !raw.trim()) return null;
@@ -81,7 +83,6 @@ function parseAndValidateModelPlan(
   for (const act of rawActions) {
     const validated = ActionSchema.parse(act);
     // Defense-in-depth safety guardrail:
-    // If the model emits close_terminals without the user asking to close/kill, discard it
     if (validated.type === 'close_terminals' && !hasCloseVerb) {
       console.warn(
         `[Operator Safety] Acción destructiva 'close_terminals' bloqueada: el prompt ("${userInput}") no contiene verbos explícitos de cierre.`
@@ -113,6 +114,10 @@ export async function planTurnLLM(
   turnId?: string
 ): Promise<OperatorPlan> {
   const currentTurnId = turnId || `turn-${Date.now()}`;
+  if (!runLedger.getRun(currentTurnId)) {
+    runLedger.startRun(input, { runId: currentTurnId, taskType: 'llm_plan' });
+  }
+
   const systemPrompt = buildOperatorSystemPrompt(context);
 
   const messages: ProviderMessage[] = [
@@ -125,11 +130,73 @@ export async function planTurnLLM(
   let modelName = 'unknown';
 
   try {
-    // Attempt 1: primary call
-    const res = await provider.plan(messages);
+    console.info(`[Zed] Planificando con ${provider.id}…`);
+    runLedger.recordProviderRequest(currentTurnId, {
+      provider: provider.id,
+      model: modelName,
+      reasoningSetting: 'low',
+    });
+
+    // Attempt 1: primary call with streaming & native tool-call listening
+    let firstTokenSeen = false;
+    const res = await provider.plan(messages, {
+      stream: true,
+      reasoning: 'low',
+      onFirstToken: (ts) => {
+        if (!firstTokenSeen) {
+          firstTokenSeen = true;
+          runLedger.recordFirstToken(currentTurnId, ts);
+        }
+      },
+      onToolCall: (tc) => {
+        runLedger.recordToolEmission(currentTurnId, {
+          name: tc.name,
+          arguments: tc.arguments,
+        });
+      },
+    });
+
     rawOutput = res.rawText;
     latencyMs = res.latencyMs;
-    modelName = res.model;
+    modelName = res.model || 'unknown';
+
+    runLedger.recordProviderResponse(currentTurnId, {
+      latencyMs,
+      tokenCounts: res.tokenCounts,
+      rawText: rawOutput,
+    });
+
+    // If native tool calls were returned, validate and construct plan directly
+    if (res.toolCalls && res.toolCalls.length > 0) {
+      const validatedActions: OperatorContractAction[] = [];
+      for (const tc of res.toolCalls) {
+        const candidate = {
+          type: tc.name,
+          ...(typeof tc.arguments === 'object' && tc.arguments !== null ? tc.arguments : {}),
+        };
+        const validated = ActionSchema.parse(candidate);
+        validatedActions.push(validated);
+      }
+
+      const plan: OperatorPlan = {
+        strategy: 'llm',
+        actions: validatedActions,
+        reply: sanitizeReply(res.rawText || 'Acción planificada con éxito.'),
+      };
+
+      emitTrace({
+        turnId: currentTurnId,
+        ev: 'plan.created',
+        strategy: 'llm',
+        provider: provider.id,
+        model: modelName,
+        latencyMs,
+        actions: validatedActions,
+        rawModelOutputTruncated: rawOutput.slice(0, 2000),
+      });
+
+      return plan;
+    }
 
     try {
       const validated = parseAndValidateModelPlan(rawOutput, systemPrompt, input);
@@ -144,6 +211,13 @@ export async function planTurnLLM(
         actions: validated.actions,
         rawModelOutputTruncated: rawOutput.slice(0, 2000),
       });
+
+      for (const act of validated.actions) {
+        runLedger.recordToolEmission(currentTurnId, {
+          name: act.type,
+          arguments: act as unknown as Record<string, unknown>,
+        });
+      }
 
       return validated.plan;
     } catch (parseErr: any) {
@@ -175,9 +249,31 @@ export async function planTurnLLM(
         rawModelOutputTruncated: rawOutput.slice(0, 2000),
       });
 
+      for (const act of retryValidated.actions) {
+        runLedger.recordToolEmission(currentTurnId, {
+          name: act.type,
+          arguments: act as unknown as Record<string, unknown>,
+        });
+      }
+
       return retryValidated.plan;
     }
   } catch (err: any) {
+    // Check if error was timeout or cancellation
+    const isTimeout = err?.errorCategory === 'timeout' || /timed out/i.test(err?.message || '');
+    const isCancellation = err?.name === 'AbortError' || /aborted/i.test(err?.message || '');
+
+    if (isTimeout) {
+      runLedger.recordTimeout(currentTurnId, {
+        errorCategory: 'gateway_timeout',
+        message: err.message,
+      });
+    } else if (isCancellation) {
+      runLedger.recordCancellation(currentTurnId, {
+        reason: err.message,
+      });
+    }
+
     // Graceful fallback to heuristic
     const fallbackReason = err?.message || 'Error invocando proveedor LLM';
     const heuristicPlan = planTurnHeuristic(input);

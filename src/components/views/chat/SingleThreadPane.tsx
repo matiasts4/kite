@@ -24,6 +24,7 @@ import { ChatComposer } from './ChatComposer';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
 import { ThreadInspector } from './ThreadInspector';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
+import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 
 export interface SingleThreadPaneProps {
   thread: ExtendedChatThread;
@@ -152,14 +153,11 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   }, []);
 
   const atLiveEdgeRef = useRef(true);
-
-  // Auto-scroll transcript on new items or streaming updates only when at live edge
-  useEffect(() => {
-    const scroller = transcriptRef.current;
-    if (scroller && atLiveEdgeRef.current) {
-      scroller.scrollTop = scroller.scrollHeight;
-    }
-  }, [thread.items.length, thread.items[thread.items.length - 1]?.text]);
+  const motionClassFor = useTranscriptMotion(
+    thread.id,
+    thread.items.map((item) => item.id),
+  );
+  useTranscriptLiveEdge(transcriptRef, thread.id, atLiveEdgeRef);
 
   const providerMeta = (PROVIDER_CATALOG as Record<string, any>)[thread.provider] || PROVIDER_CATALOG.claude;
   const models: ModelOption[] = providerMeta.isDynamic && dynamicModels.length > 0 ? dynamicModels : providerMeta.models;
@@ -210,14 +208,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
       onClick={onFocus}
       className={
         embedded
-          ? `code-thread-pane chat-surface chat-surface--thread${isMulti ? ' chat-surface--grid-pane' : ''}${
-              isFocused ? ' chat-surface--grid-focused' : ''
-            }`
+          ? `code-thread-pane chat-surface chat-surface--thread agent-chat-surface${
+              isMulti ? ' chat-surface--grid-pane' : ''
+            }${isFocused ? ' chat-surface--grid-focused' : ''}`
           : agentName
-          ? 'pane chat-surface chat-surface--thread min-h-0'
-          : `pane chat-surface chat-surface--thread${isMulti ? ' chat-surface--grid-pane' : ''}${
-              isFocused ? ' chat-surface--grid-focused' : ''
-            }`
+          ? 'pane chat-surface chat-surface--thread agent-chat-surface min-h-0'
+          : `pane chat-surface chat-surface--thread agent-chat-surface${
+              isMulti ? ' chat-surface--grid-pane' : ''
+            }${isFocused ? ' chat-surface--grid-focused' : ''}`
       }
     >
       {/* Thread Header — Thread mode only. Agent chats use the tab rail; embedded code panes use CodePaneHeader. */}
@@ -278,7 +276,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             )}
           </div>
 
-          {/* Trailing Controls faithful to zt in ChatPane-_DfdifWx.js */}
+          {/* Trailing controls */}
           <div className="chat-thread-header__trailing">
             {/* Informative model badge */}
             <span className="chat-thread-header__model">
@@ -414,9 +412,19 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
                     {displayedRows.map((row) =>
                       row.kind === 'work' ? (
-                        <ChatWorkGroup key={row.id} items={row.items} running={running} />
+                        <ChatWorkGroup
+                          key={row.id}
+                          items={row.items}
+                          running={running}
+                          motionClassFor={motionClassFor}
+                        />
                       ) : (
-                        <ChatItemRow key={row.item.id} item={row.item} threadId={thread.id} />
+                        <ChatItemRow
+                          key={row.item.id}
+                          item={row.item}
+                          threadId={thread.id}
+                          motionClass={motionClassFor(row.item.id)}
+                        />
                       )
                     )}
 
@@ -436,7 +444,11 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                             ? 'Generating response…'
                             : 'Thinking…';
                       return (
-                        <div className={`chat-working-row ${thread.pendingApproval ? 'chat-working-row--waiting' : ''}`}>
+                        <div
+                          className={`chat-working-row motion-row-in ${
+                            thread.pendingApproval ? 'chat-working-row--waiting' : ''
+                          }`}
+                        >
                           <span className="chat-working-row__dots">
                             <i />
                             <i />

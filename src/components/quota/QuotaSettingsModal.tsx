@@ -17,6 +17,8 @@ import {
 import { diagnoseProvider } from '../../lib/quota/providerState';
 import { saveOpenCodeCookie, clearOpenCodeCookie } from '../../lib/ipc';
 import { AccountSwitcherModal } from './AccountSwitcherModal';
+import { usePresence } from '../../motion/usePresence';
+import { motionSurfaceClass } from '../../motion/surface';
 
 export interface QuotaSettingsModalProps {
   isOpen: boolean;
@@ -190,7 +192,11 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
     });
   }, [searchFilter]);
 
-  if (!isOpen) return null;
+  const layerPresence = usePresence(isOpen);
+  if (!layerPresence.mounted) return null;
+
+  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
+  const panelMotion = motionSurfaceClass(layerPresence.phase, 'modal');
 
   const handleToggleMaster = () => {
     saveQuotaPreferences({ enabled: !prefs.enabled });
@@ -325,7 +331,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
 
   return createPortal(
     <div
-      className="usage-dash-portal-backdrop"
+      className={`usage-dash-portal-backdrop${scrimMotion ? ` ${scrimMotion}` : ''}`}
       role="presentation"
       onClick={onClose}
       style={{
@@ -345,6 +351,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
         aria-modal="true"
         aria-label="Configuración de Cuotas y Proveedores IA"
         onClick={(e) => e.stopPropagation()}
+        className={panelMotion || undefined}
         style={{
           width: '100%',
           maxWidth: '860px',
@@ -358,7 +365,6 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
-          animation: 'quota-popover-in 180ms cubic-bezier(0.16, 1, 0.3, 1)',
         }}
       >
         {/* Header */}

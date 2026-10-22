@@ -4,6 +4,11 @@ import { FitAddon } from '@xterm/addon-fit';
 import { invokeCommand } from '../../lib/ipc';
 import { recordTerminalOutput, markTerminalExited } from '../../lib/terminalRegistry';
 import { openFileInRightDock } from '../../lib/filePreviewNav';
+import {
+  extractTerminalLinks,
+  getTerminalWebLinksTarget,
+  openTerminalWebLink,
+} from '../../lib/terminalLinkNav';
 import './terminal.css';
 
 export interface TerminalViewProps {
@@ -538,9 +543,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       fitAddon.fit();
     } catch {}
 
-    // Register link provider for Ctrl + Left Click file preview in RightDock
-    const FILE_PATH_REGEX = /(?:file:\/\/[^\s"'`<>]+|[a-zA-Z]:[\\/][^\s"'`<>]+|(?:\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])[^\s"'`<>]+|[a-zA-Z0-9_.-]+\.(?:ts|tsx|js|jsx|json|md|mdx|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?)/gi;
-
+    // Register link provider for Ctrl + Left Click file preview and web URL navigation
     term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
         const buffer = term.buffer.active;
@@ -581,24 +584,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           return;
         }
 
+        const rawLinks = extractTerminalLinks(fullText);
+        if (rawLinks.length === 0) {
+          callback(undefined);
+          return;
+        }
+
         const links: any[] = [];
-        FILE_PATH_REGEX.lastIndex = 0;
-        let match: RegExpExecArray | null;
 
-        while ((match = FILE_PATH_REGEX.exec(fullText)) !== null) {
-          let text = match[0];
-          let matchStart = match.index;
-          let matchEnd = matchStart + text.length;
-
-          // Strip trailing punctuation while not a line number
-          while (text.length > 0 && /[,.;)>\]}]$/.test(text)) {
-            text = text.slice(0, -1);
-            matchEnd--;
-          }
-
-          if (text.length === 0) continue;
-
-          // Map matchStart and matchEnd character offsets to physical (x, y) coordinates
+        for (const item of rawLinks) {
           let startY = startLineIdx;
           let startX = 1;
           let endY = endLineIdx;
@@ -609,31 +603,40 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             const lineStart = lineOffsets[i];
             const lineEnd = i + 1 < lineOffsets.length ? lineOffsets[i + 1] : fullText.length;
 
-            if (matchStart >= lineStart && matchStart < lineEnd) {
+            if (item.start >= lineStart && item.start < lineEnd) {
               startY = y;
-              startX = matchStart - lineStart + 1;
+              startX = item.start - lineStart + 1;
             }
-            if (matchEnd > lineStart && matchEnd <= lineEnd) {
+            if (item.end > lineStart && item.end <= lineEnd) {
               endY = y;
-              endX = matchEnd - lineStart + 1;
+              endX = item.end - lineStart + 1;
             }
           }
 
           // Only report links that touch the requested buffer line
           if (lineIdx >= startY && lineIdx <= endY) {
+            const isWeb = item.kind === 'web';
             links.push({
               range: {
                 start: { x: startX, y: startY + 1 },
                 end: { x: endX, y: endY + 1 },
               },
-              text,
+              text: item.text,
               decorations: {
                 pointerCursor: true,
                 underline: true,
               },
               hover() {
                 if (term.element) {
-                  term.element.title = 'Ctrl + Click para previsualizar archivo';
+                  if (isWeb) {
+                    const target = getTerminalWebLinksTarget();
+                    term.element.title =
+                      target === 'external'
+                        ? 'Ctrl + Click para abrir en el navegador externo'
+                        : 'Ctrl + Click para abrir en el navegador integrado';
+                  } else {
+                    term.element.title = 'Ctrl + Click para previsualizar archivo';
+                  }
                 }
               },
               leave() {
@@ -642,15 +645,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 }
               },
               activate(event: MouseEvent, clickedText: string) {
-                // Unified behavior: Ctrl + Click izquierdo opens file preview in RightDock
+                // Unified behavior: Ctrl + Click izquierdo opens web link or file preview
                 if ((event.ctrlKey || event.metaKey) && event.button === 0) {
                   event.preventDefault();
-                  const candidateToOpen = (clickedText || text).trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
-                  openFileInRightDock({
-                    candidate: candidateToOpen,
-                    workspaceId: workspaceIdRef.current,
-                    collapseTree: true,
-                  });
+                  const candidate = (clickedText || item.text).trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
+                  if (isWeb) {
+                    openTerminalWebLink(candidate, workspaceIdRef.current);
+                  } else {
+                    openFileInRightDock({
+                      candidate,
+                      workspaceId: workspaceIdRef.current,
+                      collapseTree: true,
+                    });
+                  }
                 }
               },
             });
@@ -1288,6 +1295,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             title="Select Terminal Shell Engine"
           >
             <option value="powershell">PowerShell</option>
+            <option value="gentle-shell">Gentle Shell</option>
             <option value="antigravity">Antigravity (agy)</option>
             <option value="claude-code">Claude Code</option>
             <option value="codex">Codex</option>

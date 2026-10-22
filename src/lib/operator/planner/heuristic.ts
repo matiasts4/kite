@@ -162,9 +162,31 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
     return { kind: 'SUMMARIZE_AND_SPEAK', target: matchedCodename || rawTarget };
   }
 
+  const agentSaidMatch = text.match(
+    /(?:qu[eé]\s+di(?:jo|ce)|resume\s+(?:qu[eé]|lo que)\s+dijo|resum(?:e|ir|o|a|en)\s+(?:qu[eé]|lo que)\s+dijo)\s+(?:el\s+agente\s+|la\s+terminal\s+(?:de\s+)?)?([a-záéíóúñ0-9_-]+)/i
+  );
+  if (agentSaidMatch) {
+    const rawTarget = agentSaidMatch[1].trim();
+    const matchedCodename = AGENT_CODENAMES.find((c) => c.toLowerCase() === rawTarget.toLowerCase());
+    return { kind: 'SUMMARIZE_AND_SPEAK', target: matchedCodename || rawTarget };
+  }
+
+  const agentResumeMatch = text.match(
+    /resum(?:e|ir|o|a|en)\s+(?:el\s+agente\s+|la\s+terminal\s+(?:de\s+)?)?([a-záéíóúñ0-9_-]+)\b/i
+  );
+  if (agentResumeMatch) {
+    const rawTarget = agentResumeMatch[1].trim();
+    const matchedCodename = AGENT_CODENAMES.find((c) => c.toLowerCase() === rawTarget.toLowerCase());
+    if (matchedCodename) {
+      return { kind: 'SUMMARIZE_AND_SPEAK', target: matchedCodename };
+    }
+  }
+
   if (
+    /resum(?:e|ir|en|o|a|i)\b/i.test(lower) ||
     lower.includes('resumen') ||
     lower.includes('summary') ||
+    /\bnarr(?:a|ame|ar)\b/i.test(lower) ||
     /l[eé]eme/i.test(lower) ||
     lower.includes('read aloud') ||
     /cu[eé]ntame/i.test(lower) ||
@@ -194,11 +216,18 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
       if (
         !rawTarget ||
         targetLower === 'terminal' ||
-        targetLower === 'terminales' ||
         targetLower === 'agente' ||
         targetLower === 'agentes'
       ) {
         return { kind: 'CLOSE_TERMINALS', target: 'finished' };
+      }
+      if (
+        targetLower === 'terminales' ||
+        targetLower === 'las terminales' ||
+        targetLower === 'los terminales' ||
+        /^las?\s+terminales$/.test(targetLower)
+      ) {
+        return { kind: 'CLOSE_TERMINALS', target: 'all' };
       }
       if (
         targetLower.includes('terminada') ||
@@ -267,6 +296,22 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
 
   // 6. Inject prompt
   if (lower.includes('inyecta') || lower.includes('escribe') || lower.includes('inject')) {
+    const agentInjectMatch = text.match(
+      /(?:en\s+(?:la\s+)?terminal\s+de\s+|en\s+(?:el\s+)?agente\s+)([a-záéíóúñ]+)\s*(?:escribe|inyecta|ejecuta|corre)?\s*[:,-]?\s*(.+)$/i
+    );
+    if (agentInjectMatch) {
+      const rawTarget = agentInjectMatch[1].trim();
+      const matchedCodename = AGENT_CODENAMES.find((c) => c.toLowerCase() === rawTarget.toLowerCase());
+      const prompt = agentInjectMatch[2].trim().replace(/^:/, '');
+      if (prompt) {
+        return {
+          kind: 'INJECT_PROMPT',
+          target: matchedCodename || rawTarget,
+          prompt,
+        };
+      }
+    }
+
     const injectMatch = text.match(/terminal\s*(\d+|uno|dos|tres)[\s:]+(.+)$/i);
     if (injectMatch) {
       return {
@@ -282,7 +327,7 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   const TERMINAL_EXEC_VERBS_RE =
     /(?:abre|abriera|abriese|abrir|ejecuta|ejecute|corre|inicia|inicie|pon|arranca|inyecta|escribe|inject)/i;
   const TERMINAL_READ_QUESTION_RE =
-    /(?:com[eé]ntame|comentame|cu[eé]ntame|dime\s+qu[eé]|qu[eé]\s+hay|qu[eé]\s+hab[ií]a|qu[eé]\s+tiene|qu[eé]\s+contiene|qu[eé]\s+dice|en\s+pocas\s+palabras|expl[ií]came|describe|qu[eé]\s+es\s+lo\s+que\s+hay|qu[eé]\s+es\s+lo\s+que\s+hab[ií]a)/i;
+    /(?:com[eé]ntame|comentame|cu[eé]ntame|dime\s+qu[eé]|qu[eé]\s+hay|qu[eé]\s+hab[ií]a|qu[eé]\s+tiene|qu[eé]\s+contiene|qu[eé]\s+dice|en\s+pocas\s+palabras|expl[ií]came|describe|qu[eé]\s+es\s+lo\s+que\s+hay|qu[eé]\s+es\s+lo\s+que\s+hab[ií]a|resum(?:e|ir|en|o|a|i)|narr(?:a|ame|ar))/i;
   const TERMINAL_REFERENCE_RE =
     /(?:en la terminal|en esa terminal|en esta terminal|en la misma terminal|\bterminal\s*(?:\d+|uno|dos|tres|one|two|three))/i;
 
@@ -327,6 +372,26 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         target: 'active',
         prompt: cmd,
       };
+    }
+  }
+
+  // 6c. Resumir / narrar sin abrir terminales (evita confundir "resumir la tarea" con spawn Grok)
+  if (/resum(?:e|ir|en|o|a|i)\b/i.test(lower) || /\bnarr(?:a|ame|ar)\b/i.test(lower)) {
+    const hasExplicitOpen =
+      /(?:abre|abrir|abriera|abrieras|abriese|abriesen|abrir[ií]a|abrime|ábreme|abrí|abran|abras|crea|crear|crees|creas|levanta|levantar|levantes|inicia|iniciar|inicies|pon|poner|pongas|open|spawn|lanza|lanzar|lances|lanzame|lánzame)\s+(?:\d+|un|una|uno|dos|tres|cuatro|cinco|\w+\s+)?(?:terminal|terminales|agente|agentes|consola|consolas)\b/i.test(
+        lower
+      );
+    if (!hasExplicitOpen) {
+      let target: string | number | undefined;
+      if (TERMINAL_DEIXIS_RE.test(lower)) {
+        target = 'active';
+      }
+      const termMatch = lower.match(/terminal\s*(\d+|uno|dos|tres|one|two|three)/i);
+      const terminalIndex = termMatch ? parseNumberWord(termMatch[1]) : undefined;
+      if (terminalIndex !== undefined) {
+        target = terminalIndex;
+      }
+      return { kind: 'SUMMARIZE_AND_SPEAK', terminalIndex, target };
     }
   }
 

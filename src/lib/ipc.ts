@@ -1053,4 +1053,57 @@ export async function operatorOnRecordingStateChange(recording: boolean): Promis
   }
 }
 
+export interface CredentialStatusItem {
+  provider: string;
+  isConfigured: boolean;
+  source: 'vault' | 'env' | 'cli' | 'none';
+  preview?: string;
+}
+
+export async function getProviderCredentials(): Promise<{ success: boolean; credentials: CredentialStatusItem[] }> {
+  if (!isTauriEnvironment()) return { success: true, credentials: [] };
+  try {
+    return await invokeCommand<{ success: boolean; credentials: CredentialStatusItem[] }>('get_provider_credentials', {});
+  } catch {
+    return { success: false, credentials: [] };
+  }
+}
+
+export async function getActiveProviderKey(provider: string): Promise<{ success: boolean; key: string | null; source: string }> {
+  if (!isTauriEnvironment()) return { success: false, key: null, source: 'none' };
+  try {
+    return await invokeCommand<{ success: boolean; key: string | null; source: string }>('get_active_provider_key', { provider });
+  } catch {
+    return { success: false, key: null, source: 'none' };
+  }
+}
+
+export async function saveProviderCredential(provider: string, key: string): Promise<{ success: boolean; preview?: string }> {
+  if (!isTauriEnvironment()) return { success: false };
+  try {
+    return await invokeCommand<{ success: boolean; preview?: string }>('save_provider_credential', { provider, key });
+  } catch {
+    return { success: false };
+  }
+}
+
+export async function deleteProviderCredential(provider: string): Promise<{ success: boolean }> {
+  if (!isTauriEnvironment()) return { success: false };
+  try {
+    return await invokeCommand<{ success: boolean }>('delete_provider_credential', { provider });
+  } catch {
+    return { success: false };
+  }
+}
+
+export async function migrateLocalStorageCredentials(records: Record<string, string>): Promise<{ success: boolean; migrated: number }> {
+  if (!isTauriEnvironment()) return { success: false, migrated: 0 };
+  try {
+    return await invokeCommand<{ success: boolean; migrated: number }>('migrate_localstorage_credentials', { records });
+  } catch {
+    return { success: false, migrated: 0 };
+  }
+}
+
+
 

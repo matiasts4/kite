@@ -165,6 +165,7 @@ pub fn canonical_agent_engine(engine: &str) -> String {
         "claude" | "claude-code" => "claude-code".to_string(),
         "codex" => "codex".to_string(),
         "agy" | "antigravity" => "antigravity".to_string(),
+        "gentle-shell" | "gentleshell" | "gentle" | "gentle-pi" => "gentle-shell".to_string(),
         "opencode" | "open-code" => "open-code".to_string(),
         "gemini" => "gemini".to_string(),
         "cursor" | "cursor-agent" => "cursor".to_string(),
@@ -1159,6 +1160,7 @@ pub fn map_executable_name_to_agent_engine(exe_name: &str) -> Option<String> {
     let stem = stem.strip_suffix(".cmd").unwrap_or(stem);
     match stem {
         "agy" | "antigravity" => Some("antigravity".to_string()),
+        "gentle-shell" | "gentleshell" | "gentle" | "gentle-pi" | "pi" => Some("gentle-shell".to_string()),
         "claude" | "claude-code" => Some("claude-code".to_string()),
         "codex" => Some("codex".to_string()),
         "gemini" => Some("gemini".to_string()),
@@ -1562,6 +1564,14 @@ mod tests {
         assert_eq!(
             map_executable_name_to_agent_engine("opencode.exe"),
             Some("open-code".to_string())
+        );
+        assert_eq!(
+            map_executable_name_to_agent_engine("gentle-shell.cmd"),
+            Some("gentle-shell".to_string())
+        );
+        assert_eq!(
+            canonical_agent_engine("gentle-shell"),
+            "gentle-shell".to_string()
         );
         assert_eq!(map_executable_name_to_agent_engine("powershell.exe"), None);
     }

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { invokeCommand } from '../../lib/ipc';
 import { BrandLogo } from '../ui/BrandLogo';
+import { usePresence } from '../../motion/usePresence';
+import { motionSurfaceClass } from '../../motion/surface';
 
 export interface AgentPaneResumeModalProps {
   isOpen: boolean;
@@ -107,11 +109,15 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
     }
   }, [workspaceId, paneId, engine, onStartFresh, onClose]);
 
-  if (!isOpen) return null;
+  const layerPresence = usePresence(isOpen);
+  if (!layerPresence.mounted) return null;
+
+  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
+  const panelMotion = motionSurfaceClass(layerPresence.phase, 'modal');
 
   const modal = (
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop${scrimMotion ? ` ${scrimMotion}` : ''}`}
       role="presentation"
       onClick={onClose}
       style={{
@@ -126,7 +132,7 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
       }}
     >
       <div
-        className="modal agent-resume-sheet"
+        className={`modal agent-resume-sheet${panelMotion ? ` ${panelMotion}` : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label="Resume previous conversation"

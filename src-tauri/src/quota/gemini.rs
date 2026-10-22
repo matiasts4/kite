@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub fn fetch_gemini_quota() -> ProviderQuotaStatus {
     let home = user_home_dir();
     let gemini_dir = home.join(".gemini");
-    let has_key = std::env::var("GEMINI_API_KEY").is_ok();
+    let has_key = crate::credentials::resolve_provider_key("gemini").is_some();
     let is_avail = gemini_dir.exists() || has_key;
     let mut status = ProviderQuotaStatus {
         provider_id: "gemini".to_string(),

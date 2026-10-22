@@ -3,7 +3,6 @@ import {
   applyHandoffPlan,
   planHandoff,
   type HandoffContext,
-  type HandoffRequest,
 } from './agentHandoff';
 
 function makeLongBody(): string {
@@ -12,7 +11,7 @@ function makeLongBody(): string {
 }
 
 describe('agentHandoff', () => {
-  let dispatchSpy: ReturnType<typeof vi.spyOn>;
+  let dispatchSpy: { mockRestore: () => void; mock: { calls: unknown[][] } };
 
   beforeEach(() => {
     dispatchSpy = vi.spyOn(window, 'dispatchEvent');

@@ -108,3 +108,104 @@ export interface TurnContext {
     latestLine?: string;
   }>;
 }
+
+export const OPERATOR_NATIVE_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'open_terminals',
+      description: 'Open one or more terminal agent panes with an engine and optional prompts.',
+      parameters: {
+        type: 'object',
+        properties: {
+          count: { type: 'integer', minimum: 1, maximum: 8, default: 1 },
+          engine: { type: 'string', enum: ['grok', 'claude', 'codex', 'powershell', 'antigravity', 'opencode'], default: 'grok' },
+          prompts: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['count'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'close_terminals',
+      description: 'Close terminal panes matching a target (session ID, agent name, all, finished, idle, active, last, or numeric index).',
+      parameters: {
+        type: 'object',
+        properties: {
+          target: { type: ['string', 'number'], default: 'finished' },
+        },
+        required: ['target'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'inject_prompt',
+      description: 'Inject a command or prompt into a running terminal pane.',
+      parameters: {
+        type: 'object',
+        properties: {
+          target: { type: ['string', 'number'], default: 1 },
+          prompt: { type: 'string' },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'open_browser',
+      description: 'Open a URL in the browser surface.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'narrate_summary',
+      description: 'Summarize and narrate the active or specified terminal buffer aloud.',
+      parameters: {
+        type: 'object',
+        properties: {
+          target: { type: ['string', 'number'] },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_subagent',
+      description: 'Spawn a dedicated subagent with a specific CLI and task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          cli: { type: 'string', enum: ['grok', 'claude', 'codex', 'antigravity', 'opencode'], default: 'grok' },
+          task: { type: 'string' },
+        },
+        required: ['task'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'stop_speaking',
+      description: 'Halt ongoing text-to-speech audio immediately.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+];

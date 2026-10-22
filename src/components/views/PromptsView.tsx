@@ -61,7 +61,7 @@ const DEFAULT_STARTER_PROMPTS: PromptItem[] = [
   },
 ];
 
-// Scoped class dictionary matching bundle SidePromptsPanel-B-qtzvzj.js & src/chunks.css
+// Scoped class names for the prompts panel
 const k = {
   panel: '_panel_v2cfp_11',
   toolbar: '_toolbar_v2cfp_33',

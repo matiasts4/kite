@@ -280,6 +280,51 @@ fn current_date_slug() -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+fn redact_secrets_native(mut val: Value) -> Value {
+    match &mut val {
+        Value::String(s) => {
+            if s.starts_with("Bearer ") || s.starts_with("sk-") || s.starts_with("xai-") || s.starts_with("ghp_") {
+                *s = "[REDACTED_SECRET]".to_string();
+            } else {
+                for prefix in &["sk-", "xai-", "ghp_"] {
+                    if let Some(idx) = s.find(prefix) {
+                        let end = s[idx..]
+                            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}')
+                            .map(|e| idx + e)
+                            .unwrap_or(s.len());
+                        if end - idx > 16 {
+                            s.replace_range(idx..end, "[REDACTED_SECRET]");
+                        }
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                *item = redact_secrets_native(item.clone());
+            }
+        }
+        Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let lower = k.to_lowercase();
+                if lower.contains("secret")
+                    || lower.contains("apikey")
+                    || lower.contains("api_key")
+                    || lower.contains("password")
+                    || lower.contains("token")
+                {
+                    map.insert(k, Value::String("[REDACTED_SECRET]".to_string()));
+                } else if let Some(v) = map.remove(&k) {
+                    map.insert(k, redact_secrets_native(v));
+                }
+            }
+        }
+        _ => {}
+    }
+    val
+}
+
 #[tauri::command]
 pub fn operator_trace_path() -> Result<String, String> {
     let dir = crate::persist::roaming_app_dir().join("operator-traces");
@@ -304,7 +349,12 @@ pub fn operator_trace_append(line: String) -> Result<(), String> {
         .open(&file_path)
         .map_err(|e| format!("Failed to open operator trace file: {e}"))?;
 
-    writeln!(file, "{}", line.trim_end())
+    let final_line = match serde_json::from_str::<Value>(&line) {
+        Ok(val) => serde_json::to_string(&redact_secrets_native(val)).unwrap_or(line),
+        Err(_) => line,
+    };
+
+    writeln!(file, "{}", final_line.trim_end())
         .map_err(|e| format!("Failed to write operator trace: {e}"))?;
     Ok(())
 }

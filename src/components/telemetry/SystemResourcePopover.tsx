@@ -19,6 +19,7 @@ export interface SystemResourcePopoverProps {
   onRefresh: () => void;
   onClose: () => void;
   anchorRect?: DOMRect | null;
+  phase?: 'in' | 'out';
 }
 
 type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk';
@@ -152,6 +153,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   onRefresh,
   onClose,
   anchorRect,
+  phase = 'in',
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<ResourceTab>('overview');
@@ -240,7 +242,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
       ref={popoverRef}
       role="dialog"
       aria-label="Monitor de recursos del sistema y de la aplicación"
-      className="system-resource-popover"
+      className={`system-resource-popover ${phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
       style={{
         position: 'fixed',
         top: `${position.top}px`,
@@ -261,7 +263,6 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        animation: 'quota-popover-in 140ms ease-out',
       }}
       onClick={(e) => e.stopPropagation()}
     >

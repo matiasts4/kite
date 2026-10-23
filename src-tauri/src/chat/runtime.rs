@@ -8,6 +8,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use crate::chat::drivers::declaration;
+use crate::chat::session::{
+    declared_session_mode, SendReceipt, SessionManager, SessionMode, SessionSpec, SessionTransport,
+    TransportEvent, TransportSpec,
+};
 use crate::chat::threads::{
     chat_item, load_thread, replace_thread, sanitize_chat_text, touch, upsert_item,
 };
@@ -68,6 +73,185 @@ pub fn prune_stale_runs(live: &mut LiveTurns) {
 pub struct SendBinding {
     pub connection_id: Option<String>,
     pub supported_endpoint: Option<String>,
+}
+
+/// The process environment flag that opts a send into a session that stays
+/// open. It must be exactly `1`; any other value keeps the one-command path.
+pub const PERSISTENT_SESSIONS_ENV: &str = "KITE_PERSISTENT_SESSIONS";
+
+/// The largest operational notice this module writes into a thread.
+pub const MAX_NOTICE_CHARS: usize = 2_000;
+
+/// The route a send uses. Persistent sessions are opt-in per process and are
+/// only available when the driver declaration observed a lasting channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendRoute {
+    Persistent,
+    OneShot,
+}
+
+/// Why a send did not complete through the session manager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedSendError {
+    /// The process never started, so the prompt was not written anywhere and
+    /// the caller may keep today's one-command path.
+    Start(String),
+    /// The process started but rejected the turn. The prompt may have been
+    /// written, so it is never replayed as a second command.
+    Turn(String),
+}
+
+impl ManagedSendError {
+    pub fn reason(&self) -> &str {
+        match self {
+            ManagedSendError::Start(reason) | ManagedSendError::Turn(reason) => reason,
+        }
+    }
+
+    pub fn before_turn(&self) -> bool {
+        matches!(self, ManagedSendError::Start(_))
+    }
+}
+
+fn persistent_flag_enabled(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
+
+pub fn persistent_sessions_enabled() -> bool {
+    persistent_flag_enabled(std::env::var(PERSISTENT_SESSIONS_ENV).ok().as_deref())
+}
+
+/// The route a send may use. Only a driver that declared a lasting channel and
+/// a process that set the opt-in flag may keep a process open. Everything else
+/// keeps today's one-command path, so a resumable or unobservable driver never
+/// looks persistent.
+pub fn send_route(provider: &str, persistent_enabled: bool) -> SendRoute {
+    match declaration(provider) {
+        Some(declared)
+            if declared_session_mode(&declared, persistent_enabled) == SessionMode::Persistent =>
+        {
+            SendRoute::Persistent
+        }
+        _ => SendRoute::OneShot,
+    }
+}
+
+/// Provider and transport text is untrusted; operational notices stay bounded.
+pub fn bounded_notice(message: &str) -> String {
+    sanitize_chat_text(message)
+        .chars()
+        .take(MAX_NOTICE_CHARS)
+        .collect()
+}
+
+/// Sends one turn through the session manager with a caller-supplied lasting
+/// wire. The manager never picks a driver mode on its own, so a spec that was
+/// not declared persistent is rejected before anything is attached.
+pub fn managed_send(
+    manager: &mut SessionManager,
+    spec: SessionSpec,
+    transport: Box<dyn SessionTransport>,
+    command_id: &str,
+    prompt: &str,
+) -> Result<SendReceipt, ManagedSendError> {
+    if spec.mode != SessionMode::Persistent {
+        return Err(ManagedSendError::Start(
+            "the session manager only accepts a declared persistent route".to_string(),
+        ));
+    }
+    let thread_id = spec.thread_id.clone();
+    manager
+        .attach(spec, transport)
+        .map_err(|error| ManagedSendError::Start(error.to_string()))?;
+    match manager.start(&thread_id) {
+        Ok(_) => manager
+            .send_turn(&thread_id, command_id, prompt)
+            .map_err(|error| ManagedSendError::Turn(error.to_string())),
+        Err(error) => Err(ManagedSendError::Start(error.to_string())),
+    }
+}
+
+fn session_manager() -> &'static Mutex<SessionManager> {
+    static CELL: std::sync::OnceLock<Mutex<SessionManager>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(SessionManager::new()))
+}
+
+/// The lasting wire for a persistent driver. The declaration records which
+/// drivers expose one, but this build ships no adapter that speaks it. The
+/// transport fails before a process starts, so a flagged send keeps today's
+/// one-command path with a bounded notice instead of pretending the process
+/// stays open.
+fn open_persistent_transport(driver: &str) -> Box<dyn SessionTransport> {
+    Box::new(DeclaredWireUnavailable {
+        driver: driver.to_string(),
+    })
+}
+
+#[derive(Debug)]
+struct DeclaredWireUnavailable {
+    driver: String,
+}
+
+impl SessionTransport for DeclaredWireUnavailable {
+    fn spawn(&mut self, _spec: &TransportSpec) -> Result<(), String> {
+        Err(format!(
+            "no lasting wire for {} is implemented in this build",
+            self.driver
+        ))
+    }
+
+    fn write_turn(&mut self, _prompt: &str) -> Result<(), String> {
+        Err("the session did not start".to_string())
+    }
+
+    fn interrupt(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn spawn_count(&self) -> u32 {
+        0
+    }
+
+    fn resume_handle(&self) -> Option<String> {
+        None
+    }
+
+    fn drain(&mut self) -> Vec<TransportEvent> {
+        Vec::new()
+    }
+}
+
+/// Writes one bounded `notice` item into the live run and the durable thread.
+/// The user item is already stored, so a failed route never removes it.
+fn emit_notice_item(thread_id: &str, run_id: &str, message: &str) {
+    let item = chat_item(
+        &format!("n{}", Uuid::new_v4().simple()),
+        "notice",
+        &bounded_notice(message),
+        false,
+    );
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            append_event(run, json!({ "kind": "upsert", "item": item.clone() }), true);
+        }
+    }
+    {
+        let mut items = threads().lock().unwrap();
+        if let Some(thread) = items
+            .iter_mut()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+        {
+            upsert_item(thread, &item);
+            touch(thread);
+        }
+    }
+    live_cv().notify_all();
+    persist();
 }
 
 pub fn start_turn(
@@ -392,6 +576,72 @@ pub fn launch_provider(
                     plan.endpoint.verified_endpoint(),
                     plan.connection_id.as_deref().unwrap_or("none"),
                 ));
+                let persistent_enabled = persistent_sessions_enabled();
+                if send_route(&provider, persistent_enabled) == SendRoute::Persistent {
+                    if let Some(declared) = declaration(&provider) {
+                        // The mode comes from the declaration, not from the
+                        // driver id. The declaration and the flag both say
+                        // persistent or this branch is never reached.
+                        let spec = SessionSpec {
+                            thread_id: thread_id.clone(),
+                            driver: provider.clone(),
+                            connection_id: values.connection_id.map(str::to_string),
+                            working_directory: Some(cwd.to_string_lossy().to_string()),
+                            mode: SessionMode::OneShot,
+                            recipe: None,
+                        }
+                        .with_declared_mode(&declared, persistent_enabled);
+                        let outcome = {
+                            let transport = open_persistent_transport(&provider);
+                            let mut manager = session_manager().lock().unwrap();
+                            managed_send(&mut manager, spec, transport, &run_id, &prompt)
+                        };
+                        match outcome {
+                            Ok(_) => {
+                                // A lasting wire accepted the turn, but this
+                                // build has no adapter that projects its
+                                // stream. The thread stays readable instead of
+                                // claiming output that was never read.
+                                emit_notice_item(
+                                    &thread_id,
+                                    &run_id,
+                                    &format!(
+                                        "{provider} started a session that stays open, but this build cannot read its stream yet. Your message is still in the thread."
+                                    ),
+                                );
+                                finish_run(&run_id, false, false, "");
+                                return;
+                            }
+                            Err(error) if error.before_turn() => {
+                                // Nothing was written to a provider, so the
+                                // user prompt is still intact and can run on
+                                // today's one-command path.
+                                emit_notice_item(
+                                    &thread_id,
+                                    &run_id,
+                                    &format!(
+                                        "Persistent sessions are enabled, but {provider} could not start one: {}. This turn runs as one command.",
+                                        error.reason()
+                                    ),
+                                );
+                            }
+                            Err(error) => {
+                                // The turn may have reached the provider, so
+                                // it is never replayed as a second command.
+                                emit_notice_item(
+                                    &thread_id,
+                                    &run_id,
+                                    &format!(
+                                        "{provider} failed while accepting the turn on its session: {}. Your message is still in the thread.",
+                                        error.reason()
+                                    ),
+                                );
+                                finish_run(&run_id, false, false, "");
+                                return;
+                            }
+                        }
+                    }
+                }
                 let args_refs: Vec<&str> = plan.args.iter().map(|s| s.as_str()).collect();
                 match crate::hidden_exec::spawn_streaming(&plan.program, &args_refs, Some(&cwd)) {
                     Ok(child) => stream_child(thread_id, run_id, assistant_id, child),
@@ -1739,5 +1989,124 @@ mod tests {
         .expect("opencode args");
         assert_eq!(spawn.args, vec!["run", "hello"]);
         assert!(!spawn.args.iter().any(|arg| arg.contains(OPENCODE_GO_CHAT)));
+    }
+
+    use crate::chat::session::{ScriptedTransport, SessionState};
+
+    fn persistent_spec(thread_id: &str) -> SessionSpec {
+        SessionSpec {
+            thread_id: thread_id.to_string(),
+            driver: "codex".to_string(),
+            connection_id: None,
+            working_directory: None,
+            mode: SessionMode::Persistent,
+            recipe: None,
+        }
+    }
+
+    #[test]
+    fn the_persistent_route_requires_a_persistent_declaration_and_the_flag() {
+        for driver in ["antigravity", "agy", "codex", "opencode"] {
+            assert_eq!(send_route(driver, true), SendRoute::Persistent, "{driver}");
+            assert_eq!(send_route(driver, false), SendRoute::OneShot, "{driver}");
+        }
+        for driver in ["gemini", "grok", "cursor", "claude", "not-a-driver"] {
+            assert_eq!(send_route(driver, true), SendRoute::OneShot, "{driver}");
+            assert_eq!(send_route(driver, false), SendRoute::OneShot, "{driver}");
+        }
+    }
+
+    #[test]
+    fn only_the_exact_flag_value_enables_persistent_sessions() {
+        assert!(persistent_flag_enabled(Some("1")));
+        for raw in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some(" 1"),
+            Some("1 "),
+            Some("01"),
+            Some("1\n"),
+        ] {
+            assert!(!persistent_flag_enabled(raw), "{raw:?} must not enable sessions");
+        }
+    }
+
+    #[test]
+    fn operational_notices_stay_bounded() {
+        let long = "é".repeat(MAX_NOTICE_CHARS + 250);
+        let notice = bounded_notice(&long);
+
+        assert_eq!(notice.chars().count(), MAX_NOTICE_CHARS);
+        assert!(!notice.contains('\u{0}'));
+    }
+
+    #[test]
+    fn a_managed_send_that_never_started_keeps_the_prompt_for_the_one_shot_path() {
+        let mut manager = SessionManager::new();
+        let transport = ScriptedTransport::new().failing_spawn("no lasting wire");
+
+        let error = managed_send(
+            &mut manager,
+            persistent_spec("thread-1"),
+            Box::new(transport),
+            "command-1",
+            "keep this prompt",
+        )
+        .unwrap_err();
+
+        assert!(error.before_turn());
+        assert!(error.reason().contains("no lasting wire"));
+        assert_eq!(
+            manager.status("thread-1").map(|record| record.state),
+            Some(SessionState::Failed)
+        );
+    }
+
+    #[test]
+    fn a_managed_send_writes_only_the_new_message_to_one_session() {
+        let mut manager = SessionManager::new();
+        let transport = ScriptedTransport::new();
+        let probe = transport.clone();
+
+        managed_send(
+            &mut manager,
+            persistent_spec("thread-1"),
+            Box::new(transport),
+            "command-1",
+            "first",
+        )
+        .expect("first managed send");
+        managed_send(
+            &mut manager,
+            persistent_spec("thread-1"),
+            Box::new(ScriptedTransport::new()),
+            "command-2",
+            "second",
+        )
+        .expect("second managed send");
+
+        assert_eq!(probe.written_turns(), vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(probe.spawn_count(), 1);
+    }
+
+    #[test]
+    fn the_manager_route_rejects_a_non_persistent_mode() {
+        let mut manager = SessionManager::new();
+        let mut spec = persistent_spec("thread-1");
+        spec.mode = SessionMode::Resumable;
+
+        let error = managed_send(
+            &mut manager,
+            spec,
+            Box::new(ScriptedTransport::new()),
+            "command-1",
+            "hello",
+        )
+        .unwrap_err();
+
+        assert!(error.before_turn());
+        assert!(manager.status("thread-1").is_none());
     }
 }

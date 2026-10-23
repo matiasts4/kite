@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::chat::drivers::DriverDeclaration;
 use crate::chat::utils::now_ms;
 
 /// How a driver keeps a session alive between turns.
@@ -75,6 +76,35 @@ pub struct SessionSpec {
     /// Present only for an agent thread. A loose chat starts from the CLI's
     /// own account and configuration.
     pub recipe: Option<RecipeSnapshot>,
+}
+
+impl SessionSpec {
+    /// Chooses the mode from the driver declaration instead of copying it
+    /// from a driver id. A persistent declaration is honored only with the
+    /// explicit opt-in; every other case keeps one command per turn.
+    pub fn with_declared_mode(
+        mut self,
+        declaration: &DriverDeclaration,
+        persistent_enabled: bool,
+    ) -> Self {
+        self.mode = declared_session_mode(declaration, persistent_enabled);
+        self
+    }
+}
+
+/// The contract mode a declaration allows in this build.
+///
+/// `OneShot` here means today's one-command path, not a claim about the
+/// driver: a resumable declaration has no provider handle wired yet, and an
+/// unobserved driver is never classified as persistent.
+pub fn declared_session_mode(
+    declaration: &DriverDeclaration,
+    persistent_enabled: bool,
+) -> SessionMode {
+    match declaration.session_mode {
+        Some(SessionMode::Persistent) if persistent_enabled => SessionMode::Persistent,
+        _ => SessionMode::OneShot,
+    }
 }
 
 /// Durable view of the session bound to one thread.
@@ -714,6 +744,7 @@ fn state_name(state: SessionState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::drivers::declaration;
 
     fn recipe(revision: &str, role: &str) -> RecipeSnapshot {
         RecipeSnapshot {
@@ -940,5 +971,33 @@ mod tests {
         assert_eq!(record.generation, 2);
         assert_eq!(transport.spawn_count(), 2);
         assert_eq!(transport.written_turns(), vec!["next".to_string()]);
+    }
+
+    #[test]
+    fn a_declaration_chooses_the_mode_without_guessing() {
+        let codex = declaration("codex").expect("codex declaration");
+        assert_eq!(declared_session_mode(&codex, true), SessionMode::Persistent);
+        assert_eq!(declared_session_mode(&codex, false), SessionMode::OneShot);
+
+        let gemini = declaration("gemini").expect("gemini declaration");
+        assert_eq!(declared_session_mode(&gemini, true), SessionMode::OneShot);
+
+        let claude = declaration("claude").expect("claude declaration");
+        assert_eq!(declared_session_mode(&claude, true), SessionMode::OneShot);
+    }
+
+    #[test]
+    fn a_spec_takes_its_mode_from_the_declaration() {
+        let gemini = declaration("gemini").expect("gemini declaration");
+        let declared = spec("thread-1", SessionMode::Persistent, None)
+            .with_declared_mode(&gemini, true);
+
+        assert_eq!(declared.mode, SessionMode::OneShot);
+        assert_eq!(declared.driver, "codex");
+
+        let codex = declaration("codex").expect("codex declaration");
+        let live = spec("thread-2", SessionMode::OneShot, None)
+            .with_declared_mode(&codex, true);
+        assert_eq!(live.mode, SessionMode::Persistent);
     }
 }

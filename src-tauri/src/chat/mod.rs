@@ -1,10 +1,12 @@
 pub mod models;
 pub mod runtime;
+pub mod session;
 pub mod threads;
 pub mod utils;
 
 pub use models::*;
 pub use runtime::*;
+pub use session::*;
 pub use threads::*;
 pub use utils::*;
 

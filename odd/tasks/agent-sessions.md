@@ -1,7 +1,7 @@
 # Provider sessions on chat threads
 
 Objective: run a real provider session behind each Agents chat. The session uses the CLI account and configuration that already exist. The screen stays the chat Kite already has. The live process belongs to the thread. The agent is the recipe applied immediately before that process starts.
-Branch: not created. Do not commit on `main`.
+Branch: `feat/agent-sessions`, created from the pushed provider branch. Do not commit on `main`.
 Delivery: `ask-on-risk`; slices are review boundaries. Test runners: `npm test` (`vitest run`) and `cargo test` in `src-tauri`.
 Workers: the user launches them. The author of this document does not.
 ## Product decision
@@ -72,7 +72,7 @@ composer overrides stay on the thread
 The provider stream is operational and bounded. The thread transcript is durable and survives the process.
 ## Tasks
 - T0 — Evidence matrix, read-only. S4, S7, S9, S16, S17. Route: user. Status: done. Evidence: `odd/tasks/agent-sessions-t0.md`. Claude is unobservable on this machine (binary absent). For each driver record launcher, whether the process can stay open, auth source, MCP source, where an instruction document is accepted, model catalog, effort levels, permission flags, work modes, resume handle, and unknowns. Do not mutate provider files.
-- T1 — Domain contract and a deterministic fake provider. S1, S3, S4, S10–S13, S16, S18. Route: user. Status: pending. Prove that the session attaches to the thread, that two threads do not share a process, that the recipe is snapshotted at start, and that a later recipe edit does not rewrite the running session.
+- T1 — Domain contract and a deterministic fake provider. S1, S3, S4, S10–S13, S16, S18. Route: inline. Status: done. Evidence: `src-tauri/src/chat/session.rs`; `cargo test chat::session::` 12 passed; full suite 142 passed. Prove that the session attaches to the thread, that two threads do not share a process, that the recipe is snapshotted at start, and that a later recipe edit does not rewrite the running session.
 - T2 — Project the session into the existing chat and adapt the composer. S2, S8, S9. Route: user. Status: pending. Show creating, attaching, running, waiting, completed, interrupted, failed, and resumable on the thread that already exists. Composer rows come from the driver declaration. Do not add a card, a modal, or a canvas.
 - T3 — Apply the agent recipe before session start. S16, S18. Route: user. Status: pending. A workspace thread still receives the recipe. A thread with no agent does not. Later turns send only the new message. The cwd stays the workspace.
 - T4 — Session manager for drivers that can stay open. S4–S7, S11–S14, S17. Route: user. Status: pending. Antigravity, Claude, and Codex first, on the wire each one can hold open. Do not treat a parser as proof of a launcher.
@@ -124,6 +124,9 @@ Findings that change the plan:
 - The recipe sync writes `AGENTS.md`, `CLAUDE.md`, `README.md` into the agent home only: no `GEMINI.md`, no Cursor rules, and workspace threads never call it.
 - `clip_argv` truncates the prompt at 12,000 characters silently (`utils.rs:25-27`), which drops pasted thread context on a one-shot driver without a notice.
 Baseline note: the header statement "Branch: not created" is stale. The tree is on `feat/provider-connections` with unrelated modified and untracked files. No commit was made. T1 must start from a decision about that baseline before it measures anything.
+L9. 2026-10-23. T1 implemented inline on `feat/agent-sessions`. New module `src-tauri/src/chat/session.rs`: `SessionMode`, `SessionState`, `RecipeSnapshot`, `SessionRecord`, `SessionManager`, `SessionTransport`, and the deterministic `ScriptedTransport`. Proven by test: attach is idempotent and starts nothing; start spawns exactly one process per thread; two threads of one agent are two sessions; the recipe revision reaches the transport before the spawn and a later edit never reaches the running session; later turns carry only the new message; a command id is idempotent, returns a duplicate receipt, and rejects a different payload; events are monotonic; an unknown approval mutates nothing; a provider exit settles pending approvals; resume requires a provider-issued handle; a one-shot session starts a new command per send.
+Not covered yet, by design: persistence and replay (T6), real driver wiring (T4), recipe file application (T3), composer and UI projection (T2). `SessionMode::Persistent` reflects the contract only; T0's matrix decides which drivers may declare it.
+Verification note: the full suite flaked once under default parallelism in process and network tests, then passed 142/142 with `--test-threads=4`. The new module is deterministic and spawns no thread.
 ## Key Learnings
 1. The thread outlives the provider process. The process is a resource of that thread, not of the agent.
 2. One agent with several threads means several sessions. They share an account and a recipe snapshot, not a process.

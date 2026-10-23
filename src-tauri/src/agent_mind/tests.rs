@@ -1,6 +1,6 @@
 use crate::agent_mind::service::list_agent_starters;
 use serde_json::json;
-use crate::agent_mind::memory::{load_agent_mind_at, write_agent_memory_at};
+use crate::agent_mind::memory::{load_agent_mind_at, sync_agent_instructions, write_agent_memory_at};
 use crate::agent_mind::skills::{load_agent_skill_at, remove_agent_skill_at, write_agent_skill_at};
 use crate::agent_mind::starters::install_agent_starter_at;
 use crate::agent_mind::utils::empty_revision;
@@ -125,3 +125,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
             vec!["keep-a-memory", "write-a-skill", "research-a-question", "draft-for-a-reader", "root-cause"]
         );
     }
+
+    #[test]
+    fn instruction_sync_still_writes_the_agent_home_document() {
+        let root = TempRoot::new();
+        let agent_id = "e5555555-5555-4555-8555-555555555555";
+        let home = root.0.join(agent_id);
+        fs::create_dir_all(home.join("skills")).unwrap();
+        fs::write(home.join("memory.txt"), "Keep the release notes in the repo.").unwrap();
+        fs::write(home.join("user.txt"), "Prefers short answers.").unwrap();
+        fs::write(
+            home.join("skills").join("root-cause.md"),
+            "---\nname: Root cause\ndescription: Trace a failure.\n---\nReproduce it first.\n",
+        )
+        .unwrap();
+
+        sync_agent_instructions(&root.0, agent_id).unwrap();
+
+        let agents = fs::read_to_string(home.join("AGENTS.md")).unwrap();
+        assert_eq!(fs::read_to_string(home.join("CLAUDE.md")).unwrap(), agents);
+        assert_eq!(fs::read_to_string(home.join("README.md")).unwrap(), agents);
+        assert!(agents.starts_with("# Agent Instructions\n\nAgent ID: `"));
+        assert!(agents.contains("## Long-Term Memory (memory.txt)\n\nKeep the release notes in the repo."));
+        assert!(agents.contains("## Builder Context & Preferences (user.txt)\n\nPrefers short answers."));
+        assert!(agents.contains("## Learned Skills\n\n### Root cause (`root-cause`)\nTrace a failure.\n\n```markdown\nReproduce it first.\n```"));
+    }
+

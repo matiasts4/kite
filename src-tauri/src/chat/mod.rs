@@ -1,3 +1,4 @@
+pub mod contract;
 pub mod drivers;
 pub mod event_log;
 pub mod models;
@@ -10,6 +11,7 @@ pub mod session;
 pub mod threads;
 pub mod utils;
 
+pub use contract::*;
 pub use drivers::*;
 pub use event_log::*;
 pub use models::*;

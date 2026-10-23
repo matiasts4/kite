@@ -21,6 +21,9 @@ import { BrandLogo } from '../../ui/BrandLogo';
 import { invokeCommand } from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
 import { ChatComposer } from './ChatComposer';
+import { SessionLifecycleBar } from './SessionLifecycleBar';
+import { declarationFromCatalog } from './driverDeclaration';
+import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
 import { ThreadInspector } from './ThreadInspector';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
@@ -40,6 +43,10 @@ export interface SingleThreadPaneProps {
   attachments: ChatAttachment[];
   liveRunsCount: number;
   dynamicModels: ModelOption[];
+  /** Declaration supplied by the session layer for this thread. */
+  driverDeclaration?: DriverDeclaration | null;
+  /** Projection supplied by the session layer for this thread. */
+  session?: SessionProjection | null;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
@@ -87,6 +94,8 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   attachments,
   liveRunsCount: _liveRunsCount,
   dynamicModels,
+  driverDeclaration,
+  session,
   editingTitleId,
   titleInput,
   onFocus,
@@ -114,6 +123,17 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     currentWorkspace?.displayName ||
     currentWorkspace?.name ||
     (thread.workspaceId || workspaceId ? 'Workspace' : null);
+
+  const declaration = React.useMemo(
+    () =>
+      driverDeclaration ??
+      declarationFromCatalog({
+        provider: thread.provider,
+        selectedModel: thread.model,
+        dynamicModels,
+      }),
+    [driverDeclaration, thread.provider, thread.model, dynamicModels]
+  );
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [showsChanges, setShowsChanges] = useState(false);
@@ -520,6 +540,8 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               </div>
             )}
 
+            {session && <SessionLifecycleBar projection={session} />}
+
             <ChatComposer
               threadId={thread.id}
               threadItems={thread.items}
@@ -535,7 +557,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               prompt={prompt}
               attachments={attachments}
               totalTokens={totalTokens}
-              dynamicModels={dynamicModels}
+              declaration={declaration}
               isRefreshingModels={isRefreshingModels}
               onRefreshModels={onRefreshModels}
               onChangePrompt={onChangePrompt}
@@ -547,7 +569,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               onRemoveAttachment={onRemoveAttachment}
               onUpdateConfig={onUpdateConfig}
               onSelectConnection={(connectionId) => onUpdateConfig({ connectionId })}
-              pendingApproval={thread.pendingApproval}
+              pendingApproval={session?.pendingApprovals[0] ?? thread.pendingApproval}
               onApprovalDecision={onApprovalDecision}
             />
 

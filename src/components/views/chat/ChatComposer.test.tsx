@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatComposer } from './ChatComposer';
+import { declarationFromCatalog } from './driverDeclaration';
 import { listConnections, type ConnectionSummary } from '../../../lib/ipc';
 
 vi.mock('../../../lib/ipc', async (importOriginal) => {
@@ -32,11 +33,11 @@ describe('ChatComposer - Behavioral Tests', () => {
     threadMode: 'fullAccess' as const,
     threadProvider: 'claude' as const,
     threadModel: 'claude-3-5-sonnet',
+    declaration: declarationFromCatalog({ provider: 'claude', selectedModel: 'claude-3-5-sonnet' }),
     running: false,
     prompt: '',
     attachments: [],
     totalTokens: 1200,
-    dynamicModels: [],
     activeDropdown: null,
     onChangePrompt: vi.fn(),
     onSend: vi.fn(),
@@ -290,5 +291,59 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(screen.queryByText(/checking live models/i)).toBeNull();
     expect(screen.queryByText(/syncing/i)).toBeNull();
     expect(onRefreshModels).not.toHaveBeenCalled();
+  });
+
+  it('renders model rows from the supplied driver declaration', async () => {
+    const user = userEvent.setup();
+    const declaration = {
+      ...declarationFromCatalog({ provider: 'claude' }),
+      models: [{ id: 'declared-model', label: 'Declared Model', detail: 'Supplied by the session' }],
+    };
+
+    render(<ChatComposer {...defaultProps} declaration={declaration} prompt="" />);
+
+    await user.click(screen.getByRole('combobox', { name: /model/i }));
+    expect(await screen.findByText('Declared Model')).toBeInTheDocument();
+    expect(screen.queryByText('Claude Opus 5.5')).toBeNull();
+  });
+
+  it('renders permission rows from the supplied driver declaration', async () => {
+    const user = userEvent.setup();
+    const declaration = {
+      ...declarationFromCatalog({ provider: 'claude' }),
+      permission: [{ id: 'readOnly', label: 'Read only only', detail: 'No changes' }],
+    };
+
+    render(<ChatComposer {...defaultProps} declaration={declaration} prompt="" />);
+
+    await user.click(screen.getByRole('combobox', { name: /permission/i }));
+    expect(await screen.findByText('Read only only')).toBeInTheDocument();
+    expect(screen.queryByText('Full access')).toBeNull();
+  });
+
+  it('disables a control the declaration does not list and shows its reason', () => {
+    const reason = 'The connected driver did not declare reasoning effort levels.';
+    const declaration = {
+      ...declarationFromCatalog({ provider: 'claude' }),
+      effort: null,
+      unlistedReasons: { effort: reason },
+    };
+
+    render(<ChatComposer {...defaultProps} declaration={declaration} prompt="" />);
+
+    const effort = screen.getByRole('combobox', { name: /reasoning effort/i });
+    expect(effort).toBeDisabled();
+    expect(effort).toHaveAttribute('title', reason);
+    expect(screen.getByText(reason)).toBeInTheDocument();
+  });
+
+  it('keeps the previous send behavior with a declaration-driven composer', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+
+    render(<ChatComposer {...defaultProps} prompt="Explain this file" onSend={onSend} />);
+
+    await user.click(screen.getByTitle(/Send prompt/i));
+    expect(onSend).toHaveBeenCalledTimes(1);
   });
 });

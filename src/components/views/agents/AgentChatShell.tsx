@@ -9,6 +9,9 @@ import {
 } from '../chat/ChatIcons';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from '../chat/ChatItemRow';
 import { ChatComposer } from '../chat/ChatComposer';
+import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
+import { declarationFromCatalog } from '../chat/driverDeclaration';
+import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { invokeCommand } from '../../../lib/ipc';
@@ -57,6 +60,10 @@ export interface AgentChatSurfaceProps {
   attachments: ChatAttachment[];
   totalTokens: number;
   dynamicModels: ModelOption[];
+  /** Declaration supplied by the session layer for the active thread. */
+  driverDeclaration?: DriverDeclaration | null;
+  /** Projection supplied by the session layer for the active thread. */
+  session?: SessionProjection | null;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   onNew: () => void;
@@ -107,6 +114,8 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   attachments,
   totalTokens,
   dynamicModels,
+  driverDeclaration,
+  session,
   isRefreshingModels,
   onRefreshModels,
   onNew,
@@ -126,6 +135,20 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   onUpdateConfig,
   onApprovalDecision,
 }) => {
+  const effectiveProvider =
+    activeThread?.provider ?? draftProvider ?? defaultProvider ?? 'antigravity';
+  const effectiveModel = activeThread ? activeThread.model ?? null : draftModel ?? null;
+  const declaration = React.useMemo(
+    () =>
+      driverDeclaration ??
+      declarationFromCatalog({
+        provider: effectiveProvider,
+        selectedModel: effectiveModel,
+        dynamicModels,
+      }),
+    [driverDeclaration, effectiveProvider, effectiveModel, dynamicModels]
+  );
+
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>('');
@@ -558,6 +581,8 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             </div>
           ) : null}
 
+          {session && <SessionLifecycleBar projection={session} />}
+
           <ChatComposer
             threadId={activeThread?.id || 'draft'}
             agentName={agentName}
@@ -574,7 +599,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             prompt={prompt}
             attachments={attachments}
             totalTokens={totalTokens}
-            dynamicModels={dynamicModels}
+            declaration={declaration}
             isRefreshingModels={isRefreshingModels}
             onRefreshModels={onRefreshModels}
             onChangePrompt={onChangePrompt}
@@ -591,7 +616,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             onStagePaths={onStagePaths}
             onRemoveAttachment={onRemoveAttachment}
             onUpdateConfig={onUpdateConfig}
-            pendingApproval={activeThread?.pendingApproval}
+            pendingApproval={session?.pendingApprovals[0] ?? activeThread?.pendingApproval}
             onApprovalDecision={onApprovalDecision}
           />
 

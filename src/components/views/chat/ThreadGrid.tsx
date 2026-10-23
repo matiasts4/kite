@@ -9,6 +9,7 @@ import type {
   ChatMode,
 } from './types';
 import type { PlanActionPayload } from './ChatPlanPanel';
+import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 
 export interface ThreadGridProps {
   gridThreadIds: string[];
@@ -24,6 +25,10 @@ export interface ThreadGridProps {
   engineLabel?: string;
   liveRunsCount: number;
   dynamicModelsMap: Record<string, ModelOption[]>;
+  /** Session projections supplied by the caller, keyed by thread id. */
+  sessionProjections?: Record<string, SessionProjection> | null;
+  /** Driver declarations supplied by the caller, keyed by thread id. */
+  driverDeclarations?: Record<string, DriverDeclaration> | null;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   activeDropdown: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
@@ -148,6 +153,8 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   engineLabel,
   liveRunsCount,
   dynamicModelsMap,
+  sessionProjections,
+  driverDeclarations,
   isRefreshingModels,
   onRefreshModels,
   activeDropdown,
@@ -359,6 +366,8 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 attachments={attachments}
                 liveRunsCount={liveRunsCount}
                 dynamicModels={dynamicModelsMap[thread.provider] || []}
+                driverDeclaration={driverDeclarations?.[tid] ?? null}
+                session={sessionProjections?.[tid] ?? null}
                 isRefreshingModels={isRefreshingModels}
                 onRefreshModels={onRefreshModels}
                 activeDropdown={activeDropdown}

@@ -26,6 +26,7 @@ import { ThreadGrid } from './chat/ThreadGrid';
 import { ChatComposer } from './chat/ChatComposer';
 import { ChatRail } from './chat/ChatRail';
 import { useChatSession } from './chat/useChatSession';
+import type { DriverDeclaration, SessionProjection } from '../../lib/session/types';
 
 export type {
   ChatProvider,
@@ -66,6 +67,10 @@ export interface ChatViewProps {
   workspaceName?: string;
   embedded?: boolean;
   onThreadsChanged?: () => void;
+  /** Session projections supplied by the parent, keyed by thread id. */
+  sessionProjections?: Record<string, SessionProjection> | null;
+  /** Driver declarations supplied by the parent, keyed by thread id. */
+  driverDeclarations?: Record<string, DriverDeclaration> | null;
 }
 
 export const ChatView: React.FC<ChatViewProps> = (props) => {
@@ -127,6 +132,10 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         attachments={attachments}
         totalTokens={totalTokens}
         dynamicModels={dynamicModels}
+        driverDeclaration={
+          activeThreadId ? props.driverDeclarations?.[activeThreadId] ?? null : null
+        }
+        session={activeThreadId ? props.sessionProjections?.[activeThreadId] ?? null : null}
         onNew={() => void session.handleCreateNewThread()}
         onSelect={(id) => void session.handleLoadThread(id)}
         onRename={(id, title) => void session.handleRenameThread(id, title)}
@@ -234,6 +243,8 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
       engineLabel={undefined}
       liveRunsCount={session.liveRuns.length}
       dynamicModelsMap={session.dynamicModelsMap}
+      sessionProjections={props.sessionProjections}
+      driverDeclarations={props.driverDeclarations}
       isRefreshingModels={session.isRefreshingModels}
       onRefreshModels={session.refreshModels}
       activeDropdown={session.activeDropdown}

@@ -5,6 +5,34 @@ use uuid::Uuid;
 use crate::chat::models::{default_mode, mode_ok, normalize_model, provider_ok, sanitize_options};
 use crate::chat::utils::{clip_title, now_ms};
 
+/// Top-level fields of the durable thread JSON.
+///
+/// `blank_thread` writes exactly these names, and the renderer plus the native
+/// readers depend on them. A projection that adds, drops, or renames one is a
+/// compatibility break, so the event log fold is asserted against this list.
+pub const THREAD_FIELD_NAMES: [&str; 20] = [
+    "schemaVersion",
+    "revision",
+    "id",
+    "profileId",
+    "provider",
+    "providerSessionId",
+    "title",
+    "items",
+    "plans",
+    "mode",
+    "plan",
+    "model",
+    "providerOptions",
+    "status",
+    "usage",
+    "workspaceId",
+    "pinned",
+    "pendingApproval",
+    "createdAtUnixMs",
+    "updatedAtUnixMs",
+];
+
 pub fn blank_thread(
     id: &str,
     profile_id: Option<&str>,

@@ -1,9 +1,32 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatComposer } from './ChatComposer';
+import { listConnections, type ConnectionSummary } from '../../../lib/ipc';
+
+vi.mock('../../../lib/ipc', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../lib/ipc')>();
+  return { ...actual, listConnections: vi.fn(async () => []) };
+});
+
+function claudeConnection(connectionId: string, displayName: string): ConnectionSummary {
+  return {
+    connectionId,
+    driverKind: 'claude',
+    displayName,
+    authMethod: 'cli_session',
+    accountIdentity: {},
+    credentialRef: 'vault',
+    endpoints: [{ endpointId: 'claude -p', ok: true }],
+    status: 'connected',
+  };
+}
 
 describe('ChatComposer - Behavioral Tests', () => {
+  beforeEach(() => {
+    vi.mocked(listConnections).mockResolvedValue([]);
+  });
+
   const defaultProps = {
     threadId: 'thread-1',
     threadMode: 'fullAccess' as const,
@@ -211,5 +234,61 @@ describe('ChatComposer - Behavioral Tests', () => {
 
     textarea.dispatchEvent(pasteEvent);
     expect(onStageFiles).toHaveBeenCalledWith([fakeFile]);
+  });
+
+  it('asks the user to choose when two connections verified the spawn endpoint', async () => {
+    const user = userEvent.setup();
+    const onSelectConnection = vi.fn();
+    vi.mocked(listConnections).mockResolvedValue([
+      claudeConnection('conn-a', 'Claude work'),
+      claudeConnection('conn-b', 'Claude personal'),
+    ]);
+
+    render(
+      <ChatComposer
+        {...defaultProps}
+        prompt=""
+        onSelectConnection={onSelectConnection}
+      />
+    );
+
+    const trigger = await screen.findByRole('combobox', { name: /connection/i });
+    expect(trigger).toHaveTextContent('Choose connection');
+
+    await user.click(trigger);
+    await user.click(await screen.findByText('Claude personal'));
+
+    expect(onSelectConnection).toHaveBeenCalledWith('conn-b');
+  });
+
+  it('binds without asking when a single connection verified the spawn endpoint', async () => {
+    vi.mocked(listConnections).mockResolvedValue([claudeConnection('conn-a', 'Claude work')]);
+
+    render(<ChatComposer {...defaultProps} prompt="" onSelectConnection={vi.fn()} />);
+
+    await waitFor(() => expect(listConnections).toHaveBeenCalled());
+    expect(screen.queryByRole('combobox', { name: /connection/i })).toBeNull();
+  });
+
+  it('does not render a manual refresh row in the model menu', async () => {
+    const user = userEvent.setup();
+    const onRefreshModels = vi.fn();
+
+    render(
+      <ChatComposer
+        {...defaultProps}
+        prompt=""
+        onRefreshModels={onRefreshModels}
+        isRefreshingModels={true}
+      />
+    );
+
+    await user.click(screen.getByRole('combobox', { name: /model/i }));
+    expect(await screen.findByText(/Claude Opus 5.5/i)).toBeInTheDocument();
+
+    expect(screen.queryByText(/refresh available models/i)).toBeNull();
+    expect(screen.queryByText(/checking live models/i)).toBeNull();
+    expect(screen.queryByText(/syncing/i)).toBeNull();
+    expect(onRefreshModels).not.toHaveBeenCalled();
   });
 });

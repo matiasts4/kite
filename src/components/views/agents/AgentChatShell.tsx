@@ -43,6 +43,11 @@ export interface AgentChatSurfaceProps {
   agentName: string;
   engineLabel: string;
   defaultProvider?: ChatProvider;
+  /** Draft config used by the composer only while no thread exists yet. */
+  draftProvider?: ChatProvider;
+  draftMode?: ChatMode;
+  draftModel?: string | null;
+  draftEffort?: string | null;
   activeThread: ExtendedChatThread | null;
   tabs: AgentChatTab[];
   selectedId: string | null;
@@ -89,6 +94,10 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   agentName,
   engineLabel,
   defaultProvider,
+  draftProvider,
+  draftMode,
+  draftModel,
+  draftEffort,
   activeThread,
   tabs,
   selectedId,
@@ -553,10 +562,14 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             threadId={activeThread?.id || 'draft'}
             agentName={agentName}
             engineLabel={engineLabel}
-            threadMode={activeThread?.mode || 'acceptEdits'}
-            threadProvider={activeThread?.provider || defaultProvider || 'antigravity'}
-            threadModel={activeThread?.model || null}
-            threadEffort={activeThread?.effort || null}
+            threadMode={activeThread ? activeThread.mode : draftMode ?? 'acceptEdits'}
+            threadProvider={
+              activeThread
+                ? activeThread.provider
+                : draftProvider ?? defaultProvider ?? 'antigravity'
+            }
+            threadModel={activeThread ? activeThread.model || null : draftModel ?? null}
+            threadEffort={activeThread ? activeThread.effort || null : draftEffort ?? null}
             running={running}
             prompt={prompt}
             attachments={attachments}

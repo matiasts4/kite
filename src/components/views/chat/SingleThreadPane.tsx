@@ -67,7 +67,7 @@ export interface SingleThreadPaneProps {
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }) => void;
+  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; connectionId?: string | null }) => void;
   onApprovalDecision: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
   embedded?: boolean;
 }
@@ -530,6 +530,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               threadProvider={thread.provider}
               threadModel={thread.model}
               threadEffort={thread.effort}
+              threadConnectionId={thread.connectionId ?? null}
               running={running}
               prompt={prompt}
               attachments={attachments}
@@ -545,6 +546,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               onStagePaths={onStagePaths}
               onRemoveAttachment={onRemoveAttachment}
               onUpdateConfig={onUpdateConfig}
+              onSelectConnection={(connectionId) => onUpdateConfig({ connectionId })}
               pendingApproval={thread.pendingApproval}
               onApprovalDecision={onApprovalDecision}
             />

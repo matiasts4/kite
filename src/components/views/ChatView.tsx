@@ -92,7 +92,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
     const activeThreadId = session.focusedThreadId || session.knownThreadsList[0]?.id || null;
     const activeThread = activeThreadId ? session.threadsMap[activeThreadId] ?? null : null;
     const draftKey = activeThreadId || `draft-${agentId}`;
-    const effectiveProvider = activeThread?.provider || session.defaultProvider;
+    const effectiveProvider = activeThread?.provider || session.draftConfig.provider;
     const isDraft = !activeThread || (activeThread.items.length === 0 && !session.isRunning[activeThread.id]);
     const running = activeThread ? Boolean(session.isRunning[activeThread.id]) : false;
     const prompt = session.promptMap[draftKey] || '';
@@ -106,6 +106,10 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         agentName={agentName || 'Agent'}
         engineLabel={engineLabel || 'Agent'}
         defaultProvider={session.defaultProvider}
+        draftProvider={session.draftConfig.provider}
+        draftMode={session.draftConfig.mode}
+        draftModel={session.draftConfig.model}
+        draftEffort={session.draftConfig.effort}
         activeThread={activeThread}
         tabs={session.knownThreadsList.map((t) => ({
           id: t.id,
@@ -143,7 +147,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         onSend={() => activeThreadId && void session.handleSendPrompt(activeThreadId)}
         onSendInitial={(text) => {
           session.setPromptMap((prev) => ({ ...prev, [draftKey]: '' }));
-          void session.handleStartThreadFromHome(text, session.defaultProvider, 'acceptEdits');
+          void session.handleStartThreadFromHome(text);
         }}
         onStop={() => activeThreadId && void session.handleCancelTurn(activeThreadId)}
         onPickAttachments={(kind) => void session.handlePickAttachments(draftKey, kind)}
@@ -152,7 +156,11 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         onRemoveAttachment={(resId) => void session.handleRemoveAttachment(draftKey, resId)}
         isRefreshingModels={session.isRefreshingModels}
         onRefreshModels={session.refreshModels}
-        onUpdateConfig={(patch) => activeThreadId && void session.handleUpdateConfig(activeThreadId, patch)}
+        onUpdateConfig={(patch) =>
+          activeThread
+            ? void session.handleUpdateConfig(activeThread.id, patch)
+            : session.handleDraftConfigChange(patch)
+        }
         onApprovalDecision={(dec, reqId) => activeThreadId && void session.handleApproval(activeThreadId, dec, reqId)}
       />
     );

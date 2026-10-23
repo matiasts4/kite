@@ -23,7 +23,11 @@ import type { ChatItem } from '../../../types';
 import { SelectMenu } from '../../ui/SelectMenu';
 import { EffortPicker } from './EffortPicker';
 import { ChatApprovalCard } from './ChatApprovalCard';
-import { invokeCommand } from '../../../lib/ipc';
+import { invokeCommand, listConnections } from '../../../lib/ipc';
+import {
+  verifiedSpawnConnections,
+  type ConnectionCandidate,
+} from './connectionBinding';
 
 export interface ChatComposerProps {
   threadId: string;
@@ -34,14 +38,19 @@ export interface ChatComposerProps {
   threadProvider: ChatProvider;
   threadModel: string | null;
   threadEffort?: string | null;
+  threadConnectionId?: string | null;
   threadItems?: ChatItem[];
   running: boolean;
   prompt: string;
   attachments: ChatAttachment[];
   totalTokens: number;
   dynamicModels: ModelOption[];
+  /** Accepted for existing callers; the model menu no longer renders a refresh action. */
   isRefreshingModels?: boolean;
+  /** Accepted for existing callers; the model menu no longer renders a refresh action. */
   onRefreshModels?: (provider: ChatProvider) => void;
+  /** Loads a provider's live models on demand. Deduplicated per mounted chat session. */
+  ensureDynamicModels?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
   pendingApproval?: ApprovalRequest | null;
   onChangePrompt: (val: string) => void;
@@ -53,6 +62,7 @@ export interface ChatComposerProps {
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
   onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }) => void;
+  onSelectConnection?: (connectionId: string) => void;
   onApprovalDecision?: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
     requestId: string
@@ -107,14 +117,14 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadProvider,
   threadModel,
   threadEffort,
+  threadConnectionId,
   threadItems = [],
   running,
   prompt,
   attachments,
   totalTokens,
   dynamicModels,
-  isRefreshingModels = false,
-  onRefreshModels,
+  ensureDynamicModels,
   pendingApproval,
   onChangePrompt,
   onSend,
@@ -124,10 +134,30 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onStagePaths,
   onRemoveAttachment,
   onUpdateConfig,
+  onSelectConnection,
   onApprovalDecision,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
+
+  const [connectionCandidates, setConnectionCandidates] = useState<ConnectionCandidate[]>([]);
+
+  // A connection appears here only when it verified this provider's local spawn
+  // endpoint. With none or one the send binding is resolved without asking.
+  useEffect(() => {
+    let active = true;
+    void listConnections().then((connections) => {
+      if (active) setConnectionCandidates(verifiedSpawnConnections(threadProvider, connections));
+    });
+    return () => {
+      active = false;
+    };
+  }, [threadProvider]);
+
+  // The model menu is populated in the background; the composer never waits on it.
+  useEffect(() => {
+    ensureDynamicModels?.(threadProvider);
+  }, [ensureDynamicModels, threadProvider]);
 
   // Drag & drop drop-hint state ('attach' | 'mention' | 'prompt' | null)
   const [dropKind, setDropKind] = useState<'attach' | 'mention' | 'prompt' | null>(null);
@@ -396,6 +426,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const canSend = Boolean(prompt.trim() || attachments.length > 0);
   const executionMode = threadPlan ? 'plan' : threadMode;
+  const selectedConnection = connectionCandidates.find(
+    (candidate) => candidate.connectionId === threadConnectionId
+  );
 
   const composerPlaceholder = agentName
     ? running
@@ -595,6 +628,25 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                 />
               </span>
             )}
+
+            {connectionCandidates.length > 1 && onSelectConnection && (
+              <SelectMenu
+                variant="toolbar"
+                label="Connection"
+                help="Account connection used for this send"
+                triggerLabel={selectedConnection?.displayName ?? 'Choose connection'}
+                disabled={running}
+                value={threadConnectionId ?? ''}
+                panelTitle="Account connection"
+                panelDetail="Each account is verified for its own endpoints."
+                rows={connectionCandidates.map((candidate) => ({
+                  id: candidate.connectionId,
+                  title: candidate.displayName,
+                  detail: candidate.supportedEndpoint,
+                }))}
+                onSelect={onSelectConnection}
+              />
+            )}
           </div>
 
           <span className="chat-composer__spacer" />
@@ -636,35 +688,16 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               help="Model"
               searchable
               triggerLabel={modelTriggerLabel}
-              triggerBadge={isRefreshingModels ? 'Syncing…' : undefined}
               disabled={running}
               value={threadModel || providerMeta.defaultModel}
               panelTitle={`${providerMeta.label} Models`}
-              panelDetail={isRefreshingModels ? 'Querying live provider CLI…' : undefined}
               panelEngine={providerMeta.engineId || threadProvider}
-              rows={[
-                ...models.map((m) => ({
-                  id: m.id,
-                  title: m.name,
-                  detail: m.description,
-                })),
-                ...(onRefreshModels
-                  ? [
-                      {
-                        id: '__refresh_models__',
-                        title: isRefreshingModels ? 'Checking live models…' : 'Refresh available models…',
-                        detail: 'Query provider CLI directly for newly released models',
-                        ruleBefore: true,
-                        disabled: isRefreshingModels,
-                      },
-                    ]
-                  : []),
-              ]}
+              rows={models.map((m) => ({
+                id: m.id,
+                title: m.name,
+                detail: m.description,
+              }))}
               onSelect={(m) => {
-                if (m === '__refresh_models__') {
-                  onRefreshModels?.(threadProvider);
-                  return;
-                }
                 onUpdateConfig({ model: m });
               }}
             />

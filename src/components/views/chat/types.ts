@@ -44,6 +44,10 @@ export interface ExtendedChatThread extends ChatThread {
   plans?: ProposedPlan[];
   activePlanId?: string | null;
   activePlan?: ProposedPlan | null;
+  /** Connection the next send binds to, when that connection verified the
+   * provider's local spawn endpoint. Both fields are set together or not at all. */
+  connectionId?: string | null;
+  supportedEndpoint?: string | null;
 }
 
 export function getActivePlan(thread: ExtendedChatThread): ProposedPlan | null {

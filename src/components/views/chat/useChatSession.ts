@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { ChatItem } from '../../../types';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { invokeCommand } from '../../../lib/ipc';
+import { invokeCommand, listConnections, type ConnectionSummary } from '../../../lib/ipc';
 import {
   ChatProvider,
   ChatMode,
@@ -14,7 +14,69 @@ import type { PlanActionPayload } from './ChatPlanPanel';
 import { withTimeout } from './chatSessionUtils';
 import { useChatAttachments } from './hooks/useChatAttachments';
 import { useChatModels } from './hooks/useChatModels';
+import {
+  applyDraftPatch,
+  createDraftConfig,
+  draftThreadRequest,
+  type ChatConfigPatch,
+  type ChatDraftConfig,
+} from './hooks/useChatDraftConfig';
 import { pollTurnUpdates } from './turnPolling';
+import {
+  bindingForConnection,
+  resolveConnectionBinding,
+  type ThreadSendBinding,
+} from './connectionBinding';
+
+type SendBindingArgs = Partial<ThreadSendBinding>;
+
+// A send forwards the thread's connection and supported endpoint only when the
+// thread already carries them. Nothing is inferred from the provider id.
+const readThreadSendBinding = (thread: ExtendedChatThread): SendBindingArgs => {
+  const source = thread as ExtendedChatThread & {
+    connectionId?: string | null;
+    supportedEndpoint?: string | null;
+  };
+  return {
+    ...(source.connectionId ? { connectionId: source.connectionId } : {}),
+    ...(source.supportedEndpoint ? { supportedEndpoint: source.supportedEndpoint } : {}),
+  };
+};
+
+/**
+ * Re-applies the resolved send binding to every loaded thread. A provider with
+ * one verified spawn connection binds it; zero connections clear the binding;
+ * several connections stay unset until the composer lets the user pick one.
+ */
+const withResolvedSendBindings = (
+  map: Record<string, ExtendedChatThread>,
+  connections: readonly ConnectionSummary[],
+  selections: Record<string, string>
+): Record<string, ExtendedChatThread> => {
+  let changed = false;
+  const next: Record<string, ExtendedChatThread> = {};
+  for (const [id, thread] of Object.entries(map)) {
+    const selected = selections[id];
+    const candidates = resolveConnectionBinding(thread.provider, connections).candidates;
+    const binding = selected
+      ? bindingForConnection(thread.provider, connections, selected)
+      : candidates.length === 1
+        ? { connectionId: candidates[0].connectionId, supportedEndpoint: candidates[0].supportedEndpoint }
+        : null;
+    const connectionId = binding?.connectionId ?? null;
+    const supportedEndpoint = binding?.supportedEndpoint ?? null;
+    if (
+      (thread.connectionId ?? null) !== connectionId ||
+      (thread.supportedEndpoint ?? null) !== supportedEndpoint
+    ) {
+      next[id] = { ...thread, connectionId, supportedEndpoint };
+      changed = true;
+    } else {
+      next[id] = thread;
+    }
+  }
+  return changed ? next : map;
+};
 
 export interface UseChatSessionProps {
   workspaceId: string | null;
@@ -43,19 +105,30 @@ export function useChatSession({
   const [isRunning, setIsRunning] = useState<Record<string, boolean>>({});
   const [liveRuns, setLiveRuns] = useState<LiveChatRun[]>([]);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
+  const [connections, setConnections] = useState<ConnectionSummary[]>([]);
+  // Chosen connection per thread, kept apart from the thread object because the
+  // native thread schema does not carry extra fields across a reload.
+  const [threadConnections, setThreadConnections] = useState<Record<string, string>>({});
+
+  const currentAgent = agentId ? agents?.find((a) => a.id === agentId) : undefined;
 
   const defaultProvider: ChatProvider = (() => {
     if (agentEngine) {
       return engineToChatProvider(agentEngine);
     }
-    if (agentId) {
-      const ag = agents?.find((a) => a.id === agentId);
-      if (ag?.engine) {
-        return engineToChatProvider(ag.engine);
-      }
+    if (currentAgent?.engine) {
+      return engineToChatProvider(currentAgent.engine);
     }
     return 'antigravity';
   })();
+
+  // Agent surface draft: provider, mode, model and effort chosen before the
+  // first thread exists. An existing thread's own fields take precedence. The
+  // draft inherits the agent profile's default model so the first thread does
+  // not silently reset a configured model to Automatic.
+  const [draftConfig, setDraftConfig] = useState<ChatDraftConfig>(() =>
+    createDraftConfig(defaultProvider, currentAgent?.defaultModel || null)
+  );
 
   // UI state
   const [showHistoryPopover, setShowHistoryPopover] = useState(false);
@@ -87,6 +160,10 @@ export function useChatSession({
   const activePollRunsRef = useRef<Set<string>>(new Set());
   const focusedThreadIdRef = useRef(focusedThreadId);
   focusedThreadIdRef.current = focusedThreadId;
+  const connectionsRef = useRef<ConnectionSummary[]>(connections);
+  connectionsRef.current = connections;
+  const threadConnectionsRef = useRef<Record<string, string>>(threadConnections);
+  threadConnectionsRef.current = threadConnections;
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -95,6 +172,58 @@ export function useChatSession({
       activePollRunsRef.current.clear();
     };
   }, []);
+
+  const loadConnections = async (): Promise<ConnectionSummary[]> => {
+    const list = await listConnections();
+    connectionsRef.current = list;
+    if (isMountedRef.current) setConnections(list);
+    return list;
+  };
+
+  // The shared registry is read once per chat surface. A browser build returns
+  // an empty list, so nothing is bound without a verified native connection.
+  useEffect(() => {
+    void loadConnections();
+  }, []);
+
+  // When the registry, the user's choice, or a thread's own fields change,
+  // re-apply the binding so the in-memory thread always mirrors the verified
+  // connection. A chosen connection that stopped verifying is dropped.
+  useEffect(() => {
+    if (connections.length === 0) return;
+    setThreadsMap((prev) =>
+      withResolvedSendBindings(prev, connections, threadConnections)
+    );
+  }, [connections, threadConnections, threadsMap]);
+
+  const resolveThreadSendBinding = (
+    thread: ExtendedChatThread
+  ): ThreadSendBinding | null => {
+    const selected = threadConnectionsRef.current[thread.id];
+    if (selected) {
+      const chosen = bindingForConnection(thread.provider, connectionsRef.current, selected);
+      if (chosen) return chosen;
+    }
+    return resolveConnectionBinding(thread.provider, connectionsRef.current).binding;
+  };
+
+  const threadWithResolvedBinding = (thread: ExtendedChatThread): ExtendedChatThread => {
+    const binding = resolveThreadSendBinding(thread);
+    return {
+      ...thread,
+      connectionId: binding?.connectionId ?? null,
+      supportedEndpoint: binding?.supportedEndpoint ?? null,
+    };
+  };
+
+  const selectThreadConnection = async (threadId: string, connectionId: string | null) => {
+    if (connectionId && connectionsRef.current.length === 0) await loadConnections();
+    const next = { ...threadConnectionsRef.current };
+    if (connectionId) next[threadId] = connectionId;
+    else delete next[threadId];
+    threadConnectionsRef.current = next;
+    setThreadConnections(next);
+  };
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -176,7 +305,8 @@ export function useChatSession({
                 threadId: first.id,
               });
               if (isMountedRef.current && thread?.id) {
-                setThreadsMap({ [thread.id]: thread });
+                const boundThread = threadWithResolvedBinding(thread);
+                setThreadsMap({ [thread.id]: boundThread });
                 setGridThreadIds([thread.id]);
                 setFocusedThreadId(thread.id);
                 setIsLoadingInitial(false);
@@ -256,7 +386,7 @@ export function useChatSession({
             const t = agentId
               ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId: tid })
               : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
-            if (t && t.id) loadedMap[tid] = t;
+            if (t && t.id) loadedMap[tid] = threadWithResolvedBinding(t);
           } catch {
             // Check localStorage fallback
             try {
@@ -355,38 +485,28 @@ export function useChatSession({
     }
   }, [knownThreadsList]);
 
-  const handleStartThreadFromHome = async (
-    promptText: string,
-    provider: ChatProvider,
-    mode: ChatMode,
-    model?: string
-  ) => {
+  const handleStartThreadFromHome = async (promptText: string) => {
+    const request = draftThreadRequest(draftConfig, agentId);
     try {
       const thread = agentId
-        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
-            agentId,
-            provider,
-            mode,
-            model,
-          })
+        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
-            provider,
+            ...request,
             workspaceId: workspaceId ?? null,
-            mode,
-            model,
           });
 
       if (!isMountedRef.current) return;
       const tid = thread.id;
-      setThreadsMap((prev) => ({ ...prev, [tid]: thread }));
-      setKnownThreadsList((prev) => [thread, ...prev.filter((t) => t.id !== tid)]);
+      const boundThread = threadWithResolvedBinding(thread);
+      setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
+      setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
       setGridThreadIds([tid]);
       setFocusedThreadId(tid);
       void persistGrid([tid], tid);
       notifyThreadsChanged();
 
       setTimeout(() => {
-        void handleSendPrompt(tid, promptText, thread);
+        void handleSendPrompt(tid, promptText, boundThread);
       }, 30);
     } catch (err) {
       console.error('[ChatView] Failed to start thread from Chat Home:', err);
@@ -399,11 +519,11 @@ export function useChatSession({
       if (!custom.detail) return;
       const { taskId, title, description } = custom.detail;
       const prompt = `Solve task [${taskId}]: ${title}\n\n${description}`.trim();
-      void handleStartThreadFromHome(prompt, defaultProvider, 'acceptEdits');
+      void handleStartThreadFromHome(prompt);
     };
     window.addEventListener('kite:open-task-in-chat', handleOpenTask);
     return () => window.removeEventListener('kite:open-task-in-chat', handleOpenTask);
-  }, [defaultProvider]);
+  }, [draftConfig, agentId, workspaceId]);
 
   const notifyThreadsChanged = () => {
     window.dispatchEvent(new CustomEvent('kite:threads-changed'));
@@ -423,21 +543,18 @@ export function useChatSession({
     }
 
     try {
+      const request = draftThreadRequest(draftConfig, agentId);
       const thread = agentId
-        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
-            agentId,
-            provider: defaultProvider,
-            mode: 'acceptEdits',
-          })
+        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
-            provider: defaultProvider,
+            ...request,
             workspaceId: workspaceId ?? null,
-            mode: 'acceptEdits',
           });
       if (!isMountedRef.current) return;
       const tid = thread.id;
-      setThreadsMap((prev) => ({ ...prev, [tid]: thread }));
-      setKnownThreadsList((prev) => [thread, ...prev.filter((t) => t.id !== tid)]);
+      const boundThread = threadWithResolvedBinding(thread);
+      setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
+      setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
 
       const nextGrid = [tid];
       setGridThreadIds(nextGrid);
@@ -456,13 +573,14 @@ export function useChatSession({
         ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId })
         : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId });
       if (!isMountedRef.current) return;
-      setThreadsMap((prev) => ({ ...prev, [threadId]: thread }));
+      const boundThread = threadWithResolvedBinding(thread);
+      setThreadsMap((prev) => ({ ...prev, [threadId]: boundThread }));
       setKnownThreadsList((prev) => {
         const found = prev.find((t) => t.id === threadId);
         if (found) {
-          return prev.map((t) => (t.id === threadId ? thread : t));
+          return prev.map((t) => (t.id === threadId ? boundThread : t));
         }
-        return [thread, ...prev];
+        return [boundThread, ...prev];
       });
       if (!gridThreadIds.includes(threadId)) {
         const nextGrid = [threadId];
@@ -491,20 +609,17 @@ export function useChatSession({
         void persistGrid(nextGrid, focusedThreadId);
       } else {
         try {
+          const request = draftThreadRequest(draftConfig, agentId);
           const newThread = agentId
-            ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
-                agentId,
-                provider: defaultProvider,
-                mode: 'acceptEdits',
-              })
+            ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
             : await invokeCommand<ExtendedChatThread>('create_general_chat', {
-                provider: defaultProvider,
+                ...request,
                 workspaceId: workspaceId ?? null,
-                mode: 'acceptEdits',
               });
           if (!isMountedRef.current) return;
-          setThreadsMap((prev) => ({ ...prev, [newThread.id]: newThread }));
-          setKnownThreadsList((prev) => [newThread, ...prev]);
+          const boundThread = threadWithResolvedBinding(newThread);
+          setThreadsMap((prev) => ({ ...prev, [newThread.id]: boundThread }));
+          setKnownThreadsList((prev) => [boundThread, ...prev]);
           const nextGrid = [...gridThreadIds, newThread.id];
           setGridThreadIds(nextGrid);
           void persistGrid(nextGrid, focusedThreadId);
@@ -626,16 +741,49 @@ export function useChatSession({
     }
   };
 
+  const handleDraftConfigChange = (patch: ChatConfigPatch) => {
+    setDraftConfig((prev) => applyDraftPatch(prev, patch));
+  };
+
   const handleUpdateConfig = async (
     threadId: string,
-    patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null }
+    patch: {
+      provider?: ChatProvider;
+      mode?: ChatMode;
+      model?: string | null;
+      effort?: string | null;
+      connectionId?: string | null;
+    }
   ) => {
     const thread = threadsMap[threadId];
     if (!thread) return;
-    const provider = patch.provider ?? thread.provider;
-    const mode = patch.mode ?? thread.mode;
-    const model = patch.model !== undefined ? patch.model : thread.model;
-    const effort = patch.effort !== undefined ? patch.effort : thread.effort;
+    const currentConfig: ChatDraftConfig = {
+      provider: thread.provider,
+      mode: thread.mode,
+      model: thread.model ?? null,
+      effort: thread.effort ?? null,
+    };
+    const { provider, mode, model, effort } = applyDraftPatch(currentConfig, patch);
+    const providerChanged = provider !== thread.provider;
+    const connectionOnly =
+      patch.connectionId !== undefined &&
+      patch.provider === undefined &&
+      patch.mode === undefined &&
+      patch.model === undefined &&
+      patch.effort === undefined;
+
+    if (patch.connectionId !== undefined) {
+      await selectThreadConnection(threadId, patch.connectionId);
+    }
+    if (providerChanged) {
+      // A binding belonged to the previous provider, so it is cleared before
+      // the new provider's verified connection, if any, is resolved.
+      await selectThreadConnection(threadId, null);
+    }
+    if (connectionOnly) {
+      setActiveDropdown(null);
+      return;
+    }
 
     try {
       let updated = await invokeCommand<ExtendedChatThread>('update_chat_configuration', {
@@ -663,9 +811,13 @@ export function useChatSession({
         });
       }
       if (!isMountedRef.current) return;
+      const mergedThread = threadWithResolvedBinding({
+        ...updated,
+        effort: effort ?? updated.effort,
+      });
       setThreadsMap((prev) => ({
         ...prev,
-        [threadId]: { ...updated, effort: effort ?? updated.effort },
+        [threadId]: mergedThread,
       }));
 
       if (PROVIDER_CATALOG[provider]?.isDynamic) {
@@ -744,9 +896,20 @@ export function useChatSession({
       attachments: currentAttachments,
     };
 
+    const boundThread = threadWithResolvedBinding(thread);
+    const sendBinding = readThreadSendBinding(boundThread);
+
     setThreadsMap((prev) => {
-      const t = prev[threadId] || thread;
-      return { ...prev, [threadId]: { ...t, items: [...t.items, userItem], status: 'running' } };
+      const t = prev[threadId] || boundThread;
+      return {
+        ...prev,
+        [threadId]: {
+          ...t,
+          items: [...t.items, userItem],
+          status: 'running',
+          ...readThreadSendBinding(boundThread),
+        },
+      };
     });
     setIsRunning((prev) => ({ ...prev, [threadId]: true }));
 
@@ -762,6 +925,7 @@ export function useChatSession({
           provider: thread.provider,
           attachments: currentAttachments,
           planAction,
+          ...sendBinding,
         });
       } else {
         res = await invokeCommand('start_chat_turn', {
@@ -771,6 +935,7 @@ export function useChatSession({
           provider: thread.provider,
           attachments: currentAttachments,
           planAction,
+          ...sendBinding,
         });
       }
 
@@ -822,6 +987,7 @@ export function useChatSession({
 
   return {
     defaultProvider,
+    draftConfig,
     gridThreadIds,
     focusedThreadId,
     threadsMap,
@@ -854,6 +1020,7 @@ export function useChatSession({
     handlePinThread,
     handleArchiveThread,
     handleRenameThread,
+    handleDraftConfigChange,
     handleUpdateConfig,
     handleApproval,
     handleCancelTurn,

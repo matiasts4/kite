@@ -1,4 +1,5 @@
 use crate::persist::{notifications, persist, threads, workspace_path};
+use crate::connections::EndpointVerification;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -61,12 +62,31 @@ pub fn prune_stale_runs(live: &mut LiveTurns) {
     }
 }
 
+/// Connection and endpoint a chat or agent send binds to. Both are optional:
+/// a send without them keeps the local CLI's own account and model defaults.
+#[derive(Debug, Clone, Default)]
+pub struct SendBinding {
+    pub connection_id: Option<String>,
+    pub supported_endpoint: Option<String>,
+}
+
 pub fn start_turn(
     thread_id: &str,
     profile_id: Option<&str>,
     prompt: &str,
     attachments: Vec<Value>,
     routine_id: Option<&str>,
+) -> Value {
+    start_turn_with_binding(thread_id, profile_id, prompt, attachments, routine_id, None)
+}
+
+pub fn start_turn_with_binding(
+    thread_id: &str,
+    profile_id: Option<&str>,
+    prompt: &str,
+    attachments: Vec<Value>,
+    routine_id: Option<&str>,
+    binding: Option<&SendBinding>,
 ) -> Value {
     let mut thread = load_thread(thread_id, profile_id, "Chat");
     if let Some(profile_id) = profile_id {
@@ -137,7 +157,7 @@ pub fn start_turn(
         live.by_thread.insert(thread_id.to_string(), run_id.clone());
         live.runs.insert(run_id.clone(), run);
     }
-    launch_provider(thread_id.to_string(), run_id.clone(), &thread, prompt);
+    launch_provider(thread_id.to_string(), run_id.clone(), &thread, prompt, binding);
     json!({
         "schemaVersion": 1,
         "runId": run_id,
@@ -294,7 +314,13 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
     context_buffer
 }
 
-pub fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt: &str) {
+pub fn launch_provider(
+    thread_id: String,
+    run_id: String,
+    thread: &Value,
+    prompt: &str,
+    binding: Option<&SendBinding>,
+) {
     let provider = thread.get("provider").and_then(|v| v.as_str()).unwrap_or("antigravity").to_string();
     let mode = thread.get("mode").and_then(|v| v.as_str()).unwrap_or("fullAccess").to_string();
     let model = thread.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -311,11 +337,30 @@ pub fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt
     let profile_id = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
     let prompt = prompt.to_string();
     let thread_clone = thread.clone();
+    let binding = binding.cloned();
     let assistant_id = {
         let live = live_turns().lock().unwrap();
         live.runs.get(&run_id).map(|run| run.assistant_id.clone()).unwrap_or_else(|| "aassistant".into())
     };
     std::thread::spawn(move || {
+        let verified_endpoints = match verified_endpoints_for(
+            binding.as_ref().and_then(|value| value.connection_id.as_deref()),
+        ) {
+            Ok(endpoints) => endpoints,
+            Err(message) => {
+                finish_run(&run_id, false, false, &message);
+                return;
+            }
+        };
+        let values = SendValues {
+            connection_id: binding.as_ref().and_then(|value| value.connection_id.as_deref()),
+            model: model.as_deref(),
+            session_id: provider_session_id.as_deref(),
+            supported_endpoint: binding
+                .as_ref()
+                .and_then(|value| value.supported_endpoint.as_deref()),
+            verified_endpoints: &verified_endpoints,
+        };
         let cwd = workspace_id
             .as_deref()
             .and_then(workspace_path)
@@ -339,10 +384,16 @@ pub fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt
         } else {
             assemble_thread_context(&thread_clone, &prompt)
         };
-        match build_command(&provider, &mode, model.as_deref(), effort.as_deref(), provider_session_id.as_deref(), &effective_prompt) {
-            Ok((program, args)) => {
-                let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match crate::hidden_exec::spawn_streaming(&program, &args_refs, Some(&cwd)) {
+        match build_spawn(&provider, &mode, &values, effort.as_deref(), &effective_prompt) {
+            Ok(plan) => {
+                chat_log(&format!(
+                    "spawn: provider={}, endpoint={}, connection={}",
+                    provider,
+                    plan.endpoint.verified_endpoint(),
+                    plan.connection_id.as_deref().unwrap_or("none"),
+                ));
+                let args_refs: Vec<&str> = plan.args.iter().map(|s| s.as_str()).collect();
+                match crate::hidden_exec::spawn_streaming(&plan.program, &args_refs, Some(&cwd)) {
                     Ok(child) => stream_child(thread_id, run_id, assistant_id, child),
                     Err(err) => finish_run(&run_id, false, false, &format!("{provider} failed to start: {err}")),
                 }
@@ -350,6 +401,20 @@ pub fn launch_provider(thread_id: String, run_id: String, thread: &Value, prompt
             Err(message) => finish_run(&run_id, false, false, &message),
         }
     });
+}
+
+/// Endpoints verified on the connection named by the send. An empty list is
+/// returned when the send does not select a connection, so no endpoint can be
+/// claimed as supported.
+fn verified_endpoints_for(connection_id: Option<&str>) -> Result<Vec<EndpointVerification>, String> {
+    let Some(connection_id) = connection_id.filter(|id| !id.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let registry = crate::connections::ConnectionRegistry::open()?;
+    let record = registry
+        .load(connection_id)?
+        .ok_or_else(|| format!("connection {connection_id} is not in the shared registry"))?;
+    Ok(record.endpoints)
 }
 
 pub fn list_available_providers() -> Vec<&'static str> {
@@ -381,14 +446,183 @@ pub fn list_available_providers() -> Vec<&'static str> {
     available
 }
 
-pub fn build_command(
+/// One local chat spawn form. A driver id is not a permission: each endpoint
+/// declares which send values its command line can consume, and the spawn is
+/// evidence for that endpoint only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnEndpoint {
+    pub endpoint_id: &'static str,
+    /// This spawn form selects a model without an extra opt-in. It reflects
+    /// existing supported behavior, not a capability inherited from the driver.
+    pub model_by_default: bool,
+    pub accepts_model: bool,
+    pub accepts_session: bool,
+}
+
+impl SpawnEndpoint {
+    /// The only endpoint a completed spawn is evidence for. It is never a
+    /// network route, so a CLI start cannot verify a chat API endpoint.
+    pub fn verified_endpoint(&self) -> &'static str {
+        self.endpoint_id
+    }
+}
+
+pub fn spawn_endpoint(provider: &str) -> Option<SpawnEndpoint> {
+    let endpoint = match provider {
+        "antigravity" | "agy" => SpawnEndpoint {
+            endpoint_id: "agy -p",
+            model_by_default: true,
+            accepts_model: true,
+            accepts_session: true,
+        },
+        "claude" => SpawnEndpoint {
+            endpoint_id: "claude -p",
+            model_by_default: true,
+            accepts_model: true,
+            accepts_session: true,
+        },
+        "codex" => SpawnEndpoint {
+            endpoint_id: "codex exec",
+            model_by_default: true,
+            accepts_model: true,
+            accepts_session: true,
+        },
+        "cursor" => SpawnEndpoint {
+            endpoint_id: "cursor-agent -p",
+            model_by_default: false,
+            accepts_model: false,
+            accepts_session: false,
+        },
+        "grok" => SpawnEndpoint {
+            endpoint_id: "grok -p",
+            model_by_default: false,
+            accepts_model: false,
+            accepts_session: false,
+        },
+        // The Go chat route needs a Go model and the `x-opencode-session`
+        // header. `opencode run` selects neither, so it is not that endpoint.
+        "opencode" => SpawnEndpoint {
+            endpoint_id: "opencode run",
+            model_by_default: false,
+            accepts_model: false,
+            accepts_session: false,
+        },
+        "gemini" => SpawnEndpoint {
+            endpoint_id: "gemini --prompt",
+            model_by_default: false,
+            accepts_model: false,
+            accepts_session: false,
+        },
+        _ => return None,
+    };
+    Some(endpoint)
+}
+
+/// Values a chat or agent send may pass to a spawn. A value reaches the command
+/// line only when the endpoint declares it and, for a model on an endpoint that
+/// does not select one by default, when the send names the endpoint explicitly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendValues<'a> {
+    pub connection_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    /// Explicit supported-endpoint flag. It must name this spawn's endpoint and
+    /// that endpoint must be verified on `connection_id`.
+    pub supported_endpoint: Option<&'a str>,
+    pub verified_endpoints: &'a [EndpointVerification],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedSend<'a> {
+    pub endpoint: SpawnEndpoint,
+    pub connection_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+}
+
+/// Resolves the send values a spawn may forward. An explicit request is never
+/// downgraded to a silent omission: when the supported-endpoint flag cannot be
+/// honored, this returns an error.
+pub fn resolve_send<'a>(
+    provider: &str,
+    values: &SendValues<'a>,
+) -> Result<ResolvedSend<'a>, String> {
+    let endpoint =
+        spawn_endpoint(provider).ok_or_else(|| format!("{provider} has no local chat command in this build."))?;
+    let supported_endpoint = values.supported_endpoint.filter(|id| !id.is_empty());
+    let connection_id = values.connection_id.filter(|id| !id.is_empty());
+
+    if let Some(claimed) = supported_endpoint {
+        if claimed != endpoint.endpoint_id {
+            return Err(format!(
+                "{claimed} is not the endpoint the {provider} spawn uses ({})",
+                endpoint.endpoint_id
+            ));
+        }
+        if !endpoint.accepts_model {
+            return Err(format!(
+                "the {provider} spawn endpoint {claimed} does not support model selection"
+            ));
+        }
+        let connection_id = connection_id.ok_or_else(|| {
+            format!("endpoint {claimed} must belong to a connection before a send can use it")
+        })?;
+        let verified = values
+            .verified_endpoints
+            .iter()
+            .any(|endpoint| endpoint.endpoint_id == claimed && endpoint.ok);
+        if !verified {
+            return Err(format!(
+                "endpoint {claimed} is not verified for connection {connection_id}"
+            ));
+        }
+    } else if connection_id.is_some() {
+        return Err(
+            "a send cannot pass a connection without naming the endpoint that supports it".to_string(),
+        );
+    }
+
+    let model = values
+        .model
+        .filter(|model| !model.is_empty())
+        .filter(|_| endpoint.accepts_model && (supported_endpoint.is_some() || endpoint.model_by_default));
+    let session_id = values
+        .session_id
+        .filter(|session| !session.is_empty())
+        .filter(|_| endpoint.accepts_session);
+
+    Ok(ResolvedSend {
+        endpoint,
+        connection_id,
+        model,
+        session_id,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnArgs {
+    pub endpoint: SpawnEndpoint,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnPlan {
+    pub endpoint: SpawnEndpoint,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub connection_id: Option<String>,
+}
+
+/// Builds the argument vector for one spawn endpoint. Program lookup is left to
+/// `build_spawn`, so argument rules are testable without an installed CLI.
+pub fn spawn_args(
     provider: &str,
     mode: &str,
-    model: Option<&str>,
+    values: &SendValues<'_>,
     effort: Option<&str>,
-    session_id: Option<&str>,
     prompt: &str,
-) -> Result<(PathBuf, Vec<String>), String> {
+) -> Result<SpawnArgs, String> {
+    let resolved = resolve_send(provider, values)?;
     let prompt = clip_argv(prompt);
     let read_only = mode == "readOnly";
     let sent = if read_only {
@@ -396,15 +630,10 @@ pub fn build_command(
     } else {
         prompt
     };
-    let (program, args) = match provider {
+    let args = match provider {
         "antigravity" | "agy" => {
-            let program = resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"])
-                .ok_or_else(|| {
-                    let avail = list_available_providers().join(", ");
-                    format!("Antigravity CLI (agy) is not installed. Available providers: {avail}")
-                })?;
             let mut args = vec!["-p".into(), sent, "--output-format".into(), "stream-json".into()];
-            if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+            if let Some(sid) = resolved.session_id {
                 args.push("--conversation".into());
                 args.push(sid.to_string());
             }
@@ -421,7 +650,7 @@ pub fn build_command(
                     args.push("--dangerously-skip-permissions".into());
                 }
             }
-            if let Some(model) = model {
+            if let Some(model) = resolved.model {
                 args.push("--model".into());
                 args.push(model.into());
             }
@@ -429,43 +658,28 @@ pub fn build_command(
                 args.push("--effort".into());
                 args.push(effort.into());
             }
-            (program, args)
+            args
         }
         "claude" => {
-            let program = resolve_bin("claude", &[]).ok_or_else(|| {
-                let avail = list_available_providers().join(", ");
-                if avail.is_empty() {
-                    "Claude Code is not installed. Install it with 'npm install -g @anthropic-ai/claude-code'.".to_string()
-                } else {
-                    format!("Claude Code is not installed. Installed on this system: {avail}. Please switch providers in the dropdown.")
-                }
-            })?;
             let permission = match mode {
                 "readOnly" => "plan",
                 "acceptEdits" => "acceptEdits",
                 _ => "bypassPermissions",
             };
             let mut args = vec!["-p".into(), "--output-format".into(), "text".into(), "--permission-mode".into(), permission.into()];
-            if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+            if let Some(sid) = resolved.session_id {
                 args.push("--resume".into());
                 args.push(sid.to_string());
             }
-            if let Some(model) = model {
+            if let Some(model) = resolved.model {
                 args.push("--model".into());
                 args.push(model.into());
             }
             args.push(sent);
-            (program, args)
+            args
         }
         "codex" => {
-            let program = resolve_bin("codex", &[
-                r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
-                r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
-            ]).ok_or_else(|| {
-                let avail = list_available_providers().join(", ");
-                format!("Codex is not installed. Available providers: {avail}")
-            })?;
-            let mut args = if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+            let mut args = if let Some(sid) = resolved.session_id {
                 vec!["exec".into(), "resume".into(), sid.to_string(), "--skip-git-repo-check".into()]
             } else {
                 vec!["exec".into(), "--skip-git-repo-check".into()]
@@ -476,46 +690,85 @@ pub fn build_command(
             } else {
                 args.push("--full-auto".into());
             }
-            if let Some(model) = model {
+            if let Some(model) = resolved.model {
                 args.push("--model".into());
                 args.push(model.into());
             }
             args.push(sent);
-            (program, args)
+            args
         }
-        "cursor" => {
-            let program = resolve_bin("agent", &[])
-                .or_else(|| resolve_bin("cursor-agent", &[]))
-                .ok_or_else(|| {
-                    let avail = list_available_providers().join(", ");
-                    format!("Cursor Agent is not installed. Available providers: {avail}")
-                })?;
-            (program, vec!["-p".into(), sent])
-        }
-        "grok" => {
-            let program = resolve_bin("grok", &[]).ok_or_else(|| {
-                let avail = list_available_providers().join(", ");
-                format!("Grok is not installed. Available providers: {avail}")
-            })?;
-            (program, vec!["-p".into(), sent])
-        }
-        "opencode" => {
-            let program = resolve_bin("opencode", &[]).ok_or_else(|| {
-                let avail = list_available_providers().join(", ");
-                format!("OpenCode is not installed. Available providers: {avail}")
-            })?;
-            (program, vec!["run".into(), sent])
-        }
-        "gemini" => {
-            let program = resolve_bin("gemini", &[]).ok_or_else(|| {
-                let avail = list_available_providers().join(", ");
-                format!("Gemini CLI is not installed. Available providers: {avail}")
-            })?;
-            (program, vec!["--prompt".into(), sent])
-        }
+        "cursor" | "grok" => vec!["-p".into(), sent],
+        "opencode" => vec!["run".into(), sent],
+        "gemini" => vec!["--prompt".into(), sent],
         other => return Err(format!("{other} has no local chat command in this build.")),
     };
-    Ok((program, args))
+    Ok(SpawnArgs {
+        endpoint: resolved.endpoint,
+        args,
+    })
+}
+
+fn resolve_spawn_program(provider: &str) -> Result<PathBuf, String> {
+    let program = match provider {
+        "antigravity" | "agy" => {
+            resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]).ok_or_else(|| {
+                let avail = list_available_providers().join(", ");
+                format!("Antigravity CLI (agy) is not installed. Available providers: {avail}")
+            })?
+        }
+        "claude" => resolve_bin("claude", &[]).ok_or_else(|| {
+            let avail = list_available_providers().join(", ");
+            if avail.is_empty() {
+                "Claude Code is not installed. Install it with 'npm install -g @anthropic-ai/claude-code'.".to_string()
+            } else {
+                format!("Claude Code is not installed. Installed on this system: {avail}. Please switch providers in the dropdown.")
+            }
+        })?,
+        "codex" => resolve_bin("codex", &[
+            r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
+            r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
+        ]).ok_or_else(|| {
+            let avail = list_available_providers().join(", ");
+            format!("Codex is not installed. Available providers: {avail}")
+        })?,
+        "cursor" => resolve_bin("agent", &[])
+            .or_else(|| resolve_bin("cursor-agent", &[]))
+            .ok_or_else(|| {
+                let avail = list_available_providers().join(", ");
+                format!("Cursor Agent is not installed. Available providers: {avail}")
+            })?,
+        "grok" => resolve_bin("grok", &[]).ok_or_else(|| {
+            let avail = list_available_providers().join(", ");
+            format!("Grok is not installed. Available providers: {avail}")
+        })?,
+        "opencode" => resolve_bin("opencode", &[]).ok_or_else(|| {
+            let avail = list_available_providers().join(", ");
+            format!("OpenCode is not installed. Available providers: {avail}")
+        })?,
+        "gemini" => resolve_bin("gemini", &[]).ok_or_else(|| {
+            let avail = list_available_providers().join(", ");
+            format!("Gemini CLI is not installed. Available providers: {avail}")
+        })?,
+        other => return Err(format!("{other} has no local chat command in this build.")),
+    };
+    Ok(program)
+}
+
+pub fn build_spawn(
+    provider: &str,
+    mode: &str,
+    values: &SendValues<'_>,
+    effort: Option<&str>,
+    prompt: &str,
+) -> Result<SpawnPlan, String> {
+    let spawn = spawn_args(provider, mode, values, effort, prompt)?;
+    let program = resolve_spawn_program(provider)?;
+    Ok(SpawnPlan {
+        endpoint: spawn.endpoint,
+        program,
+        args: spawn.args,
+        connection_id: values.connection_id.filter(|id| !id.is_empty()).map(str::to_string),
+    })
 }
 
 pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) {
@@ -1222,4 +1475,269 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
 
     let profile_id = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
     Ok(start_turn(&thread_id, profile_id.as_deref(), &handoff_prompt, Vec::new(), None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connections::EndpointVerification;
+
+    const OPENCODE_GO_CHAT: &str =
+        "https://opencode.ai/inference/go/openai/v1/chat/completions";
+
+    fn send<'a>(
+        model: Option<&'a str>,
+        session_id: Option<&'a str>,
+        connection_id: Option<&'a str>,
+        supported_endpoint: Option<&'a str>,
+        verified_endpoints: &'a [EndpointVerification],
+    ) -> SendValues<'a> {
+        SendValues {
+            connection_id,
+            model,
+            session_id,
+            supported_endpoint,
+            verified_endpoints,
+        }
+    }
+
+    fn model_flags(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).filter(|arg| *arg == "--model").collect()
+    }
+
+    #[test]
+    fn spawns_without_a_supported_endpoint_omit_model_and_session() {
+        for provider in ["cursor", "grok", "opencode", "gemini"] {
+            let values = send(Some("go-model-1"), Some("session-1"), None, None, &[]);
+            let spawn = spawn_args(provider, "fullAccess", &values, None, "hello")
+                .unwrap_or_else(|error| panic!("{provider} spawn args: {error}"));
+
+            let joined = spawn.args.join(" ");
+            assert!(
+                model_flags(&spawn.args).is_empty(),
+                "{provider} must omit --model without a supported endpoint: {joined}"
+            );
+            assert!(
+                !spawn.args.iter().any(|arg| arg == "--conversation" || arg == "--resume" || arg == "resume"),
+                "{provider} must omit session resume: {joined}"
+            );
+            assert!(
+                !spawn.args.iter().any(|arg| arg.contains("opencode.ai")),
+                "{provider} must not name a network endpoint: {joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_endpoint_flag_fails_on_a_spawn_without_model_support() {
+        for provider in ["cursor", "grok", "opencode", "gemini"] {
+            let endpoint_id = spawn_endpoint(provider)
+                .unwrap_or_else(|| panic!("{provider} endpoint"))
+                .endpoint_id;
+            let verified = vec![EndpointVerification {
+                endpoint_id: endpoint_id.to_string(),
+                ok: true,
+            }];
+            let values = send(
+                Some("go-model-1"),
+                None,
+                Some("connection-1"),
+                Some(endpoint_id),
+                &verified,
+            );
+            let error = spawn_args(provider, "fullAccess", &values, None, "hello")
+                .expect_err("a spawn without model support must fail, not add --model");
+
+            assert!(
+                error.contains("does not support model selection"),
+                "{provider}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_endpoint_without_a_verified_connection_endpoint_fails() {
+        let unverified = vec![EndpointVerification {
+            endpoint_id: "agy -p".to_string(),
+            ok: false,
+        }];
+        let values = send(
+            Some("gemini-4-argon"),
+            None,
+            Some("antigravity:api_key:email=|org=|account="),
+            Some("agy -p"),
+            &unverified,
+        );
+        let error = spawn_args("antigravity", "fullAccess", &values, None, "hello")
+            .expect_err("an endpoint that is not verified on the connection must fail");
+        assert!(error.contains("is not verified for connection"), "{error}");
+
+        let without_connection = send(Some("gemini-4-argon"), None, None, Some("agy -p"), &[]);
+        let error = spawn_args("antigravity", "fullAccess", &without_connection, None, "hello")
+            .expect_err("a supported endpoint needs a connection");
+        assert!(error.contains("must belong to a connection"), "{error}");
+    }
+
+    #[test]
+    fn verified_supported_endpoint_forwards_connection_model_and_session() {
+        let connection_id = "antigravity:api_key:email=|org=|account=";
+        let verified = vec![EndpointVerification {
+            endpoint_id: "agy -p".to_string(),
+            ok: true,
+        }];
+        let values = send(
+            Some("gemini-4-argon"),
+            Some("conversation-1"),
+            Some(connection_id),
+            Some("agy -p"),
+            &verified,
+        );
+
+        let resolved = resolve_send("antigravity", &values).expect("supported send");
+        assert_eq!(resolved.endpoint.endpoint_id, "agy -p");
+        assert_eq!(resolved.connection_id, Some(connection_id));
+        assert_eq!(resolved.model, Some("gemini-4-argon"));
+        assert_eq!(resolved.session_id, Some("conversation-1"));
+
+        let spawn = spawn_args("antigravity", "fullAccess", &values, None, "hello")
+            .expect("spawn args");
+        assert_eq!(model_flags(&spawn.args), vec!["--model"]);
+        assert!(spawn.args.iter().any(|arg| arg == "gemini-4-argon"));
+        assert!(spawn.args.iter().any(|arg| arg == "--conversation"));
+    }
+
+    #[test]
+    fn connection_without_a_named_supported_endpoint_fails() {
+        let values = send(
+            Some("composer"),
+            None,
+            Some("cursor:api_key:email=|org=|account="),
+            None,
+            &[],
+        );
+        let error = spawn_args("cursor", "fullAccess", &values, None, "hello")
+            .expect_err("a connection needs a named endpoint");
+        assert!(
+            error.contains("without naming the endpoint that supports it"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn existing_model_and_session_flags_are_preserved() {
+        let agy = spawn_args(
+            "antigravity",
+            "readOnly",
+            &send(Some("gemini-4-argon"), Some("conversation-1"), None, None, &[]),
+            Some("high"),
+            "hello",
+        )
+        .expect("antigravity args");
+        assert_eq!(
+            agy.args,
+            vec![
+                "-p",
+                "Read-only mode: do not create, edit, or delete files.\n\nhello",
+                "--output-format",
+                "stream-json",
+                "--conversation",
+                "conversation-1",
+                "--mode",
+                "plan",
+                "--model",
+                "gemini-4-argon",
+                "--effort",
+                "high",
+            ]
+        );
+
+        let claude = spawn_args(
+            "claude",
+            "acceptEdits",
+            &send(Some("sonnet"), Some("conversation-1"), None, None, &[]),
+            None,
+            "hello",
+        )
+        .expect("claude args");
+        assert_eq!(
+            claude.args,
+            vec![
+                "-p",
+                "--output-format",
+                "text",
+                "--permission-mode",
+                "acceptEdits",
+                "--resume",
+                "conversation-1",
+                "--model",
+                "sonnet",
+                "hello",
+            ]
+        );
+
+        let codex = spawn_args(
+            "codex",
+            "acceptEdits",
+            &send(Some("gpt-6-sol"), Some("conversation-1"), None, None, &[]),
+            None,
+            "hello",
+        )
+        .expect("codex args");
+        assert_eq!(
+            codex.args,
+            vec![
+                "exec",
+                "resume",
+                "conversation-1",
+                "--skip-git-repo-check",
+                "--full-auto",
+                "--model",
+                "gpt-6-sol",
+                "hello",
+            ]
+        );
+    }
+
+    #[test]
+    fn claiming_the_go_chat_endpoint_on_a_cli_spawn_fails() {
+        let verified = vec![EndpointVerification {
+            endpoint_id: OPENCODE_GO_CHAT.to_string(),
+            ok: true,
+        }];
+        let values = send(
+            Some("go-model-1"),
+            Some("session-1"),
+            Some("opencode:api_key:email=|org=|account="),
+            Some(OPENCODE_GO_CHAT),
+            &verified,
+        );
+        let error = spawn_args("opencode", "fullAccess", &values, None, "hello")
+            .expect_err("the Go chat route is not the opencode run endpoint");
+        assert!(
+            error.contains("is not the endpoint the opencode spawn uses"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn opencode_run_is_not_evidence_for_the_go_chat_endpoint() {
+        let endpoint = spawn_endpoint("opencode").expect("opencode endpoint");
+        assert_eq!(endpoint.endpoint_id, "opencode run");
+        assert_ne!(endpoint.endpoint_id, OPENCODE_GO_CHAT);
+        assert!(
+            !endpoint.endpoint_id.contains("opencode.ai"),
+            "a local spawn endpoint is not a network route"
+        );
+
+        let spawn = spawn_args(
+            "opencode",
+            "fullAccess",
+            &send(None, None, None, None, &[]),
+            None,
+            "hello",
+        )
+        .expect("opencode args");
+        assert_eq!(spawn.args, vec!["run", "hello"]);
+        assert!(!spawn.args.iter().any(|arg| arg.contains(OPENCODE_GO_CHAT)));
+    }
 }

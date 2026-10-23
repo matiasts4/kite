@@ -8,12 +8,15 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::chat::drivers::declaration;
-use crate::chat::persistent::{has_persistent_wire, AntigravitySession, PersistentControls};
+use crate::chat::drivers::{declaration, DriverVersion};
+use crate::chat::persistent::{
+    unsupported_wire, AntigravitySession, OpenCodeServerSession, PersistentControls,
+    ANTIGRAVITY_DRIVER, OPENCODE_DRIVER,
+};
 use crate::chat::recipe::{apply_recipe, snapshot_for_agent};
 use crate::chat::session::{
     declared_session_mode, RecipeSnapshot, SendReceipt, SessionManager, SessionMode, SessionSpec,
-    SessionState, SessionTransport, TransportEvent, TransportSpec,
+    SessionState, SessionTransport,
 };
 use crate::chat::threads::{
     chat_item, load_thread, replace_thread, sanitize_chat_text, touch, upsert_item,
@@ -264,56 +267,72 @@ fn session_manager() -> &'static Mutex<SessionManager> {
     CELL.get_or_init(|| Mutex::new(SessionManager::new()))
 }
 
-/// The lasting wire for a persistent driver. Only Antigravity has an adapter in
-/// this build; a driver whose declaration allows a lasting channel but has no
-/// adapter fails before a process starts, so the caller keeps the one-command
-/// path with a bounded notice instead of pretending the process stays open.
-fn open_persistent_transport(driver: &str, controls: PersistentControls) -> Box<dyn SessionTransport> {
-    if has_persistent_wire(driver) {
-        Box::new(AntigravitySession::new(controls))
-    } else {
-        Box::new(DeclaredWireUnavailable {
-            driver: driver.to_string(),
-        })
-    }
+/// The lasting wire a send may open. The kind is evidence about this build's
+/// adapter, not a capability derived from the driver id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Antigravity,
+    OpenCodeServer,
 }
 
+/// A lasting transport chosen from the declaration, plus the version evidence
+/// that gates it. The comparison itself runs inside `spawn`, before any
+/// process starts, so a mismatch reaches the caller as a start failure.
 #[derive(Debug)]
-struct DeclaredWireUnavailable {
-    driver: String,
+pub struct SelectedTransport {
+    pub driver: String,
+    pub kind: TransportKind,
+    pub version: DriverVersion,
+    pub transport: Box<dyn SessionTransport>,
 }
 
-impl SessionTransport for DeclaredWireUnavailable {
-    fn spawn(&mut self, _spec: &TransportSpec) -> Result<(), String> {
-        Err(format!(
-            "no lasting wire for {} is implemented in this build",
-            self.driver
-        ))
+/// Chooses the lasting transport for a driver that declared one. A wire this
+/// build does not speak, a declaration without version evidence, and a driver
+/// without an adapter all fail closed before a session is attached. The caller
+/// keeps the one-command path and writes the reason into the thread.
+pub fn select_persistent_transport(
+    driver: &str,
+    controls: PersistentControls,
+) -> Result<SelectedTransport, String> {
+    let declared = declaration(driver)
+        .ok_or_else(|| format!("{driver} has no driver declaration in this build"))?;
+    if let Some(refusal) = unsupported_wire(driver) {
+        return Err(refusal);
     }
+    let version = declared.version.clone().ok_or_else(|| {
+        format!(
+            "{} declares no version evidence, so a lasting session cannot start",
+            declared.driver
+        )
+    })?;
+    let kind = match declared.driver.as_str() {
+        ANTIGRAVITY_DRIVER => TransportKind::Antigravity,
+        OPENCODE_DRIVER => TransportKind::OpenCodeServer,
+        other => {
+            return Err(format!(
+                "Unsupported: {other} declares a lasting wire but this build has no adapter for it"
+            ))
+        }
+    };
+    let transport: Box<dyn SessionTransport> = match kind {
+        TransportKind::Antigravity => Box::new(AntigravitySession::new(controls)),
+        TransportKind::OpenCodeServer => Box::new(OpenCodeServerSession::new()),
+    };
+    Ok(SelectedTransport {
+        driver: declared.driver,
+        kind,
+        version,
+        transport,
+    })
+}
 
-    fn write_turn(&mut self, _prompt: &str) -> Result<(), String> {
-        Err("the session did not start".to_string())
-    }
-
-    fn interrupt(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn spawn_count(&self) -> u32 {
-        0
-    }
-
-    fn resume_handle(&self) -> Option<String> {
-        None
-    }
-
-    fn drain(&mut self) -> Vec<TransportEvent> {
-        Vec::new()
-    }
+/// The bounded statement a thread receives when the lasting route could not
+/// start. The prompt is already stored, so the same send can run on the
+/// one-command path without losing it.
+pub fn persistent_fallback_notice(driver: &str, reason: &str) -> String {
+    bounded_notice(&format!(
+        "Persistent sessions are enabled, but {driver} could not start one: {reason}. This turn runs as one command."
+    ))
 }
 
 /// Writes one bounded `notice` item into the live run and the durable thread.
@@ -369,6 +388,14 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
                     }
                 }
                 "turnCompleted" => outcome = Some((true, String::new())),
+                "turnFailed" => {
+                    let reason = event
+                        .payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the provider reported that this turn failed");
+                    outcome = Some((false, reason.to_string()));
+                }
                 "stopped" | "interrupted" => outcome = Some((true, String::new())),
                 "failed" => {
                     let reason = event
@@ -766,22 +793,37 @@ pub fn launch_provider(
                         let cwd_for_prepare = cwd.clone();
                         let recipe_for_prepare = recipe.clone();
                         let outcome = {
-                            let transport = open_persistent_transport(&provider, controls);
-                            let mut manager = session_manager().lock().unwrap();
-                            managed_send_prepared(
-                                &mut manager,
-                                spec,
-                                transport,
-                                &run_id,
-                                &prompt,
-                                move || {
-                                    if !first_session {
-                                        return Ok(());
-                                    }
-                                    apply_agent_recipe(&cwd_for_prepare, recipe_for_prepare.as_ref())
-                                        .map(|_| ())
-                                },
-                            )
+                            match select_persistent_transport(&provider, controls) {
+                                Ok(selected) => {
+                                    chat_log(&format!(
+                                        "persistent transport: driver={}, kind={:?}, minimum={}",
+                                        selected.driver, selected.kind, selected.version.minimum
+                                    ));
+                                    let mut manager = session_manager().lock().unwrap();
+                                    managed_send_prepared(
+                                        &mut manager,
+                                        spec,
+                                        selected.transport,
+                                        &run_id,
+                                        &prompt,
+                                        move || {
+                                            if !first_session {
+                                                return Ok(());
+                                            }
+                                            apply_agent_recipe(
+                                                &cwd_for_prepare,
+                                                recipe_for_prepare.as_ref(),
+                                            )
+                                            .map(|_| ())
+                                        },
+                                    )
+                                }
+                                // Selection reads the driver declaration and its
+                                // version evidence. Nothing was attached and no
+                                // process started, so the prompt can run on the
+                                // one-command path below.
+                                Err(reason) => Err(ManagedSendError::Start(reason)),
+                            }
                         };
                         match outcome {
                             Ok(_) => {
@@ -816,10 +858,7 @@ pub fn launch_provider(
                                 emit_notice_item(
                                     &thread_id,
                                     &run_id,
-                                    &format!(
-                                        "Persistent sessions are enabled, but {provider} could not start one: {}. This turn runs as one command.",
-                                        error.reason()
-                                    ),
+                                    &persistent_fallback_notice(&provider, error.reason()),
                                 );
                                 fallback_notice_emitted = true;
                             }
@@ -1205,10 +1244,14 @@ fn resolve_spawn_program(provider: &str) -> Result<PathBuf, String> {
             let avail = list_available_providers().join(", ");
             format!("Grok is not installed. Available providers: {avail}")
         })?,
-        "opencode" => resolve_bin("opencode", &[]).ok_or_else(|| {
-            let avail = list_available_providers().join(", ");
-            format!("OpenCode is not installed. Available providers: {avail}")
-        })?,
+        "opencode" => {
+            let natives = crate::chat::persistent::opencode_native_paths();
+            let fallbacks: Vec<&str> = natives.iter().map(String::as_str).collect();
+            resolve_bin("opencode", &fallbacks).ok_or_else(|| {
+                let avail = list_available_providers().join(", ");
+                format!("OpenCode is not installed. Available providers: {avail}")
+            })?
+        }
         "gemini" => resolve_bin("gemini", &[]).ok_or_else(|| {
             let avail = list_available_providers().join(", ");
             format!("Gemini CLI is not installed. Available providers: {avail}")
@@ -2465,5 +2508,109 @@ mod tests {
         assert!(one_shot_notice("codex", true).is_none());
         assert!(one_shot_notice("opencode", true).is_none());
         assert!(one_shot_notice("not-a-driver", true).is_none());
+    }
+
+    #[test]
+    fn transport_selection_follows_the_declaration_and_wire() {
+        let antigravity = select_persistent_transport("antigravity", PersistentControls::default())
+            .expect("antigravity transport");
+        assert_eq!(antigravity.kind, TransportKind::Antigravity);
+        assert_eq!(antigravity.driver, "antigravity");
+        assert_eq!(antigravity.version.minimum.to_string(), "1.4.5");
+
+        let opencode = select_persistent_transport("opencode", PersistentControls::default())
+            .expect("opencode transport");
+        assert_eq!(opencode.kind, TransportKind::OpenCodeServer);
+        assert_eq!(opencode.version.minimum.to_string(), "2.1.4");
+
+        let codex = select_persistent_transport("codex", PersistentControls::default())
+            .expect_err("codex documents no turn frame");
+        assert!(codex.contains("Unsupported"), "{codex}");
+        assert!(codex.contains("app-server"), "{codex}");
+
+        for driver in ["claude", "gemini", "grok", "cursor"] {
+            let error = select_persistent_transport(driver, PersistentControls::default())
+                .expect_err("no lasting wire");
+            assert!(error.contains("Unsupported"), "{driver}: {error}");
+        }
+
+        let unknown = select_persistent_transport("not-a-driver", PersistentControls::default())
+            .expect_err("unknown driver");
+        assert!(unknown.contains("no driver declaration"), "{unknown}");
+    }
+
+    #[test]
+    fn an_unsupported_wire_keeps_the_prompt_and_attaches_nothing() {
+        let mut manager = SessionManager::new();
+
+        let outcome = match select_persistent_transport("codex", PersistentControls::default()) {
+            Ok(selected) => managed_send_prepared(
+                &mut manager,
+                persistent_spec("thread-1"),
+                selected.transport,
+                "command-1",
+                "keep this prompt",
+                || Ok(()),
+            ),
+            Err(reason) => Err(ManagedSendError::Start(reason)),
+        };
+
+        let error = outcome.expect_err("the codex wire is refused");
+        assert!(error.before_turn());
+        assert!(error.reason().contains("app-server"), "{error:?}");
+        assert!(manager.status("thread-1").is_none());
+        assert_eq!(manager.active_thread_count(), 0);
+    }
+
+    #[test]
+    fn a_fallback_notice_is_bounded_and_names_the_reason() {
+        let reason = "Unsupported: codex: `codex app-server --help` documents the stdio transport";
+        let notice = persistent_fallback_notice("codex", reason);
+
+        assert!(notice.starts_with("Persistent sessions are enabled"), "{notice}");
+        assert!(notice.contains("codex"), "{notice}");
+        assert!(notice.contains("app-server"), "{notice}");
+        assert!(notice.contains("This turn runs as one command."), "{notice}");
+        assert!(notice.chars().count() <= MAX_NOTICE_CHARS);
+    }
+
+    #[test]
+    fn a_version_mismatch_becomes_a_bounded_fallback_notice() {
+        let evidence = declaration("antigravity")
+            .expect("antigravity declaration")
+            .version
+            .expect("antigravity version evidence");
+        let reason = crate::chat::drivers::evaluate_version("agy 1.0.0", &evidence)
+            .expect_err("1.0.0 is older than 1.4.5");
+        let notice = persistent_fallback_notice(
+            "antigravity",
+            &format!("antigravity version check failed: {reason}"),
+        );
+
+        assert!(notice.contains("1.0.0"), "{notice}");
+        assert!(notice.contains("1.4.5"), "{notice}");
+        assert!(notice.chars().count() <= MAX_NOTICE_CHARS);
+    }
+
+    #[test]
+    fn a_started_turn_is_never_replayed_as_a_second_command() {
+        let mut manager = SessionManager::new();
+        let transport = ScriptedTransport::new().failing_write("the provider refused the message");
+
+        let error = managed_send(
+            &mut manager,
+            persistent_spec("thread-1"),
+            Box::new(transport),
+            "command-1",
+            "only once",
+        )
+        .unwrap_err();
+
+        assert!(!error.before_turn(), "a started turn must not fall back");
+        assert!(error.reason().contains("refused"), "{error:?}");
+        assert_eq!(
+            manager.status("thread-1").map(|record| record.state),
+            Some(SessionState::Running)
+        );
     }
 }

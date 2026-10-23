@@ -246,6 +246,9 @@ pub enum TransportEvent {
     /// The provider finished answering this turn but the process still serves
     /// the session. A later turn writes onto the same process.
     TurnEnded,
+    /// The provider reported that this turn failed while its process still
+    /// serves the session. The next turn may still be written to it.
+    TurnFailed(String),
     Exit { code: Option<i32>, error: Option<String> },
 }
 
@@ -268,6 +271,7 @@ struct ScriptedState {
     pending: Vec<TransportEvent>,
     resume_handle: Option<String>,
     fail_spawn: Option<String>,
+    fail_write: Option<String>,
 }
 
 /// Deterministic transport for tests. It records what it was asked to do and
@@ -296,6 +300,13 @@ impl ScriptedTransport {
         self
     }
 
+    /// Accepted the process but refused the turn. Reproduces a provider that
+    /// started and then rejected the message.
+    pub fn failing_write(self, reason: &str) -> Self {
+        self.state.lock().unwrap().fail_write = Some(reason.to_string());
+        self
+    }
+
     pub fn spawn_count(&self) -> u32 {
         self.state.lock().unwrap().spawns
     }
@@ -321,7 +332,11 @@ impl SessionTransport for ScriptedTransport {
     }
 
     fn write_turn(&mut self, prompt: &str) -> Result<(), String> {
-        self.state.lock().unwrap().turns.push(prompt.to_string());
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = state.fail_write.clone() {
+            return Err(reason);
+        }
+        state.turns.push(prompt.to_string());
         Ok(())
     }
 
@@ -602,6 +617,13 @@ impl SessionManager {
                         session.record.state = SessionState::Completed;
                     }
                     push_event(session, "turnCompleted", json!({}));
+                }
+                TransportEvent::TurnFailed(reason) => {
+                    // The process still serves the session, so the state is
+                    // completed rather than failed: only this turn failed.
+                    settle_approvals(session, "turnFailed");
+                    session.record.state = SessionState::Completed;
+                    push_event(session, "turnFailed", json!({ "reason": reason }));
                 }
                 TransportEvent::Exit { code, error } => {
                     exit = Some((code, error));
@@ -1052,5 +1074,52 @@ mod tests {
             manager.status("thread-1").unwrap().state,
             SessionState::Running
         );
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_the_persistent_process_for_the_next_message() {
+        let mut manager = SessionManager::new();
+        let transport = attach(&mut manager, spec("thread-1", SessionMode::Persistent, None), ScriptedTransport::new());
+        manager.start("thread-1").unwrap();
+        manager.send_turn("thread-1", "command-1", "first").unwrap();
+        transport.script(TransportEvent::TurnFailed("the provider rejected the turn".to_string()));
+        manager.poll("thread-1").unwrap();
+
+        let record = manager.status("thread-1").unwrap();
+        assert_eq!(record.state, SessionState::Completed);
+        assert!(manager
+            .events_since("thread-1", 0)
+            .iter()
+            .any(|event| event.kind == "turnFailed"));
+
+        manager.send_turn("thread-1", "command-2", "second").unwrap();
+
+        assert_eq!(transport.spawn_count(), 1);
+        assert_eq!(
+            transport.written_turns(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_turn_the_provider_refused_is_not_a_spawn_failure() {
+        let mut manager = SessionManager::new();
+        let transport = attach(
+            &mut manager,
+            spec("thread-1", SessionMode::Persistent, None),
+            ScriptedTransport::new().failing_write("the provider refused the message"),
+        );
+        manager.start("thread-1").unwrap();
+
+        let error = manager
+            .send_turn("thread-1", "command-1", "hello")
+            .unwrap_err();
+
+        assert!(matches!(error, SessionError::Transport(_)), "{error}");
+        assert_eq!(
+            manager.status("thread-1").unwrap().state,
+            SessionState::Running
+        );
+        assert!(transport.written_turns().is_empty());
     }
 }

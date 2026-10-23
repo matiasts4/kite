@@ -17,6 +17,16 @@ struct QuotaCache {
 
 static CACHE: Mutex<Option<QuotaCache>> = Mutex::new(None);
 const CACHE_TTL_SECS: u64 = 180;
+// OpenCode Go exposes short-lived 5-hour windows; refresh it more aggressively.
+const OPENCODE_CACHE_TTL_SECS: u64 = 60;
+
+fn cache_ttl_secs(provider: &str) -> u64 {
+    if provider == "opencode" {
+        OPENCODE_CACHE_TTL_SECS
+    } else {
+        CACHE_TTL_SECS
+    }
+}
 static IS_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn quota_cache_path() -> PathBuf {
@@ -36,6 +46,15 @@ fn load_persisted_cache() -> HashMap<String, (Instant, ProviderQuotaStatus)> {
     if let Ok(data) = std::fs::read(&p) {
         if let Ok(saved) = serde_json::from_slice::<HashMap<String, ProviderQuotaStatus>>(&data) {
             for (k, v) in saved {
+                // Drop pre-v2 OpenCode entries: they reported a fake 0% without calling the API.
+                if k == "opencode"
+                    && v.metadata
+                        .get("quotaSchema")
+                        .and_then(|value| value.as_i64())
+                        != Some(2)
+                {
+                    continue;
+                }
                 map.insert(k, (Instant::now(), v));
             }
         }
@@ -90,7 +109,7 @@ fn provider_name(p: &str) -> &str {
         "qoder" => "Qoder",
         "claude" => "Claude",
         "codex" => "Codex",
-        "opencode" => "OpenCode",
+        "opencode" => "OpenCode Go",
         "grok" => "Grok",
         "gemini" => "Gemini",
         "cursor" => "Cursor",
@@ -201,7 +220,7 @@ pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> V
             let needs_fetch = if is_force {
                 true
             } else if let Some((fetched_at, _)) = cache.entries.get(p) {
-                fetched_at.elapsed() > Duration::from_secs(CACHE_TTL_SECS)
+                fetched_at.elapsed() > Duration::from_secs(cache_ttl_secs(p))
             } else {
                 true
             };

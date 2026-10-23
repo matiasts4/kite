@@ -79,28 +79,27 @@ fn appdata_dir() -> PathBuf {
 }
 
 fn profiles_root() -> PathBuf {
-    let folder = if cfg!(debug_assertions) {
-        "Kite Code Dev"
-    } else {
-        "Kite Code"
-    };
-    let root = appdata_dir().join(folder).join("account-profiles");
+    let root = crate::connections::shared_account_profiles_root();
     let _ = fs::create_dir_all(&root);
     root
 }
 
-fn registry_file() -> PathBuf {
-    profiles_root().join("profiles.json")
+fn registry_file_in(root: &Path) -> PathBuf {
+    root.join("profiles.json")
 }
 
-fn profile_storage_dir(provider: &str, account_id: &str) -> PathBuf {
-    let dir = profiles_root().join(provider).join(account_id);
+fn profile_storage_dir_in(root: &Path, provider: &str, account_id: &str) -> PathBuf {
+    let dir = root.join(provider).join(account_id);
     let _ = fs::create_dir_all(&dir);
     dir
 }
 
-fn load_registry() -> AccountProfilesRegistry {
-    let file = registry_file();
+fn profile_storage_dir(provider: &str, account_id: &str) -> PathBuf {
+    profile_storage_dir_in(&profiles_root(), provider, account_id)
+}
+
+fn load_registry_from(root: &Path) -> AccountProfilesRegistry {
+    let file = registry_file_in(root);
     if file.exists() {
         if let Ok(data) = fs::read(&file) {
             if let Ok(mut reg) = serde_json::from_slice::<AccountProfilesRegistry>(&data) {
@@ -132,14 +131,202 @@ fn load_registry() -> AccountProfilesRegistry {
     AccountProfilesRegistry::default()
 }
 
+fn load_registry() -> AccountProfilesRegistry {
+    load_registry_from(&profiles_root())
+}
+
+fn save_registry_to(root: &Path, registry: &AccountProfilesRegistry) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    let file = registry_file_in(root);
+    let bytes = serde_json::to_vec_pretty(registry)
+        .map_err(|e| format!("cannot serialize {}: {e}", file.display()))?;
+    let tmp = staged_path(&file);
+    if let Err(e) = fs::write(&tmp, bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
+    if let Err(e) = fs::rename(&tmp, &file) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot replace {}: {e}", file.display()));
+    }
+    Ok(())
+}
+
 fn save_registry(registry: &AccountProfilesRegistry) {
-    let file = registry_file();
-    if let Ok(bytes) = serde_json::to_vec_pretty(registry) {
-        let tmp = staged_path(&file);
-        if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, &file).is_err() {
-            let _ = fs::remove_file(&tmp);
+    let _ = save_registry_to(&profiles_root(), registry);
+}
+
+// ---------------------------------------------------------------------------
+// Import from a legacy per-install account-profiles tree
+// ---------------------------------------------------------------------------
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
+    let entries = fs::read_dir(src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &target)?;
+        } else if !copy_atomic(&path, &target) {
+            return Err(format!("cannot copy {}", path.display()));
         }
     }
+    Ok(())
+}
+
+fn snapshot_account_dirs(root: &Path) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Ok(providers) = fs::read_dir(root) else {
+        return found;
+    };
+    for provider_entry in providers.flatten() {
+        if !provider_entry.path().is_dir() {
+            continue;
+        }
+        let provider = provider_entry.file_name().to_string_lossy().to_string();
+        if provider == "_backups" {
+            continue;
+        }
+        let Ok(accounts) = fs::read_dir(provider_entry.path()) else {
+            continue;
+        };
+        for account_entry in accounts.flatten() {
+            if account_entry.path().is_dir() {
+                found.push((
+                    provider.clone(),
+                    account_entry.file_name().to_string_lossy().to_string(),
+                ));
+            }
+        }
+    }
+    found
+}
+
+fn merge_profile(registry: &mut AccountProfilesRegistry, incoming: SavedAccountProfile) -> bool {
+    let canonical_provider = canon_provider(&incoming.provider);
+    let existing = registry.profiles.iter().position(|profile| {
+        canon_provider(&profile.provider) == canonical_provider
+            && match (&profile.email, &incoming.email) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => profile.id == incoming.id,
+            }
+    });
+    let provider_has_active = registry
+        .profiles
+        .iter()
+        .any(|profile| canon_provider(&profile.provider) == canonical_provider && profile.is_active);
+
+    match existing {
+        Some(index) => {
+            let current = &mut registry.profiles[index];
+            if incoming.last_used_unix_ms >= current.last_used_unix_ms {
+                if !incoming.label.trim().is_empty() {
+                    current.label = incoming.label;
+                }
+                if incoming.email.is_some() {
+                    current.email = incoming.email;
+                }
+                if incoming.plan_name.is_some() {
+                    current.plan_name = incoming.plan_name;
+                }
+                if incoming.primary_remaining_percent.is_some() {
+                    current.primary_remaining_percent = incoming.primary_remaining_percent;
+                }
+                if incoming.primary_reset_at.is_some() {
+                    current.primary_reset_at = incoming.primary_reset_at;
+                }
+                if incoming.time_until_reset_ms.is_some() {
+                    current.time_until_reset_ms = incoming.time_until_reset_ms;
+                }
+                current.last_used_unix_ms = incoming.last_used_unix_ms;
+            }
+            if !provider_has_active && incoming.is_active {
+                current.is_active = true;
+            }
+            false
+        }
+        None => {
+            let mut profile = incoming;
+            profile.provider = canonical_provider;
+            profile.is_active = profile.is_active && !provider_has_active;
+            registry.profiles.push(profile);
+            true
+        }
+    }
+}
+
+/// Copies account profiles from a legacy per-install `account-profiles` tree
+/// into the shared connections tree. The source tree is only read: files are
+/// copied, never moved or deleted.
+pub fn import_account_profiles_from(
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<usize, String> {
+    if !source_root.is_dir() {
+        return Ok(0);
+    }
+
+    let profiles_file = registry_file_in(source_root);
+    let mut incoming = if profiles_file.is_file() {
+        let bytes = fs::read(&profiles_file)
+            .map_err(|e| format!("cannot read {}: {e}", profiles_file.display()))?;
+        serde_json::from_slice::<AccountProfilesRegistry>(&bytes)
+            .map_err(|e| format!("cannot parse {}: {e}", profiles_file.display()))?
+            .profiles
+    } else {
+        Vec::new()
+    };
+
+    // Snapshots whose index entry was already lost still belong to an account.
+    for (provider, account_id) in snapshot_account_dirs(source_root) {
+        if !incoming
+            .iter()
+            .any(|profile| same_provider(&profile.provider, &provider) && profile.id == account_id)
+        {
+            incoming.push(SavedAccountProfile {
+                id: account_id,
+                label: format!("{provider} Profile"),
+                provider,
+                email: None,
+                plan_name: None,
+                is_active: false,
+                last_used_unix_ms: 0,
+                primary_remaining_percent: None,
+                primary_reset_at: None,
+                time_until_reset_ms: None,
+            });
+        }
+    }
+
+    if incoming.is_empty() {
+        return Ok(0);
+    }
+
+    for profile in &incoming {
+        let provider = canon_provider(&profile.provider);
+        let mut source = source_root.join(&provider).join(&profile.id);
+        if !source.is_dir() && provider != profile.provider {
+            source = source_root.join(&profile.provider).join(&profile.id);
+        }
+        if source.is_dir() {
+            let destination = profile_storage_dir_in(destination_root, &provider, &profile.id);
+            copy_tree(&source, &destination)?;
+        }
+    }
+
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let mut registry = load_registry_from(destination_root);
+    let mut imported = 0;
+    for profile in incoming {
+        if merge_profile(&mut registry, profile) {
+            imported += 1;
+        }
+    }
+    if imported > 0 {
+        save_registry_to(destination_root, &registry)?;
+    }
+    Ok(imported)
 }
 
 // ---------------------------------------------------------------------------

@@ -91,7 +91,14 @@ export interface QuotaPreferences {
   providerOrder: string[];
   enabledProviders: string[];
   displayMode: 'percent_remaining' | 'percent_used' | 'compact';
+  /**
+   * 1 = legacy install where every supported provider was enabled implicitly.
+   * 2 = explicit onboarding: only providers the user added are enabled.
+   */
+  setupVersion?: number;
 }
+
+export const QUOTA_SETUP_VERSION = 2;
 
 export const ALL_SUPPORTED_PROVIDERS: string[] = [
   PROVIDERS.ANTIGRAVITY,
@@ -113,6 +120,36 @@ export const DEFAULT_QUOTA_PREFERENCES: QuotaPreferences = {
   pinnedProvider: null,
   autoDetectActive: true,
   providerOrder: [...ALL_SUPPORTED_PROVIDERS],
-  enabledProviders: [...ALL_SUPPORTED_PROVIDERS],
+  enabledProviders: [],
   displayMode: 'percent_remaining',
+  setupVersion: QUOTA_SETUP_VERSION,
 };
+
+/** Keeps only supported provider ids, preserving the given order. */
+export function normalizeProviderIds(ids: unknown): string[] {
+  if (!Array.isArray(ids)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of ids) {
+    if (typeof id !== 'string' || !ALL_SUPPORTED_PROVIDERS.includes(id) || seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
+}
+
+/** Full catalog order: stored order first, then any provider missing from it. */
+export function normalizeProviderOrder(order: unknown): string[] {
+  const known = normalizeProviderIds(order);
+  const missing = ALL_SUPPORTED_PROVIDERS.filter((id) => !known.includes(id));
+  return [...known, ...missing];
+}
+
+/** Providers the user explicitly added, in the order their tabs should appear. */
+export function resolveEnabledProviderIds(
+  prefs: Pick<QuotaPreferences, 'enabledProviders' | 'providerOrder'>
+): string[] {
+  const enabled = new Set(normalizeProviderIds(prefs.enabledProviders));
+  if (enabled.size === 0) return [];
+  return normalizeProviderOrder(prefs.providerOrder).filter((id) => enabled.has(id));
+}

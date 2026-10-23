@@ -45,6 +45,7 @@ pub mod operator_runtime;
 pub mod audio_ducking;
 pub mod agent_inbox;
 pub mod credentials;
+pub mod connections;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -54,6 +55,7 @@ use odd_tasks::*;
 use operator_runtime::*;
 use audio_ducking::*;
 use agent_inbox::*;
+use connections::*;
 use credentials::*;
 
 use account_switcher::*;
@@ -196,6 +198,10 @@ fn main() {
         }
     }
 
+    // The installed and dev builds share one connection registry. Whichever
+    // opens first imports the per-install vaults and account profiles once.
+    crate::connections::ensure_shared_registry();
+
     persist::workspaces();
 
     #[allow(unused_mut)]
@@ -323,8 +329,9 @@ fn main() {
             ensure_files_resource,
             get_agent_availability,
             get_subscription_quotas,
-            save_opencode_cookie,
-            clear_opencode_cookie,
+            opencode_go_credential_status,
+            save_opencode_api_key,
+            clear_opencode_api_key,
             insert_terminal_drop_paths,
             insert_terminal_files_entry,
             install_agent_starter,
@@ -338,6 +345,7 @@ fn main() {
             list_archived_chats,
             list_chat_provider_models,
             list_chat_summaries,
+            list_connections,
             list_dictation_input_devices,
             list_files_directory,
             list_launch_presets,

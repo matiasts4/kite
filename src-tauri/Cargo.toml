@@ -1,6 +1,6 @@
 [package]
 name = "kite-code"
-version = "0.1.24"
+version = "0.1.26"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
@@ -19,7 +19,7 @@ tauri-plugin-process = "2"
 portable-pty = "0.9.0"
 sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 dotenvy = "0.15"
 
 [target.'cfg(windows)'.dependencies]

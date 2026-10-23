@@ -295,6 +295,78 @@
 .qt-provider__pct + .qt-provider__chevron { margin-left: var(--space-2); }
 .qt-provider[data-open] .qt-provider__chevron { transform: rotate(180deg); }
 
+.qt-provider__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.qt-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.qt-icon-button:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--text-primary);
+}
+.qt-icon-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.qt-icon-button[data-active] {
+  border-color: var(--accent-tint-strong);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+/* ── Add provider dialog ────────────────────────────────── */
+.qt-add-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.qt-add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-row);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.qt-add-row:hover { background: var(--hover-fill); }
+.qt-add-row[data-selected] {
+  border-color: var(--accent-tint-strong);
+  background: var(--accent-tint);
+}
+.qt-add-row input[type='checkbox'] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.qt-add-row__name {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: var(--weight-medium, 500);
+}
+
 .qt-provider__detail {
   display: flex;
   flex-direction: column;

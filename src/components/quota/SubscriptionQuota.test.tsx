@@ -3,7 +3,20 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SubscriptionQuotaBadge } from './SubscriptionQuotaBadge';
 import { SubscriptionQuotaPopover } from './SubscriptionQuotaPopover';
-import { DEFAULT_QUOTA_PREFERENCES, PROVIDERS } from '../../lib/quota/types';
+import { DEFAULT_QUOTA_PREFERENCES, PROVIDERS, QUOTA_SETUP_VERSION } from '../../lib/quota/types';
+
+const PREFS_STORAGE_KEY = 'kite_quota_preferences';
+
+function seedQuotaPreferences(enabledProviders: string[]) {
+  localStorage.setItem(
+    PREFS_STORAGE_KEY,
+    JSON.stringify({
+      ...DEFAULT_QUOTA_PREFERENCES,
+      setupVersion: QUOTA_SETUP_VERSION,
+      enabledProviders,
+    })
+  );
+}
 
 vi.mock('../../lib/ipc', () => ({
   getSubscriptionQuotas: vi.fn().mockResolvedValue({
@@ -62,6 +75,8 @@ vi.mock('../../lib/ipc', () => ({
 describe('Subscription Quota UI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
+    seedQuotaPreferences([PROVIDERS.ANTIGRAVITY]);
   });
 
   it('renders the quota badge with default provider and percentage', async () => {
@@ -69,7 +84,7 @@ describe('Subscription Quota UI', () => {
     expect(screen.getByRole('button', { name: /cuota/i })).toBeInTheDocument();
   });
 
-  it('renders minified top bar quota badge with logo, ring, percentage and countdown without provider text', async () => {
+  it('renders minified top bar quota badge with logo, ring and percentage but no reset clock', async () => {
     const { container } = render(<SubscriptionQuotaBadge />);
     const button = screen.getByRole('button', { name: /cuota/i });
     expect(button).toBeInTheDocument();
@@ -80,6 +95,25 @@ describe('Subscription Quota UI', () => {
     // Logo image and SVG ring are present
     expect(container.querySelector('img.brand-logo')).not.toBeNull();
     expect(container.querySelector('svg circle')).not.toBeNull();
+
+    // Only icon + ring + percentage remain: the reset clock is gone from the pill
+    expect(container.querySelector('svg polyline')).toBeNull();
+    expect(button.textContent).not.toMatch(/\d+\s*[hm]\b/i);
+    expect(button.textContent).toMatch(/%|--/);
+  });
+
+  it('keeps the quota pill visible and offers the add-provider state when none are enabled', async () => {
+    seedQuotaPreferences([]);
+    const user = userEvent.setup();
+    render(<SubscriptionQuotaBadge />);
+
+    const button = screen.getByRole('button', { name: /cuotas/i });
+    expect(button).toBeInTheDocument();
+    expect(button.textContent).toContain('Cuotas');
+
+    await user.click(button);
+    expect(screen.getByText('No agregaste ningún proveedor')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /agregar proveedor/i })).toBeInTheDocument();
   });
 
   it('opens SubscriptionQuotaPopover on click and displays usage windows', async () => {
@@ -123,7 +157,11 @@ describe('Subscription Quota UI', () => {
         onRefresh={vi.fn()}
         onClose={vi.fn()}
         onOpenTokenUsage={onOpenTokenUsage}
-        prefs={DEFAULT_QUOTA_PREFERENCES}
+        prefs={{
+          ...DEFAULT_QUOTA_PREFERENCES,
+          setupVersion: QUOTA_SETUP_VERSION,
+          enabledProviders: [PROVIDERS.ANTIGRAVITY],
+        }}
       />
     );
 
@@ -138,6 +176,44 @@ describe('Subscription Quota UI', () => {
     const heatmapBtn = screen.getByRole('button', { name: /mapa de tokens/i });
     await user.click(heatmapBtn);
     expect(onOpenTokenUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('only lists providers the user added and shows an empty state when none are enabled', () => {
+    const { rerender } = render(
+      <SubscriptionQuotaPopover
+        allQuotas={{}}
+        selectedProvider={PROVIDERS.ANTIGRAVITY}
+        onSelectProvider={vi.fn()}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+        prefs={{
+          ...DEFAULT_QUOTA_PREFERENCES,
+          setupVersion: QUOTA_SETUP_VERSION,
+          enabledProviders: [PROVIDERS.ANTIGRAVITY],
+        }}
+      />
+    );
+
+    expect(screen.queryByText('Grok')).toBeNull();
+    expect(screen.queryByText('Qoder')).toBeNull();
+
+    rerender(
+      <SubscriptionQuotaPopover
+        allQuotas={{}}
+        selectedProvider={PROVIDERS.ANTIGRAVITY}
+        onSelectProvider={vi.fn()}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+        prefs={{
+          ...DEFAULT_QUOTA_PREFERENCES,
+          setupVersion: QUOTA_SETUP_VERSION,
+          enabledProviders: [],
+        }}
+      />
+    );
+
+    expect(screen.getByText('No agregaste ningún proveedor')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /agregar proveedor/i })).toBeInTheDocument();
   });
 
   it('renders brand logos with valid /assets/logos/ image sources', () => {

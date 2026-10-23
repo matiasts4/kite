@@ -137,12 +137,19 @@ pub fn persistent_sessions_enabled() -> bool {
 /// keeps today's one-command path, so a resumable or unobservable driver never
 /// looks persistent.
 pub fn send_route(provider: &str, persistent_enabled: bool) -> SendRoute {
-    match declaration(provider) {
-        Some(declared)
-            if declared_session_mode(&declared, persistent_enabled) == SessionMode::Persistent =>
-        {
-            SendRoute::Persistent
-        }
+    let Some(declared) = declaration(provider) else {
+        return SendRoute::OneShot;
+    };
+    if declared_session_mode(&declared, persistent_enabled) != SessionMode::Persistent {
+        return SendRoute::OneShot;
+    }
+    // A declaration is not an adapter: without a documented wire and a served
+    // transport the route stays one command per turn.
+    if unsupported_wire(provider).is_some() {
+        return SendRoute::OneShot;
+    }
+    match declared.driver.as_str() {
+        ANTIGRAVITY_DRIVER | OPENCODE_DRIVER => SendRoute::Persistent,
         _ => SendRoute::OneShot,
     }
 }
@@ -1200,7 +1207,20 @@ pub fn spawn_args(
             args.push(sent);
             args
         }
-        "cursor" | "grok" => vec!["-p".into(), sent],
+        "grok" => {
+            let permission = match mode {
+                "readOnly" => "plan",
+                "acceptEdits" => "acceptEdits",
+                _ => "bypassPermissions",
+            };
+            vec![
+                "-p".into(),
+                "--permission-mode".into(),
+                permission.into(),
+                sent,
+            ]
+        }
+        "cursor" => vec!["-p".into(), sent],
         "opencode" => vec!["run".into(), sent],
         "gemini" => vec!["--prompt".into(), sent],
         other => return Err(format!("{other} has no local chat command in this build.")),
@@ -2263,11 +2283,11 @@ mod tests {
 
     #[test]
     fn the_persistent_route_requires_a_persistent_declaration_and_the_flag() {
-        for driver in ["antigravity", "agy", "codex", "opencode"] {
+        for driver in ["antigravity", "agy", "opencode"] {
             assert_eq!(send_route(driver, true), SendRoute::Persistent, "{driver}");
             assert_eq!(send_route(driver, false), SendRoute::OneShot, "{driver}");
         }
-        for driver in ["gemini", "grok", "cursor", "claude", "not-a-driver"] {
+        for driver in ["codex", "gemini", "grok", "cursor", "claude", "not-a-driver"] {
             assert_eq!(send_route(driver, true), SendRoute::OneShot, "{driver}");
             assert_eq!(send_route(driver, false), SendRoute::OneShot, "{driver}");
         }

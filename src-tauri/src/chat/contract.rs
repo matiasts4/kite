@@ -1113,7 +1113,7 @@ mod tests {
                 ],
             ),
             ("cursor", "cursor-agent -p", "acceptEdits", &["-p", "hello"]),
-            ("grok", "grok -p", "acceptEdits", &["-p", "hello"]),
+            ("grok", "grok -p", "acceptEdits", &["-p", "--permission-mode", "acceptEdits", "hello"]),
             ("opencode", "opencode run", "acceptEdits", &["run", "hello"]),
             ("gemini", "gemini --prompt", "acceptEdits", &["--prompt", "hello"]),
         ];
@@ -1171,17 +1171,7 @@ mod tests {
                     !permission_flag,
                     "{driver} must not pass an undeclared permission control"
                 );
-            }
-            // Grok is the one declared permission control this build does not
-            // wire yet. The pin keeps the gap visible instead of implying the
-            // value is mapped.
-            if driver == "grok" {
-                assert!(declared.accepts_permission);
-                assert!(
-                    !permission_flag,
-                    "grok permission mapping is still a gap in the one-shot path"
-                );
-            } else if declared.accepts_permission {
+            } else {
                 assert!(
                     permission_flag,
                     "{driver} must map its declared permission control"

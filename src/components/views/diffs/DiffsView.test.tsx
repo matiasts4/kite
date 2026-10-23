@@ -103,7 +103,7 @@ describe('DiffsView Component Tests', () => {
     expect(screen.getByRole('button', { name: /^Unstaged/ })).toBeInTheDocument();
 
     expect(screen.getAllByText('index.html').length).toBeGreaterThan(0);
-    expect(screen.getByText('main.ts')).toBeInTheDocument();
+    expect(screen.getAllByText('main.ts').length).toBeGreaterThan(0);
   });
 
   it('toggles file tree navigation panel when clicked', () => {
@@ -134,7 +134,8 @@ describe('DiffsView Component Tests', () => {
     expect(localStorage.getItem('bmone.diffs.wordwrap.v1')).toBe('false');
   });
 
-  it('renders stepper navigation with file counter and allows selecting files', () => {
+  it('renders stepper navigation with file counter and allows selecting files in focused mode', () => {
+    localStorage.setItem('bmone.diffs.viewmode.v1', 'focused');
     render(<DiffsView workspaceId="ws-test" />);
 
     // In focused mode with multiple files, the stepper is rendered
@@ -145,6 +146,75 @@ describe('DiffsView Component Tests', () => {
     const selector = screen.getByLabelText('Jump to file');
     expect(selector).toBeInTheDocument();
     fireEvent.change(selector, { target: { value: 'src/main.ts' } });
+  });
+
+  it('starts stream mode with all diff cards collapsed by default', () => {
+    render(<DiffsView workspaceId="ws-test" />);
+
+    // Both cards exist in the stream
+    const cards = screen.getAllByRole('article');
+    expect(cards.length).toBe(2);
+
+    // Diffs should not be visible initially because cards start collapsed
+    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+
+    // Chevrons should have collapsed aria-label
+    const chevrons = screen.getAllByLabelText('Expand');
+    expect(chevrons.length).toBe(2);
+  });
+
+  it('expands a diff card when clicked and collapses it when clicked again', async () => {
+    render(<DiffsView workspaceId="ws-test" />);
+
+    // Initially collapsed
+    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+
+    // Click on index.html chevron to expand
+    const chevrons = screen.getAllByLabelText('Expand');
+    fireEvent.click(chevrons[0]);
+
+    // Now diff content appears
+    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+
+    // Click again to collapse
+    const collapseChevron = screen.getByLabelText('Collapse');
+    fireEvent.click(collapseChevron);
+    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+  });
+
+  it('toggles all diff cards using Expand all files / Collapse all files', async () => {
+    render(<DiffsView workspaceId="ws-test" />);
+
+    // Initially all collapsed
+    const toggleBtn = screen.getByLabelText('Expand all files');
+    expect(toggleBtn).toBeInTheDocument();
+
+    // Click Expand all
+    fireEvent.click(toggleBtn);
+
+    // Now diff content for both files is loaded
+    const diffTitles = await screen.findAllByText('<title>New Clean Diff</title>');
+    expect(diffTitles.length).toBe(2);
+    expect(screen.getByLabelText('Collapse all files')).toBeInTheDocument();
+
+    // Click Collapse all
+    fireEvent.click(screen.getByLabelText('Collapse all files'));
+    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand all files')).toBeInTheDocument();
+  });
+
+  it('expands file card when selected from file tree in stream mode', async () => {
+    render(<DiffsView workspaceId="ws-test" />);
+
+    // Initially collapsed
+    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+
+    // In file tree, click on main.ts
+    const treeItems = screen.getAllByRole('button', { name: /main\.ts/i });
+    fireEvent.click(treeItems[0]);
+
+    // Now diff content for that file is loaded and rendered
+    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
   });
 
   it('opens authentic ui-menu overflow dropdown when narrow and handles selection and Escape', () => {

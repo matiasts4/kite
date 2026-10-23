@@ -107,6 +107,15 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
         <div
           className="diff-file-card-title-group"
           onClick={onToggleCollapse}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onToggleCollapse();
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
           title={collapsed ? 'Expand file diff' : 'Collapse file diff'}
         >
           <button

@@ -140,11 +140,11 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
       const saved = localStorage.getItem('bmone.diffs.viewmode.v1');
       if (saved === 'focused' || saved === 'stream') return saved;
     } catch {}
-    return 'focused'; // Default to focused for fast, responsive single-file review
+    return 'stream'; // Default to stream with all cards collapsed for instant load and easy one-by-one review
   });
 
   const [filter, setFilter] = useState<'all' | 'staged' | 'unstaged'>('all');
-  const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [copiedPath, setCopiedPath] = useState<boolean>(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState<boolean>(false);
 
@@ -290,16 +290,14 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     return displayedFiles.filter((f) => f.path.toLowerCase().includes(q));
   }, [displayedFiles, quickJumpFilter]);
 
-  // Keep Stream mode lightweight by collapsing all files except the first one when workspace is loaded with many files
+  // Reset expanded files when switching workspaces so all diffs start collapsed
   const currentWorkspaceRef = useRef<string | null>(null);
   useEffect(() => {
     if (currentWsId && currentWsId !== currentWorkspaceRef.current) {
       currentWorkspaceRef.current = currentWsId;
-      if (displayedFiles.length > 3) {
-        setCollapsedFiles(new Set(displayedFiles.slice(1).map((f) => f.path)));
-      }
+      setExpandedFiles(new Set());
     }
-  }, [currentWsId, displayedFiles]);
+  }, [currentWsId]);
 
   // Pre-load adjacent diffs in background so next/prev switching is 0ms instant
   useEffect(() => {
@@ -316,20 +314,20 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   // Collapse / Expand All toggle (for Stream mode)
   const allCollapsed = useMemo(() => {
-    if (displayedFiles.length === 0) return false;
-    return displayedFiles.every((f) => collapsedFiles.has(f.path));
-  }, [displayedFiles, collapsedFiles]);
+    if (displayedFiles.length === 0) return true;
+    return displayedFiles.every((f) => !expandedFiles.has(f.path));
+  }, [displayedFiles, expandedFiles]);
 
   const toggleAllCollapse = () => {
     if (allCollapsed) {
-      setCollapsedFiles(new Set());
+      setExpandedFiles(new Set(displayedFiles.map((f) => f.path)));
     } else {
-      setCollapsedFiles(new Set(displayedFiles.map((f) => f.path)));
+      setExpandedFiles(new Set());
     }
   };
 
   const toggleFileCollapse = useCallback((path: string) => {
-    setCollapsedFiles((prev) => {
+    setExpandedFiles((prev) => {
       const next = new Set(prev);
       if (next.has(path)) {
         next.delete(path);
@@ -343,15 +341,15 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const handleSelectFileFromTree = (path: string) => {
     setSelectedDiffPath(path);
     // Expand file if collapsed in stream mode
-    setCollapsedFiles((prev) => {
+    setExpandedFiles((prev) => {
       const next = new Set(prev);
-      next.delete(path);
+      next.add(path);
       return next;
     });
     // If in stream mode, scroll to card
     if (viewMode === 'stream') {
       const targetEl = document.getElementById(`diff-file-${encodeURIComponent(path)}`);
-      if (targetEl) {
+      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
         targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     }
@@ -1285,7 +1283,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                 file={file}
                 workspaceId={currentWsId}
                 gitService={gitService}
-                collapsed={collapsedFiles.has(file.path)}
+                collapsed={!expandedFiles.has(file.path)}
                 layout={layout}
                 wordWrap={wordWrap}
                 busy={gitBusy !== null}

@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.26] - 2026-10-22
+
+> Cuotas a tu medida: agregá, ordená y fijá proveedores
+
+### Added
+- Agregá proveedores de cuotas manualmente desde Configuración → Cuotas
+- Reordená proveedores con flechas y fijá cuál se muestra en la barra
+
+### Changed
+- Todos los proveedores arrancan deshabilitados; solo se monitorean los que agregues
+- La barra superior muestra solo el icono y el porcentaje, sin tiempo de reseteo
+- La primera actualización reinicia la lista de proveedores monitoreados; tus claves y sesiones se conservan
+
+### Fixed
+- La pastilla de cuotas sigue visible aunque no tengas proveedores agregados
+- Navegación con flechas y rueda en el popover cuando hay más de tres proveedores
+
+---
+
+## [0.1.25] - 2026-10-22
+
+> OpenCode Go sincroniza su cuota real
+
+### Added
+- Detección automática de credenciales desde OpenCode (opencode.db y auth.json), OPENCODE_API_KEY y la configuración de OpenCode.
+- Diagnóstico visible con fuente de credencial, endpoint, estado HTTP y errores por ventana.
+
+### Changed
+- La configuración de OpenCode Go usa una API key opcional y deja de pedir la cookie y el workspace legacy.
+
+### Fixed
+- OpenCode Go consulta la API oficial de uso y muestra las ventanas de 5 horas, semanal y mensual en lugar de un 0% fijo.
+
+---
+
 ## [0.1.24] - 2026-10-22
 
 > Soporte oficial para Gentle Shell

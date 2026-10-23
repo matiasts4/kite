@@ -35,6 +35,7 @@ src-tauri/.cargo/
 *.pem
 
 # Local Agent & Indexing Artifacts (DO NOT COMMIT)
+.kite/
 .codegraph/
 .atl/
 scratch/

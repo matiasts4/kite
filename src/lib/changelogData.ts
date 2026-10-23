@@ -33,6 +33,66 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.26',
+    tag: 'v0.1.26',
+    date: 'Oct 22, 2026',
+    title: 'Cuotas a tu medida: agregá, ordená y fijá proveedores',
+    items: [
+      {
+        kind: 'added',
+        description: 'Agregá proveedores de cuotas manualmente desde Configuración → Cuotas',
+      },
+      {
+        kind: 'changed',
+        description: 'Todos los proveedores arrancan deshabilitados; solo se monitorean los que agregues',
+      },
+      {
+        kind: 'fixed',
+        description: 'La pastilla de cuotas sigue visible aunque no tengas proveedores agregados',
+      },
+      {
+        kind: 'changed',
+        description: 'La barra superior muestra solo el icono y el porcentaje, sin tiempo de reseteo',
+      },
+      {
+        kind: 'added',
+        description: 'Reordená proveedores con flechas y fijá cuál se muestra en la barra',
+      },
+      {
+        kind: 'fixed',
+        description: 'Navegación con flechas y rueda en el popover cuando hay más de tres proveedores',
+      },
+      {
+        kind: 'changed',
+        description: 'La primera actualización reinicia la lista de proveedores monitoreados; tus claves y sesiones se conservan',
+      },
+    ],
+  },
+  {
+    version: '0.1.25',
+    tag: 'v0.1.25',
+    date: 'Oct 22, 2026',
+    title: 'OpenCode Go sincroniza su cuota real',
+    items: [
+      {
+        kind: 'added',
+        description: 'Detección automática de credenciales desde OpenCode (opencode.db y auth.json), OPENCODE_API_KEY y la configuración de OpenCode.',
+      },
+      {
+        kind: 'added',
+        description: 'Diagnóstico visible con fuente de credencial, endpoint, estado HTTP y errores por ventana.',
+      },
+      {
+        kind: 'changed',
+        description: 'La configuración de OpenCode Go usa una API key opcional y deja de pedir la cookie y el workspace legacy.',
+      },
+      {
+        kind: 'fixed',
+        description: 'OpenCode Go consulta la API oficial de uso y muestra las ventanas de 5 horas, semanal y mensual en lugar de un 0% fijo.',
+      },
+    ],
+  },
+  {
     version: '0.1.24',
     tag: 'v0.1.24',
     date: 'Oct 22, 2026',

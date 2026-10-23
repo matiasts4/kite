@@ -1,12 +1,39 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { renderHook, act } from '@testing-library/react';
 import {
   createOperatorTurnGate,
   resolveZedOrbState,
   withTurnTimeout,
+  withPriorTurnHistory,
   OperatorTurnTimeoutError,
   OPERATOR_TURN_TIMEOUT_MS,
   OPERATOR_TURN_TIMEOUT_MESSAGE,
 } from './useOperatorTurnLogic';
+import { useOperatorTurn } from './useOperatorTurn';
+import { getTurnTraces } from '../trace/trace';
+import { runOperatorTurn } from '../index';
+import type { OperatorTurnTrace } from '../trace/types';
+
+vi.mock('../trace/trace', () => ({
+  getTurnTraces: vi.fn(),
+  getTurnTrace: vi.fn(),
+  clearTurnTraces: vi.fn(),
+  subscribeTrace: vi.fn(() => () => {}),
+  getOperatorTraceDiskPath: vi.fn(),
+}));
+
+vi.mock('../index', () => ({
+  runOperatorTurn: vi.fn(),
+}));
+
+function makeTrace(
+  turnId: string,
+  startedAt: number,
+  input: string,
+  reply?: string
+): OperatorTurnTrace {
+  return { turnId, startedAt, input, reply, events: [] };
+}
 
 describe('useOperatorTurn logic', () => {
   describe('resolveZedOrbState', () => {
@@ -83,6 +110,70 @@ describe('useOperatorTurn logic', () => {
     });
   });
 
+  describe('withPriorTurnHistory', () => {
+    it('builds prior user and assistant turns oldest first from completed traces', () => {
+      const traces = [
+        makeTrace('turn-2', 200, 'y ahora los tests', 'Los corro.'),
+        makeTrace('turn-1', 100, 'abre una terminal', 'Listo.'),
+        makeTrace('turn-0', 50, 'estado del repo', 'Sin cambios.'),
+      ];
+
+      const result = withPriorTurnHistory('y ahora los tests', undefined, traces);
+
+      expect(result.history).toEqual([
+        { role: 'user', content: 'estado del repo' },
+        { role: 'assistant', content: 'Sin cambios.' },
+        { role: 'user', content: 'abre una terminal' },
+        { role: 'assistant', content: 'Listo.' },
+        { role: 'user', content: 'y ahora los tests' },
+        { role: 'assistant', content: 'Los corro.' },
+      ]);
+    });
+
+    it('skips the pending trace for the current input when it has no reply', () => {
+      const traces = [
+        makeTrace('turn-pending', 300, 'corre los tests'),
+        makeTrace('turn-1', 100, 'abre una terminal', 'Listo.'),
+      ];
+
+      const result = withPriorTurnHistory('corre los tests', undefined, traces);
+
+      expect(result.history).toEqual([
+        { role: 'user', content: 'abre una terminal' },
+        { role: 'assistant', content: 'Listo.' },
+      ]);
+    });
+
+    it('keeps caller-provided history unchanged', () => {
+      const provided = [{ role: 'user' as const, content: 'contexto previo' }];
+      const traces = [makeTrace('turn-1', 100, 'abre una terminal', 'Listo.')];
+
+      const result = withPriorTurnHistory('nueva orden', { history: provided }, traces);
+
+      expect(result.history).toBe(provided);
+    });
+
+    it('omits empty turns and assistant messages when the reply is empty', () => {
+      const traces = [
+        makeTrace('turn-empty', 100, '   '),
+        makeTrace('turn-user-only', 200, 'solo usuario'),
+      ];
+
+      const result = withPriorTurnHistory('nueva orden', undefined, traces);
+
+      expect(result.history).toEqual([{ role: 'user', content: 'solo usuario' }]);
+    });
+
+    it('returns no history when there are no prior turns or caller history', () => {
+      expect(withPriorTurnHistory('nueva orden', undefined, [])).toEqual({});
+      expect(
+        withPriorTurnHistory('nueva orden', undefined, [
+          makeTrace('turn-pending', 100, 'nueva orden'),
+        ])
+      ).toEqual({});
+    });
+  });
+
   describe('createOperatorTurnGate', () => {
     beforeEach(() => {
       vi.useFakeTimers();
@@ -145,6 +236,48 @@ describe('useOperatorTurn logic', () => {
       await vi.runAllTimersAsync();
       await expect(queuedPromise).resolves.toEqual({ input: 'cola', value: 'ok:cola' });
       expect(run).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+describe('useOperatorTurn hook', () => {
+  const runOperatorTurnMock = vi.mocked(runOperatorTurn);
+  const getTurnTracesMock = vi.mocked(getTurnTraces);
+
+  beforeEach(() => {
+    runOperatorTurnMock.mockReset();
+    runOperatorTurnMock.mockResolvedValue({
+      turnId: 'turn-result',
+      plan: { strategy: 'heuristic', actions: [] },
+      receipts: [],
+      reply: 'ok',
+      overallSuccess: true,
+      durationMs: 1,
+      strategy: 'heuristic',
+    });
+    getTurnTracesMock.mockReset();
+    getTurnTracesMock.mockReturnValue([]);
+  });
+
+  it('forwards existing turn options and adds prior-turn history', async () => {
+    getTurnTracesMock.mockReturnValue([
+      makeTrace('turn-1', 100, 'abre una terminal', 'Listo.'),
+    ]);
+
+    const { result } = renderHook(() => useOperatorTurn('ws-1'));
+
+    await act(async () => {
+      await result.current.runTurn('nueva orden', { source: 'texto', ttsEnabled: false });
+    });
+
+    expect(runOperatorTurnMock).toHaveBeenCalledWith('nueva orden', {
+      workspaceId: 'ws-1',
+      source: 'texto',
+      ttsEnabled: false,
+      history: [
+        { role: 'user', content: 'abre una terminal' },
+        { role: 'assistant', content: 'Listo.' },
+      ],
     });
   });
 });

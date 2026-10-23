@@ -11,7 +11,20 @@ interface ProxyHttpResponse {
   error?: string | null;
 }
 
-export async function operatorHttpFetch(url: string, init?: RequestInit): Promise<Response> {
+export interface OperatorHttpFetchOptions {
+  /**
+   * Let the native proxy resolve the provider credential when the caller does
+   * not have an explicit key. Currently used by OpenCode Go so the token never
+   * has to be copied out of the OpenCode CLI store.
+   */
+  credentialProvider?: 'opencode';
+}
+
+export async function operatorHttpFetch(
+  url: string,
+  init?: RequestInit,
+  options?: OperatorHttpFetchOptions
+): Promise<Response> {
   if (isTauriEnvironment()) {
     try {
       const method = init?.method || 'GET';
@@ -43,6 +56,9 @@ export async function operatorHttpFetch(url: string, init?: RequestInit): Promis
         headers: headersRecord,
         body: bodyStr,
         timeoutSecs: 60,
+        ...(options?.credentialProvider
+          ? { credentialProvider: options.credentialProvider }
+          : {}),
       });
 
       if (proxyRes) {
@@ -92,76 +108,164 @@ export interface OpenCodeModelOption {
   description: string;
 }
 
+/**
+ * OpenCode Go is a subscription, not the pay-as-you-go Console balance.
+ * The OpenAI-compatible chat endpoint lives under /inference/go/openai/v1 and
+ * requires the x-opencode-session header on every request.
+ */
+export const OPENCODE_GO_CHAT_BASE_URL = 'https://opencode.ai/inference/go/openai/v1';
+export const OPENCODE_GO_MODELS_URL = 'https://opencode.ai/zen/go/v1/models';
+
+/**
+ * OpenCode pay-as-you-go inference roots. An OpenCode Go API key is rejected
+ * there (HTTP 402), so a stored value that points at one is migrated to the Go
+ * chat base instead of being sent as-is.
+ */
+const OPENCODE_PAYG_BASE_URLS = [
+  'https://api.deepseek.com/v1',
+  'https://api.opencode.ai/v1',
+  'https://opencode.ai/inference/v1',
+  'https://opencode.ai/inference/openai/v1',
+];
+
+function canonicalOpenCodeBaseUrl(baseUrl: string): string {
+  return baseUrl
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/chat\/completions$/i, '');
+}
+
+/**
+ * Returns the base the OpenCode driver may send a Go key to. Pay-as-you-go
+ * inference routes are replaced by the Go subscription base, including when the
+ * stored value carries a trailing slash or a full /chat/completions path.
+ */
+export function normalizeOpenCodeBaseUrl(baseUrl: string | undefined): string {
+  const trimmed = (baseUrl ?? '').trim();
+  if (!trimmed) return OPENCODE_GO_CHAT_BASE_URL;
+  const canonical = canonicalOpenCodeBaseUrl(trimmed).toLowerCase();
+  if (OPENCODE_PAYG_BASE_URLS.includes(canonical)) {
+    return OPENCODE_GO_CHAT_BASE_URL;
+  }
+  return trimmed;
+}
+
+/** True when the base is the OpenCode Go Chat Completions gateway. */
+export function isOpenCodeGoChatBaseUrl(baseUrl: string | undefined): boolean {
+  return canonicalOpenCodeBaseUrl(baseUrl ?? '') === OPENCODE_GO_CHAT_BASE_URL;
+}
+
+/**
+ * Only models served through the OpenAI Chat Completions API can be used by
+ * the Zed HTTP provider. GPT/Grok use the Responses API; Claude/Gemini use
+ * their native APIs and are intentionally excluded from this list.
+ */
+const OPENCODE_GO_NON_CHAT_PREFIXES = ['gpt-', 'grok-', 'claude-', 'gemini-', 'muse-'];
+
+export function isOpenCodeGoChatCompatibleModel(modelId: string): boolean {
+  const id = modelId.trim().toLowerCase();
+  if (!id) return false;
+  return !OPENCODE_GO_NON_CHAT_PREFIXES.some((prefix) => id.startsWith(prefix));
+}
+
 export const OPENCODE_MODEL_CATALOG: OpenCodeModelOption[] = [
   {
     id: 'deepseek-v4.1-flash',
-    label: 'DeepSeek V4.1 Flash (via OpenCode)',
+    label: 'DeepSeek V4.1 Flash (OpenCode Go)',
     badge: 'Ultra-Fast',
-    tier: 'Ultra-Fast',
-    description: 'Baja latencia ideal para abrir terminales, inyectar prompts y despachar tareas rápidas.',
+    tier: 'Go · Fast',
+    description: 'Baja latencia ideal para el planificador de Zed y acciones rápidas.',
   },
   {
     id: 'deepseek-v4-pro',
-    label: 'DeepSeek V4 Pro (via OpenCode)',
+    label: 'DeepSeek V4 Pro (OpenCode Go)',
     badge: 'Pro Reasoning',
-    tier: 'Pro Reasoning',
-    description: 'Alta capacidad de razonamiento para arquitectura y planes complejos.',
+    tier: 'Go · Pro',
+    description: 'Mayor capacidad de razonamiento para planes y diagnóstico complejo.',
   },
   {
-    id: 'gemini-3.8-flash',
-    label: 'Gemini 3.8 Flash (via OpenCode)',
-    badge: 'Fast Multimodal',
-    tier: 'Fast Multimodal',
-    description: 'Velocidad balanceada y comprensión profunda de contexto de workspace.',
-  },
-  {
-    id: 'gemini-3.5-flash-lite',
-    label: 'Gemini 3.5 Flash Lite (via OpenCode)',
-    badge: 'Lightweight',
-    tier: 'Lightweight',
-    description: 'Extremadamente ligero y económico para acciones directas.',
-  },
-  {
-    id: 'jev-1.13',
-    label: 'Jev 1.13 (via OpenCode)',
-    badge: 'Fast Agentic',
-    tier: 'Fast Agentic',
-    description: 'Optimizado para herramientas y ejecución estructurada de agentes.',
-  },
-  {
-    id: 'gpt-5.4-mini',
-    label: 'GPT-5.4 Mini (via OpenCode)',
-    badge: 'Fast Precision',
-    tier: 'Fast Precision',
-    description: 'Excelente para formateo JSON estricto y parsing de intenciones.',
-  },
-  {
-    id: 'qwen3.8-flash',
-    label: 'Qwen 3.8 Flash (via OpenCode)',
-    badge: 'Code & Logic',
-    tier: 'Code & Logic',
-    description: 'Especialista en código y generación de comandos CLI.',
+    id: 'kimi-k3',
+    label: 'Kimi K3 (OpenCode Go)',
+    badge: 'Coding Agent',
+    tier: 'Go · Coding',
+    description: 'Modelo agéntico para código, herramientas y contexto extenso.',
   },
   {
     id: 'kimi-k2.7-code',
-    label: 'Kimi K2.7 Code (via OpenCode)',
+    label: 'Kimi K2.7 Code (OpenCode Go)',
     badge: 'Coding Agent',
-    tier: 'Coding Agent',
-    description: 'Modelo enfocado en programación y contexto extenso.',
+    tier: 'Go · Coding',
+    description: 'Especializado en programación y generación de comandos.',
   },
   {
-    id: 'claude-sonnet-5-5',
-    label: 'Claude Sonnet 5.5 (via OpenCode)',
-    badge: 'Premium Analysis',
-    tier: 'Premium Analysis',
-    description: 'Máxima precisión analítica y síntesis para planes de alto nivel.',
+    id: 'minimax-m3',
+    label: 'MiniMax M3 (OpenCode Go)',
+    badge: 'Balanced',
+    tier: 'Go · Balanced',
+    description: 'Equilibrio entre razonamiento, velocidad y costo.',
   },
   {
-    id: 'grok-4.7',
-    label: 'Grok 4.7 (via OpenCode)',
-    badge: 'Direct & Fast',
-    tier: 'Direct & Fast',
-    description: 'Respuestas directas con alta fidelidad.',
+    id: 'minimax-m3.1-flash',
+    label: 'MiniMax M3.1 Flash (OpenCode Go)',
+    badge: 'Fast',
+    tier: 'Go · Fast',
+    description: 'Variante rápida para respuestas cortas y despacho de acciones.',
+  },
+  {
+    id: 'glm-5.3',
+    label: 'GLM 5.3 (OpenCode Go)',
+    badge: 'Pro',
+    tier: 'Go · Pro',
+    description: 'Razonamiento sólido con buen desempeño en herramientas.',
+  },
+  {
+    id: 'glm-5.3-flash',
+    label: 'GLM 5.3 Flash (OpenCode Go)',
+    badge: 'Fast',
+    tier: 'Go · Fast',
+    description: 'Versión liviana para planificación de baja latencia.',
+  },
+  {
+    id: 'qwen3.8-flash',
+    label: 'Qwen 3.8 Flash (OpenCode Go)',
+    badge: 'Code & Logic',
+    tier: 'Go · Fast',
+    description: 'Rápido en código y estructuración de comandos CLI.',
+  },
+  {
+    id: 'qwen3.8-max',
+    label: 'Qwen 3.8 Max (OpenCode Go)',
+    badge: 'Pro',
+    tier: 'Go · Pro',
+    description: 'Mayor capacidad analítica dentro de la suscripción Go.',
+  },
+  {
+    id: 'mimo-v2.6-flash',
+    label: 'MiMo V2.6 Flash (OpenCode Go)',
+    badge: 'Fast',
+    tier: 'Go · Fast',
+    description: 'Modelo liviano para turnos cortos y de baja latencia.',
+  },
+  {
+    id: 'mimo-v2.6-pro',
+    label: 'MiMo V2.6 Pro (OpenCode Go)',
+    badge: 'Pro',
+    tier: 'Go · Pro',
+    description: 'Mayor profundidad para tareas de planificación.',
+  },
+  {
+    id: 'hy3',
+    label: 'Hy3 (OpenCode Go)',
+    badge: 'Open',
+    tier: 'Go · Open',
+    description: 'Modelo open-weights incluido en el plan Go.',
+  },
+  {
+    id: 'step-5-preview',
+    label: 'Step 5 Preview (OpenCode Go)',
+    badge: 'Preview',
+    tier: 'Go · Preview',
+    description: 'Modelo en preview para evaluar calidad y latencia.',
   },
 ];
 
@@ -276,10 +380,12 @@ export interface ZedPersonaConfig {
 
 export interface OperatorProviderConfig {
   activeProvider: OperatorProviderId;
-  // OpenCode Multi-Model Gateway (Base API Key + selectable models including DeepSeek, Gemini, Jev)
+  // OpenCode Go subscription (HTTP OpenAI-compatible gateway)
   opencodeApiKey: string;
   opencodeBaseUrl: string;
   opencodeModel: string;
+  /** Stable x-opencode-session value used by the Go inference gateway. */
+  opencodeSessionId: string;
   // Vercel AI Gateway / SDK
   vercelApiKey: string;
   vercelBaseUrl: string;
@@ -375,8 +481,9 @@ export const DEFAULT_ZED_PERSONA: ZedPersonaConfig = {
 export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   activeProvider: 'cloudflare',
   opencodeApiKey: '',
-  opencodeBaseUrl: 'https://opencode.ai/inference/v1',
+  opencodeBaseUrl: OPENCODE_GO_CHAT_BASE_URL,
   opencodeModel: 'deepseek-v4.1-flash',
+  opencodeSessionId: '',
   vercelApiKey: '',
   vercelBaseUrl: 'https://ai-gateway.vercel.sh/v1',
   vercelModel: 'deepseek/deepseek-chat',
@@ -427,15 +534,17 @@ export function loadOperatorConfig(): OperatorProviderConfig {
       localStorage.getItem(LEGACY_CONFIG_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_OPERATOR_CONFIG, persona: { ...DEFAULT_ZED_PERSONA } };
     const parsed = JSON.parse(raw) as Partial<OperatorProviderConfig>;
-    let baseUrl = parsed.opencodeBaseUrl || DEFAULT_OPERATOR_CONFIG.opencodeBaseUrl;
-    if (baseUrl === 'https://api.deepseek.com/v1' || baseUrl === 'https://api.opencode.ai/v1') {
-      baseUrl = 'https://opencode.ai/inference/v1';
-    }
+    // Migrate any stored pay-as-you-go inference base to the OpenCode Go
+    // gateway. Without this, a Go API key receives HTTP 402 from /inference/v1.
+    const baseUrl = normalizeOpenCodeBaseUrl(parsed.opencodeBaseUrl);
     let model = parsed.opencodeModel || DEFAULT_OPERATOR_CONFIG.opencodeModel;
     if (model === 'deepseek-4.1-flash') {
       model = 'deepseek-v4.1-flash';
     } else if (model === 'jev') {
       model = 'jev-1.13';
+    } else if (model === 'deepseek-v4.1-coder') {
+      // No longer present in the OpenCode Go catalog.
+      model = 'deepseek-v4.1-flash';
     }
 
     const apiKey =
@@ -467,6 +576,8 @@ export function loadOperatorConfig(): OperatorProviderConfig {
       opencodeApiKey: apiKey,
       opencodeBaseUrl: baseUrl,
       opencodeModel: model,
+      opencodeSessionId:
+        typeof parsed.opencodeSessionId === 'string' ? parsed.opencodeSessionId : '',
       vercelApiKey: vercelKey,
       vercelBaseUrl: parsed.vercelBaseUrl || DEFAULT_OPERATOR_CONFIG.vercelBaseUrl,
       vercelModel: parsed.vercelModel || DEFAULT_OPERATOR_CONFIG.vercelModel,
@@ -494,6 +605,9 @@ export function saveOperatorConfig(
   const merged: OperatorProviderConfig = {
     ...current,
     ...partialOrFull,
+    opencodeBaseUrl: normalizeOpenCodeBaseUrl(
+      partialOrFull.opencodeBaseUrl ?? current.opencodeBaseUrl
+    ),
     persona: {
       ...current.persona,
       ...(partialOrFull.persona ?? {}),
@@ -526,6 +640,31 @@ export function saveOperatorConfig(
     // ignore storage errors
   }
   return merged;
+}
+
+function newOpenCodeSessionId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `ses_kite_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    }
+  } catch {
+    // fall through to the timestamp-based id
+  }
+  return `ses_kite_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * OpenCode Go requires a stable session id on every request. It is used for
+ * routing and prompt caching, so it must survive turns and app restarts.
+ */
+export function getOrCreateOpenCodeSessionId(
+  config: OperatorProviderConfig = loadOperatorConfig()
+): string {
+  const existing = config.opencodeSessionId?.trim();
+  if (existing) return existing;
+  const next = newOpenCodeSessionId();
+  saveOperatorConfig({ opencodeSessionId: next });
+  return next;
 }
 
 /**
@@ -898,7 +1037,7 @@ export function getProviderLatencyStats(
 }
 
 const MODEL_CATALOG_KEYS = {
-  opencode: 'kite.operator.modelCatalog.opencode.v1',
+  opencode: 'kite.operator.modelCatalog.opencode.v2',
   vercel: 'kite.operator.modelCatalog.vercel.v1',
   cloudflare: 'kite.operator.modelCatalog.cloudflare.v1',
 } as const;
@@ -1013,8 +1152,7 @@ export async function fetchOpenCodeModels(
 ): Promise<ModelCatalogFetchResult> {
   const cfg = loadOperatorConfig();
   const key = (apiKey ?? cfg.opencodeApiKey)?.trim();
-  const base =
-    (baseUrl ?? cfg.opencodeBaseUrl)?.replace(/\/+$/, '') || 'https://opencode.ai/inference/v1';
+  const base = normalizeOpenCodeBaseUrl(baseUrl ?? cfg.opencodeBaseUrl).replace(/\/+$/, '');
 
   if (!key) {
     return keptCatalog(
@@ -1022,6 +1160,13 @@ export async function fetchOpenCodeModels(
       OPENCODE_MODEL_CATALOG,
       'Falta la API key de OpenCode.'
     );
+  }
+
+  // The Go gateway does not serve /models under its chat base; the plan
+  // catalog lives on a different endpoint. Never probe the pay-as-you-go
+  // /inference/v1 base with a Go key.
+  if (isOpenCodeGoChatBaseUrl(base)) {
+    return fetchOpenCodeGoModels(key);
   }
 
   try {
@@ -1071,6 +1216,87 @@ export async function fetchOpenCodeModels(
       'opencode',
       OPENCODE_MODEL_CATALOG,
       'No se pudo consultar OpenCode.'
+    );
+  }
+}
+
+/**
+ * Fetches the plan-scoped OpenCode Go catalog. Unlike the pay-as-you-go
+ * /inference/v1/models endpoint, this list only contains models the Go
+ * subscription is allowed to use.
+ */
+export async function fetchOpenCodeGoModels(
+  apiKey?: string
+): Promise<ModelCatalogFetchResult> {
+  const cfg = loadOperatorConfig();
+  const key = (apiKey ?? cfg.opencodeApiKey)?.trim();
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (key) headers.Authorization = `Bearer ${key}`;
+
+  try {
+    const res = await operatorHttpFetch(
+      OPENCODE_GO_MODELS_URL,
+      { method: 'GET', headers },
+      { credentialProvider: 'opencode' }
+    );
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const list: Array<{ id?: string }> = Array.isArray(data?.data)
+      ? data.data
+      : Array.isArray(data)
+        ? data
+        : [];
+
+    const dynamic: OpenCodeModelOption[] = list
+      .filter(
+        (model) =>
+          typeof model?.id === 'string' && isOpenCodeGoChatCompatibleModel(model.id)
+      )
+      .map((model) => {
+        const id = model.id as string;
+        const known = OPENCODE_MODEL_CATALOG.find((entry) => entry.id === id);
+        if (known) return known;
+
+        const label = id
+          .split('-')
+          .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+          .join(' ');
+        return {
+          id,
+          label: `${label} (OpenCode Go)`,
+          badge: /flash|mini|lite/i.test(id)
+            ? 'Fast'
+            : /pro|max/i.test(id)
+              ? 'Pro'
+              : 'Go',
+          tier: 'OpenCode Go',
+          description: `Modelo ${id} incluido en la suscripción OpenCode Go.`,
+        };
+      });
+
+    if (!dynamic.length) {
+      return keptCatalog(
+        'opencode',
+        OPENCODE_MODEL_CATALOG,
+        'OpenCode Go no devolvió modelos compatibles con Chat Completions.'
+      );
+    }
+
+    const saved = saveModelCatalog('opencode', dynamic);
+    return {
+      models: saved.models,
+      fresh: true,
+      savedAt: saved.savedAt,
+      detail: '',
+    };
+  } catch {
+    return keptCatalog(
+      'opencode',
+      OPENCODE_MODEL_CATALOG,
+      'No se pudo consultar el catálogo de OpenCode Go.'
     );
   }
 }

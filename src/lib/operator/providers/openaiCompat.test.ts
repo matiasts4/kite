@@ -213,6 +213,33 @@ describe('OpenAiCompatPlannerProvider — Streaming, Native Tool Calls & Resilie
     });
   });
 
+  it('sends the OpenCode Go session header and omits an empty Authorization header', async () => {
+    let capturedInit: RequestInit | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      capturedInit = init;
+      return Promise.resolve(
+        new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
+    const provider = new OpenAiCompatPlannerProvider({
+      baseUrl: 'https://opencode.ai/inference/go/openai/v1',
+      apiKey: '',
+      model: 'deepseek-v4.1-flash',
+      credentialProvider: 'opencode',
+      sessionId: 'ses_kite_test123',
+    });
+
+    await provider.plan([{ role: 'user', content: 'ping' }], { stream: false });
+
+    const headers = (capturedInit?.headers ?? {}) as Record<string, string>;
+    expect(headers['x-opencode-session']).toBe('ses_kite_test123');
+    expect(headers.Authorization).toBeUndefined();
+  });
+
   it('aborts with timeout error when request exceeds timeoutSecs', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
       return new Promise((_resolve, reject) => {

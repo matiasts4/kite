@@ -1,9 +1,14 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   OperatorConfig,
   OperatorProviderId,
   OpenCodeModelOption,
 } from '../../../../lib/operator/operatorConfig';
+import {
+  isVerifiedChatEndpoint,
+  listZedChatConnections,
+} from '../../../../lib/operator/operatorProviders';
+import type { ConnectionSummary } from '../../../../lib/ipc';
 import { ModelSearchField } from './ModelSearchField';
 
 export interface ZedProvidersSectionProps {
@@ -14,6 +19,7 @@ export interface ZedProvidersSectionProps {
   onToggleApiKey: (provider: string) => void;
   testingProvider: OperatorProviderId | null;
   onRunProbe: (providerId: OperatorProviderId) => void;
+  openCodeGoCredential: { available: boolean; source: string | null } | null;
   effectiveOpenCodeModels: OpenCodeModelOption[];
   syncingModels: boolean;
   openCodeSavedAt: string | null;
@@ -36,6 +42,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
   onToggleApiKey,
   testingProvider,
   onRunProbe,
+  openCodeGoCredential,
   effectiveOpenCodeModels,
   syncingModels,
   openCodeSavedAt,
@@ -49,6 +56,18 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
   cloudflareSavedAt,
   onSyncCloudflareModels,
 }) => {
+  const [verifiedChatConnections, setVerifiedChatConnections] = useState<ConnectionSummary[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listZedChatConnections().then((connections) => {
+      if (!cancelled) setVerifiedChatConnections(connections);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <section className="settings-group">
       <div
@@ -67,6 +86,43 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
         </span>
       </div>
 
+      {verifiedChatConnections.length > 0 ? (
+        <div className="ui-card" style={{ marginBottom: 12 }}>
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Conexiones de chat verificadas</h3>
+              <p>
+                Se leen del registro compartido. Un proveedor aparece aquí solo si uno de sus
+                endpoints de chat fue verificado. El nombre del driver no alcanza.
+              </p>
+            </div>
+          </div>
+          {verifiedChatConnections.map((connection) => {
+            const verifiedCount = connection.endpoints.filter(
+              (endpoint) => endpoint.ok && isVerifiedChatEndpoint(endpoint.endpointId)
+            ).length;
+            return (
+              <div key={connection.connectionId} className="ui-card__row settings-row">
+                <div className="settings-row__copy">
+                  <h3 className="settings-row__title">{connection.displayName}</h3>
+                  <p>
+                    {connection.driverKind} · {connection.authMethod}
+                  </p>
+                </div>
+                <div className="settings-row__control">
+                  <span className="settings-badge">Chat verified</span>
+                  <span
+                    style={{ fontSize: 11.5, color: 'var(--text-muted)', marginLeft: 8 }}
+                  >
+                    {verifiedCount} endpoint{verifiedCount === 1 ? '' : 's'}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
       <div className="ui-card">
         {/* Active Provider Selector */}
         <div className="ui-card__row settings-row">
@@ -82,7 +138,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
             <fieldset aria-label="Proveedor IA" className="ui-segmented">
               {(
                 [
-                  { id: 'opencode', label: 'OpenCode Gateway' },
+                  { id: 'opencode', label: 'OpenCode Go' },
                   { id: 'vercel', label: 'Vercel AI' },
                   { id: 'cloudflare', label: 'Cloudflare AI' },
                   { id: 'antigravity', label: 'Antigravity' },
@@ -104,7 +160,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
           </div>
         </div>
 
-        {/* OpenCode Gateway Configuration */}
+        {/* OpenCode Go Configuration */}
         <div
           className="ui-card__row"
           style={{
@@ -119,13 +175,14 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <h3 className="settings-row__title" style={{ margin: 0 }}>
-                  OpenCode Multi-Model Gateway
+                  OpenCode Go
                 </h3>
-                <span className="settings-badge">Recomendado</span>
+                <span className="settings-badge">Suscripción</span>
               </div>
               <p style={{ margin: '3px 0 0', fontSize: 12, color: 'var(--text-secondary)' }}>
-                Conecta tu API Key de OpenCode como base y selecciona cualquier modelo rápido o
-                gratuito (incluyendo DeepSeek vía OpenCode, sin requerir API directa de DeepSeek).
+                Usa tu suscripción OpenCode Go a través del gateway OpenAI-compatible oficial.
+                Si ya iniciaste sesión con <code>opencode auth login opencode-go</code>, la
+                credencial se resuelve sola y no hace falta pegarla acá.
               </p>
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -143,7 +200,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                 disabled={testingProvider !== null}
                 onClick={() => void onRunProbe('opencode')}
               >
-                {testingProvider === 'opencode' ? 'Probando...' : 'Test OpenCode'}
+                {testingProvider === 'opencode' ? 'Probando...' : 'Probar OpenCode Go'}
               </button>
             </div>
           </div>
@@ -157,7 +214,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
           >
             <div>
               <label className="zed-settings__label" style={{ display: 'block', marginBottom: 5 }}>
-                OpenCode API Key
+                API Key de OpenCode Go (opcional)
               </label>
               <div style={{ display: 'flex', gap: 6 }}>
                 <input
@@ -165,7 +222,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                   className="zed-settings__input"
                   value={config.opencodeApiKey}
                   onChange={(e) => onFieldChange('opencodeApiKey', e.target.value)}
-                  placeholder="sk-opencode-..."
+                  placeholder="oc_sk_..."
                   style={{ flex: 1 }}
                 />
                 <button
@@ -181,26 +238,45 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                 <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
                   Guardada en Bóveda Local SQLite
                 </span>
+              ) : openCodeGoCredential?.available ? (
+                <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'block', marginTop: '4px' }}>
+                  Credencial detectada en OpenCode CLI ({openCodeGoCredential.source}). El campo
+                  puede quedar vacío.
+                </span>
               ) : (
                 <span style={{ fontSize: '11px', color: 'var(--text-muted, #94a3b8)', marginTop: '4px', display: 'block' }}>
-                  Opcional: si está vacía, se resolverá OPENCODE_API_KEY desde .env
+                  Ejecutá <code>opencode auth login opencode-go</code> o pegá una key{' '}
+                  <code>oc_sk_...</code>. También se acepta <code>OPENCODE_API_KEY</code>.
                 </span>
               )}
             </div>
 
             <div>
               <label className="zed-settings__label" style={{ display: 'block', marginBottom: 5 }}>
-                OpenCode Endpoint Base URL
+                Base URL del gateway Go
               </label>
               <input
                 type="text"
                 className="zed-settings__input"
                 value={config.opencodeBaseUrl}
                 onChange={(e) => onFieldChange('opencodeBaseUrl', e.target.value)}
-                placeholder="https://api.opencode.ai/v1"
+                placeholder="https://opencode.ai/inference/go/openai/v1"
                 style={{ width: '100%' }}
               />
+              <span style={{ fontSize: '11px', color: 'var(--text-muted, #94a3b8)', marginTop: '4px', display: 'block' }}>
+                Debe ser la ruta de la suscripción: <code>/inference/go/openai/v1</code>. La ruta
+                <code> /inference/v1</code> factura pay-as-you-go y devuelve 402.
+              </span>
             </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 11, color: 'var(--text-muted)' }}>
+            <span>
+              Sesión Go: <code>{config.opencodeSessionId || 'se genera automáticamente'}</code>
+            </span>
+            <span>
+              Header requerido: <code>x-opencode-session</code>
+            </span>
           </div>
 
           <ModelSearchField

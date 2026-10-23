@@ -30,6 +30,22 @@ function extractJsonFromModelOutput(raw: string): any {
   return JSON.parse(jsonSlice);
 }
 
+const MAX_PRIOR_TURNS = 14;
+
+function buildPlannerMessages(
+  systemPrompt: string,
+  input: string,
+  history?: ProviderMessage[]
+): ProviderMessage[] {
+  const priorTurns = history ? history.slice(-MAX_PRIOR_TURNS) : [];
+
+  return [
+    { role: 'system', content: systemPrompt },
+    ...priorTurns,
+    { role: 'user', content: input },
+  ];
+}
+
 function parseAndValidateModelPlan(
   rawText: string,
   systemPrompt: string,
@@ -111,7 +127,8 @@ export async function planTurnLLM(
   input: string,
   provider: PlannerProvider,
   context?: TurnContext,
-  turnId?: string
+  turnId?: string,
+  history?: ProviderMessage[]
 ): Promise<OperatorPlan> {
   const currentTurnId = turnId || `turn-${Date.now()}`;
   if (!runLedger.getRun(currentTurnId)) {
@@ -120,10 +137,7 @@ export async function planTurnLLM(
 
   const systemPrompt = buildOperatorSystemPrompt(context);
 
-  const messages: ProviderMessage[] = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: input },
-  ];
+  const messages = buildPlannerMessages(systemPrompt, input, history);
 
   let rawOutput = '';
   let latencyMs = 0;

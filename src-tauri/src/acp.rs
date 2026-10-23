@@ -16,7 +16,7 @@ pub struct AcpModelDescriptor {
     pub effort_options: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpToolCall {
     pub id: String,
@@ -121,7 +121,7 @@ pub fn resolve_antigravity_acp_binary() -> Option<PathBuf> {
     None
 }
 
-fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<String>, String, Option<String>, Option<String>, Option<usize>, Option<usize>) {
+pub(crate) fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<String>, String, Option<String>, Option<String>, Option<usize>, Option<usize>) {
     let lower = raw_name.to_lowercase();
 
     // Extract MCP server name & clean tool name if formatted like mcp__server__tool or mcp_server_tool or call_mcp_tool
@@ -235,7 +235,7 @@ fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<Str
     )
 }
 
-fn summarize_tool_detail(params: &Value, output: &Option<String>, command: &Option<String>, file_path: &Option<String>) -> String {
+pub(crate) fn summarize_tool_detail(params: &Value, output: &Option<String>, command: &Option<String>, file_path: &Option<String>) -> String {
     let mut parts = Vec::new();
     if let Some(cmd) = command {
         parts.push(format!("$ {}", cmd));

@@ -243,6 +243,9 @@ pub enum TransportEvent {
     Text(String),
     Notice(String),
     ApprovalRequest { id: String, kind: String },
+    /// The provider finished answering this turn but the process still serves
+    /// the session. A later turn writes onto the same process.
+    TurnEnded,
     Exit { code: Option<i32>, error: Option<String> },
 }
 
@@ -476,7 +479,14 @@ impl SessionManager {
             session.record.state,
             SessionState::Running | SessionState::Waiting
         ) {
-            spawn_once(session, None)?;
+            // A persistent process that already answered a turn still serves
+            // the session: the next message is written onto it.
+            let process_serves_the_thread = session.record.mode == SessionMode::Persistent
+                && session.record.state == SessionState::Completed
+                && session.transport.spawn_count() > 0;
+            if !process_serves_the_thread {
+                spawn_once(session, None)?;
+            }
         }
         session
             .transport
@@ -587,6 +597,12 @@ impl SessionManager {
                         json!({ "requestId": id, "kind": kind }),
                     );
                 }
+                TransportEvent::TurnEnded => {
+                    if session.record.pending_approvals.is_empty() {
+                        session.record.state = SessionState::Completed;
+                    }
+                    push_event(session, "turnCompleted", json!({}));
+                }
                 TransportEvent::Exit { code, error } => {
                     exit = Some((code, error));
                 }
@@ -692,6 +708,12 @@ fn spawn_once(session: &mut ManagedSession, resume_handle: Option<String>) -> Re
 }
 
 fn apply_exit(session: &mut ManagedSession, code: Option<i32>, error: Option<String>) {
+    // The provider may announce its handle after the spawn returned.
+    if let Some(handle) = session.transport.resume_handle() {
+        if !handle.trim().is_empty() {
+            session.record.resume_handle = Some(handle);
+        }
+    }
     settle_approvals(session, "sessionExit");
     session.record.state = if error.is_some() {
         SessionState::Failed
@@ -999,5 +1021,36 @@ mod tests {
         let live = spec("thread-2", SessionMode::OneShot, None)
             .with_declared_mode(&codex, true);
         assert_eq!(live.mode, SessionMode::Persistent);
+    }
+
+    #[test]
+    fn a_persistent_turn_end_keeps_one_process_for_the_next_message() {
+        let mut manager = SessionManager::new();
+        let transport = attach(
+            &mut manager,
+            spec("thread-1", SessionMode::Persistent, None),
+            ScriptedTransport::new(),
+        );
+        manager.start("thread-1").unwrap();
+        manager.send_turn("thread-1", "command-1", "first").unwrap();
+        transport.script(TransportEvent::TurnEnded);
+        manager.poll("thread-1").unwrap();
+
+        assert_eq!(
+            manager.status("thread-1").unwrap().state,
+            SessionState::Completed
+        );
+
+        manager.send_turn("thread-1", "command-2", "second").unwrap();
+
+        assert_eq!(transport.spawn_count(), 1);
+        assert_eq!(
+            transport.written_turns(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert_eq!(
+            manager.status("thread-1").unwrap().state,
+            SessionState::Running
+        );
     }
 }

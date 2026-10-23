@@ -1,6 +1,8 @@
 pub mod drivers;
 pub mod event_log;
 pub mod models;
+pub mod normalize;
+pub mod persistent;
 pub mod provider_env;
 pub mod recipe;
 pub mod runtime;
@@ -11,6 +13,8 @@ pub mod utils;
 pub use drivers::*;
 pub use event_log::*;
 pub use models::*;
+pub use normalize::*;
+pub use persistent::*;
 pub use provider_env::*;
 pub use recipe::*;
 pub use runtime::*;

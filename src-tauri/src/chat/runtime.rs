@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::chat::drivers::declaration;
+use crate::chat::persistent::{has_persistent_wire, AntigravitySession, PersistentControls};
+use crate::chat::recipe::{apply_recipe, snapshot_for_agent};
 use crate::chat::session::{
-    declared_session_mode, SendReceipt, SessionManager, SessionMode, SessionSpec, SessionTransport,
-    TransportEvent, TransportSpec,
+    declared_session_mode, RecipeSnapshot, SendReceipt, SessionManager, SessionMode, SessionSpec,
+    SessionState, SessionTransport, TransportEvent, TransportSpec,
 };
 use crate::chat::threads::{
     chat_item, load_thread, replace_thread, sanitize_chat_text, touch, upsert_item,
@@ -93,6 +95,10 @@ pub enum SendRoute {
 /// Why a send did not complete through the session manager.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedSendError {
+    /// The agent recipe could not be written before the process started. No
+    /// session was attached and no turn was written, and the caller must not
+    /// fall back to a command that would run without its recipe.
+    Prepare(String),
     /// The process never started, so the prompt was not written anywhere and
     /// the caller may keep today's one-command path.
     Start(String),
@@ -104,7 +110,9 @@ pub enum ManagedSendError {
 impl ManagedSendError {
     pub fn reason(&self) -> &str {
         match self {
-            ManagedSendError::Start(reason) | ManagedSendError::Turn(reason) => reason,
+            ManagedSendError::Prepare(reason)
+            | ManagedSendError::Start(reason)
+            | ManagedSendError::Turn(reason) => reason,
         }
     }
 
@@ -171,20 +179,103 @@ pub fn managed_send(
     }
 }
 
+/// Sends one turn after a caller-owned preparation step completes. The step
+/// runs before the session is attached, so it is also before any process
+/// starts: an agent recipe is already on disk when the provider launches. A
+/// preparation failure never reaches a provider and is never retried as a
+/// second command.
+pub fn managed_send_prepared<F>(
+    manager: &mut SessionManager,
+    spec: SessionSpec,
+    transport: Box<dyn SessionTransport>,
+    command_id: &str,
+    prompt: &str,
+    prepare: F,
+) -> Result<SendReceipt, ManagedSendError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    if spec.mode != SessionMode::Persistent {
+        return Err(ManagedSendError::Start(
+            "the session manager only accepts a declared persistent route".to_string(),
+        ));
+    }
+    let thread_id = spec.thread_id.clone();
+    prepare().map_err(ManagedSendError::Prepare)?;
+    manager
+        .attach(spec, transport)
+        .map_err(|error| ManagedSendError::Start(error.to_string()))?;
+    match manager.start(&thread_id) {
+        Ok(_) => manager
+            .send_turn(&thread_id, command_id, prompt)
+            .map_err(|error| ManagedSendError::Turn(error.to_string())),
+        Err(error) => Err(ManagedSendError::Start(error.to_string())),
+    }
+}
+
+/// Whether the next send needs a new provider process. A running, waiting, or
+/// completed persistent session still owns its process; every other state
+/// starts a generation, and an agent thread applies the current recipe first.
+pub fn starts_new_session(state: Option<SessionState>) -> bool {
+    !matches!(
+        state,
+        Some(SessionState::Running | SessionState::Waiting | SessionState::Completed)
+    )
+}
+
+/// Writes the agent recipe into the directory the session will use. A loose
+/// chat has no recipe and writes nothing. The return value reports whether a
+/// recipe was applied.
+pub fn apply_agent_recipe(cwd: &Path, recipe: Option<&RecipeSnapshot>) -> Result<bool, String> {
+    let Some(recipe) = recipe else {
+        return Ok(false);
+    };
+    apply_recipe(cwd, recipe).map(|()| true).map_err(|error| {
+        format!("could not write the agent recipe before the session started: {error}")
+    })
+}
+
+/// The bounded statement a one-command send adds to its thread. It comes from
+/// the driver declaration, so a resumable driver, an unobserved driver, and a
+/// disabled persistent process each say their own reason instead of sharing a
+/// guessed claim.
+pub fn one_shot_notice(provider: &str, persistent_enabled: bool) -> Option<String> {
+    let declared = declaration(provider)?;
+    let notice = match declared.session_mode {
+        Some(SessionMode::Persistent) if !persistent_enabled => format!(
+            "Persistent sessions are off for {provider} in this process, so each send is a new command. The thread context is attached to every turn."
+        ),
+        Some(SessionMode::Persistent) => return None,
+        Some(SessionMode::Resumable) => format!(
+            "{provider} can continue a session with a provider-issued id, but this build does not pass one, so each send is a new command. The thread context is attached to every turn."
+        ),
+        Some(SessionMode::OneShot) => format!(
+            "{provider} has no lasting session channel, so each send is a new command. The thread context is attached to every turn."
+        ),
+        None => format!(
+            "The lasting session mode of {provider} could not be observed on this machine, so each send is a new command. The thread context is attached to every turn."
+        ),
+    };
+    Some(bounded_notice(&notice))
+}
+
 fn session_manager() -> &'static Mutex<SessionManager> {
     static CELL: std::sync::OnceLock<Mutex<SessionManager>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| Mutex::new(SessionManager::new()))
 }
 
-/// The lasting wire for a persistent driver. The declaration records which
-/// drivers expose one, but this build ships no adapter that speaks it. The
-/// transport fails before a process starts, so a flagged send keeps today's
-/// one-command path with a bounded notice instead of pretending the process
-/// stays open.
-fn open_persistent_transport(driver: &str) -> Box<dyn SessionTransport> {
-    Box::new(DeclaredWireUnavailable {
-        driver: driver.to_string(),
-    })
+/// The lasting wire for a persistent driver. Only Antigravity has an adapter in
+/// this build; a driver whose declaration allows a lasting channel but has no
+/// adapter fails before a process starts, so the caller keeps the one-command
+/// path with a bounded notice instead of pretending the process stays open.
+fn open_persistent_transport(driver: &str, controls: PersistentControls) -> Box<dyn SessionTransport> {
+    if has_persistent_wire(driver) {
+        Box::new(AntigravitySession::new(controls))
+    } else {
+        Box::new(DeclaredWireUnavailable {
+            driver: driver.to_string(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -252,6 +343,69 @@ fn emit_notice_item(thread_id: &str, run_id: &str, message: &str) {
     }
     live_cv().notify_all();
     persist();
+}
+
+/// Reads a lasting session's normalized events into the live chat run. The
+/// pump stops at a completed turn, a provider exit, a failure, or a run the
+/// user already finished.
+fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: String) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(40));
+        let events = {
+            let mut manager = session_manager().lock().unwrap();
+            manager.poll(&thread_id).unwrap_or_default()
+        };
+        let mut outcome: Option<(bool, String)> = None;
+        for event in events {
+            match event.kind.as_str() {
+                "text" => {
+                    if let Some(text) = event.payload.get("text").and_then(Value::as_str) {
+                        emit_deltas(&thread_id, &run_id, &assistant_id, text);
+                    }
+                }
+                "notice" => {
+                    if let Some(text) = event.payload.get("text").and_then(Value::as_str) {
+                        emit_notice_item(&thread_id, &run_id, text);
+                    }
+                }
+                "turnCompleted" => outcome = Some((true, String::new())),
+                "stopped" | "interrupted" => outcome = Some((true, String::new())),
+                "failed" => {
+                    let reason = event
+                        .payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the provider session failed");
+                    outcome = Some((false, reason.to_string()));
+                }
+                "exited" => {
+                    let code = event.payload.get("code").and_then(Value::as_i64);
+                    let error = event
+                        .payload
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let ok = error.is_none() && code.unwrap_or(0) == 0;
+                    outcome = Some((ok, error.unwrap_or_default()));
+                }
+                _ => {}
+            }
+        }
+        if let Some((ok, error)) = outcome {
+            finish_run(&run_id, ok, false, &error);
+            return;
+        }
+        let finished = live_turns()
+            .lock()
+            .unwrap()
+            .runs
+            .get(&run_id)
+            .map(|run| run.finished || run.closing)
+            .unwrap_or(true);
+        if finished {
+            return;
+        }
+    });
 }
 
 pub fn start_turn(
@@ -421,6 +575,11 @@ pub fn cancel_turn(thread_id: &str) {
             let _ = child.kill();
         }
     }
+    // A lasting session owns its own process, so the live-run handle is not
+    // enough to stop it. Stopping is a no-op for a thread with no session.
+    if let Ok(mut manager) = session_manager().lock() {
+        let _ = manager.stop(thread_id);
+    }
     finish_run(&run_id, false, true, "Stopped.");
 }
 
@@ -563,6 +722,9 @@ pub fn launch_provider(
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 }
             });
+        // Snapshot once. The same value is written before the process starts
+        // and stored on the session, so a later agent edit cannot reach it.
+        let recipe = profile_id.as_deref().and_then(snapshot_for_agent);
         let effective_prompt = if provider_session_id.is_some() {
             prompt.clone()
         } else {
@@ -577,6 +739,7 @@ pub fn launch_provider(
                     plan.connection_id.as_deref().unwrap_or("none"),
                 ));
                 let persistent_enabled = persistent_sessions_enabled();
+                let mut fallback_notice_emitted = false;
                 if send_route(&provider, persistent_enabled) == SendRoute::Persistent {
                     if let Some(declared) = declaration(&provider) {
                         // The mode comes from the declaration, not from the
@@ -588,28 +751,62 @@ pub fn launch_provider(
                             connection_id: values.connection_id.map(str::to_string),
                             working_directory: Some(cwd.to_string_lossy().to_string()),
                             mode: SessionMode::OneShot,
-                            recipe: None,
+                            recipe: recipe.clone(),
                         }
                         .with_declared_mode(&declared, persistent_enabled);
+                        let first_session = {
+                            let manager = session_manager().lock().unwrap();
+                            starts_new_session(manager.status(&thread_id).map(|record| record.state))
+                        };
+                        let controls = PersistentControls {
+                            model: model.clone(),
+                            effort: effort.clone(),
+                            permission_mode: Some(mode.clone()),
+                        };
+                        let cwd_for_prepare = cwd.clone();
+                        let recipe_for_prepare = recipe.clone();
                         let outcome = {
-                            let transport = open_persistent_transport(&provider);
+                            let transport = open_persistent_transport(&provider, controls);
                             let mut manager = session_manager().lock().unwrap();
-                            managed_send(&mut manager, spec, transport, &run_id, &prompt)
+                            managed_send_prepared(
+                                &mut manager,
+                                spec,
+                                transport,
+                                &run_id,
+                                &prompt,
+                                move || {
+                                    if !first_session {
+                                        return Ok(());
+                                    }
+                                    apply_agent_recipe(&cwd_for_prepare, recipe_for_prepare.as_ref())
+                                        .map(|_| ())
+                                },
+                            )
                         };
                         match outcome {
                             Ok(_) => {
-                                // A lasting wire accepted the turn, but this
-                                // build has no adapter that projects its
-                                // stream. The thread stays readable instead of
-                                // claiming output that was never read.
+                                // The lasting wire accepted the turn. Its frames
+                                // are projected into this live run until the
+                                // turn ends, fails, or the process exits.
+                                pump_persistent_session(
+                                    thread_id.clone(),
+                                    run_id.clone(),
+                                    assistant_id.clone(),
+                                );
+                                return;
+                            }
+                            Err(ManagedSendError::Prepare(reason)) => {
+                                // The recipe never landed on disk, so neither
+                                // the lasting session nor a one-command send may
+                                // run without it.
                                 emit_notice_item(
                                     &thread_id,
                                     &run_id,
                                     &format!(
-                                        "{provider} started a session that stays open, but this build cannot read its stream yet. Your message is still in the thread."
+                                        "The agent recipe could not be written, so the {provider} session did not start: {reason} Your message is still in the thread."
                                     ),
                                 );
-                                finish_run(&run_id, false, false, "");
+                                finish_run(&run_id, false, false, &reason);
                                 return;
                             }
                             Err(error) if error.before_turn() => {
@@ -624,6 +821,7 @@ pub fn launch_provider(
                                         error.reason()
                                     ),
                                 );
+                                fallback_notice_emitted = true;
                             }
                             Err(error) => {
                                 // The turn may have reached the provider, so
@@ -641,6 +839,22 @@ pub fn launch_provider(
                             }
                         }
                     }
+                }
+                if !fallback_notice_emitted {
+                    if let Some(notice) = one_shot_notice(&provider, persistent_enabled) {
+                        emit_notice_item(&thread_id, &run_id, &notice);
+                    }
+                }
+                if let Err(reason) = apply_agent_recipe(&cwd, recipe.as_ref()) {
+                    emit_notice_item(
+                        &thread_id,
+                        &run_id,
+                        &format!(
+                            "The agent recipe could not be written before {provider} started: {reason} Your message is still in the thread."
+                        ),
+                    );
+                    finish_run(&run_id, false, false, &reason);
+                    return;
                 }
                 let args_refs: Vec<&str> = plan.args.iter().map(|s| s.as_str()).collect();
                 match crate::hidden_exec::spawn_streaming(&plan.program, &args_refs, Some(&cwd)) {
@@ -2108,5 +2322,148 @@ mod tests {
 
         assert!(error.before_turn());
         assert!(manager.status("thread-1").is_none());
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "kite-runtime-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn agent_recipe() -> RecipeSnapshot {
+        RecipeSnapshot {
+            agent_id: "agent-1".to_string(),
+            revision: "r1".to_string(),
+            role: "Ordered role.".to_string(),
+            memory: "memory".to_string(),
+            user: "user".to_string(),
+            skills: vec!["root-cause".to_string()],
+        }
+    }
+
+    #[test]
+    fn the_recipe_is_written_before_the_session_starts() {
+        let dir = TempDir::new("recipe-order");
+        let recipe = agent_recipe();
+        let mut spec = persistent_spec("thread-1");
+        spec.recipe = Some(recipe.clone());
+        let transport = ScriptedTransport::new();
+        let probe = transport.clone();
+        let observer = transport.clone();
+        let spawns_at_prepare = Arc::new(Mutex::new(None));
+        let observed = spawns_at_prepare.clone();
+        let target = dir.path().to_path_buf();
+        let for_prepare = recipe.clone();
+        let mut manager = SessionManager::new();
+
+        managed_send_prepared(
+            &mut manager,
+            spec,
+            Box::new(transport),
+            "command-1",
+            "hello",
+            move || {
+                *observed.lock().unwrap() = Some(observer.spawn_count());
+                apply_agent_recipe(&target, Some(&for_prepare)).map(|_| ())
+            },
+        )
+        .expect("prepared send");
+
+        assert_eq!(*spawns_at_prepare.lock().unwrap(), Some(0));
+        let agents = std::fs::read_to_string(dir.path().join("AGENTS.md")).expect("recipe written");
+        assert!(agents.contains("Ordered role."));
+        assert_eq!(
+            probe.spawned_specs()[0].recipe_revision.as_deref(),
+            Some("r1")
+        );
+    }
+
+    #[test]
+    fn a_loose_chat_writes_no_recipe_before_the_session_starts() {
+        let dir = TempDir::new("loose-chat");
+
+        assert_eq!(apply_agent_recipe(dir.path(), None), Ok(false));
+        assert!(!dir.path().join("AGENTS.md").exists());
+        assert!(!dir.path().join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn a_live_session_does_not_start_another_process() {
+        assert!(starts_new_session(None));
+        assert!(!starts_new_session(Some(SessionState::Running)));
+        assert!(!starts_new_session(Some(SessionState::Waiting)));
+        assert!(!starts_new_session(Some(SessionState::Completed)));
+        assert!(starts_new_session(Some(SessionState::Closed)));
+        assert!(starts_new_session(Some(SessionState::Failed)));
+        assert!(starts_new_session(Some(SessionState::Interrupted)));
+        assert!(starts_new_session(Some(SessionState::Resumable)));
+    }
+
+    #[test]
+    fn a_preparation_failure_starts_nothing_and_is_not_replayed() {
+        let transport = ScriptedTransport::new();
+        let probe = transport.clone();
+        let mut manager = SessionManager::new();
+
+        let error = managed_send_prepared(
+            &mut manager,
+            persistent_spec("thread-1"),
+            Box::new(transport),
+            "command-1",
+            "keep this prompt",
+            || Err("recipe could not be written".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ManagedSendError::Prepare("recipe could not be written".to_string())
+        );
+        assert!(!error.before_turn());
+        assert_eq!(probe.spawn_count(), 0);
+        assert!(manager.status("thread-1").is_none());
+    }
+
+    #[test]
+    fn one_shot_notices_follow_the_driver_declaration() {
+        for driver in ["gemini", "grok", "cursor"] {
+            let notice = one_shot_notice(driver, true).expect("resumable notice");
+            assert!(notice.contains("provider-issued id"), "{driver}: {notice}");
+            assert!(
+                notice.chars().count() <= MAX_NOTICE_CHARS,
+                "{driver} notice must stay bounded"
+            );
+        }
+
+        let claude = one_shot_notice("claude", true).expect("unobserved notice");
+        assert!(claude.contains("could not be observed"), "{claude}");
+
+        let disabled = one_shot_notice("antigravity", false).expect("disabled notice");
+        assert!(disabled.contains("Persistent sessions are off"), "{disabled}");
+        assert!(one_shot_notice("antigravity", true).is_none());
+        assert!(one_shot_notice("codex", true).is_none());
+        assert!(one_shot_notice("opencode", true).is_none());
+        assert!(one_shot_notice("not-a-driver", true).is_none());
     }
 }

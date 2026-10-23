@@ -149,7 +149,12 @@ export const PROVIDER_CATALOG: Record<
     engineId: 'grok',
     defaultModel: 'grok-build',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [{ id: 'grok-build', name: 'Grok Build', description: 'xAI Grok Build', supportsEffort: true }],
+    models: [
+      { id: 'grok-4.7', name: 'Grok 4.7', description: 'xAI Grok default model', supportsEffort: true },
+      { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Build Fast', description: 'Fast agentic build model', supportsEffort: true },
+      { id: 'grok-4.6', name: 'Grok 4.6', description: 'Previous Grok model', supportsEffort: true },
+      { id: 'grok-4.5', name: 'Grok 4.5', description: 'Legacy Grok model', supportsEffort: true },
+    ],
     isDynamic: true,
     supportsEffort: true,
   },
@@ -170,7 +175,6 @@ export const PROVIDER_CATALOG: Record<
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
     models: [
       { id: 'auto', name: 'Auto', description: 'Cursor picks a model' },
-      { id: 'composer', name: 'Composer', description: 'Cursor coding model' },
     ],
     isDynamic: true,
   },

@@ -46,14 +46,8 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
     let fresh_models = match canon {
         "antigravity" => fetch_antigravity_models_dynamic(),
         "codex" => fetch_codex_models_dynamic(),
-        "cursor" => vec![
-            model_row("auto", "Auto", "Cursor picks a model", false),
-            model_row("composer", "Composer", "Cursor coding model", false),
-        ],
-        "grok" => vec![
-            model_row("grok-build", "Grok Build", "xAI Grok Build", true),
-            model_row("grok-code", "Grok Code", "Fast coding and terminal execution", true),
-        ],
+        "cursor" => fetch_cursor_models_dynamic(),
+        "grok" => fetch_grok_models_dynamic(),
         "opencode" => fetch_opencode_models_dynamic(),
         "claude" => vec![
             model_row("sonnet", "Claude Sonnet 5", "Balanced daily driver", true),
@@ -239,6 +233,103 @@ pub fn fetch_codex_models_dynamic() -> Vec<Value> {
     models
 }
 
+pub fn fetch_grok_models_dynamic() -> Vec<Value> {
+    if let Some(program) = resolve_bin("grok", &[]) {
+        if let Ok(out) = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(10)) {
+            if out.success() {
+                let models = parse_grok_models(&out.stdout_lossy());
+                if !models.is_empty() {
+                    return models;
+                }
+            }
+        }
+    }
+    grok_fallback_models()
+}
+
+pub fn grok_fallback_models() -> Vec<Value> {
+    vec![
+        model_row("grok-4.7", "Grok 4.7", "xAI Grok default model", true),
+        model_row(
+            "grok-4.7-build-fast",
+            "Grok 4.7 Build Fast",
+            "Fast agentic build model",
+            true,
+        ),
+        model_row("grok-4.6", "Grok 4.6", "Previous Grok model", true),
+        model_row("grok-4.5", "Grok 4.5", "Legacy Grok model", true),
+    ]
+}
+
+/// Parses `grok models`: a bulleted list under an `Available models:` header.
+pub fn parse_grok_models(raw: &str) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let entry = trimmed
+            .strip_prefix("* ")
+            .or_else(|| trimmed.strip_prefix("- "));
+        let Some(entry) = entry else {
+            continue;
+        };
+        let id = entry.split_whitespace().next().unwrap_or("").trim();
+        if id.is_empty() || !model_id_ok(id) || !seen.insert(id.to_string()) {
+            continue;
+        }
+        models.push(model_row(id, id, "Listed by the Grok CLI", true));
+    }
+    models
+}
+
+pub fn fetch_cursor_models_dynamic() -> Vec<Value> {
+    if let Some(program) = resolve_bin("cursor-agent", &[]) {
+        if let Ok(out) = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(10)) {
+            if out.success() {
+                let models = parse_cursor_models(&out.stdout_lossy());
+                if !models.is_empty() {
+                    return models;
+                }
+            }
+        }
+    }
+    cursor_fallback_models()
+}
+
+pub fn cursor_fallback_models() -> Vec<Value> {
+    vec![model_row("auto", "Auto", "Cursor picks a model", false)]
+}
+
+/// Parses `cursor-agent models`: `id - Name` rows under an `Available models`
+/// header.
+pub fn parse_cursor_models(raw: &str) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("Available models") {
+            continue;
+        }
+        let Some((id, name)) = trimmed.split_once(" - ") else {
+            continue;
+        };
+        let id = id.split_whitespace().next().unwrap_or("").trim();
+        if id.is_empty() || !model_id_ok(id) || !seen.insert(id.to_string()) {
+            continue;
+        }
+        models.push(model_row(
+            id,
+            name.trim(),
+            "Listed by the Cursor Agent CLI",
+            false,
+        ));
+        if models.len() >= 400 {
+            break;
+        }
+    }
+    models
+}
+
 pub fn model_row(id: &str, name: &str, description: &str, supports_effort: bool) -> Value {
     json!({
         "id": id,
@@ -410,5 +501,40 @@ mod tests {
     #[test]
     fn a_list_without_a_provider_prefix_yields_no_models() {
         assert!(ids("auto\ncomposer\ndefault\n").is_empty());
+    }
+
+    #[test]
+    fn parses_grok_models_output() {
+        let raw = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.6\n  - grok-4.5\n";
+        let parsed: Vec<String> = parse_grok_models(raw)
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                "grok-4.7".to_string(),
+                "grok-4.7-build-fast".to_string(),
+                "grok-4.6".to_string(),
+                "grok-4.5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_cursor_models_output() {
+        let raw = "Available models\n\nauto - Auto (current, default)\ngpt-5.3-codex-low - Codex 5.3 Low\ngpt-5.3-codex - Codex 5.3\n";
+        let parsed = parse_cursor_models(raw);
+        let ids: Vec<&str> = parsed
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["auto", "gpt-5.3-codex-low", "gpt-5.3-codex"]);
+        let names: Vec<&str> = parsed
+            .iter()
+            .filter_map(|model| model.get("name").and_then(|value| value.as_str()))
+            .collect();
+        assert_eq!(names[1], "Codex 5.3 Low");
     }
 }

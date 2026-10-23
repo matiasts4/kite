@@ -1263,8 +1263,8 @@ fn resolve_spawn_program(provider: &str) -> Result<PathBuf, String> {
             let avail = list_available_providers().join(", ");
             format!("Codex is not installed. Available providers: {avail}")
         })?,
-        "cursor" => resolve_bin("agent", &[])
-            .or_else(|| resolve_bin("cursor-agent", &[]))
+        "cursor" => resolve_bin("cursor-agent", &[])
+            .or_else(|| resolve_bin("agent", &[]))
             .ok_or_else(|| {
                 let avail = list_available_providers().join(", ");
                 format!("Cursor Agent is not installed. Available providers: {avail}")

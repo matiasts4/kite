@@ -395,13 +395,12 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
         "opencode" => DriverDeclaration {
             driver: driver.to_string(),
             session_mode: Some(SessionMode::Persistent),
-            accepts_model: false,
+            accepts_model: true,
             accepts_effort: false,
             accepts_permission: false,
             work_modes: Vec::new(),
             accepts_resume: true,
             unsupported: vec![
-                unsupported("model", "opencode", "the run spawn passes no model; selection was not observed"),
                 unsupported("effort", "opencode", "no effort flag was observed"),
                 unsupported("permission", "opencode", "no permission flag was observed"),
                 unsupported("workMode", "opencode", "no plan, build, or ask switch was observed"),
@@ -447,7 +446,7 @@ mod tests {
         let expected: [(&str, Option<SessionMode>, bool, bool, bool, bool); 7] = [
             ("antigravity", Some(SessionMode::Persistent), true, true, true, true),
             ("codex", Some(SessionMode::Persistent), true, false, true, true),
-            ("opencode", Some(SessionMode::Persistent), false, false, false, true),
+            ("opencode", Some(SessionMode::Persistent), true, false, false, true),
             ("gemini", Some(SessionMode::Resumable), false, false, false, true),
             ("grok", Some(SessionMode::Resumable), false, false, true, true),
             ("cursor", Some(SessionMode::Resumable), false, false, false, true),

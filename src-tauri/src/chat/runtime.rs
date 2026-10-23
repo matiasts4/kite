@@ -1009,12 +1009,13 @@ pub fn spawn_endpoint(provider: &str) -> Option<SpawnEndpoint> {
             accepts_model: false,
             accepts_session: false,
         },
-        // The Go chat route needs a Go model and the `x-opencode-session`
-        // header. `opencode run` selects neither, so it is not that endpoint.
+        // `opencode run` accepts `--model` (documented by the CLI), but it does
+        // not select the Go session header. It is a CLI spawn, not the Go chat
+        // endpoint, and the connection registry keeps that split.
         "opencode" => SpawnEndpoint {
             endpoint_id: "opencode run",
-            model_by_default: false,
-            accepts_model: false,
+            model_by_default: true,
+            accepts_model: true,
             accepts_session: false,
         },
         "gemini" => SpawnEndpoint {
@@ -1221,7 +1222,15 @@ pub fn spawn_args(
             ]
         }
         "cursor" => vec!["-p".into(), sent],
-        "opencode" => vec!["run".into(), sent],
+        "opencode" => {
+            let mut args = vec!["run".into()];
+            if let Some(model) = resolved.model {
+                args.push("--model".into());
+                args.push(model.into());
+            }
+            args.push(sent);
+            args
+        }
         "gemini" => vec!["--prompt".into(), sent],
         other => return Err(format!("{other} has no local chat command in this build.")),
     };
@@ -2034,7 +2043,7 @@ mod tests {
 
     #[test]
     fn spawns_without_a_supported_endpoint_omit_model_and_session() {
-        for provider in ["cursor", "grok", "opencode", "gemini"] {
+        for provider in ["cursor", "grok", "gemini"] {
             let values = send(Some("go-model-1"), Some("session-1"), None, None, &[]);
             let spawn = spawn_args(provider, "fullAccess", &values, None, "hello")
                 .unwrap_or_else(|error| panic!("{provider} spawn args: {error}"));
@@ -2057,7 +2066,7 @@ mod tests {
 
     #[test]
     fn supported_endpoint_flag_fails_on_a_spawn_without_model_support() {
-        for provider in ["cursor", "grok", "opencode", "gemini"] {
+        for provider in ["cursor", "grok", "gemini"] {
             let endpoint_id = spawn_endpoint(provider)
                 .unwrap_or_else(|| panic!("{provider} endpoint"))
                 .endpoint_id;

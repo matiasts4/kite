@@ -4,11 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { ChatComposer } from './ChatComposer';
 import { declarationFromCatalog } from './driverDeclaration';
 import { listConnections, type ConnectionSummary } from '../../../lib/ipc';
+import { openSettingsTab } from '../../../lib/settingsNav';
 
 vi.mock('../../../lib/ipc', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../lib/ipc')>();
   return { ...actual, listConnections: vi.fn(async () => []) };
 });
+
+vi.mock('../../../lib/settingsNav', () => ({ openSettingsTab: vi.fn() }));
 
 function claudeConnection(connectionId: string, displayName: string): ConnectionSummary {
   return {
@@ -55,6 +58,16 @@ describe('ChatComposer - Behavioral Tests', () => {
 
     const sendBtn = screen.getByTitle(/Send prompt/i);
     expect(sendBtn).toBeDisabled();
+  });
+
+  it('offers a connect action when no connection verified the provider', async () => {
+    const user = userEvent.setup();
+    render(<ChatComposer {...defaultProps} />);
+
+    const connect = screen.getByRole('button', { name: /connect claude code/i });
+    await user.click(connect);
+
+    expect(openSettingsTab).toHaveBeenCalledWith('zed', 'claude');
   });
 
   it('calls onSend when send button is clicked or Enter is pressed', async () => {

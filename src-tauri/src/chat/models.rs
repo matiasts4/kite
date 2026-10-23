@@ -54,9 +54,7 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
             model_row("grok-build", "Grok Build", "xAI Grok Build", true),
             model_row("grok-code", "Grok Code", "Fast coding and terminal execution", true),
         ],
-        "opencode" => vec![
-            model_row("auto", "Auto", "OpenCode default model", false),
-        ],
+        "opencode" => fetch_opencode_models_dynamic(),
         "claude" => vec![
             model_row("sonnet", "Claude Sonnet 5", "Balanced daily driver", true),
             model_row("opus", "Claude Opus (latest)", "Latest Opus release", true),
@@ -250,6 +248,59 @@ pub fn model_row(id: &str, name: &str, description: &str, supports_effort: bool)
     })
 }
 
+pub fn fetch_opencode_models_dynamic() -> Vec<Value> {
+    if let Some(live) = query_opencode_models_cli() {
+        if !live.is_empty() {
+            return live;
+        }
+    }
+    vec![model_row("auto", "Auto", "OpenCode default model", false)]
+}
+
+/// Parses the CLI's `provider/model` lines into catalog rows. Pure, so it is
+/// testable without spawning the CLI.
+pub fn parse_opencode_models(raw: &str) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    for line in raw.lines() {
+        let id = line.trim();
+        if id.is_empty() || !id.contains('/') || id.chars().any(char::is_whitespace) {
+            continue;
+        }
+        if !model_id_ok(id) || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let provider = id.split_once('/').map(|(provider, _)| provider).unwrap_or("");
+        models.push(model_row(
+            id,
+            id,
+            &format!("{provider} through the OpenCode CLI"),
+            false,
+        ));
+        if models.len() >= 400 {
+            break;
+        }
+    }
+    models
+}
+
+/// Reads the CLI's own model list. Read-only: it never selects, downloads, or
+/// authenticates a provider.
+pub fn query_opencode_models_cli() -> Option<Vec<Value>> {
+    let program = crate::chat::persistent::resolve_opencode_program().ok()?;
+    let out = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(10)).ok()?;
+    if !out.success() {
+        return None;
+    }
+    let raw = out.stdout_lossy();
+    let models = parse_opencode_models(&raw);
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
+}
+
 pub fn provider_ok(provider: &str) -> bool {
     matches!(provider, "antigravity" | "agy" | "claude" | "codex" | "cursor" | "grok" | "opencode" | "gemini")
 }
@@ -324,4 +375,40 @@ pub fn sanitize_options(options: &[Value]) -> Vec<Value> {
         })
         .take(16)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(raw: &str) -> Vec<String> {
+        parse_opencode_models(raw)
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn parses_provider_model_lines_and_drops_duplicates() {
+        let raw = "google/gemini-3.1-pro-preview\n\nnot-a-model\ngoogle/gemini-3.1-pro-preview\nopenai/gpt-5.6-sol\n";
+        assert_eq!(
+            ids(raw),
+            vec![
+                "google/gemini-3.1-pro-preview".to_string(),
+                "openai/gpt-5.6-sol".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_ids_with_whitespace_or_an_invalid_start() {
+        let raw = "google/gemini 3\n-/bad\n/model\nok/model-1\n";
+        assert_eq!(ids(raw), vec!["ok/model-1".to_string()]);
+    }
+
+    #[test]
+    fn a_list_without_a_provider_prefix_yields_no_models() {
+        assert!(ids("auto\ncomposer\ndefault\n").is_empty());
+    }
 }

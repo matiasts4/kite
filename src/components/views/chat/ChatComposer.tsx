@@ -23,6 +23,7 @@ import { SelectMenu } from '../../ui/SelectMenu';
 import { EffortPicker } from './EffortPicker';
 import { ChatApprovalCard } from './ChatApprovalCard';
 import { invokeCommand, listConnections } from '../../../lib/ipc';
+import { openSettingsTab } from '../../../lib/settingsNav';
 import {
   verifiedSpawnConnections,
   type ConnectionCandidate,
@@ -665,6 +666,28 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             </span>
             {permissionReason && <ControlReason reason={permissionReason} />}
 
+            {connectionCandidates.length === 0 && (
+              <button
+                type="button"
+                className="chat-composer__connect"
+                style={{
+                  appearance: 'none',
+                  background: 'transparent',
+                  border: '1px solid var(--block-stroke, rgba(127,127,127,0.35))',
+                  borderRadius: 'var(--radius-chip, 6px)',
+                  color: 'var(--text-secondary, inherit)',
+                  cursor: 'pointer',
+                  fontSize: 'var(--text-caption, 12px)',
+                  minHeight: 24,
+                  padding: '0 10px',
+                }}
+                title={`Connect ${providerRow?.label ?? declaration.driver} in Settings`}
+                disabled={running}
+                onClick={() => openSettingsTab('zed', declaration.driver)}
+              >
+                Connect {providerRow?.label ?? declaration.driver}
+              </button>
+            )}
             {connectionCandidates.length > 1 && onSelectConnection && (
               <SelectMenu
                 variant="toolbar"

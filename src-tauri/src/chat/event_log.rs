@@ -568,6 +568,117 @@ impl ThreadEventLog {
     }
 }
 
+/// Where a recovered thread came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverySource {
+    /// The log was readable and produced the thread.
+    Log,
+    /// The compatibility snapshot was returned because the log was absent or
+    /// could not be read.
+    Snapshot,
+}
+
+impl RecoverySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoverySource::Log => "log",
+            RecoverySource::Snapshot => "snapshot",
+        }
+    }
+}
+
+/// A thread that can be rendered after a reopen, together with the ordered
+/// events that produced it.
+///
+/// Recovery never spawns a provider, never writes a file, and never invents a
+/// resume handle. `resume_handle` is only the stored provider-issued value; its
+/// presence is the only reason the renderer may offer a resume.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredThread {
+    pub thread_id: String,
+    pub thread: Value,
+    pub events: Vec<ThreadEvent>,
+    pub source: RecoverySource,
+    pub resume_handle: Option<String>,
+    /// Set when the log could not be read. The compatibility snapshot is still
+    /// returned, so the previous data stays readable.
+    pub diagnostic: Option<String>,
+}
+
+impl RecoveredThread {
+    /// True only when the recovered thread carries a non-empty provider handle.
+    pub fn resume_available(&self) -> bool {
+        self.resume_handle.is_some()
+    }
+}
+
+/// Reopens `thread_id` from its log, falling back to the stored compatibility
+/// snapshot when the log is absent or unreadable.
+///
+/// This is read-only: it never saves, migrates, repairs, or deletes the store.
+pub fn recover_thread(thread_id: &str, path: &Path) -> RecoveredThread {
+    let snapshot = stored_thread_snapshot(thread_id);
+    recover_thread_with_snapshot(thread_id, path, snapshot.as_ref())
+}
+
+/// Reopens a thread over an explicit compatibility snapshot.
+///
+/// The application uses [`recover_thread`]; tests use this form to supply the
+/// snapshot without touching application state.
+pub fn recover_thread_with_snapshot(
+    thread_id: &str,
+    path: &Path,
+    snapshot: Option<&Value>,
+) -> RecoveredThread {
+    let base = snapshot.cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    match ThreadEventLog::load(thread_id, path) {
+        Ok(log) => {
+            let thread = log.fold(&base);
+            let resume_handle = provider_handle(&thread);
+            RecoveredThread {
+                thread_id: thread_id.to_string(),
+                thread,
+                source: if log.entries().is_empty() {
+                    RecoverySource::Snapshot
+                } else {
+                    RecoverySource::Log
+                },
+                events: log.entries().to_vec(),
+                resume_handle,
+                diagnostic: None,
+            }
+        }
+        Err(error) => RecoveredThread {
+            thread_id: thread_id.to_string(),
+            thread: base,
+            events: Vec::new(),
+            source: RecoverySource::Snapshot,
+            resume_handle: snapshot.and_then(provider_handle),
+            diagnostic: Some(error.to_string()),
+        },
+    }
+}
+
+fn stored_thread_snapshot(thread_id: &str) -> Option<Value> {
+    crate::persist::threads()
+        .lock()
+        .ok()?
+        .iter()
+        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+        .cloned()
+}
+
+/// Reads the provider-issued handle the existing thread already stores. It
+/// never derives a handle from a thread id, driver, or process.
+fn provider_handle(thread: &Value) -> Option<String> {
+    thread
+        .get("providerSessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|handle| !handle.is_empty())
+        .map(str::to_string)
+}
+
 fn validate_payload(kind: ThreadEventKind, payload: &Value) -> Result<(), String> {
     let object = payload
         .as_object()
@@ -1544,5 +1655,125 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn recovery_is_idempotent_across_two_loads() {
+        let dir = TempDir::new("recovery-idempotent");
+        let path = dir.join("thread.json");
+        populated_log().save_to(&path).unwrap();
+        let snapshot = thread_fixture();
+
+        let first = recover_thread_with_snapshot("thread-1", &path, Some(&snapshot));
+        let second = recover_thread_with_snapshot("thread-1", &path, Some(&snapshot));
+
+        assert_eq!(first, second);
+        assert_eq!(first.source, RecoverySource::Log);
+        assert_eq!(first.events.len(), 8);
+        assert_eq!(first.thread["title"], "Renamed");
+        assert_eq!(first.thread["status"], "running");
+        assert_eq!(first.thread["items"][0]["text"], "do the thing");
+        assert!(first.diagnostic.is_none());
+    }
+
+    #[test]
+    fn a_corrupted_log_falls_back_to_the_snapshot_and_is_left_alone() {
+        let dir = TempDir::new("recovery-corrupt");
+        let path = dir.join("thread.json");
+        let garbage = b"{ not json".to_vec();
+        fs::write(&path, &garbage).unwrap();
+        let snapshot = thread_fixture();
+
+        let recovered = recover_thread_with_snapshot("thread-1", &path, Some(&snapshot));
+
+        assert_eq!(recovered.source, RecoverySource::Snapshot);
+        assert_eq!(recovered.thread, snapshot);
+        assert!(recovered.events.is_empty());
+        assert!(recovered.diagnostic.is_some());
+        assert_eq!(fs::read(&path).unwrap(), garbage);
+    }
+
+    #[test]
+    fn a_missing_log_falls_back_to_the_snapshot_without_creating_a_file() {
+        let dir = TempDir::new("recovery-missing");
+        let path = dir.join("thread.json");
+        let snapshot = thread_fixture();
+
+        let recovered = recover_thread_with_snapshot("thread-1", &path, Some(&snapshot));
+
+        assert_eq!(recovered.thread, snapshot);
+        assert_eq!(recovered.source, RecoverySource::Snapshot);
+        assert!(recovered.events.is_empty());
+        assert!(recovered.diagnostic.is_none());
+        assert!(!path.exists(), "recovery is read-only");
+    }
+
+    #[test]
+    fn the_fold_and_the_compatibility_snapshot_agree() {
+        let snapshot = thread_fixture();
+        let log = populated_log();
+        let projection = log.compatibility_projection();
+
+        assert_eq!(log.fold(&snapshot), projection);
+
+        let dir = TempDir::new("recovery-agree");
+        let path = dir.join("thread.json");
+        log.save_to(&path).unwrap();
+
+        let recovered = recover_thread_with_snapshot("thread-1", &path, Some(&snapshot));
+
+        assert_eq!(recovered.thread, log.fold(&snapshot));
+        assert_eq!(recovered.thread, projection);
+        assert_eq!(recovered.thread["title"], "Renamed");
+        assert_eq!(recovered.thread["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_public_recovery_reads_a_self_contained_log_without_writing() {
+        let dir = TempDir::new("recovery-public");
+        let path = dir.join("thread.json");
+        let log = populated_log();
+        log.save_to(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let recovered = recover_thread("thread-1", &path);
+
+        assert_eq!(recovered.source, RecoverySource::Log);
+        assert_eq!(recovered.thread, log.compatibility_projection());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn recovery_reports_only_a_stored_provider_handle() {
+        let dir = TempDir::new("recovery-handle");
+        let path = dir.join("thread.json");
+        let mut log = ThreadEventLog::from_thread(&thread_fixture()).unwrap();
+        log.append(
+            ThreadEventKind::Field,
+            json!({ "name": "providerSessionId", "value": "provider-session-9" }),
+        )
+        .unwrap();
+        log.save_to(&path).unwrap();
+
+        let recovered = recover_thread_with_snapshot("thread-1", &path, Some(&thread_fixture()));
+        assert!(recovered.resume_available());
+        assert_eq!(recovered.resume_handle.as_deref(), Some("provider-session-9"));
+
+        let blank = recover_thread_with_snapshot("thread-1", &path, None);
+        assert!(blank.resume_available());
+
+        let mut blank_log = ThreadEventLog::from_thread(&thread_fixture()).unwrap();
+        blank_log
+            .append(
+                ThreadEventKind::Field,
+                json!({ "name": "providerSessionId", "value": "   " }),
+            )
+            .unwrap();
+        let blank_path = dir.join("blank.json");
+        blank_log.save_to(&blank_path).unwrap();
+
+        let empty = recover_thread_with_snapshot("thread-1", &blank_path, Some(&thread_fixture()));
+        assert!(!empty.resume_available());
+        assert_eq!(empty.resume_handle, None);
     }
 }

@@ -1,8 +1,9 @@
 use crate::chat::{
     apply_launch_choices, archived_at_ms, cancel_turn, configure_thread, create_thread, history, live_turns,
-    load_thread, parse_attachments, provider_models, provider_ok, read_turn_updates, release_staged_attachment,
-    remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned, stage_blob_attachment,
-    stage_dropped_path, stage_dropped_paths, start_turn_with_binding, touch, SendBinding,
+    load_thread, parse_attachments, provider_models, provider_ok, read_turn_updates, recover_thread,
+    release_staged_attachment, remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned,
+    stage_blob_attachment, stage_dropped_path, stage_dropped_paths, start_turn_with_binding, touch,
+    SendBinding, ThreadEventLog,
 };
 use crate::persist::{body, load_grid, persist, save_grid, threads};
 use serde_json::{json, Value};
@@ -117,6 +118,41 @@ pub fn load_agent_chat_thread(request: Option<Value>) -> Value {
     let agent_id = req.and_then(|r| r.get("agentId")).and_then(|v| v.as_str()).unwrap_or("c3333333-3333-4333-8333-333333333333");
     let thread_id = req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()).unwrap_or("11111111-1111-4111-8111-111111111111");
     load_thread(thread_id, Some(agent_id), "Agent Chat Thread")
+}
+
+/// Reopens a thread from its durable event log without starting a provider.
+///
+/// The recovered thread falls back to the stored compatibility snapshot when
+/// the log is absent or unreadable. The response separates "a provider handle
+/// exists" from "the renderer may resume": a session is offered only when the
+/// recovered thread carries a provider-issued handle.
+#[tauri::command]
+pub fn recover_chat_thread(request: Option<Value>) -> Value {
+    let Some(thread_id) = request_thread_id(&request) else {
+        return json!({
+            "threadId": Value::Null,
+            "thread": Value::Null,
+            "events": [],
+            "source": "snapshot",
+            "resumeAvailable": false,
+            "resumeHandle": Value::Null,
+            "diagnostic": "a thread id is required",
+            "readOnly": true
+        });
+    };
+    let path = ThreadEventLog::default_path(&thread_id);
+    let recovered = recover_thread(&thread_id, &path);
+    let resume_available = recovered.resume_available();
+    json!({
+        "threadId": recovered.thread_id,
+        "thread": recovered.thread,
+        "events": recovered.events,
+        "source": recovered.source.as_str(),
+        "resumeAvailable": resume_available,
+        "resumeHandle": recovered.resume_handle,
+        "diagnostic": recovered.diagnostic,
+        "readOnly": true
+    })
 }
 
 #[tauri::command]

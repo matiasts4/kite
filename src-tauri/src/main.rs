@@ -399,6 +399,7 @@ fn main() {
             read_workspace_changes,
             read_workspace_file_diff,
             reconnect_ssh_workspace,
+            recover_chat_thread,
             release_chat_attachment,
             remove_agent_skill,
             remove_workspace_from_list,

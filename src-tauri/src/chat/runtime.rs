@@ -229,7 +229,13 @@ where
 pub fn starts_new_session(state: Option<SessionState>) -> bool {
     !matches!(
         state,
-        Some(SessionState::Running | SessionState::Waiting | SessionState::Completed)
+        Some(
+            SessionState::Running
+                | SessionState::Waiting
+                | SessionState::Completed
+                | SessionState::Idle
+                | SessionState::Resurrecting
+        )
     )
 }
 
@@ -269,9 +275,29 @@ pub fn one_shot_notice(provider: &str, persistent_enabled: bool) -> Option<Strin
     Some(bounded_notice(&notice))
 }
 
-fn session_manager() -> &'static Mutex<SessionManager> {
+pub fn session_manager() -> &'static Mutex<SessionManager> {
     static CELL: std::sync::OnceLock<Mutex<SessionManager>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| Mutex::new(SessionManager::new()))
+}
+
+pub fn sync_thread_provider_session_id(thread_id: &str, handle: Option<&str>) {
+    let Some(handle) = handle.filter(|h| !h.trim().is_empty()) else {
+        return;
+    };
+    let mut updated = false;
+    {
+        let mut items = threads().lock().unwrap();
+        if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
+            if thread.get("providerSessionId").and_then(|v| v.as_str()) != Some(handle) {
+                thread["providerSessionId"] = json!(handle);
+                touch(thread);
+                updated = true;
+            }
+        }
+    }
+    if updated {
+        persist();
+    }
 }
 
 /// The lasting wire a send may open. The kind is evidence about this build's
@@ -377,10 +403,15 @@ fn emit_notice_item(thread_id: &str, run_id: &str, message: &str) {
 fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: String) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(40));
-        let events = {
+        let (events, handle) = {
             let mut manager = session_manager().lock().unwrap();
-            manager.poll(&thread_id).unwrap_or_default()
+            let events = manager.poll(&thread_id).unwrap_or_default();
+            let handle = manager.status(&thread_id).and_then(|r| r.resume_handle.clone());
+            (events, handle)
         };
+        if let Some(h) = handle.as_deref() {
+            sync_thread_provider_session_id(&thread_id, Some(h));
+        }
         let mut outcome: Option<(bool, String)> = None;
         for event in events {
             match event.kind.as_str() {
@@ -426,6 +457,13 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
             }
         }
         if let Some((ok, error)) = outcome {
+            let handle = {
+                let manager = session_manager().lock().unwrap();
+                manager.status(&thread_id).and_then(|r| r.resume_handle.clone())
+            };
+            if let Some(h) = handle.as_deref() {
+                sync_thread_provider_session_id(&thread_id, Some(h));
+            }
             finish_run(&run_id, ok, false, &error);
             return;
         }
@@ -437,6 +475,13 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
             .map(|run| run.finished || run.closing)
             .unwrap_or(true);
         if finished {
+            let handle = {
+                let manager = session_manager().lock().unwrap();
+                manager.status(&thread_id).and_then(|r| r.resume_handle.clone())
+            };
+            if let Some(h) = handle.as_deref() {
+                sync_thread_provider_session_id(&thread_id, Some(h));
+            }
             return;
         }
     });
@@ -765,7 +810,14 @@ pub fn launch_provider(
         // Snapshot once. The same value is written before the process starts
         // and stored on the session, so a later agent edit cannot reach it.
         let recipe = profile_id.as_deref().and_then(snapshot_for_agent);
-        let effective_prompt = if provider_session_id.is_some() {
+        let is_session_warm_or_has_handle = {
+            let manager = session_manager().lock().unwrap();
+            manager
+                .status(&thread_id)
+                .map(|r| r.is_warm() || r.resume_handle.is_some())
+                .unwrap_or(false)
+        };
+        let effective_prompt = if provider_session_id.is_some() || is_session_warm_or_has_handle {
             prompt.clone()
         } else {
             assemble_thread_context(&thread_clone, &prompt)
@@ -792,6 +844,7 @@ pub fn launch_provider(
                             working_directory: Some(cwd.to_string_lossy().to_string()),
                             mode: SessionMode::OneShot,
                             recipe: recipe.clone(),
+                            resume_handle: provider_session_id.clone(),
                         }
                         .with_declared_mode(&declared, persistent_enabled);
                         let first_session = {
@@ -2499,6 +2552,7 @@ mod tests {
             working_directory: None,
             mode: SessionMode::Persistent,
             recipe: None,
+            resume_handle: None,
         }
     }
 
@@ -2698,10 +2752,13 @@ mod tests {
         assert!(!starts_new_session(Some(SessionState::Running)));
         assert!(!starts_new_session(Some(SessionState::Waiting)));
         assert!(!starts_new_session(Some(SessionState::Completed)));
+        assert!(!starts_new_session(Some(SessionState::Idle)));
+        assert!(!starts_new_session(Some(SessionState::Resurrecting)));
         assert!(starts_new_session(Some(SessionState::Closed)));
         assert!(starts_new_session(Some(SessionState::Failed)));
         assert!(starts_new_session(Some(SessionState::Interrupted)));
         assert!(starts_new_session(Some(SessionState::Resumable)));
+        assert!(starts_new_session(Some(SessionState::Reaped)));
     }
 
     #[test]
@@ -2853,5 +2910,52 @@ mod tests {
             manager.status("thread-1").map(|record| record.state),
             Some(SessionState::Running)
         );
+    }
+
+    #[test]
+    fn sync_thread_provider_session_id_updates_thread_record() {
+        let thread_id = "test-sync-provider-session-thread";
+        {
+            let mut items = threads().lock().unwrap();
+            items.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(thread_id));
+            items.push(json!({
+                "id": thread_id,
+                "title": "Test Sync",
+                "provider": "antigravity",
+                "providerSessionId": Value::Null,
+                "items": [],
+            }));
+        }
+
+        sync_thread_provider_session_id(thread_id, Some("provider-session-xyz"));
+
+        {
+            let items = threads().lock().unwrap();
+            let thread = items
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                .expect("thread found");
+            assert_eq!(
+                thread.get("providerSessionId").and_then(|v| v.as_str()),
+                Some("provider-session-xyz")
+            );
+        }
+
+        sync_thread_provider_session_id(thread_id, None);
+        sync_thread_provider_session_id(thread_id, Some("   "));
+        {
+            let items = threads().lock().unwrap();
+            let thread = items
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                .expect("thread found");
+            assert_eq!(
+                thread.get("providerSessionId").and_then(|v| v.as_str()),
+                Some("provider-session-xyz")
+            );
+        }
+
+        let mut items = threads().lock().unwrap();
+        items.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(thread_id));
     }
 }

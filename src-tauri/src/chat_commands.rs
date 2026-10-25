@@ -462,6 +462,64 @@ pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
     active
 }
 
+#[tauri::command]
+pub fn get_chat_session_status(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = match req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim(),
+        _ => return json!({ "error": "threadId is required" }),
+    };
+
+    let session_status = crate::chat::runtime::session_manager()
+        .lock()
+        .unwrap()
+        .status(thread_id);
+
+    if let Some(record) = session_status {
+        json!({
+            "threadId": thread_id,
+            "state": record.state.as_str(),
+            "mode": record.mode.as_str(),
+            "isWarm": record.is_warm(),
+            "isIdle": record.is_idle(),
+            "hasResumeHandle": record.resume_handle.is_some(),
+            "resumeHandle": record.resume_handle,
+            "lastActiveAtMs": record.last_active_at_ms,
+        })
+    } else {
+        let provider_session_id = {
+            let list = threads().lock().unwrap();
+            list.iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                .and_then(|t| t.get("providerSessionId").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        };
+
+        if let Some(handle) = provider_session_id {
+            json!({
+                "threadId": thread_id,
+                "state": "reaped",
+                "mode": "chat",
+                "isWarm": false,
+                "isIdle": false,
+                "hasResumeHandle": true,
+                "resumeHandle": handle,
+                "lastActiveAtMs": 0,
+            })
+        } else {
+            json!({
+                "threadId": thread_id,
+                "state": "closed",
+                "mode": "chat",
+                "isWarm": false,
+                "isIdle": false,
+                "hasResumeHandle": false,
+                "resumeHandle": Value::Null,
+                "lastActiveAtMs": 0,
+            })
+        }
+    }
+}
+
 fn handle_plan_action(thread_id: &str, plan_action: Option<&Value>) {
     let Some(action) = plan_action else { return };
     let kind = action.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -898,6 +956,17 @@ mod tests {
             resolve_initial_provider(Some("not-a-provider"), None),
             "antigravity"
         );
+    }
+
+    #[test]
+    fn test_get_chat_session_status_command() {
+        let missing = get_chat_session_status(None);
+        assert!(missing.get("error").is_some());
+
+        let unknown = get_chat_session_status(Some(json!({ "threadId": "non-existent-thread-xyz" })));
+        assert_eq!(unknown["state"], "closed");
+        assert_eq!(unknown["isWarm"], false);
+        assert_eq!(unknown["hasResumeHandle"], false);
     }
 }
 

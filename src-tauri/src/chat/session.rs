@@ -33,9 +33,20 @@ impl SessionMode {
     pub fn accepts_another_turn(self) -> bool {
         !matches!(self, SessionMode::OneShot)
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionMode::Persistent => "persistent",
+            SessionMode::Resumable => "resumable",
+            SessionMode::OneShot => "one_shot",
+        }
+    }
 }
 
 /// Lifecycle state of one session. A thread is readable in every state.
+pub const DEFAULT_MAX_WARM_SESSIONS: usize = 3;
+pub const DEFAULT_IDLE_TIMEOUT_MS: i64 = 30 * 60 * 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     /// The binding exists; no process has been started for it yet.
@@ -44,13 +55,38 @@ pub enum SessionState {
     Running,
     /// Waiting for the user to answer an approval request.
     Waiting,
+    /// Warm process idle and waiting for the next turn.
+    Idle,
     Completed,
     Interrupted,
     Failed,
     /// A provider handle exists and the next turn may continue it.
     Resumable,
+    /// Process terminated by eviction reaper; resume handle retained.
+    Reaped,
+    /// Resurrecting from reaped state using provider resume handle.
+    Resurrecting,
     /// No live session. The next turn starts a new one.
     Closed,
+}
+
+impl SessionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionState::Prepared => "prepared",
+            SessionState::Starting => "starting",
+            SessionState::Running => "running",
+            SessionState::Waiting => "waiting",
+            SessionState::Idle => "idle",
+            SessionState::Completed => "completed",
+            SessionState::Interrupted => "interrupted",
+            SessionState::Failed => "failed",
+            SessionState::Resumable => "resumable",
+            SessionState::Reaped => "reaped",
+            SessionState::Resurrecting => "resurrecting",
+            SessionState::Closed => "closed",
+        }
+    }
 }
 
 /// The recipe an agent thread starts with. It is copied before the process
@@ -76,6 +112,7 @@ pub struct SessionSpec {
     /// Present only for an agent thread. A loose chat starts from the CLI's
     /// own account and configuration.
     pub recipe: Option<RecipeSnapshot>,
+    pub resume_handle: Option<String>,
 }
 
 impl SessionSpec {
@@ -88,6 +125,11 @@ impl SessionSpec {
         persistent_enabled: bool,
     ) -> Self {
         self.mode = declared_session_mode(declaration, persistent_enabled);
+        self
+    }
+
+    pub fn with_resume_handle(mut self, resume_handle: Option<String>) -> Self {
+        self.resume_handle = resume_handle;
         self
     }
 }
@@ -123,6 +165,7 @@ pub struct SessionRecord {
     /// Only ever set from a value the provider returned.
     pub resume_handle: Option<String>,
     pub started_at_ms: i64,
+    pub last_active_at_ms: i64,
     pub next_sequence: u64,
     pub pending_approvals: Vec<String>,
 }
@@ -131,6 +174,17 @@ impl SessionRecord {
     /// A provider handle is the only thing that makes a session continuable.
     pub fn can_resume(&self) -> bool {
         self.accepts_another_turn() && self.resume_handle.is_some()
+    }
+
+    pub fn is_warm(&self) -> bool {
+        matches!(
+            self.state,
+            SessionState::Running | SessionState::Waiting | SessionState::Idle
+        )
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.state == SessionState::Idle
     }
 
     fn accepts_another_turn(&self) -> bool {
@@ -266,6 +320,7 @@ pub trait SessionTransport: fmt::Debug + Send {
 #[derive(Debug, Default)]
 struct ScriptedState {
     spawns: u32,
+    stops: u32,
     specs: Vec<TransportSpec>,
     turns: Vec<String>,
     pending: Vec<TransportEvent>,
@@ -311,6 +366,10 @@ impl ScriptedTransport {
         self.state.lock().unwrap().spawns
     }
 
+    pub fn stop_count(&self) -> u32 {
+        self.state.lock().unwrap().stops
+    }
+
     pub fn spawned_specs(&self) -> Vec<TransportSpec> {
         self.state.lock().unwrap().specs.clone()
     }
@@ -345,6 +404,7 @@ impl SessionTransport for ScriptedTransport {
     }
 
     fn stop(&mut self) -> Result<(), String> {
+        self.state.lock().unwrap().stops += 1;
         Ok(())
     }
 
@@ -413,6 +473,12 @@ impl SessionManager {
             .map(|existing| existing.record.generation + 1)
             .unwrap_or(1);
         let session_id = format!("{}:{}", spec.thread_id, generation);
+        let initial_state = if spec.resume_handle.is_some() && spec.mode == SessionMode::Persistent {
+            SessionState::Reaped
+        } else {
+            SessionState::Prepared
+        };
+        let now = now_ms();
         let record = SessionRecord {
             thread_id: spec.thread_id.clone(),
             session_id,
@@ -421,10 +487,11 @@ impl SessionManager {
             connection_id: spec.connection_id,
             working_directory: spec.working_directory,
             mode: spec.mode,
-            state: SessionState::Prepared,
+            state: initial_state,
             recipe: spec.recipe,
-            resume_handle: None,
-            started_at_ms: now_ms(),
+            resume_handle: spec.resume_handle,
+            started_at_ms: now,
+            last_active_at_ms: now,
             next_sequence: 0,
             pending_approvals: Vec::new(),
         };
@@ -441,18 +508,49 @@ impl SessionManager {
 
     /// Starts the bound process, once. A second start is a no-op.
     pub fn start(&mut self, thread_id: &str) -> Result<u64, SessionError> {
+        let is_persistent_and_needs_spawn = self
+            .sessions
+            .get(thread_id)
+            .map(|s| {
+                s.record.mode == SessionMode::Persistent
+                    && !matches!(
+                        s.record.state,
+                        SessionState::Running | SessionState::Waiting | SessionState::Idle
+                    )
+            })
+            .unwrap_or(false);
+        if is_persistent_and_needs_spawn {
+            self.enforce_lru_capacity(DEFAULT_MAX_WARM_SESSIONS.saturating_sub(1));
+        }
+
         let session = self
             .sessions
             .get_mut(thread_id)
             .ok_or_else(|| SessionError::NotAttached(thread_id.to_string()))?;
         if matches!(
             session.record.state,
-            SessionState::Running | SessionState::Waiting
+            SessionState::Running | SessionState::Waiting | SessionState::Idle
         ) {
             return Ok(session.record.generation);
         }
+        if session.record.state == SessionState::Reaped {
+            session.record.state = SessionState::Resurrecting;
+            let handle = session.record.resume_handle.clone();
+            let generation = session.record.generation;
+            if let Err(err) = spawn_once(session, handle) {
+                if session.record.resume_handle.is_some() {
+                    session.record.resume_handle = None;
+                    spawn_once(session, None)?;
+                } else {
+                    return Err(err);
+                }
+            }
+            session.record.last_active_at_ms = now_ms();
+            return Ok(generation);
+        }
         let generation = session.record.generation;
         spawn_once(session, None)?;
+        session.record.last_active_at_ms = now_ms();
         Ok(generation)
     }
 
@@ -475,6 +573,21 @@ impl SessionManager {
             return Ok(receipt);
         }
 
+        let is_persistent_and_needs_spawn = self
+            .sessions
+            .get(thread_id)
+            .map(|s| {
+                s.record.mode == SessionMode::Persistent
+                    && !matches!(
+                        s.record.state,
+                        SessionState::Running | SessionState::Waiting | SessionState::Idle
+                    )
+            })
+            .unwrap_or(false);
+        if is_persistent_and_needs_spawn {
+            self.enforce_lru_capacity(DEFAULT_MAX_WARM_SESSIONS.saturating_sub(1));
+        }
+
         let session = self
             .sessions
             .get_mut(thread_id)
@@ -494,13 +607,22 @@ impl SessionManager {
             session.record.state,
             SessionState::Running | SessionState::Waiting
         ) {
-            // A persistent process that already answered a turn still serves
-            // the session: the next message is written onto it.
-            let process_serves_the_thread = session.record.mode == SessionMode::Persistent
-                && session.record.state == SessionState::Completed
-                && session.transport.spawn_count() > 0;
-            if !process_serves_the_thread {
-                spawn_once(session, None)?;
+            if session.record.state == SessionState::Reaped {
+                session.record.state = SessionState::Resurrecting;
+                let handle = session.record.resume_handle.clone();
+                if let Err(_) = spawn_once(session, handle) {
+                    session.record.resume_handle = None;
+                    spawn_once(session, None)?;
+                }
+            } else {
+                // A persistent process that already answered a turn still serves
+                // the session: the next message is written onto it.
+                let process_serves_the_thread = session.record.mode == SessionMode::Persistent
+                    && matches!(session.record.state, SessionState::Completed | SessionState::Idle)
+                    && session.transport.spawn_count() > 0;
+                if !process_serves_the_thread {
+                    spawn_once(session, None)?;
+                }
             }
         }
         session
@@ -508,6 +630,7 @@ impl SessionManager {
             .write_turn(prompt)
             .map_err(SessionError::Transport)?;
         session.record.state = SessionState::Running;
+        session.record.last_active_at_ms = now_ms();
         push_event(session, "turnAccepted", json!({ "commandId": command_id }));
 
         let receipt = SendReceipt {
@@ -614,15 +737,35 @@ impl SessionManager {
                 }
                 TransportEvent::TurnEnded => {
                     if session.record.pending_approvals.is_empty() {
-                        session.record.state = SessionState::Completed;
+                        session.record.state = if session.record.mode == SessionMode::Persistent {
+                            SessionState::Idle
+                        } else {
+                            SessionState::Completed
+                        };
+                    }
+                    session.record.last_active_at_ms = now_ms();
+                    if let Some(handle) = session.transport.resume_handle() {
+                        if !handle.trim().is_empty() {
+                            session.record.resume_handle = Some(handle);
+                        }
                     }
                     push_event(session, "turnCompleted", json!({}));
                 }
                 TransportEvent::TurnFailed(reason) => {
                     // The process still serves the session, so the state is
-                    // completed rather than failed: only this turn failed.
+                    // completed/idle rather than failed: only this turn failed.
                     settle_approvals(session, "turnFailed");
-                    session.record.state = SessionState::Completed;
+                    session.record.state = if session.record.mode == SessionMode::Persistent {
+                        SessionState::Idle
+                    } else {
+                        SessionState::Completed
+                    };
+                    session.record.last_active_at_ms = now_ms();
+                    if let Some(handle) = session.transport.resume_handle() {
+                        if !handle.trim().is_empty() {
+                            session.record.resume_handle = Some(handle);
+                        }
+                    }
                     push_event(session, "turnFailed", json!({ "reason": reason }));
                 }
                 TransportEvent::Exit { code, error } => {
@@ -702,6 +845,98 @@ impl SessionManager {
             .filter(|session| session.record.state != SessionState::Closed)
             .count()
     }
+
+    pub fn reap_session(&mut self, thread_id: &str) -> Result<Option<String>, SessionError> {
+        let session = self
+            .sessions
+            .get_mut(thread_id)
+            .ok_or_else(|| SessionError::NotAttached(thread_id.to_string()))?;
+        if let Some(handle) = session.transport.resume_handle() {
+            if !handle.trim().is_empty() {
+                session.record.resume_handle = Some(handle);
+            }
+        }
+        session.transport.stop().map_err(SessionError::Transport)?;
+        settle_approvals(session, "reaped");
+        session.record.state = SessionState::Reaped;
+        let handle = session.record.resume_handle.clone();
+        push_event(session, "reaped", json!({ "resumeHandle": handle }));
+        Ok(handle)
+    }
+
+    pub fn reap_idle_sessions(&mut self, idle_timeout_ms: i64) -> Vec<String> {
+        let now = now_ms();
+        let to_reap: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.record.mode == SessionMode::Persistent
+                    && session.record.is_idle()
+                    && (now - session.record.last_active_at_ms) >= idle_timeout_ms
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut reaped = Vec::new();
+        for thread_id in to_reap {
+            if self.reap_session(&thread_id).is_ok() {
+                reaped.push(thread_id);
+            }
+        }
+        reaped
+    }
+
+    pub fn warm_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.record.is_warm())
+            .count()
+    }
+
+    pub fn enforce_lru_capacity(&mut self, max_warm: usize) -> Vec<String> {
+        if self.warm_count() <= max_warm {
+            return Vec::new();
+        }
+        let mut idle_sessions: Vec<(String, i64)> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.record.mode == SessionMode::Persistent && session.record.is_idle()
+            })
+            .map(|(id, session)| (id.clone(), session.record.last_active_at_ms))
+            .collect();
+
+        // Oldest first (smallest timestamp)
+        idle_sessions.sort_by_key(|(_, ts)| *ts);
+
+        let mut reaped = Vec::new();
+        for (thread_id, _) in idle_sessions {
+            if self.warm_count() <= max_warm {
+                break;
+            }
+            if self.reap_session(&thread_id).is_ok() {
+                reaped.push(thread_id);
+            }
+        }
+        reaped
+    }
+
+    pub fn stop_all(&mut self) -> Vec<String> {
+        let thread_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.record.state != SessionState::Closed)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut stopped = Vec::new();
+        for thread_id in thread_ids {
+            if self.stop(&thread_id).is_ok() {
+                stopped.push(thread_id);
+            }
+        }
+        stopped
+    }
 }
 
 fn spawn_once(session: &mut ManagedSession, resume_handle: Option<String>) -> Result<(), SessionError> {
@@ -777,10 +1012,13 @@ fn state_name(state: SessionState) -> &'static str {
         SessionState::Starting => "starting",
         SessionState::Running => "running",
         SessionState::Waiting => "waiting",
+        SessionState::Idle => "idle",
         SessionState::Completed => "completed",
         SessionState::Interrupted => "interrupted",
         SessionState::Failed => "failed",
         SessionState::Resumable => "resumable",
+        SessionState::Reaped => "reaped",
+        SessionState::Resurrecting => "resurrecting",
         SessionState::Closed => "closed",
     }
 }
@@ -809,6 +1047,7 @@ mod tests {
             working_directory: Some("E:/kite".to_string()),
             mode,
             recipe,
+            resume_handle: None,
         }
     }
 
@@ -1060,7 +1299,7 @@ mod tests {
 
         assert_eq!(
             manager.status("thread-1").unwrap().state,
-            SessionState::Completed
+            SessionState::Idle
         );
 
         manager.send_turn("thread-1", "command-2", "second").unwrap();
@@ -1086,7 +1325,7 @@ mod tests {
         manager.poll("thread-1").unwrap();
 
         let record = manager.status("thread-1").unwrap();
-        assert_eq!(record.state, SessionState::Completed);
+        assert_eq!(record.state, SessionState::Idle);
         assert!(manager
             .events_since("thread-1", 0)
             .iter()
@@ -1121,5 +1360,114 @@ mod tests {
             SessionState::Running
         );
         assert!(transport.written_turns().is_empty());
+    }
+
+    #[test]
+    fn reaping_idle_session_stops_transport_and_preserves_resume_handle() {
+        let mut manager = SessionManager::new();
+        let transport = attach(
+            &mut manager,
+            spec("thread-1", SessionMode::Persistent, None),
+            ScriptedTransport::new().with_resume_handle("handle-1"),
+        );
+        manager.start("thread-1").unwrap();
+        manager.send_turn("thread-1", "cmd-1", "hello").unwrap();
+        transport.script(TransportEvent::TurnEnded);
+        manager.poll("thread-1").unwrap();
+
+        assert_eq!(manager.status("thread-1").unwrap().state, SessionState::Idle);
+        assert_eq!(manager.warm_count(), 1);
+
+        let handle = manager.reap_session("thread-1").unwrap();
+        assert_eq!(handle.as_deref(), Some("handle-1"));
+        assert_eq!(manager.status("thread-1").unwrap().state, SessionState::Reaped);
+        assert_eq!(manager.warm_count(), 0);
+        assert_eq!(transport.stop_count(), 1);
+
+        // Resurrecting from reaped with send_turn
+        manager.send_turn("thread-1", "cmd-2", "world").unwrap();
+        assert_eq!(manager.status("thread-1").unwrap().state, SessionState::Running);
+        assert_eq!(manager.warm_count(), 1);
+        let specs = transport.spawned_specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].resume_handle.as_deref(), Some("handle-1"));
+    }
+
+    #[test]
+    fn reap_idle_sessions_respects_idle_timeout() {
+        let mut manager = SessionManager::new();
+        let transport1 = attach(&mut manager, spec("t1", SessionMode::Persistent, None), ScriptedTransport::new());
+        let transport2 = attach(&mut manager, spec("t2", SessionMode::Persistent, None), ScriptedTransport::new());
+
+        manager.start("t1").unwrap();
+        manager.start("t2").unwrap();
+
+        transport1.script(TransportEvent::TurnEnded);
+        transport2.script(TransportEvent::TurnEnded);
+        manager.poll("t1").unwrap();
+        manager.poll("t2").unwrap();
+
+        // Mutate t1's last_active_at_ms to be older than timeout
+        if let Some(session) = manager.sessions.get_mut("t1") {
+            session.record.last_active_at_ms = now_ms() - 100_000;
+        }
+
+        let reaped = manager.reap_idle_sessions(50_000);
+        assert_eq!(reaped, vec!["t1".to_string()]);
+        assert_eq!(manager.status("t1").unwrap().state, SessionState::Reaped);
+        assert_eq!(manager.status("t2").unwrap().state, SessionState::Idle);
+    }
+
+    #[test]
+    fn enforce_lru_capacity_reaps_oldest_idle_sessions() {
+        let mut manager = SessionManager::new();
+        let t1 = attach(&mut manager, spec("t1", SessionMode::Persistent, None), ScriptedTransport::new());
+        let t2 = attach(&mut manager, spec("t2", SessionMode::Persistent, None), ScriptedTransport::new());
+        let t3 = attach(&mut manager, spec("t3", SessionMode::Persistent, None), ScriptedTransport::new());
+
+        manager.start("t1").unwrap();
+        manager.start("t2").unwrap();
+        manager.start("t3").unwrap();
+
+        t1.script(TransportEvent::TurnEnded);
+        t2.script(TransportEvent::TurnEnded);
+        t3.script(TransportEvent::TurnEnded);
+        manager.poll("t1").unwrap();
+        manager.poll("t2").unwrap();
+        manager.poll("t3").unwrap();
+
+        if let Some(session) = manager.sessions.get_mut("t1") {
+            session.record.last_active_at_ms = 100;
+        }
+        if let Some(session) = manager.sessions.get_mut("t2") {
+            session.record.last_active_at_ms = 200;
+        }
+        if let Some(session) = manager.sessions.get_mut("t3") {
+            session.record.last_active_at_ms = 300;
+        }
+
+        assert_eq!(manager.warm_count(), 3);
+        // Enforce max capacity of 1 warm session: should reap t1 and t2 (oldest)
+        let reaped = manager.enforce_lru_capacity(1);
+        assert_eq!(reaped, vec!["t1".to_string(), "t2".to_string()]);
+        assert_eq!(manager.status("t1").unwrap().state, SessionState::Reaped);
+        assert_eq!(manager.status("t2").unwrap().state, SessionState::Reaped);
+        assert_eq!(manager.status("t3").unwrap().state, SessionState::Idle);
+        assert_eq!(manager.warm_count(), 1);
+    }
+
+    #[test]
+    fn stop_all_terminates_all_active_transports() {
+        let mut manager = SessionManager::new();
+        let t1 = attach(&mut manager, spec("t1", SessionMode::Persistent, None), ScriptedTransport::new());
+        let t2 = attach(&mut manager, spec("t2", SessionMode::Persistent, None), ScriptedTransport::new());
+
+        manager.start("t1").unwrap();
+        manager.start("t2").unwrap();
+
+        let stopped = manager.stop_all();
+        assert_eq!(stopped.len(), 2);
+        assert_eq!(t1.stop_count(), 1);
+        assert_eq!(t2.stop_count(), 1);
     }
 }

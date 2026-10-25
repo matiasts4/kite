@@ -443,7 +443,7 @@ impl SessionTransport for AntigravitySession {
         self.stdin = child.stdin.take();
         self.child = Some(child);
         self.events.lock().unwrap().clear();
-        *self.resume.lock().unwrap() = None;
+        *self.resume.lock().unwrap() = spec.resume_handle.clone();
         self.eof.store(false, Ordering::SeqCst);
         self.stopping = false;
         self.spawns += 1;
@@ -825,7 +825,7 @@ impl SessionTransport for OpenCodeServerSession {
         self.working_directory = working_directory;
         self.server = Some(child);
         self.port = Some(port);
-        self.session_key = Some(spec.session_id.clone());
+        self.session_key = spec.resume_handle.clone().or_else(|| Some(spec.session_id.clone()));
         self.events.lock().unwrap().clear();
 
         let eof = Arc::new(AtomicBool::new(false));
@@ -914,9 +914,7 @@ impl SessionTransport for OpenCodeServerSession {
     }
 
     fn resume_handle(&self) -> Option<String> {
-        // The session id is created through the documented create-if-absent
-        // flag, so it is not reported as a provider-issued resume handle.
-        None
+        self.session_key.clone()
     }
 
     fn drain(&mut self) -> Vec<TransportEvent> {
@@ -1092,6 +1090,32 @@ fn tail_detail(tail: &str) -> String {
     }
     let clipped: String = trimmed.chars().take(400).collect();
     format!(": {clipped}")
+}
+
+/// Spawns a background thread that periodically reaps idle sessions
+/// exceeding `DEFAULT_IDLE_TIMEOUT_MS`.
+pub fn start_idle_reaper() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::thread::Builder::new()
+            .name("chat-session-reaper".to_string())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                let mut manager = match crate::chat::runtime::session_manager().lock() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let reaped = manager.reap_idle_sessions(crate::chat::session::DEFAULT_IDLE_TIMEOUT_MS);
+                if !reaped.is_empty() {
+                    crate::chat::utils::chat_log(&format!(
+                        "reaped {} idle session(s): {:?}",
+                        reaped.len(),
+                        reaped
+                    ));
+                }
+            })
+            .expect("failed to spawn chat session reaper thread");
+    });
 }
 
 #[cfg(test)]

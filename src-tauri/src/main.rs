@@ -94,6 +94,9 @@ fn register_windows_shutdown_handler() {
     unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 2 || ctrl_type == 5 || ctrl_type == 6 {
             crate::terminal::snapshot_and_shutdown_all_terminals("windows_ctrl_shutdown");
+            if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                manager.stop_all();
+            }
         }
         0
     }
@@ -239,6 +242,7 @@ fn main() {
             if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
+            crate::chat::persistent::start_idle_reaper();
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
             for (label, w) in &windows {
@@ -254,6 +258,9 @@ fn main() {
                 ) {
                     crate::terminal::snapshot_and_shutdown_all_terminals("main_window_close");
                     crate::audio_ducking::restore_audio_immediate();
+                    if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                        manager.stop_all();
+                    }
                 }
             }
         })
@@ -332,6 +339,7 @@ fn main() {
             draft_agent_with_ai,
             ensure_files_resource,
             get_agent_availability,
+            get_chat_session_status,
             get_subscription_quotas,
             opencode_go_credential_status,
             save_opencode_api_key,
@@ -552,11 +560,17 @@ fn main() {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
                 crate::audio_ducking::restore_audio_immediate();
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit_requested");
+                if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                    manager.stop_all();
+                }
             }
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, ensuring all terminals are snapshotted");
                 crate::audio_ducking::restore_audio_immediate();
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit");
+                if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                    manager.stop_all();
+                }
             }
             tauri::RunEvent::MainEventsCleared => {
                 // Do NOT log MainEventsCleared. It triggers dozens of times per second,

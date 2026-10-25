@@ -1394,6 +1394,7 @@ mod tests {
             working_directory: None,
             mode: SessionMode::OneShot,
             recipe: None,
+            resume_handle: None,
         };
         manager.attach(spec, Box::new(transport.clone())).unwrap();
         manager.start("thread-1").unwrap();

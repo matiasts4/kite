@@ -116,6 +116,7 @@ mod tests {
             working_directory: Some("E:/kite".to_string()),
             mode,
             recipe,
+            resume_handle: None,
         }
     }
 
@@ -713,6 +714,7 @@ mod tests {
             recipe: None,
             resume_handle: Some("provider-handle-1".to_string()),
             started_at_ms: 0,
+            last_active_at_ms: 0,
             next_sequence: 0,
             pending_approvals: Vec::new(),
         };

@@ -7,6 +7,9 @@ import {
   type DetectedCliAccount,
 } from '../../../lib/ipc';
 import { BrandLogo } from '../../ui/BrandLogo';
+import { AccountSwitcherModal } from '../../quota/AccountSwitcherModal';
+import { MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
+import { CheckIcon, XIcon } from './icons';
 
 export interface AccountTabProps {
   accountName?: string;
@@ -37,6 +40,7 @@ export const AccountTab: React.FC<AccountTabProps> = ({
   const [googleNotice, setGoogleNotice] = useState<string | null>(null);
   const [detectedAccounts, setDetectedAccounts] = useState<DetectedCliAccount[]>([]);
   const [loadingDetected, setLoadingDetected] = useState(false);
+  const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
   const avatarLetter = (accountName || 'K').trim().charAt(0).toUpperCase();
 
   useEffect(() => {
@@ -189,15 +193,18 @@ export const AccountTab: React.FC<AccountTabProps> = ({
                       )}
                       {isAuth ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '1px 7px', borderRadius: '4px', fontSize: '11px', fontWeight: 500, background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
-                          ● Sesión activa
+                          <CheckIcon size={11} strokeWidth={2.5} />
+                          <span>Sesión activa</span>
                         </span>
                       ) : isInstalled ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '1px 7px', borderRadius: '4px', fontSize: '11px', fontWeight: 500, background: 'rgba(234, 179, 8, 0.15)', color: '#facc15', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
-                          ○ CLI instalada
+                          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#facc15', display: 'inline-block' }} />
+                          <span>CLI instalada</span>
                         </span>
                       ) : (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '1px 7px', borderRadius: '4px', fontSize: '11px', fontWeight: 500, background: 'rgba(148, 163, 184, 0.1)', color: 'var(--text-secondary)', border: '1px solid rgba(148, 163, 184, 0.2)' }}>
-                          ✕ No instalado
+                          <XIcon size={11} strokeWidth={2.5} />
+                          <span>No instalado</span>
                         </span>
                       )}
                     </div>
@@ -229,10 +236,22 @@ export const AccountTab: React.FC<AccountTabProps> = ({
                     >
                       {googleAccounts.map((email) => (
                         <option key={email} value={email}>
-                          {email} {email === googleActive ? '✓ (Activa)' : ''}
+                          {email} {email === googleActive ? '(Activa)' : ''}
                         </option>
                       ))}
                     </select>
+                  )}
+
+                  {MULTI_ACCOUNT_PROVIDERS.some((p) => p.id === acc.provider) && (
+                    <button
+                      className="secondary-button"
+                      onClick={() => setSwitcherProvider({ id: acc.provider, label: acc.displayName })}
+                      type="button"
+                      style={{ height: '28px', padding: '0 10px', fontSize: '12px' }}
+                      title={`Cambiar o gestionar cuentas guardadas de ${acc.displayName}`}
+                    >
+                      Cuentas…
+                    </button>
                   )}
 
                   <button
@@ -357,6 +376,17 @@ export const AccountTab: React.FC<AccountTabProps> = ({
             </div>
           </div>
         </div>
+      )}
+      {switcherProvider && (
+        <AccountSwitcherModal
+          provider={switcherProvider.id}
+          providerLabel={switcherProvider.label}
+          isOpen={!!switcherProvider}
+          onClose={() => setSwitcherProvider(null)}
+          onAccountSwitched={() => {
+            void loadDetectedAccounts();
+          }}
+        />
       )}
     </>
   );

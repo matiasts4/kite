@@ -33,6 +33,66 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.37',
+    tag: 'v0.1.37',
+    date: 'Oct 25, 2026',
+    title: 'Conmutación Asíncrona de Cuentas, Restauración de Sesiones y Estabilidad de Terminal',
+    items: [
+      {
+        kind: 'added',
+        description: 'Conmutador desplegable flotante de cuentas superpuesto en el popover de Cuotas',
+      },
+      {
+        kind: 'added',
+        description: 'Restauración automática de la conversación y sesión activa de AntiGravity al reiniciar o cambiar de cuenta',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminación del congelamiento de la interfaz durante el cambio de cuenta con ejecución asíncrona',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corrección de caracteres fantasma y artefactos en la terminal reseteando el estado ANSI al reconectar',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corrección del bloqueo de dimensiones de la terminal en 80 columnas sincronizando tamaño real de filas y columnas',
+      },
+      {
+        kind: 'changed',
+        description: 'Optimización del apagado y reinicio de agentes reduciendo latencia y timeouts',
+      },
+    ],
+  },
+  {
+    version: '0.1.36',
+    tag: 'v0.1.36',
+    date: 'Oct 25, 2026',
+    title: 'Consolidacion de Sistema de Diseno y Pestanas Dinamicas',
+    items: [
+      {
+        kind: 'added',
+        description: 'Sistema unificado de border-radius y tokens semánticos en visual-language y Tailwind',
+      },
+      {
+        kind: 'changed',
+        description: 'Estandarización de alturas y controles en paneles laterales a 32px y 28px',
+      },
+      {
+        kind: 'added',
+        description: 'Pestañas Prompts y Tasks configurables y cerrables a demanda en RightDock',
+      },
+      {
+        kind: 'fixed',
+        description: 'Rediseño visual del botón Commit en DiffsView alineado con el tema principal',
+      },
+      {
+        kind: 'changed',
+        description: 'Integración de directrices estrictas de diseño y arquitectura en AGENTS.md',
+      },
+    ],
+  },
+  {
     version: '0.1.35',
     tag: 'v0.1.35',
     date: 'Oct 25, 2026',

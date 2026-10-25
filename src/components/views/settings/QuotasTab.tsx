@@ -1,7 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './quotas-tab.css';
-import { AccountVault } from './AccountVault';
-import { BrandLogo } from '../agents/engineMetadata';
+import { AccountVault, MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
+import { BrandLogo } from '../../ui/BrandLogo';
+import { AddProviderModal } from '../../quota/AddProviderModal';
+import { AccountSwitcherModal } from '../../quota/AccountSwitcherModal';
+import { ProviderConnectionPanel } from '../../quota/ProviderConnectionPanel';
+import { ENGINE_METADATA } from '../agents/engineMetadata';
 import {
   ALL_SUPPORTED_PROVIDERS,
   PROVIDER_LABELS,
@@ -22,10 +26,22 @@ import { PROVIDER_CONFIGS_ES } from '../../quota/QuotaSettingsModal';
 import {
   clearOpenCodeApiKey,
   saveOpenCodeApiKey,
+  listDetectedCliAccounts,
   type ConnectionSummary,
+  type DetectedCliAccount,
+  type CredentialStatusItem,
 } from '../../../lib/ipc';
+import { getActiveAgentTerminals, type ActiveAgentTerminal } from '../../../lib/terminalRegistry';
+import {
+  detectAllProviderSessions,
+  getAutoEnableSuggestedProviders,
+} from '../../../lib/quota/sessionDetection';
+import {
+  fetchVaultCredentials,
+  getProviderConnectionMeta,
+} from '../../../lib/quota/connectionMethods';
 import { SETTINGS_PROVIDER_STORAGE_KEY } from '../../../lib/settingsNav';
-import { Sheet } from '../../ui/Sheet';
+import { StarIcon, ChevronDownIcon, ChevronUpIcon } from './icons';
 
 const DISPLAY_MODES: { id: QuotaPreferences['displayMode']; label: string }[] = [
   { id: 'percent_remaining', label: '% restante' },
@@ -34,6 +50,27 @@ const DISPLAY_MODES: { id: QuotaPreferences['displayMode']; label: string }[] = 
 ];
 
 const toneFor = (pct: number) => (pct >= 45 ? 'ok' : pct >= 20 ? 'warn' : 'low');
+
+function formatReset(ms?: number | null, resetAt?: string | null): string | null {
+  if (ms && ms > 0) {
+    const mins = Math.round(ms / 60000);
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `Reinicia en ${h} h ${m} min` : `Reinicia en ${m} min`;
+  }
+  if (resetAt) {
+    try {
+      const d = new Date(resetAt);
+      if (!isNaN(d.getTime())) {
+        return `Reinicia a las ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      }
+    } catch {
+      /* fallback */
+    }
+    return `Reinicia ${resetAt}`;
+  }
+  return null;
+}
 
 const Switch: React.FC<{ checked: boolean; label: string; onChange: () => void }> = ({
   checked,
@@ -55,20 +92,35 @@ const Switch: React.FC<{ checked: boolean; label: string; onChange: () => void }
 export const QuotasTab: React.FC = () => {
   const [prefs, setPrefs] = useState<QuotaPreferences>(() => readQuotaPreferences());
   const [quotas, setQuotas] = useState<Record<string, ProviderQuotaStatus>>({});
-  const [refreshing, setRefreshing] = useState(false);
-  const [expanded, setExpanded] = useState<string | null>(() => {
+  const [cliAccounts, setCliAccounts] = useState<DetectedCliAccount[]>([]);
+  const [activeTerminals, setActiveTerminals] = useState<ActiveAgentTerminal[]>(() => {
     try {
-      return localStorage.getItem(SETTINGS_PROVIDER_STORAGE_KEY);
+      return getActiveAgentTerminals();
     } catch {
-      return null;
+      return [];
     }
   });
-  const [copied, setCopied] = useState<string | null>(null);
+  const [expandedWindows, setExpandedWindows] = useState<Record<string, boolean>>({});
+  const [refreshing, setRefreshing] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [openCodeStatus, setOpenCodeStatus] = useState<string | null>(null);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
-  const [addSelection, setAddSelection] = useState<string[]>([]);
+  const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
   const [verifiedConnections, setVerifiedConnections] = useState<ConnectionSummary[]>([]);
+  const [vaultCredentials, setVaultCredentials] = useState<Record<string, CredentialStatusItem>>({});
+
+  const refreshCredentials = useCallback(async () => {
+    try {
+      const creds = await fetchVaultCredentials();
+      setVaultCredentials(creds);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCredentials();
+  }, [refreshCredentials]);
 
   useEffect(() => subscriptionQuotaManager.subscribe((data) => setQuotas(data)), []);
 
@@ -77,9 +129,24 @@ export const QuotasTab: React.FC = () => {
     void listQuotaConnections().then((connections) => {
       if (!cancelled) setVerifiedConnections(connections);
     });
+    void listDetectedCliAccounts().then((accounts) => {
+      if (!cancelled) setCliAccounts(accounts);
+    });
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const handleTerminalUpdate = () => {
+      try {
+        setActiveTerminals(getActiveAgentTerminals());
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener('kite:terminal-agent-update', handleTerminalUpdate);
+    return () => window.removeEventListener('kite:terminal-agent-update', handleTerminalUpdate);
   }, []);
 
   useEffect(() => {
@@ -91,8 +158,35 @@ export const QuotasTab: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    void subscriptionQuotaManager.fetchAll(false).catch(() => undefined);
+    // Prewarm all supported providers so quotas and models are populated across views
+    void subscriptionQuotaManager.fetchAll(false, ALL_SUPPORTED_PROVIDERS).catch(() => undefined);
   }, []);
+
+  const handleCredentialChanged = async () => {
+    await refreshCredentials();
+    void subscriptionQuotaManager.fetchAll(true);
+  };
+
+  const detectedSessions = useMemo(
+    () =>
+      detectAllProviderSessions(
+        cliAccounts,
+        activeTerminals,
+        quotas,
+        Object.values(vaultCredentials)
+      ),
+    [cliAccounts, activeTerminals, quotas, vaultCredentials]
+  );
+
+  // Auto-seed detected sessions if the user has never configured providers yet
+  useEffect(() => {
+    if (prefs.enabledProviders && prefs.enabledProviders.length > 0) return;
+    const suggested = getAutoEnableSuggestedProviders(detectedSessions);
+    if (suggested.length > 0) {
+      saveQuotaPreferences({ enabledProviders: suggested });
+      setSelectedProviderId((prev) => prev ?? suggested[0]);
+    }
+  }, [detectedSessions, prefs.enabledProviders]);
 
   const enabledIds = useMemo(() => resolveEnabledProviderIds(prefs), [prefs]);
 
@@ -109,6 +203,31 @@ export const QuotasTab: React.FC = () => {
     () => fullOrder.filter((id) => !enabledIdSet.has(id)),
     [fullOrder, enabledIdSet]
   );
+
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(() => {
+    try {
+      const stored = localStorage.getItem(SETTINGS_PROVIDER_STORAGE_KEY);
+      if (stored && enabledIds.includes(stored)) return stored;
+    } catch {
+      /* ignore */
+    }
+    return enabledIds[0] ?? null;
+  });
+
+  useEffect(() => {
+    if (!selectedProviderId || !enabledIds.includes(selectedProviderId)) {
+      setSelectedProviderId(enabledIds[0] ?? null);
+    }
+  }, [enabledIds, selectedProviderId]);
+
+  const handleSelectProvider = (id: string) => {
+    setSelectedProviderId(id);
+    try {
+      localStorage.setItem(SETTINGS_PROVIDER_STORAGE_KEY, id);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const refresh = async () => {
     setRefreshing(true);
@@ -146,28 +265,18 @@ export const QuotasTab: React.FC = () => {
   };
 
   const openAddProvider = () => {
-    setAddSelection([]);
     setAddProviderOpen(true);
   };
 
-  const confirmAddProviders = () => {
-    if (addSelection.length === 0) return;
+  const handleConfirmAddProviders = (ids: string[]) => {
+    if (ids.length === 0) return;
     const next = [...enabledIds];
-    for (const id of addSelection) {
+    for (const id of ids) {
       if (!next.includes(id)) next.push(id);
     }
     saveQuotaPreferences({ enabledProviders: next });
-    setAddProviderOpen(false);
-    setAddSelection([]);
-  };
-
-  const copy = async (cmd: string) => {
-    try {
-      await navigator.clipboard.writeText(cmd);
-      setCopied(cmd);
-      setTimeout(() => setCopied(null), 2200);
-    } catch {
-      /* clipboard unavailable */
+    if (ids[0]) {
+      handleSelectProvider(ids[0]);
     }
   };
 
@@ -198,75 +307,531 @@ export const QuotasTab: React.FC = () => {
     setTimeout(() => setOpenCodeStatus(null), 3000);
   };
 
+  const activeProvider = selectedProviderId ? selectedProviderId : null;
+  const activeQuota = activeProvider ? quotas[activeProvider] : undefined;
+  const activeSession = activeProvider ? detectedSessions[activeProvider] : undefined;
+  const activeDiag = diagnoseProvider(activeQuota);
+  const activeCfg = activeProvider ? PROVIDER_CONFIGS_ES[activeProvider] : undefined;
+  const activeMeta = activeProvider ? ENGINE_METADATA[activeProvider] : undefined;
+  const activeIndex = activeProvider ? enabledIds.indexOf(activeProvider) : -1;
+  const activePinned = activeProvider ? prefs.pinnedProvider === activeProvider : false;
+  const activePct =
+    activeDiag.state === 'ok' && activeQuota
+      ? Math.round(activeQuota.primaryRemainingPercent ?? 0)
+      : null;
+
   return (
     <>
-      {/* ── Indicator preferences ───────────────────────────── */}
+      {/* ── 1. TOP SECTION: PROVIDERS (T3 Code-inspired Master-Detail) ─────── */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Medidor de la barra superior</h2>
-        <div className="ui-card">
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Mostrar medidor de cuota</h3>
-              <p>Porcentaje restante y tiempo de reinicio del agente que estás usando.</p>
-            </div>
-            <div className="settings-row__control">
-              <Switch
-                checked={prefs.enabled}
-                label="Mostrar medidor de cuota"
-                onChange={() => saveQuotaPreferences({ enabled: !prefs.enabled })}
-              />
-            </div>
+        <div className="qt-group-head">
+          <div>
+            <h2 className="settings-group__title">Proveedores</h2>
+            <p className="qt-lead" style={{ margin: '3px 0 0' }}>
+              Conexiones de IA activas en tu equipo. Configura tus agentes o agrega nuevos proveedores.
+            </p>
           </div>
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Detectar el agente activo</h3>
-              <p>El medidor cambia solo al proveedor de la sesión en la que trabajas.</p>
-            </div>
-            <div className="settings-row__control">
-              <Switch
-                checked={prefs.autoDetectActive}
-                label="Detectar el agente activo"
-                onChange={() => saveQuotaPreferences({ autoDetectActive: !prefs.autoDetectActive })}
-              />
-            </div>
-          </div>
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Formato</h3>
-              <p>Cómo se muestra el porcentaje en la pastilla.</p>
-            </div>
-            <div className="settings-row__control">
-              <div className="qt-segment qt-segment--compact" role="radiogroup" aria-label="Formato">
-                {DISPLAY_MODES.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={prefs.displayMode === m.id}
-                    className="qt-segment__item"
-                    data-active={prefs.displayMode === m.id ? '' : undefined}
-                    onClick={() => saveQuotaPreferences({ displayMode: m.id })}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+          <div className="qt-group-head__actions">
+            <button
+              type="button"
+              className="qt-button"
+              disabled={refreshing || enabledIds.length === 0}
+              onClick={refresh}
+            >
+              {refreshing ? 'Actualizando…' : 'Actualizar'}
+            </button>
+            <button
+              type="button"
+              className="qt-button qt-button--primary"
+              onClick={openAddProvider}
+            >
+              + Agregar proveedor
+            </button>
           </div>
         </div>
+
+        {enabledIds.length === 0 ? (
+          <div className="qt-empty" style={{ margin: '14px 0' }}>
+            <span
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '50%',
+                background: 'var(--chip-fill)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--accent)',
+                marginBottom: '4px',
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            </span>
+            <strong>Todavía no agregaste proveedores</strong>
+            <span>Agrega tus proveedores de IA para monitorear sus cuotas y alternar sesiones en un clic.</span>
+            <button
+              type="button"
+              className="qt-button qt-button--primary"
+              onClick={openAddProvider}
+              style={{ marginTop: '8px' }}
+            >
+              + Agregar proveedor
+            </button>
+          </div>
+        ) : (
+          <div className="qt-providers-container" style={{ marginTop: '12px' }}>
+            {/* Left Column: Connected Providers List + Add Provider Row at bottom */}
+            <div className="qt-providers-sidebar">
+              <div className="qt-providers-sidebar__scroll">
+                {enabledIds.map((id) => {
+                  const q = quotas[id];
+                  const s = detectedSessions[id];
+                  const diag = diagnoseProvider(q);
+                  const isSelected = selectedProviderId === id;
+                  const isPinned = prefs.pinnedProvider === id;
+                  const pct = diag.state === 'ok' && q ? Math.round(q.primaryRemainingPercent ?? 0) : null;
+
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      className="qt-providers-sidebar__item"
+                      data-selected={isSelected ? '' : undefined}
+                      onClick={() => handleSelectProvider(id)}
+                    >
+                      <BrandLogo engine={id} size={18} />
+                      <span className="qt-providers-sidebar__name">
+                        {PROVIDER_LABELS[id] || id}
+                      </span>
+                      {isPinned ? (
+                        <span
+                          title="Fijado en la barra superior"
+                          style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center' }}
+                        >
+                          <StarIcon size={12} filled />
+                        </span>
+                      ) : null}
+                      {pct !== null ? (
+                        <span className="qt-provider__pct" data-tone={toneFor(pct)}>
+                          {pct}%
+                        </span>
+                      ) : (
+                        <span
+                          className="qt-chip"
+                          data-tone={
+                            s?.statusTone ??
+                            (diag.state === 'ok' || diag.state === 'detected'
+                              ? 'ok'
+                              : diag.state === 'not_installed'
+                              ? 'idle'
+                              : 'warn')
+                          }
+                          style={{ padding: '0 5px', fontSize: '9.5px', height: '16px' }}
+                        >
+                          {s?.sessionType === 'terminal_agent'
+                            ? 'Term'
+                            : s?.sessionType === 'cli_authenticated'
+                            ? 'CLI'
+                            : diag.state === 'ok' || diag.state === 'detected'
+                            ? 'OK'
+                            : diag.state === 'not_installed'
+                            ? 'Login'
+                            : '!'}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Exact T3 Code location: "+ Add provider" at the bottom of the list */}
+              <button
+                type="button"
+                className="qt-add-provider-trigger"
+                onClick={openAddProvider}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                <span>Agregar proveedor</span>
+              </button>
+            </div>
+
+            {/* Right Column: Selected Provider Inspector & Editor */}
+            <div className="qt-providers-detail">
+              {activeProvider ? (
+                <>
+                  <div className="qt-providers-detail__header">
+                    <div className="qt-providers-detail__brand">
+                      <div className="qt-providers-detail__icon-box">
+                        <BrandLogo engine={activeProvider} size={30} />
+                      </div>
+                      <div className="qt-providers-detail__title-col">
+                        <h3>
+                          <span>{PROVIDER_LABELS[activeProvider] || activeProvider}</span>
+                          {activePinned ? <span className="qt-chip" data-tone="ok">En la barra</span> : null}
+                          {activePct !== null ? (
+                            <span className="qt-chip" data-tone={toneFor(activePct)}>
+                              {activePct}% disponible
+                            </span>
+                          ) : null}
+                        </h3>
+                        <div className="qt-providers-detail__vendor">
+                          {activeMeta?.vendor ? `${activeMeta.vendor} · ` : ''}
+                          {activeCfg?.title || 'Proveedor de IA'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="qt-providers-detail__actions">
+                      <button
+                        type="button"
+                        className="qt-button"
+                        data-active={activePinned ? '' : undefined}
+                        onClick={() => togglePin(activeProvider)}
+                        title={activePinned ? 'Dejar de fijar en la barra superior' : 'Fijar en la barra superior'}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                      >
+                        <StarIcon size={13} filled={Boolean(activePinned)} />
+                        <span>{activePinned ? 'Fijado' : 'Fijar en barra'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="qt-icon-button"
+                        title="Subir en el orden de prioridad"
+                        disabled={activeIndex === 0}
+                        onClick={() => moveProvider(activeProvider, 'up')}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="6 15 12 9 18 15" />
+                        </svg>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="qt-icon-button"
+                        title="Bajar en el orden de prioridad"
+                        disabled={activeIndex === enabledIds.length - 1}
+                        onClick={() => moveProvider(activeProvider, 'down')}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                      </button>
+
+                      {MULTI_ACCOUNT_PROVIDERS.some((p) => p.id === activeProvider) && (
+                        <button
+                          type="button"
+                          className="qt-button"
+                          onClick={() =>
+                            setSwitcherProvider({
+                              id: activeProvider,
+                              label: PROVIDER_LABELS[activeProvider] || activeProvider,
+                            })
+                          }
+                          title="Alternar entre múltiples cuentas guardadas"
+                        >
+                          Cuentas en bóveda…
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className="qt-button qt-button--ghost"
+                        onClick={() => removeProvider(activeProvider)}
+                        title="Quitar este proveedor de los monitoreados"
+                        style={{ color: 'var(--status-failed)' }}
+                      >
+                        Quitar
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Spec Grid */}
+                  <div className="qt-providers-detail__grid">
+                    <div className="qt-spec-card">
+                      <span className="qt-spec-card__label">Estado de conexión</span>
+                      <span className="qt-spec-card__value">
+                        <span
+                          className="qt-chip"
+                          data-tone={
+                            activeSession?.statusTone ??
+                            (activeDiag.state === 'ok' || activeDiag.state === 'detected'
+                              ? 'ok'
+                              : activeDiag.state === 'not_installed'
+                              ? 'idle'
+                              : 'warn')
+                          }
+                        >
+                          <span
+                            className="qt-status-dot"
+                            data-tone={
+                              activeSession?.statusTone ??
+                              (activeDiag.state === 'ok' || activeDiag.state === 'detected'
+                                ? 'ok'
+                                : activeDiag.state === 'not_installed'
+                                ? 'idle'
+                                : 'warn')
+                            }
+                          />
+                          {activeSession?.statusLabel ?? activeDiag.statusLabel}
+                        </span>
+                      </span>
+                    </div>
+
+                    <div className="qt-spec-card">
+                      <span className="qt-spec-card__label">Cuenta detectada</span>
+                      <span className="qt-spec-card__value">
+                        {activeSession?.email
+                          ? activeSession.email
+                          : activeSession?.accountLabel
+                          ? activeSession.accountLabel
+                          : activeQuota?.metadata?.email
+                          ? String(activeQuota.metadata.email)
+                          : activeSession?.hasSession
+                          ? 'Sesión local detectada'
+                          : 'Sesión local del sistema'}
+                      </span>
+                    </div>
+
+                    <div className="qt-spec-card">
+                      <span className="qt-spec-card__label">Origen de datos</span>
+                      <span className="qt-spec-card__value">
+                        <code>{activeSession?.details || activeCfg?.source || 'CLI local'}</code>
+                      </span>
+                    </div>
+
+                    <div className="qt-spec-card">
+                      <span className="qt-spec-card__label">Tipo de sesión</span>
+                      <span className="qt-spec-card__value">
+                        {activeSession?.sessionType === 'terminal_agent'
+                          ? 'Agente en terminal interactiva'
+                          : activeSession?.sessionType === 'cli_authenticated'
+                          ? activeSession.planName || 'CLI local autenticada'
+                          : activeCfg?.connectionType === 'cli_oauth'
+                          ? 'OAuth CLI heredado'
+                          : activeCfg?.connectionType === 'local_rpc'
+                          ? 'RPC local'
+                          : activeCfg?.connectionType === 'opencode_form'
+                          ? 'Formulario OpenCode'
+                          : 'Configuración de equipo'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Multi-Method Connection Panel (CLI Terminal, API Key in Vault, Web Console) */}
+                  <ProviderConnectionPanel
+                    providerId={activeProvider}
+                    detectedSession={activeSession}
+                    vaultCredential={
+                      vaultCredentials[
+                        getProviderConnectionMeta(activeProvider)?.apiKeyProviderKey ?? activeProvider
+                      ]
+                    }
+                    onCredentialChanged={handleCredentialChanged}
+                  />
+
+                  {/* OpenCode custom form */}
+                  {activeCfg?.connectionType === 'opencode_form' ? (
+                    <div className="qt-spec-card">
+                      <span className="qt-spec-card__label">Configuración de clave API de OpenCode</span>
+                      <div className="qt-form" style={{ marginTop: '8px' }}>
+                        <div className="qt-hint">
+                          Detección:{' '}
+                          {String(
+                            quotas['opencode']?.metadata?.authSource ||
+                              'sin credenciales detectadas'
+                          )}{' '}
+                          · HTTP {quotas['opencode']?.metadata?.httpStatus ?? '—'}
+                        </div>
+                        {quotas['opencode']?.metadata?.legacyNote ? (
+                          <div className="qt-hint">
+                            {String(quotas['opencode'].metadata.legacyNote)}
+                          </div>
+                        ) : null}
+                        <input
+                          className="qt-input"
+                          type="password"
+                          autoComplete="off"
+                          placeholder="API key de OpenCode Go (opcional si OpenCode ya está logueado)"
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                        />
+                        <div className="qt-form__actions">
+                          <button
+                            type="button"
+                            className="qt-button qt-button--primary"
+                            onClick={saveApiKey}
+                          >
+                            Guardar API key
+                          </button>
+                          <button
+                            type="button"
+                            className="qt-button qt-button--ghost"
+                            onClick={clearApiKey}
+                          >
+                            Quitar clave de Kite
+                          </button>
+                          {openCodeStatus ? <span className="qt-hint">{openCodeStatus}</span> : null}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <div className="qt-empty" style={{ margin: 'auto' }}>
+                  <strong>Selecciona un proveedor de la lista</strong>
+                  <span>Elige un proveedor para ver su diagnóstico, cuentas y opciones.</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
-      {/* ── Account vault ───────────────────────────────────── */}
+      {/* ── 2. USAGE PROVIDERS (Límites y consumo en tiempo real) ──────────── */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Cuentas conectadas</h2>
-        <p className="qt-lead">
-          Guarda varias suscripciones y cambia de una a otra en un clic cuando una se agote. Todo queda en
-          tu equipo, sin proxies.
-        </p>
-        <AccountVault onChanged={() => void subscriptionQuotaManager.fetchAll(true)} />
+        <div className="qt-group-head">
+          <div>
+            <h2 className="settings-group__title">Límites y consumo de proveedores</h2>
+            <p className="qt-lead" style={{ margin: '3px 0 0' }}>
+              Consumo en tiempo real, ventanas de 5 horas, límites semanales y tiempo de reinicio.
+            </p>
+          </div>
+        </div>
+
+        {enabledIds.length === 0 ? (
+          <p className="qt-hint">Agrega proveedores en la sección superior para ver sus métricas de consumo aquí.</p>
+        ) : (
+          <div className="qt-usage-grid" style={{ marginTop: '12px' }}>
+            {enabledIds.map((id) => {
+              const q = quotas[id];
+              const s = detectedSessions[id];
+              const diag = diagnoseProvider(q);
+              const pct = diag.state === 'ok' && q ? Math.round(q.primaryRemainingPercent ?? 0) : null;
+              const resetLabel = formatReset(q?.timeUntilResetMs, q?.primaryResetAt);
+              const isWindowsExpanded = expandedWindows[id] ?? false;
+              const hasWindows = Boolean(q?.windows && q.windows.length > 0);
+
+              return (
+                <div key={id} className="qt-usage-card">
+                  <div className="qt-usage-card__head">
+                    <div className="qt-usage-card__brand">
+                      <BrandLogo engine={id} size={22} />
+                      <span className="qt-usage-card__name">
+                        {PROVIDER_LABELS[id] || id}
+                      </span>
+                    </div>
+                    {pct !== null ? (
+                      <span className="qt-usage-card__pct" data-tone={toneFor(pct)}>
+                        {pct}%
+                      </span>
+                    ) : (
+                      <span
+                        className="qt-chip"
+                        data-tone={
+                          s?.statusTone ??
+                          (diag.state === 'ok' || diag.state === 'detected'
+                            ? 'ok'
+                            : diag.state === 'not_installed'
+                            ? 'idle'
+                            : 'warn')
+                        }
+                      >
+                        {s?.statusLabel ?? diag.statusLabel}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="qt-usage-card__meter-container">
+                    {pct !== null ? (
+                      <>
+                        <div className="qt-meter" data-tone={toneFor(pct)}>
+                          <span style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                          <span className="qt-hint">
+                            {s?.email || s?.accountLabel || (q?.metadata?.email ? String(q.metadata.email) : 'Cuenta activa')}
+                          </span>
+                          {resetLabel ? <span className="qt-hint">{resetLabel}</span> : null}
+                        </div>
+                      </>
+                    ) : (
+                      <span className="qt-hint">
+                        {s?.hasSession ? s.details : (diag.detail || 'Sin datos de cuota disponibles actualmente.')}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Collapsible Sub-windows for models to prevent vertical explosion */}
+                  {hasWindows ? (
+                    <div className="qt-usage-card__windows-wrapper">
+                      <button
+                        type="button"
+                        className="qt-usage-card__toggle-btn"
+                        onClick={() =>
+                          setExpandedWindows((prev) => ({
+                            ...prev,
+                            [id]: !isWindowsExpanded,
+                          }))
+                        }
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                      >
+                        {isWindowsExpanded ? (
+                          <>
+                            <ChevronUpIcon size={12} />
+                            <span>Ocultar desglose de modelos</span>
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDownIcon size={12} />
+                            <span>Ver desglose por modelo ({q!.windows.length})</span>
+                          </>
+                        )}
+                      </button>
+
+                      {isWindowsExpanded ? (
+                        <div className="qt-usage-card__windows-scroll">
+                          {q!.windows.map((win, wIdx) => {
+                            const winPct = Math.round((win.remainingFraction ?? 0) * 100);
+                            const winReset = formatReset(win.timeUntilResetMs, win.resetsAt);
+                            return (
+                              <div key={wIdx} className="qt-usage-card__window-row">
+                                <div className="qt-usage-card__window-head">
+                                  <span>{win.name}</span>
+                                  <span data-tone={toneFor(winPct)} style={{ fontWeight: 600 }}>
+                                    {winPct}%
+                                  </span>
+                                </div>
+                                <div className="qt-meter" data-tone={toneFor(winPct)} style={{ height: '4px' }}>
+                                  <span style={{ width: `${Math.max(2, Math.min(100, winPct))}%` }} />
+                                </div>
+                                {winReset ? (
+                                  <span className="qt-hint" style={{ fontSize: '10.5px' }}>
+                                    {winReset}
+                                  </span>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
-      {/* ── Connections verified in the shared registry ──────── */}
+      {/* ── Verified connections from shared registry ───────────────────────── */}
       {verifiedConnections.length > 0 ? (
         <section className="settings-group">
           <h2 className="settings-group__title">Conexiones con cuota verificada</h2>
@@ -305,247 +870,93 @@ export const QuotasTab: React.FC = () => {
         </section>
       ) : null}
 
-      {/* ── Providers ───────────────────────────────────────── */}
+      {/* ── 3. TOP BAR METER PREFERENCES ───────────────────────────────────── */}
       <section className="settings-group">
-        <div className="qt-group-head">
-          <h2 className="settings-group__title">Proveedores monitoreados</h2>
-          <div className="qt-group-head__actions">
-            <button type="button" className="qt-button qt-button--primary" onClick={openAddProvider}>
-              Agregar proveedor
-            </button>
-            <button
-              type="button"
-              className="qt-button"
-              disabled={refreshing || enabledIds.length === 0}
-              onClick={refresh}
-            >
-              {refreshing ? 'Actualizando…' : 'Actualizar'}
-            </button>
+        <h2 className="settings-group__title">Medidor de la barra superior</h2>
+        <div className="ui-card">
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Mostrar medidor de cuota</h3>
+              <p>Porcentaje restante y tiempo de reinicio del agente que estás usando en la barra superior.</p>
+            </div>
+            <div className="settings-row__control">
+              <Switch
+                checked={prefs.enabled}
+                label="Mostrar medidor de cuota"
+                onChange={() => saveQuotaPreferences({ enabled: !prefs.enabled })}
+              />
+            </div>
           </div>
-        </div>
-        <p className="qt-lead">
-          Nada se monitorea por defecto. Agregá solo los proveedores que usás; tus claves y sesiones
-          existentes no se modifican ni se borran.
-        </p>
-
-        {enabledIds.length === 0 ? (
-          <div className="qt-empty">
-            <strong>Todavía no agregaste proveedores</strong>
-            <span>Sumá un proveedor para ver su cuota en la barra superior.</span>
-            <button type="button" className="qt-button qt-button--primary" onClick={openAddProvider}>
-              Agregar proveedor
-            </button>
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Detectar el agente activo</h3>
+              <p>El medidor cambia solo al proveedor de la sesión en la que trabajas.</p>
+            </div>
+            <div className="settings-row__control">
+              <Switch
+                checked={prefs.autoDetectActive}
+                label="Detectar el agente activo"
+                onChange={() => saveQuotaPreferences({ autoDetectActive: !prefs.autoDetectActive })}
+              />
+            </div>
           </div>
-        ) : (
-        <div className="ui-card qt-providers">
-          {enabledIds.map((id, index) => {
-            const q = quotas[id];
-            const diag = diagnoseProvider(q);
-            const cfg = PROVIDER_CONFIGS_ES[id];
-            const pct = diag.state === 'ok' && q ? Math.round(q.primaryRemainingPercent ?? 0) : null;
-            const open = expanded === id;
-            const pinned = prefs.pinnedProvider === id;
-            return (
-              <div key={id} className="qt-provider" data-open={open ? '' : undefined}>
-                <div className="qt-provider__row">
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Formato</h3>
+              <p>Cómo se muestra el porcentaje en la pastilla de la barra.</p>
+            </div>
+            <div className="settings-row__control">
+              <div className="qt-segment qt-segment--compact" role="radiogroup" aria-label="Formato">
+                {DISPLAY_MODES.map((m) => (
                   <button
+                    key={m.id}
                     type="button"
-                    className="qt-provider__main"
-                    aria-expanded={open}
-                    onClick={() => setExpanded(open ? null : id)}
+                    role="radio"
+                    aria-checked={prefs.displayMode === m.id}
+                    className="qt-segment__item"
+                    data-active={prefs.displayMode === m.id ? '' : undefined}
+                    onClick={() => saveQuotaPreferences({ displayMode: m.id })}
                   >
-                    <BrandLogo engine={id} size={18} />
-                    <span className="qt-provider__name">{PROVIDER_LABELS[id] || id}</span>
-                    <span className="qt-chip" data-tone={diag.state === 'ok' || diag.state === 'detected' ? 'ok' : diag.state === 'not_installed' ? 'idle' : 'warn'}>
-                      {diag.statusLabel}
-                    </span>
-                    {pinned ? <span className="qt-chip" data-tone="ok">En la barra</span> : null}
-                    {pct !== null ? (
-                      <span className="qt-provider__pct" data-tone={toneFor(pct)}>
-                        {pct}%
-                      </span>
-                    ) : null}
-                    <svg className="qt-provider__chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <polyline points="6 9 12 15 18 9" />
-                    </svg>
+                    {m.label}
                   </button>
-
-                  <div className="qt-provider__actions">
-                    <button
-                      type="button"
-                      className="qt-icon-button"
-                      title="Subir en el orden"
-                      aria-label={`Subir ${PROVIDER_LABELS[id] || id}`}
-                      disabled={index === 0}
-                      onClick={() => moveProvider(id, 'up')}
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="6 15 12 9 18 15" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      className="qt-icon-button"
-                      title="Bajar en el orden"
-                      aria-label={`Bajar ${PROVIDER_LABELS[id] || id}`}
-                      disabled={index === enabledIds.length - 1}
-                      onClick={() => moveProvider(id, 'down')}
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      className="qt-icon-button"
-                      data-active={pinned ? '' : undefined}
-                      title={pinned ? 'Dejar de fijar en la barra' : 'Fijar en la barra superior'}
-                      aria-label={pinned ? `Dejar de fijar ${PROVIDER_LABELS[id] || id}` : `Fijar ${PROVIDER_LABELS[id] || id} en la barra`}
-                      aria-pressed={pinned}
-                      onClick={() => togglePin(id)}
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M9 3h6l-1 7 3 3H7l3-3-1-7z" />
-                        <line x1="12" y1="16" x2="12" y2="21" />
-                      </svg>
-                    </button>
-                    <Switch
-                      checked
-                      label={`Quitar ${PROVIDER_LABELS[id] || id}`}
-                      onChange={() => removeProvider(id)}
-                    />
-                  </div>
-                </div>
-
-                {open ? (
-                  <div className="qt-provider__detail">
-                    {cfg ? (
-                      <>
-                        <h4>{cfg.title}</h4>
-                        <p>{cfg.desc}</p>
-                        <dl>
-                          <dt>Origen de datos</dt>
-                          <dd><code>{cfg.source}</code></dd>
-                          {q?.metadata?.email ? (
-                            <>
-                              <dt>Cuenta detectada</dt>
-                              <dd>{String(q.metadata.email)}</dd>
-                            </>
-                          ) : null}
-                          {diag.state !== 'ok' && diag.detail ? (
-                            <>
-                              <dt>Estado</dt>
-                              <dd>{diag.detail}</dd>
-                            </>
-                          ) : null}
-                        </dl>
-                        <p className="qt-provider__note">{cfg.details}</p>
-                        {cfg.loginCmd ? (
-                          <div className="qt-cmd">
-                            <code>{cfg.loginCmd}</code>
-                            <button type="button" className="qt-button qt-button--ghost" onClick={() => copy(cfg.loginCmd!)}>
-                              {copied === cfg.loginCmd ? 'Copiado' : 'Copiar'}
-                            </button>
-                          </div>
-                        ) : null}
-                        {cfg.connectionType === 'opencode_form' ? (
-                          <div className="qt-form">
-                            <div className="qt-hint">
-                              Detección:{' '}
-                              {String(
-                                quotas['opencode']?.metadata?.authSource ||
-                                  'sin credenciales detectadas'
-                              )}{' '}
-                              · HTTP {quotas['opencode']?.metadata?.httpStatus ?? '—'}
-                            </div>
-                            {quotas['opencode']?.metadata?.legacyNote ? (
-                              <div className="qt-hint">
-                                {String(quotas['opencode'].metadata.legacyNote)}
-                              </div>
-                            ) : null}
-                            <input
-                              className="qt-input"
-                              type="password"
-                              autoComplete="off"
-                              placeholder="API key de OpenCode Go (opcional si OpenCode ya está logueado)"
-                              value={apiKey}
-                              onChange={(e) => setApiKey(e.target.value)}
-                            />
-                            <div className="qt-form__actions">
-                              <button type="button" className="qt-button qt-button--primary" onClick={saveApiKey}>
-                                Guardar API key
-                              </button>
-                              <button type="button" className="qt-button qt-button--ghost" onClick={clearApiKey}>
-                                Quitar clave de Kite
-                              </button>
-                              {openCodeStatus ? <span className="qt-hint">{openCodeStatus}</span> : null}
-                            </div>
-                          </div>
-                        ) : null}
-                      </>
-                    ) : (
-                      <p>Sin información adicional para este proveedor.</p>
-                    )}
-                  </div>
-                ) : null}
+                ))}
               </div>
-            );
-          })}
+            </div>
+          </div>
         </div>
-        )}
       </section>
 
-      <Sheet
-        open={addProviderOpen}
-        title="Agregar proveedor"
-        description="Elegí qué proveedores querés monitorear. Después podés configurarlos y ordenarlos como quieras."
-        width={460}
-        onCancel={() => setAddProviderOpen(false)}
-        primary={{
-          label:
-            addSelection.length > 0 ? `Agregar (${addSelection.length})` : 'Agregar',
-          onClick: confirmAddProviders,
-          disabled: addSelection.length === 0,
-        }}
-        secondary={{ label: 'Cancelar', onClick: () => setAddProviderOpen(false) }}
-      >
-        <div className="qt-add-list">
-          {availableProviders.map((id) => {
-            const diag = diagnoseProvider(quotas[id]);
-            const checked = addSelection.includes(id);
-            return (
-              <label key={id} className="qt-add-row" data-selected={checked ? '' : undefined}>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() =>
-                    setAddSelection((prev) =>
-                      prev.includes(id) ? prev.filter((providerId) => providerId !== id) : [...prev, id]
-                    )
-                  }
-                />
-                <BrandLogo engine={id} size={18} />
-                <span className="qt-add-row__name">{PROVIDER_LABELS[id] || id}</span>
-                <span
-                  className="qt-chip"
-                  data-tone={
-                    diag.state === 'ok' || diag.state === 'detected'
-                      ? 'ok'
-                      : diag.state === 'not_installed'
-                      ? 'idle'
-                      : 'warn'
-                  }
-                >
-                  {diag.statusLabel}
-                </span>
-              </label>
-            );
-          })}
-          {availableProviders.length === 0 ? (
-            <p className="qt-hint">Todos los proveedores ya están agregados.</p>
-          ) : null}
-        </div>
-      </Sheet>
+      {/* ── 4. ACCOUNT VAULT (Cuentas conectadas) ─────────────────────────── */}
+      <section className="settings-group">
+        <h2 className="settings-group__title">Bóveda de cuentas conectadas</h2>
+        <p className="qt-lead">
+          Guarda varias suscripciones y cambia de una a otra en un clic cuando una se agote. Todo queda en
+          tu equipo, sin proxies.
+        </p>
+        <AccountVault onChanged={() => void subscriptionQuotaManager.fetchAll(true)} />
+      </section>
+
+      {/* ── Cohesive Modals ──────────────────────────────────────────────── */}
+      <AddProviderModal
+        isOpen={addProviderOpen}
+        onClose={() => setAddProviderOpen(false)}
+        availableProviders={availableProviders}
+        quotas={quotas}
+        detectedSessions={detectedSessions}
+        onAdd={handleConfirmAddProviders}
+      />
+
+      {switcherProvider && (
+        <AccountSwitcherModal
+          provider={switcherProvider.id}
+          providerLabel={switcherProvider.label}
+          isOpen={!!switcherProvider}
+          onClose={() => setSwitcherProvider(null)}
+          onAccountSwitched={() => {
+            void subscriptionQuotaManager.fetchAll(true);
+          }}
+        />
+      )}
     </>
   );
 };

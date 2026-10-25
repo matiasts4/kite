@@ -2,12 +2,36 @@
    Proposal: docs/visual-language.md. Loaded after the base bundle.
    Scoped to body.kite-app so the dev-only ?animate lab keeps its own values. */
 
+:root {
+  --control-radius: 8px;
+  --card-radius: 12px;
+  --dialog-radius: 14px;
+  --chip-radius: 6px;
+  --pill-radius: 9999px;
+}
+
 body.kite-app {
   --vl-radius-xs: 4px;
   --vl-radius-sm: 6px;
   --vl-radius-md: 8px;
   --vl-radius-lg: 12px;
   --vl-radius-xl: 14px;
+
+  /* Semantic scale aliases */
+  --control-radius: var(--vl-radius-md);
+  --card-radius: var(--vl-radius-lg);
+  --dialog-radius: var(--vl-radius-xl);
+  --chip-radius: var(--vl-radius-sm);
+  --pill-radius: 9999px;
+
+  /* Legacy variable reconciliation: harmonizes existing views automatically */
+  --radius-panel: var(--dialog-radius);
+  --radius-card: var(--card-radius);
+  --radius-composer: var(--card-radius);
+  --radius-row: var(--control-radius);
+  --radius-tile: var(--control-radius);
+  --radius-chip: var(--chip-radius);
+  --radius-pill: var(--pill-radius);
 
   --vl-control-sm: 26px;
   --vl-control-md: 32px;
@@ -608,3 +632,47 @@ body.kite-app .chat-composer__send:not(:disabled):hover {
   border-color: #343e50;
   color: #ffffff;
 }
+
+/* Lateral Panels & View Controls Standardization -------------------------- */
+
+body.kite-app .tickets-search {
+  height: var(--vl-control-md, 32px);
+  border-radius: var(--control-radius, 8px);
+  padding: 0 var(--space-2);
+  background: var(--vl-surface-canvas);
+  border: 1px solid var(--vl-stroke);
+  box-shadow: var(--vl-inset-field);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+}
+
+body.kite-app .tickets-search input {
+  height: 100%;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+body.kite-app .tickets-search:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+body.kite-app .tickets-header {
+  min-height: 44px;
+  align-items: center;
+}
+
+body.kite-app .tickets-header__trailing {
+  align-items: center;
+}
+
+body.kite-app .tickets-header__trailing .chrome-button {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--control-radius, 8px);
+}
+

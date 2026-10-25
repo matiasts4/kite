@@ -70,8 +70,6 @@ const STORAGE_KEY_BROWSER = 'kite-code.app-browser.v1';
 
 const DEFAULT_TABS: DockTabItem[] = [
   { id: 'dashboard', kind: 'dashboard' },
-  { id: 'tasks', kind: 'tasks' },
-  { id: 'prompts', kind: 'prompts' },
 ];
 
 interface StoredTabsPayload {
@@ -107,17 +105,9 @@ function loadInitialTabs(): { tabs: DockTabItem[]; activeTabId: string } {
           }
         }
 
-        // Pinned tabs: dashboard, tasks, prompts must be present
+        // Pinned anchor: dashboard must be present
         if (!validTabs.some((t) => t.kind === 'dashboard')) {
           validTabs.unshift({ id: 'dashboard', kind: 'dashboard' });
-        }
-        if (!validTabs.some((t) => t.kind === 'tasks')) {
-          const dashIdx = validTabs.findIndex((t) => t.kind === 'dashboard');
-          validTabs.splice(dashIdx + 1, 0, { id: 'tasks', kind: 'tasks' });
-        }
-        if (!validTabs.some((t) => t.kind === 'prompts')) {
-          const tasksIdx = validTabs.findIndex((t) => t.kind === 'tasks');
-          validTabs.splice(tasksIdx + 1, 0, { id: 'prompts', kind: 'prompts' });
         }
 
         const activeId =
@@ -130,7 +120,7 @@ function loadInitialTabs(): { tabs: DockTabItem[]; activeTabId: string } {
     }
   } catch {}
 
-  return { tabs: DEFAULT_TABS, activeTabId: 'tasks' };
+  return { tabs: DEFAULT_TABS, activeTabId: 'dashboard' };
 }
 
 function loadInitialWidth(): number {
@@ -364,8 +354,8 @@ const TAB_CONFIGS: Record<string, TabResolvedDef> = {
   browser: { label: 'Browser', tooltip: 'Browser', closable: true, renderIcon: () => <GlobeGlyph /> },
   files: { label: 'Files', tooltip: 'Files', closable: true, renderIcon: () => <FolderGlyph /> },
   diffs: { label: 'Diffs', tooltip: 'Diffs & Changes', closable: true, renderIcon: () => <GitDiffGlyph /> },
-  tasks: { label: 'Tasks', tooltip: 'Tasks', closable: false, renderIcon: () => <ListTodoGlyph /> },
-  prompts: { label: 'Prompts', tooltip: 'Prompts', closable: false, renderIcon: () => <MessageSquareQuoteGlyph /> },
+  tasks: { label: 'Tasks', tooltip: 'Tasks', closable: true, renderIcon: () => <ListTodoGlyph /> },
+  prompts: { label: 'Prompts', tooltip: 'Prompts', closable: true, renderIcon: () => <MessageSquareQuoteGlyph /> },
   'app:focusTimer': { label: 'Focus timer', tooltip: 'Focus timer', closable: true, renderIcon: () => <TimerGlyph /> },
   'app:scratchpad': { label: 'Scratchpad', tooltip: 'Scratchpad', closable: true, renderIcon: () => <NotebookPenGlyph /> },
   'app:bombSprint': { label: 'Bomb Sprint', tooltip: 'Bomb Sprint', closable: true, renderIcon: () => <FlameGlyph /> },
@@ -419,7 +409,7 @@ export const RightDock: React.FC<RightDockProps> = ({
 
   const effectiveWorkspaceId = useMemo(() => {
     if (workspaceId) return workspaceId;
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null;
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
     if (saved && workspaces?.some((w) => w.id === saved)) return saved;
     return workspaces?.[0]?.id ?? null;
   }, [workspaceId, workspaces]);

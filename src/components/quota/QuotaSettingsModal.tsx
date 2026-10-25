@@ -17,6 +17,7 @@ import {
 import { diagnoseProvider } from '../../lib/quota/providerState';
 import { saveOpenCodeApiKey, clearOpenCodeApiKey } from '../../lib/ipc';
 import { AccountSwitcherModal } from './AccountSwitcherModal';
+import { UsersIcon, ChevronUpIcon, ChevronDownIcon } from '../views/settings/icons';
 import { usePresence } from '../../motion/usePresence';
 import { motionSurfaceClass } from '../../motion/surface';
 
@@ -891,10 +892,12 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                                   padding: '1px 3px',
                                   color: '#a1a1aa',
                                   cursor: 'pointer',
-                                  fontSize: '10px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
                                 }}
                               >
-                                ▲
+                                <ChevronUpIcon size={12} strokeWidth={2.5} />
                               </button>
                             )}
                             {index < prefs.providerOrder.length - 1 && (
@@ -908,10 +911,12 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                                   padding: '1px 3px',
                                   color: '#a1a1aa',
                                   cursor: 'pointer',
-                                  fontSize: '10px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
                                 }}
                               >
-                                ▼
+                                <ChevronDownIcon size={12} strokeWidth={2.5} />
                               </button>
                             )}
                           </div>
@@ -1210,12 +1215,11 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
-                          fontSize: '18px',
                           flexShrink: 0,
                           color: '#60a5fa',
                         }}
                       >
-                        👥
+                        <UsersIcon size={18} />
                       </div>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: '13px', fontWeight: 600, color: '#f4f4f5', display: 'flex', alignItems: 'center', gap: '8px' }}>

@@ -53,14 +53,14 @@
 
 /* Toolbar */
 .app-browser-toolbar {
-  height: var(--pane-header-height, 30px);
-  min-height: var(--pane-header-height, 30px);
+  height: 38px;
+  min-height: 38px;
   border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
   flex: none;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  padding: 0 6px;
+  padding: 0 8px;
   display: flex;
   background: var(--sidebar-fill, #1e1e1f);
 }
@@ -74,12 +74,16 @@
   border-bottom: 0;
   flex: none;
   padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .app-browser-toolbar .browser-device-toolbar button {
-  min-width: 22px;
-  height: 22px;
-  padding: 0 4px;
+  min-width: 26px;
+  height: 26px;
+  border-radius: var(--control-radius, 8px);
+  padding: 0 6px;
 }
 
 .app-browser-toolbar .browser-device-toolbar button span {
@@ -100,13 +104,13 @@
 
 .browser-pane-nav {
   grid-column: 1;
-  gap: 1px;
+  gap: 2px;
 }
 
 .browser-pane-nav button {
-  width: var(--control-pane-header, 22px);
-  height: var(--control-pane-header, 22px);
-  border-radius: var(--radius-chip, 6px);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--control-radius, 8px);
   color: var(--text-faint, #6e6e6e);
   transition: background-color var(--duration-ink, 0.12s) var(--ease-out, ease-out), color var(--duration-ink, 0.12s) var(--ease-out, ease-out);
   background: 0 0;
@@ -132,15 +136,15 @@
 /* Address bar */
 .browser-pane-address {
   white-space: nowrap;
-  border-radius: var(--radius-chip, 6px);
+  border-radius: var(--control-radius, 8px);
   background: var(--chip-fill, rgba(255, 255, 255, 0.06));
-  height: 20px;
+  height: 28px;
   color: var(--text-faint, #6e6e6e);
-  grid-template-columns: auto minmax(0, 1fr) 20px;
+  grid-template-columns: auto minmax(0, 1fr) 24px;
   justify-self: stretch;
   align-items: center;
-  gap: 5px;
-  padding: 0 7px;
+  gap: 6px;
+  padding: 0 8px;
   display: grid;
   overflow: hidden;
 }
@@ -230,9 +234,9 @@
 /* Design mode toggle and External browser button */
 .browser-design-mode,
 .browser-external-open {
-  border-radius: var(--radius-chip, 6px);
-  min-width: 22px;
-  height: 22px;
+  border-radius: var(--control-radius, 8px);
+  min-width: 26px;
+  height: 26px;
   color: var(--text-secondary, #a1a1a1);
   cursor: pointer;
   transition: background-color var(--duration-ink, 0.12s) var(--ease-ink, ease), color var(--duration-ink, 0.12s) var(--ease-ink, ease);

@@ -49,14 +49,14 @@ fn now_ms() -> i64 {
 
 /// `antigravity` and `agy` are the same product; keep a single identity so
 /// profiles / active flags / vault folders never diverge.
-fn canon_provider(p: &str) -> String {
+pub fn canon_provider(p: &str) -> String {
     match p {
         "antigravity" => "agy".to_string(),
         other => other.to_string(),
     }
 }
 
-fn same_provider(a: &str, b: &str) -> bool {
+pub fn same_provider(a: &str, b: &str) -> bool {
     canon_provider(a) == canon_provider(b)
 }
 
@@ -503,18 +503,61 @@ fn running_process_names() -> Option<Vec<String>> {
 }
 
 fn is_blocking_process(provider: &str, name: &str) -> bool {
+    // Note: CLI processes (agy.exe, claude.exe, codex.exe) are automatically
+    // terminated and respawned during rotation. Only standalone external IDEs
+    // (e.g. Antigravity IDE window) that cannot be safely terminated remain here.
     match canon_provider(provider).as_str() {
-        "agy" => {
-            name.contains("antigravity")
-                || name.starts_with("language_server")
-                || matches!(name, "agy" | "agy.exe")
-        }
-        "claude" => matches!(name, "claude" | "claude.exe"),
-        "codex" => matches!(name, "codex" | "codex.exe"),
-        "grok" => matches!(name, "grok" | "grok.exe"),
-        "opencode" => matches!(name, "opencode" | "opencode.exe"),
+        "agy" => matches!(name, "antigravity" | "antigravity.exe"),
         _ => false,
     }
+}
+
+/// Automatically terminates any running background or terminal CLI processes
+/// for this provider so they release locks on auth and session files before rotation.
+pub fn terminate_provider_cli_processes(provider: &str) {
+    let canon = canon_provider(provider);
+    #[cfg(windows)]
+    {
+        let image_names: Vec<&str> = match canon.as_str() {
+            "agy" => vec!["agy.exe", "language_server_windows_x64.exe"],
+            "claude" => vec!["claude.exe"],
+            "codex" => vec!["codex.exe"],
+            "grok" => vec!["grok.exe"],
+            "opencode" => vec!["opencode.exe"],
+            _ => Vec::new(),
+        };
+
+        if !image_names.is_empty() {
+            let mut args: Vec<&str> = vec!["/F", "/T"];
+            for img in &image_names {
+                args.push("/IM");
+                args.push(img);
+            }
+            let _ = crate::hidden_exec::run(
+                std::path::Path::new("taskkill.exe"),
+                &args,
+                std::time::Duration::from_millis(400),
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let pattern = match canon.as_str() {
+            "agy" => "agy",
+            "claude" => "claude",
+            "codex" => "codex",
+            "grok" => "grok",
+            "opencode" => "opencode",
+            _ => "",
+        };
+        if !pattern.is_empty() {
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", pattern])
+                .output();
+        }
+    }
+    // Brief sleep to allow OS file handles to be released
+    std::thread::sleep(std::time::Duration::from_millis(50));
 }
 
 /// Err(message) when a client that owns the session files is running.
@@ -533,7 +576,7 @@ fn ensure_provider_idle(provider: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Cierra el cliente de {} antes de cambiar de cuenta (procesos activos: {}).",
+            "Cierra la aplicación externa de {} antes de cambiar de cuenta (procesos activos: {}).",
             canon_provider(provider),
             busy.join(", ")
         ))
@@ -741,62 +784,92 @@ pub fn list_saved_accounts(request: Option<Value>) -> Value {
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Phase 1: read the registry (short lock).
-    let active: Vec<(String, String, Option<String>)> = {
-        let _guard = REGISTRY_LOCK.lock().unwrap();
-        load_registry()
-            .profiles
-            .iter()
-            .filter(|p| p.is_active)
-            .filter(|p| provider.as_deref().map_or(true, |want| same_provider(&p.provider, want)))
-            .map(|p| (p.id.clone(), p.provider.clone(), p.email.clone()))
-            .collect()
-    };
+    let canon_prov = provider.as_deref().map(canon_provider);
+    let probe_target = canon_prov.clone().unwrap_or_else(|| "agy".to_string());
 
-    // Phase 2: probe live quota WITHOUT holding the registry lock (spawns `agy`, can be slow).
-    let live: Vec<(String, LiveQuota)> = active
-        .into_iter()
-        .filter_map(|(id, prov, saved_email)| {
-            let q = get_cached_live_quota(&prov)?;
-            // The live identity differs from the profile marked active (user logged in
-            // outside Kite Code): don't attribute this quota/email to the wrong profile.
-            if let (Some(saved), Some(now)) = (saved_email.as_deref(), q.email.as_deref()) {
-                if !saved.eq_ignore_ascii_case(now) {
-                    return None;
-                }
-            }
-            Some((id, q))
-        })
-        .collect();
+    // Phase 1: probe live quota (reads real OS credentials / token).
+    let live_q = get_cached_live_quota(&probe_target).or_else(|| fetch_live_quota(&probe_target));
 
-    // Phase 3: apply and persist (short lock, re-read to avoid clobbering concurrent edits).
+    // Phase 2: reconcile live identity with registry (short lock).
     let _guard = REGISTRY_LOCK.lock().unwrap();
     let mut reg = load_registry();
-    if !live.is_empty() {
-        for (id, q) in live {
-            if let Some(profile) = reg.profiles.iter_mut().find(|p| p.id == id) {
-                profile.primary_remaining_percent = Some(q.percent);
-                profile.primary_reset_at = q.reset_at;
-                profile.time_until_reset_ms = q.until_ms;
-                if q.email.is_some() {
-                    profile.email = q.email;
+    let mut changed = false;
+    let mut unregistered_live_session: Option<Value> = None;
+
+    if let Some(ref q) = live_q {
+        if let Some(ref live_email) = q.email {
+            let matching_idx = reg.profiles.iter().position(|p| {
+                same_provider(&p.provider, &probe_target)
+                    && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(live_email))
+            });
+
+            if let Some(idx) = matching_idx {
+                for (i, p) in reg.profiles.iter_mut().enumerate() {
+                    if same_provider(&p.provider, &probe_target) {
+                        let should_be_active = i == idx;
+                        if p.is_active != should_be_active {
+                            p.is_active = should_be_active;
+                            changed = true;
+                        }
+                        if should_be_active {
+                            p.primary_remaining_percent = Some(q.percent);
+                            p.primary_reset_at = q.reset_at.clone();
+                            p.time_until_reset_ms = q.until_ms;
+                            if q.plan.is_some() {
+                                p.plan_name = q.plan.clone();
+                            }
+                            p.last_used_unix_ms = now_ms();
+                            changed = true;
+                        }
+                    }
                 }
-                if q.plan.is_some() {
-                    profile.plan_name = q.plan;
+            } else {
+                // The live account does not match any profile in the vault.
+                // Avoid false active badges and expose unregistered session to frontend.
+                for p in &mut reg.profiles {
+                    if same_provider(&p.provider, &probe_target) && p.is_active {
+                        p.is_active = false;
+                        changed = true;
+                    }
+                }
+                unregistered_live_session = Some(json!({
+                    "provider": probe_target,
+                    "email": live_email,
+                    "planName": q.plan,
+                    "primaryRemainingPercent": q.percent,
+                    "primaryResetAt": q.reset_at,
+                    "timeUntilResetMs": q.until_ms,
+                }));
+            }
+        } else {
+            // Live email not detected, but update active profile quota if available
+            for p in &mut reg.profiles {
+                if same_provider(&p.provider, &probe_target) && p.is_active {
+                    p.primary_remaining_percent = Some(q.percent);
+                    p.primary_reset_at = q.reset_at.clone();
+                    p.time_until_reset_ms = q.until_ms;
+                    if q.plan.is_some() {
+                        p.plan_name = q.plan.clone();
+                    }
+                    changed = true;
                 }
             }
         }
+    }
+
+    if changed {
         save_registry(&reg);
     }
 
-    let filtered: Vec<SavedAccountProfile> = match provider.as_deref() {
+    let filtered: Vec<SavedAccountProfile> = match canon_prov.as_deref() {
         Some(p) => reg.profiles.into_iter().filter(|a| same_provider(&a.provider, p)).collect(),
         None => reg.profiles,
     };
 
     json!({
         "schemaVersion": 1,
-        "profiles": filtered
+        "profiles": filtered,
+        "unregisteredLiveSession": unregistered_live_session
     })
 }
 
@@ -933,8 +1006,21 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         return json!({ "success": false, "error": "Profile not found" });
     };
 
-    // 0. Never swap session files under a running client.
+    // 0. Quiesce Kite-managed terminals for this provider so they flush scrollback and release file locks
+    let quiesced_terminals = crate::terminal::quiesce_provider_terminals(&provider);
+
+    // Terminate any CLI processes of this provider so credentials files are completely unlocked
+    terminate_provider_cli_processes(&provider);
+
+    // If external processes outside Kite are still running and blocking:
     if let Err(msg) = ensure_provider_idle(&provider) {
+        let current_label = reg
+            .profiles
+            .iter()
+            .find(|p| same_provider(&p.provider, &provider) && p.is_active)
+            .map(|p| p.label.as_str())
+            .unwrap_or("Actual");
+        crate::terminal::respawn_provider_terminals(&provider, current_label, &quiesced_terminals);
         return json!({ "success": false, "code": "PROVIDER_BUSY", "error": msg });
     }
 
@@ -955,6 +1041,13 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     // 2. Transactional restore (backs up current state, rolls back on failure).
     if let Err(e) = apply_profile_to_active(&provider, &account_id) {
         log_trace(&format!("account_switcher: switch failed: {e}"));
+        let current_label = reg
+            .profiles
+            .iter()
+            .find(|p| same_provider(&p.provider, &provider) && p.is_active)
+            .map(|p| p.label.as_str())
+            .unwrap_or("Actual");
+        crate::terminal::respawn_provider_terminals(&provider, current_label, &quiesced_terminals);
         return json!({ "success": false, "error": e });
     }
 
@@ -972,19 +1065,32 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     sync_google_siblings(&mut reg, &provider, &activated_profile);
     save_registry(&reg);
 
+    // Invalidate quota cache for this provider so stale in-memory cached identity does not shadow the newly switched account
+    let canon = canon_provider(&provider);
+    let quota_key = match canon.as_str() {
+        "agy" => "antigravity",
+        other => other,
+    };
+    crate::quota::invalidate_provider_cache(quota_key);
+    crate::quota::invalidate_provider_cache(&provider);
+
+    // 4. Respawn the quiesced terminals with the new account's credentials!
+    crate::terminal::respawn_provider_terminals(&provider, &activated_profile.label, &quiesced_terminals);
+
     log_trace(&format!(
-        "account_switcher: Switched to profile {} ({}) for provider {}",
-        account_id, activated_profile.label, provider
+        "account_switcher: Switched to profile {} ({}) for provider {} (restarted {} terminals)",
+        account_id, activated_profile.label, provider, quiesced_terminals.len()
     ));
 
     json!({
         "success": true,
-        "profile": activated_profile
+        "profile": activated_profile,
+        "terminalsRestarted": quiesced_terminals.len()
     })
 }
 
 #[tauri::command]
-pub fn switch_account_profile(request: Option<Value>) -> Value {
+pub async fn switch_account_profile(request: Option<Value>) -> Value {
     let req = crate::persist::body(&request);
     let provider = req
         .and_then(|r| r.get("provider"))
@@ -996,7 +1102,17 @@ pub fn switch_account_profile(request: Option<Value>) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    switch_account_profile_direct(provider, account_id)
+
+    tokio::task::spawn_blocking(move || {
+        switch_account_profile_direct(provider, account_id)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        json!({
+            "success": false,
+            "error": format!("Worker task failed: {e}")
+        })
+    })
 }
 
 #[tauri::command]
@@ -1035,12 +1151,41 @@ pub fn get_active_account_profile(request: Option<Value>) -> Value {
         .and_then(|r| r.get("provider"))
         .and_then(|v| v.as_str())
         .unwrap_or("agy");
+    let canon_p = canon_provider(provider);
+
+    // Reconcile if live quota has an authenticated email
+    if let Some(q) = get_cached_live_quota(&canon_p) {
+        if let Some(ref live_email) = q.email {
+            let _guard = REGISTRY_LOCK.lock().unwrap();
+            let mut reg = load_registry();
+            let matching_idx = reg.profiles.iter().position(|p| {
+                same_provider(&p.provider, &canon_p)
+                    && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(live_email))
+            });
+            if let Some(idx) = matching_idx {
+                let mut changed = false;
+                for (i, p) in reg.profiles.iter_mut().enumerate() {
+                    if same_provider(&p.provider, &canon_p) {
+                        let should_be_active = i == idx;
+                        if p.is_active != should_be_active {
+                            p.is_active = should_be_active;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    save_registry(&reg);
+                }
+            }
+        }
+    }
+
     let _guard = REGISTRY_LOCK.lock().unwrap();
     let reg = load_registry();
     if let Some(profile) = reg
         .profiles
         .iter()
-        .find(|p| same_provider(&p.provider, provider) && p.is_active)
+        .find(|p| same_provider(&p.provider, &canon_p) && p.is_active)
     {
         json!({ "found": true, "profile": profile })
     } else {
@@ -1469,13 +1614,11 @@ mod tests {
     #[test]
     fn test_blocking_process_detection() {
         assert!(is_blocking_process("agy", "antigravity.exe"));
-        assert!(is_blocking_process("agy", "language_server_windows_x64.exe"));
-        assert!(is_blocking_process("agy", "agy.exe"));
+        assert!(is_blocking_process("agy", "antigravity"));
         assert!(!is_blocking_process("agy", "geminiapplauncher.exe"));
+        assert!(!is_blocking_process("agy", "agy.exe"));
         assert!(!is_blocking_process("claude", "agy.exe"));
-        assert!(is_blocking_process("claude", "claude.exe"));
-        assert!(is_blocking_process("grok", "grok.exe"));
-        assert!(is_blocking_process("opencode", "opencode.exe"));
+        assert!(!is_blocking_process("claude", "claude.exe"));
     }
 
     #[test]

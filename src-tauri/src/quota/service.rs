@@ -84,6 +84,20 @@ pub fn get_cached_provider_status(provider: &str) -> Option<ProviderQuotaStatus>
     cache.entries.get(provider).map(|(_, s)| s.clone())
 }
 
+pub fn invalidate_provider_cache(provider: &str) {
+    if let Ok(mut cache_guard) = CACHE.lock() {
+        if cache_guard.is_none() {
+            *cache_guard = Some(QuotaCache {
+                entries: load_persisted_cache(),
+            });
+        }
+        if let Some(ref mut cache) = *cache_guard {
+            cache.entries.remove(provider);
+            save_persisted_cache(cache);
+        }
+    }
+}
+
 
 pub fn fetch_single_provider(p: &str) -> ProviderQuotaStatus {
     match p {
@@ -159,7 +173,15 @@ fn build_cache_result(providers: &[&str]) -> Value {
 }
 
 #[tauri::command]
-pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
+pub async fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
+    tokio::task::spawn_blocking(move || {
+        get_subscription_quotas_direct(request, force)
+    })
+    .await
+    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+}
+
+pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool>) -> Value {
     let is_force = force.unwrap_or(false)
         || request
             .as_ref()

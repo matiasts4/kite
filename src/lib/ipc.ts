@@ -903,13 +903,38 @@ export async function pushWorkspaceChanges(workspaceId: string): Promise<Workspa
 
 // ── Account Switcher & Agent Handoff IPC ─────────────────────────────
 
+export interface ListSavedAccountsResult {
+  profiles: SavedAccountProfile[];
+  unregisteredLiveSession?: {
+    provider: string;
+    email: string;
+    planName?: string | null;
+    primaryRemainingPercent?: number | null;
+    primaryResetAt?: string | null;
+    timeUntilResetMs?: number | null;
+  } | null;
+}
+
 export async function listSavedAccounts(provider?: string): Promise<SavedAccountProfile[]> {
   try {
-    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[] }>('list_saved_accounts', { provider });
+    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[]; unregisteredLiveSession?: any }>('list_saved_accounts', { provider });
     return res?.profiles || [];
   } catch (err) {
     console.warn('[IPC] listSavedAccounts failed:', err);
     return [];
+  }
+}
+
+export async function listSavedAccountsFull(provider?: string): Promise<ListSavedAccountsResult> {
+  try {
+    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[]; unregisteredLiveSession?: any }>('list_saved_accounts', { provider });
+    return {
+      profiles: res?.profiles || [],
+      unregisteredLiveSession: res?.unregisteredLiveSession || null,
+    };
+  } catch (err) {
+    console.warn('[IPC] listSavedAccountsFull failed:', err);
+    return { profiles: [] };
   }
 }
 

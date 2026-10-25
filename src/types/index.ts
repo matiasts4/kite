@@ -122,6 +122,9 @@ export interface ChatThread {
   workspaceId: string | null;
   pinned: boolean;
   quotaHandoffOffer?: QuotaHandoffOffer | null;
+  sessionState?: string;
+  isWarm?: boolean;
+  isSettled?: boolean;
   createdAtUnixMs: number;
   updatedAtUnixMs: number;
 }

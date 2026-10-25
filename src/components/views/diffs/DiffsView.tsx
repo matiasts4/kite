@@ -50,7 +50,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const [currentWsId, setCurrentWsId] = useState<string | null>(() => {
     return (
       workspaceId ||
-      (typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null)
+      (typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null)
     );
   });
 
@@ -63,7 +63,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   // Auto-select workspace if none is selected
   useEffect(() => {
     if (!currentWsId && workspaces && workspaces.length > 0) {
-      const saved = typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null;
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
       const target = (saved && workspaces.some((w) => w.id === saved)) ? saved : workspaces[0].id;
       setCurrentWsId(target);
       onSelectWorkspace?.(target);
@@ -74,7 +74,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   useEffect(() => {
     if (currentWsId) {
       try {
-        localStorage.setItem('bmone.selectedWorkspaceId', currentWsId);
+        localStorage.setItem('kite.selectedWorkspaceId', currentWsId);
       } catch {}
     }
   }, [currentWsId]);
@@ -113,7 +113,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   // Layout & Visibility preferences with localStorage
   const [layout, setLayout] = useState<'unified' | 'split'>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.layout.v1');
+      const saved = localStorage.getItem('kite.diffs.layout.v1');
       if (saved === 'unified' || saved === 'split') return saved;
     } catch {}
     return 'unified';
@@ -121,7 +121,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   const [wordWrap, setWordWrap] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.wordwrap.v1');
+      const saved = localStorage.getItem('kite.diffs.wordwrap.v1');
       if (saved !== null) return saved === 'true';
     } catch {}
     return true; // Default to true so lines are never clipped!
@@ -129,7 +129,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   const [fileTreeOpen, setFileTreeOpen] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.filetree.v1');
+      const saved = localStorage.getItem('kite.diffs.filetree.v1');
       if (saved !== null) return saved === 'true';
     } catch {}
     return true; // Default to true so changed files are immediately visible!
@@ -137,7 +137,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   const [viewMode, setViewMode] = useState<'focused' | 'stream'>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.viewmode.v1');
+      const saved = localStorage.getItem('kite.diffs.viewmode.v1');
       if (saved === 'focused' || saved === 'stream') return saved;
     } catch {}
     return 'stream'; // Default to stream with all cards collapsed for instant load and easy one-by-one review
@@ -197,25 +197,25 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.layout.v1', layout);
+      localStorage.setItem('kite.diffs.layout.v1', layout);
     } catch {}
   }, [layout]);
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.wordwrap.v1', String(wordWrap));
+      localStorage.setItem('kite.diffs.wordwrap.v1', String(wordWrap));
     } catch {}
   }, [wordWrap]);
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.filetree.v1', String(fileTreeOpen));
+      localStorage.setItem('kite.diffs.filetree.v1', String(fileTreeOpen));
     } catch {}
   }, [fileTreeOpen]);
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.viewmode.v1', viewMode);
+      localStorage.setItem('kite.diffs.viewmode.v1', viewMode);
     } catch {}
   }, [viewMode]);
 
@@ -411,7 +411,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                     setCurrentWsId(ws.id);
                     onSelectWorkspace?.(ws.id);
                     try {
-                      localStorage.setItem('bmone.selectedWorkspaceId', ws.id);
+                      localStorage.setItem('kite.selectedWorkspaceId', ws.id);
                     } catch {}
                   }}
                 >
@@ -485,7 +485,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
           />
           <button
             type="button"
-            className="diffs-commit-btn"
+            className="primary-button diffs-commit-btn"
             disabled={!canCommit}
             onClick={handleCommitSubmit}
             title={
@@ -664,7 +664,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                           setCurrentWsId(ws.id);
                           onSelectWorkspace?.(ws.id);
                           try {
-                            localStorage.setItem('bmone.selectedWorkspaceId', ws.id);
+                            localStorage.setItem('kite.selectedWorkspaceId', ws.id);
                           } catch {}
                           setIsFolderMenuOpen(false);
                         }}

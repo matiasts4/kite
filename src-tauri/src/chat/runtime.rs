@@ -627,7 +627,8 @@ pub fn read_turn_updates(run_id: &str, after_sequence: u64, wait_ms: u64) -> Val
                 "afterSequence": after_sequence,
                 "nextSequence": next,
                 "events": events,
-                "resyncRequired": false
+                "resyncRequired": false,
+                "finished": finished
             });
         }
         let remaining = deadline.saturating_duration_since(Instant::now());

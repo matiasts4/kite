@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import type { SavedAccountProfile } from '../../types';
 import {
@@ -9,6 +10,8 @@ import {
 } from '../../lib/ipc';
 import { surfaceMotion } from '../../motion/standard/surfaces';
 import { springs, tweens } from '../../motion/standard/tokens';
+import { BrandLogo } from '../ui/BrandLogo';
+import { XIcon } from '../views/settings/icons';
 
 export interface AccountSwitcherModalProps {
   provider: string;
@@ -34,13 +37,16 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  const titleId = useId();
+  const descId = useId();
+
   const fetchProfiles = async () => {
     setLoading(true);
     setErrorMsg(null);
     try {
       const data = await listSavedAccounts(provider);
       setProfiles(data);
-    } catch (err: any) {
+    } catch {
       setErrorMsg('Error al cargar las cuentas guardadas');
     } finally {
       setLoading(false);
@@ -53,6 +59,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       setSuccessMsg(null);
       setErrorMsg(null);
       setShowAddForm(false);
+      setNewLabel('');
     }
   }, [isOpen, provider]);
 
@@ -61,19 +68,33 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     setSwitchingId(id);
     setErrorMsg(null);
     setSuccessMsg(null);
+    // Optimistically reflect active account immediately for instantaneous visual feedback
+    setProfiles((prev) =>
+      prev.map((p) => ({
+        ...p,
+        isActive: p.id === id,
+      }))
+    );
     try {
       const res = await switchAccountProfile(provider, id);
       if (res.success && res.profile) {
-        setSuccessMsg(`Sesión cambiada a: ${res.profile.label}`);
+        setSuccessMsg(`Sesión cambiada exitosamente a «${res.profile.label}».`);
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-command', {
+            detail: { command: 'restart-agent' },
+          })
+        );
         await fetchProfiles();
         if (onAccountSwitched) {
           onAccountSwitched(res.profile);
         }
       } else {
         setErrorMsg(res.error || 'No se pudo cambiar la sesión.');
+        await fetchProfiles();
       }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Error al cambiar cuenta');
+      await fetchProfiles();
     } finally {
       setSwitchingId(null);
     }
@@ -88,7 +109,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       const label = newLabel.trim() || `Cuenta ${profiles.length + 1}`;
       const res = await saveCurrentAccountProfile(provider, label);
       if (res.success && res.profile) {
-        setSuccessMsg(`Sesión actual guardada como "${res.profile.label}"`);
+        setSuccessMsg(`Sesión actual guardada como «${res.profile.label}».`);
         setNewLabel('');
         setShowAddForm(false);
         await fetchProfiles();
@@ -104,248 +125,177 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm('¿Seguro que deseas eliminar este perfil guardado?')) return;
+    if (!window.confirm('¿Seguro que deseas eliminar este perfil guardado de la bóveda?')) return;
     try {
       await deleteAccountProfile(provider, id);
       await fetchProfiles();
-    } catch (err: any) {
+    } catch {
       setErrorMsg('Error al eliminar la cuenta');
     }
   };
 
-  const modal = (
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      onClose();
+    }
+  };
+
+  if (!isOpen) return null;
+
+  const content = (
     <motion.div
-      key="account-switcher"
+      key="account-switcher-scrim"
       {...surfaceMotion('scrim')}
       transition={tweens.overlay}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 10005,
-        backgroundColor: 'rgba(0, 0, 0, 0.75)',
-        backdropFilter: 'blur(8px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '16px',
-      }}
+      className="qt-modal-scrim"
       onClick={onClose}
+      onKeyDown={handleKeyDown}
+      tabIndex={-1}
     >
       <motion.div
+        key="account-switcher-dialog"
         {...surfaceMotion('dialog')}
         transition={springs.dialog}
-        style={{
-          width: '100%',
-          maxWidth: '480px',
-          backgroundColor: '#18181b',
-          border: '1px solid rgba(255, 255, 255, 0.12)',
-          borderRadius: '14px',
-          boxShadow: '0 25px 60px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.05)',
-          color: '#f4f4f5',
-          fontSize: '13px',
-          overflow: 'hidden',
-          display: 'flex',
-          flexDirection: 'column',
-          maxHeight: '90vh',
-        }}
+        className="qt-modal-container qt-modal-container--compact"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
       >
         {/* Header */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '16px 20px',
-            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-          }}
-        >
-          <div>
-            <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>
-              Cuentas de {providerLabel}
-            </h3>
-            <p style={{ margin: '2px 0 0', color: '#a1a1aa', fontSize: '12px' }}>
-              Cambia rápidamente de cuenta sin cerrar sesión ni volver al navegador.
-            </p>
+        <header className="qt-modal-header">
+          <div className="qt-modal-header__brand">
+            <span className="qt-modal-icon-badge" aria-hidden="true">
+              <BrandLogo engine={provider} size={22} />
+            </span>
+            <div>
+              <h2 id={titleId} className="qt-modal-title">
+                Cuentas de {providerLabel}
+              </h2>
+              <p id={descId} className="qt-modal-desc">
+                Cambia rápidamente de cuenta sin cerrar sesión ni volver al navegador.
+              </p>
+            </div>
           </div>
           <button
             type="button"
+            className="qt-modal-close"
             onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: '#a1a1aa',
-              cursor: 'pointer',
-              fontSize: '18px',
-              padding: '4px',
-              borderRadius: '4px',
-              lineHeight: 1,
-            }}
+            aria-label="Cerrar"
           >
-            ✕
+            <XIcon size={14} />
           </button>
-        </div>
+        </header>
 
         {/* Content Body */}
-        <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {errorMsg && (
-            <div style={{ padding: '8px 12px', borderRadius: '6px', backgroundColor: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#fca5a5', fontSize: '12px' }}>
+        <div className="qt-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {errorMsg ? (
+            <div className="qt-banner" data-tone="error">
               {errorMsg}
             </div>
-          )}
+          ) : null}
 
-          {successMsg && (
-            <div style={{ padding: '8px 12px', borderRadius: '6px', backgroundColor: 'rgba(16, 185, 129, 0.15)', border: '1px solid rgba(16, 185, 129, 0.3)', color: '#6ee7b7', fontSize: '12px' }}>
+          {successMsg ? (
+            <div className="qt-banner" data-tone="ok">
               {successMsg}
             </div>
-          )}
+          ) : null}
 
           {/* Accounts List */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="qt-accounts-modal-list">
             {loading ? (
-              <div style={{ textAlign: 'center', padding: '24px 0', color: '#a1a1aa' }}>
-                Cargando perfiles...
+              <div className="qt-empty" style={{ padding: '24px 0' }}>
+                Cargando perfiles guardados…
               </div>
             ) : profiles.length === 0 ? (
-              <div
-                style={{
-                  padding: '24px 16px',
-                  textAlign: 'center',
-                  backgroundColor: 'rgba(255, 255, 255, 0.02)',
-                  borderRadius: '10px',
-                  border: '1px dashed rgba(255, 255, 255, 0.1)',
-                  color: '#a1a1aa',
-                }}
-              >
-                <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#e4e4e7' }}>
-                  No tienes cuentas guardadas en la bóveda todavía.
-                </p>
-                <p style={{ margin: 0, fontSize: '12px' }}>
-                  Guarda la sesión actual con la que estás trabajando para empezar a rotar cuentas en 1 clic.
-                </p>
+              <div className="qt-empty">
+                <strong>No tienes cuentas guardadas en la bóveda todavía</strong>
+                <span>
+                  Guarda la sesión con la que estás trabajando en tu equipo para alternar cuentas en 1 clic.
+                </span>
               </div>
             ) : (
               profiles.map((prof) => {
                 const isCurrent = prof.isActive;
                 const isSwitching = switchingId === prof.id;
-                const remPct = prof.primaryRemainingPercent !== null && prof.primaryRemainingPercent !== undefined
-                  ? Math.round(prof.primaryRemainingPercent)
-                  : null;
+                const remPct =
+                  prof.primaryRemainingPercent !== null && prof.primaryRemainingPercent !== undefined
+                    ? Math.round(prof.primaryRemainingPercent)
+                    : null;
 
                 return (
                   <div
                     key={prof.id}
+                    className="qt-account-row"
+                    data-active={isCurrent ? '' : undefined}
                     onClick={() => !isCurrent && handleSwitch(prof.id)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '12px 14px',
-                      borderRadius: '10px',
-                      border: isCurrent
-                        ? '1px solid rgba(16, 185, 129, 0.6)'
-                        : '1px solid rgba(255, 255, 255, 0.08)',
-                      backgroundColor: isCurrent
-                        ? 'rgba(16, 185, 129, 0.1)'
-                        : 'rgba(255, 255, 255, 0.03)',
-                      cursor: isCurrent ? 'default' : 'pointer',
-                      transition: 'all 120ms ease',
-                    }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
-                      <span
-                        style={{
-                          width: '8px',
-                          height: '8px',
-                          borderRadius: '50%',
-                          backgroundColor: isCurrent ? '#10b981' : '#71717a',
-                          flexShrink: 0,
-                        }}
-                      />
-                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontWeight: 600, color: isCurrent ? '#34d399' : '#f4f4f5' }}>
-                            {prof.label}
-                          </span>
-                          {isCurrent && (
-                            <span
-                              style={{
-                                fontSize: '10px',
-                                fontWeight: 600,
-                                padding: '1px 5px',
-                                borderRadius: '4px',
-                                backgroundColor: 'rgba(16, 185, 129, 0.25)',
-                                color: '#6ee7b7',
-                              }}
-                            >
+                    <div className="qt-account-row__main">
+                      <div className="qt-account-row__avatar-container">
+                        <span className="qt-account-row__avatar" aria-hidden="true">
+                          {(prof.label || '?').trim().charAt(0).toUpperCase()}
+                        </span>
+                        <div className="qt-account-row__logo-badge">
+                          <BrandLogo engine={provider} size={14} />
+                        </div>
+                      </div>
+
+                      <div className="qt-account-row__details">
+                        <div className="qt-account-row__name-line">
+                          <span className="qt-account-row__label">{prof.label}</span>
+                          {isCurrent ? (
+                            <span className="qt-chip" data-tone="ok">
                               Activa
                             </span>
-                          )}
+                          ) : null}
                         </div>
-                        <div style={{ fontSize: '11px', color: '#a1a1aa', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          {prof.email && <span>{prof.email}</span>}
-                          {prof.planName && <span>• {prof.planName}</span>}
+                        <div className="qt-account-row__sub-line">
+                          {prof.email ? <span>{prof.email}</span> : <span>Sin correo detectado</span>}
+                          {prof.planName ? <span>· {prof.planName}</span> : null}
                         </div>
                       </div>
                     </div>
 
-                    {/* Right side: Quota & Actions */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0, marginLeft: '12px' }}>
-                      {remPct !== null && (
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px' }}>
+                    <div className="qt-account-row__actions">
+                      {remPct !== null ? (
+                        <div className="qt-account-row__quota-info">
                           <span
-                            style={{
-                              fontSize: '12px',
-                              fontWeight: 600,
-                              color: remPct >= 50 ? '#10b981' : remPct >= 20 ? '#f59e0b' : '#ef4444',
-                            }}
+                            className="qt-account-row__pct"
+                            data-tone={remPct >= 45 ? 'ok' : remPct >= 20 ? 'warn' : 'low'}
                           >
                             {remPct}%
                           </span>
-                          <span style={{ fontSize: '10px', color: '#71717a' }}>
-                            disponible
-                          </span>
+                          <span className="qt-hint">disponible</span>
                         </div>
-                      )}
+                      ) : null}
 
                       {!isCurrent ? (
                         <button
                           type="button"
+                          className="qt-button"
                           disabled={isSwitching}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleSwitch(prof.id);
                           }}
-                          style={{
-                            padding: '5px 12px',
-                            borderRadius: '6px',
-                            backgroundColor: 'rgba(255, 255, 255, 0.08)',
-                            color: '#e4e4e7',
-                            border: 'none',
-                            fontSize: '11px',
-                            fontWeight: 500,
-                            cursor: 'pointer',
-                          }}
                         >
-                          {isSwitching ? 'Cambiando...' : 'Activar'}
+                          {isSwitching ? 'Cambiando…' : 'Activar'}
                         </button>
                       ) : null}
 
                       <button
                         type="button"
+                        className="qt-icon-button"
                         onClick={(e) => handleDelete(prof.id, e)}
-                        title="Eliminar perfil"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#71717a',
-                          padding: '4px',
-                          cursor: 'pointer',
-                          fontSize: '12px',
-                          borderRadius: '4px',
-                        }}
+                        title="Eliminar de la bóveda"
+                        aria-label="Eliminar cuenta"
                       >
-                        🗑
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
                       </button>
                     </div>
                   </div>
@@ -354,167 +304,77 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
             )}
           </div>
 
-          {/* Add form */}
+          {/* Snapshot current session form */}
           {showAddForm ? (
-            <div
-              style={{
-                marginTop: '8px',
-                padding: '14px',
-                borderRadius: '10px',
-                backgroundColor: 'rgba(0, 0, 0, 0.3)',
-                border: '1px solid rgba(255, 255, 255, 0.1)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px',
-              }}
-            >
-              <div style={{ fontSize: '12px', fontWeight: 600, color: '#e4e4e7' }}>
-                Guardar sesión actual de {providerLabel}
+            <div className="qt-save-card">
+              <div className="qt-save-card__copy">
+                <h4>Guardar sesión actual de {providerLabel}</h4>
+                <p>
+                  Captura las credenciales de la cuenta que está actualmente activa en tu equipo y la guarda en la bóveda local.
+                </p>
               </div>
-              <p style={{ margin: 0, fontSize: '11px', color: '#a1a1aa' }}>
-                Captura las credenciales de la cuenta que está actualmente activa en tu equipo y la guarda en la bóveda local.
-              </p>
               <input
                 type="text"
-                placeholder="Nombre o etiqueta (ej. Google Pro Personal)"
+                className="qt-input"
+                placeholder="Nombre o etiqueta (ej. Google Pro Personal, Claude Team)..."
                 value={newLabel}
                 onChange={(e) => setNewLabel(e.target.value)}
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  backgroundColor: '#09090b',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  color: '#f4f4f5',
-                  fontSize: '12px',
-                  outline: 'none',
-                }}
+                autoFocus
               />
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <div className="qt-save-card__actions">
                 <button
                   type="button"
+                  className="qt-button"
                   onClick={() => setShowAddForm(false)}
-                  style={{
-                    padding: '6px 12px',
-                    borderRadius: '6px',
-                    background: 'none',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    color: '#a1a1aa',
-                    fontSize: '11px',
-                    cursor: 'pointer',
-                  }}
                 >
                   Cancelar
                 </button>
                 <button
                   type="button"
+                  className="qt-button qt-button--primary"
                   disabled={isSaving}
                   onClick={handleSaveCurrent}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: '6px',
-                    backgroundColor: '#10b981',
-                    color: '#09090b',
-                    fontWeight: 600,
-                    border: 'none',
-                    fontSize: '11px',
-                    cursor: isSaving ? 'not-allowed' : 'pointer',
-                  }}
                 >
-                  {isSaving ? 'Guardando...' : 'Guardar sesión actual'}
+                  {isSaving ? 'Guardando…' : 'Guardar sesión actual'}
                 </button>
               </div>
             </div>
           ) : (
             <button
               type="button"
+              className="qt-save-trigger"
               onClick={() => setShowAddForm(true)}
-              style={{
-                marginTop: '4px',
-                padding: '8px 12px',
-                borderRadius: '8px',
-                border: '1px dashed rgba(255, 255, 255, 0.2)',
-                backgroundColor: 'transparent',
-                color: '#60a5fa',
-                fontSize: '12px',
-                fontWeight: 500,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px',
-                transition: 'all 120ms ease',
-              }}
             >
-              <span>+ Guardar sesión actual como nueva cuenta</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              <span>Guardar sesión actual como nueva cuenta en la bóveda</span>
             </button>
           )}
         </div>
 
-        {/* Footer with Antigravity Login Instructions */}
-        <div
-          style={{
-            padding: '14px 20px',
-            borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-            backgroundColor: 'rgba(0, 0, 0, 0.25)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '10px',
-          }}
-        >
-          <div
-            style={{
-              padding: '10px 12px',
-              borderRadius: '8px',
-              backgroundColor: 'rgba(59, 130, 246, 0.08)',
-              border: '1px solid rgba(59, 130, 246, 0.2)',
-              fontSize: '11px',
-              color: '#93c5fd',
-              lineHeight: 1.5,
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span>ℹ️</span>
-              <span>¿Cómo agregar una cuenta adicional de Antigravity?</span>
-            </div>
-            <p style={{ margin: '0 0 6px', color: '#bfdbfe' }}>
-              Antigravity no tiene un comando de terminal como <code>agy login</code>. La autenticación oficial de Google se realiza a través de su aplicación:
-            </p>
-            <ol style={{ margin: 0, paddingLeft: '18px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-              <li>Abre <strong>Antigravity IDE</strong> (la aplicación de escritorio).</li>
-              <li>En la esquina inferior izquierda, haz clic en el icono de <strong>Cuentas</strong> e inicia sesión con tu otra cuenta de Google AI Pro en el navegador.</li>
-              <li>Cierra Antigravity para liberar los archivos de sesión.</li>
-              <li>Vuelve aquí y pulsa <strong>"+ Guardar sesión actual como nueva cuenta"</strong>.</li>
-            </ol>
-            <p style={{ margin: '6px 0 0', color: '#93c5fd', fontStyle: 'italic' }}>
-              ¡Solo debes hacer este inicio de sesión en el navegador una única vez por cuenta! Luego rotarás entre ellas en 1 clic desde Kite.
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: '11px', color: '#71717a' }}>
-              Seguro & Nativo • Sin proxies externos
+        {/* Footer */}
+        <footer className="qt-modal-footer">
+          <div className="qt-modal-footer__count">
+            <span className="qt-hint">
+              {profiles.length} cuenta{profiles.length === 1 ? '' : 's'} guardada{profiles.length === 1 ? '' : 's'} en este equipo
             </span>
-            <button
-              type="button"
-              onClick={onClose}
-              style={{
-                padding: '6px 14px',
-                borderRadius: '6px',
-                backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                color: '#f4f4f5',
-                border: 'none',
-                fontSize: '12px',
-                fontWeight: 500,
-                cursor: 'pointer',
-              }}
-            >
+          </div>
+          <div className="qt-modal-footer__actions">
+            <button type="button" className="qt-button" onClick={onClose}>
               Cerrar
             </button>
           </div>
-        </div>
+        </footer>
       </motion.div>
     </motion.div>
   );
 
-  return <AnimatePresence>{isOpen ? modal : null}</AnimatePresence>;
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
+    <AnimatePresence>{isOpen ? content : null}</AnimatePresence>,
+    document.querySelector('.app-frame--scaled') ?? document.body
+  );
 };

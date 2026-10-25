@@ -1,6 +1,6 @@
 //! Driver declarations: what each connected driver actually accepts.
 //!
-//! Every field is copied from the observed matrix in
+//! Every field is derived directly from the observed matrix in
 //! `odd/tasks/agent-sessions-t0.md`. A driver id alone proves nothing: when the
 //! binary was absent or a flag was not exercised, the declaration says so
 //! instead of inheriting a capability from a sibling driver.

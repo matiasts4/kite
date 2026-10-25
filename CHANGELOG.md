@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.37] - 2026-10-25
+
+> Conmutación Asíncrona de Cuentas, Restauración de Sesiones y Estabilidad de Terminal
+
+### Added
+- Conmutador desplegable flotante de cuentas superpuesto en el popover de Cuotas
+- Restauración automática de la conversación y sesión activa de AntiGravity al reiniciar o cambiar de cuenta
+
+### Changed
+- Optimización del apagado y reinicio de agentes reduciendo latencia y timeouts
+
+### Fixed
+- Eliminación del congelamiento de la interfaz durante el cambio de cuenta con ejecución asíncrona
+- Corrección de caracteres fantasma y artefactos en la terminal reseteando el estado ANSI al reconectar
+- Corrección del bloqueo de dimensiones de la terminal en 80 columnas sincronizando tamaño real de filas y columnas
+
+---
+
+## [0.1.36] - 2026-10-25
+
+> Consolidacion de Sistema de Diseno y Pestanas Dinamicas
+
+### Added
+- Sistema unificado de border-radius y tokens semánticos en visual-language y Tailwind
+- Pestañas Prompts y Tasks configurables y cerrables a demanda en RightDock
+
+### Changed
+- Estandarización de alturas y controles en paneles laterales a 32px y 28px
+- Integración de directrices estrictas de diseño y arquitectura en AGENTS.md
+
+### Fixed
+- Rediseño visual del botón Commit en DiffsView alineado con el tema principal
+
+---
+
 ## [0.1.35] - 2026-10-25
 
 > Restauracion de ZedOrb WebGL2 y Fluidez en Barra de Tareas

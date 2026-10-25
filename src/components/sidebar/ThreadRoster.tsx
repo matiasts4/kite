@@ -14,6 +14,7 @@ import {
   CloseIcon,
   PencilIcon,
 } from './sidebarIcons';
+import { BrandLogo } from '../ui/BrandLogo';
 
 export interface ThreadRosterProps {
   threads: ChatThreadSummary[];
@@ -33,17 +34,27 @@ export interface ThreadRosterProps {
   activeContextMenuTargetId?: string | null;
 }
 
-function getStatusDotClass(status?: string): string {
-  switch (status) {
-    case 'running':
-      return 'chat-thread-row__dot chat-thread-row__dot--running';
-    case 'waiting':
-      return 'chat-thread-row__dot chat-thread-row__dot--waiting';
-    case 'error':
-      return 'chat-thread-row__dot chat-thread-row__dot--failed';
-    default:
-      return 'chat-thread-row__dot';
+function getStatusDotClass(status?: string, sessionState?: string, isWarm?: boolean): string {
+  if (status === 'running') {
+    return 'chat-thread-row__dot chat-thread-row__dot--running';
   }
+  if (status === 'waiting') {
+    return 'chat-thread-row__dot chat-thread-row__dot--waiting';
+  }
+  if (status === 'error') {
+    return 'chat-thread-row__dot chat-thread-row__dot--failed';
+  }
+  if (isWarm || sessionState === 'warm') {
+    return 'chat-thread-row__dot chat-thread-row__dot--warm';
+  }
+  return 'chat-thread-row__dot chat-thread-row__dot--settled';
+}
+
+export function isThreadSettled(thread: ChatThreadSummary): boolean {
+  if (thread.isSettled !== undefined) return thread.isSettled;
+  const isWarm = Boolean(thread.isWarm || thread.sessionState === 'warm');
+  const isBusy = thread.status === 'running' || thread.status === 'waiting' || thread.status === 'error';
+  return !isWarm && !isBusy;
 }
 
 function getTrailingModifier(status?: string): string {
@@ -109,6 +120,18 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   const otherThreads = threads.filter(
     (t) => !(t.isPinned || t.pinned) && (!t.workspaceId || !workspaceIds.has(t.workspaceId))
   );
+
+  const activeOtherThreads = otherThreads.filter((t) => !isThreadSettled(t));
+  const settledOtherThreads = otherThreads.filter((t) => isThreadSettled(t));
+
+  const [settledOpen, setSettledOpen] = useState<boolean | null>(null);
+  const isSelectedInSettled = selectedThreadId
+    ? settledOtherThreads.some((t) => t.id === selectedThreadId)
+    : false;
+  const isSettledExpanded =
+    settledOpen !== null
+      ? settledOpen
+      : activeOtherThreads.length === 0 || isSelectedInSettled;
 
   const toggleWorkspace = (wsId: string) => {
     setExpandedWorkspaces((prev) => {
@@ -231,6 +254,8 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       );
     }
 
+    const isSettled = isThreadSettled(thread);
+
     return (
       <motion.div
         layout
@@ -238,7 +263,9 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
         key={thread.id}
         className={`chat-thread-row${isSelected ? ' chat-thread-row--selected' : ''}${
           nested ? ' chat-thread-row--nested' : ''
-        }${isMenuOpen ? ' chat-thread-row--menu-open' : ''}`}
+        }${isMenuOpen ? ' chat-thread-row--menu-open' : ''}${
+          isSettled ? ' chat-thread-row--settled' : ''
+        }`}
         data-thread-id={thread.id}
       >
         <button
@@ -252,7 +279,8 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           onContextMenu={(e) => handleOpenThreadMenu(thread, e)}
           title={folderName ? `${thread.title} · ${folderName}` : thread.title}
         >
-          <i aria-hidden="true" className={getStatusDotClass(thread.status)} />
+          <i aria-hidden="true" className={getStatusDotClass(thread.status, thread.sessionState, thread.isWarm)} />
+          <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title}</span>
           {thread.unread && <i aria-hidden="true" className="chat-thread-row__unread" />}
           <span
@@ -394,16 +422,55 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       })}
 
       {/* 4. Other threads */}
-      {otherThreads.length > 0 && (
+      {activeOtherThreads.length > 0 && (
         <section className="chat-rail__band">
           <h3 className="chat-rail__band-title">Other threads</h3>
           <section aria-label="Other threads" className="chat-thread-list">
-            {otherThreads.map((t) => renderRow(t, false))}
+            {activeOtherThreads.map((t) => renderRow(t, false))}
           </section>
         </section>
       )}
 
-      {/* 5. Archived threads button */}
+      {/* 5. Settled threads */}
+      {settledOtherThreads.length > 0 && (
+        <section className="chat-rail__band chat-rail__band--settled">
+          <button
+            type="button"
+            className="chat-rail__settled-toggle"
+            onClick={() => setSettledOpen(!isSettledExpanded)}
+            aria-expanded={isSettledExpanded}
+          >
+            <ChevronRightIcon
+              size={10}
+              style={{
+                transform: isSettledExpanded ? 'rotate(90deg)' : 'none',
+                transition: 'transform 120ms ease',
+                flexShrink: 0,
+              }}
+            />
+            <span className="chat-rail__band-title" style={{ margin: 0, textTransform: 'none' }}>Settled</span>
+            <span
+              style={{
+                marginLeft: 'auto',
+                fontSize: 'var(--text-badge)',
+                color: 'var(--text-faint)',
+                padding: '0 4px',
+                borderRadius: 'var(--radius-chip)',
+                background: 'var(--chip-fill)',
+              }}
+            >
+              {settledOtherThreads.length}
+            </span>
+          </button>
+          {isSettledExpanded && (
+            <section aria-label="Settled threads" className="chat-thread-list">
+              {settledOtherThreads.map((t) => renderRow(t, false))}
+            </section>
+          )}
+        </section>
+      )}
+
+      {/* 6. Archived threads button */}
       <button
         type="button"
         aria-label="Archived threads"

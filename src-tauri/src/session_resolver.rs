@@ -459,6 +459,7 @@ fn resolve_antigravity_session_id(
     // Gather candidate conversations matching `cwd` from conversation_summaries.db and history.jsonl
     let mut workspace_candidates: HashSet<String> = HashSet::new();
     let mut summary_meta: HashMap<String, (String, String)> = HashMap::new();
+    let mut most_recent_ws_candidate: Option<String> = None;
 
     let db_path = agy_dir.join("conversation_summaries.db");
     if db_path.is_file() {
@@ -502,6 +503,12 @@ fn resolve_antigravity_session_id(
                                 uris_raw.to_ascii_lowercase().contains(&target_uri)
                             });
                         if uri_matched {
+                            if most_recent_ws_candidate.is_none() {
+                                most_recent_ws_candidate = Some(conv_id.clone());
+                            }
+                            if root_pid.is_some() && locked_conversations.contains_key(&conv_id) {
+                                return Some(conv_id);
+                            }
                             workspace_candidates.insert(conv_id.clone());
                             summary_meta.insert(conv_id, (title, preview));
                         }
@@ -745,6 +752,12 @@ fn resolve_antigravity_session_id(
                 }
             }
         }
+    }
+
+    // Fallback: if scrollback scoring was inconclusive, resume the most recent
+    // conversation matching this workspace from conversation_summaries.db
+    if let Some(recent_id) = most_recent_ws_candidate {
+        return Some(recent_id);
     }
 
     None

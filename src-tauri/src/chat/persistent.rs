@@ -43,7 +43,7 @@ pub const ANTIGRAVITY_DRIVER: &str = "antigravity";
 /// The canonical OpenCode driver id.
 pub const OPENCODE_DRIVER: &str = "opencode";
 
-/// The argument prefix the lasting Antigravity wire needs. It is copied from
+/// The argument prefix the lasting Antigravity wire needs. It is sourced directly from
 /// the observed flags: `--print` runs one turn without a prompt positional,
 /// `--input-format stream-json` reads one NDJSON message per line, and the
 /// matching output format is required by the observed launcher.

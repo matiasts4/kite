@@ -2,11 +2,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import type { SavedAccountProfile } from '../../../types';
 import {
   deleteAccountProfile,
-  listSavedAccounts,
+  listSavedAccountsFull,
   saveCurrentAccountProfile,
   switchAccountProfile,
 } from '../../../lib/ipc';
-import { BrandLogo } from '../agents/engineMetadata';
+import { BrandLogo } from '../../ui/BrandLogo';
+import { SparklesIcon } from './icons';
 
 /** Providers whose local session can be snapshotted into the account vault. */
 export const MULTI_ACCOUNT_PROVIDERS: { id: string; label: string }[] = [
@@ -36,6 +37,10 @@ export interface AccountVaultProps {
 export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
   const [provider, setProvider] = useState<string>(MULTI_ACCOUNT_PROVIDERS[0].id);
   const [profiles, setProfiles] = useState<SavedAccountProfile[]>([]);
+  const [unregisteredSession, setUnregisteredSession] = useState<{
+    email: string;
+    planName?: string | null;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [label, setLabel] = useState('');
@@ -48,7 +53,11 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setProfiles(await listSavedAccounts(provider));
+      const res = await listSavedAccountsFull(provider);
+      setProfiles(res.profiles || []);
+      setUnregisteredSession(
+        res.unregisteredLiveSession ? { email: res.unregisteredLiveSession.email, planName: res.unregisteredLiveSession.planName } : null
+      );
     } catch {
       setError('No se pudieron cargar las cuentas guardadas.');
     } finally {
@@ -67,31 +76,53 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
     setSwitchingId(id);
     setError(null);
     setNotice(null);
+    // Optimistically reflect active account immediately for instantaneous visual feedback
+    setProfiles((prev) =>
+      prev.map((p) => ({
+        ...p,
+        isActive: p.id === id,
+      }))
+    );
     try {
       const res = await switchAccountProfile(provider, id);
       if (res.success && res.profile) {
-        setNotice(`Sesión cambiada a «${res.profile.label}».`);
-        await refresh();
+        const restartedCount = (res as any).terminalsRestarted ?? 0;
+        const terminalNotice =
+          restartedCount > 0
+            ? ` (${restartedCount} terminal${restartedCount > 1 ? 'es' : ''} actualizada${restartedCount > 1 ? 's' : ''})`
+            : '';
+        setNotice(`Sesión cambiada a «${res.profile.label}»${terminalNotice}.`);
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-command', {
+            detail: { command: 'restart-agent' },
+          })
+        );
+        void refresh();
         onChanged?.();
       } else {
         setError(res.error || 'No se pudo cambiar la sesión.');
+        await refresh();
       }
+    } catch (err: any) {
+      setError(err?.message || 'Error al cambiar cuenta');
+      await refresh();
     } finally {
       setSwitchingId(null);
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = async (overrideLabel?: string) => {
     if (saving) return;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
-      const res = await saveCurrentAccountProfile(provider, label.trim() || `Cuenta ${profiles.length + 1}`);
+      const profileName = overrideLabel || label.trim() || `Cuenta ${profiles.length + 1}`;
+      const res = await saveCurrentAccountProfile(provider, profileName);
       if (res.success && res.profile) {
         setNotice(`Sesión actual guardada como «${res.profile.label}».`);
         setLabel('');
-        await refresh();
+        void refresh();
         onChanged?.();
       } else {
         setError(res.error || 'No se pudo guardar la sesión actual.');
@@ -130,6 +161,30 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
       {error ? <div className="qt-banner" data-tone="error">{error}</div> : null}
       {notice ? <div className="qt-banner" data-tone="ok">{notice}</div> : null}
 
+      {unregisteredSession ? (
+        <div className="qt-banner" data-tone="warn" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+          <div>
+            <strong style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+              <SparklesIcon size={13} />
+              <span>Sesión en uso no registrada:</span>
+            </strong>{' '}
+            <code>{unregisteredSession.email}</code>
+            <div style={{ fontSize: '11px', opacity: 0.85, marginTop: '2px' }}>
+              Esta cuenta está activa en tu sistema operativo pero aún no la has guardado en la bóveda de {providerLabel}.
+            </div>
+          </div>
+          <button
+            type="button"
+            className="qt-button qt-button--primary"
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={saving}
+            onClick={() => handleSave(unregisteredSession.email)}
+          >
+            Guardar en bóveda
+          </button>
+        </div>
+      ) : null}
+
       {loading && profiles.length === 0 ? (
         <div className="qt-empty">Cargando cuentas…</div>
       ) : profiles.length === 0 ? (
@@ -146,9 +201,14 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
             return (
               <article key={prof.id} className="qt-account" data-active={prof.isActive ? '' : undefined}>
                 <header className="qt-account__head">
-                  <span className="qt-account__avatar" aria-hidden="true">
-                    {(prof.label || '?').trim().charAt(0).toUpperCase()}
-                  </span>
+                  <div className="qt-account__avatar-lockup">
+                    <span className="qt-account__avatar" aria-hidden="true">
+                      {(prof.label || '?').trim().charAt(0).toUpperCase()}
+                    </span>
+                    <span className="qt-account__provider-badge">
+                      <BrandLogo engine={provider} size={13} />
+                    </span>
+                  </div>
                   <div className="qt-account__id">
                     <div className="qt-account__name">
                       <span>{prof.label}</span>
@@ -220,7 +280,7 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
             if (e.key === 'Enter') void handleSave();
           }}
         />
-        <button type="button" className="qt-button qt-button--primary" disabled={saving} onClick={handleSave}>
+        <button type="button" className="qt-button qt-button--primary" disabled={saving} onClick={() => void handleSave()}>
           {saving ? 'Guardando…' : 'Guardar sesión'}
         </button>
       </div>

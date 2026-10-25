@@ -14,6 +14,8 @@ import { diagnoseProvider } from '../../lib/quota/providerState';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { saveQuotaPreferences } from '../../lib/quota/quotaManager';
 import { openSettingsTab } from '../../lib/settingsNav';
+import { listSavedAccounts, switchAccountProfile } from '../../lib/ipc';
+import type { SavedAccountProfile } from '../../types';
 import { MOTION_EXIT_MS } from '../../motion/contract';
 import { surfaceMotion } from '../../motion/standard/surfaces';
 
@@ -43,12 +45,66 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   phase = 'in',
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null);
+  const accountsDropdownRef = useRef<HTMLDivElement>(null);
+  const [isAccountsExpanded, setIsAccountsExpanded] = useState(false);
+  const [savedAccounts, setSavedAccounts] = useState<SavedAccountProfile[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [switchingAccountId, setSwitchingAccountId] = useState<string | null>(null);
+  const [switchFeedback, setSwitchFeedback] = useState<string | null>(null);
 
   const handleOpenSettings = (providerId?: string) => {
     onClose();
     openSettingsTab('quotas', providerId);
   };
-  const openAccounts = () => handleOpenSettings(selectedProvider);
+
+  const toggleAccountsExpanded = () => {
+    setIsAccountsExpanded((prev) => !prev);
+  };
+  const openAccounts = toggleAccountsExpanded;
+
+  const fetchAccounts = useCallback(async (prov: string) => {
+    setLoadingAccounts(true);
+    setSwitchFeedback(null);
+    try {
+      const list = await listSavedAccounts(prov);
+      setSavedAccounts(list);
+    } catch {
+      setSavedAccounts([]);
+    } finally {
+      setLoadingAccounts(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isAccountsExpanded) {
+      void fetchAccounts(selectedProvider);
+    }
+  }, [isAccountsExpanded, selectedProvider, fetchAccounts]);
+
+  const handleSwitchAccount = async (profileId: string) => {
+    setSwitchingAccountId(profileId);
+    setSwitchFeedback(null);
+    try {
+      const res = await switchAccountProfile(selectedProvider, profileId);
+      if (res.success) {
+        setSwitchFeedback('Cuenta activada');
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-command', {
+            detail: { command: 'restart-agent' },
+          })
+        );
+        // Dispatch background terminal reconnect and quota refresh without blocking UI
+        void onRefresh();
+        void fetchAccounts(selectedProvider);
+      } else {
+        setSwitchFeedback(res.error || 'Error al cambiar cuenta');
+      }
+    } catch (err: any) {
+      setSwitchFeedback(err?.message || 'Error al cambiar cuenta');
+    } finally {
+      setSwitchingAccountId(null);
+    }
+  };
 
   const currentQuota = allQuotas[selectedProvider] || null;
   const diagnostic = diagnoseProvider(currentQuota);
@@ -118,6 +174,12 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   useEffect(() => {
     const handlePointerDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
+      if (isAccountsExpanded && accountsDropdownRef.current && !accountsDropdownRef.current.contains(target)) {
+        if (!target.closest('.subscription-quota-account-toggle')) {
+          setIsAccountsExpanded(false);
+          return;
+        }
+      }
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         if (!target.closest('.subscription-quota-badge')) {
           onClose();
@@ -126,7 +188,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     };
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [onClose]);
+  }, [onClose, isAccountsExpanded]);
 
   const popoverNode = (
     <motion.div
@@ -664,53 +726,283 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
               </div>
             )}
 
-            {/* Multi-Account Switcher Quick Pill */}
+            {/* Multi-Account Bar & Floating Overlay */}
             <div
               style={{
+                position: 'relative',
                 display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
+                flexDirection: 'column',
                 padding: '6px 10px',
-                borderRadius: '6px',
+                borderRadius: 'var(--control-radius, 8px)',
                 backgroundColor: 'var(--block-fill)',
                 border: '1px solid var(--block-stroke)',
                 marginTop: '4px',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
-                <span
-                  style={{
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    color: 'var(--text-primary)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={openAccounts}
+              <div
                 style={{
-                  background: 'none',
-                  border: '1px solid var(--accent-tint-strong)',
-                  backgroundColor: 'var(--accent-tint)',
-                  color: 'var(--accent)',
-                  padding: '3px 8px',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  flexShrink: 0,
-                  marginLeft: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  width: '100%',
                 }}
               >
-                Cambiar cuenta...
-              </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      color: 'var(--text-primary)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
+                  >
+                    {currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="subscription-quota-account-toggle"
+                  onClick={toggleAccountsExpanded}
+                  style={{
+                    background: 'none',
+                    border: '1px solid var(--accent-tint-strong)',
+                    backgroundColor: isAccountsExpanded ? 'var(--accent-tint-strong)' : 'var(--accent-tint)',
+                    color: 'var(--accent)',
+                    padding: '3px 8px',
+                    borderRadius: 'var(--vl-radius-xs, 4px)',
+                    fontSize: '11px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                  }}
+                  title={isAccountsExpanded ? 'Ocultar cuentas' : 'Ver cuentas para cambiar'}
+                >
+                  <span>{isAccountsExpanded ? 'Cerrar' : 'Cambiar cuenta'}</span>
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{
+                      transform: isAccountsExpanded ? 'rotate(180deg)' : 'none',
+                      transition: 'transform 150ms ease',
+                    }}
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Floating Accounts Dropdown Menu (Overlays the windows without stretching popover) */}
+              {isAccountsExpanded && (
+                <div
+                  ref={accountsDropdownRef}
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 4px)',
+                    left: 0,
+                    right: 0,
+                    zIndex: 100,
+                    backgroundColor: 'var(--menu-glass, #161618)',
+                    backdropFilter: 'var(--menu-backdrop, blur(24px))',
+                    WebkitBackdropFilter: 'var(--menu-backdrop, blur(24px))',
+                    border: '1px solid var(--block-stroke)',
+                    borderRadius: 'var(--control-radius, 8px)',
+                    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+                    padding: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    maxHeight: '230px',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {switchFeedback && (
+                    <div
+                      style={{
+                        fontSize: '10.5px',
+                        padding: '3px 6px',
+                        borderRadius: 'var(--vl-radius-xs, 4px)',
+                        backgroundColor: switchFeedback.includes('Error') ? 'rgba(239, 68, 68, 0.15)' : 'var(--accent-tint)',
+                        color: switchFeedback.includes('Error') ? 'var(--warning-text, #ef4444)' : 'var(--accent)',
+                      }}
+                    >
+                      {switchFeedback}
+                    </div>
+                  )}
+
+                  {loadingAccounts ? (
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)', padding: '6px 2px' }}>
+                      Cargando cuentas guardadas...
+                    </div>
+                  ) : savedAccounts.length === 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 0' }}>
+                      <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                        No hay otras cuentas guardadas para este proveedor.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSettings(selectedProvider)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          color: 'var(--accent)',
+                          fontSize: '11px',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Administrar bóveda en Configuración →
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '180px', overflowY: 'auto' }}>
+                      {savedAccounts.map((acc) => {
+                        const isCurrentActive = acc.isActive;
+                        const isSwitching = switchingAccountId === acc.id;
+
+                        return (
+                          <div
+                            key={acc.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '5px 8px',
+                              borderRadius: 'var(--vl-radius-xs, 4px)',
+                              backgroundColor: isCurrentActive ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+                              border: isCurrentActive ? '1px solid var(--block-stroke)' : '1px solid transparent',
+                              gap: '6px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                <span
+                                  style={{
+                                    width: '6px',
+                                    height: '6px',
+                                    borderRadius: '50%',
+                                    backgroundColor: isCurrentActive ? 'var(--status-running, #10b981)' : 'var(--text-secondary)',
+                                    flexShrink: 0,
+                                  }}
+                                />
+                                <span
+                                  style={{
+                                    fontSize: '11px',
+                                    fontWeight: isCurrentActive ? 600 : 500,
+                                    color: 'var(--text-primary)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {acc.label || acc.email}
+                                </span>
+                              </div>
+                              {acc.email && acc.label && acc.email !== acc.label && (
+                                <span
+                                  style={{
+                                    fontSize: '10px',
+                                    color: 'var(--text-secondary)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    paddingLeft: '11px',
+                                  }}
+                                >
+                                  {acc.email}
+                                </span>
+                              )}
+                            </div>
+
+                            {isCurrentActive ? (
+                              <span
+                                style={{
+                                  fontSize: '10px',
+                                  color: 'var(--accent)',
+                                  fontWeight: 600,
+                                  padding: '2px 6px',
+                                  borderRadius: 'var(--vl-radius-xs, 4px)',
+                                  backgroundColor: 'var(--accent-tint)',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                Activa ✓
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={isSwitching}
+                                onClick={() => handleSwitchAccount(acc.id)}
+                                style={{
+                                  background: 'var(--control-fill, rgba(255, 255, 255, 0.08))',
+                                  border: '1px solid var(--block-stroke)',
+                                  color: 'var(--text-primary)',
+                                  padding: '3px 8px',
+                                  borderRadius: 'var(--vl-radius-xs, 4px)',
+                                  fontSize: '10.5px',
+                                  fontWeight: 500,
+                                  cursor: isSwitching ? 'default' : 'pointer',
+                                  flexShrink: 0,
+                                  opacity: isSwitching ? 0.6 : 1,
+                                }}
+                              >
+                                {isSwitching ? 'Activando…' : 'Activar'}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'flex-end',
+                          paddingTop: '4px',
+                          borderTop: '1px dashed var(--block-stroke)',
+                          marginTop: '2px',
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSettings(selectedProvider)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            color: 'var(--text-secondary)',
+                            fontSize: '10.5px',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '3px',
+                          }}
+                        >
+                          <span>Bóveda completa en Ajustes</span>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="9 18 15 12 9 6" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Individual windows breakdown */}

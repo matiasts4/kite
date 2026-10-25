@@ -131,11 +131,11 @@ describe('DiffsView Component Tests', () => {
     expect(wrapToggle).toBeInTheDocument();
 
     fireEvent.click(wrapToggle);
-    expect(localStorage.getItem('bmone.diffs.wordwrap.v1')).toBe('false');
+    expect(localStorage.getItem('kite.diffs.wordwrap.v1')).toBe('false');
   });
 
   it('renders stepper navigation with file counter and allows selecting files in focused mode', () => {
-    localStorage.setItem('bmone.diffs.viewmode.v1', 'focused');
+    localStorage.setItem('kite.diffs.viewmode.v1', 'focused');
     render(<DiffsView workspaceId="ws-test" />);
 
     // In focused mode with multiple files, the stepper is rendered
@@ -297,7 +297,7 @@ describe('DiffsView Component Tests', () => {
     // Select second workspace
     fireEvent.click(screen.getByText('Backend API'));
     expect(onSelect).toHaveBeenCalledWith('ws-2');
-    expect(localStorage.getItem('bmone.selectedWorkspaceId')).toBe('ws-2');
+    expect(localStorage.getItem('kite.selectedWorkspaceId')).toBe('ws-2');
   });
 
   it('auto-selects first workspace when workspaceId is null', () => {

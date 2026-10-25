@@ -61,6 +61,8 @@ export interface BrandLogoProps {
   alt?: string;
   label?: string;
   size?: number;
+  className?: string;
+  style?: React.CSSProperties;
 }
 
 export const BrandLogo: React.FC<BrandLogoProps> = ({
@@ -68,15 +70,22 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
   alt = '',
   label = '',
   size = 13,
+  className = '',
+  style: customStyle,
 }) => {
   const effectiveAlt = label || alt;
-  const style = { '--brand-logo-size': `${size}px` } as React.CSSProperties;
+  const style: React.CSSProperties = {
+    '--brand-logo-size': `${size}px`,
+    flex: 'none',
+    ...customStyle,
+  } as React.CSSProperties;
   const normalizedEngine = (engine || 'antigravity').toLowerCase();
   const variant = BRAND_VARIANTS[normalizedEngine] ?? null;
+  const extraClass = className ? ` ${className}` : '';
 
   if (variant === null) {
     return (
-      <span aria-hidden="true" className="brand-logo brand-logo--fallback" style={style}>
+      <span aria-hidden="true" className={`brand-logo brand-logo--fallback${extraClass}`} style={style}>
         <TerminalIcon aria-hidden="true" size={Math.round(size * 0.92)} strokeWidth={1.6} />
       </span>
     );
@@ -86,7 +95,7 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
     return (
       <img
         alt={effectiveAlt}
-        className="brand-logo"
+        className={`brand-logo${extraClass}`}
         height={size}
         width={size}
         src={logoUrl(variant.file)}
@@ -97,7 +106,7 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
 
   if (variant.onDark && variant.onLight) {
     return (
-      <span aria-hidden="true" className="brand-logo-pair" style={style}>
+      <span aria-hidden="true" className={`brand-logo-pair${extraClass}`} style={style}>
         <img
           alt=""
           className="brand-logo brand-logo--dark"
@@ -117,7 +126,7 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
   }
 
   return (
-    <span aria-hidden="true" className="brand-logo brand-logo--fallback" style={style}>
+    <span aria-hidden="true" className={`brand-logo brand-logo--fallback${extraClass}`} style={style}>
       <TerminalIcon aria-hidden="true" size={Math.round(size * 0.92)} strokeWidth={1.6} />
     </span>
   );

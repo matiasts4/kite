@@ -36,6 +36,6 @@ fn test_fetch_cursor_quota() {
 
 #[test]
 fn test_all_quotas() {
-    let val = get_subscription_quotas(None, Some(true));
+    let val = get_subscription_quotas_direct(None, Some(true));
     println!("ALL QUOTAS:\n{}", serde_json::to_string_pretty(&val).unwrap());
 }

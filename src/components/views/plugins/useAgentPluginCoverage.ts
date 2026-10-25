@@ -12,7 +12,7 @@ export interface AgentPluginCoverage {
   refresh: () => Promise<void>;
 }
 
-const CACHED_AGENTS_KEY = 'bmone.cached_agents';
+const CACHED_AGENTS_KEY = 'kite.cached_agents';
 
 export function getFallbackAgents(): AgentProfile[] {
   if (typeof window !== 'undefined') {

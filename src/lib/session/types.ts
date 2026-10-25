@@ -6,10 +6,14 @@ export type SessionLifecycle =
   | 'attaching'
   | 'running'
   | 'waiting'
+  | 'idle'
   | 'completed'
   | 'interrupted'
   | 'failed'
-  | 'resumable';
+  | 'resumable'
+  | 'reaped'
+  | 'resurrecting'
+  | 'closed';
 
 /** Every lifecycle value, in the order a session normally walks them. */
 export const SESSION_LIFECYCLES: readonly SessionLifecycle[] = [
@@ -17,10 +21,14 @@ export const SESSION_LIFECYCLES: readonly SessionLifecycle[] = [
   'attaching',
   'running',
   'waiting',
+  'idle',
   'completed',
   'interrupted',
   'failed',
   'resumable',
+  'reaped',
+  'resurrecting',
+  'closed',
 ];
 
 /** How a driver keeps a session alive between turns. */

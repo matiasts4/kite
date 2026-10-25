@@ -7,10 +7,14 @@ export const SESSION_LIFECYCLE_LABELS: Record<SessionLifecycle, string> = {
   attaching: 'Attaching session',
   running: 'Session running',
   waiting: 'Waiting for approval',
+  idle: 'Session warm',
   completed: 'Session completed',
   interrupted: 'Session interrupted',
   failed: 'Session failed',
   resumable: 'Session resumable',
+  reaped: 'Session sleeping',
+  resurrecting: 'Resurrecting session',
+  closed: 'Session closed',
 };
 
 type LifecycleTone = 'neutral' | 'active' | 'attention' | 'done' | 'error';
@@ -20,10 +24,14 @@ const LIFECYCLE_TONES: Record<SessionLifecycle, LifecycleTone> = {
   attaching: 'neutral',
   running: 'active',
   waiting: 'attention',
+  idle: 'active',
   completed: 'done',
   interrupted: 'done',
   failed: 'error',
   resumable: 'neutral',
+  reaped: 'neutral',
+  resurrecting: 'active',
+  closed: 'done',
 };
 
 const TONE_COLORS: Record<LifecycleTone, string> = {

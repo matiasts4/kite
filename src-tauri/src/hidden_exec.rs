@@ -330,6 +330,23 @@ mod windows_impl {
     }
 
     fn command_line(program: &Path, args: &[&str]) -> Vec<u16> {
+        let is_batch = program.extension().map_or(false, |ext| {
+            ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+        });
+        if is_batch {
+            let mut line = quote_arg(OsStr::new("cmd.exe"));
+            line.push(b' ' as u16);
+            line.extend(quote_arg(OsStr::new("/c")));
+            line.push(b' ' as u16);
+            line.extend(quote_arg(program.as_os_str()));
+            for arg in args {
+                line.push(b' ' as u16);
+                line.extend(quote_arg(OsStr::new(arg)));
+            }
+            line.push(0);
+            return line;
+        }
+
         let mut line = quote_arg(program.as_os_str());
         for arg in args {
             line.push(b' ' as u16);

@@ -20,11 +20,21 @@ Write-Host "[1/4] Limpiando instancias de desarrollo previas y bloqueos WebView2
 Get-Process -Name "*kite*" -ErrorAction SilentlyContinue | Where-Object {
     $_.Path -and ($_.Path -like "*\target\debug\*")
 } | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
+
+# Also terminate orphaned dev WebView2 processes to release EBWebView files
+Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -and ($_.CommandLine -like "*dev.kite.code.dev*")
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Start-Sleep -Milliseconds 600
 
 $devLockPath = "$env:LOCALAPPDATA\dev.kite.code.dev\EBWebView\Default\LOCK"
 if (Test-Path $devLockPath) {
     Remove-Item $devLockPath -Force -ErrorAction SilentlyContinue
+}
+$devEbLockPath = "$env:LOCALAPPDATA\dev.kite.code.dev\EBWebView\EBWebView\Default\LOCK"
+if (Test-Path $devEbLockPath) {
+    Remove-Item $devEbLockPath -Force -ErrorAction SilentlyContinue
 }
 
 
@@ -40,21 +50,26 @@ if (-not $viteRunning) {
     Write-Host "Iniciando servidor Vite..." -ForegroundColor Yellow
     $viteProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run dev" -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
     
-    # Wait for Vite to be ready
-    $retries = 20
+    # Wait for Vite to be ready (up to 30s)
+    $retries = 60
     while ($retries -gt 0) {
         Start-Sleep -Milliseconds 500
         try {
-            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
-            if ($resp.StatusCode -eq 200) {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $connect = $tcp.BeginConnect("127.0.0.1", 1420, $null, $null)
+            $wait = $connect.AsyncWaitHandle.WaitOne(400, $false)
+            if ($wait) {
+                $tcp.EndConnect($connect)
+                $tcp.Close()
                 $viteRunning = $true
                 break
             }
+            $tcp.Close()
         } catch {}
         $retries--
     }
     if (-not $viteRunning) {
-        Write-Error "No se pudo conectar al servidor Vite en http://127.0.0.1:1420."
+        Write-Error "No se pudo conectar al servidor Vite en http://127.0.0.1:1420 tras 30 segundos."
         exit 1
     }
     Write-Host "Servidor Vite listo en http://127.0.0.1:1420." -ForegroundColor Green
@@ -128,6 +143,9 @@ public class DesktopManager {
     public static extern bool EnumDesktopWindows(IntPtr hDesktop, EnumDesktopWindowsProc lpfn, IntPtr lParam);
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool EnumWindows(EnumDesktopWindowsProc lpfn, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool CloseDesktop(IntPtr hDesktop);
 
     [DllImport("user32.dll")]
@@ -157,12 +175,27 @@ public class DesktopManager {
             IntPtr.Zero,
             IntPtr.Zero,
             false,
-            0x00000200,
+            0x01000200, // CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP
             IntPtr.Zero,
             workingDir,
             ref si,
             out pi
         );
+
+        if (!success) {
+            success = CreateProcess(
+                appPath,
+                null,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                false,
+                0x00000200,
+                IntPtr.Zero,
+                workingDir,
+                ref si,
+                out pi
+            );
+        }
 
         if (!success) {
             int err = Marshal.GetLastWin32Error();
@@ -176,24 +209,29 @@ public class DesktopManager {
 
     public static List<string> CheckAndFocus(uint targetPid) {
         var list = new List<string>();
-        IntPtr h = OpenDesktop("Default", 0, false, 0x01FF);
-        if (h != IntPtr.Zero) {
-            EnumDesktopWindows(h, (hWnd, lParam) => {
-                uint pid;
-                GetWindowThreadProcessId(hWnd, out pid);
-                if (pid == targetPid) {
-                    var sb = new StringBuilder(256);
-                    GetWindowText(hWnd, sb, 256);
-                    string title = sb.ToString();
-                    if (!string.IsNullOrEmpty(title) && !title.Contains("IME") && IsWindowVisible(hWnd)) {
-                        ShowWindow(hWnd, 9); // SW_RESTORE
-                        SetForegroundWindow(hWnd);
-                    }
-                    list.Add(string.Format("HWND: 0x{0:X}, Visible: {1}, Title: '{2}'", hWnd.ToInt64(), IsWindowVisible(hWnd), sb));
+        EnumDesktopWindowsProc callback = (hWnd, lParam) => {
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (pid == targetPid) {
+                var sb = new StringBuilder(256);
+                GetWindowText(hWnd, sb, 256);
+                string title = sb.ToString();
+                if (!string.IsNullOrEmpty(title) && !title.Contains("IME") && IsWindowVisible(hWnd)) {
+                    ShowWindow(hWnd, 9); // SW_RESTORE
+                    SetForegroundWindow(hWnd);
                 }
-                return true;
-            }, IntPtr.Zero);
+                list.Add(string.Format("HWND: 0x{0:X}, Visible: {1}, Title: '{2}'", hWnd.ToInt64(), IsWindowVisible(hWnd), sb));
+            }
+            return true;
+        };
+
+        IntPtr h = OpenDesktop("Default", 0, false, 0x0041);
+        if (h != IntPtr.Zero) {
+            EnumDesktopWindows(h, callback, IntPtr.Zero);
             CloseDesktop(h);
+        }
+        if (list.Count == 0) {
+            EnumWindows(callback, IntPtr.Zero);
         }
         return list;
     }
@@ -233,24 +271,41 @@ if ($needsBuild) {
 }
 
 Write-Host "[4/4] Lanzando $binary en la pantalla del usuario (WinSta0\Default)..." -ForegroundColor Cyan
-Start-Process "explorer.exe" -ArgumentList $binary
+$appPid = 0
+try {
+    $appPid = [DesktopManager]::Launch($binary, $ProjectRoot)
+    Write-Host "Proceso lanzado con PID: $appPid en WinSta0\Default." -ForegroundColor Green
+} catch {
+    Write-Host "DesktopManager::Launch ($($_.Exception.Message)) -> usando Start-Process..." -ForegroundColor Yellow
+    $proc = Start-Process -FilePath $binary -WorkingDirectory $ProjectRoot -PassThru
+    $appPid = $proc.Id
+}
 
 # Wait a moment and check for the window with polling
 $found = $false
-$appPid = 0
-for ($i = 0; $i -lt 15; $i++) {
-    Start-Sleep -Milliseconds 600
-    $devProc = Get-Process -Name "kite-code" -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and ($_.Path -like "*\target\debug\*")
-    } | Select-Object -First 1
-    if ($devProc) {
-        $appPid = $devProc.Id
+for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 500
+    if ($appPid -gt 0) {
         $windows = [DesktopManager]::CheckAndFocus($appPid)
         if ($windows.Count -gt 0) {
             Write-Host "¡Ventana detectada y enfocada en pantalla (PID: $appPid)!" -ForegroundColor Green
             $windows | ForEach-Object { Write-Host " - $_" -ForegroundColor Green }
             $found = $true
             break
+        }
+    } else {
+        $devProc = Get-Process -Name "kite-code" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Path -and ($_.Path -like "*\target\debug\*")
+        } | Select-Object -First 1
+        if ($devProc) {
+            $appPid = $devProc.Id
+            $windows = [DesktopManager]::CheckAndFocus($appPid)
+            if ($windows.Count -gt 0) {
+                Write-Host "¡Ventana detectada y enfocada en pantalla (PID: $appPid)!" -ForegroundColor Green
+                $windows | ForEach-Object { Write-Host " - $_" -ForegroundColor Green }
+                $found = $true
+                break
+            }
         }
     }
 }

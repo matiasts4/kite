@@ -288,7 +288,11 @@ class SubscriptionQuotaManager {
       this.timer = setInterval(tick, this.pollIntervalMs);
 
       if (typeof window !== 'undefined') {
-        window.addEventListener('focus', tick);
+        let focusTimer: any = null;
+        window.addEventListener('focus', () => {
+          if (focusTimer) clearTimeout(focusTimer);
+          focusTimer = setTimeout(tick, 2500);
+        });
       }
     }
   }

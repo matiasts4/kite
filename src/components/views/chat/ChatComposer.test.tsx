@@ -4,14 +4,11 @@ import userEvent from '@testing-library/user-event';
 import { ChatComposer } from './ChatComposer';
 import { declarationFromCatalog } from './driverDeclaration';
 import { listConnections, type ConnectionSummary } from '../../../lib/ipc';
-import { openSettingsTab } from '../../../lib/settingsNav';
 
 vi.mock('../../../lib/ipc', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../lib/ipc')>();
   return { ...actual, listConnections: vi.fn(async () => []) };
 });
-
-vi.mock('../../../lib/settingsNav', () => ({ openSettingsTab: vi.fn() }));
 
 function claudeConnection(connectionId: string, displayName: string): ConnectionSummary {
   return {
@@ -60,14 +57,9 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(sendBtn).toBeDisabled();
   });
 
-  it('offers a connect action when no connection verified the provider', async () => {
-    const user = userEvent.setup();
+  it('does not render a misleading connect button when using inherited CLI sessions', () => {
     render(<ChatComposer {...defaultProps} />);
-
-    const connect = screen.getByRole('button', { name: /connect claude code/i });
-    await user.click(connect);
-
-    expect(openSettingsTab).toHaveBeenCalledWith('zed', 'claude');
+    expect(screen.queryByRole('button', { name: /connect/i })).not.toBeInTheDocument();
   });
 
   it('calls onSend when send button is clicked or Enter is pressed', async () => {
@@ -132,10 +124,11 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(modelBtn).toBeInTheDocument();
     await user.click(modelBtn);
 
-    const option = await screen.findByText(/Claude Opus 5.5/i);
+    const option = await screen.findByRole('option', { name: /Automatic/i });
     await user.click(option);
 
-    expect(onUpdateConfig).toHaveBeenCalledWith({ model: 'claude-opus-5-5' });
+    expect(onUpdateConfig).toHaveBeenCalledWith({ model: null });
+    expect(screen.queryByText(/Claude Opus 5.5/i)).toBeNull();
   });
 
   it('navigates user prompt history with ArrowUp and ArrowDown', async () => {
@@ -298,7 +291,8 @@ describe('ChatComposer - Behavioral Tests', () => {
     );
 
     await user.click(screen.getByRole('combobox', { name: /model/i }));
-    expect(await screen.findByText(/Claude Opus 5.5/i)).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: /Automatic/i })).toBeInTheDocument();
+    expect(screen.queryByText(/Claude Opus 5.5/i)).toBeNull();
 
     expect(screen.queryByText(/refresh available models/i)).toBeNull();
     expect(screen.queryByText(/checking live models/i)).toBeNull();

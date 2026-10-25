@@ -46,6 +46,7 @@ pub mod audio_ducking;
 pub mod agent_inbox;
 pub mod credentials;
 pub mod connections;
+pub mod plugins;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -227,11 +228,15 @@ fn main() {
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
             log_trace("Setup hook running");
-            if cfg!(debug_assertions) {
-                if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window("main") {
+                if cfg!(debug_assertions) {
                     let _ = w.set_title("Kite Code (Dev)");
                 }
-            } else {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
             let windows = app.webview_windows();
@@ -242,7 +247,6 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            log_trace(&format!("WindowEvent on {}: {:?}", window.label(), event));
             if window.label() == "main" {
                 if matches!(
                     event,
@@ -352,6 +356,7 @@ fn main() {
             list_live_chat_runs,
             list_prompts,
             list_provider_mcp_servers,
+            list_provider_agents,
             list_routines,
             list_terminal_profiles,
             load_agent_chat_thread,
@@ -494,6 +499,7 @@ fn main() {
             updater_update_and_restart,
             get_app_version,
             list_saved_accounts,
+            list_detected_cli_accounts,
             save_current_account_profile,
             switch_account_profile,
             delete_account_profile,
@@ -519,6 +525,10 @@ fn main() {
             save_provider_credential,
             delete_provider_credential,
             migrate_localstorage_credentials,
+            plugins::plugin_connections,
+            plugins::plugin_connection_action,
+            plugins::get_plugin_config,
+            plugins::save_plugin_config,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
@@ -552,9 +562,7 @@ fn main() {
                 // Do NOT log MainEventsCleared. It triggers dozens of times per second,
                 // and writing synchronously to app.log on disk blocks the main UI message pump.
             }
-            other => {
-                log_trace(&format!("RunEvent: {:?}", other));
-            }
+            _other => {}
         }
     });
 }

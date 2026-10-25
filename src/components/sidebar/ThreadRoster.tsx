@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { motion } from 'motion/react';
+import { springs } from '../../motion/standard/tokens';
 import type { Workspace } from '../../types';
 import type { ChatThreadSummary, MenuItem, ContextMenuState } from './types';
 import { formatThreadTrailing } from './types';
@@ -230,7 +232,9 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
     }
 
     return (
-      <div
+      <motion.div
+        layout
+        transition={springs.reflow}
         key={thread.id}
         className={`chat-thread-row${isSelected ? ' chat-thread-row--selected' : ''}${
           nested ? ' chat-thread-row--nested' : ''
@@ -272,7 +276,7 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
             <PinIcon size={12} filled={isPinned} />
           </button>
         </span>
-      </div>
+      </motion.div>
     );
   };
 

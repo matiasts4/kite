@@ -104,6 +104,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
     const attachments = session.attachmentsMap[draftKey] || [];
     const totalTokens = activeThread ? ((activeThread.usage?.inputTokens || 0) + (activeThread.usage?.outputTokens || 0)) : 0;
     const dynamicModels = session.dynamicModelsMap[effectiveProvider] || [];
+    const dynamicAgents = session.dynamicAgentsMap[effectiveProvider] || [];
 
     return (
       <AgentChatSurface
@@ -115,6 +116,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         draftMode={session.draftConfig.mode}
         draftModel={session.draftConfig.model}
         draftEffort={session.draftConfig.effort}
+        draftAgent={session.draftConfig.agent}
         activeThread={activeThread}
         tabs={session.knownThreadsList.map((t) => ({
           id: t.id,
@@ -132,6 +134,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         attachments={attachments}
         totalTokens={totalTokens}
         dynamicModels={dynamicModels}
+        dynamicAgents={dynamicAgents}
         driverDeclaration={
           activeThreadId ? props.driverDeclarations?.[activeThreadId] ?? null : null
         }
@@ -243,6 +246,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
       engineLabel={undefined}
       liveRunsCount={session.liveRuns.length}
       dynamicModelsMap={session.dynamicModelsMap}
+      dynamicAgentsMap={session.dynamicAgentsMap}
       sessionProjections={props.sessionProjections}
       driverDeclarations={props.driverDeclarations}
       isRefreshingModels={session.isRefreshingModels}

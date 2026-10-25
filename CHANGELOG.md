@@ -6,6 +6,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.35] - 2026-10-25
+
+> Restauracion de ZedOrb WebGL2 y Fluidez en Barra de Tareas
+
+### Changed
+- feat(zed): Restaurar el renderizador WebGL2 de ZedOrb con optimizacion inteligente de tasa de cuadros y pausa en minimizado
+- perf(taskbar): Eliminar mas de 110,000 escrituras sincronas en app.log durante eventos de ventana y restauracion
+- perf(titlebar): Restaurar mini-orbe ligero acelerado por GPU eliminando animaciones CSS continuas y capas SVG pesadas
+- perf(focus): Debounce en refreshGit (1.2s), metricas de sistema (2s) y cuotas (2.5s) al reactivar o enfocar la aplicacion
+- perf(terminal): Cachear sesiones de proveedor ya vinculadas evitando re-resolucion innecesaria
+
+---
+
+## [0.1.34] - 2026-10-25
+
+> Eliminacion de Bucles de E/S y Bloqueos de Arranque
+
+### Changed
+- perf: Reemplazar raymarching WebGL2 continuo en ZedOrb por esfera CSS acelerada por hardware
+- perf: Reducir polling IPC inactivo de terminal de 90ms a 220ms conservando 40ms en escritura
+- perf: Acelerar animacion de mini-orbe en barra de titulo con capas de composicion GPU
+
+### Fixed
+- Eliminar escaneo periodico de 70MB de transcripciones y contencion en terminal.rs
+- Desactivar llamadas bloqueantes a Windows Restart Manager (rstrtmgr.dll) en resolucion de sesiones
+
+---
+
+## [0.1.33] - 2026-10-25
+
+> Estabilización y Rendimiento de Arranque
+
+### Changed
+- Mejorar el lanzador de escritorio limpiando procesos residuales y liberando candados de EBWebView
+- Sincronizar catalogo de modelos de Grok y Cursor con sus respectivas CLIs
+
+### Fixed
+- Eliminar shaders WebGL (ReadPixels) y loops de canvas raymarching en vistas de produccion para evitar bloqueos
+- Resolver contencion en el bucle principal de WebView2 y limpiar procesos huerfanos al iniciar
+- Optimizar animaciones de la orbe Zed en la barra de titulo con degradados acelerados por hardware
+
+---
+
+## [0.1.32] - 2026-10-25
+
+> Gobernanza de Plugins y Asignación de Motores de IA
+
+### Added
+- Selector interactivo de proveedores para motores de IA
+- Asignación granular por agente con switches sincronizados
+
+### Changed
+- Modal rediseñado con componente Sheet nativo y tokens de diseño
+
+### Fixed
+- Validación estricta de credenciales en plugins antes de conectar
+
+---
+
+## [0.1.31] - 2026-10-24
+
+> Validación de Credenciales y Selección de Proveedores en Plugins
+
+### Added
+- Modal de detalles con Sheet oficial y pestañas para Configuración, Proveedores de IA y Agentes
+- Selector interactivo de proveedores para habilitar/deshabilitar plugins por motor de IA (Claude, Codex, Antigravity, OpenCode, Cursor, Gemini, Grok)
+- Asignación granular por agente con switches individuales y sincronización con perfiles
+
+### Changed
+- Reemplazo completo de modales flotantes por el componente Sheet nativo con tokens de diseño auténticos
+
+### Fixed
+- Validación estricta de credenciales en plugins antes de conectar, previniendo falsos estados activos
+
+---
+
+## [0.1.30] - 2026-10-24
+
+> Refinamiento de UI y Proveedores en Plugins
+
+### Added
+- Visualización de proveedores y motores compatibles (Claude Code, Codex, Antigravity, OpenCode, Cursor, Gemini) en el modal de detalles
+
+### Changed
+- Diseño minimalista y limpio en las tarjetas del catálogo de Plugins
+- Enrutamiento de gobernanza de plugins directamente a la pestaña Ajustes de cada agente
+
+### Fixed
+- Eliminación de elementos visuales saturados en las tarjetas del catálogo
+
+---
+
+## [0.1.29] - 2026-10-24
+
+> Ecosistema de Plugins y Cobertura de Agentes
+
+### Added
+- Catálogo canónico de 29 plugins para servicios externos y herramientas de agentes
+- Modal interactivo de configuración de credenciales (API keys / puertos MCP) y permisos por plugin
+- Cobertura bidireccional de agentes con gobernanza granular de plugins
+- Pila compacta de mini-avatares en tarjetas conectadas mostrando los agentes activos
+- Sincronización en segundo plano cada 2000ms con detección de foco
+
+### Changed
+- Integración automática de plugins conectados en el catálogo MCP de Agent Settings
+
+### Fixed
+- Control de acceso en modo sólo lectura para herramientas con mutaciones
+
+---
+
+## [0.1.28] - 2026-10-24
+
+> Laboratorio de Animaciones y Ajustes Visuales
+
+### Added
+- Laboratorio interactivo de efectos visuales y motion en el puerto 1430
+
+### Changed
+- Preservacion de la interfaz nativa y personalizacion del chat composer
+- Sincronizacion de metricas de telemetria y cuotas en la barra superior
+
+### Fixed
+- Estabilizacion de dependencias WebGL y eliminacion de img-fx
+
+---
+
 ## [0.1.26] - 2026-10-22
 
 > Cuotas a tu medida: agregá, ordená y fijá proveedores

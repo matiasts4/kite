@@ -388,6 +388,16 @@ pub fn list_chat_provider_models(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub fn list_provider_agents(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "provider": provider,
+        "agents": crate::chat::models::provider_agents(provider),
+    })
+}
+
+#[tauri::command]
 pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
     // Snapshot active runs under live_turns lock, then drop live_turns BEFORE acquiring threads
     let active_runs: Vec<(String, Option<String>, Option<String>, i64)> = {

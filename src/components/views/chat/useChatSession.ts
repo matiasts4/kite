@@ -7,13 +7,13 @@ import {
   ChatMode,
   ExtendedChatThread,
   LiveChatRun,
-  PROVIDER_CATALOG,
   engineToChatProvider,
 } from './types';
 import type { PlanActionPayload } from './ChatPlanPanel';
 import { withTimeout } from './chatSessionUtils';
 import { useChatAttachments } from './hooks/useChatAttachments';
 import { useChatModels } from './hooks/useChatModels';
+import { useChatAgents } from './hooks/useChatAgents';
 import {
   applyDraftPatch,
   createDraftConfig,
@@ -21,6 +21,7 @@ import {
   type ChatConfigPatch,
   type ChatDraftConfig,
 } from './hooks/useChatDraftConfig';
+import { getSavedSelectedProvider } from './modelPersistence';
 import { pollTurnUpdates } from './turnPolling';
 import {
   bindingForConnection,
@@ -119,6 +120,10 @@ export function useChatSession({
     if (currentAgent?.engine) {
       return engineToChatProvider(currentAgent.engine);
     }
+    const saved = getSavedSelectedProvider();
+    if (saved && ['claude', 'codex', 'cursor', 'grok', 'opencode', 'antigravity'].includes(saved)) {
+      return saved as ChatProvider;
+    }
     return 'antigravity';
   })();
 
@@ -155,6 +160,8 @@ export function useChatSession({
     fetchDynamicModels,
     refreshModels,
   } = useChatModels();
+
+  const { dynamicAgentsMap, ensureDynamicAgents } = useChatAgents(defaultProvider);
 
   const isMountedRef = useRef(true);
   const activePollRunsRef = useRef<Set<string>>(new Set());
@@ -378,33 +385,40 @@ export function useChatSession({
         }
       }
 
-      // If there are thread IDs in grid, load them
+      // If there are thread IDs in grid, load them in parallel
       if (loadedIds.length > 0) {
+        const loadedEntries = await Promise.all(
+          loadedIds.map(async (tid) => {
+            try {
+              const t = agentId
+                ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId: tid })
+                : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
+              if (t && t.id) return [tid, threadWithResolvedBinding(t)] as const;
+            } catch {
+              // Check localStorage fallback
+              try {
+                const localRaw = localStorage.getItem(`kite.chat.thread.${tid}`);
+                if (localRaw) {
+                  const parsed = JSON.parse(localRaw);
+                  if (parsed?.id) return [tid, parsed] as const;
+                }
+              } catch {}
+            }
+            try {
+              const localRaw = localStorage.getItem(`kite.chat.thread.${tid}`);
+              if (localRaw) {
+                const parsed = JSON.parse(localRaw);
+                if (parsed?.id) return [tid, parsed] as const;
+              }
+            } catch {}
+            return null;
+          })
+        );
+
         const loadedMap: Record<string, ExtendedChatThread> = {};
-        for (const tid of loadedIds) {
-          try {
-            const t = agentId
-              ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId: tid })
-              : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
-            if (t && t.id) loadedMap[tid] = threadWithResolvedBinding(t);
-          } catch {
-            // Check localStorage fallback
-            try {
-              const localRaw = localStorage.getItem(`kite.chat.thread.${tid}`);
-              if (localRaw) {
-                const parsed = JSON.parse(localRaw);
-                if (parsed?.id) loadedMap[tid] = parsed;
-              }
-            } catch {}
-          }
-          if (!loadedMap[tid]) {
-            try {
-              const localRaw = localStorage.getItem(`kite.chat.thread.${tid}`);
-              if (localRaw) {
-                const parsed = JSON.parse(localRaw);
-                if (parsed?.id) loadedMap[tid] = parsed;
-              }
-            } catch {}
+        for (const entry of loadedEntries) {
+          if (entry) {
+            loadedMap[entry[0]] = entry[1];
           }
         }
 
@@ -742,6 +756,10 @@ export function useChatSession({
   };
 
   const handleDraftConfigChange = (patch: ChatConfigPatch) => {
+    if (patch.provider) {
+      void ensureDynamicAgents(patch.provider);
+      void fetchDynamicModels(patch.provider);
+    }
     setDraftConfig((prev) => applyDraftPatch(prev, patch));
   };
 
@@ -752,6 +770,8 @@ export function useChatSession({
       mode?: ChatMode;
       model?: string | null;
       effort?: string | null;
+      plan?: boolean;
+      agent?: string | null;
       connectionId?: string | null;
     }
   ) => {
@@ -762,20 +782,25 @@ export function useChatSession({
       mode: thread.mode,
       model: thread.model ?? null,
       effort: thread.effort ?? null,
+      agent: (thread as any).agent || (thread as any).workMode || null,
     };
-    const { provider, mode, model, effort } = applyDraftPatch(currentConfig, patch);
+    const { provider, mode, model, effort, agent } = applyDraftPatch(currentConfig, patch);
     const providerChanged = provider !== thread.provider;
     const connectionOnly =
       patch.connectionId !== undefined &&
       patch.provider === undefined &&
       patch.mode === undefined &&
       patch.model === undefined &&
-      patch.effort === undefined;
+      patch.effort === undefined &&
+      patch.plan === undefined &&
+      patch.agent === undefined;
 
     if (patch.connectionId !== undefined) {
       await selectThreadConnection(threadId, patch.connectionId);
     }
     if (providerChanged) {
+      void ensureDynamicAgents(provider);
+      void fetchDynamicModels(provider);
       // A binding belonged to the previous provider, so it is cleared before
       // the new provider's verified connection, if any, is resolved.
       await selectThreadConnection(threadId, null);
@@ -791,6 +816,8 @@ export function useChatSession({
         provider,
         mode,
         model,
+        plan: patch.plan !== undefined ? patch.plan : thread.plan,
+        agent: agent ?? (thread as any).agent ?? (thread as any).workMode,
         providerOptions: effort ? [{ id: 'effort', value: effort }] : undefined,
       });
       if (agentId && (patch.provider !== undefined || patch.model !== undefined)) {
@@ -820,9 +847,8 @@ export function useChatSession({
         [threadId]: mergedThread,
       }));
 
-      if (PROVIDER_CATALOG[provider]?.isDynamic) {
-        void fetchDynamicModels(provider);
-      }
+      void fetchDynamicModels(provider);
+      void ensureDynamicAgents(provider);
     } catch (err) {
       console.error('[ChatView] update_chat_configuration error:', err);
     } finally {
@@ -1007,6 +1033,7 @@ export function useChatSession({
     setPromptMap,
     attachmentsMap,
     dynamicModelsMap,
+    dynamicAgentsMap,
     isRefreshingModels,
     refreshModels,
     setFocusedThreadId,

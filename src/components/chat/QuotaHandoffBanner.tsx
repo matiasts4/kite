@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import type { QuotaHandoffOffer, ContinuationSuggestion } from '../../types';
 import { continueTurnWithHandoff } from '../../lib/ipc';
+import { springs } from '../../motion/standard/tokens';
 
 export interface QuotaHandoffBannerProps {
   offer: QuotaHandoffOffer;
@@ -50,8 +52,11 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
   };
 
   return (
-    <div
+    <motion.div
       className="quota-handoff-banner"
+      initial={{ opacity: 0, y: -6, scale: 0.99 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={springs.toast}
       style={{
         margin: '12px 0',
         padding: '16px',
@@ -295,6 +300,6 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
           )}
         </button>
       </div>
-    </div>
+    </motion.div>
   );
 };

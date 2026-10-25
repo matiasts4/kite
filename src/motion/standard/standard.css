@@ -1,0 +1,80 @@
+/*
+ * Kite motion standard — global values.
+ *
+ * Springs and role tokens live in `src/motion/standard/tokens.ts`. These CSS
+ * values only cover the parts that must stay CSS: press feedback, ink
+ * transitions and the fallback keyframes used by surfaces that have not been
+ * converted to Motion yet.
+ */
+
+:root {
+  --motion-enter: 220ms;
+  --motion-exit: 160ms;
+  --motion-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --motion-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --duration-press: 120ms;
+  --duration-state: 180ms;
+  --duration-nav: 220ms;
+
+  --press-scale: 0.97;
+  --press-scale-small: 0.985;
+  --ease-press: var(--motion-spring);
+}
+
+/* A CSS-only press helper for controls that cannot use the Motion component. */
+.motion-press {
+  transition: scale var(--duration-press) var(--motion-spring);
+}
+
+.motion-press:active:not(:disabled) {
+  scale: var(--press-scale);
+}
+
+/* Shared buttons keep their ink transitions and gain the standard press. */
+.primary-button,
+.secondary-button,
+.danger-button {
+  transition:
+    background-color var(--duration-ink) var(--ease-ink),
+    border-color var(--duration-ink) var(--ease-ink),
+    color var(--duration-ink) var(--ease-ink),
+    opacity var(--duration-ink) var(--ease-ink),
+    scale var(--duration-press) var(--motion-spring);
+}
+
+.primary-button:active:not(:disabled),
+.secondary-button:active:not(:disabled),
+.danger-button:active:not(:disabled) {
+  scale: var(--press-scale);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-enter: 0ms;
+    --motion-exit: 0ms;
+    --duration-press: 0ms;
+    --duration-state: 0ms;
+    --duration-nav: 0ms;
+    --press-scale: 1;
+    --press-scale-small: 1;
+  }
+
+  .motion-press:active:not(:disabled) {
+    scale: 1;
+  }
+}
+
+html[data-motion='reduce'] {
+  --motion-enter: 0ms;
+  --motion-exit: 0ms;
+  --duration-press: 0ms;
+  --duration-state: 0ms;
+  --duration-nav: 0ms;
+  --press-scale: 1;
+  --press-scale-small: 1;
+}
+
+html[data-motion='reduce'] .motion-press:active:not(:disabled) {
+  scale: 1;
+}

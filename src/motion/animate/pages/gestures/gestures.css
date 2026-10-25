@@ -1,0 +1,927 @@
+/* Page 08 — Gestos y movimiento estructural. Scoped under .p8-* inside .animate-lab. */
+
+.p8-kicker {
+  display: block;
+  color: var(--alab-faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.p8-note {
+  min-height: 14px;
+  margin: 8px 0 0;
+  color: var(--alab-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.p8-note[aria-live='off'] {
+  color: var(--alab-faint);
+}
+
+.cmp-btn.p8-mini {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.p8-chip-static {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid var(--alab-border);
+  border-radius: 999px;
+  color: var(--alab-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8.5px;
+  white-space: nowrap;
+}
+
+/* 08.01 — Shared element -------------------------------------------------- */
+
+.p8-shared {
+  position: relative;
+  height: 260px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.p8-shared__base {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  justify-content: flex-start;
+  transition: opacity 180ms var(--motion-ease);
+}
+
+.p8-shared__base.is-veiled {
+  opacity: 0.32;
+}
+
+html[data-motion='reduce'] .p8-shared__base {
+  transition: none;
+}
+
+.p8-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.p8-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid var(--alab-border);
+  border-radius: 9px;
+  background: #10151c;
+  color: var(--alab-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.p8-card:hover {
+  border-color: var(--alab-border-strong);
+  background: #161b22;
+}
+
+.p8-card:active {
+  transform: translateY(1px);
+}
+
+.p8-card:focus-visible {
+  outline: 2px solid var(--alab-accent);
+  outline-offset: 2px;
+}
+
+html[data-motion='reduce'] .p8-card:active {
+  transform: none;
+}
+
+.p8-card__art {
+  display: block;
+  height: 42px;
+  border-radius: 6px;
+}
+
+.p8-card__art--blue {
+  background: linear-gradient(135deg, #1f6feb, #58a6ff);
+}
+
+.p8-card__art--green {
+  background: linear-gradient(135deg, #238636, #3fb950);
+}
+
+.p8-card__art--amber {
+  background: linear-gradient(135deg, #9e6a03, #d29922);
+}
+
+.p8-card__title {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.p8-card__meta {
+  color: var(--alab-faint);
+  font-size: 8.5px;
+}
+
+.p8-shared__hint {
+  margin: 10px 0 0;
+  color: var(--alab-faint);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.p8-shared__layer {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  pointer-events: none;
+}
+
+.p8-shared__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.62);
+  pointer-events: auto;
+}
+
+.p8-detail {
+  position: relative;
+  z-index: 1;
+  width: min(310px, 100%);
+  max-height: 100%;
+  border: 1px solid var(--alab-border-strong);
+  border-radius: 12px;
+  background: var(--alab-panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  overflow: auto;
+  pointer-events: auto;
+}
+
+.p8-detail:focus {
+  outline: none;
+}
+
+.p8-detail__cover {
+  display: block;
+  height: 70px;
+}
+
+.p8-detail__body {
+  padding: 9px 11px 11px;
+}
+
+.p8-detail__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.p8-detail__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.cmp-btn.p8-detail__close {
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+}
+
+.p8-detail__content p {
+  margin: 0 0 7px;
+  color: var(--alab-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.p8-detail__content ul {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.p8-detail__content li {
+  overflow: hidden;
+  padding: 4px 6px;
+  border: 1px solid var(--alab-border);
+  border-radius: 5px;
+  background: #0b0f14;
+  color: var(--alab-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p8-detail__foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 9px;
+}
+
+/* 08.02 — Reorder --------------------------------------------------------- */
+
+.p8-reorder-scene {
+  display: flex;
+  flex-direction: column;
+  height: 302px;
+  padding: 12px;
+}
+
+.p8-reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.p8-reorder__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 4px 6px 4px 8px;
+  border: 1px solid var(--alab-border);
+  border-radius: 8px;
+  background: #10151c;
+}
+
+.p8-reorder__row.is-draggable {
+  cursor: grab;
+}
+
+.p8-reorder__row.is-draggable:active {
+  cursor: grabbing;
+}
+
+.p8-reorder__row:focus-visible {
+  outline: 2px solid var(--alab-accent);
+  outline-offset: 2px;
+}
+
+.p8-reorder__grip {
+  flex: none;
+  color: var(--alab-faint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: inherit;
+}
+
+.p8-reorder__label {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.p8-reorder__pos {
+  min-width: 10px;
+  color: var(--alab-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  text-align: center;
+}
+
+.p8-reorder__actions {
+  display: flex;
+  gap: 1px;
+}
+
+/* 08.03 — Kanban drag and drop -------------------------------------------- */
+
+.p8-kanban-scene {
+  padding: 12px;
+}
+
+.p8-kanban {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  height: 280px;
+}
+
+.p8-kanban__col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--alab-border);
+  border-radius: 9px;
+  background: #0d1219;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.p8-kanban__col.is-over {
+  border-color: var(--alab-accent);
+  background: rgba(31, 111, 235, 0.08);
+}
+
+.p8-kanban__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--alab-border);
+  color: var(--alab-muted);
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.p8-kanban__count {
+  color: var(--alab-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8px;
+}
+
+.p8-kanban__stack {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 0;
+  padding: 5px;
+}
+
+.p8-kanban__card-slot {
+  position: relative;
+}
+
+.p8-kanban__card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid var(--alab-border);
+  border-radius: 7px;
+  background: var(--alab-panel);
+  cursor: grab;
+}
+
+.p8-kanban__card--draggable {
+  position: relative;
+  z-index: 1;
+  touch-action: none;
+}
+
+.p8-kanban__card:active {
+  cursor: grabbing;
+}
+
+.p8-kanban__card:focus-visible,
+.p8-kanban__card-slot:focus-visible {
+  outline: 2px solid var(--alab-accent);
+  outline-offset: 2px;
+}
+
+.p8-kanban__card.is-dragging {
+  border-style: dashed;
+  opacity: 0.4;
+}
+
+.p8-kanban__title {
+  font-size: 10px;
+  font-weight: 550;
+  line-height: 1.25;
+}
+
+.p8-kanban__tag {
+  color: var(--alab-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8px;
+}
+
+.p8-kanban__moves {
+  display: flex;
+  gap: 1px;
+  margin-top: 2px;
+}
+
+.p8-kanban__moves .cmp-btn.p8-mini {
+  width: 18px;
+  height: 18px;
+  font-size: 9px;
+}
+
+.p8-kanban__slot {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  left: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  border: 1px dashed var(--alab-accent);
+  border-radius: 7px;
+  background: rgba(31, 111, 235, 0.14);
+  color: var(--alab-accent);
+  font-size: 8.5px;
+  pointer-events: none;
+}
+
+/* 08.04 — Scroll ---------------------------------------------------------- */
+
+.p8-scroll-scene {
+  padding: 12px 12px 10px;
+}
+
+.p8-scroll__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.p8-scroll__track {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: #21262d;
+  overflow: hidden;
+}
+
+.p8-scroll__bar {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--alab-accent-fill), var(--alab-accent));
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.p8-scroll__bar--kite {
+  transition: transform 90ms linear;
+}
+
+.p8-scroll__pct {
+  min-width: 30px;
+  color: var(--alab-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8.5px;
+  text-align: right;
+}
+
+.p8-scroll__wrap {
+  position: relative;
+  margin-top: 7px;
+}
+
+.p8-scroll__frame {
+  border: 1px solid var(--alab-border);
+  border-radius: 9px;
+  background: #0b0f14;
+  overflow: hidden;
+}
+
+.p8-scroll__viewport {
+  height: 224px;
+  padding: 2px 7px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #30363d transparent;
+  scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 14px,
+    #000 calc(100% - 16px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 14px,
+    #000 calc(100% - 16px),
+    transparent 100%
+  );
+}
+
+.p8-scroll__viewport:focus-visible {
+  outline: 2px solid var(--alab-accent);
+  outline-offset: -2px;
+}
+
+.p8-scroll__inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 2px;
+}
+
+.p8-reveal {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 9px;
+  border: 1px solid var(--alab-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(31, 111, 235, 0.12), rgba(16, 21, 28, 0.6));
+}
+
+.p8-reveal strong {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.p8-reveal span {
+  color: var(--alab-muted);
+  font-size: 9.5px;
+}
+
+html:not([data-motion='reduce']) .p8-reveal {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+html:not([data-motion='reduce']) .p8-reveal.is-in {
+  animation: p8-reveal-in 180ms var(--motion-ease) both;
+}
+
+@keyframes p8-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+html[data-motion='reduce'] .p8-reveal {
+  opacity: 1;
+  transform: none;
+  animation: none;
+}
+
+.p8-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.p8-line {
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.p8-line--user {
+  max-width: 92%;
+  align-self: flex-end;
+  border-color: rgba(31, 111, 235, 0.35);
+  background: rgba(31, 111, 235, 0.18);
+}
+
+.p8-line--assistant {
+  background: var(--alab-panel);
+}
+
+.p8-line--tool {
+  color: var(--alab-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8.5px;
+}
+
+.p8-live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px;
+  color: var(--alab-green);
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.p8-live__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--alab-green);
+}
+
+.p8-jump {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 4px 8px;
+  border-color: var(--alab-accent);
+  background: rgba(13, 17, 23, 0.94);
+  color: var(--alab-accent);
+  font-size: 9.5px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.cmp-btn.p8-jump {
+  border-color: var(--alab-accent);
+  background: rgba(13, 17, 23, 0.94);
+  color: var(--alab-accent);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.p8-scroll__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.p8-scroll__state {
+  color: var(--alab-faint);
+  font-size: 9.5px;
+}
+
+.p8-scroll__state.is-live {
+  color: var(--alab-green);
+}
+
+/* 08.05 — View transition, stagger, interruption --------------------------- */
+
+.p8-view {
+  display: flex;
+  flex-direction: column;
+  height: 330px;
+  padding: 12px;
+}
+
+.p8-view__bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+}
+
+.p8-view__state {
+  font-size: 10.5px;
+  font-weight: 550;
+}
+
+.p8-view__stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--alab-border);
+  border-radius: 9px;
+  background: #0b0f14;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.p8-view__layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.p8-view__layer:focus,
+.p8-pane:focus {
+  outline: none;
+}
+
+.p8-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.p8-thread-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--alab-border);
+  border-radius: 8px;
+  background: #10151c;
+  color: var(--alab-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.p8-thread-row:hover {
+  border-color: var(--alab-border-strong);
+  background: #161b22;
+}
+
+.p8-thread-row:focus-visible {
+  outline: 2px solid var(--alab-accent);
+  outline-offset: 2px;
+}
+
+.p8-thread-row__text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.p8-thread-row__title {
+  display: block;
+  overflow: hidden;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p8-thread-row small {
+  color: var(--alab-faint);
+  font-size: 9px;
+}
+
+.p8-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--alab-muted);
+}
+
+.p8-dot--running {
+  background: var(--alab-green);
+}
+
+.p8-dot--done {
+  background: var(--alab-accent);
+}
+
+.p8-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.p8-pane__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  border-bottom: 1px solid var(--alab-border);
+}
+
+.p8-pane__title {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p8-chips {
+  display: flex;
+  gap: 3px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--alab-border);
+}
+
+.p8-chip {
+  position: relative;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--alab-muted);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.p8-chip.is-selected {
+  color: var(--alab-text);
+}
+
+.p8-chip:focus-visible {
+  outline: 2px solid var(--alab-accent);
+  outline-offset: 1px;
+}
+
+.p8-chip__indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  background: #21262d;
+  box-shadow: inset 0 0 0 1px var(--alab-border);
+}
+
+.p8-chip__label {
+  position: relative;
+  z-index: 1;
+}
+
+.p8-messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  padding: 7px;
+  overflow: auto;
+}
+
+.p8-message {
+  max-width: 94%;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--alab-panel);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.p8-message:nth-child(even) {
+  align-self: flex-end;
+  border-color: rgba(31, 111, 235, 0.3);
+  background: rgba(31, 111, 235, 0.14);
+}
+
+.p8-pane__foot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-top: 1px solid var(--alab-border);
+}
+
+.p8-pane__hint {
+  margin-left: auto;
+  color: var(--alab-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8.5px;
+  white-space: nowrap;
+}
+
+/* Responsive -------------------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .p8-cards {
+    gap: 4px;
+  }
+
+  .p8-card {
+    padding: 6px;
+  }
+
+  .p8-card__art {
+    height: 34px;
+  }
+
+  .p8-kanban {
+    height: 300px;
+  }
+
+  .p8-kanban__title {
+    font-size: 9.5px;
+  }
+
+  .p8-view {
+    height: 350px;
+  }
+}

@@ -3,6 +3,7 @@ import type { ChatItem } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
 import { ExtendedChatThread } from './types';
 import { withTimeout } from './chatSessionUtils';
+import { playApprovalChime, playCompletionChime } from '../../../lib/notifications/audioCues';
 
 export interface PollTurnOptions {
   runId: string;
@@ -85,6 +86,10 @@ export async function pollTurnUpdates({
         for (const ev of res.events) {
           if (ev.kind === 'status' && ev.status) {
             status = ev.status;
+            if (ev.status === 'idle' || ev.status === 'error') {
+              isDone = true;
+              items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
+            }
           } else if (ev.kind === 'upsert' && ev.item) {
             const idx = items.findIndex((it) => it.id === ev.item!.id);
             if (idx >= 0) {
@@ -117,12 +122,14 @@ export async function pollTurnUpdates({
           } else if (ev.kind === 'approvalOpened' && ev.approval) {
             pendingApproval = ev.approval;
             status = 'waiting';
+            playApprovalChime();
           } else if (ev.kind === 'approvalResolved') {
             pendingApproval = null;
           } else if (ev.kind === 'finished') {
             isDone = true;
             status = 'idle';
             items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
+            playCompletionChime(ev.ok !== false);
           }
         }
 

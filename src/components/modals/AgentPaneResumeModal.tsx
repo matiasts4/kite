@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import { invokeCommand } from '../../lib/ipc';
 import { BrandLogo } from '../ui/BrandLogo';
-import { usePresence } from '../../motion/usePresence';
-import { motionSurfaceClass } from '../../motion/surface';
+import { surfaceMotion } from '../../motion/standard/surfaces';
+import { springs, tweens } from '../../motion/standard/tokens';
 
 export interface AgentPaneResumeModalProps {
   isOpen: boolean;
@@ -109,17 +110,13 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
     }
   }, [workspaceId, paneId, engine, onStartFresh, onClose]);
 
-  const layerPresence = usePresence(isOpen);
-  if (!layerPresence.mounted) return null;
-
-  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
-  const panelMotion = motionSurfaceClass(layerPresence.phase, 'modal');
-
   const modal = (
-    <div
-      className={`modal-backdrop${scrimMotion ? ` ${scrimMotion}` : ''}`}
+    <motion.div
+      key="agent-pane-resume"
       role="presentation"
       onClick={onClose}
+      {...surfaceMotion('scrim')}
+      transition={tweens.overlay}
       style={{
         position: 'fixed',
         inset: 0,
@@ -131,12 +128,14 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
         backdropFilter: 'blur(4px)',
       }}
     >
-      <div
-        className={`modal agent-resume-sheet${panelMotion ? ` ${panelMotion}` : ''}`}
+      <motion.div
+        className="modal agent-resume-sheet"
         role="dialog"
         aria-modal="true"
         aria-label="Resume previous conversation"
         onClick={(e) => e.stopPropagation()}
+        {...surfaceMotion('dialog')}
+        transition={springs.dialog}
         style={{
           width: '520px',
           maxWidth: '92vw',
@@ -301,9 +300,11 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
             Cancel
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 
-  return typeof document !== 'undefined' ? createPortal(modal, document.body) : null;
+  return typeof document !== 'undefined'
+    ? createPortal(<AnimatePresence>{isOpen ? modal : null}</AnimatePresence>, document.body)
+    : null;
 };

@@ -13,6 +13,7 @@ import {
   ChatMode,
   ChatAttachment,
   ApprovalRequest,
+  AUTOMATIC_MODEL_ID,
   formatTokens,
   formatBytes,
 } from './types';
@@ -23,7 +24,6 @@ import { SelectMenu } from '../../ui/SelectMenu';
 import { EffortPicker } from './EffortPicker';
 import { ChatApprovalCard } from './ChatApprovalCard';
 import { invokeCommand, listConnections } from '../../../lib/ipc';
-import { openSettingsTab } from '../../../lib/settingsNav';
 import {
   verifiedSpawnConnections,
   type ConnectionCandidate,
@@ -38,6 +38,7 @@ export interface ChatComposerProps {
   threadProvider: ChatProvider;
   threadModel: string | null;
   threadEffort?: string | null;
+  threadAgent?: string | null;
   threadConnectionId?: string | null;
   threadItems?: ChatItem[];
   declaration: DriverDeclaration;
@@ -61,7 +62,7 @@ export interface ChatComposerProps {
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }) => void;
+  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null }) => void;
   onSelectConnection?: (connectionId: string) => void;
   onApprovalDecision?: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
@@ -122,6 +123,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadProvider,
   threadModel,
   threadEffort,
+  threadAgent,
   threadConnectionId,
   threadItems = [],
   declaration,
@@ -424,15 +426,16 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const providerReason = providerDeclared ? null : undeclaredReason(declaration, 'provider');
 
   const models = declaration.models;
+  const liveModels = models.filter((model) => model.id !== AUTOMATIC_MODEL_ID);
   const modelsDeclared = models.length > 0;
-  const modelReason = modelsDeclared ? null : undeclaredReason(declaration, 'model');
+  const modelReason =
+    liveModels.length > 0 ? null : undeclaredReason(declaration, 'model');
   const currentModelOption = models.find((model) => model.id === threadModel);
   const currentModelName =
-    currentModelOption?.label || threadModel || declaration.defaultModel || 'Model';
-  const modelTriggerLabel =
-    agentName && (!threadModel || threadModel === declaration.defaultModel)
+    !threadModel || threadModel === AUTOMATIC_MODEL_ID
       ? 'Automatic'
-      : currentModelName.replace(/^Claude /u, '');
+      : currentModelOption?.label || threadModel;
+  const modelTriggerLabel = currentModelName.replace(/^Claude /u, '');
 
   const effortChoices = declaration.effort ?? [];
   const effortDeclared = isControlDeclared(declaration.effort);
@@ -449,7 +452,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const workModeDeclared = isControlDeclared(declaration.workMode);
   const workModeReason = workModeDeclared ? null : undeclaredReason(declaration, 'workMode');
   const selectedWorkMode =
-    workModes.find((mode) => mode.plan === Boolean(threadPlan)) ?? null;
+    workModes.find((mode) => (threadAgent ? mode.id === threadAgent : false)) ??
+    workModes.find((mode) => mode.plan === Boolean(threadPlan)) ??
+    null;
 
   const canSend = Boolean(prompt.trim() || attachments.length > 0);
   const selectedConnection = connectionCandidates.find(
@@ -640,7 +645,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                 }))}
                 onSelect={(modeId) => {
                   const mode = workModes.find((candidate) => candidate.id === modeId);
-                  if (mode) onUpdateConfig({ plan: mode.plan });
+                  if (mode) onUpdateConfig({ plan: mode.plan, agent: mode.id });
                 }}
               />
             </span>
@@ -666,28 +671,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             </span>
             {permissionReason && <ControlReason reason={permissionReason} />}
 
-            {connectionCandidates.length === 0 && (
-              <button
-                type="button"
-                className="chat-composer__connect"
-                style={{
-                  appearance: 'none',
-                  background: 'transparent',
-                  border: '1px solid var(--block-stroke, rgba(127,127,127,0.35))',
-                  borderRadius: 'var(--radius-chip, 6px)',
-                  color: 'var(--text-secondary, inherit)',
-                  cursor: 'pointer',
-                  fontSize: 'var(--text-caption, 12px)',
-                  minHeight: 24,
-                  padding: '0 10px',
-                }}
-                title={`Connect ${providerRow?.label ?? declaration.driver} in Settings`}
-                disabled={running}
-                onClick={() => openSettingsTab('zed', declaration.driver)}
-              >
-                Connect {providerRow?.label ?? declaration.driver}
-              </button>
-            )}
             {connectionCandidates.length > 1 && onSelectConnection && (
               <SelectMenu
                 variant="toolbar"
@@ -745,7 +728,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               searchable
               triggerLabel={modelTriggerLabel}
               disabled={running || !modelsDeclared}
-              value={threadModel || declaration.defaultModel || ''}
+              value={threadModel || AUTOMATIC_MODEL_ID}
               panelTitle={`${providerRow?.label ?? declaration.driver} Models`}
               panelEngine={providerRow?.engine ?? declaration.driver}
               rows={models.map((model) => ({
@@ -754,7 +737,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                 detail: model.detail,
               }))}
               onSelect={(model) => {
-                onUpdateConfig({ model });
+                onUpdateConfig({ model: model === AUTOMATIC_MODEL_ID ? null : model });
               }}
             />
 
@@ -794,7 +777,24 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               }
               aria-label={dictationState === 'recording' ? 'Finish dictation' : 'Dictate message'}
             >
-              {dictationState === 'recording' ? <StopIcon size={10} /> : <MicIcon size={12} />}
+              {dictationState === 'recording' ? (
+                <StopIcon size={10} />
+              ) : dictationState === 'transcribing' ? (
+                <svg
+                  className="animate-spin"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  aria-hidden="true"
+                >
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                </svg>
+              ) : (
+                <MicIcon size={12} />
+              )}
             </button>
             <span aria-live="polite" className="sr-only" role="status">
               {dictationState === 'recording' ? 'Listening. Press again to transcribe.' : 'Dictate message'}
@@ -832,6 +832,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           )}
         </div>
       </div>
-    </div>
+  </div>
   );
 };

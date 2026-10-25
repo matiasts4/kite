@@ -10,9 +10,7 @@ vi.mock('../../../../lib/ipc', () => ({
 
 type ModelsResponse = { models: ModelOption[]; cached?: boolean };
 
-const dynamicProviders = (Object.keys(PROVIDER_CATALOG) as ChatProvider[]).filter(
-  (provider) => PROVIDER_CATALOG[provider].isDynamic
-);
+const dynamicProviders = Object.keys(PROVIDER_CATALOG) as ChatProvider[];
 
 function liveModels(provider: ChatProvider): ModelOption[] {
   return [{ id: `${provider}-live`, name: `${provider} live`, description: 'Reported by the provider CLI' }];
@@ -96,7 +94,7 @@ describe('useChatModels', () => {
     expect(result.current.isRefreshingModels).toBe(false);
   });
 
-  it('keeps the static catalog path usable when a fetch fails and never clears a good list with an empty refresh', async () => {
+  it('does not invent a model list when a fetch fails, and never clears a good list with an empty refresh', async () => {
     const provider = dynamicProviders[0];
     vi.mocked(invokeCommand).mockRejectedValue(new Error('provider CLI unavailable'));
 

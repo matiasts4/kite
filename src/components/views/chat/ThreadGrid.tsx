@@ -25,6 +25,7 @@ export interface ThreadGridProps {
   engineLabel?: string;
   liveRunsCount: number;
   dynamicModelsMap: Record<string, ModelOption[]>;
+  dynamicAgentsMap?: Record<string, any[]>;
   /** Session projections supplied by the caller, keyed by thread id. */
   sessionProjections?: Record<string, SessionProjection> | null;
   /** Driver declarations supplied by the caller, keyed by thread id. */
@@ -153,6 +154,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   engineLabel,
   liveRunsCount,
   dynamicModelsMap,
+  dynamicAgentsMap,
   sessionProjections,
   driverDeclarations,
   isRefreshingModels,
@@ -366,6 +368,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 attachments={attachments}
                 liveRunsCount={liveRunsCount}
                 dynamicModels={dynamicModelsMap[thread.provider] || []}
+                dynamicAgents={dynamicAgentsMap?.[thread.provider] || []}
                 driverDeclaration={driverDeclarations?.[tid] ?? null}
                 session={sessionProjections?.[tid] ?? null}
                 isRefreshingModels={isRefreshingModels}

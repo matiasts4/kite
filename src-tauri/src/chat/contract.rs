@@ -1098,7 +1098,7 @@ mod tests {
                 "codex",
                 "codex exec",
                 "acceptEdits",
-                &["exec", "--skip-git-repo-check", "--full-auto", "hello"],
+                &["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--json", "hello"],
             ),
             (
                 "codex",
@@ -1109,12 +1109,13 @@ mod tests {
                     "--skip-git-repo-check",
                     "--sandbox",
                     "read-only",
+                    "--json",
                     read_only.as_str(),
                 ],
             ),
             ("cursor", "cursor-agent -p", "acceptEdits", &["-p", "hello"]),
             ("grok", "grok -p", "acceptEdits", &["-p", "--permission-mode", "acceptEdits", "hello"]),
-            ("opencode", "opencode run", "acceptEdits", &["run", "hello"]),
+            ("opencode", "opencode run", "acceptEdits", &["run", "--format", "json", "hello"]),
             ("gemini", "gemini --prompt", "acceptEdits", &["--prompt", "hello"]),
         ];
 
@@ -1160,6 +1161,7 @@ mod tests {
                 "--permission-mode",
                 "--mode",
                 "--dangerously-skip-permissions",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--full-auto",
                 "--sandbox",
             ]

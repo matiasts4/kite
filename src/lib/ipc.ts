@@ -913,6 +913,28 @@ export async function listSavedAccounts(provider?: string): Promise<SavedAccount
   }
 }
 
+export interface DetectedCliAccount {
+  provider: string;
+  displayName: string;
+  authState: 'authenticated' | 'unauthenticated' | 'not_installed';
+  accountLabel?: string;
+  email?: string;
+  planName?: string;
+  binaryPath?: string;
+  configPath?: string;
+  details?: string;
+}
+
+export async function listDetectedCliAccounts(): Promise<DetectedCliAccount[]> {
+  try {
+    const res = await invokeCommand<{ schemaVersion: number; accounts: DetectedCliAccount[] }>('list_detected_cli_accounts');
+    return res?.accounts || [];
+  } catch (err) {
+    console.warn('[IPC] listDetectedCliAccounts failed:', err);
+    return [];
+  }
+}
+
 export async function saveCurrentAccountProfile(
   provider: string,
   label: string

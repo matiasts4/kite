@@ -11,9 +11,10 @@ import { BrandLogo } from '../agents/engineMetadata';
 /** Providers whose local session can be snapshotted into the account vault. */
 export const MULTI_ACCOUNT_PROVIDERS: { id: string; label: string }[] = [
   { id: 'antigravity', label: 'Antigravity' },
-  { id: 'gemini', label: 'Gemini CLI' },
-  { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'grok', label: 'Grok' },
+  { id: 'opencode', label: 'OpenCode' },
 ];
 
 const toneFor = (pct: number) => (pct >= 45 ? 'ok' : pct >= 20 ? 'warn' : 'low');

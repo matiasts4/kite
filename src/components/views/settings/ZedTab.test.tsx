@@ -32,7 +32,7 @@ describe('ZedTab Component Refactoring', () => {
 
     // Provider section
     expect(screen.getByText(/Canal y Pasarela de Proveedor IA/i)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /OpenCode Go/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^OpenCode Go/ })).toBeInTheDocument();
 
     // Latency section
     expect(screen.getByText(/Rendimiento y Latencia por Proveedor \/ Tarea/i)).toBeInTheDocument();

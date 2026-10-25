@@ -96,6 +96,7 @@
 }
 
 .settings-rail__row {
+  position: relative;
   align-items: center;
   gap: var(--space-2, 8px);
   width: 100%;
@@ -114,13 +115,27 @@
   display: flex;
 }
 
+.settings-rail__indicator {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--radius-row, 6px);
+  background: var(--selected-fill, rgba(255, 255, 255, 0.09));
+  pointer-events: none;
+}
+
+.settings-rail__row > :not(.settings-rail__indicator) {
+  position: relative;
+  z-index: 1;
+}
+
 .settings-rail__row:hover:not(.sidebar-row--selected) {
   background: var(--hover-fill, rgba(255, 255, 255, 0.05));
   color: var(--text-primary, #fafafa);
 }
 
 .settings-rail__row.sidebar-row--selected {
-  background: var(--selected-fill, rgba(255, 255, 255, 0.09));
+  background: transparent;
   color: var(--text-primary, #fafafa);
   font-weight: var(--weight-semibold, 600);
 }
@@ -364,12 +379,16 @@ select.settings-control {
   height: 20px;
   transition: background-color var(--duration-ink, 150ms) var(--ease-ink, ease),
               opacity var(--duration-press, 100ms) var(--ease-snappy, ease),
-              transform var(--duration-press, 100ms) var(--ease-snappy, ease);
+              scale var(--duration-press, 120ms) var(--motion-spring, cubic-bezier(0.34, 1.56, 0.64, 1));
   border: 0;
   flex: none;
   padding: 0;
   position: relative;
   cursor: pointer;
+}
+
+.ui-switch:active:not(:disabled) {
+  scale: var(--press-scale, 0.97);
 }
 
 .ui-switch:hover:not(:disabled) {
@@ -390,7 +409,9 @@ select.settings-control {
   width: 26px;
   height: 16px;
   box-shadow: var(--switch-knob-shadow, 0 1px 3px rgba(0, 0, 0, 0.3));
-  transition: transform var(--duration-state, 150ms) var(--ease-snappy, cubic-bezier(0.16, 1, 0.3, 1));
+  transition: transform var(--duration-state, 180ms) var(--motion-spring, cubic-bezier(0.34, 1.56, 0.64, 1)),
+              scale var(--duration-press, 120ms) var(--motion-spring, cubic-bezier(0.34, 1.56, 0.64, 1));
+  transform-origin: left center;
   position: absolute;
   top: 2px;
   left: 2px;
@@ -398,6 +419,12 @@ select.settings-control {
 
 .ui-switch[aria-checked="true"] .ui-switch__knob {
   transform: translate(14px);
+  transform-origin: right center;
+}
+
+/* Pressed, the knob stretches toward the side it is about to travel to. */
+.ui-switch:active:not(:disabled) .ui-switch__knob {
+  scale: 1.08 0.94;
 }
 
 .ui-switch:disabled {
@@ -420,6 +447,7 @@ select.settings-control {
 }
 
 .ui-segmented__item {
+  position: relative;
   min-width: 70px;
   height: 24px;
   padding: 0 var(--space-2, 8px);
@@ -430,7 +458,8 @@ select.settings-control {
   line-height: var(--leading-caption, 16px);
   white-space: nowrap;
   transition: background-color var(--duration-state, 150ms) var(--ease-snappy, ease),
-              color var(--duration-ink, 150ms) var(--ease-ink, ease);
+              color var(--duration-ink, 150ms) var(--ease-ink, ease),
+              scale var(--duration-press, 120ms) var(--motion-spring, cubic-bezier(0.34, 1.56, 0.64, 1));
   background: transparent;
   border: 0;
   justify-content: center;
@@ -440,13 +469,32 @@ select.settings-control {
   cursor: pointer;
 }
 
+.ui-segmented__indicator {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: calc(var(--radius-chip, 6px) - 1px);
+  background: var(--thumb-fill, rgba(255, 255, 255, 0.12));
+  box-shadow: var(--shadow-segment-thumb, 0 1px 2px rgba(0, 0, 0, 0.2));
+  pointer-events: none;
+}
+
+.ui-segmented__item > :not(.ui-segmented__indicator) {
+  position: relative;
+  z-index: 1;
+}
+
+.ui-segmented__item:active:not(:disabled) {
+  scale: var(--press-scale, 0.97);
+}
+
 .ui-segmented__item:hover:not(:disabled):not([aria-pressed="true"]) {
   color: var(--text-primary, #fafafa);
 }
 
 .ui-segmented__item[aria-pressed="true"] {
-  background: var(--thumb-fill, rgba(255, 255, 255, 0.12));
-  box-shadow: var(--shadow-segment-thumb, 0 1px 2px rgba(0, 0, 0, 0.2));
+  background: transparent;
+  box-shadow: none;
   color: var(--text-primary, #fafafa);
   font-weight: var(--weight-semibold, 600);
 }
@@ -466,6 +514,41 @@ select.settings-control {
   flex: none;
   width: 12px;
   height: 12px;
+}
+
+/* Reduced motion: the controls still answer with color, but never move. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-switch,
+  .ui-switch__knob,
+  .ui-segmented__item {
+    transition-duration: 0ms;
+    transition-delay: 0ms;
+  }
+
+  .ui-switch:active:not(:disabled),
+  .ui-segmented__item:active:not(:disabled) {
+    scale: 1;
+  }
+
+  .ui-switch:active:not(:disabled) .ui-switch__knob {
+    scale: 1;
+  }
+}
+
+html[data-motion='reduce'] .ui-switch,
+html[data-motion='reduce'] .ui-switch__knob,
+html[data-motion='reduce'] .ui-segmented__item {
+  transition-duration: 0ms;
+  transition-delay: 0ms;
+}
+
+html[data-motion='reduce'] .ui-switch:active:not(:disabled),
+html[data-motion='reduce'] .ui-segmented__item:active:not(:disabled) {
+  scale: 1;
+}
+
+html[data-motion='reduce'] .ui-switch:active:not(:disabled) .ui-switch__knob {
+  scale: 1;
 }
 
 /* Theme Grid & Cards */
@@ -1078,3 +1161,56 @@ select.settings-control {
   text-align: left;
 }
 
+
+/* Provider switcher (Zed > Canal y Pasarela de Proveedor IA) */
+.zed-provider-switcher-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2, 8px);
+  padding: var(--space-4, 16px) var(--space-5, 20px);
+}
+
+.zed-provider-switcher-copy p {
+  color: var(--text-secondary, #a3a3a3);
+  font-size: var(--text-row, 13px);
+  line-height: var(--leading-row, 18px);
+  margin: 0;
+}
+
+.zed-provider-switcher {
+  height: auto;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.zed-provider-switcher .ui-segmented__item {
+  flex: 1 1 auto;
+}
+
+.zed-provider__panel {
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  padding: var(--space-4, 16px) var(--space-5, 20px);
+  border-top: 1px solid var(--separator, #262626);
+  display: flex;
+}
+
+.zed-provider__note {
+  color: var(--text-secondary, #a3a3a3);
+  font-size: var(--text-row, 12px);
+  line-height: var(--leading-row, 18px);
+  margin: 0;
+}
+
+.zed-provider__toolbar {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2, 8px);
+  display: flex;
+}
+
+.zed-provider__grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3, 12px);
+  display: grid;
+}

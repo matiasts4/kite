@@ -712,6 +712,11 @@ pub fn launch_provider(
         .map(|s| s.to_string());
     let workspace_id = thread.get("workspaceId").and_then(|v| v.as_str()).map(|s| s.to_string());
     let profile_id = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let agent = thread
+        .get("agent")
+        .or_else(|| thread.get("workMode"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let prompt = prompt.to_string();
     let thread_clone = thread.clone();
     let binding = binding.cloned();
@@ -737,6 +742,7 @@ pub fn launch_provider(
                 .as_ref()
                 .and_then(|value| value.supported_endpoint.as_deref()),
             verified_endpoints: &verified_endpoints,
+            agent: agent.as_deref(),
         };
         let cwd = workspace_id
             .as_deref()
@@ -929,12 +935,19 @@ fn verified_endpoints_for(connection_id: Option<&str>) -> Result<Vec<EndpointVer
 
 pub fn list_available_providers() -> Vec<&'static str> {
     let mut available = Vec::new();
+    let home = crate::quota::utils::user_home_dir();
+    let grok_path = home.join(".grok").join("bin").join("grok.exe");
+    let codex_path = home.join("AppData").join("Local").join("Programs").join("OpenAI").join("Codex").join("bin").join("codex.exe");
+    let natives = crate::chat::persistent::opencode_native_paths();
+    let opencode_fallbacks: Vec<&str> = natives.iter().map(String::as_str).collect();
+
     if resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]).is_some() {
         available.push("Antigravity");
     }
     if resolve_bin("codex", &[
         r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
         r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
+        &codex_path.to_string_lossy(),
     ]).is_some() {
         available.push("Codex");
     }
@@ -944,14 +957,11 @@ pub fn list_available_providers() -> Vec<&'static str> {
     if resolve_bin("agent", &[]).or_else(|| resolve_bin("cursor-agent", &[])).is_some() {
         available.push("Cursor");
     }
-    if resolve_bin("grok", &[]).is_some() {
+    if resolve_bin("grok", &[&grok_path.to_string_lossy()]).is_some() {
         available.push("Grok");
     }
-    if resolve_bin("opencode", &[]).is_some() {
+    if resolve_bin("opencode", &opencode_fallbacks).is_some() {
         available.push("OpenCode");
-    }
-    if resolve_bin("gemini", &[]).is_some() {
-        available.push("Gemini CLI");
     }
     available
 }
@@ -1041,6 +1051,7 @@ pub struct SendValues<'a> {
     /// that endpoint must be verified on `connection_id`.
     pub supported_endpoint: Option<&'a str>,
     pub verified_endpoints: &'a [EndpointVerification],
+    pub agent: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1049,6 +1060,7 @@ pub struct ResolvedSend<'a> {
     pub connection_id: Option<&'a str>,
     pub model: Option<&'a str>,
     pub session_id: Option<&'a str>,
+    pub agent: Option<&'a str>,
 }
 
 /// Resolves the send values a spawn may forward. An explicit request is never
@@ -1107,6 +1119,7 @@ pub fn resolve_send<'a>(
         connection_id,
         model,
         session_id,
+        agent: values.agent,
     })
 }
 
@@ -1199,12 +1212,13 @@ pub fn spawn_args(
                 args.push("--sandbox".into());
                 args.push("read-only".into());
             } else {
-                args.push("--full-auto".into());
+                args.push("--dangerously-bypass-approvals-and-sandbox".into());
             }
             if let Some(model) = resolved.model {
                 args.push("--model".into());
                 args.push(model.into());
             }
+            args.push("--json".into());
             args.push(sent);
             args
         }
@@ -1223,7 +1237,13 @@ pub fn spawn_args(
         }
         "cursor" => vec!["-p".into(), sent],
         "opencode" => {
-            let mut args = vec!["run".into()];
+            let mut args = vec!["run".into(), "--format".into(), "json".into()];
+            if let Some(agent) = resolved.agent.or(values.agent) {
+                if !agent.is_empty() && agent != "build" {
+                    args.push("--agent".into());
+                    args.push(agent.into());
+                }
+            }
             if let Some(model) = resolved.model {
                 args.push("--model".into());
                 args.push(model.into());
@@ -1241,38 +1261,58 @@ pub fn spawn_args(
 }
 
 fn resolve_spawn_program(provider: &str) -> Result<PathBuf, String> {
+    let home = crate::quota::utils::user_home_dir();
     let program = match provider {
         "antigravity" | "agy" => {
-            resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]).ok_or_else(|| {
+            let agy_user = home.join("AppData").join("Local").join("agy").join("bin").join("agy.exe");
+            resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe", &agy_user.to_string_lossy()]).ok_or_else(|| {
                 let avail = list_available_providers().join(", ");
                 format!("Antigravity CLI (agy) is not installed. Available providers: {avail}")
             })?
         }
-        "claude" => resolve_bin("claude", &[]).ok_or_else(|| {
-            let avail = list_available_providers().join(", ");
-            if avail.is_empty() {
-                "Claude Code is not installed. Install it with 'npm install -g @anthropic-ai/claude-code'.".to_string()
-            } else {
-                format!("Claude Code is not installed. Installed on this system: {avail}. Please switch providers in the dropdown.")
+        "claude" => {
+            let appdata_npm = std::env::var("APPDATA")
+                .map(|a| PathBuf::from(a).join("npm").join("claude.cmd"))
+                .ok();
+            let mut fallbacks = Vec::new();
+            if let Some(ref p) = appdata_npm {
+                fallbacks.push(p.to_string_lossy().to_string());
             }
-        })?,
-        "codex" => resolve_bin("codex", &[
-            r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
-            r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
-        ]).ok_or_else(|| {
-            let avail = list_available_providers().join(", ");
-            format!("Codex is not installed. Available providers: {avail}")
-        })?,
+            fallbacks.push(home.join(".local").join("bin").join("claude.exe").to_string_lossy().to_string());
+            let fb_refs: Vec<&str> = fallbacks.iter().map(String::as_str).collect();
+            resolve_bin("claude", &fb_refs).ok_or_else(|| {
+                let avail = list_available_providers().join(", ");
+                if avail.is_empty() {
+                    "Claude Code is not installed. Install it with 'npm install -g @anthropic-ai/claude-code'.".to_string()
+                } else {
+                    format!("Claude Code is not installed. Installed on this system: {avail}. Please switch providers in the dropdown.")
+                }
+            })?
+        }
+        "codex" => {
+            let codex_user = home.join("AppData").join("Local").join("Programs").join("OpenAI").join("Codex").join("bin").join("codex.exe");
+            resolve_bin("codex", &[
+                r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
+                r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
+                &codex_user.to_string_lossy(),
+            ]).ok_or_else(|| {
+                let avail = list_available_providers().join(", ");
+                format!("Codex is not installed. Available providers: {avail}")
+            })?
+        }
         "cursor" => resolve_bin("cursor-agent", &[])
             .or_else(|| resolve_bin("agent", &[]))
             .ok_or_else(|| {
                 let avail = list_available_providers().join(", ");
                 format!("Cursor Agent is not installed. Available providers: {avail}")
             })?,
-        "grok" => resolve_bin("grok", &[]).ok_or_else(|| {
-            let avail = list_available_providers().join(", ");
-            format!("Grok is not installed. Available providers: {avail}")
-        })?,
+        "grok" => {
+            let grok_user = home.join(".grok").join("bin").join("grok.exe");
+            resolve_bin("grok", &[&grok_user.to_string_lossy()]).ok_or_else(|| {
+                let avail = list_available_providers().join(", ");
+                format!("Grok is not installed. Available providers: {avail}")
+            })?
+        }
         "opencode" => {
             let natives = crate::chat::persistent::opencode_native_paths();
             let fallbacks: Vec<&str> = natives.iter().map(String::as_str).collect();
@@ -1342,6 +1382,14 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
             touch(thread);
         }
     }
+    {
+        let mut notifs = notifications().lock().unwrap();
+        if let Some(item) = notifs.iter_mut().find(|n| n.get("id").and_then(|v| v.as_str()) == Some(request_id)) {
+            item["isWaitingForInput"] = json!(false);
+            item["resolution"] = json!("attended");
+            item["isRead"] = json!(true);
+        }
+    }
     persist();
 
     if let Some(stdin_mutex) = stdin_arc {
@@ -1356,7 +1404,9 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
 pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut child: crate::hidden_exec::HiddenChild) {
     let pid = child.id();
     chat_log(&format!("stream_child: started for run_id={}, pid={}", run_id, pid));
-    let stdin = child.stdin.take().map(|s| Arc::new(Mutex::new(s)));
+    // Drop the stdin write pipe immediately so child processes (like `opencode run` and `codex exec`,
+    // which check if stdin is a pipe and wait for EOF) receive EOF and do not hang.
+    drop(child.stdin.take());
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let shared = Arc::new(Mutex::new(child));
@@ -1364,7 +1414,7 @@ pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut
         let mut live = live_turns().lock().unwrap();
         if let Some(run) = live.runs.get_mut(&run_id) {
             run.child = Some(Arc::clone(&shared));
-            run.stdin = stdin;
+            run.stdin = None;
         }
     }
     let out_run = run_id.clone();
@@ -1484,6 +1534,65 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                     tool_item["durationSeconds"] = json!(dur);
                 }
 
+                // If this is a subsequent tool update (e.g. tool_result), preserve existing metadata
+                {
+                    let items = threads().lock().unwrap();
+                    if let Some(thread) = items.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
+                        if let Some(list) = thread.get("items").and_then(|v| v.as_array()) {
+                            if let Some(ex) = list.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(&tool.id)) {
+                                if let Some(ex_title) = ex.get("title").and_then(|v| v.as_str()) {
+                                    if !ex_title.is_empty() && ex_title != "tool" && tool_item["title"].as_str().map_or(true, |s| s.is_empty() || s == "tool") {
+                                        tool_item["title"] = json!(ex_title);
+                                    }
+                                }
+                                if let Some(ex_detail) = ex.get("detail").and_then(|v| v.as_str()) {
+                                    if !ex_detail.is_empty() && tool_item["detail"].as_str().map_or(true, |s| s.is_empty()) {
+                                        tool_item["detail"] = json!(ex_detail);
+                                    }
+                                }
+                                if let Some(ex_name) = ex.get("toolName").and_then(|v| v.as_str()) {
+                                    if !ex_name.is_empty() && ex_name != "tool" && tool_item["toolName"].as_str().map_or(true, |s| s.is_empty() || s == "tool") {
+                                        tool_item["toolName"] = json!(ex_name);
+                                    }
+                                }
+                                if let Some(ex_kind) = ex.get("toolKind").and_then(|v| v.as_str()) {
+                                    if !ex_kind.is_empty() && tool_item["toolKind"].as_str().map_or(true, |s| s.is_empty() || s == "dynamicToolCall") {
+                                        tool_item["toolKind"] = json!(ex_kind);
+                                    }
+                                }
+                                if tool_item.get("serverName").is_none() {
+                                    if let Some(s) = ex.get("serverName") {
+                                        tool_item["serverName"] = s.clone();
+                                    }
+                                }
+                                if tool_item.get("command").is_none() {
+                                    if let Some(c) = ex.get("command") {
+                                        tool_item["command"] = c.clone();
+                                    }
+                                }
+                                if tool_item.get("filePath").is_none() {
+                                    if let Some(f) = ex.get("filePath") {
+                                        tool_item["filePath"] = f.clone();
+                                    }
+                                }
+                                if tool_item.get("addedLines").is_none() {
+                                    if let Some(a) = ex.get("addedLines") {
+                                        tool_item["addedLines"] = a.clone();
+                                    }
+                                }
+                                if tool_item.get("removedLines").is_none() {
+                                    if let Some(r) = ex.get("removedLines") {
+                                        tool_item["removedLines"] = r.clone();
+                                    }
+                                }
+                                if let Some(c) = ex.get("createdAtUnixMs") {
+                                    tool_item["createdAtUnixMs"] = c.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+
                 {
                     let mut live = live_turns().lock().unwrap();
                     if let Some(run) = live.runs.get_mut(run_id) {
@@ -1526,12 +1635,39 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                     }
                 }
                 live_cv().notify_all();
-                {
+                let profile_id = {
                     let mut items = threads().lock().unwrap();
                     if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
                         thread["pendingApproval"] = approval_val;
                         thread["status"] = json!("waiting");
                         touch(thread);
+                        thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                };
+                {
+                    let source = if profile_id.is_some() { "agentChat" } else { "codeThread" };
+                    let notice = json!({
+                        "id": approval.request_id,
+                        "runId": run_id,
+                        "target": { "source": source, "id": thread_id },
+                        "profileId": profile_id,
+                        "routineId": Value::Null,
+                        "kind": { "kind": "needsInput", "requestKind": "toolApproval" },
+                        "resolution": Value::Null,
+                        "createdAtUnixMs": now_ms(),
+                        "isRead": false,
+                        "isWaitingForInput": true
+                    });
+                    let mut notifs = notifications().lock().unwrap();
+                    if let Some(pos) = notifs.iter().position(|n| n.get("id").and_then(|v| v.as_str()) == Some(&approval.request_id)) {
+                        notifs[pos] = notice;
+                    } else {
+                        notifs.insert(0, notice);
+                        if notifs.len() > 100 {
+                            notifs.truncate(100);
+                        }
                     }
                 }
                 persist();
@@ -1561,7 +1697,7 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                 input_tokens,
                 output_tokens,
                 duration_seconds,
-                ..
+                ref status,
             } => {
                 let usage_val = json!({
                     "inputTokens": input_tokens,
@@ -1584,14 +1720,44 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                     }
                 }
                 persist();
+
+                let is_ok = !status.eq_ignore_ascii_case("ERROR") && !status.eq_ignore_ascii_case("FAILED");
+                finish_run(run_id, is_ok, false, "");
+
+                // Reap child process if still alive so pipe reader threads terminate promptly without hanging
+                if let Some(child_arc) = {
+                    let live = live_turns().lock().unwrap();
+                    live.runs.get(run_id).and_then(|r| r.child.clone())
+                } {
+                    if let Ok(mut c) = child_arc.lock() {
+                        let _ = c.kill();
+                    }
+                }
+
                 return true;
             }
             crate::acp::AcpStreamEvent::Raw { .. } => {}
         }
     }
 
-    if val.get("event").is_some() || val.get("jsonrpc").is_some() {
-        return true;
+    if val.is_object() {
+        if val.get("type").is_some()
+            || val.get("event").is_some()
+            || val.get("jsonrpc").is_some()
+            || val.get("sessionID").is_some()
+            || val.get("sessionId").is_some()
+            || val.get("session_id").is_some()
+            || val.get("step").is_some()
+            || val.get("step_index").is_some()
+            || val.get("tokens").is_some()
+            || val.get("part").is_some()
+            || val.get("delta").is_some()
+            || val.get("method").is_some()
+            || val.get("result").is_some()
+            || val.get("error").is_some()
+        {
+            return true;
+        }
     }
 
     false
@@ -1888,6 +2054,8 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
         if !thread_id.is_empty() {
             settle_routine(run_id, &thread_id, routine_id, profile_for_routine.as_deref(), ok, stopped);
         }
+    } else if !thread_id.is_empty() {
+        settle_turn_notification(run_id, &thread_id, profile_for_routine.as_deref(), ok, stopped);
     }
 
     {
@@ -1941,6 +2109,37 @@ pub fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_i
         "target": { "source": "codeThread", "id": thread_id },
         "profileId": profile,
         "routineId": routine,
+        "kind": { "kind": "settled", "outcome": outcome },
+        "resolution": "runSettled",
+        "createdAtUnixMs": now_ms(),
+        "isRead": false,
+        "isWaitingForInput": false
+    });
+    let mut items = notifications().lock().unwrap();
+    items.insert(0, notice);
+    if items.len() > 100 {
+        items.truncate(100);
+    }
+}
+
+pub fn settle_turn_notification(run_id: &str, thread_id: &str, profile_id: Option<&str>, ok: bool, stopped: bool) {
+    if thread_id.is_empty() {
+        return;
+    }
+    let outcome = if stopped {
+        "cancelled"
+    } else if ok {
+        "completed"
+    } else {
+        "failed"
+    };
+    let source = if profile_id.is_some() { "agentChat" } else { "codeThread" };
+    let notice = json!({
+        "id": Uuid::new_v4().to_string(),
+        "runId": run_id,
+        "target": { "source": source, "id": thread_id },
+        "profileId": profile_id,
+        "routineId": Value::Null,
         "kind": { "kind": "settled", "outcome": outcome },
         "resolution": "runSettled",
         "createdAtUnixMs": now_ms(),
@@ -2034,6 +2233,7 @@ mod tests {
             session_id,
             supported_endpoint,
             verified_endpoints,
+            agent: None,
         }
     }
 
@@ -2226,9 +2426,10 @@ mod tests {
                 "resume",
                 "conversation-1",
                 "--skip-git-repo-check",
-                "--full-auto",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
                 "gpt-6-sol",
+                "--json",
                 "hello",
             ]
         );
@@ -2273,8 +2474,19 @@ mod tests {
             "hello",
         )
         .expect("opencode args");
-        assert_eq!(spawn.args, vec!["run", "hello"]);
+        assert_eq!(spawn.args, vec!["run", "--format", "json", "hello"]);
         assert!(!spawn.args.iter().any(|arg| arg.contains(OPENCODE_GO_CHAT)));
+
+        let mut values_with_agent = send(None, None, None, None, &[]);
+        values_with_agent.agent = Some("gentle-orchestrator");
+        let spawn_agent = spawn_args(
+            "opencode",
+            "fullAccess",
+            &values_with_agent,
+            None,
+            "hello",
+        ).expect("opencode args with agent");
+        assert_eq!(spawn_agent.args, vec!["run", "--format", "json", "--agent", "gentle-orchestrator", "hello"]);
     }
 
     use crate::chat::session::{ScriptedTransport, SessionState};

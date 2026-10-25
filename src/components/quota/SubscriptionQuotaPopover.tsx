@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import { QuotaProgressRing } from './QuotaProgressRing';
 import { formatDetailedReset, useResetCountdownClock } from '../../lib/quota/useResetCountdownClock';
 import {
@@ -13,6 +14,8 @@ import { diagnoseProvider } from '../../lib/quota/providerState';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { saveQuotaPreferences } from '../../lib/quota/quotaManager';
 import { openSettingsTab } from '../../lib/settingsNav';
+import { MOTION_EXIT_MS } from '../../motion/contract';
+import { surfaceMotion } from '../../motion/standard/surfaces';
 
 export interface SubscriptionQuotaPopoverProps {
   allQuotas: Record<string, ProviderQuotaStatus>;
@@ -126,15 +129,18 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   }, [onClose]);
 
   const popoverNode = (
-    <div
+    <motion.div
+      {...surfaceMotion('popover', { exitMs: MOTION_EXIT_MS })}
       ref={popoverRef}
       role="dialog"
       aria-label="Cuotas de suscripción IA"
-      className={`subscription-quota-popover ${phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
+      className="subscription-quota-popover"
       style={{
         position: 'fixed',
         top: `${position.top}px`,
         right: `${position.right}px`,
+        // The panel's right edge sits under the badge, so it grows from that corner.
+        transformOrigin: 'top right',
         width: '410px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
@@ -506,95 +512,95 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
                 padding: '10px 12px',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <div
-                  style={{
-                    position: 'relative',
-                    width: 36,
-                    height: 36,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <QuotaProgressRing
-                    percentage={remPct ?? 100}
-                    size={36}
-                    strokeWidth={3}
-                    dimmed={!hasData}
-                  />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <div
                     style={{
-                      position: 'absolute',
+                      position: 'relative',
+                      width: 36,
+                      height: 36,
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      pointerEvents: 'none',
                     }}
                   >
-                    <BrandLogo engine={selectedProvider} size={16} />
-                  </div>
-                </div>
-
-                <div>
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      fontSize: '13px',
-                      color: 'var(--text-primary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                    }}
-                  >
-                    {currentQuota.displayName}
-                    <span
+                    <QuotaProgressRing
+                      percentage={remPct ?? 100}
+                      size={36}
+                      strokeWidth={3}
+                      dimmed={!hasData}
+                    />
+                    <div
                       style={{
-                        fontSize: '9px',
-                        fontWeight: 500,
-                        padding: '1px 5px',
-                        borderRadius: '4px',
-                        backgroundColor: 'var(--accent-tint)',
-                        color: 'var(--accent)',
-                        border: '1px solid var(--accent-tint-strong)',
+                        position: 'absolute',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        pointerEvents: 'none',
                       }}
                     >
-                      En línea
-                    </span>
+                      <BrandLogo engine={selectedProvider} size={16} />
+                    </div>
                   </div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                    {resetCountdown
-                      ? `Resetea en ${resetCountdown}`
-                      : formatDetailedReset(currentQuota.timeUntilResetMs)}
-                  </div>
-                </div>
-              </div>
 
-              <div style={{ textAlign: 'right' }}>
-                <div
-                  style={{
-                    fontSize: '18px',
-                    fontWeight: 700,
-                    lineHeight: 1,
-                    color:
-                      remPct != null && remPct < 20
-                        ? 'var(--status-failed)'
-                        : remPct != null && remPct < 45
-                        ? 'var(--warning-text)'
-                        : 'var(--accent)',
-                  }}
-                >
-                  {remPct}%
+                  <div>
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: '13px',
+                        color: 'var(--text-primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      {currentQuota.displayName}
+                      <span
+                        style={{
+                          fontSize: '9px',
+                          fontWeight: 500,
+                          padding: '1px 5px',
+                          borderRadius: '4px',
+                          backgroundColor: 'var(--accent-tint)',
+                          color: 'var(--accent)',
+                          border: '1px solid var(--accent-tint-strong)',
+                        }}
+                      >
+                        En línea
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                      {resetCountdown
+                        ? `Resetea en ${resetCountdown}`
+                        : formatDetailedReset(currentQuota.timeUntilResetMs)}
+                    </div>
+                  </div>
                 </div>
-                <div style={{ fontSize: '9px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                  {currentQuota.metadata?.primaryWindowLabel
-                    ? String(currentQuota.metadata.primaryWindowLabel)
-                    : currentQuota.metadata?.primaryWindow === '5h'
-                      ? 'Límite de 5 horas'
-                      : 'Restante'}
+
+                <div style={{ textAlign: 'right' }}>
+                  <div
+                    style={{
+                      fontSize: '18px',
+                      fontWeight: 700,
+                      lineHeight: 1,
+                      color:
+                        remPct != null && remPct < 20
+                          ? 'var(--status-failed)'
+                          : remPct != null && remPct < 45
+                          ? 'var(--warning-text)'
+                          : 'var(--accent)',
+                    }}
+                  >
+                    {remPct}%
+                  </div>
+                  <div style={{ fontSize: '9px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                    {currentQuota.metadata?.primaryWindowLabel
+                      ? String(currentQuota.metadata.primaryWindowLabel)
+                      : currentQuota.metadata?.primaryWindow === '5h'
+                        ? 'Límite de 5 horas'
+                        : 'Restante'}
+                  </div>
                 </div>
               </div>
-            </div>
 
             {/* Badges / Metadata row */}
             {currentQuota.metadata && Object.keys(currentQuota.metadata).length > 0 && (
@@ -638,7 +644,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
                       border: '1px solid var(--block-stroke)',
                     }}
                   >
-                    {currentQuota.metadata.tier}
+                    Tier: {String(currentQuota.metadata.tier)}
                   </span>
                 )}
                 {selectedProvider === 'opencode' && currentQuota.metadata.authSource && (
@@ -1074,8 +1080,11 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
           </button>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 
-  return createPortal(popoverNode, document.body);
+  return createPortal(
+    <AnimatePresence>{phase === 'in' && popoverNode}</AnimatePresence>,
+    document.body
+  );
 };

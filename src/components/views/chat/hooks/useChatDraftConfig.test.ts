@@ -90,6 +90,27 @@ describe('applyDraftPatch', () => {
       effort: 'low',
     });
   });
+
+  it('remembers and restores the saved model and agent when switching between providers', () => {
+    // 1. User picks model and agent on opencode
+    const opencodeDraft = applyDraftPatch(
+      { provider: 'opencode', mode: 'fullAccess', model: null, effort: null },
+      { model: 'deepseek-chat', agent: 'gentle-orchestrator' }
+    );
+    expect(opencodeDraft.model).toBe('deepseek-chat');
+    expect(opencodeDraft.agent).toBe('gentle-orchestrator');
+
+    // 2. User switches to antigravity
+    const agyDraft = applyDraftPatch(opencodeDraft, { provider: 'antigravity', model: 'gemini-2.5-pro' });
+    expect(agyDraft.provider).toBe('antigravity');
+    expect(agyDraft.model).toBe('gemini-2.5-pro');
+
+    // 3. User switches back to opencode without specifying a model -> saved model and agent are restored!
+    const restored = applyDraftPatch(agyDraft, { provider: 'opencode' });
+    expect(restored.provider).toBe('opencode');
+    expect(restored.model).toBe('deepseek-chat');
+    expect(restored.agent).toBe('gentle-orchestrator');
+  });
 });
 
 describe('draftThreadRequest', () => {

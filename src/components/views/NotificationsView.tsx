@@ -6,9 +6,11 @@ import './notifications.css';
 export interface NotificationsViewProps {
   onUnreadCountChange?: (count: number) => void;
   onNavigateAgent?: (agentId: string) => void;
+  onNavigateThread?: (threadId: string, agentId?: string | null) => void;
   onNavigateMode?: (mode: 'agent' | 'code' | 'chat') => void;
   onClose?: () => void;
   onOpenSettings?: () => void;
+  externalSnapshot?: NotificationsSnapshot | null;
 }
 
 export interface NotificationRecord {
@@ -194,9 +196,11 @@ const SettingsIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size 
 export const NotificationsView: React.FC<NotificationsViewProps> = ({
   onUnreadCountChange,
   onNavigateAgent,
+  onNavigateThread,
   onNavigateMode,
   onClose: _onClose,
   onOpenSettings,
+  externalSnapshot,
 }) => {
   const [snapshot, setSnapshot] = useState<NotificationsSnapshot | null>(null);
   const [dismissedIds] = useState<Set<string>>(() => getDismissedSet());
@@ -279,11 +283,20 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     }
   };
 
+  useEffect(() => {
+    if (externalSnapshot) {
+      syncSnapshot(externalSnapshot);
+    }
+  }, [externalSnapshot, syncSnapshot]);
+
   const handleRowClick = (rec: NotificationRecord) => {
     if (!rec.isRead) {
       handleMarkRead(rec.id);
     }
-    if (rec.target?.source === 'agentChat' && rec.profileId && onNavigateAgent) {
+    const targetThreadId = rec.target?.id;
+    if (onNavigateThread && targetThreadId) {
+      onNavigateThread(targetThreadId, rec.profileId);
+    } else if (rec.target?.source === 'agentChat' && rec.profileId && onNavigateAgent) {
       onNavigateAgent(rec.profileId);
     } else if (
       (rec.target?.source === 'codeThread' || rec.target?.source === 'codeTerminal') &&

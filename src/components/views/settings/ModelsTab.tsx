@@ -6,79 +6,10 @@ import {
   QUOTA_PREFS_CHANGED_EVENT,
 } from '../../../lib/quota/quotaManager';
 
-interface ModelItem {
-  id: string;
-  name: string;
-  provider: string;
-  contextWindow: string;
-  isDefault?: boolean;
-  isLocal?: boolean;
-}
-
-const CONFIGURED_MODELS: ModelItem[] = [
-  {
-    id: 'antigravity-gemini-argon',
-    name: 'Antigravity (Gemini 4 Argon / 3.8 Flash)',
-    provider: 'Google DeepMind',
-    contextWindow: '1M tokens',
-    isDefault: true,
-  },
-  {
-    id: 'claude-3-5-sonnet',
-    name: 'Claude 3.5 Sonnet',
-    provider: 'Anthropic',
-    contextWindow: '200k tokens',
-  },
-  {
-    id: 'gpt-4o',
-    name: 'GPT-4o / Codex',
-    provider: 'OpenAI',
-    contextWindow: '128k tokens',
-  },
-  {
-    id: 'ollama-local',
-    name: 'Ollama Local (Llama 3.2 / Qwen)',
-    provider: 'Ollama On-Device',
-    contextWindow: '128k tokens',
-    isLocal: true,
-  },
-  {
-    id: 'deepseek-r1',
-    name: 'DeepSeek R1 / V3',
-    provider: 'DeepSeek',
-    contextWindow: '64k tokens',
-  },
-];
-
 export const ModelsTab: React.FC = () => {
-  const [selectedModel, setSelectedModel] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem('bmone.defaultModel');
-      return saved === 'antigravity-gemini-pro' || !saved ? 'antigravity-gemini-argon' : saved;
-    } catch {
-      return 'antigravity-gemini-argon';
-    }
-  });
-
-  const [reasoningEffort, setReasoningEffort] = useState<'low' | 'medium' | 'high'>(() => {
-    try {
-      return (localStorage.getItem('bmone.reasoningEffort') as any) || 'medium';
-    } catch {
-      return 'medium';
-    }
-  });
-
   const [offlineFallback, setOfflineFallback] = useState<boolean>(() => {
     try {
       return localStorage.getItem('bmone.offlineFallback') !== 'false';
-    } catch {
-      return true;
-    }
-  });
-
-  const [streamResponses, setStreamResponses] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('bmone.streamResponses') !== 'false';
     } catch {
       return true;
     }
@@ -133,28 +64,6 @@ export const ModelsTab: React.FC = () => {
     window.addEventListener(QUOTA_PREFS_CHANGED_EVENT, handler);
     return () => window.removeEventListener(QUOTA_PREFS_CHANGED_EVENT, handler);
   }, []);
-
-  const handleModelChange = (id: string) => {
-    setSelectedModel(id);
-    try {
-      localStorage.setItem('bmone.defaultModel', id);
-    } catch {}
-  };
-
-  const handleReasoningChange = (effort: 'low' | 'medium' | 'high') => {
-    setReasoningEffort(effort);
-    try {
-      localStorage.setItem('bmone.reasoningEffort', effort);
-    } catch {}
-  };
-
-  const handleToggleStreaming = () => {
-    const next = !streamResponses;
-    setStreamResponses(next);
-    try {
-      localStorage.setItem('bmone.streamResponses', String(next));
-    } catch {}
-  };
 
   const handleToggleOfflineFallback = () => {
     const next = !offlineFallback;
@@ -211,91 +120,16 @@ export const ModelsTab: React.FC = () => {
         </div>
       </section>
 
-      {/* 2. Modelo Principal del Agente */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Modelo y Razonamiento del Agente</h2>
+        <h2 className="settings-group__title">Modelo del chat</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Modelo predeterminado</h3>
-              <p>Motor de razonamiento preferente para síntesis de código, terminal y análisis de proyecto.</p>
-            </div>
-            <div className="settings-row__control settings-row__control--menu">
-              <select
-                aria-label="Modelo predeterminado"
-                className="settings-control ui-button"
-                onChange={(e) => handleModelChange(e.target.value)}
-                value={selectedModel}
-                style={{
-                  height: '28px',
-                  padding: '0 8px',
-                  fontSize: '12px',
-                  borderRadius: 'var(--radius-chip, 6px)',
-                  background: 'var(--block-fill, rgba(255,255,255,0.05))',
-                  border: '1px solid var(--block-stroke, rgba(255,255,255,0.1))',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                {CONFIGURED_MODELS.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name} ({model.provider})
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Nivel de razonamiento (Thinking)</h3>
-              <p>Presupuesto computacional asignado para la cadena de pensamiento interna antes de emitir código.</p>
-            </div>
-            <div className="settings-row__control">
-              <fieldset aria-label="Nivel de razonamiento" className="ui-segmented">
-                <button
-                  aria-pressed={reasoningEffort === 'low'}
-                  className="ui-segmented__item"
-                  onClick={() => handleReasoningChange('low')}
-                  type="button"
-                >
-                  <span>Bajo</span>
-                </button>
-                <button
-                  aria-pressed={reasoningEffort === 'medium'}
-                  className="ui-segmented__item"
-                  onClick={() => handleReasoningChange('medium')}
-                  type="button"
-                >
-                  <span>Medio</span>
-                </button>
-                <button
-                  aria-pressed={reasoningEffort === 'high'}
-                  className="ui-segmented__item"
-                  onClick={() => handleReasoningChange('high')}
-                  type="button"
-                >
-                  <span>Alto</span>
-                </button>
-              </fieldset>
-            </div>
-          </div>
-
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Transmisión de respuesta (Streaming)</h3>
-              <p>Envía los tokens inmediatamente al chat y terminales conforme se generan.</p>
-            </div>
-            <div className="settings-row__control">
-              <button
-                aria-checked={streamResponses}
-                aria-label="Streaming de respuestas"
-                className="ui-switch"
-                onClick={handleToggleStreaming}
-                role="switch"
-                type="button"
-              >
-                <span aria-hidden="true" className="ui-switch__knob" />
-              </button>
+              <h3 className="settings-row__title">Se elige en la conversación</h3>
+              <p>
+                El menú del chat muestra los modelos que el programa conectado acaba de listar, o Automático
+                si todavía no hay lista. Esta pantalla no elige un modelo y no conecta una cuenta.
+              </p>
             </div>
           </div>
         </div>

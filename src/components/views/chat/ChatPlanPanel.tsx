@@ -1,5 +1,5 @@
 import React, { useState, useId } from 'react';
-import { FileCodeIcon } from './ChatIcons';
+import { FileCodeIcon, ChevronRightIcon, CloseIcon } from './ChatIcons';
 import { MarkdownMessage } from './MarkdownMessage';
 import {
   dispatchPlanToSubagentTerminal,
@@ -27,6 +27,7 @@ export interface ChatPlanPanelProps {
   plan: ProposedPlan;
   disabled?: boolean;
   onSend: (text: string, planAction?: PlanActionPayload) => Promise<boolean | void> | void;
+  onDismiss?: () => void;
 }
 
 const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
@@ -49,8 +50,9 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
   plan,
   disabled = false,
   onSend,
+  onDismiss,
 }) => {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [formMode, setFormMode] = useState<'revise' | 'new' | null>(null);
   const [inputText, setInputText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -103,14 +105,52 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
           aria-controls={expanded ? contentId : undefined}
           aria-expanded={expanded}
           onClick={() => setExpanded((v) => !v)}
-          title={expanded ? 'Hide the plan' : 'Read the full plan'}
+          title={expanded ? 'Minimizar artefacto' : 'Expandir artefacto'}
         >
+          <ChevronRightIcon
+            size={10}
+            strokeWidth={2.5}
+            className={`chat-chevron chat-chevron--flip ${expanded ? 'chat-chevron--open' : ''}`}
+          />
           <FileCodeIcon size={12} strokeWidth={2} />
           <span>{extractPlanTitle(plan.markdown)}</span>
         </button>
-        <span className="chat-plan-panel__status">
-          v{plan.revision} · {PLAN_STATUS_LABELS[plan.status] || plan.status}
-        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span className="chat-plan-panel__status">
+            v{plan.revision} · {PLAN_STATUS_LABELS[plan.status] || plan.status}
+          </span>
+          {onDismiss && (
+            <button
+              type="button"
+              className="chat-plan-panel__icon-btn chat-plan-panel__icon-btn--close"
+              onClick={onDismiss}
+              title="Cerrar / Ocultar artefacto"
+              aria-label="Cerrar / Ocultar artefacto"
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '3px',
+                borderRadius: '4px',
+                transition: 'color 0.15s ease, background-color 0.15s ease',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = 'var(--text-primary)';
+                e.currentTarget.style.background = 'var(--hover-fill, rgba(255,255,255,0.08))';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = 'var(--text-secondary)';
+                e.currentTarget.style.background = 'none';
+              }}
+            >
+              <CloseIcon size={12} strokeWidth={2} />
+            </button>
+          )}
+        </div>
       </div>
 
       {expanded && (
@@ -119,7 +159,8 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
         </div>
       )}
 
-      <div className="chat-plan-panel__actions" style={{ position: 'relative' }}>
+      {expanded && (
+        <div className="chat-plan-panel__actions" style={{ position: 'relative' }}>
         <button
           type="button"
           className="secondary-button action-button--row chat-plan-panel__action"
@@ -249,6 +290,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
           {isSubmitting ? 'Starting…' : 'Implement'}
         </button>
       </div>
+      )}
 
       {delegatedTask && (
         <div

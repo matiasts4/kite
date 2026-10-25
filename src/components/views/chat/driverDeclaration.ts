@@ -1,5 +1,7 @@
 import type { DriverDeclaration, DriverChoice } from '../../../lib/session/types';
+import type { WorkModeOption } from './hooks/useChatAgents';
 import {
+  AUTOMATIC_MODEL_ID,
   DEFAULT_EFFORT_CHOICES,
   MODE_LABELS,
   PROVIDER_CATALOG,
@@ -23,6 +25,7 @@ export interface CatalogDeclarationInput {
   provider: ChatProvider;
   selectedModel?: string | null;
   dynamicModels?: ModelOption[];
+  dynamicAgents?: WorkModeOption[];
 }
 
 /**
@@ -37,19 +40,29 @@ export function declarationFromCatalog({
   provider,
   selectedModel = null,
   dynamicModels = [],
+  dynamicAgents = [],
 }: CatalogDeclarationInput): DriverDeclaration {
   const meta = PROVIDER_CATALOG[provider] ?? PROVIDER_CATALOG.claude;
-  const catalogModels =
-    meta.isDynamic && dynamicModels.length > 0 ? dynamicModels : meta.models;
-  const models = catalogModels.map((model) => ({
-    id: model.id,
-    label: model.name,
-    detail: model.description,
-    supportsEffort: model.supportsEffort,
-  }));
+  const liveModels = dynamicModels
+    .filter((model) => model.id && model.id !== AUTOMATIC_MODEL_ID)
+    .map((model) => ({
+      id: model.id,
+      label: model.name,
+      detail: model.description,
+      supportsEffort: model.supportsEffort,
+    }));
+  const models = [
+    {
+      id: AUTOMATIC_MODEL_ID,
+      label: 'Automatic',
+      detail: 'The connected program chooses.',
+      supportsEffort: false,
+    },
+    ...liveModels,
+  ];
 
-  const selectedOption = models.find((model) => model.id === selectedModel);
-  const supportsEffort = Boolean(meta.supportsEffort || selectedOption?.supportsEffort);
+  const selectedOption = liveModels.find((model) => model.id === selectedModel);
+  const supportsEffort = Boolean(selectedOption?.supportsEffort);
 
   const permission = meta.modes.map((mode) => ({
     id: mode,
@@ -57,11 +70,23 @@ export function declarationFromCatalog({
     detail: MODE_LABELS[mode].detail,
   }));
 
+  const workModeChoices = (dynamicAgents && dynamicAgents.length > 0)
+    ? dynamicAgents.map((a) => ({
+        id: a.id,
+        label: a.label,
+        detail: a.detail,
+        plan: Boolean(a.plan),
+      }))
+    : [
+        { id: 'plan', label: 'Plan', detail: 'Reads and plans, changes nothing', plan: true },
+        { id: 'build', label: 'Build', detail: 'Works with the permission mode below', plan: false },
+      ];
+
   return {
     driver: provider,
     provider,
     sessionMode: 'oneShot',
-    defaultModel: meta.defaultModel,
+    defaultModel: null,
     defaultEffort: supportsEffort ? 'medium' : null,
     providers: providerRows(),
     models,
@@ -69,16 +94,18 @@ export function declarationFromCatalog({
       ? DEFAULT_EFFORT_CHOICES.map(({ id, label, detail }) => ({ id, label, detail }))
       : null,
     permission,
-    workMode: [
-      { id: 'plan', label: 'Plan', detail: 'Reads and plans, changes nothing', plan: true },
-      { id: 'build', label: 'Build', detail: 'Works with the permission mode below', plan: false },
-    ],
-    unlistedReasons: supportsEffort
-      ? undefined
-      : {
-          effort: `${
-            selectedOption?.label ?? selectedModel ?? meta.label
-          } does not advertise reasoning effort levels.`,
-        },
+    workMode: workModeChoices,
+    unlistedReasons: {
+      ...(liveModels.length === 0
+        ? { model: `${meta.label} has not listed its models yet.` }
+        : {}),
+      ...(supportsEffort
+        ? {}
+        : {
+            effort: `${
+              selectedOption?.label ?? 'Automatic'
+            } does not advertise reasoning effort levels.`,
+          }),
+    },
   };
 }

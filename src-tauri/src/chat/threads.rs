@@ -183,6 +183,19 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
         if let Some(plan) = patch.get("plan").and_then(|v| v.as_bool()) {
             thread["plan"] = json!(plan);
         }
+        if let Some(agent) = patch
+            .get("agent")
+            .or_else(|| patch.get("workMode"))
+            .and_then(|v| v.as_str())
+        {
+            thread["agent"] = json!(agent);
+            thread["workMode"] = json!(agent);
+            if agent == "plan" {
+                thread["plan"] = json!(true);
+            } else if agent == "build" {
+                thread["plan"] = json!(false);
+            }
+        }
         if patch.get("model").is_some() {
             thread["model"] = normalize_model(patch.get("model"));
         }
@@ -343,7 +356,27 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
         .iter_mut()
         .find(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
     {
-        *slot = item.clone();
+        if let (Some(existing_obj), Some(new_obj)) = (slot.as_object_mut(), item.as_object()) {
+            for (k, v) in new_obj {
+                if v.is_null() {
+                    continue;
+                }
+                if let Some(s) = v.as_str() {
+                    if (s.is_empty() || s == "tool")
+                        && existing_obj
+                            .get(k)
+                            .and_then(|x| x.as_str())
+                            .map(|x| !x.is_empty() && x != "tool")
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                }
+                existing_obj.insert(k.clone(), v.clone());
+            }
+        } else {
+            *slot = item.clone();
+        }
     } else {
         list.push(item.clone());
     }

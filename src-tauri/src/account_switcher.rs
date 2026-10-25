@@ -372,20 +372,6 @@ fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
                 rel_dest: "oauth_creds.json",
             },
         ],
-        "gemini" => vec![
-            FileMapping {
-                source: home.join(".gemini").join("oauth_creds.json"),
-                rel_dest: "oauth_creds.json",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("google_accounts.json"),
-                rel_dest: "google_accounts.json",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("state.json"),
-                rel_dest: "state.json",
-            },
-        ],
         "claude" => vec![
             FileMapping {
                 source: home.join(".claude").join(".credentials.json"),
@@ -403,6 +389,26 @@ fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
             },
             FileMapping {
                 source: home.join(".codex").join("config.json"),
+                rel_dest: "config.json",
+            },
+        ],
+        "grok" => vec![
+            FileMapping {
+                source: home.join(".grok").join("auth.json"),
+                rel_dest: "auth.json",
+            },
+            FileMapping {
+                source: home.join(".grok").join("config.json"),
+                rel_dest: "config.json",
+            },
+        ],
+        "opencode" => vec![
+            FileMapping {
+                source: home.join(".local").join("share").join("opencode").join("auth.json"),
+                rel_dest: "auth.json",
+            },
+            FileMapping {
+                source: home.join(".config").join("opencode").join("config.json"),
                 rel_dest: "config.json",
             },
         ],
@@ -498,14 +504,15 @@ fn running_process_names() -> Option<Vec<String>> {
 
 fn is_blocking_process(provider: &str, name: &str) -> bool {
     match canon_provider(provider).as_str() {
-        // agy and gemini share ~/.gemini/oauth_creds.json, so either client blocks both.
-        "agy" | "gemini" => {
+        "agy" => {
             name.contains("antigravity")
                 || name.starts_with("language_server")
-                || matches!(name, "agy" | "agy.exe" | "gemini" | "gemini.exe")
+                || matches!(name, "agy" | "agy.exe")
         }
         "claude" => matches!(name, "claude" | "claude.exe"),
         "codex" => matches!(name, "codex" | "codex.exe"),
+        "grok" => matches!(name, "grok" | "grok.exe"),
+        "opencode" => matches!(name, "opencode" | "opencode.exe"),
         _ => false,
     }
 }
@@ -1060,6 +1067,366 @@ pub fn get_alternative_accounts_with_quota(provider: &str) -> Vec<SavedAccountPr
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Detected CLI Accounts (auto-discovery across local CLI files / tools)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedCliAccount {
+    pub provider: String,
+    pub display_name: String,
+    pub auth_state: String, // "authenticated" | "unauthenticated" | "not_installed"
+    pub account_label: Option<String>,
+    pub email: Option<String>,
+    pub plan_name: Option<String>,
+    pub binary_path: Option<String>,
+    pub config_path: Option<String>,
+    pub details: Option<String>,
+}
+
+pub fn decode_jwt_payload(jwt: &str) -> Option<Value> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut payload_b64 = parts[1].replace('-', "+").replace('_', "/");
+    while payload_b64.len() % 4 != 0 {
+        payload_b64.push('=');
+    }
+    let bytes = crate::chat_attachments::decode_base64(&payload_b64)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[tauri::command]
+pub fn list_detected_cli_accounts() -> Value {
+    let home = user_home_dir();
+    let appdata = appdata_dir();
+    let mut accounts: Vec<DetectedCliAccount> = Vec::new();
+
+    // 1. Antigravity (Google)
+    {
+        let bin = crate::acp::resolve_antigravity_acp_binary()
+            .map(|p| p.to_string_lossy().to_string());
+        let creds_file = home.join(".gemini").join("oauth_creds.json");
+        let accounts_file = home.join(".gemini").join("google_accounts.json");
+        let mut email: Option<String> = None;
+        let mut name: Option<String> = None;
+
+        if creds_file.exists() {
+            if let Ok(bytes) = fs::read(&creds_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(id_tok) = val.get("id_token").and_then(|v| v.as_str()) {
+                        if let Some(payload) = decode_jwt_payload(id_tok) {
+                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                            name = payload.get("name").and_then(|v| v.as_str()).map(String::from);
+                        }
+                    }
+                }
+            }
+        }
+        if email.is_none() && accounts_file.exists() {
+            if let Ok(bytes) = fs::read(&accounts_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    email = val.get("active").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        }
+
+        let auth_state = if email.is_some() || creds_file.exists() {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "antigravity".into(),
+            display_name: "Antigravity".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or(name).or_else(|| Some("Google Account".into())),
+            email,
+            plan_name: Some("Google Cloud AI / Gemini".into()),
+            binary_path: bin,
+            config_path: Some(creds_file.to_string_lossy().to_string()),
+            details: Some("Sesión OAuth detectada en ~/.gemini/oauth_creds.json".into()),
+        });
+    }
+
+    // 2. Codex (OpenAI)
+    {
+        let bin = crate::chat::resolve_bin("codex", &[
+            r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
+            r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
+        ]).map(|p| p.to_string_lossy().to_string());
+        let auth_file = home.join(".codex").join("auth.json");
+        let mut email: Option<String> = None;
+        let mut plan: Option<String> = None;
+        let mut has_auth = false;
+
+        if auth_file.exists() {
+            if let Ok(bytes) = fs::read(&auth_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(id_tok) = val.pointer("/tokens/id_token").and_then(|v| v.as_str()) {
+                        has_auth = true;
+                        if let Some(payload) = decode_jwt_payload(id_tok) {
+                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                            if let Some(plan_type) = payload.pointer("/https:~1~1api.openai.com~1auth/chatgpt_plan_type").and_then(|v| v.as_str()) {
+                                plan = Some(match plan_type {
+                                    "plus" => "ChatGPT Plus".into(),
+                                    "pro" => "ChatGPT Pro".into(),
+                                    "team" => "ChatGPT Team".into(),
+                                    other => format!("ChatGPT {}", other),
+                                });
+                            }
+                        }
+                    } else if val.pointer("/tokens/access_token").is_some() || val.get("OPENAI_API_KEY").and_then(|v| v.as_str()).map_or(false, |k| !k.is_empty()) {
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "codex".into(),
+            display_name: "Codex".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("ChatGPT Account".into())),
+            email,
+            plan_name: plan.or_else(|| Some("ChatGPT Plus / OpenAI".into())),
+            binary_path: bin,
+            config_path: Some(auth_file.to_string_lossy().to_string()),
+            details: Some("Tokens CLI detectados en ~/.codex/auth.json".into()),
+        });
+    }
+
+    // 3. Grok (xAI)
+    {
+        let bin = crate::chat::resolve_bin("grok", &[])
+            .map(|p| p.to_string_lossy().to_string());
+        let auth_file = home.join(".grok").join("auth.json");
+        let mut email: Option<String> = None;
+        let mut has_auth = false;
+
+        if auth_file.exists() {
+            if let Ok(bytes) = fs::read(&auth_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(obj) = val.as_object() {
+                        for (_k, v) in obj {
+                            if let Some(em) = v.get("email").and_then(|e| e.as_str()) {
+                                email = Some(em.to_string());
+                                has_auth = true;
+                                break;
+                            }
+                            if v.get("key").is_some() || v.get("refresh_token").is_some() {
+                                has_auth = true;
+                            }
+                        }
+                    }
+                    if !has_auth && (val.get("api_key").is_some() || val.get("email").is_some()) {
+                        email = val.get("email").and_then(|e| e.as_str()).map(String::from);
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "grok".into(),
+            display_name: "Grok".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("xAI Account".into())),
+            email,
+            plan_name: Some("xAI Grok CLI".into()),
+            binary_path: bin,
+            config_path: Some(auth_file.to_string_lossy().to_string()),
+            details: Some("Sesión OIDC detectada en ~/.grok/auth.json".into()),
+        });
+    }
+
+    // 4. OpenCode
+    {
+        let bin = crate::chat::resolve_bin("opencode", &[])
+            .map(|p| p.to_string_lossy().to_string());
+        let auth_file = home.join(".local").join("share").join("opencode").join("auth.json");
+        let mut providers_list: Vec<String> = Vec::new();
+        let mut has_auth = false;
+
+        if auth_file.exists() {
+            if let Ok(bytes) = fs::read(&auth_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(obj) = val.as_object() {
+                        providers_list = obj.keys().cloned().collect();
+                        has_auth = !providers_list.is_empty();
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        let account_label = if !providers_list.is_empty() {
+            let cap = 3;
+            let shown = providers_list.iter().take(cap).cloned().collect::<Vec<_>>().join(", ");
+            if providers_list.len() > cap {
+                Some(format!("{} (+{})", shown, providers_list.len() - cap))
+            } else {
+                Some(shown)
+            }
+        } else {
+            Some("OpenCode CLI".into())
+        };
+
+        let details = if !providers_list.is_empty() {
+            Some(format!("Proveedores autenticados: {}", providers_list.join(", ")))
+        } else {
+            Some("Sesión local en ~/.local/share/opencode".into())
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "opencode".into(),
+            display_name: "OpenCode".into(),
+            auth_state: auth_state.into(),
+            account_label,
+            email: None,
+            plan_name: Some("Multi-proveedor / OpenCode Go".into()),
+            binary_path: bin,
+            config_path: Some(auth_file.to_string_lossy().to_string()),
+            details,
+        });
+    }
+
+    // 5. Cursor
+    {
+        let bin = crate::chat::resolve_bin("cursor-agent", &[])
+            .or_else(|| crate::chat::resolve_bin("agent", &[]))
+            .map(|p| p.to_string_lossy().to_string());
+        let cursor_auth1 = appdata.join("Cursor").join("auth.json");
+        let cursor_auth2 = home.join(".cursor").join("auth.json");
+        let auth_file = if cursor_auth1.exists() {
+            Some(cursor_auth1)
+        } else if cursor_auth2.exists() {
+            Some(cursor_auth2)
+        } else {
+            None
+        };
+
+        let mut email: Option<String> = None;
+        let mut has_auth = false;
+
+        if let Some(ref af) = auth_file {
+            if let Ok(bytes) = fs::read(af) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(tok) = val.get("accessToken").and_then(|v| v.as_str()) {
+                        if let Some(payload) = decode_jwt_payload(tok) {
+                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                        }
+                        has_auth = true;
+                    } else if val.get("apiKey").is_some() {
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth || bin.is_some() {
+            "authenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "cursor".into(),
+            display_name: "Cursor".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("Cursor CLI / Agent".into())),
+            email,
+            plan_name: Some("Cursor Pro / Agent".into()),
+            binary_path: bin,
+            config_path: auth_file.map(|p| p.to_string_lossy().to_string()),
+            details: Some("cursor-agent en PATH".into()),
+        });
+    }
+
+    // 6. Claude Code
+    {
+        let bin = crate::chat::resolve_bin("claude", &[])
+            .map(|p| p.to_string_lossy().to_string());
+        let creds_file = home.join(".claude").join(".credentials.json");
+        let conf_file = home.join(".claude.json");
+        let mut email: Option<String> = None;
+        let mut has_auth = false;
+
+        if creds_file.exists() {
+            if let Ok(bytes) = fs::read(&creds_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if val.pointer("/claudeAiOauth/accessToken").is_some() {
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+        if conf_file.exists() {
+            if let Ok(bytes) = fs::read(&conf_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(em) = val.pointer("/oauthAccount/emailAddress").and_then(|v| v.as_str()) {
+                        email = Some(em.to_string());
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "claude".into(),
+            display_name: "Claude Code".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("Claude CLI".into())),
+            email,
+            plan_name: Some("Anthropic Claude Code".into()),
+            binary_path: bin,
+            config_path: Some(creds_file.to_string_lossy().to_string()),
+            details: Some("Sesión OAuth en ~/.claude".into()),
+        });
+    }
+
+    json!({
+        "schemaVersion": 1,
+        "accounts": accounts
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,10 +1470,12 @@ mod tests {
     fn test_blocking_process_detection() {
         assert!(is_blocking_process("agy", "antigravity.exe"));
         assert!(is_blocking_process("agy", "language_server_windows_x64.exe"));
-        assert!(is_blocking_process("gemini", "agy.exe"));
+        assert!(is_blocking_process("agy", "agy.exe"));
         assert!(!is_blocking_process("agy", "geminiapplauncher.exe"));
         assert!(!is_blocking_process("claude", "agy.exe"));
         assert!(is_blocking_process("claude", "claude.exe"));
+        assert!(is_blocking_process("grok", "grok.exe"));
+        assert!(is_blocking_process("opencode", "opencode.exe"));
     }
 
     #[test]

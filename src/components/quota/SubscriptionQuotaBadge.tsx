@@ -137,10 +137,10 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
           display: 'inline-flex',
           alignItems: 'center',
           gap: '6px',
-          padding: '0 8px',
+          padding: '0 10px',
           height: '24px',
           width: 'auto',
-          borderRadius: 'var(--radius-chip, 6px)',
+          borderRadius: '9999px',
           border: '1px solid var(--block-stroke)',
           backgroundColor: isOpen ? 'var(--block-stroke)' : 'var(--block-fill)',
           color: 'var(--text-primary, var(--text-primary))',
@@ -156,25 +156,27 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
       >
         {/* Brand Logo Icon */}
         {displayProvider ? (
-          <BrandLogo engine={displayProvider} size={13} />
+          <span style={{ display: 'inline-flex', alignItems: 'center', animation: isRefreshing ? 'spin 1s linear infinite' : 'none' }}>
+            <BrandLogo engine={displayProvider} size={13} />
+          </span>
         ) : (
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-            style={{ color: 'var(--text-secondary)' }}
-          >
-            <circle cx="12" cy="12" r="9" />
-            <line x1="12" y1="8" x2="12" y2="16" />
-            <line x1="8" y1="12" x2="16" y2="12" />
-          </svg>
-        )}
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              <circle cx="12" cy="12" r="9" />
+              <line x1="12" y1="8" x2="12" y2="16" />
+              <line x1="8" y1="12" x2="16" y2="12" />
+            </svg>
+          )}
 
         {displayProvider ? (
           <QuotaProgressRing

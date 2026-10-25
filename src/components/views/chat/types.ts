@@ -40,6 +40,8 @@ export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
 export interface ExtendedChatThread extends ChatThread {
   pendingApproval?: ApprovalRequest | null;
   effort?: string | null;
+  agent?: string | null;
+  workMode?: string | null;
   diff?: DiffData | null;
   plans?: ProposedPlan[];
   activePlanId?: string | null;
@@ -83,6 +85,9 @@ export interface LiveChatRun {
   line: string | null;
 }
 
+/** Sentinel row for "let the connected program choose". Never a CLI model id. */
+export const AUTOMATIC_MODEL_ID = 'automatic';
+
 export const PROVIDER_CATALOG: Record<
   ChatProvider,
   {
@@ -100,95 +105,64 @@ export const PROVIDER_CATALOG: Record<
     label: 'Antigravity',
     vendor: 'Google DeepMind',
     engineId: 'antigravity',
-    defaultModel: 'gemini-4-argon',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    supportsEffort: true,
     isDynamic: true,
-    models: [
-      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', description: 'Frontier reasoning & agentic coding (Google DeepMind)', supportsEffort: true },
-      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: 'Ultra-fast, lightweight agentic execution (Google DeepMind)', supportsEffort: true },
-      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'Frontier reasoning for long-horizon agentic work (Anthropic)', supportsEffort: true },
-      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', description: 'Balanced high-speed coding & design (Anthropic)', supportsEffort: true },
-      { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', description: 'Open-weights 120B parameter model hosted on Antigravity', supportsEffort: false },
-    ],
+    models: [],
   },
   claude: {
     label: 'Claude Code',
     vendor: 'Anthropic',
     engineId: 'claude-code',
-    defaultModel: 'sonnet',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    supportsEffort: true,
-    models: [
-      { id: 'sonnet', name: 'Claude Sonnet 5', description: 'Balanced daily driver', supportsEffort: true },
-      { id: 'opus', name: 'Claude Opus (latest)', description: 'Latest Opus release', supportsEffort: true },
-      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'Long-running agentic work', supportsEffort: true },
-      { id: 'fable', name: 'Claude Fable 5.1', description: 'Hardest problems', supportsEffort: true },
-      { id: 'haiku', name: 'Claude Haiku 4.5', description: 'Fastest replies', supportsEffort: false },
-    ],
+    isDynamic: true,
+    models: [],
   },
   codex: {
     label: 'Codex',
     vendor: 'OpenAI',
     engineId: 'codex',
-    defaultModel: 'gpt-5.6-sol',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits'],
-    supportsEffort: true,
-    models: [
-      { id: 'gpt-6-astra', name: 'GPT-6 Astra', description: 'Most capable for complex work', supportsEffort: true },
-      { id: 'gpt-6-sol', name: 'GPT-6 Sol', description: 'Complex coding and agentic work', supportsEffort: true },
-      { id: 'gpt-6-luna', name: 'GPT-6 Luna', description: 'Fast, efficient work', supportsEffort: false },
-      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', description: 'Frontier agentic work', supportsEffort: true },
-      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: 'Balanced agentic work', supportsEffort: true },
-      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: 'Fast, efficient work', supportsEffort: false },
-    ],
+    isDynamic: true,
+    models: [],
   },
   grok: {
     label: 'Grok Build',
     vendor: 'xAI',
     engineId: 'grok',
-    defaultModel: 'grok-build',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [
-      { id: 'grok-4.7', name: 'Grok 4.7', description: 'xAI Grok default model', supportsEffort: true },
-      { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Build Fast', description: 'Fast agentic build model', supportsEffort: true },
-      { id: 'grok-4.6', name: 'Grok 4.6', description: 'Previous Grok model', supportsEffort: true },
-      { id: 'grok-4.5', name: 'Grok 4.5', description: 'Legacy Grok model', supportsEffort: true },
-    ],
     isDynamic: true,
-    supportsEffort: true,
+    models: [],
   },
   opencode: {
     label: 'OpenCode',
     vendor: 'OpenCode',
     engineId: 'open-code',
-    defaultModel: 'auto',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [{ id: 'auto', name: 'Auto', description: 'OpenCode default model' }],
     isDynamic: true,
+    models: [],
   },
   cursor: {
     label: 'Cursor Agent',
     vendor: 'Cursor',
     engineId: 'cursor',
-    defaultModel: 'auto',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [
-      { id: 'auto', name: 'Auto', description: 'Cursor picks a model' },
-    ],
     isDynamic: true,
+    models: [],
   },
   gemini: {
     label: 'Gemini CLI',
     vendor: 'Google',
     engineId: 'gemini',
-    defaultModel: 'gemini-2.5-pro',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    supportsEffort: true,
-    models: [
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Deep reasoning & coding', supportsEffort: true },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast agentic execution', supportsEffort: false },
-    ],
+    isDynamic: true,
+    models: [],
   },
 };
 

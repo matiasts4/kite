@@ -165,6 +165,7 @@ pub struct TerminalInstance {
     pub input_line_buffer: Mutex<String>,
     pub last_user_input: Mutex<Option<String>>,
     pub last_bind_attempt_ms: AtomicU64,
+    pub bind_attempts: std::sync::atomic::AtomicU32,
 }
 
 pub fn get_terminals() -> &'static Mutex<HashMap<String, Arc<TerminalInstance>>> {
@@ -294,8 +295,12 @@ pub fn try_bind_provider_session_id(session_id: &str, inst: &TerminalInstance) -
     // Flush any unread output into scrollback so transcript/scrollback matching has the latest bytes
     let _ = drain_buffer_into_scrollback(session_id, inst);
 
-    let claimed_ids = get_globally_claimed_provider_ids(session_id);
     let existing_prov = inst.provider_session_id.lock().ok().and_then(|p| p.clone());
+    if let Some(ref pid) = existing_prov {
+        return Some(pid.clone());
+    }
+
+    let claimed_ids = get_globally_claimed_provider_ids(session_id);
     let resolved = resolve_provider_session_id_with_context(
         &engine,
         &cwd,
@@ -981,6 +986,7 @@ pub fn spawn_session_with_options(
         input_line_buffer: Mutex::new(String::new()),
         last_user_input: Mutex::new(None),
         last_bind_attempt_ms: AtomicU64::new(0),
+        bind_attempts: std::sync::atomic::AtomicU32::new(0),
     });
 
     if let Ok(mut map) = get_terminals().lock() {
@@ -1304,26 +1310,45 @@ pub fn read_terminal_output(request: serde_json::Value) -> serde_json::Value {
 
         let now = now_unix_ms();
 
-        // Periodically check if an active terminal still needs its providerSessionId bound
+        // Periodically check if an active terminal still needs its providerSessionId bound.
+        // Generic shells (PowerShell, cmd) never need binding unless a child agent was detected.
+        // AI agents attempt binding with progressive backoff and stop after 4 attempts.
         let needs_bind = inst
             .provider_session_id
             .lock()
             .ok()
             .and_then(|p| p.clone())
             .is_none();
-        if needs_bind
-            && (inst.had_user_activity.load(Ordering::Relaxed)
-                || is_generic_shell_engine(&inst.engine))
-        {
-            let last_attempt = inst.last_bind_attempt_ms.load(Ordering::Relaxed) as i64;
-            if now.saturating_sub(last_attempt) >= 2_500 {
-                inst.last_bind_attempt_ms
-                    .store(now as u64, Ordering::Relaxed);
-                let sid = session_id.to_string();
-                let inst_clone = Arc::clone(&inst);
-                std::thread::spawn(move || {
-                    let _ = try_bind_provider_session_id(&sid, &inst_clone);
-                });
+        let is_shell = is_generic_shell_engine(&inst.engine);
+        let shell_has_agent = is_shell
+            && inst
+                .detected_agent_engine
+                .lock()
+                .ok()
+                .and_then(|d| d.clone())
+                .is_some();
+        let should_attempt = needs_bind && (!is_shell || shell_has_agent);
+
+        if should_attempt {
+            let attempts = inst.bind_attempts.load(Ordering::Relaxed);
+            if attempts < 4 {
+                let last_attempt = inst.last_bind_attempt_ms.load(Ordering::Relaxed) as i64;
+                let required_gap_ms = match attempts {
+                    0 => 1_200,
+                    1 => 3_500,
+                    2 => 8_000,
+                    _ => 18_000,
+                };
+                if now.saturating_sub(last_attempt) >= required_gap_ms {
+                    inst.last_bind_attempt_ms
+                        .store(now as u64, Ordering::Relaxed);
+                    inst.bind_attempts.fetch_add(1, Ordering::Relaxed);
+                    let sid = session_id.to_string();
+                    let inst_clone = Arc::clone(&inst);
+                    std::thread::spawn(move || {
+                        let _ = try_bind_provider_session_id(&sid, &inst_clone);
+                    });
+                }
             }
         }
 
@@ -1404,6 +1429,7 @@ pub fn write_terminal(request: serde_json::Value) -> serde_json::Value {
         }
 
         if submitted_line {
+            inst.bind_attempts.store(0, Ordering::Relaxed);
             let sid = session_id.to_string();
             let inst_clone = Arc::clone(&inst);
             std::thread::spawn(move || {

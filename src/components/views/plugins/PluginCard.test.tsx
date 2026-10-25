@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { PluginCard } from './PluginCard';
-import type { ActivePlugin } from './types';
+import { PluginCard, resolveCardCopy } from './PluginCard';
+import type { ActivePlugin, PluginConnection } from './types';
 
 describe('PluginCard - Layout Integrity', () => {
   const mockPlugin: ActivePlugin = {
@@ -96,5 +96,196 @@ describe('PluginCard - Layout Integrity', () => {
     await user.click(connectBtn);
 
     expect(onConnectAction).toHaveBeenCalledWith(mockPlugin);
+  });
+});
+
+describe('PluginCard - Copy Resolution & Action States', () => {
+  const basePlugin: ActivePlugin = {
+    id: 'stripe',
+    name: 'Stripe',
+    vendor: 'Stripe Inc.',
+    version: '1.0.0',
+    summary: 'Process payments and customer invoices.',
+    description: 'Process payments and customer invoices.',
+    status: 'available',
+    logo: { file: 'plugin-stripe' },
+    category: 'finance',
+    authentication: 'apiKey',
+    prefersDarkTile: false,
+    fallbackIcon: null,
+    initialState: 'disconnected',
+    permissions: [],
+  };
+
+  it('resolves copy when connection.message exists with failed tone', () => {
+    const conn: PluginConnection = {
+      id: 'stripe',
+      state: 'disconnected',
+      account: null,
+      message: 'Invalid API key provided.',
+    };
+
+    const copy = resolveCardCopy(basePlugin, conn);
+    expect(copy.text).toBe('Invalid API key provided.');
+    expect(copy.tone).toBe('failed');
+
+    const { container } = render(<PluginCard plugin={basePlugin} connection={conn} />);
+    const small = container.querySelector('small');
+    expect(small).toHaveAttribute('data-tone', 'failed');
+    expect(small).toHaveTextContent('Invalid API key provided.');
+  });
+
+  it('resolves copy for connected state with account or fallback', () => {
+    const connWithAccount: PluginConnection = {
+      id: 'stripe',
+      state: 'connected',
+      account: 'acct_1849204',
+      message: null,
+    };
+    expect(resolveCardCopy(basePlugin, connWithAccount).text).toBe('acct_1849204');
+
+    const connWithoutAccount: PluginConnection = {
+      id: 'stripe',
+      state: 'connected',
+      account: null,
+      message: null,
+    };
+    expect(resolveCardCopy(basePlugin, connWithoutAccount).text).toBe('Connected');
+  });
+
+  it('resolves copy for needsReauth state with account or name', () => {
+    const connWithAccount: PluginConnection = {
+      id: 'stripe',
+      state: 'needsReauth',
+      account: 'acct_1849204',
+      message: null,
+    };
+    expect(resolveCardCopy(basePlugin, connWithAccount).text).toBe('acct_1849204 — reconnect to keep using it.');
+
+    const connWithoutAccount: PluginConnection = {
+      id: 'stripe',
+      state: 'needsReauth',
+      account: null,
+      message: null,
+    };
+    expect(resolveCardCopy(basePlugin, connWithoutAccount).text).toBe('Stripe — reconnect to keep using it.');
+  });
+
+  it('resolves copy for connecting, unavailable, and default states', () => {
+    expect(resolveCardCopy(basePlugin, { id: 'stripe', state: 'connecting', account: null, message: null }).text).toBe(
+      'Finish in your browser or local app, then return here.'
+    );
+    expect(resolveCardCopy(basePlugin, { id: 'stripe', state: 'unavailable', account: null, message: null }).text).toBe(
+      'Account setup is not available in this build.'
+    );
+    expect(resolveCardCopy(basePlugin, { id: 'stripe', state: 'disconnected', account: null, message: null }).text).toBe(
+      'Process payments and customer invoices.'
+    );
+  });
+
+  it('renders static chip for preview and unavailable states', () => {
+    const { rerender } = render(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'preview', account: null, message: null }}
+      />
+    );
+    expect(screen.getByText('Preview')).toHaveClass('plugin-connect--chip');
+
+    rerender(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'unavailable', account: null, message: null }}
+      />
+    );
+    expect(screen.getByText('Unavailable')).toHaveClass('plugin-connect--chip');
+  });
+
+  it('renders quiet button with spinner and Cancel for connecting state', async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+
+    const { container } = render(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'connecting', account: null, message: null }}
+        onAction={onAction}
+      />
+    );
+
+    const cancelBtn = screen.getByRole('button', { name: /Cancel Stripe/i });
+    expect(cancelBtn).toHaveClass('plugin-connect--quiet');
+    expect(container.querySelector('.button-spinner')).toBeInTheDocument();
+
+    await user.click(cancelBtn);
+    expect(onAction).toHaveBeenCalledWith('stripe', 'cancel');
+  });
+
+  it('renders hover-swap connected button with green dot and Disconnect', async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+
+    const { container } = render(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'connected', account: 'acct_123', message: null }}
+        onAction={onAction}
+      />
+    );
+
+    const disconnectBtn = screen.getByRole('button', { name: /Disconnect Stripe/i });
+    expect(disconnectBtn).toHaveClass('plugin-connect--linked');
+    expect(container.querySelector('.plugin-connect__dot')).toBeInTheDocument();
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.getByText('Disconnect')).toBeInTheDocument();
+
+    await user.click(disconnectBtn);
+    expect(onAction).toHaveBeenCalledWith('stripe', 'disconnect');
+  });
+
+  it('renders Reconnect button for needsReauth and Disconnect button for disconnectPending', async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+
+    const { rerender } = render(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'needsReauth', account: null, message: null }}
+        onAction={onAction}
+      />
+    );
+
+    const reconnectBtn = screen.getByRole('button', { name: /Reconnect Stripe/i });
+    await user.click(reconnectBtn);
+    expect(onAction).toHaveBeenCalledWith('stripe', 'connect');
+
+    rerender(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'disconnectPending', account: null, message: null }}
+        onAction={onAction}
+      />
+    );
+
+    const disconnectBtn = screen.getByRole('button', { name: /Disconnect Stripe/i });
+    await user.click(disconnectBtn);
+    expect(onAction).toHaveBeenCalledWith('stripe', 'disconnect');
+  });
+
+  it('triggers onOpenDetails when card is clicked', async () => {
+    const user = userEvent.setup();
+    const onOpenDetails = vi.fn();
+
+    render(
+      <PluginCard
+        plugin={basePlugin}
+        connection={{ id: 'stripe', state: 'connected', account: 'acct_123', message: null }}
+        onOpenDetails={onOpenDetails}
+      />
+    );
+
+    const card = screen.getByRole('article', { name: /Stripe/i });
+    await user.click(card);
+    expect(onOpenDetails).toHaveBeenCalledWith(basePlugin);
   });
 });

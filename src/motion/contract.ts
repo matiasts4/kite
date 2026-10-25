@@ -3,7 +3,7 @@
 export const MOTION_ENTER_MS = 180;
 export const MOTION_EXIT_MS = 140;
 /** Minimum splash time on cold start (bootstrap may finish underneath). */
-export const APP_INTRO_MIN_MS = 2000;
+export const APP_INTRO_MIN_MS = 3000;
 export const LIVE_EDGE_THRESHOLD_PX = 48;
 
 export const MOTION_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)';

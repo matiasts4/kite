@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { motion } from 'motion/react';
+import { springs } from '../../motion/standard/tokens';
 import {
   ChevronLeftIcon,
   SettingsIcon,
@@ -39,6 +41,7 @@ import { ChangelogTab } from './settings/ChangelogTab';
 import { AccountTab } from './settings/AccountTab';
 import { QuotasTab } from './settings/QuotasTab';
 import { ZedTab } from './settings/ZedTab';
+import { SegmentedIndicator } from '../ui/SegmentedIndicator';
 import { PluginsView } from './PluginsView';
 import { RoutinesView } from './RoutinesView';
 import { listAudioInputDevices } from '../../lib/operator/voice/zedVoice';
@@ -50,6 +53,7 @@ import {
   TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
   type TerminalWebLinksTarget,
 } from '../../lib/terminalLinkNav';
+import { playCompletionChime } from '../../lib/notifications/audioCues';
 import './settings.css';
 
 interface NotificationCenterSnapshot {
@@ -538,6 +542,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const handlePlayNotificationSample = async () => {
     try {
+      playCompletionChime(true, true);
       await invokeCommand('notifications_play_sample');
     } catch (err) {
       console.warn('[SettingsView] Failed to play the notification sample:', err);
@@ -610,6 +615,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     onClick={() => handleSelectTab(tab.id)}
                     type="button"
                   >
+                    {isSelected && (
+                      <motion.span
+                        layoutId="settings-rail-indicator"
+                        className="settings-rail__indicator"
+                        transition={springs.selection}
+                        initial={false}
+                        aria-hidden="true"
+                      />
+                    )}
                     <span className="settings-rail__glyph">
                       <TabIcon aria-hidden="true" size={14} strokeWidth={1.75} />
                     </span>
@@ -766,6 +780,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                             }}
                             type="button"
                           >
+                            {terminalWebLinksTarget === 'internal' && (
+                              <SegmentedIndicator group="settings-terminal-links-target" />
+                            )}
                             <span>Navegador integrado</span>
                           </button>
                           <button
@@ -777,6 +794,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                             }}
                             type="button"
                           >
+                            {terminalWebLinksTarget === 'external' && (
+                              <SegmentedIndicator group="settings-terminal-links-target" />
+                            )}
                             <span>Navegador externo</span>
                           </button>
                         </fieldset>

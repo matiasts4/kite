@@ -131,7 +131,9 @@ export function deriveAvatarChoice(id: string, choice?: AvatarChoice | string | 
 }
 
 interface AgentAvatarProps {
-  id: string;
+  id?: string;
+  name?: string;
+  avatar?: AvatarChoice | string | null;
   choice?: AvatarChoice | string | null;
   size?: number;
   state?: 'idle' | 'running' | 'needsYou';
@@ -140,6 +142,8 @@ interface AgentAvatarProps {
 
 export const AgentAvatar: React.FC<AgentAvatarProps> = ({
   id,
+  name,
+  avatar: avatarProp,
   choice,
   size = 30,
   state = 'idle',
@@ -147,7 +151,9 @@ export const AgentAvatar: React.FC<AgentAvatarProps> = ({
 }) => {
   const rawId = useId();
   const maskId = `agent-avatar-mask-${rawId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-  const avatar = deriveAvatarChoice(id, choice);
+  const effectiveId = id || name || 'agent';
+  const effectiveChoice = choice ?? avatarProp;
+  const avatar = deriveAvatarChoice(effectiveId, effectiveChoice);
   const color = SWATCHES[avatar.swatch] || SWATCHES[0];
   const eyes = EYE_METRICS[avatar.eyes] || EYE_METRICS.oval;
   const center = FORM_CENTERS[avatar.form] || FORM_CENTERS.squircle;

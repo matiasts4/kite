@@ -35,6 +35,9 @@ Observed facts, not future requirements:
 - One agent already has many threads (`AgentChatShell` tabs).
 - Threads and items persist as application state. Live turn buffers stay in memory.
 - Quota reads are separate endpoints. A usage probe does not verify a chat spawn, and a chat spawn does not refresh the plan meter. OpenCode Go quota stays on its usage endpoint.
+- Settings tab `agents` ("Agents & Models") renders `ModelsTab`. That screen is a fixed list: Antigravity, Claude 3.5 Sonnet, GPT-4o, Ollama, DeepSeek. Choosing one writes `localStorage` keys prefixed `bmone.` (`defaultModel`, `reasoningEffort`, `streamResponses`). Nothing in the chat send path reads those keys. The only navigation off that screen opens Cuotas y cuentas. It does not sign in a CLI and it does not attach a model to a thread.
+- The composer and the per-agent settings picker read a second fixed list, `PROVIDER_CATALOG` in `src/components/views/chat/types.ts`. Claude, Codex, and Gemini always show that list. Antigravity, Grok, OpenCode, and Cursor replace it only when `list_chat_provider_models` returns rows. Until then the menu shows names the CLI did not offer, including ids such as `gpt-6-astra` and `gemini-4-argon`.
+- `declarationFromCatalog` already admits this list is transitional and marks every driver `oneShot`. The composer still renders it.
 Missing seams:
 - no session manager that keeps one process open and accepts the next message on that process;
 - no record joining thread, connection, session generation, and optional resume handle;
@@ -60,6 +63,9 @@ S15. Out of scope: remote access, voice, a new memory backend, automatic account
 S16. Placement. The live process, resume handle, in-flight turn, and composer overrides belong to the thread. The agent holds the recipe. On the first send of a thread that has an agent, write the current recipe with the existing instruction sync, then start the session. The working directory stays the workspace when the thread has one. The recipe enters through the channel that driver accepts. Later messages on that session do not repeat the recipe. Editing skills or memory does not change a running session. The next session of that agent reads the updated recipe. A thread with no agent starts from inherited CLI config only.
 S17. A driver whose wire can stay open keeps one process for the thread. The next user message is written to that process. Claude's open session speaks stream-json on stdin and stdout, with partial messages. Codex's open session speaks its app-server. OpenCode's open session speaks its local server. Cursor and Antigravity use the lasting channel each driver actually has. A driver with no lasting channel stays `one_shot`.
 S18. Two threads of the same agent are two sessions. They share the account and the recipe snapshot each one started with. They do not share a process.
+S19. A model the user can pick is one the connected CLI just listed, or the single choice Automatic. The same rule applies in the agent chat, in the loose chat, and on the agent's own settings. A name written into the app is not a choice. While the CLI has not answered, the menu says the list is not loaded. It does not fill itself with stand-in names.
+S20. The Settings screen labeled Agents & Models is not where an account is connected and not where a thread's model is chosen. Connecting an account stays on Cuotas y cuentas, and only for the endpoint that screen actually checks. The model for a conversation is chosen on that conversation. An agent's default model, when one is saved, is an id from that same CLI list, stored on the agent. The `bmone.defaultModel` browser value is not a model selection.
+S21. Thinking level follows the same rule as the model. Bajo, medio, and alto appear when the selected model offers them. The thinking value stored only in the browser does not change the session. Streaming is a property of the open session, not a switch on that settings screen.
 ## Architecture
 ```text
 agent recipe (role, skills, memory, defaults)
@@ -82,13 +88,15 @@ The provider stream is operational and bounded. The thread transcript is durable
 - T8 — Transcript normalization and approvals. S2, S11, S12. Route: delegated. Status: done. Evidence: `src-tauri/src/chat/normalize.rs`; 18 tests; checked-in fixtures; unknown frames become bounded notices. Normalize tools, plans, reasoning, approvals, notices, usage, and errors.
 - T9 — Recovery and a second view. S3, S10, S13, S16. Route: delegated. Status: done. Evidence: `recover_thread` plus `recover_chat_thread`; 25 event-log tests; 5 view tests. The second view is exported but not mounted. Reopen from the log, resume only with a provider handle, and show the same thread twice.
 - T10 — Fixture and failure verification. S1–S18. Route: delegated. Status: done. Evidence: `src-tauri/src/chat/contract.rs`; 13 tests; full suite 261 Rust + 413 frontend. Replay adapters, compare behavior before and after, assert auth and MCP bytes, and recover from a malformed frame.
-Slices: A = T0–T3; B = T4–T6; C = T7–T8; D = T9–T10.
+- T11 — One real model list. S19, S20, S21. Route: user. Status: done. Evidence: `src-tauri/src/chat/models.rs` returns an empty list for Claude, Gemini, and Codex instead of invented names; Antigravity, Grok, Cursor, and OpenCode keep only what their CLI prints. The composer and the agent model menu offer Automatic plus that list. Settings → Agents & Models no longer writes `bmone.defaultModel`. `cargo test chat::models::tests` 6 passed; `vitest` ChatComposer, useChatModels, useChatDraftConfig 31 passed.
+- T12 — Local CLI session discovery & provider execution unblocking (OpenCode, Codex, Grok, Antigravity). S5, S7. Route: user. Status: done. Evidence: unblocked stdin pipe in `stream_child` (`src-tauri/src/chat/runtime.rs`); added Codex stream JSONL event translation (`thread.started`, `item.completed`, `turn.completed`) in `src-tauri/src/acp.rs`; added `list_detected_cli_accounts` in `src-tauri/src/account_switcher.rs` discovering credentials without manual in-app logins; purged deprecated `gemini` provider and expanded `AccountVault` and `AccountTab` to cover `codex`, `grok`, and `opencode`; full test suites passed (144 chat tests, 5 switcher tests, 441 vitest tests).
+Slices: A = T0–T3; B = T4–T6; C = T7–T8; D = T9–T12.
 ## Non-regression and verification
 - Preserve endpoint-specific connection eligibility, chat item kinds, approval decisions, and a readable thread when the provider fails.
 - T0 is read-only. T1–T3 use the fake provider, then the applicable suite. T4–T8 use fixtures and argv or env assertions. T6 and T9 replay the same log twice. T10 runs the focused tests and the applicable suites once.
 - Every completed task closes with `Risk: item N (reason)`, or `Risk: none` only after checking shared behavior.
 ## Candidate edit surfaces
-Planning candidates, not blanket authorization. The user names exact surfaces when launching a worker. Expected areas: `src-tauri/src/chat/runtime.rs`, `src-tauri/src/chat/threads.rs`, `src-tauri/src/chat/mod.rs`, `src-tauri/src/acp.rs`, `src-tauri/src/agent_mind/`, `src-tauri/src/chat/session.rs` if a new file is warranted, `src/lib/chat/`, `src/components/views/chat/`, `src/components/views/agents/`. `src-tauri/src/connections.rs` is read-only from this feature. Do not edit `provider-connections.md`.
+Planning candidates, not blanket authorization. The user names exact surfaces when launching a worker. Expected areas: `src-tauri/src/chat/runtime.rs`, `src-tauri/src/chat/threads.rs`, `src-tauri/src/chat/mod.rs`, `src-tauri/src/acp.rs`, `src-tauri/src/agent_mind/`, `src-tauri/src/chat/session.rs` if a new file is warranted, `src/lib/chat/`, `src/components/views/chat/`, `src/components/views/agents/`, `src/components/views/settings/ModelsTab.tsx`, `src/components/views/SettingsView.tsx`. `src-tauri/src/connections.rs` is read-only from this feature. Do not edit `provider-connections.md`.
 ## Invariants
 - Do not branch the shared connection registry on `cfg!(debug_assertions)`.
 - Do not write, move, or delete provider auth or MCP files during probes, discovery, or a rejected command.
@@ -101,6 +109,7 @@ Planning candidates, not blanket authorization. The user names exact surfaces wh
 - Do not repeat the recipe or the prior transcript on a later turn of a persistent session.
 - Do not add a task card, a floating modal, or a canvas for this feature.
 - Do not let a composer change on one thread rewrite the agent recipe.
+- Do not present a model the CLI did not list. Do not treat the Agents & Models settings list, or `bmone.defaultModel`, as the model a thread will run.
 - Generated artifacts stay in English. Product docs, UI copy, comments, and commit messages describe this product's own implementation only: no external project names and no derivation or provenance claims.
 - Do not add a memory backend or a remote protocol in this feature.
 - The author of this document does not launch the implementing agents.
@@ -114,6 +123,9 @@ L4. 2026-10-23. Current-tree reconciliation: connection/endpoint verification, t
 L5. 2026-10-23. User correction, verbatim: the session layer is what gets implemented. The screen stays the existing chat. The composer is adapted for provider, model, thinking level, permissions, and the work mode each provider already has. Task cards, floating modals, and the canvas are not part of this feature. Quota remains a separate endpoint.
 L6. 2026-10-23. User correction, verbatim: decide whether the session belongs to the agent or the thread. Both sides participate. On an agent thread the recipe (how that agent should behave, including skills) is applied before the session starts.
 L7. 2026-10-23. Decision recorded for workers the user will launch. The thread owns the live session. The agent owns the recipe and that recipe is snapshotted before start. A loose chat has no Kite recipe. This document supersedes the task-card product decision in L2 and L4. The author does not launch those workers.
+L8. 2026-10-23. User, verbatim:
+"Okey, ahorita me estás terminando lo que sería el contenido entero. Si es siguiente, no me gusta hablar en cuanto a términos. Con respecto a los modelos y los seleccionamientos, cuando voy a la parte de Agents, o también en en 3a, veo que hay modelos y que están factoreados. Aparece la parte de Monet, pero me lleva a parte canadienia y que no sirve para conectar los AI. Aún falta hablar de esa lógica. revisa más sobre eso."
+Decision: S19–S21 and T11. A pickable model is one the CLI returned, or Automatic. The Settings screen Agents & Models (`ModelsTab`, browser keys `bmone.*`) is not a connection screen and is not read by the send path. The composer catalog is a second invented list.
 L8. 2026-10-23. T0 completed read-only, evidence in `odd/tasks/agent-sessions-t0.md`. Observed: installed `agy` 1.4.5, `codex` 0.163.0, `cursor-agent` 2026.10.22, `gemini` 0.64.0, `grok` 1.0.62, `opencode` 2.1.4; `claude` absent. No provider auth or MCP file was written, moved, or deleted; no provider process was started with a prompt.
 Findings that change the plan:
 - Cursor's launcher resolves `agent` before `cursor-agent` (`runtime.rs:734`), and on this machine `agent` is Grok's binary. A Cursor send starts Grok. Defect, not a gap.
@@ -141,3 +153,4 @@ L12. 2026-10-23. User reported that several model catalogs are stale and never s
 4. A successful spawn proves process execution only. It does not prove authentication, entitlement, MCP preservation, model support, or resumability.
 5. A driver without a lasting channel stays one command per turn, and the chat says so.
 6. The connection registry and the existing chat are the foundations to extend.
+7. Two model lists exist today and neither is the CLI's list. Settings Agents & Models writes a browser key the send path never reads. The composer catalog invents names until a provider happens to return its own.

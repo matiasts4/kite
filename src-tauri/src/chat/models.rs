@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::chat::utils::{resolve_bin, user_home_dir};
+use crate::chat::utils::resolve_bin;
 
 pub(crate) struct CachedProviderModels {
     pub(crate) models: Vec<Value>,
@@ -17,7 +17,60 @@ pub(crate) fn model_cache() -> &'static Mutex<HashMap<String, CachedProviderMode
     MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) const MODEL_CACHE_TTL: Duration = Duration::from_secs(900); // 15 minutes TTL
+pub(crate) const MODEL_CACHE_TTL: Duration = Duration::from_secs(900); // 15 minutes in-memory TTL
+pub(crate) const DISK_CACHE_TTL_MS: i64 = 4 * 3600 * 1000; // 4 hours disk TTL
+
+fn models_cache_path() -> std::path::PathBuf {
+    crate::persist::roaming_app_dir().join("provider_models_cache.json")
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn load_provider_models_from_disk(provider: &str) -> Option<Vec<Value>> {
+    let path = models_cache_path();
+    let bytes = std::fs::read(&path).ok()?;
+    let val: Value = serde_json::from_slice(&bytes).ok()?;
+    let entry = val.get(provider)?;
+    let cached_at = entry.get("cachedAtUnixMs").and_then(|v| v.as_i64())?;
+    if now_unix_ms().saturating_sub(cached_at) > DISK_CACHE_TTL_MS {
+        return None;
+    }
+    let models = entry.get("models")?.as_array()?.clone();
+    if models.is_empty() {
+        return None;
+    }
+    Some(models)
+}
+
+fn save_provider_models_to_disk(provider: &str, models: &[Value]) {
+    if models.is_empty() {
+        return;
+    }
+    let path = models_cache_path();
+    let mut root: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({}));
+
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert(
+            provider.to_string(),
+            json!({
+                "models": models,
+                "cachedAtUnixMs": now_unix_ms(),
+            }),
+        );
+        if let Ok(serialized) = serde_json::to_vec_pretty(&root) {
+            let _ = std::fs::create_dir_all(crate::persist::roaming_app_dir());
+            let _ = std::fs::write(&path, serialized);
+        }
+    }
+}
 
 pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
     let canon = match provider {
@@ -27,7 +80,7 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
         other => other,
     };
 
-    // 1. Check cache first unless force_refresh is requested
+    // 1. Check in-memory cache first unless force_refresh is requested
     if !force_refresh {
         if let Ok(cache) = model_cache().lock() {
             if let Some(entry) = cache.get(canon) {
@@ -40,6 +93,24 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
                 }
             }
         }
+
+        // 1b. Check disk cache if in-memory cache is cold
+        if let Some(disk_models) = load_provider_models_from_disk(canon) {
+            if let Ok(mut cache) = model_cache().lock() {
+                cache.insert(
+                    canon.to_string(),
+                    CachedProviderModels {
+                        models: disk_models.clone(),
+                        cached_at: Instant::now(),
+                    },
+                );
+            }
+            return json!({
+                "provider": canon,
+                "models": disk_models,
+                "cached": true,
+            });
+        }
     }
 
     // 2. Fetch fresh dynamic models per provider
@@ -49,17 +120,9 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
         "cursor" => fetch_cursor_models_dynamic(),
         "grok" => fetch_grok_models_dynamic(),
         "opencode" => fetch_opencode_models_dynamic(),
-        "claude" => vec![
-            model_row("sonnet", "Claude Sonnet 5", "Balanced daily driver", true),
-            model_row("opus", "Claude Opus (latest)", "Latest Opus release", true),
-            model_row("claude-opus-5-5", "Claude Opus 5.5", "Long-running agentic work", true),
-            model_row("fable", "Claude Fable 5.1", "Hardest problems", true),
-            model_row("haiku", "Claude Haiku 4.5", "Fastest replies", false),
-        ],
-        "gemini" => vec![
-            model_row("gemini-4-argon", "Gemini 4 Argon", "Frontier reasoning & agentic coding", true),
-            model_row("gemini-3.8-flash", "Gemini 3.8 Flash", "Ultra-fast agentic execution", true),
-        ],
+        // Claude and Gemini have no list command wired here. An empty list
+        // means the menu offers Automatic, not a stand-in catalog.
+        "claude" | "gemini" => Vec::new(),
         _ => Vec::new(),
     };
 
@@ -74,6 +137,7 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
                 },
             );
         }
+        save_provider_models_to_disk(canon, &fresh_models);
     }
 
     json!({
@@ -84,12 +148,7 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
 }
 
 pub fn fetch_antigravity_models_dynamic() -> Vec<Value> {
-    if let Some(live) = query_agy_models_cli() {
-        if !live.is_empty() {
-            return live;
-        }
-    }
-    antigravity_fallback_models()
+    query_agy_models_cli().unwrap_or_default()
 }
 
 pub fn query_agy_models_cli() -> Option<Vec<Value>> {
@@ -183,54 +242,11 @@ pub fn query_agy_models_cli() -> Option<Vec<Value>> {
     Some(parsed)
 }
 
-pub fn antigravity_fallback_models() -> Vec<Value> {
-    vec![
-        model_row("gemini-4-argon", "Gemini 4 Argon", "Frontier reasoning & agentic coding (Google DeepMind)", true),
-        model_row("gemini-3.8-flash", "Gemini 3.8 Flash", "Ultra-fast, lightweight agentic execution (Google DeepMind)", true),
-        model_row("claude-opus-5-5", "Claude Opus 5.5", "Frontier reasoning on Antigravity (Anthropic)", true),
-        model_row("claude-sonnet-5-5", "Claude Sonnet 5.5", "Balanced high-speed coding on Antigravity (Anthropic)", true),
-        model_row("gpt-oss-120b", "GPT-OSS 120B", "Open-weights 120B model hosted on Antigravity", false),
-    ]
-}
-
+/// Codex has no model-list command wired here. The configured `model` key in
+/// `config.toml` is one saved choice, not the catalog, so it is not expanded
+/// into a menu.
 pub fn fetch_codex_models_dynamic() -> Vec<Value> {
-    let mut models = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    let home = user_home_dir();
-    let config_path = home.join(".codex").join("config.toml");
-    if let Ok(contents) = std::fs::read_to_string(config_path) {
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("model") && trimmed.contains('=') {
-                if let Some(idx) = trimmed.find('=') {
-                    let raw_val = trimmed[idx + 1..].trim().trim_matches('"').trim_matches('\'');
-                    if !raw_val.is_empty() && seen.insert(raw_val.to_string()) {
-                        let label = format!("{} (Configured Default)", raw_val);
-                        models.push(model_row(raw_val, &label, "Configured in ~/.codex/config.toml", true));
-                    }
-                }
-            }
-        }
-    }
-
-    let default_codex = [
-        ("gpt-6.1-sol", "GPT-6.1 Sol", "Latest frontier reasoning and coding agent", true),
-        ("gpt-6-astra", "GPT-6 Astra", "Most capable for complex agentic workflows", true),
-        ("gpt-6-sol", "GPT-6 Sol", "Complex coding and agentic work", true),
-        ("gpt-6-luna", "GPT-6 Luna", "Fast, efficient work", false),
-        ("gpt-5.6-sol", "GPT-5.6 Sol", "Frontier agentic work", true),
-        ("gpt-5.6-terra", "GPT-5.6 Terra", "Balanced agentic work", true),
-        ("gpt-5.6-luna", "GPT-5.6 Luna", "Fast, efficient work", false),
-    ];
-
-    for (id, name, desc, effort) in default_codex {
-        if seen.insert(id.to_string()) {
-            models.push(model_row(id, name, desc, effort));
-        }
-    }
-
-    models
+    Vec::new()
 }
 
 pub fn fetch_grok_models_dynamic() -> Vec<Value> {
@@ -244,21 +260,7 @@ pub fn fetch_grok_models_dynamic() -> Vec<Value> {
             }
         }
     }
-    grok_fallback_models()
-}
-
-pub fn grok_fallback_models() -> Vec<Value> {
-    vec![
-        model_row("grok-4.7", "Grok 4.7", "xAI Grok default model", true),
-        model_row(
-            "grok-4.7-build-fast",
-            "Grok 4.7 Build Fast",
-            "Fast agentic build model",
-            true,
-        ),
-        model_row("grok-4.6", "Grok 4.6", "Previous Grok model", true),
-        model_row("grok-4.5", "Grok 4.5", "Legacy Grok model", true),
-    ]
+    Vec::new()
 }
 
 /// Parses `grok models`: a bulleted list under an `Available models:` header.
@@ -293,11 +295,7 @@ pub fn fetch_cursor_models_dynamic() -> Vec<Value> {
             }
         }
     }
-    cursor_fallback_models()
-}
-
-pub fn cursor_fallback_models() -> Vec<Value> {
-    vec![model_row("auto", "Auto", "Cursor picks a model", false)]
+    Vec::new()
 }
 
 /// Parses `cursor-agent models`: `id - Name` rows under an `Available models`
@@ -340,12 +338,7 @@ pub fn model_row(id: &str, name: &str, description: &str, supports_effort: bool)
 }
 
 pub fn fetch_opencode_models_dynamic() -> Vec<Value> {
-    if let Some(live) = query_opencode_models_cli() {
-        if !live.is_empty() {
-            return live;
-        }
-    }
-    vec![model_row("auto", "Auto", "OpenCode default model", false)]
+    query_opencode_models_cli().unwrap_or_default()
 }
 
 /// Parses the CLI's `provider/model` lines into catalog rows. Pure, so it is
@@ -481,6 +474,22 @@ mod tests {
     }
 
     #[test]
+    fn providers_without_a_list_command_return_no_invented_models() {
+        for provider in ["claude", "gemini", "codex"] {
+            let value = provider_models(provider, true);
+            let models = value
+                .get("models")
+                .and_then(|entry| entry.as_array())
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                models.is_empty(),
+                "{provider} returned invented models: {models:?}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_provider_model_lines_and_drops_duplicates() {
         let raw = "google/gemini-3.1-pro-preview\n\nnot-a-model\ngoogle/gemini-3.1-pro-preview\nopenai/gpt-5.6-sol\n";
         assert_eq!(
@@ -537,4 +546,131 @@ mod tests {
             .collect();
         assert_eq!(names[1], "Codex 5.3 Low");
     }
+
+    #[test]
+    fn parses_opencode_agents_default_and_custom() {
+        let agents = provider_agents("opencode");
+        assert!(agents.iter().any(|a| a.get("id").and_then(|v| v.as_str()) == Some("build")));
+        assert!(agents.iter().any(|a| a.get("id").and_then(|v| v.as_str()) == Some("plan")));
+        // If local opencode.json exists, gentle-orchestrator should be present
+        if std::path::Path::new(&format!("{}/.config/opencode/opencode.json", std::env::var("USERPROFILE").unwrap_or_default())).is_file() {
+            assert!(agents.iter().any(|a| a.get("id").and_then(|v| v.as_str()) == Some("gentle-orchestrator")));
+        }
+    }
+}
+
+pub fn provider_agents(provider: &str) -> Vec<Value> {
+    let canon = match provider {
+        "agy" => "antigravity",
+        "claude-code" => "claude",
+        "open-code" => "opencode",
+        other => other,
+    };
+
+    let mut modes = vec![
+        json!({
+            "id": "build",
+            "label": "Build",
+            "detail": "Works with the permission mode below",
+            "plan": false,
+        }),
+        json!({
+            "id": "plan",
+            "label": "Plan",
+            "detail": "Reads and plans, changes nothing",
+            "plan": true,
+        }),
+    ];
+
+    if canon == "opencode" {
+        if let Some(custom_agents) = read_opencode_config_agents() {
+            for agent in custom_agents {
+                let id = agent.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if id != "build" && id != "plan" {
+                    modes.push(agent);
+                }
+            }
+        }
+    }
+
+    modes
+}
+
+fn read_opencode_config_agents() -> Option<Vec<Value>> {
+    let mut candidates = Vec::new();
+    if let Ok(user) = std::env::var("USERPROFILE") {
+        candidates.push(std::path::PathBuf::from(&user).join(".config").join("opencode").join("opencode.json"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.json"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(std::path::PathBuf::from(&local).join("opencode").join("opencode.json"));
+    }
+    candidates.push(std::path::PathBuf::from(".opencode").join("opencode.json"));
+
+    for path in candidates {
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                    if let Some(agents_obj) = val.get("agent").and_then(|v| v.as_object()) {
+                        let mut list = Vec::new();
+                        for (key, agent_data) in agents_obj {
+                            let hidden = agent_data
+                                .get("hidden")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if hidden {
+                                continue;
+                            }
+                            let desc = agent_data
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let mode = agent_data
+                                .get("mode")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("subagent");
+                            let model = agent_data
+                                .get("model")
+                                .and_then(|v| v.as_str());
+
+                            // Generate human-friendly label
+                            let label = key
+                                .split(&['-', '_'][..])
+                                .map(|w| {
+                                    let mut chars = w.chars();
+                                    match chars.next() {
+                                        None => String::new(),
+                                        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ");
+
+                            let detail = if !desc.is_empty() {
+                                desc.to_string()
+                            } else {
+                                format!("Mode: {mode}")
+                            };
+
+                            let mut entry = json!({
+                                "id": key,
+                                "label": label,
+                                "detail": detail,
+                                "plan": false,
+                                "mode": mode,
+                            });
+                            if let Some(m) = model {
+                                entry["model"] = json!(m);
+                            }
+                            list.push(entry);
+                        }
+                        return Some(list);
+                    }
+                }
+            }
+        }
+    }
+    None
 }

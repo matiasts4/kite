@@ -730,7 +730,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           } else if (hasRecentUserInput) {
             nextDelay = 40;
           } else {
-            nextDelay = 90;
+            nextDelay = 220;
           }
         }
       } catch {

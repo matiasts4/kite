@@ -33,6 +33,226 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.35',
+    tag: 'v0.1.35',
+    date: 'Oct 25, 2026',
+    title: 'Restauracion de ZedOrb WebGL2 y Fluidez en Barra de Tareas',
+    items: [
+      {
+        kind: 'changed',
+        description: 'feat(zed): Restaurar el renderizador WebGL2 de ZedOrb con optimizacion inteligente de tasa de cuadros y pausa en minimizado',
+      },
+      {
+        kind: 'changed',
+        description: 'perf(taskbar): Eliminar mas de 110,000 escrituras sincronas en app.log durante eventos de ventana y restauracion',
+      },
+      {
+        kind: 'changed',
+        description: 'perf(titlebar): Restaurar mini-orbe ligero acelerado por GPU eliminando animaciones CSS continuas y capas SVG pesadas',
+      },
+      {
+        kind: 'changed',
+        description: 'perf(focus): Debounce en refreshGit (1.2s), metricas de sistema (2s) y cuotas (2.5s) al reactivar o enfocar la aplicacion',
+      },
+      {
+        kind: 'changed',
+        description: 'perf(terminal): Cachear sesiones de proveedor ya vinculadas evitando re-resolucion innecesaria',
+      },
+    ],
+  },
+  {
+    version: '0.1.34',
+    tag: 'v0.1.34',
+    date: 'Oct 25, 2026',
+    title: 'Eliminacion de Bucles de E/S y Bloqueos de Arranque',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Eliminar escaneo periodico de 70MB de transcripciones y contencion en terminal.rs',
+      },
+      {
+        kind: 'fixed',
+        description: 'Desactivar llamadas bloqueantes a Windows Restart Manager (rstrtmgr.dll) en resolucion de sesiones',
+      },
+      {
+        kind: 'changed',
+        description: 'perf: Reemplazar raymarching WebGL2 continuo en ZedOrb por esfera CSS acelerada por hardware',
+      },
+      {
+        kind: 'changed',
+        description: 'perf: Reducir polling IPC inactivo de terminal de 90ms a 220ms conservando 40ms en escritura',
+      },
+      {
+        kind: 'changed',
+        description: 'perf: Acelerar animacion de mini-orbe en barra de titulo con capas de composicion GPU',
+      },
+    ],
+  },
+  {
+    version: '0.1.33',
+    tag: 'v0.1.33',
+    date: 'Oct 25, 2026',
+    title: 'Estabilización y Rendimiento de Arranque',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Eliminar shaders WebGL (ReadPixels) y loops de canvas raymarching en vistas de produccion para evitar bloqueos',
+      },
+      {
+        kind: 'fixed',
+        description: 'Resolver contencion en el bucle principal de WebView2 y limpiar procesos huerfanos al iniciar',
+      },
+      {
+        kind: 'fixed',
+        description: 'Optimizar animaciones de la orbe Zed en la barra de titulo con degradados acelerados por hardware',
+      },
+      {
+        kind: 'changed',
+        description: 'Mejorar el lanzador de escritorio limpiando procesos residuales y liberando candados de EBWebView',
+      },
+      {
+        kind: 'changed',
+        description: 'Sincronizar catalogo de modelos de Grok y Cursor con sus respectivas CLIs',
+      },
+    ],
+  },
+  {
+    version: '0.1.32',
+    tag: 'v0.1.32',
+    date: 'Oct 24, 2026',
+    title: 'Gobernanza de Plugins y Asignación de Motores de IA',
+    items: [
+      {
+        kind: 'added',
+        description: 'Selector interactivo de proveedores para motores de IA',
+      },
+      {
+        kind: 'added',
+        description: 'Asignación granular por agente con switches sincronizados',
+      },
+      {
+        kind: 'fixed',
+        description: 'Validación estricta de credenciales en plugins antes de conectar',
+      },
+      {
+        kind: 'changed',
+        description: 'Modal rediseñado con componente Sheet nativo y tokens de diseño',
+      },
+    ],
+  },
+  {
+    version: '0.1.31',
+    tag: 'v0.1.31',
+    date: 'Oct 24, 2026',
+    title: 'Validación de Credenciales y Selección de Proveedores en Plugins',
+    items: [
+      {
+        kind: 'added',
+        description: 'Modal de detalles con Sheet oficial y pestañas para Configuración, Proveedores de IA y Agentes',
+      },
+      {
+        kind: 'added',
+        description: 'Selector interactivo de proveedores para habilitar/deshabilitar plugins por motor de IA (Claude, Codex, Antigravity, OpenCode, Cursor, Gemini, Grok)',
+      },
+      {
+        kind: 'added',
+        description: 'Asignación granular por agente con switches individuales y sincronización con perfiles',
+      },
+      {
+        kind: 'changed',
+        description: 'Reemplazo completo de modales flotantes por el componente Sheet nativo con tokens de diseño auténticos',
+      },
+      {
+        kind: 'fixed',
+        description: 'Validación estricta de credenciales en plugins antes de conectar, previniendo falsos estados activos',
+      },
+    ],
+  },
+  {
+    version: '0.1.30',
+    tag: 'v0.1.30',
+    date: 'Oct 24, 2026',
+    title: 'Refinamiento de UI y Proveedores en Plugins',
+    items: [
+      {
+        kind: 'added',
+        description: 'Visualización de proveedores y motores compatibles (Claude Code, Codex, Antigravity, OpenCode, Cursor, Gemini) en el modal de detalles',
+      },
+      {
+        kind: 'changed',
+        description: 'Diseño minimalista y limpio en las tarjetas del catálogo de Plugins',
+      },
+      {
+        kind: 'changed',
+        description: 'Enrutamiento de gobernanza de plugins directamente a la pestaña Ajustes de cada agente',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminación de elementos visuales saturados en las tarjetas del catálogo',
+      },
+    ],
+  },
+  {
+    version: '0.1.29',
+    tag: 'v0.1.29',
+    date: 'Oct 24, 2026',
+    title: 'Ecosistema de Plugins y Cobertura de Agentes',
+    items: [
+      {
+        kind: 'added',
+        description: 'Catálogo canónico de 29 plugins para servicios externos y herramientas de agentes',
+      },
+      {
+        kind: 'added',
+        description: 'Modal interactivo de configuración de credenciales (API keys / puertos MCP) y permisos por plugin',
+      },
+      {
+        kind: 'added',
+        description: 'Cobertura bidireccional de agentes con gobernanza granular de plugins',
+      },
+      {
+        kind: 'added',
+        description: 'Pila compacta de mini-avatares en tarjetas conectadas mostrando los agentes activos',
+      },
+      {
+        kind: 'added',
+        description: 'Sincronización en segundo plano cada 2000ms con detección de foco',
+      },
+      {
+        kind: 'changed',
+        description: 'Integración automática de plugins conectados en el catálogo MCP de Agent Settings',
+      },
+      {
+        kind: 'fixed',
+        description: 'Control de acceso en modo sólo lectura para herramientas con mutaciones',
+      },
+    ],
+  },
+  {
+    version: '0.1.28',
+    tag: 'v0.1.28',
+    date: 'Oct 24, 2026',
+    title: 'Laboratorio de Animaciones y Ajustes Visuales',
+    items: [
+      {
+        kind: 'added',
+        description: 'Laboratorio interactivo de efectos visuales y motion en el puerto 1430',
+      },
+      {
+        kind: 'changed',
+        description: 'Preservacion de la interfaz nativa y personalizacion del chat composer',
+      },
+      {
+        kind: 'changed',
+        description: 'Sincronizacion de metricas de telemetria y cuotas en la barra superior',
+      },
+      {
+        kind: 'fixed',
+        description: 'Estabilizacion de dependencias WebGL y eliminacion de img-fx',
+      },
+    ],
+  },
+  {
     version: '0.1.26',
     tag: 'v0.1.26',
     date: 'Oct 22, 2026',

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import type { SavedAccountProfile } from '../../types';
 import {
   listSavedAccounts,
@@ -6,8 +7,8 @@ import {
   switchAccountProfile,
   deleteAccountProfile,
 } from '../../lib/ipc';
-import { usePresence } from '../../motion/usePresence';
-import { motionSurfaceClass } from '../../motion/surface';
+import { surfaceMotion } from '../../motion/standard/surfaces';
+import { springs, tweens } from '../../motion/standard/tokens';
 
 export interface AccountSwitcherModalProps {
   provider: string;
@@ -112,15 +113,11 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     }
   };
 
-  const layerPresence = usePresence(isOpen);
-  if (!layerPresence.mounted) return null;
-
-  const scrimMotion = motionSurfaceClass(layerPresence.phase, 'scrim');
-  const panelMotion = motionSurfaceClass(layerPresence.phase, 'modal');
-
-  return (
-    <div
-      className={scrimMotion || undefined}
+  const modal = (
+    <motion.div
+      key="account-switcher"
+      {...surfaceMotion('scrim')}
+      transition={tweens.overlay}
       style={{
         position: 'fixed',
         inset: 0,
@@ -134,8 +131,9 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       }}
       onClick={onClose}
     >
-      <div
-        className={panelMotion || undefined}
+      <motion.div
+        {...surfaceMotion('dialog')}
+        transition={springs.dialog}
         style={{
           width: '100%',
           maxWidth: '480px',
@@ -514,7 +512,9 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
+
+  return <AnimatePresence>{isOpen ? modal : null}</AnimatePresence>;
 };

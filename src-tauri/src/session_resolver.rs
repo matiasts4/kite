@@ -546,19 +546,40 @@ fn resolve_antigravity_session_id(
         if norm_sb.len() >= 25 || norm_user_input.is_some() {
             let mut scores: HashMap<String, u32> = HashMap::new();
 
-            // A. Match against brain/<conv_id>/.system_generated/logs/transcript.jsonl
+            // A. Match against workspace candidate transcripts in brain/<conv_id>/.system_generated/logs/transcript.jsonl
             let brain_dir = agy_dir.join("brain");
             let mut brain_candidates: Vec<String> = workspace_candidates.iter().cloned().collect();
-            if let Ok(entries) = std::fs::read_dir(&brain_dir) {
-                for entry in entries.flatten() {
-                    if let Some(conv_id) = entry.file_name().to_str().map(str::to_string) {
-                        if !conv_id.is_empty()
-                            && !claimed_ids.contains(&conv_id)
-                            && !is_locked_by_other(&conv_id)
-                            && !workspace_candidates.contains(&conv_id)
-                        {
-                            brain_candidates.push(conv_id);
+
+            // If workspace candidates are empty, look at at most 5 recently modified candidates
+            if brain_candidates.is_empty() {
+                if let Ok(entries) = std::fs::read_dir(&brain_dir) {
+                    let mut recent: Vec<(u128, String)> = Vec::new();
+                    for entry in entries.flatten() {
+                        if let Some(conv_id) = entry.file_name().to_str().map(str::to_string) {
+                            if !conv_id.is_empty()
+                                && !claimed_ids.contains(&conv_id)
+                                && !is_locked_by_other(&conv_id)
+                            {
+                                let tpath = brain_dir
+                                    .join(&conv_id)
+                                    .join(".system_generated")
+                                    .join("logs")
+                                    .join("transcript.jsonl");
+                                if let Ok(meta) = std::fs::metadata(&tpath) {
+                                    let mtime = meta
+                                        .modified()
+                                        .ok()
+                                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0);
+                                    recent.push((mtime, conv_id));
+                                }
+                            }
                         }
+                    }
+                    recent.sort_by(|a, b| b.0.cmp(&a.0));
+                    for (_, cid) in recent.into_iter().take(5) {
+                        brain_candidates.push(cid);
                     }
                 }
             }
@@ -584,6 +605,16 @@ fn resolve_antigravity_session_id(
                     .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis())
                     .unwrap_or(0);
+
+                // Never read transcripts older than terminal spawn time
+                if min_mtime_ms > 0 && mod_ms < min_mtime_ms {
+                    continue;
+                }
+                // Cap single transcript read to 4MB to prevent memory exhaustion
+                if meta.len() > 4 * 1024 * 1024 {
+                    continue;
+                }
+
                 let recency_mult: u32 = if min_mtime_ms > 0 && mod_ms >= min_mtime_ms {
                     2
                 } else {
@@ -1267,120 +1298,8 @@ pub fn collect_process_tree_pids(root_pid: u32) -> HashSet<u32> {
     set
 }
 
-/// Uses Windows Restart Manager (`rstrtmgr.dll`) to query the OS PIDs holding an open handle/lock on `path`.
-#[cfg(windows)]
-fn get_locking_pids_for_file(path: &Path) -> Vec<u32> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const CCH_RM_SESSION_KEY: usize = 32;
-    const CCH_RM_MAX_APP_NAME: usize = 255;
-    const CCH_RM_MAX_SVC_NAME: usize = 63;
-    const ERROR_MORE_DATA: u32 = 234;
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct FILETIME {
-        dw_low_date_time: u32,
-        dw_high_date_time: u32,
-    }
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct RM_UNIQUE_PROCESS {
-        dw_process_id: u32,
-        process_start_time: FILETIME,
-    }
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct RM_PROCESS_INFO {
-        process: RM_UNIQUE_PROCESS,
-        str_app_name: [u16; CCH_RM_MAX_APP_NAME + 1],
-        str_service_short_name: [u16; CCH_RM_MAX_SVC_NAME + 1],
-        application_type: u32,
-        app_status: u32,
-        ts_session_id: u32,
-        b_restartable: i32,
-    }
-
-    #[link(name = "rstrtmgr")]
-    extern "system" {
-        fn RmStartSession(p_session_handle: *mut u32, dw_session_flags: u32, str_session_key: *mut u16) -> u32;
-        fn RmEndSession(dw_session_handle: u32) -> u32;
-        fn RmRegisterResources(
-            dw_session_handle: u32,
-            n_files: u32,
-            rgs_file_names: *const *const u16,
-            n_applications: u32,
-            rg_applications: *const RM_UNIQUE_PROCESS,
-            n_services: u32,
-            rgs_service_names: *const *const u16,
-        ) -> u32;
-        fn RmGetList(
-            dw_session_handle: u32,
-            pn_proc_info_needed: *mut u32,
-            pn_proc_info: *mut u32,
-            rg_affected_apps: *mut RM_PROCESS_INFO,
-            lpdw_reboot_reasons: *mut u32,
-        ) -> u32;
-    }
-
-    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let mut session_handle: u32 = 0;
-    let mut session_key = [0u16; CCH_RM_SESSION_KEY + 1];
-
-    let mut pids = Vec::new();
-    unsafe {
-        if RmStartSession(&mut session_handle, 0, session_key.as_mut_ptr()) != 0 {
-            return pids;
-        }
-        let file_ptr = wide_path.as_ptr();
-        if RmRegisterResources(
-            session_handle,
-            1,
-            &file_ptr,
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-        ) == 0
-        {
-            let mut needed: u32 = 0;
-            let mut count: u32 = 0;
-            let mut reason: u32 = 0;
-            let res = RmGetList(
-                session_handle,
-                &mut needed,
-                &mut count,
-                std::ptr::null_mut(),
-                &mut reason,
-            );
-            if res == ERROR_MORE_DATA && needed > 0 {
-                count = needed;
-                let mut infos: Vec<RM_PROCESS_INFO> = vec![std::mem::zeroed(); count as usize];
-                if RmGetList(
-                    session_handle,
-                    &mut needed,
-                    &mut count,
-                    infos.as_mut_ptr(),
-                    &mut reason,
-                ) == 0
-                {
-                    for info in infos.into_iter().take(count as usize) {
-                        if info.process.dw_process_id > 0 {
-                            pids.push(info.process.dw_process_id);
-                        }
-                    }
-                }
-            }
-        }
-        let _ = RmEndSession(session_handle);
-    }
-    pids
-}
-
-/// Scans `~/.gemini/antigravity-cli/presence/*.lock`, tests which files have an active OS byte-range lock,
-/// and maps each locked conversation ID to the PID(s) holding the lock.
+/// Scans `~/.gemini/antigravity-cli/presence/*.lock` and detects which conversations currently
+/// have an active byte-range lock held by an Antigravity process, without invoking blocking system APIs.
 #[cfg(windows)]
 pub fn get_all_locked_antigravity_conversations() -> HashMap<String, Vec<u32>> {
     let mut map = HashMap::new();
@@ -1410,8 +1329,7 @@ pub fn get_all_locked_antigravity_conversations() -> HashMap<String, Vec<u32>> {
         // Antigravity CLI holds an exclusive LockFileEx on byte 0 while running;
         // reading 1 byte fails with ERROR_LOCK_VIOLATION (33) if and only if an agy process holds the lock.
         if file.read(&mut buf).is_err() {
-            let pids = get_locking_pids_for_file(&path);
-            map.insert(conv_id.to_string(), pids);
+            map.insert(conv_id.to_string(), Vec::new());
         }
     }
     map

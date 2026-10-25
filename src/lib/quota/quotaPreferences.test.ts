@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSubscriptionQuotas } from '../ipc';
 import {
+  ALL_SUPPORTED_PROVIDERS,
   DEFAULT_QUOTA_PREFERENCES,
   PROVIDERS,
   QUOTA_SETUP_VERSION,
@@ -69,8 +70,8 @@ describe('quota preferences', () => {
     const prefs = readQuotaPreferences();
     expect(prefs.enabledProviders).toEqual([PROVIDERS.GROK]);
     expect(prefs.providerOrder[0]).toBe(PROVIDERS.OPENCODE);
-    expect(prefs.providerOrder).toHaveLength(12);
-    expect(new Set(prefs.providerOrder).size).toBe(12);
+    expect(prefs.providerOrder).toHaveLength(ALL_SUPPORTED_PROVIDERS.length);
+    expect(new Set(prefs.providerOrder).size).toBe(ALL_SUPPORTED_PROVIDERS.length);
   });
 
   it('migrates legacy installs to an empty monitored list without polling providers', async () => {

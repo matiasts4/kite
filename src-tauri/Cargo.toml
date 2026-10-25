@@ -1,6 +1,6 @@
 [package]
 name = "kite-code"
-version = "0.1.26"
+version = "0.1.35"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"

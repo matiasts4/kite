@@ -8,6 +8,7 @@ import {
   type TranscriptionTestResult,
   type TranscriptionTestSession,
 } from '../../../lib/operator/voice/zedVoice';
+import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 
 interface VoiceTabProps {
   dictationSettings: DictationSettings;
@@ -225,6 +226,9 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                   onClick={() => onUpdateDictationMode('local')}
                   type="button"
                 >
+                  {dictationSettings.mode === 'local' && (
+                    <SegmentedIndicator group="settings-voice-transcription" />
+                  )}
                   <span>On this PC</span>
                 </button>
                 <button
@@ -233,6 +237,9 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                   onClick={() => onUpdateDictationMode('cloud')}
                   type="button"
                 >
+                  {dictationSettings.mode === 'cloud' && (
+                    <SegmentedIndicator group="settings-voice-transcription" />
+                  )}
                   <span>Cloud</span>
                 </button>
               </fieldset>

@@ -99,14 +99,6 @@ export const PROVIDER_CONFIGS_ES: Record<string, ProviderMetaConfig> = {
     details:
       'Lee las credenciales OAuth en `~/.kimi-code/credentials/kimi-code.json` y refresca el token automáticamente. Si el token de actualización expira o la sesión caduca, ejecuta `kimi login` en la terminal.',
   },
-  [PROVIDERS.GEMINI]: {
-    title: 'Google Gemini CLI',
-    desc: 'Cuotas y contexto para Google Gemini 2.5 Pro y Flash.',
-    source: '~/.gemini/ o variable GEMINI_API_KEY',
-    connectionType: 'local_config',
-    details:
-      'Detecta la instalación de Gemini CLI en `~/.gemini/` o la presencia de la variable de entorno `GEMINI_API_KEY`.',
-  },
   [PROVIDERS.COPILOT]: {
     title: 'GitHub Copilot CLI',
     desc: 'Límites de peticiones y cuota de GitHub Copilot.',
@@ -1195,7 +1187,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                 </div>
 
                 {/* Multi-Account Switcher Vault Card */}
-                {['antigravity', 'gemini', 'claude', 'codex'].includes(selectedTab) && (
+                {['antigravity', 'claude', 'codex', 'opencode', 'grok'].includes(selectedTab) && (
                   <div
                     style={{
                       backgroundColor: 'rgba(59, 130, 246, 0.08)',

@@ -145,27 +145,27 @@ Evaluate all ManagedSessions:
 ```
 
 ## Tasks
-- **T0 — Driver resume & lasting channel verification matrix.** S8. Route: user. Status: planned.
+- **T0 — Driver resume & lasting channel verification matrix.** S8. Route: user. Status: completed.
   Verify CLI flags and observable behaviors for Antigravity, OpenCode, Codex, Claude, and Cursor regarding resume handles and lasting stdio/HTTP transports. Output: `odd/tasks/warm-provider-sessions-t0.md`.
-- **T1 — Session pool & lifecycle state machine.** S1, S4. Route: inline. Status: planned.
+- **T1 — Session pool & lifecycle state machine.** S1, S4. Route: inline. Status: completed.
   Extend `src-tauri/src/chat/session.rs` and `persistent.rs` with `SessionState::Idle`, `SessionState::Reaped`, `SessionState::Resurrecting`, and `last_active_at` tracking. Unit test state transitions with `ScriptedTransport`.
-- **T2 — Background idle reaper engine.** S2, S9. Route: delegated. Status: planned.
+- **T2 — Background idle reaper engine.** S2, S9. Route: delegated. Status: completed.
   Implement `SessionReaper` background worker running periodic sweeps (60s interval). Test configurable idle timeout eviction and graceful process reaping.
-- **T3 — LRU capacity governor.** S3. Route: delegated. Status: planned.
+- **T3 — LRU capacity governor.** S3. Route: delegated. Status: completed.
   Implement pool capacity budgeting in `SessionManager`. When active warm processes exceed `MAX_WARM_PROCESSES`, evict least recently active idle sessions.
-- **T4 — SQLite persistence for session handles and state.** S4, S7. Route: delegated. Status: planned.
+- **T4 — SQLite persistence for session handles and state.** S4, S7. Route: delegated. Status: completed.
   Update database schema in `src-tauri/src/chat/threads.rs` to persist `resume_handle`, `session_state`, and `last_active_at`. Ensure thread recovery accurately loads reaped state on application reboot.
-- **T5 — Transparent lazy resurrection pipeline.** S5, S8. Route: delegated. Status: planned.
+- **T5 — Transparent lazy resurrection pipeline.** S5, S8. Route: delegated. Status: completed.
   Implement `resurrect_session` in `SessionManager`. On new message to a reaped thread, spawn the provider using `--resume <handle>` and pipe the new turn. Handle fallback to cold-start on expired handles.
-- **T6 — Delta turn dispatcher & prompt cache preservation.** S6, S7. Route: delegated. Status: planned.
+- **T6 — Delta turn dispatcher & prompt cache preservation.** S6, S7. Route: delegated. Status: completed.
   Modify `src-tauri/src/chat/runtime.rs` so that warm and resurrected sends bypass `assemble_thread_context()` and send raw delta user turns. Validate that cold start remains the sole consumer of context assembly.
-- **T7 — Driver adapters wire alignment.** S8. Route: delegated. Status: planned.
+- **T7 — Driver adapters wire alignment.** S8. Route: delegated. Status: completed.
   Update adapters for Antigravity, OpenCode, Codex, and Claude in `src-tauri/src/chat/persistent.rs` and `runtime.rs` to support both lasting bidirectional communication and resume-handle resurrection invocations.
-- **T8 — App lifecycle & shutdown safety hooks.** S9, S10. Route: delegated. Status: planned.
+- **T8 — App lifecycle & shutdown safety hooks.** S9, S10. Route: delegated. Status: completed.
   Hook into Tauri window close / app exit events to ensure all live warm sessions are gracefully reaped and terminated without leaving detached background processes.
-- **T9 — UI session status projection.** S11. Route: delegated. Status: planned.
+- **T9 — UI session status projection.** S11. Route: delegated. Status: completed.
   Expose session state (`warm`, `sleeping`, `active`) to the frontend via existing chat events and thread metadata. Render lightweight status indicators in `ChatComposer` and thread header.
-- **T10 — Verification & benchmark suite.** S1–S11. Route: delegated. Status: planned.
+- **T10 — Verification & benchmark suite.** S1–S11. Route: delegated. Status: completed.
   Validate memory usage with multiple dormant threads (<50MB aggregate RAM overhead after reap), verify turn-to-turn latency reduction (<100ms for warm turns), and verify prompt cache hit rate invariants via mock and live telemetry.
 
 Slices: A = T0–T3; B = T4–T6; C = T7–T8; D = T9–T10.

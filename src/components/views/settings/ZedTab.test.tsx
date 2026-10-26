@@ -4,6 +4,7 @@ import { ZedTab } from './ZedTab';
 
 vi.mock('../../../lib/ipc', () => ({
   invokeCommand: vi.fn().mockResolvedValue({}),
+  isTauriEnvironment: vi.fn(() => false),
 }));
 
 vi.mock('../../../lib/operator/voice/zedVoice', () => ({
@@ -31,7 +32,7 @@ describe('ZedTab Component Refactoring', () => {
 
     // Provider section
     expect(screen.getByText(/Canal y Pasarela de Proveedor IA/i)).toBeInTheDocument();
-    expect(screen.getByText(/OpenCode Multi-Model Gateway/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^OpenCode Go/ })).toBeInTheDocument();
 
     // Latency section
     expect(screen.getByText(/Rendimiento y Latencia por Proveedor \/ Tarea/i)).toBeInTheDocument();

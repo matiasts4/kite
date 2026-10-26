@@ -42,27 +42,13 @@ pub fn resolve_bin(name: &str, fallbacks: &[&str]) -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let has_ext = name.contains('.');
-    if binary_exists(name) {
-        return Some(PathBuf::from(name));
-    }
-    if !has_ext && cfg!(windows) {
-        let with_exe = format!("{name}.exe");
-        if binary_exists(&with_exe) {
-            return Some(PathBuf::from(with_exe));
-        }
-        let with_cmd = format!("{name}.cmd");
-        if binary_exists(&with_cmd) {
-            return Some(PathBuf::from(with_cmd));
-        }
-    }
-    None
+    find_in_path(name)
 }
 
-pub fn binary_exists(name: &str) -> bool {
+pub fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = match std::env::var_os("PATH") {
         Some(p) => p,
-        None => return false,
+        None => return None,
     };
     let path_exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
@@ -75,19 +61,29 @@ pub fn binary_exists(name: &str) -> bool {
         Vec::new()
     };
 
+    let has_ext = name.contains('.');
     for dir in std::env::split_paths(&path_var) {
         let direct = dir.join(name);
         if direct.is_file() {
-            return true;
+            return Some(direct);
         }
-        if cfg!(windows) {
+        if cfg!(windows) && !has_ext {
+            // First check .exe for best execution
+            let with_exe = dir.join(format!("{name}.exe"));
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
             for ext in &path_exts {
                 let with_ext = dir.join(format!("{}{}", name, ext));
                 if with_ext.is_file() {
-                    return true;
+                    return Some(with_ext);
                 }
             }
         }
     }
-    false
+    None
+}
+
+pub fn binary_exists(name: &str) -> bool {
+    find_in_path(name).is_some()
 }

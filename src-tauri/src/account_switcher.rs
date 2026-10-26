@@ -49,14 +49,14 @@ fn now_ms() -> i64 {
 
 /// `antigravity` and `agy` are the same product; keep a single identity so
 /// profiles / active flags / vault folders never diverge.
-fn canon_provider(p: &str) -> String {
+pub fn canon_provider(p: &str) -> String {
     match p {
         "antigravity" => "agy".to_string(),
         other => other.to_string(),
     }
 }
 
-fn same_provider(a: &str, b: &str) -> bool {
+pub fn same_provider(a: &str, b: &str) -> bool {
     canon_provider(a) == canon_provider(b)
 }
 
@@ -79,28 +79,27 @@ fn appdata_dir() -> PathBuf {
 }
 
 fn profiles_root() -> PathBuf {
-    let folder = if cfg!(debug_assertions) {
-        "Kite Code Dev"
-    } else {
-        "Kite Code"
-    };
-    let root = appdata_dir().join(folder).join("account-profiles");
+    let root = crate::connections::shared_account_profiles_root();
     let _ = fs::create_dir_all(&root);
     root
 }
 
-fn registry_file() -> PathBuf {
-    profiles_root().join("profiles.json")
+fn registry_file_in(root: &Path) -> PathBuf {
+    root.join("profiles.json")
 }
 
-fn profile_storage_dir(provider: &str, account_id: &str) -> PathBuf {
-    let dir = profiles_root().join(provider).join(account_id);
+fn profile_storage_dir_in(root: &Path, provider: &str, account_id: &str) -> PathBuf {
+    let dir = root.join(provider).join(account_id);
     let _ = fs::create_dir_all(&dir);
     dir
 }
 
-fn load_registry() -> AccountProfilesRegistry {
-    let file = registry_file();
+fn profile_storage_dir(provider: &str, account_id: &str) -> PathBuf {
+    profile_storage_dir_in(&profiles_root(), provider, account_id)
+}
+
+fn load_registry_from(root: &Path) -> AccountProfilesRegistry {
+    let file = registry_file_in(root);
     if file.exists() {
         if let Ok(data) = fs::read(&file) {
             if let Ok(mut reg) = serde_json::from_slice::<AccountProfilesRegistry>(&data) {
@@ -132,14 +131,202 @@ fn load_registry() -> AccountProfilesRegistry {
     AccountProfilesRegistry::default()
 }
 
+fn load_registry() -> AccountProfilesRegistry {
+    load_registry_from(&profiles_root())
+}
+
+fn save_registry_to(root: &Path, registry: &AccountProfilesRegistry) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    let file = registry_file_in(root);
+    let bytes = serde_json::to_vec_pretty(registry)
+        .map_err(|e| format!("cannot serialize {}: {e}", file.display()))?;
+    let tmp = staged_path(&file);
+    if let Err(e) = fs::write(&tmp, bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
+    if let Err(e) = fs::rename(&tmp, &file) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot replace {}: {e}", file.display()));
+    }
+    Ok(())
+}
+
 fn save_registry(registry: &AccountProfilesRegistry) {
-    let file = registry_file();
-    if let Ok(bytes) = serde_json::to_vec_pretty(registry) {
-        let tmp = staged_path(&file);
-        if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, &file).is_err() {
-            let _ = fs::remove_file(&tmp);
+    let _ = save_registry_to(&profiles_root(), registry);
+}
+
+// ---------------------------------------------------------------------------
+// Import from a legacy per-install account-profiles tree
+// ---------------------------------------------------------------------------
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
+    let entries = fs::read_dir(src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &target)?;
+        } else if !copy_atomic(&path, &target) {
+            return Err(format!("cannot copy {}", path.display()));
         }
     }
+    Ok(())
+}
+
+fn snapshot_account_dirs(root: &Path) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Ok(providers) = fs::read_dir(root) else {
+        return found;
+    };
+    for provider_entry in providers.flatten() {
+        if !provider_entry.path().is_dir() {
+            continue;
+        }
+        let provider = provider_entry.file_name().to_string_lossy().to_string();
+        if provider == "_backups" {
+            continue;
+        }
+        let Ok(accounts) = fs::read_dir(provider_entry.path()) else {
+            continue;
+        };
+        for account_entry in accounts.flatten() {
+            if account_entry.path().is_dir() {
+                found.push((
+                    provider.clone(),
+                    account_entry.file_name().to_string_lossy().to_string(),
+                ));
+            }
+        }
+    }
+    found
+}
+
+fn merge_profile(registry: &mut AccountProfilesRegistry, incoming: SavedAccountProfile) -> bool {
+    let canonical_provider = canon_provider(&incoming.provider);
+    let existing = registry.profiles.iter().position(|profile| {
+        canon_provider(&profile.provider) == canonical_provider
+            && match (&profile.email, &incoming.email) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => profile.id == incoming.id,
+            }
+    });
+    let provider_has_active = registry
+        .profiles
+        .iter()
+        .any(|profile| canon_provider(&profile.provider) == canonical_provider && profile.is_active);
+
+    match existing {
+        Some(index) => {
+            let current = &mut registry.profiles[index];
+            if incoming.last_used_unix_ms >= current.last_used_unix_ms {
+                if !incoming.label.trim().is_empty() {
+                    current.label = incoming.label;
+                }
+                if incoming.email.is_some() {
+                    current.email = incoming.email;
+                }
+                if incoming.plan_name.is_some() {
+                    current.plan_name = incoming.plan_name;
+                }
+                if incoming.primary_remaining_percent.is_some() {
+                    current.primary_remaining_percent = incoming.primary_remaining_percent;
+                }
+                if incoming.primary_reset_at.is_some() {
+                    current.primary_reset_at = incoming.primary_reset_at;
+                }
+                if incoming.time_until_reset_ms.is_some() {
+                    current.time_until_reset_ms = incoming.time_until_reset_ms;
+                }
+                current.last_used_unix_ms = incoming.last_used_unix_ms;
+            }
+            if !provider_has_active && incoming.is_active {
+                current.is_active = true;
+            }
+            false
+        }
+        None => {
+            let mut profile = incoming;
+            profile.provider = canonical_provider;
+            profile.is_active = profile.is_active && !provider_has_active;
+            registry.profiles.push(profile);
+            true
+        }
+    }
+}
+
+/// Copies account profiles from a legacy per-install `account-profiles` tree
+/// into the shared connections tree. The source tree is only read: files are
+/// copied, never moved or deleted.
+pub fn import_account_profiles_from(
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<usize, String> {
+    if !source_root.is_dir() {
+        return Ok(0);
+    }
+
+    let profiles_file = registry_file_in(source_root);
+    let mut incoming = if profiles_file.is_file() {
+        let bytes = fs::read(&profiles_file)
+            .map_err(|e| format!("cannot read {}: {e}", profiles_file.display()))?;
+        serde_json::from_slice::<AccountProfilesRegistry>(&bytes)
+            .map_err(|e| format!("cannot parse {}: {e}", profiles_file.display()))?
+            .profiles
+    } else {
+        Vec::new()
+    };
+
+    // Snapshots whose index entry was already lost still belong to an account.
+    for (provider, account_id) in snapshot_account_dirs(source_root) {
+        if !incoming
+            .iter()
+            .any(|profile| same_provider(&profile.provider, &provider) && profile.id == account_id)
+        {
+            incoming.push(SavedAccountProfile {
+                id: account_id,
+                label: format!("{provider} Profile"),
+                provider,
+                email: None,
+                plan_name: None,
+                is_active: false,
+                last_used_unix_ms: 0,
+                primary_remaining_percent: None,
+                primary_reset_at: None,
+                time_until_reset_ms: None,
+            });
+        }
+    }
+
+    if incoming.is_empty() {
+        return Ok(0);
+    }
+
+    for profile in &incoming {
+        let provider = canon_provider(&profile.provider);
+        let mut source = source_root.join(&provider).join(&profile.id);
+        if !source.is_dir() && provider != profile.provider {
+            source = source_root.join(&profile.provider).join(&profile.id);
+        }
+        if source.is_dir() {
+            let destination = profile_storage_dir_in(destination_root, &provider, &profile.id);
+            copy_tree(&source, &destination)?;
+        }
+    }
+
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let mut registry = load_registry_from(destination_root);
+    let mut imported = 0;
+    for profile in incoming {
+        if merge_profile(&mut registry, profile) {
+            imported += 1;
+        }
+    }
+    if imported > 0 {
+        save_registry_to(destination_root, &registry)?;
+    }
+    Ok(imported)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,20 +372,6 @@ fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
                 rel_dest: "oauth_creds.json",
             },
         ],
-        "gemini" => vec![
-            FileMapping {
-                source: home.join(".gemini").join("oauth_creds.json"),
-                rel_dest: "oauth_creds.json",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("google_accounts.json"),
-                rel_dest: "google_accounts.json",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("state.json"),
-                rel_dest: "state.json",
-            },
-        ],
         "claude" => vec![
             FileMapping {
                 source: home.join(".claude").join(".credentials.json"),
@@ -216,6 +389,26 @@ fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
             },
             FileMapping {
                 source: home.join(".codex").join("config.json"),
+                rel_dest: "config.json",
+            },
+        ],
+        "grok" => vec![
+            FileMapping {
+                source: home.join(".grok").join("auth.json"),
+                rel_dest: "auth.json",
+            },
+            FileMapping {
+                source: home.join(".grok").join("config.json"),
+                rel_dest: "config.json",
+            },
+        ],
+        "opencode" => vec![
+            FileMapping {
+                source: home.join(".local").join("share").join("opencode").join("auth.json"),
+                rel_dest: "auth.json",
+            },
+            FileMapping {
+                source: home.join(".config").join("opencode").join("config.json"),
                 rel_dest: "config.json",
             },
         ],
@@ -310,17 +503,61 @@ fn running_process_names() -> Option<Vec<String>> {
 }
 
 fn is_blocking_process(provider: &str, name: &str) -> bool {
+    // Note: CLI processes (agy.exe, claude.exe, codex.exe) are automatically
+    // terminated and respawned during rotation. Only standalone external IDEs
+    // (e.g. Antigravity IDE window) that cannot be safely terminated remain here.
     match canon_provider(provider).as_str() {
-        // agy and gemini share ~/.gemini/oauth_creds.json, so either client blocks both.
-        "agy" | "gemini" => {
-            name.contains("antigravity")
-                || name.starts_with("language_server")
-                || matches!(name, "agy" | "agy.exe" | "gemini" | "gemini.exe")
-        }
-        "claude" => matches!(name, "claude" | "claude.exe"),
-        "codex" => matches!(name, "codex" | "codex.exe"),
+        "agy" => matches!(name, "antigravity" | "antigravity.exe"),
         _ => false,
     }
+}
+
+/// Automatically terminates any running background or terminal CLI processes
+/// for this provider so they release locks on auth and session files before rotation.
+pub fn terminate_provider_cli_processes(provider: &str) {
+    let canon = canon_provider(provider);
+    #[cfg(windows)]
+    {
+        let image_names: Vec<&str> = match canon.as_str() {
+            "agy" => vec!["agy.exe", "language_server_windows_x64.exe"],
+            "claude" => vec!["claude.exe"],
+            "codex" => vec!["codex.exe"],
+            "grok" => vec!["grok.exe"],
+            "opencode" => vec!["opencode.exe"],
+            _ => Vec::new(),
+        };
+
+        if !image_names.is_empty() {
+            let mut args: Vec<&str> = vec!["/F", "/T"];
+            for img in &image_names {
+                args.push("/IM");
+                args.push(img);
+            }
+            let _ = crate::hidden_exec::run(
+                std::path::Path::new("taskkill.exe"),
+                &args,
+                std::time::Duration::from_millis(400),
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let pattern = match canon.as_str() {
+            "agy" => "agy",
+            "claude" => "claude",
+            "codex" => "codex",
+            "grok" => "grok",
+            "opencode" => "opencode",
+            _ => "",
+        };
+        if !pattern.is_empty() {
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", pattern])
+                .output();
+        }
+    }
+    // Brief sleep to allow OS file handles to be released
+    std::thread::sleep(std::time::Duration::from_millis(50));
 }
 
 /// Err(message) when a client that owns the session files is running.
@@ -339,7 +576,7 @@ fn ensure_provider_idle(provider: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Cierra el cliente de {} antes de cambiar de cuenta (procesos activos: {}).",
+            "Cierra la aplicación externa de {} antes de cambiar de cuenta (procesos activos: {}).",
             canon_provider(provider),
             busy.join(", ")
         ))
@@ -547,62 +784,92 @@ pub fn list_saved_accounts(request: Option<Value>) -> Value {
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Phase 1: read the registry (short lock).
-    let active: Vec<(String, String, Option<String>)> = {
-        let _guard = REGISTRY_LOCK.lock().unwrap();
-        load_registry()
-            .profiles
-            .iter()
-            .filter(|p| p.is_active)
-            .filter(|p| provider.as_deref().map_or(true, |want| same_provider(&p.provider, want)))
-            .map(|p| (p.id.clone(), p.provider.clone(), p.email.clone()))
-            .collect()
-    };
+    let canon_prov = provider.as_deref().map(canon_provider);
+    let probe_target = canon_prov.clone().unwrap_or_else(|| "agy".to_string());
 
-    // Phase 2: probe live quota WITHOUT holding the registry lock (spawns `agy`, can be slow).
-    let live: Vec<(String, LiveQuota)> = active
-        .into_iter()
-        .filter_map(|(id, prov, saved_email)| {
-            let q = get_cached_live_quota(&prov)?;
-            // The live identity differs from the profile marked active (user logged in
-            // outside Kite Code): don't attribute this quota/email to the wrong profile.
-            if let (Some(saved), Some(now)) = (saved_email.as_deref(), q.email.as_deref()) {
-                if !saved.eq_ignore_ascii_case(now) {
-                    return None;
-                }
-            }
-            Some((id, q))
-        })
-        .collect();
+    // Phase 1: probe live quota (reads real OS credentials / token).
+    let live_q = get_cached_live_quota(&probe_target).or_else(|| fetch_live_quota(&probe_target));
 
-    // Phase 3: apply and persist (short lock, re-read to avoid clobbering concurrent edits).
+    // Phase 2: reconcile live identity with registry (short lock).
     let _guard = REGISTRY_LOCK.lock().unwrap();
     let mut reg = load_registry();
-    if !live.is_empty() {
-        for (id, q) in live {
-            if let Some(profile) = reg.profiles.iter_mut().find(|p| p.id == id) {
-                profile.primary_remaining_percent = Some(q.percent);
-                profile.primary_reset_at = q.reset_at;
-                profile.time_until_reset_ms = q.until_ms;
-                if q.email.is_some() {
-                    profile.email = q.email;
+    let mut changed = false;
+    let mut unregistered_live_session: Option<Value> = None;
+
+    if let Some(ref q) = live_q {
+        if let Some(ref live_email) = q.email {
+            let matching_idx = reg.profiles.iter().position(|p| {
+                same_provider(&p.provider, &probe_target)
+                    && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(live_email))
+            });
+
+            if let Some(idx) = matching_idx {
+                for (i, p) in reg.profiles.iter_mut().enumerate() {
+                    if same_provider(&p.provider, &probe_target) {
+                        let should_be_active = i == idx;
+                        if p.is_active != should_be_active {
+                            p.is_active = should_be_active;
+                            changed = true;
+                        }
+                        if should_be_active {
+                            p.primary_remaining_percent = Some(q.percent);
+                            p.primary_reset_at = q.reset_at.clone();
+                            p.time_until_reset_ms = q.until_ms;
+                            if q.plan.is_some() {
+                                p.plan_name = q.plan.clone();
+                            }
+                            p.last_used_unix_ms = now_ms();
+                            changed = true;
+                        }
+                    }
                 }
-                if q.plan.is_some() {
-                    profile.plan_name = q.plan;
+            } else {
+                // The live account does not match any profile in the vault.
+                // Avoid false active badges and expose unregistered session to frontend.
+                for p in &mut reg.profiles {
+                    if same_provider(&p.provider, &probe_target) && p.is_active {
+                        p.is_active = false;
+                        changed = true;
+                    }
+                }
+                unregistered_live_session = Some(json!({
+                    "provider": probe_target,
+                    "email": live_email,
+                    "planName": q.plan,
+                    "primaryRemainingPercent": q.percent,
+                    "primaryResetAt": q.reset_at,
+                    "timeUntilResetMs": q.until_ms,
+                }));
+            }
+        } else {
+            // Live email not detected, but update active profile quota if available
+            for p in &mut reg.profiles {
+                if same_provider(&p.provider, &probe_target) && p.is_active {
+                    p.primary_remaining_percent = Some(q.percent);
+                    p.primary_reset_at = q.reset_at.clone();
+                    p.time_until_reset_ms = q.until_ms;
+                    if q.plan.is_some() {
+                        p.plan_name = q.plan.clone();
+                    }
+                    changed = true;
                 }
             }
         }
+    }
+
+    if changed {
         save_registry(&reg);
     }
 
-    let filtered: Vec<SavedAccountProfile> = match provider.as_deref() {
+    let filtered: Vec<SavedAccountProfile> = match canon_prov.as_deref() {
         Some(p) => reg.profiles.into_iter().filter(|a| same_provider(&a.provider, p)).collect(),
         None => reg.profiles,
     };
 
     json!({
         "schemaVersion": 1,
-        "profiles": filtered
+        "profiles": filtered,
+        "unregisteredLiveSession": unregistered_live_session
     })
 }
 
@@ -739,8 +1006,21 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         return json!({ "success": false, "error": "Profile not found" });
     };
 
-    // 0. Never swap session files under a running client.
+    // 0. Quiesce Kite-managed terminals for this provider so they flush scrollback and release file locks
+    let quiesced_terminals = crate::terminal::quiesce_provider_terminals(&provider);
+
+    // Terminate any CLI processes of this provider so credentials files are completely unlocked
+    terminate_provider_cli_processes(&provider);
+
+    // If external processes outside Kite are still running and blocking:
     if let Err(msg) = ensure_provider_idle(&provider) {
+        let current_label = reg
+            .profiles
+            .iter()
+            .find(|p| same_provider(&p.provider, &provider) && p.is_active)
+            .map(|p| p.label.as_str())
+            .unwrap_or("Actual");
+        crate::terminal::respawn_provider_terminals(&provider, current_label, &quiesced_terminals);
         return json!({ "success": false, "code": "PROVIDER_BUSY", "error": msg });
     }
 
@@ -761,6 +1041,13 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     // 2. Transactional restore (backs up current state, rolls back on failure).
     if let Err(e) = apply_profile_to_active(&provider, &account_id) {
         log_trace(&format!("account_switcher: switch failed: {e}"));
+        let current_label = reg
+            .profiles
+            .iter()
+            .find(|p| same_provider(&p.provider, &provider) && p.is_active)
+            .map(|p| p.label.as_str())
+            .unwrap_or("Actual");
+        crate::terminal::respawn_provider_terminals(&provider, current_label, &quiesced_terminals);
         return json!({ "success": false, "error": e });
     }
 
@@ -778,19 +1065,32 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     sync_google_siblings(&mut reg, &provider, &activated_profile);
     save_registry(&reg);
 
+    // Invalidate quota cache for this provider so stale in-memory cached identity does not shadow the newly switched account
+    let canon = canon_provider(&provider);
+    let quota_key = match canon.as_str() {
+        "agy" => "antigravity",
+        other => other,
+    };
+    crate::quota::invalidate_provider_cache(quota_key);
+    crate::quota::invalidate_provider_cache(&provider);
+
+    // 4. Respawn the quiesced terminals with the new account's credentials!
+    crate::terminal::respawn_provider_terminals(&provider, &activated_profile.label, &quiesced_terminals);
+
     log_trace(&format!(
-        "account_switcher: Switched to profile {} ({}) for provider {}",
-        account_id, activated_profile.label, provider
+        "account_switcher: Switched to profile {} ({}) for provider {} (restarted {} terminals)",
+        account_id, activated_profile.label, provider, quiesced_terminals.len()
     ));
 
     json!({
         "success": true,
-        "profile": activated_profile
+        "profile": activated_profile,
+        "terminalsRestarted": quiesced_terminals.len()
     })
 }
 
 #[tauri::command]
-pub fn switch_account_profile(request: Option<Value>) -> Value {
+pub async fn switch_account_profile(request: Option<Value>) -> Value {
     let req = crate::persist::body(&request);
     let provider = req
         .and_then(|r| r.get("provider"))
@@ -802,7 +1102,17 @@ pub fn switch_account_profile(request: Option<Value>) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    switch_account_profile_direct(provider, account_id)
+
+    tokio::task::spawn_blocking(move || {
+        switch_account_profile_direct(provider, account_id)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        json!({
+            "success": false,
+            "error": format!("Worker task failed: {e}")
+        })
+    })
 }
 
 #[tauri::command]
@@ -841,12 +1151,41 @@ pub fn get_active_account_profile(request: Option<Value>) -> Value {
         .and_then(|r| r.get("provider"))
         .and_then(|v| v.as_str())
         .unwrap_or("agy");
+    let canon_p = canon_provider(provider);
+
+    // Reconcile if live quota has an authenticated email
+    if let Some(q) = get_cached_live_quota(&canon_p) {
+        if let Some(ref live_email) = q.email {
+            let _guard = REGISTRY_LOCK.lock().unwrap();
+            let mut reg = load_registry();
+            let matching_idx = reg.profiles.iter().position(|p| {
+                same_provider(&p.provider, &canon_p)
+                    && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(live_email))
+            });
+            if let Some(idx) = matching_idx {
+                let mut changed = false;
+                for (i, p) in reg.profiles.iter_mut().enumerate() {
+                    if same_provider(&p.provider, &canon_p) {
+                        let should_be_active = i == idx;
+                        if p.is_active != should_be_active {
+                            p.is_active = should_be_active;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    save_registry(&reg);
+                }
+            }
+        }
+    }
+
     let _guard = REGISTRY_LOCK.lock().unwrap();
     let reg = load_registry();
     if let Some(profile) = reg
         .profiles
         .iter()
-        .find(|p| same_provider(&p.provider, provider) && p.is_active)
+        .find(|p| same_provider(&p.provider, &canon_p) && p.is_active)
     {
         json!({ "found": true, "profile": profile })
     } else {
@@ -871,6 +1210,366 @@ pub fn get_alternative_accounts_with_quota(provider: &str) -> Vec<SavedAccountPr
             remaining > 0.0 || (time_until_reset > 0 && now >= (p.last_used_unix_ms + time_until_reset))
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Detected CLI Accounts (auto-discovery across local CLI files / tools)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedCliAccount {
+    pub provider: String,
+    pub display_name: String,
+    pub auth_state: String, // "authenticated" | "unauthenticated" | "not_installed"
+    pub account_label: Option<String>,
+    pub email: Option<String>,
+    pub plan_name: Option<String>,
+    pub binary_path: Option<String>,
+    pub config_path: Option<String>,
+    pub details: Option<String>,
+}
+
+pub fn decode_jwt_payload(jwt: &str) -> Option<Value> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut payload_b64 = parts[1].replace('-', "+").replace('_', "/");
+    while payload_b64.len() % 4 != 0 {
+        payload_b64.push('=');
+    }
+    let bytes = crate::chat_attachments::decode_base64(&payload_b64)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[tauri::command]
+pub fn list_detected_cli_accounts() -> Value {
+    let home = user_home_dir();
+    let appdata = appdata_dir();
+    let mut accounts: Vec<DetectedCliAccount> = Vec::new();
+
+    // 1. Antigravity (Google)
+    {
+        let bin = crate::acp::resolve_antigravity_acp_binary()
+            .map(|p| p.to_string_lossy().to_string());
+        let creds_file = home.join(".gemini").join("oauth_creds.json");
+        let accounts_file = home.join(".gemini").join("google_accounts.json");
+        let mut email: Option<String> = None;
+        let mut name: Option<String> = None;
+
+        if creds_file.exists() {
+            if let Ok(bytes) = fs::read(&creds_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(id_tok) = val.get("id_token").and_then(|v| v.as_str()) {
+                        if let Some(payload) = decode_jwt_payload(id_tok) {
+                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                            name = payload.get("name").and_then(|v| v.as_str()).map(String::from);
+                        }
+                    }
+                }
+            }
+        }
+        if email.is_none() && accounts_file.exists() {
+            if let Ok(bytes) = fs::read(&accounts_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    email = val.get("active").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        }
+
+        let auth_state = if email.is_some() || creds_file.exists() {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "antigravity".into(),
+            display_name: "Antigravity".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or(name).or_else(|| Some("Google Account".into())),
+            email,
+            plan_name: Some("Google Cloud AI / Gemini".into()),
+            binary_path: bin,
+            config_path: Some(creds_file.to_string_lossy().to_string()),
+            details: Some("Sesión OAuth detectada en ~/.gemini/oauth_creds.json".into()),
+        });
+    }
+
+    // 2. Codex (OpenAI)
+    {
+        let bin = crate::chat::resolve_bin("codex", &[
+            r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
+            r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
+        ]).map(|p| p.to_string_lossy().to_string());
+        let auth_file = home.join(".codex").join("auth.json");
+        let mut email: Option<String> = None;
+        let mut plan: Option<String> = None;
+        let mut has_auth = false;
+
+        if auth_file.exists() {
+            if let Ok(bytes) = fs::read(&auth_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(id_tok) = val.pointer("/tokens/id_token").and_then(|v| v.as_str()) {
+                        has_auth = true;
+                        if let Some(payload) = decode_jwt_payload(id_tok) {
+                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                            if let Some(plan_type) = payload.pointer("/https:~1~1api.openai.com~1auth/chatgpt_plan_type").and_then(|v| v.as_str()) {
+                                plan = Some(match plan_type {
+                                    "plus" => "ChatGPT Plus".into(),
+                                    "pro" => "ChatGPT Pro".into(),
+                                    "team" => "ChatGPT Team".into(),
+                                    other => format!("ChatGPT {}", other),
+                                });
+                            }
+                        }
+                    } else if val.pointer("/tokens/access_token").is_some() || val.get("OPENAI_API_KEY").and_then(|v| v.as_str()).map_or(false, |k| !k.is_empty()) {
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "codex".into(),
+            display_name: "Codex".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("ChatGPT Account".into())),
+            email,
+            plan_name: plan.or_else(|| Some("ChatGPT Plus / OpenAI".into())),
+            binary_path: bin,
+            config_path: Some(auth_file.to_string_lossy().to_string()),
+            details: Some("Tokens CLI detectados en ~/.codex/auth.json".into()),
+        });
+    }
+
+    // 3. Grok (xAI)
+    {
+        let bin = crate::chat::resolve_bin("grok", &[])
+            .map(|p| p.to_string_lossy().to_string());
+        let auth_file = home.join(".grok").join("auth.json");
+        let mut email: Option<String> = None;
+        let mut has_auth = false;
+
+        if auth_file.exists() {
+            if let Ok(bytes) = fs::read(&auth_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(obj) = val.as_object() {
+                        for (_k, v) in obj {
+                            if let Some(em) = v.get("email").and_then(|e| e.as_str()) {
+                                email = Some(em.to_string());
+                                has_auth = true;
+                                break;
+                            }
+                            if v.get("key").is_some() || v.get("refresh_token").is_some() {
+                                has_auth = true;
+                            }
+                        }
+                    }
+                    if !has_auth && (val.get("api_key").is_some() || val.get("email").is_some()) {
+                        email = val.get("email").and_then(|e| e.as_str()).map(String::from);
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "grok".into(),
+            display_name: "Grok".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("xAI Account".into())),
+            email,
+            plan_name: Some("xAI Grok CLI".into()),
+            binary_path: bin,
+            config_path: Some(auth_file.to_string_lossy().to_string()),
+            details: Some("Sesión OIDC detectada en ~/.grok/auth.json".into()),
+        });
+    }
+
+    // 4. OpenCode
+    {
+        let bin = crate::chat::resolve_bin("opencode", &[])
+            .map(|p| p.to_string_lossy().to_string());
+        let auth_file = home.join(".local").join("share").join("opencode").join("auth.json");
+        let mut providers_list: Vec<String> = Vec::new();
+        let mut has_auth = false;
+
+        if auth_file.exists() {
+            if let Ok(bytes) = fs::read(&auth_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(obj) = val.as_object() {
+                        providers_list = obj.keys().cloned().collect();
+                        has_auth = !providers_list.is_empty();
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        let account_label = if !providers_list.is_empty() {
+            let cap = 3;
+            let shown = providers_list.iter().take(cap).cloned().collect::<Vec<_>>().join(", ");
+            if providers_list.len() > cap {
+                Some(format!("{} (+{})", shown, providers_list.len() - cap))
+            } else {
+                Some(shown)
+            }
+        } else {
+            Some("OpenCode CLI".into())
+        };
+
+        let details = if !providers_list.is_empty() {
+            Some(format!("Proveedores autenticados: {}", providers_list.join(", ")))
+        } else {
+            Some("Sesión local en ~/.local/share/opencode".into())
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "opencode".into(),
+            display_name: "OpenCode".into(),
+            auth_state: auth_state.into(),
+            account_label,
+            email: None,
+            plan_name: Some("Multi-proveedor / OpenCode Go".into()),
+            binary_path: bin,
+            config_path: Some(auth_file.to_string_lossy().to_string()),
+            details,
+        });
+    }
+
+    // 5. Cursor
+    {
+        let bin = crate::chat::resolve_bin("cursor-agent", &[])
+            .or_else(|| crate::chat::resolve_bin("agent", &[]))
+            .map(|p| p.to_string_lossy().to_string());
+        let cursor_auth1 = appdata.join("Cursor").join("auth.json");
+        let cursor_auth2 = home.join(".cursor").join("auth.json");
+        let auth_file = if cursor_auth1.exists() {
+            Some(cursor_auth1)
+        } else if cursor_auth2.exists() {
+            Some(cursor_auth2)
+        } else {
+            None
+        };
+
+        let mut email: Option<String> = None;
+        let mut has_auth = false;
+
+        if let Some(ref af) = auth_file {
+            if let Ok(bytes) = fs::read(af) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(tok) = val.get("accessToken").and_then(|v| v.as_str()) {
+                        if let Some(payload) = decode_jwt_payload(tok) {
+                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                        }
+                        has_auth = true;
+                    } else if val.get("apiKey").is_some() {
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth || bin.is_some() {
+            "authenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "cursor".into(),
+            display_name: "Cursor".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("Cursor CLI / Agent".into())),
+            email,
+            plan_name: Some("Cursor Pro / Agent".into()),
+            binary_path: bin,
+            config_path: auth_file.map(|p| p.to_string_lossy().to_string()),
+            details: Some("cursor-agent en PATH".into()),
+        });
+    }
+
+    // 6. Claude Code
+    {
+        let bin = crate::chat::resolve_bin("claude", &[])
+            .map(|p| p.to_string_lossy().to_string());
+        let creds_file = home.join(".claude").join(".credentials.json");
+        let conf_file = home.join(".claude.json");
+        let mut email: Option<String> = None;
+        let mut has_auth = false;
+
+        if creds_file.exists() {
+            if let Ok(bytes) = fs::read(&creds_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if val.pointer("/claudeAiOauth/accessToken").is_some() {
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+        if conf_file.exists() {
+            if let Ok(bytes) = fs::read(&conf_file) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(em) = val.pointer("/oauthAccount/emailAddress").and_then(|v| v.as_str()) {
+                        email = Some(em.to_string());
+                        has_auth = true;
+                    }
+                }
+            }
+        }
+
+        let auth_state = if has_auth {
+            "authenticated"
+        } else if bin.is_some() {
+            "unauthenticated"
+        } else {
+            "not_installed"
+        };
+
+        accounts.push(DetectedCliAccount {
+            provider: "claude".into(),
+            display_name: "Claude Code".into(),
+            auth_state: auth_state.into(),
+            account_label: email.clone().or_else(|| Some("Claude CLI".into())),
+            email,
+            plan_name: Some("Anthropic Claude Code".into()),
+            binary_path: bin,
+            config_path: Some(creds_file.to_string_lossy().to_string()),
+            details: Some("Sesión OAuth en ~/.claude".into()),
+        });
+    }
+
+    json!({
+        "schemaVersion": 1,
+        "accounts": accounts
+    })
 }
 
 #[cfg(test)]
@@ -915,11 +1614,11 @@ mod tests {
     #[test]
     fn test_blocking_process_detection() {
         assert!(is_blocking_process("agy", "antigravity.exe"));
-        assert!(is_blocking_process("agy", "language_server_windows_x64.exe"));
-        assert!(is_blocking_process("gemini", "agy.exe"));
+        assert!(is_blocking_process("agy", "antigravity"));
         assert!(!is_blocking_process("agy", "geminiapplauncher.exe"));
+        assert!(!is_blocking_process("agy", "agy.exe"));
         assert!(!is_blocking_process("claude", "agy.exe"));
-        assert!(is_blocking_process("claude", "claude.exe"));
+        assert!(!is_blocking_process("claude", "claude.exe"));
     }
 
     #[test]

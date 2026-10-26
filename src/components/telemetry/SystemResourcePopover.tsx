@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   type SystemMetricsSnapshot,
   type SystemMetricsHistoryPoint,
@@ -10,6 +11,8 @@ import {
   getPressureColors,
   saveSystemMetricsPreferences,
 } from '../../lib/systemMetrics';
+import { MOTION_EXIT_MS } from '../../motion/contract';
+import { surfaceMotion } from '../../motion/standard/surfaces';
 
 export interface SystemResourcePopoverProps {
   snapshot: SystemMetricsSnapshot;
@@ -238,15 +241,18 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   ];
 
   const popoverNode = (
-    <div
+    <motion.div
+      {...surfaceMotion('popover', { exitMs: MOTION_EXIT_MS })}
       ref={popoverRef}
       role="dialog"
       aria-label="Monitor de recursos del sistema y de la aplicación"
-      className={`system-resource-popover ${phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
+      className="system-resource-popover"
       style={{
         position: 'fixed',
         top: `${position.top}px`,
         right: `${position.right}px`,
+        // The panel's right edge sits under the badge, so it grows from that corner.
+        transformOrigin: 'top right',
         width: '416px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
@@ -1213,8 +1219,11 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 
-  return createPortal(popoverNode, document.body);
+  return createPortal(
+    <AnimatePresence>{phase === 'in' && popoverNode}</AnimatePresence>,
+    document.body
+  );
 };

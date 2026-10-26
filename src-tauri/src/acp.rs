@@ -16,7 +16,7 @@ pub struct AcpModelDescriptor {
     pub effort_options: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpToolCall {
     pub id: String,
@@ -121,7 +121,7 @@ pub fn resolve_antigravity_acp_binary() -> Option<PathBuf> {
     None
 }
 
-fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<String>, String, Option<String>, Option<String>, Option<usize>, Option<usize>) {
+pub(crate) fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<String>, String, Option<String>, Option<String>, Option<usize>, Option<usize>) {
     let lower = raw_name.to_lowercase();
 
     // Extract MCP server name & clean tool name if formatted like mcp__server__tool or mcp_server_tool or call_mcp_tool
@@ -155,14 +155,33 @@ fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<Str
         .get("CommandLine")
         .or_else(|| params.get("command"))
         .or_else(|| params.get("cmd"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+        .and_then(|v| {
+            if let Some(s) = v.as_str() {
+                Some(s.to_string())
+            } else if let Some(arr) = v.as_array() {
+                let parts: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+                if parts.is_empty() { None } else { Some(parts.join(" ")) }
+            } else {
+                None
+            }
+        });
 
     let file_path = params
         .get("TargetFile")
         .or_else(|| params.get("AbsolutePath"))
+        .or_else(|| params.get("filePath"))
         .or_else(|| params.get("file_path"))
         .or_else(|| params.get("path"))
+        .or_else(|| params.get("target"))
+        .or_else(|| params.get("file"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let pattern = params
+        .get("pattern")
+        .or_else(|| params.get("query"))
+        .or_else(|| params.get("search"))
+        .or_else(|| params.get("url"))
         .and_then(|v| v.as_str())
         .map(String::from);
 
@@ -220,6 +239,14 @@ fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<Str
         } else {
             format!("Read {}", base)
         }
+    } else if let Some(ref pat) = pattern {
+        if clean_name.contains("grep") || clean_name.contains("search") || clean_name.contains("find") {
+            format!("Search `{}`", pat)
+        } else if clean_name.contains("url") || clean_name.contains("fetch") {
+            format!("Fetch {}", pat)
+        } else {
+            format!("{} {}", clean_name.replace('_', " "), pat)
+        }
     } else {
         clean_name.replace('_', " ")
     };
@@ -235,7 +262,7 @@ fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<Str
     )
 }
 
-fn summarize_tool_detail(params: &Value, output: &Option<String>, command: &Option<String>, file_path: &Option<String>) -> String {
+pub(crate) fn summarize_tool_detail(params: &Value, output: &Option<String>, command: &Option<String>, file_path: &Option<String>) -> String {
     let mut parts = Vec::new();
     if let Some(cmd) = command {
         parts.push(format!("$ {}", cmd));
@@ -634,9 +661,24 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                     });
                 }
             }
-            "content_block_delta" | "text_delta" => {
+            "step_start" | "step-start" => {
+                let conv_id = val
+                    .get("sessionID")
+                    .or_else(|| val.get("sessionId"))
+                    .or_else(|| val.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !conv_id.is_empty() {
+                    return Some(AcpStreamEvent::Init {
+                        conversation_id: conv_id.to_string(),
+                        model: String::new(),
+                    });
+                }
+            }
+            "content_block_delta" | "text_delta" | "text-delta" | "text" => {
                 let text = val
                     .pointer("/delta/text")
+                    .or_else(|| val.pointer("/part/text"))
                     .or_else(|| val.get("text"))
                     .and_then(|v| v.as_str())?;
                 return Some(AcpStreamEvent::ContentDelta { text: text.to_string() });
@@ -653,10 +695,154 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                     duration_seconds: val.get("duration_seconds").and_then(|v| v.as_f64()),
                 });
             }
-            "tool_use" | "tool_call" => {
-                let tool_id = val.get("id").and_then(|v| v.as_str()).unwrap_or("tool_1").to_string();
-                let tool_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                let params = val.get("input").or_else(|| val.get("parameters")).cloned().unwrap_or(Value::Null);
+            "thread.started" => {
+                let conv_id = val.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+                if !conv_id.is_empty() {
+                    return Some(AcpStreamEvent::Init {
+                        conversation_id: conv_id.to_string(),
+                        model: String::new(),
+                    });
+                }
+            }
+            "item.completed" | "item.started" => {
+                if let Some(item) = val.get("item") {
+                    let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if item_type == "agent_message" {
+                        let text = item
+                            .get("text")
+                            .or_else(|| item.pointer("/content/0/text"))
+                            .and_then(|v| v.as_str());
+                        if let Some(t) = text {
+                            if !t.is_empty() {
+                                return Some(AcpStreamEvent::ContentDelta { text: t.to_string() });
+                            }
+                        }
+                    } else if item_type == "reasoning" {
+                        let text = item.get("text").and_then(|v| v.as_str());
+                        if let Some(t) = text {
+                            return Some(AcpStreamEvent::ThoughtDelta {
+                                text: t.to_string(),
+                                is_done: msg_type == "item.completed",
+                                duration_seconds: None,
+                            });
+                        }
+                    } else if item_type == "command_execution" {
+                        let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("cmd_1").to_string();
+                        let command = item.get("command").and_then(|v| v.as_str()).map(String::from);
+                        let output = item.get("output").and_then(|v| v.as_str()).map(String::from);
+                        let is_done = msg_type == "item.completed";
+                        let status = if is_done {
+                            let exit_code = item.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if exit_code != 0 { "failed" } else { "completed" }
+                        } else {
+                            "running"
+                        };
+                        let title = command.as_ref().map(|c| {
+                            let short: String = c.chars().take(72).collect();
+                            format!("Run `{}`", short)
+                        }).unwrap_or_else(|| "Command".into());
+                        let detail = command.as_ref().map(|c| format!("$ {}", c)).unwrap_or_default();
+                        return Some(AcpStreamEvent::ToolUpdate {
+                            tool: AcpToolCall {
+                                id: tool_id,
+                                name: "command_execution".to_string(),
+                                title,
+                                detail,
+                                tool_kind: "command".to_string(),
+                                server_name: None,
+                                command,
+                                file_path: None,
+                                added_lines: None,
+                                removed_lines: None,
+                                parameters: Value::Null,
+                                status: status.to_string(),
+                                output,
+                                duration_seconds: None,
+                            },
+                        });
+                    } else if item_type == "mcp_tool_call" {
+                        let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("mcp_1").to_string();
+                        let tool_name = item.get("tool").or_else(|| item.get("name")).and_then(|v| v.as_str()).unwrap_or("tool");
+                        let server_name = item.get("server").and_then(|v| v.as_str()).map(String::from);
+                        let params = item.get("arguments").or_else(|| item.get("parameters")).cloned().unwrap_or(Value::Null);
+                        let output = item.get("result").or_else(|| item.get("output")).and_then(|v| {
+                            if let Some(s) = v.as_str() { Some(s.to_string()) }
+                            else if !v.is_null() { serde_json::to_string_pretty(v).ok() }
+                            else { None }
+                        });
+                        let is_done = msg_type == "item.completed";
+                        let (tool_kind, _, title, command, file_path, added_lines, removed_lines) =
+                            classify_tool_metadata(tool_name, &params);
+                        let detail = summarize_tool_detail(&params, &output, &command, &file_path);
+                        return Some(AcpStreamEvent::ToolUpdate {
+                            tool: AcpToolCall {
+                                id: tool_id,
+                                name: tool_name.to_string(),
+                                title,
+                                detail,
+                                tool_kind,
+                                server_name,
+                                command,
+                                file_path,
+                                added_lines,
+                                removed_lines,
+                                parameters: params,
+                                status: if is_done { "completed".into() } else { "running".into() },
+                                output,
+                                duration_seconds: None,
+                            },
+                        });
+                    }
+                }
+            }
+            "turn.completed" | "step_finish" | "step-finish" | "step.completed" => {
+                let in_tok = val.pointer("/usage/input_tokens")
+                    .or_else(|| val.pointer("/tokens/input"))
+                    .or_else(|| val.pointer("/tokens/prompt"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let out_tok = val.pointer("/usage/output_tokens")
+                    .or_else(|| val.pointer("/tokens/output"))
+                    .or_else(|| val.pointer("/tokens/completion"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let dur = val.get("duration_seconds").or_else(|| val.get("duration")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let status = val.get("reason").and_then(|v| v.as_str()).unwrap_or("SUCCESS");
+                return Some(AcpStreamEvent::Result {
+                    status: status.to_string(),
+                    input_tokens: in_tok,
+                    output_tokens: out_tok,
+                    duration_seconds: dur,
+                });
+            }
+            "tool_use" | "tool_call" | "tool-call" | "tool-use" => {
+                let part = val.get("part");
+                let src = part.unwrap_or(&val);
+                let tool_id = src
+                    .get("callID")
+                    .or_else(|| src.get("callId"))
+                    .or_else(|| src.get("id"))
+                    .or_else(|| src.get("tool_call_id"))
+                    .or_else(|| val.get("callID"))
+                    .or_else(|| val.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool_1")
+                    .to_string();
+                let tool_name = src
+                    .get("tool")
+                    .or_else(|| src.get("name"))
+                    .or_else(|| src.get("tool_name"))
+                    .or_else(|| val.get("tool"))
+                    .or_else(|| val.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool");
+                let params = src
+                    .get("input")
+                    .or_else(|| src.get("parameters"))
+                    .or_else(|| src.get("arguments"))
+                    .or_else(|| val.get("input"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 let (tool_kind, server_name, title, command, file_path, added_lines, removed_lines) =
                     classify_tool_metadata(tool_name, &params);
                 let detail = summarize_tool_detail(&params, &None, &command, &file_path);
@@ -675,6 +861,62 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         parameters: params,
                         status: "running".to_string(),
                         output: None,
+                        duration_seconds: None,
+                    },
+                });
+            }
+            "tool_result" | "tool-result" | "tool_output" | "tool-output" => {
+                let part = val.get("part");
+                let src = part.unwrap_or(&val);
+                let tool_id = src
+                    .get("callID")
+                    .or_else(|| src.get("callId"))
+                    .or_else(|| src.get("id"))
+                    .or_else(|| src.get("tool_call_id"))
+                    .or_else(|| val.get("callID"))
+                    .or_else(|| val.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool_1")
+                    .to_string();
+                let tool_name = src
+                    .get("tool")
+                    .or_else(|| src.get("name"))
+                    .or_else(|| src.get("tool_name"))
+                    .or_else(|| val.get("tool"))
+                    .or_else(|| val.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let output = src
+                    .get("output")
+                    .or_else(|| src.get("result"))
+                    .or_else(|| src.get("content"))
+                    .or_else(|| val.get("output"))
+                    .and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_string())
+                        } else if !v.is_null() {
+                            serde_json::to_string_pretty(v).ok()
+                        } else {
+                            None
+                        }
+                    });
+                let is_error = src.get("is_error").or_else(|| val.get("is_error")).and_then(|v| v.as_bool()).unwrap_or(false);
+                let status = if is_error { "failed" } else { "completed" };
+                return Some(AcpStreamEvent::ToolUpdate {
+                    tool: AcpToolCall {
+                        id: tool_id,
+                        name: tool_name.to_string(),
+                        title: String::new(),
+                        detail: String::new(),
+                        tool_kind: "dynamicToolCall".to_string(),
+                        server_name: None,
+                        command: None,
+                        file_path: None,
+                        added_lines: None,
+                        removed_lines: None,
+                        parameters: Value::Null,
+                        status: status.to_string(),
+                        output,
                         duration_seconds: None,
                     },
                 });

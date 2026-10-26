@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import { QuotaProgressRing } from './QuotaProgressRing';
 import { formatDetailedReset, useResetCountdownClock } from '../../lib/quota/useResetCountdownClock';
 import {
@@ -7,11 +8,16 @@ import {
   type QuotaPreferences,
   PROVIDER_LABELS,
   SHORT_PROVIDER_LABELS,
+  resolveEnabledProviderIds,
 } from '../../lib/quota/types';
 import { diagnoseProvider } from '../../lib/quota/providerState';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { saveQuotaPreferences } from '../../lib/quota/quotaManager';
 import { openSettingsTab } from '../../lib/settingsNav';
+import { listSavedAccounts, switchAccountProfile } from '../../lib/ipc';
+import type { SavedAccountProfile } from '../../types';
+import { MOTION_EXIT_MS } from '../../motion/contract';
+import { surfaceMotion } from '../../motion/standard/surfaces';
 
 export interface SubscriptionQuotaPopoverProps {
   allQuotas: Record<string, ProviderQuotaStatus>;
@@ -39,22 +45,119 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   phase = 'in',
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null);
+  const accountsDropdownRef = useRef<HTMLDivElement>(null);
+  const [isAccountsExpanded, setIsAccountsExpanded] = useState(false);
+  const [savedAccounts, setSavedAccounts] = useState<SavedAccountProfile[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [switchingAccountId, setSwitchingAccountId] = useState<string | null>(null);
+  const [switchFeedback, setSwitchFeedback] = useState<string | null>(null);
 
   const handleOpenSettings = (providerId?: string) => {
     onClose();
     openSettingsTab('quotas', providerId);
   };
-  const openAccounts = () => handleOpenSettings(selectedProvider);
+
+  const toggleAccountsExpanded = () => {
+    setIsAccountsExpanded((prev) => !prev);
+  };
+  const openAccounts = toggleAccountsExpanded;
+
+  const fetchAccounts = useCallback(async (prov: string) => {
+    setLoadingAccounts(true);
+    setSwitchFeedback(null);
+    try {
+      const list = await listSavedAccounts(prov);
+      setSavedAccounts(list);
+    } catch {
+      setSavedAccounts([]);
+    } finally {
+      setLoadingAccounts(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isAccountsExpanded) {
+      void fetchAccounts(selectedProvider);
+    }
+  }, [isAccountsExpanded, selectedProvider, fetchAccounts]);
+
+  const handleSwitchAccount = async (profileId: string) => {
+    setSwitchingAccountId(profileId);
+    setSwitchFeedback(null);
+    try {
+      const res = await switchAccountProfile(selectedProvider, profileId);
+      if (res.success) {
+        setSwitchFeedback('Cuenta activada');
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-command', {
+            detail: { command: 'restart-agent' },
+          })
+        );
+        // Dispatch background terminal reconnect and quota refresh without blocking UI
+        void onRefresh();
+        void fetchAccounts(selectedProvider);
+      } else {
+        setSwitchFeedback(res.error || 'Error al cambiar cuenta');
+      }
+    } catch (err: any) {
+      setSwitchFeedback(err?.message || 'Error al cambiar cuenta');
+    } finally {
+      setSwitchingAccountId(null);
+    }
+  };
 
   const currentQuota = allQuotas[selectedProvider] || null;
   const diagnostic = diagnoseProvider(currentQuota);
-  const enabledSet = new Set(prefs.enabledProviders || prefs.providerOrder);
-  const providerIds = prefs.providerOrder.filter((id) => enabledSet.has(id));
-  const activeIds = providerIds.length > 0 ? providerIds : Object.keys(PROVIDER_LABELS);
+  const activeIds = resolveEnabledProviderIds(prefs);
+  const activeIdsKey = activeIds.join('|');
 
   const resetCountdown = useResetCountdownClock(currentQuota?.timeUntilResetMs);
   const hasData = diagnostic.state === 'ok';
   const remPct = hasData ? currentQuota?.primaryRemainingPercent ?? 100 : null;
+
+  // Horizontal navigation for the provider tab strip (more than 3 providers
+  // overflow the popover header on narrow widths).
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateTabScrollState = useCallback(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    setCanScrollLeft(el.scrollLeft > 1);
+    setCanScrollRight(el.scrollLeft < max - 1);
+  }, []);
+
+  useEffect(() => {
+    updateTabScrollState();
+    const el = tabsRef.current;
+    if (!el) return;
+    const observer =
+      typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateTabScrollState) : null;
+    observer?.observe(el);
+    el.addEventListener('scroll', updateTabScrollState, { passive: true });
+    window.addEventListener('resize', updateTabScrollState);
+    return () => {
+      observer?.disconnect();
+      el.removeEventListener('scroll', updateTabScrollState);
+      window.removeEventListener('resize', updateTabScrollState);
+    };
+  }, [updateTabScrollState, activeIdsKey]);
+
+  // Keep the selected tab visible when switching providers.
+  useEffect(() => {
+    const el = tabsRef.current?.querySelector<HTMLElement>(
+      `[data-provider-tab="${selectedProvider}"]`
+    );
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [selectedProvider]);
+
+  const scrollTabs = (direction: -1 | 1) => {
+    tabsRef.current?.scrollBy({ left: direction * 140, behavior: 'smooth' });
+  };
 
   // Compute fixed position anchored to the badge
   const [position, setPosition] = useState<{ top: number; right: number }>({ top: 44, right: 16 });
@@ -71,6 +174,12 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   useEffect(() => {
     const handlePointerDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
+      if (isAccountsExpanded && accountsDropdownRef.current && !accountsDropdownRef.current.contains(target)) {
+        if (!target.closest('.subscription-quota-account-toggle')) {
+          setIsAccountsExpanded(false);
+          return;
+        }
+      }
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         if (!target.closest('.subscription-quota-badge')) {
           onClose();
@@ -79,18 +188,21 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     };
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [onClose]);
+  }, [onClose, isAccountsExpanded]);
 
   const popoverNode = (
-    <div
+    <motion.div
+      {...surfaceMotion('popover', { exitMs: MOTION_EXIT_MS })}
       ref={popoverRef}
       role="dialog"
       aria-label="Cuotas de suscripción IA"
-      className={`subscription-quota-popover ${phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
+      className="subscription-quota-popover"
       style={{
         position: 'fixed',
         top: `${position.top}px`,
         right: `${position.right}px`,
+        // The panel's right edge sits under the badge, so it grows from that corner.
+        transformOrigin: 'top right',
         width: '410px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
@@ -126,84 +238,152 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: '4px',
-            overflowX: 'auto',
-            scrollbarWidth: 'none',
+            gap: '2px',
             flex: 1,
             minWidth: 0,
           }}
         >
-          {activeIds.map((id) => {
-            const shortLabel = SHORT_PROVIDER_LABELS[id] || PROVIDER_LABELS[id] || id;
-            const fullLabel = PROVIDER_LABELS[id] || id;
-            const q = allQuotas[id];
-            const d = diagnoseProvider(q);
-            const isActive = id === selectedProvider;
+          <button
+            type="button"
+            aria-label="Proveedores anteriores"
+            title="Proveedores anteriores"
+            disabled={!canScrollLeft}
+            onClick={() => scrollTabs(-1)}
+            style={{
+              flexShrink: 0,
+              background: 'none',
+              border: 'none',
+              padding: '2px',
+              borderRadius: '4px',
+              color: 'var(--text-secondary)',
+              cursor: canScrollLeft ? 'pointer' : 'default',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              visibility: canScrollLeft ? 'visible' : 'hidden',
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
 
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => onSelectProvider(id)}
-                title={`${fullLabel} (${d.statusLabel})`}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '5px',
-                  padding: '4px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: isActive ? 600 : 400,
-                  border: isActive
-                    ? '1px solid var(--accent-tint-strong)'
-                    : '1px solid transparent',
-                  backgroundColor: isActive
-                    ? 'var(--accent-tint)'
-                    : d.state !== 'not_installed'
-                    ? 'var(--block-fill)'
-                    : 'transparent',
-                  color: isActive
-                    ? 'var(--accent)'
-                    : d.state === 'ok'
-                    ? 'var(--text-primary)'
-                    : d.state === 'detected'
-                    ? 'var(--text-secondary)'
-                    : d.state === 'signed_out' || d.state === 'error'
-                    ? 'var(--warning-text)'
-                    : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  transition: 'all 120ms ease',
-                  whiteSpace: 'nowrap',
-                  flexShrink: 0,
-                }}
-              >
-                <BrandLogo engine={id} size={13} />
-                <span>{shortLabel}</span>
-                {d.state === 'ok' && (
-                  <span
-                    style={{
-                      width: '5px',
-                      height: '5px',
-                      borderRadius: '50%',
-                      backgroundColor: 'var(--status-running)',
-                      display: 'inline-block',
-                    }}
-                  />
-                )}
-                {(d.state === 'signed_out' || d.state === 'error') && (
-                  <span
-                    style={{
-                      width: '5px',
-                      height: '5px',
-                      borderRadius: '50%',
-                      backgroundColor: 'var(--warning-text)',
-                      display: 'inline-block',
-                    }}
-                  />
-                )}
-              </button>
-            );
-          })}
+          <div
+            ref={tabsRef}
+            onWheel={(e) => {
+              const el = tabsRef.current;
+              if (!el || el.scrollWidth <= el.clientWidth) return;
+              el.scrollLeft += e.deltaY;
+            }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              overflowX: 'auto',
+              scrollbarWidth: 'none',
+              flex: 1,
+              minWidth: 0,
+              scrollBehavior: 'smooth',
+            }}
+          >
+            {activeIds.map((id) => {
+              const shortLabel = SHORT_PROVIDER_LABELS[id] || PROVIDER_LABELS[id] || id;
+              const fullLabel = PROVIDER_LABELS[id] || id;
+              const q = allQuotas[id];
+              const d = diagnoseProvider(q);
+              const isActive = id === selectedProvider;
+
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  data-provider-tab={id}
+                  onClick={() => onSelectProvider(id)}
+                  title={`${fullLabel} (${d.statusLabel})`}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '4px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: isActive ? 600 : 400,
+                    border: isActive
+                      ? '1px solid var(--accent-tint-strong)'
+                      : '1px solid transparent',
+                    backgroundColor: isActive
+                      ? 'var(--accent-tint)'
+                      : d.state !== 'not_installed'
+                      ? 'var(--block-fill)'
+                      : 'transparent',
+                    color: isActive
+                      ? 'var(--accent)'
+                      : d.state === 'ok'
+                      ? 'var(--text-primary)'
+                      : d.state === 'detected'
+                      ? 'var(--text-secondary)'
+                      : d.state === 'signed_out' || d.state === 'error'
+                      ? 'var(--warning-text)'
+                      : 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    transition: 'all 120ms ease',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                >
+                  <BrandLogo engine={id} size={13} />
+                  <span>{shortLabel}</span>
+                  {d.state === 'ok' && (
+                    <span
+                      style={{
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '50%',
+                        backgroundColor: 'var(--status-running)',
+                        display: 'inline-block',
+                      }}
+                    />
+                  )}
+                  {(d.state === 'signed_out' || d.state === 'error') && (
+                    <span
+                      style={{
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '50%',
+                        backgroundColor: 'var(--warning-text)',
+                        display: 'inline-block',
+                      }}
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            aria-label="Proveedores siguientes"
+            title="Proveedores siguientes"
+            disabled={!canScrollRight}
+            onClick={() => scrollTabs(1)}
+            style={{
+              flexShrink: 0,
+              background: 'none',
+              border: 'none',
+              padding: '2px',
+              borderRadius: '4px',
+              color: 'var(--text-secondary)',
+              cursor: canScrollRight ? 'pointer' : 'default',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              visibility: canScrollRight ? 'visible' : 'hidden',
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
         </div>
 
         {/* Action icons - Sleek SVGs, zero emojis */}
@@ -341,6 +521,45 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
 
       {/* Selected Provider Details */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', overflowY: 'auto' }}>
+        {activeIds.length === 0 ? (
+          <div
+            style={{
+              padding: '18px 14px',
+              backgroundColor: 'var(--block-fill)',
+              border: '1px dashed var(--block-stroke)',
+              borderRadius: '8px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              alignItems: 'flex-start',
+            }}
+          >
+            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+              No agregaste ningún proveedor
+            </div>
+            <p style={{ margin: 0, fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+              Elegí qué cuotas querés monitorear. Tus claves y sesiones existentes siguen
+              guardadas; solo se muestran los proveedores que agregues manualmente.
+            </p>
+            <button
+              type="button"
+              onClick={() => handleOpenSettings()}
+              style={{
+                backgroundColor: 'var(--accent-tint)',
+                border: '1px solid var(--accent-tint-strong)',
+                borderRadius: '6px',
+                padding: '6px 12px',
+                color: 'var(--accent)',
+                fontSize: '11px',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Agregar proveedor
+            </button>
+          </div>
+        ) : (
+          <>
         {/* Case 1: Active with real live quota windows */}
         {diagnostic.state === 'ok' && currentQuota && (
           <>
@@ -355,91 +574,95 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
                 padding: '10px 12px',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <div
-                  style={{
-                    position: 'relative',
-                    width: 36,
-                    height: 36,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <QuotaProgressRing
-                    percentage={remPct ?? 100}
-                    size={36}
-                    strokeWidth={3}
-                    dimmed={!hasData}
-                  />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <div
                     style={{
-                      position: 'absolute',
+                      position: 'relative',
+                      width: 36,
+                      height: 36,
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      pointerEvents: 'none',
                     }}
                   >
-                    <BrandLogo engine={selectedProvider} size={16} />
-                  </div>
-                </div>
-
-                <div>
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      fontSize: '13px',
-                      color: 'var(--text-primary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                    }}
-                  >
-                    {currentQuota.displayName}
-                    <span
+                    <QuotaProgressRing
+                      percentage={remPct ?? 100}
+                      size={36}
+                      strokeWidth={3}
+                      dimmed={!hasData}
+                    />
+                    <div
                       style={{
-                        fontSize: '9px',
-                        fontWeight: 500,
-                        padding: '1px 5px',
-                        borderRadius: '4px',
-                        backgroundColor: 'var(--accent-tint)',
-                        color: 'var(--accent)',
-                        border: '1px solid var(--accent-tint-strong)',
+                        position: 'absolute',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        pointerEvents: 'none',
                       }}
                     >
-                      En línea
-                    </span>
+                      <BrandLogo engine={selectedProvider} size={16} />
+                    </div>
                   </div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                    {resetCountdown
-                      ? `Resetea en ${resetCountdown}`
-                      : formatDetailedReset(currentQuota.timeUntilResetMs)}
-                  </div>
-                </div>
-              </div>
 
-              <div style={{ textAlign: 'right' }}>
-                <div
-                  style={{
-                    fontSize: '18px',
-                    fontWeight: 700,
-                    lineHeight: 1,
-                    color:
-                      remPct != null && remPct < 20
-                        ? 'var(--status-failed)'
-                        : remPct != null && remPct < 45
-                        ? 'var(--warning-text)'
-                        : 'var(--accent)',
-                  }}
-                >
-                  {remPct}%
+                  <div>
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: '13px',
+                        color: 'var(--text-primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      {currentQuota.displayName}
+                      <span
+                        style={{
+                          fontSize: '9px',
+                          fontWeight: 500,
+                          padding: '1px 5px',
+                          borderRadius: '4px',
+                          backgroundColor: 'var(--accent-tint)',
+                          color: 'var(--accent)',
+                          border: '1px solid var(--accent-tint-strong)',
+                        }}
+                      >
+                        En línea
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                      {resetCountdown
+                        ? `Resetea en ${resetCountdown}`
+                        : formatDetailedReset(currentQuota.timeUntilResetMs)}
+                    </div>
+                  </div>
                 </div>
-                <div style={{ fontSize: '9px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                  {currentQuota.metadata?.primaryWindow === '5h' ? 'Límite de 5 horas' : 'Restante'}
+
+                <div style={{ textAlign: 'right' }}>
+                  <div
+                    style={{
+                      fontSize: '18px',
+                      fontWeight: 700,
+                      lineHeight: 1,
+                      color:
+                        remPct != null && remPct < 20
+                          ? 'var(--status-failed)'
+                          : remPct != null && remPct < 45
+                          ? 'var(--warning-text)'
+                          : 'var(--accent)',
+                    }}
+                  >
+                    {remPct}%
+                  </div>
+                  <div style={{ fontSize: '9px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                    {currentQuota.metadata?.primaryWindowLabel
+                      ? String(currentQuota.metadata.primaryWindowLabel)
+                      : currentQuota.metadata?.primaryWindow === '5h'
+                        ? 'Límite de 5 horas'
+                        : 'Restante'}
+                  </div>
                 </div>
               </div>
-            </div>
 
             {/* Badges / Metadata row */}
             {currentQuota.metadata && Object.keys(currentQuota.metadata).length > 0 && (
@@ -483,59 +706,303 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
                       border: '1px solid var(--block-stroke)',
                     }}
                   >
-                    {currentQuota.metadata.tier}
+                    Tier: {String(currentQuota.metadata.tier)}
+                  </span>
+                )}
+                {selectedProvider === 'opencode' && currentQuota.metadata.authSource && (
+                  <span
+                    style={{
+                      fontSize: '10px',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      backgroundColor: 'var(--block-fill)',
+                      color: 'var(--text-secondary)',
+                      border: '1px solid var(--block-stroke)',
+                    }}
+                  >
+                    Fuente: {String(currentQuota.metadata.authSource)}
                   </span>
                 )}
               </div>
             )}
 
-            {/* Multi-Account Switcher Quick Pill */}
+            {/* Multi-Account Bar & Floating Overlay */}
             <div
               style={{
+                position: 'relative',
                 display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
+                flexDirection: 'column',
                 padding: '6px 10px',
-                borderRadius: '6px',
+                borderRadius: 'var(--control-radius, 8px)',
                 backgroundColor: 'var(--block-fill)',
                 border: '1px solid var(--block-stroke)',
                 marginTop: '4px',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
-                <span
-                  style={{
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    color: 'var(--text-primary)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={openAccounts}
+              <div
                 style={{
-                  background: 'none',
-                  border: '1px solid var(--accent-tint-strong)',
-                  backgroundColor: 'var(--accent-tint)',
-                  color: 'var(--accent)',
-                  padding: '3px 8px',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  flexShrink: 0,
-                  marginLeft: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  width: '100%',
                 }}
               >
-                Cambiar cuenta...
-              </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      color: 'var(--text-primary)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
+                  >
+                    {currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="subscription-quota-account-toggle"
+                  onClick={toggleAccountsExpanded}
+                  style={{
+                    background: 'none',
+                    border: '1px solid var(--accent-tint-strong)',
+                    backgroundColor: isAccountsExpanded ? 'var(--accent-tint-strong)' : 'var(--accent-tint)',
+                    color: 'var(--accent)',
+                    padding: '3px 8px',
+                    borderRadius: 'var(--vl-radius-xs, 4px)',
+                    fontSize: '11px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                  }}
+                  title={isAccountsExpanded ? 'Ocultar cuentas' : 'Ver cuentas para cambiar'}
+                >
+                  <span>{isAccountsExpanded ? 'Cerrar' : 'Cambiar cuenta'}</span>
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{
+                      transform: isAccountsExpanded ? 'rotate(180deg)' : 'none',
+                      transition: 'transform 150ms ease',
+                    }}
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Floating Accounts Dropdown Menu (Overlays the windows without stretching popover) */}
+              {isAccountsExpanded && (
+                <div
+                  ref={accountsDropdownRef}
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 4px)',
+                    left: 0,
+                    right: 0,
+                    zIndex: 100,
+                    backgroundColor: 'var(--menu-glass, #161618)',
+                    backdropFilter: 'var(--menu-backdrop, blur(24px))',
+                    WebkitBackdropFilter: 'var(--menu-backdrop, blur(24px))',
+                    border: '1px solid var(--block-stroke)',
+                    borderRadius: 'var(--control-radius, 8px)',
+                    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+                    padding: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    maxHeight: '230px',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {switchFeedback && (
+                    <div
+                      style={{
+                        fontSize: '10.5px',
+                        padding: '3px 6px',
+                        borderRadius: 'var(--vl-radius-xs, 4px)',
+                        backgroundColor: switchFeedback.includes('Error') ? 'rgba(239, 68, 68, 0.15)' : 'var(--accent-tint)',
+                        color: switchFeedback.includes('Error') ? 'var(--warning-text, #ef4444)' : 'var(--accent)',
+                      }}
+                    >
+                      {switchFeedback}
+                    </div>
+                  )}
+
+                  {loadingAccounts ? (
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)', padding: '6px 2px' }}>
+                      Cargando cuentas guardadas...
+                    </div>
+                  ) : savedAccounts.length === 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 0' }}>
+                      <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                        No hay otras cuentas guardadas para este proveedor.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSettings(selectedProvider)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          color: 'var(--accent)',
+                          fontSize: '11px',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Administrar bóveda en Configuración →
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '180px', overflowY: 'auto' }}>
+                      {savedAccounts.map((acc) => {
+                        const isCurrentActive = acc.isActive;
+                        const isSwitching = switchingAccountId === acc.id;
+
+                        return (
+                          <div
+                            key={acc.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '5px 8px',
+                              borderRadius: 'var(--vl-radius-xs, 4px)',
+                              backgroundColor: isCurrentActive ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+                              border: isCurrentActive ? '1px solid var(--block-stroke)' : '1px solid transparent',
+                              gap: '6px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                <span
+                                  style={{
+                                    width: '6px',
+                                    height: '6px',
+                                    borderRadius: '50%',
+                                    backgroundColor: isCurrentActive ? 'var(--status-running, #10b981)' : 'var(--text-secondary)',
+                                    flexShrink: 0,
+                                  }}
+                                />
+                                <span
+                                  style={{
+                                    fontSize: '11px',
+                                    fontWeight: isCurrentActive ? 600 : 500,
+                                    color: 'var(--text-primary)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {acc.label || acc.email}
+                                </span>
+                              </div>
+                              {acc.email && acc.label && acc.email !== acc.label && (
+                                <span
+                                  style={{
+                                    fontSize: '10px',
+                                    color: 'var(--text-secondary)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    paddingLeft: '11px',
+                                  }}
+                                >
+                                  {acc.email}
+                                </span>
+                              )}
+                            </div>
+
+                            {isCurrentActive ? (
+                              <span
+                                style={{
+                                  fontSize: '10px',
+                                  color: 'var(--accent)',
+                                  fontWeight: 600,
+                                  padding: '2px 6px',
+                                  borderRadius: 'var(--vl-radius-xs, 4px)',
+                                  backgroundColor: 'var(--accent-tint)',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                Activa ✓
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={isSwitching}
+                                onClick={() => handleSwitchAccount(acc.id)}
+                                style={{
+                                  background: 'var(--control-fill, rgba(255, 255, 255, 0.08))',
+                                  border: '1px solid var(--block-stroke)',
+                                  color: 'var(--text-primary)',
+                                  padding: '3px 8px',
+                                  borderRadius: 'var(--vl-radius-xs, 4px)',
+                                  fontSize: '10.5px',
+                                  fontWeight: 500,
+                                  cursor: isSwitching ? 'default' : 'pointer',
+                                  flexShrink: 0,
+                                  opacity: isSwitching ? 0.6 : 1,
+                                }}
+                              >
+                                {isSwitching ? 'Activando…' : 'Activar'}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'flex-end',
+                          paddingTop: '4px',
+                          borderTop: '1px dashed var(--block-stroke)',
+                          marginTop: '2px',
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSettings(selectedProvider)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            color: 'var(--text-secondary)',
+                            fontSize: '10.5px',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '3px',
+                          }}
+                        >
+                          <span>Bóveda completa en Ajustes</span>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="9 18 15 12 9 6" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Individual windows breakdown */}
@@ -843,6 +1310,8 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
             </button>
           </div>
         )}
+          </>
+        )}
       </div>
 
       {/* Footer controls with official ui-switch and Token Heatmap link */}
@@ -903,8 +1372,11 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
           </button>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 
-  return createPortal(popoverNode, document.body);
+  return createPortal(
+    <AnimatePresence>{phase === 'in' && popoverNode}</AnimatePresence>,
+    document.body
+  );
 };

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"perm-42","method":"session/request_permission","params":{"toolCall":{"toolCallId":"call_permission_2","name":"shell","rawInput":{"command":"cargo publish --dry-run"}},"description":"Publish the crate to the registry"}}

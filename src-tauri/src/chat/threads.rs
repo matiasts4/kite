@@ -5,6 +5,34 @@ use uuid::Uuid;
 use crate::chat::models::{default_mode, mode_ok, normalize_model, provider_ok, sanitize_options};
 use crate::chat::utils::{clip_title, now_ms};
 
+/// Top-level fields of the durable thread JSON.
+///
+/// `blank_thread` writes exactly these names, and the renderer plus the native
+/// readers depend on them. A projection that adds, drops, or renames one is a
+/// compatibility break, so the event log fold is asserted against this list.
+pub const THREAD_FIELD_NAMES: [&str; 20] = [
+    "schemaVersion",
+    "revision",
+    "id",
+    "profileId",
+    "provider",
+    "providerSessionId",
+    "title",
+    "items",
+    "plans",
+    "mode",
+    "plan",
+    "model",
+    "providerOptions",
+    "status",
+    "usage",
+    "workspaceId",
+    "pinned",
+    "pendingApproval",
+    "createdAtUnixMs",
+    "updatedAtUnixMs",
+];
+
 pub fn blank_thread(
     id: &str,
     profile_id: Option<&str>,
@@ -53,7 +81,7 @@ pub fn create_thread(
 
 pub fn load_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Value {
     let mut items = threads().lock().unwrap();
-    if let Some(thread) = items
+    let mut thread = if let Some(thread) = items
         .iter_mut()
         .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
     {
@@ -64,13 +92,37 @@ pub fn load_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Va
         let cloned = thread.clone();
         drop(items);
         persist();
-        return cloned;
-    }
-    let provider = last_provider().lock().unwrap().clone();
-    let thread = blank_thread(thread_id, profile_id, title, &provider, None);
-    items.push(thread.clone());
-    drop(items);
-    persist();
+        cloned
+    } else {
+        let provider = last_provider().lock().unwrap().clone();
+        let thread = blank_thread(thread_id, profile_id, title, &provider, None);
+        items.push(thread.clone());
+        drop(items);
+        persist();
+        thread
+    };
+
+    let status_str = thread.get("status").and_then(|v| v.as_str()).unwrap_or("idle");
+    let (is_warm, session_state) = crate::chat::runtime::session_manager()
+        .lock()
+        .ok()
+        .and_then(|mgr| mgr.status(thread_id))
+        .map(|record| {
+            let warm = record.is_warm();
+            let state = if warm && record.is_idle() {
+                "warm".to_string()
+            } else {
+                record.state.as_str().to_string()
+            };
+            (warm, state)
+        })
+        .unwrap_or_else(|| (false, "sleeping".to_string()));
+
+    let is_settled = !is_warm && status_str != "running";
+    thread["sessionState"] = json!(session_state);
+    thread["isWarm"] = json!(is_warm);
+    thread["isSettled"] = json!(is_settled);
+
     thread
 }
 
@@ -154,6 +206,19 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
         };
         if let Some(plan) = patch.get("plan").and_then(|v| v.as_bool()) {
             thread["plan"] = json!(plan);
+        }
+        if let Some(agent) = patch
+            .get("agent")
+            .or_else(|| patch.get("workMode"))
+            .and_then(|v| v.as_str())
+        {
+            thread["agent"] = json!(agent);
+            thread["workMode"] = json!(agent);
+            if agent == "plan" {
+                thread["plan"] = json!(true);
+            } else if agent == "build" {
+                thread["plan"] = json!(false);
+            }
         }
         if patch.get("model").is_some() {
             thread["model"] = normalize_model(patch.get("model"));
@@ -257,12 +322,36 @@ pub fn history(agent_id: Option<&str>) -> Value {
 }
 
 pub fn summary_of(thread: &Value) -> Option<Value> {
+    let thread_id = thread.get("id")?.as_str()?;
+    let status_val = thread.get("status").cloned().unwrap_or(json!("idle"));
+    let status_str = status_val.as_str().unwrap_or("idle");
+
+    let (is_warm, session_state) = crate::chat::runtime::session_manager()
+        .lock()
+        .ok()
+        .and_then(|mgr| mgr.status(thread_id))
+        .map(|record| {
+            let warm = record.is_warm();
+            let state = if warm && record.is_idle() {
+                "warm".to_string()
+            } else {
+                record.state.as_str().to_string()
+            };
+            (warm, state)
+        })
+        .unwrap_or_else(|| (false, "sleeping".to_string()));
+
+    let is_settled = !is_warm && status_str != "running";
+
     Some(json!({
-        "id": thread.get("id")?,
+        "id": thread_id,
         "profileId": thread.get("profileId").cloned().unwrap_or(Value::Null),
         "title": thread.get("title").cloned().unwrap_or(json!("Chat")),
         "provider": thread.get("provider").cloned().unwrap_or(json!("antigravity")),
-        "status": thread.get("status").cloned().unwrap_or(json!("idle")),
+        "status": status_val,
+        "sessionState": session_state,
+        "isWarm": is_warm,
+        "isSettled": is_settled,
         "hasContent": thread.get("items").and_then(|v| v.as_array()).map(|items| !items.is_empty()).unwrap_or(false),
         "workspaceId": thread.get("workspaceId").cloned().unwrap_or(Value::Null),
         "pinned": thread.get("pinned").cloned().unwrap_or(json!(false)),
@@ -315,7 +404,27 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
         .iter_mut()
         .find(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
     {
-        *slot = item.clone();
+        if let (Some(existing_obj), Some(new_obj)) = (slot.as_object_mut(), item.as_object()) {
+            for (k, v) in new_obj {
+                if v.is_null() {
+                    continue;
+                }
+                if let Some(s) = v.as_str() {
+                    if (s.is_empty() || s == "tool")
+                        && existing_obj
+                            .get(k)
+                            .and_then(|x| x.as_str())
+                            .map(|x| !x.is_empty() && x != "tool")
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                }
+                existing_obj.insert(k.clone(), v.clone());
+            }
+        } else {
+            *slot = item.clone();
+        }
     } else {
         list.push(item.clone());
     }

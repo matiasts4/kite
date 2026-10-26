@@ -4,6 +4,7 @@ Este directorio contiene la arquitectura, análisis del estado del arte (incluye
 
 - **[Registro de fallos de Zed](./zed-fallos.md)** — protocolo para anotar malos turnos del operador y cerrarlos con utterances o evidencia.
 - **[Handoff agente → terminal hija](./agent-handoff.md)** — buzón `.kite/inbox`, CLI `scripts/kite-agent.mjs` y entrega del cuerpo completo del archivo de tarea.
+- **[OpenCode Go en Zed](./opencode-go-integration.md)** — contrato HTTP verificado, resolución de credenciales, sesión y catálogo; ACP documentado como opción futura.
 
 ## 📑 Documentos de Planificación
 

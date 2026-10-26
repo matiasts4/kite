@@ -129,6 +129,97 @@ pub(crate) fn write_agent_memory_at(
 }
 
 
+/// One skill as it appears in an instruction document.
+pub(crate) struct InstructionSkill<'a> {
+    pub(crate) id: &'a str,
+    /// `None` when only the identity of the skill is known, as in a recipe
+    /// snapshot. The document then lists the id without a body.
+    pub(crate) name: Option<&'a str>,
+    pub(crate) description: &'a str,
+    pub(crate) body: Option<&'a str>,
+}
+
+/// The recipe fields an instruction document is built from.
+pub(crate) struct InstructionSource<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) title: &'a str,
+    pub(crate) engine: Option<&'a str>,
+    pub(crate) role: &'a str,
+    pub(crate) memory: &'a str,
+    pub(crate) user: &'a str,
+    pub(crate) skills: &'a [InstructionSkill<'a>],
+}
+
+/// Title used when the document is written outside the agent home and the
+/// agent display name is not part of the recipe.
+pub(crate) const WORKSPACE_RECIPE_TITLE: &str = "Agent Instructions";
+
+/// The document body shared by the agent-home sync and the workspace apply.
+pub(crate) fn instruction_document(source: &InstructionSource<'_>) -> String {
+    let mut doc = String::new();
+    doc.push_str(&format!("# {}\n\n", source.title));
+    match source.engine {
+        Some(engine) => doc.push_str(&format!(
+            "Agent ID: `{}`\nEngine: `{engine}`\n\n",
+            source.agent_id
+        )),
+        None => doc.push_str(&format!("Agent ID: `{}`\n\n", source.agent_id)),
+    }
+
+    let role = source.role.trim();
+    if !role.is_empty() {
+        if role.starts_with('#') {
+            doc.push_str(role);
+            doc.push_str("\n\n");
+        } else {
+            doc.push_str("## Role & Charter\n\n");
+            doc.push_str(role);
+            doc.push_str("\n\n");
+        }
+    }
+
+    doc.push_str("Kite Code automatically synchronizes this context from memory, builder context, skills, and teammates.\n\n");
+
+    if !source.memory.trim().is_empty() {
+        doc.push_str("## Long-Term Memory (memory.txt)\n\n");
+        doc.push_str(source.memory.trim());
+        doc.push_str("\n\n");
+    }
+    if !source.user.trim().is_empty() {
+        doc.push_str("## Builder Context & Preferences (user.txt)\n\n");
+        doc.push_str(source.user.trim());
+        doc.push_str("\n\n");
+    }
+    if !source.skills.is_empty() {
+        doc.push_str("## Learned Skills\n\n");
+        for skill in source.skills {
+            match skill.name {
+                Some(name) => {
+                    doc.push_str(&format!("### {name} (`{}`)\n", skill.id));
+                    if !skill.description.is_empty() {
+                        doc.push_str(&format!("{}\n\n", skill.description));
+                    }
+                    if let Some(body) = skill.body.filter(|body| !body.is_empty()) {
+                        doc.push_str("```markdown\n");
+                        doc.push_str(body);
+                        doc.push_str("\n```\n\n");
+                    }
+                }
+                None => doc.push_str(&format!("- `{}`\n\n", skill.id)),
+            }
+        }
+    }
+    doc
+}
+
+/// A skill summary plus the body read from the agent home.
+struct SkillRecord {
+    id: String,
+    name: String,
+    description: String,
+    body: Option<String>,
+}
+
 pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
     let dir = root.join(agent_id);
     let _ = fs::create_dir_all(&dir);
@@ -141,62 +232,75 @@ pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
         items.iter().find(|a| a.id == agent_id).cloned()
     };
 
-    let mut doc = String::new();
-    if let Some(ref agent) = agent_opt {
-        doc.push_str(&format!("# {}\n\n", agent.name));
-        doc.push_str(&format!("Agent ID: `{agent_id}`\nEngine: `{}`\n\n", agent.engine));
-        let brief_text = if !agent.brief.trim().is_empty() {
-            agent.brief.trim()
-        } else {
-            agent.purpose.trim()
-        };
-        if !brief_text.is_empty() {
-            if brief_text.starts_with('#') {
-                doc.push_str(brief_text);
-                doc.push_str("\n\n");
+    let skill_records: Vec<SkillRecord> = skills
+        .iter()
+        .map(|skill| {
+            let id = skill
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("skill")
+                .to_string();
+            let name = skill
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id.as_str())
+                .to_string();
+            let description = skill
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let body = read_skill_source(&dir.join("skills").join(format!("{id}.md")))
+                .ok()
+                .flatten()
+                .map(|src| {
+                    src.split("---")
+                        .nth(2)
+                        .map(str::trim)
+                        .unwrap_or(src.trim())
+                        .to_string()
+                })
+                .filter(|body| !body.is_empty());
+            SkillRecord {
+                id,
+                name,
+                description,
+                body,
+            }
+        })
+        .collect();
+    let instruction_skills: Vec<InstructionSkill<'_>> = skill_records
+        .iter()
+        .map(|skill| InstructionSkill {
+            id: &skill.id,
+            name: Some(&skill.name),
+            description: &skill.description,
+            body: skill.body.as_deref(),
+        })
+        .collect();
+
+    let (title, engine, role) = match agent_opt.as_ref() {
+        Some(agent) => (
+            agent.name.as_str(),
+            Some(agent.engine.as_str()),
+            if !agent.brief.trim().is_empty() {
+                agent.brief.trim()
             } else {
-                doc.push_str("## Role & Charter\n\n");
-                doc.push_str(brief_text);
-                doc.push_str("\n\n");
-            }
-        }
-    } else {
-        doc.push_str(&format!("# Agent Instructions\n\nAgent ID: `{agent_id}`\n\n"));
-    }
+                agent.purpose.trim()
+            },
+        ),
+        None => (WORKSPACE_RECIPE_TITLE, None, ""),
+    };
 
-    doc.push_str("Kite Code automatically synchronizes this context from memory, builder context, skills, and teammates.\n\n");
-
-    if !mem.trim().is_empty() {
-        doc.push_str("## Long-Term Memory (memory.txt)\n\n");
-        doc.push_str(mem.trim());
-        doc.push_str("\n\n");
-    }
-    if !usr.trim().is_empty() {
-        doc.push_str("## Builder Context & Preferences (user.txt)\n\n");
-        doc.push_str(usr.trim());
-        doc.push_str("\n\n");
-    }
-    if !skills.is_empty() {
-        doc.push_str("## Learned Skills\n\n");
-        for skill in &skills {
-            let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
-            let name = skill.get("name").and_then(|v| v.as_str()).unwrap_or(id);
-            let desc = skill.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            doc.push_str(&format!("### {name} (`{id}`)\n"));
-            if !desc.is_empty() {
-                doc.push_str(&format!("{desc}\n\n"));
-            }
-            let spath = dir.join("skills").join(format!("{id}.md"));
-            if let Ok(Some(src)) = read_skill_source(&spath) {
-                let body = src.split("---").nth(2).map(str::trim).unwrap_or(src.trim());
-                if !body.is_empty() {
-                    doc.push_str("```markdown\n");
-                    doc.push_str(body);
-                    doc.push_str("\n```\n\n");
-                }
-            }
-        }
-    }
+    let mut doc = instruction_document(&InstructionSource {
+        agent_id,
+        title,
+        engine,
+        role,
+        memory: &mem,
+        user: &usr,
+        skills: &instruction_skills,
+    });
 
     let allow_msg = agent_opt.as_ref().and_then(|a| a.allow_agent_messaging).unwrap_or(true);
     if allow_msg {
@@ -219,6 +323,69 @@ pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
     let _ = fs::write(dir.join("AGENTS.md"), &doc);
     let _ = fs::write(dir.join("CLAUDE.md"), &doc);
     let _ = fs::write(dir.join("README.md"), &doc);
+    Ok(())
+}
+
+/// The recipe fields that live in the agent home. Unreadable files read as
+/// empty text, the same way the instruction sync treats them.
+pub(crate) struct AgentRecipeFiles {
+    pub(crate) memory: String,
+    pub(crate) user: String,
+    pub(crate) skills: Vec<String>,
+}
+
+pub(crate) fn read_agent_recipe_at(root: &Path, agent_id: &str) -> AgentRecipeFiles {
+    let dir = root.join(agent_id);
+    let memory = read_text_record(&dir.join("memory.txt"), "memoryUnreadable").text;
+    let user = read_text_record(&dir.join("user.txt"), "userUnreadable").text;
+    let (skills, _) = read_skills(&dir.join("skills"));
+    let skills = skills
+        .iter()
+        .filter_map(|skill| {
+            skill
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    AgentRecipeFiles {
+        memory,
+        user,
+        skills,
+    }
+}
+
+/// Writes a recipe into a workspace through the same document builder the
+/// agent home uses. `AGENTS.md` and `CLAUDE.md` belong to the recipe;
+/// `README.md` belongs to the workspace and is never touched here.
+pub(crate) fn write_recipe_instructions(
+    target: &Path,
+    agent_id: &str,
+    role: &str,
+    memory: &str,
+    user: &str,
+    skills: &[String],
+) -> io::Result<()> {
+    let instruction_skills: Vec<InstructionSkill<'_>> = skills
+        .iter()
+        .map(|id| InstructionSkill {
+            id,
+            name: None,
+            description: "",
+            body: None,
+        })
+        .collect();
+    let doc = instruction_document(&InstructionSource {
+        agent_id,
+        title: WORKSPACE_RECIPE_TITLE,
+        engine: None,
+        role,
+        memory,
+        user,
+        skills: &instruction_skills,
+    });
+    fs::write(target.join("AGENTS.md"), &doc)?;
+    fs::write(target.join("CLAUDE.md"), &doc)?;
     Ok(())
 }
 

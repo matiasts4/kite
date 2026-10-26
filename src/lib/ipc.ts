@@ -121,27 +121,27 @@ export async function getSubscriptionQuotas(
   }
 }
 
-export async function saveOpenCodeCookie(cookie: string, workspaceId?: string): Promise<boolean> {
+export async function saveOpenCodeApiKey(apiKey: string): Promise<boolean> {
   if (!isTauriEnvironment()) {
     try {
-      localStorage.setItem('opencode_go_auth_cookie', cookie);
-      if (workspaceId) localStorage.setItem('opencode_go_workspace_id', workspaceId);
+      localStorage.setItem('opencode_go_api_key', apiKey);
       return true;
     } catch {
       return false;
     }
   }
   try {
-    return await invokeCommand<boolean>('save_opencode_cookie', { cookie, workspaceId: workspaceId || null });
+    return await invokeCommand<boolean>('save_opencode_api_key', { apiKey });
   } catch (err) {
-    console.warn('[IPC] Failed to save OpenCode cookie:', err);
+    console.warn('[IPC] Failed to save OpenCode API key:', err);
     return false;
   }
 }
 
-export async function clearOpenCodeCookie(): Promise<boolean> {
+export async function clearOpenCodeApiKey(): Promise<boolean> {
   if (!isTauriEnvironment()) {
     try {
+      localStorage.removeItem('opencode_go_api_key');
       localStorage.removeItem('opencode_go_auth_cookie');
       localStorage.removeItem('opencode_go_workspace_id');
       return true;
@@ -150,10 +150,47 @@ export async function clearOpenCodeCookie(): Promise<boolean> {
     }
   }
   try {
-    return await invokeCommand<boolean>('clear_opencode_cookie', {});
+    return await invokeCommand<boolean>('clear_opencode_api_key', {});
   } catch (err) {
-    console.warn('[IPC] Failed to clear OpenCode cookie:', err);
+    console.warn('[IPC] Failed to clear OpenCode API key:', err);
     return false;
+  }
+}
+
+// Shared connection registry. Both the installed and the dev build read the
+// same native store; a surface shows a connection only for the endpoints that
+// connection verified.
+export interface ConnectionEndpointView {
+  endpointId: string;
+  ok: boolean;
+}
+
+export interface ConnectionSummary {
+  connectionId: string;
+  driverKind: string;
+  displayName: string;
+  authMethod: string;
+  accountIdentity: {
+    email?: string | null;
+    orgId?: string | null;
+    accountId?: string | null;
+  };
+  credentialRef: string;
+  billingMode?: string | null;
+  endpoints: ConnectionEndpointView[];
+  status: string;
+  lastCheckedMs?: number | null;
+  expiresMs?: number | null;
+  lastHttpStatus?: number | null;
+}
+
+export async function listConnections(): Promise<ConnectionSummary[]> {
+  if (!isTauriEnvironment()) return [];
+  try {
+    return await invokeCommand<ConnectionSummary[]>('list_connections');
+  } catch (err) {
+    console.warn('[IPC] Failed to list connections:', err);
+    return [];
   }
 }
 
@@ -866,12 +903,59 @@ export async function pushWorkspaceChanges(workspaceId: string): Promise<Workspa
 
 // ── Account Switcher & Agent Handoff IPC ─────────────────────────────
 
+export interface ListSavedAccountsResult {
+  profiles: SavedAccountProfile[];
+  unregisteredLiveSession?: {
+    provider: string;
+    email: string;
+    planName?: string | null;
+    primaryRemainingPercent?: number | null;
+    primaryResetAt?: string | null;
+    timeUntilResetMs?: number | null;
+  } | null;
+}
+
 export async function listSavedAccounts(provider?: string): Promise<SavedAccountProfile[]> {
   try {
-    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[] }>('list_saved_accounts', { provider });
+    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[]; unregisteredLiveSession?: any }>('list_saved_accounts', { provider });
     return res?.profiles || [];
   } catch (err) {
     console.warn('[IPC] listSavedAccounts failed:', err);
+    return [];
+  }
+}
+
+export async function listSavedAccountsFull(provider?: string): Promise<ListSavedAccountsResult> {
+  try {
+    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[]; unregisteredLiveSession?: any }>('list_saved_accounts', { provider });
+    return {
+      profiles: res?.profiles || [],
+      unregisteredLiveSession: res?.unregisteredLiveSession || null,
+    };
+  } catch (err) {
+    console.warn('[IPC] listSavedAccountsFull failed:', err);
+    return { profiles: [] };
+  }
+}
+
+export interface DetectedCliAccount {
+  provider: string;
+  displayName: string;
+  authState: 'authenticated' | 'unauthenticated' | 'not_installed';
+  accountLabel?: string;
+  email?: string;
+  planName?: string;
+  binaryPath?: string;
+  configPath?: string;
+  details?: string;
+}
+
+export async function listDetectedCliAccounts(): Promise<DetectedCliAccount[]> {
+  try {
+    const res = await invokeCommand<{ schemaVersion: number; accounts: DetectedCliAccount[] }>('list_detected_cli_accounts');
+    return res?.accounts || [];
+  } catch (err) {
+    console.warn('[IPC] listDetectedCliAccounts failed:', err);
     return [];
   }
 }

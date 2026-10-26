@@ -1,3 +1,6 @@
+import type { ProviderMessage } from '../providers/types';
+import type { OperatorTurnTrace } from '../trace/types';
+
 export type TurnStage =
   | 'idle'
   | 'planning'
@@ -124,6 +127,56 @@ export interface OperatorTurnGateResult {
 export interface OperatorTurnGate {
   runTurn: (input: string) => Promise<OperatorTurnGateResult>;
   isBusy: () => boolean;
+}
+
+export interface OperatorTurnHistoryOptions {
+  history?: ProviderMessage[];
+}
+
+/**
+ * Builds the prior conversation from completed operator traces, oldest first.
+ * Traces arrive newest-first from the trace store; empty turns are omitted and
+ * a pending trace for the current input (no reply yet) is skipped.
+ */
+export function buildPriorTurnMessages(
+  input: string,
+  traces: readonly OperatorTurnTrace[]
+): ProviderMessage[] {
+  const chronological = [...traces].sort((a, b) => a.startedAt - b.startedAt);
+  const currentInput = input.trim();
+  const messages: ProviderMessage[] = [];
+
+  for (const trace of chronological) {
+    const turnInput = (trace.input || '').trim();
+    if (!turnInput) continue;
+
+    const reply = (trace.reply || '').trim();
+    if (turnInput === currentInput && !reply) continue;
+
+    messages.push({ role: 'user', content: trace.input });
+    if (reply) {
+      messages.push({ role: 'assistant', content: trace.reply! });
+    }
+  }
+
+  return messages;
+}
+
+/**
+ * Adds prior operator turns unless the caller already supplied history.
+ * The planner applies its own bound, so this keeps the full ordered buffer.
+ */
+export function withPriorTurnHistory(
+  input: string,
+  opts: OperatorTurnHistoryOptions | undefined,
+  traces: readonly OperatorTurnTrace[]
+): OperatorTurnHistoryOptions {
+  if (opts?.history) {
+    return { history: opts.history };
+  }
+
+  const history = buildPriorTurnMessages(input, traces);
+  return history.length > 0 ? { history } : {};
 }
 
 /** Pure turn gate: single-slot queue, timeout, generation — for tests and hook parity. */

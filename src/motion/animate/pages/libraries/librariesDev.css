@@ -1,0 +1,1054 @@
+/* ==========================================================================
+   Page 11: Libraries.dev Suite Showcase CSS
+   ========================================================================== */
+
+.p11-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.p11-intro-hero {
+  background: var(--vl-surface-raised, #131922);
+  border: 1px solid var(--vl-stroke-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 12px;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.p11-intro-hero h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+  color: #f1f5f9;
+}
+
+.p11-intro-hero p {
+  color: #94a3b8;
+  font-size: 13.5px;
+  line-height: 1.6;
+  margin: 0;
+  max-width: 820px;
+}
+
+.p11-badges-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.p11-badge-pill {
+  font-size: 11.5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+/* Containers */
+.p11-showcase-box {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+}
+
+.p11-controls-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.p11-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.p11-subtext {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0;
+}
+
+/* Segmented controls */
+.p11-segmented {
+  display: inline-flex;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 2px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.p11-seg-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.p11-seg-btn:hover {
+  color: #f1f5f9;
+}
+
+.p11-seg-btn--active {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.p11-mini-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.p11-mini-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.p11-mini-btn--active {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #38bdf8;
+}
+
+.p11-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+/* 11.1 Buttons */
+.p11-button-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.p11-demo-btn {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: var(--vl-radius-md, 8px);
+}
+
+.p11-metal-btn {
+  height: 38px;
+  padding: 0 18px;
+  background: linear-gradient(180deg, var(--vl-primary-top, #1a2029), var(--vl-primary-bottom, #0b0f14) 72%);
+  color: var(--vl-text-primary, #ffffff);
+  border: 1px solid var(--vl-border-light, rgba(255, 255, 255, 0.2));
+  border-radius: var(--vl-radius-md, 8px);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.p11-beam-btn {
+  height: 38px;
+  padding: 0 16px;
+  background: var(--vl-surface-raised, #111722);
+  color: #e2e8f0;
+  border: 1px solid var(--vl-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: var(--vl-radius-md, 8px);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.p11-kite-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #60a5fa;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.p11-title-sample {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.p11-sample-headline {
+  font-size: 20px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+/* 11.2 Thinking Orbs */
+.p11-states-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.p11-state-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: #cbd5e1;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.p11-state-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.p11-state-chip--active {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #38bdf8;
+}
+
+.p11-orb-stage {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 20px 24px;
+}
+
+.p11-orb-display {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+}
+
+.p11-orb-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.p11-orb-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #f1f5f9;
+  font-size: 14px;
+}
+
+.p11-size-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+}
+
+.p11-orb-desc {
+  font-size: 12.5px;
+  color: #94a3b8;
+  margin: 0;
+}
+
+.p11-orb-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.p11-agent-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.p11-agent-step-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: #e2e8f0;
+}
+
+.p11-kite-thinking {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+
+.p11-kite-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: p11-spin 0.8s linear infinite;
+}
+
+@keyframes p11-spin {
+  to { transform: rotate(360deg); }
+}
+
+.p11-thinking-text {
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.p11-steps-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 8px;
+}
+
+.p11-step-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: #94a3b8;
+}
+
+.p11-step-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #38bdf8;
+}
+
+/* 11.3 Bot Avatars */
+.p11-avatar-stage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.p11-avatar-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.p11-click-hint {
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+.p11-avatar-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.p11-roster-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.p11-live-agent-card,
+.p11-static-agent-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.p11-static-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+}
+
+.p11-agent-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+}
+
+.p11-agent-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f1f5f9;
+  font-size: 13.5px;
+}
+
+.p11-badge-status {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.p11-badge-status--busy {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+
+.p11-badge-status--ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.p11-badge-status--sleep {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+/* 11.4 Composer */
+.p11-composer-box {
+  background: var(--vl-surface-canvas, #0c1118);
+  border: 1px solid var(--vl-stroke-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.p11-composer-box--active {
+  border-color: rgba(56, 189, 248, 0.3);
+}
+
+.p11-textarea {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #f1f5f9;
+}
+
+.p11-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.p11-tools-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.p11-icon-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.p11-model-chip {
+  font-size: 11.5px;
+  color: #64748b;
+  font-family: monospace;
+}
+
+.p11-send-btn {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  border-radius: 6px;
+}
+
+.p11-pulse-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 10px #38bdf8;
+  animation: p11-pulse 1.2s infinite alternate;
+}
+
+@keyframes p11-pulse {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+.p11-voice-status {
+  font-size: 12px;
+  color: #38bdf8;
+  font-weight: 500;
+}
+
+.p11-voice-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 11.5 Liquid Gooey */
+.p11-liquid-stage {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 12px;
+  padding: 30px;
+}
+
+.p11-liquid-main-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  font-size: 20px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.p11-liquid-sat-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  font-size: 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.p11-static-menu-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.p11-fab-btn {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 8px;
+}
+
+.p11-static-popup {
+  display: flex;
+  flex-direction: column;
+  background: var(--vl-surface-raised, #18202c);
+  border: 1px solid var(--vl-stroke-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 6px;
+  gap: 4px;
+}
+
+.p11-popup-item {
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  text-align: left;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.p11-popup-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 11.6 Image FX */
+.p11-image-stage {
+  display: flex;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.p11-skeleton-card {
+  width: 100%;
+  max-width: 420px;
+  height: 200px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.p11-skeleton-shimmer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
+  animation: p11-shimmer 1.8s infinite;
+}
+
+@keyframes p11-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* ==========================================================================
+   Libraries.dev Button & Pill Design System (Images 1 & 2)
+   ========================================================================== */
+
+/* 1. Glass Stadium Pill (Image 1: Agent v, Auto v) */
+.ld-glass-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--ld-pill-radius, 9999px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 0 rgba(0, 0, 0, 0.3),
+    0 2px 6px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  outline: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.ld-glass-pill:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.05) 100%);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.35),
+    0 4px 14px rgba(0, 0, 0, 0.45);
+  transform: translateY(-0.5px);
+}
+
+.ld-glass-pill:active {
+  transform: translateY(0.5px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.4),
+    0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.ld-glass-pill--active {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.15) 0%, rgba(56, 189, 248, 0.05) 100%);
+  border-color: rgba(56, 189, 248, 0.35);
+  box-shadow:
+    inset 0 1px 0 0 rgba(56, 189, 248, 0.4),
+    0 2px 8px rgba(0, 0, 0, 0.4);
+  color: #38bdf8;
+}
+
+.ld-glass-pill__chevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0.65;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+  flex-shrink: 0;
+}
+
+.ld-glass-pill:hover .ld-glass-pill__chevron {
+  opacity: 1;
+}
+
+/* 2. Chromatic Iridescent Prism Action Button (Image 1: Circular Send button) */
+.ld-chromatic-btn {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  outline: none;
+  border: none;
+  padding: 0;
+  background: transparent;
+  flex-shrink: 0;
+  transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ld-chromatic-btn:hover {
+  transform: scale(1.06);
+}
+
+.ld-chromatic-btn:active {
+  transform: scale(0.96);
+}
+
+.ld-chromatic-btn__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  padding: 1.5px;
+  background: conic-gradient(
+    from 215deg at 50% 50%,
+    #a5b4fc 0deg,
+    #38bdf8 60deg,
+    #c084fc 120deg,
+    #f472b6 170deg,
+    #fef08a 210deg,
+    #e0e7ff 260deg,
+    #38bdf8 310deg,
+    #a5b4fc 360deg
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  box-shadow: 0 0 12px -1px rgba(56, 189, 248, 0.4);
+  transition: all 0.25s ease;
+}
+
+.ld-chromatic-btn:hover .ld-chromatic-btn__ring {
+  box-shadow:
+    0 0 18px 0 rgba(56, 189, 248, 0.65),
+    0 0 30px -4px rgba(192, 132, 252, 0.4);
+  animation: ld-prism-spin 8s linear infinite;
+}
+
+@keyframes ld-prism-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.ld-chromatic-btn__core {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, #222227 0%, #151518 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.22),
+    0 4px 10px rgba(0, 0, 0, 0.6);
+}
+
+.ld-chromatic-btn__glow {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 28px;
+  height: 8px;
+  background: radial-gradient(ellipse at center, rgba(56, 189, 248, 0.45) 0%, transparent 70%);
+  filter: blur(3px);
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* 3. Nested Stadium Pill (Image 2: 📁 Gooey Project 45 files) */
+.ld-nested-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 3px 16px 3px 4px;
+  border-radius: var(--ld-pill-radius, 9999px);
+  background: linear-gradient(180deg, #1c1c1f 0%, #131316 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 4px 12px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  user-select: none;
+  outline: none;
+}
+
+.ld-nested-pill:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 6px 18px rgba(0, 0, 0, 0.45);
+  transform: translateY(-0.5px);
+}
+
+.ld-nested-pill__chip {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--ld-chip-radius, 50%);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #cbd5e1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  flex-shrink: 0;
+}
+
+.ld-nested-pill__title {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ld-nested-pill__meta {
+  color: #94a3b8;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+/* 4. Circular Plus Button (Image 1: + button) */
+.ld-circle-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--ld-icon-btn-radius, 50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+  color: #94a3b8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  padding: 0;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.ld-circle-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: scale(1.04);
+}
+
+/* 5. Persistent Cognitive Thinking State Bar (Solves "remonta demasiado") */
+.ld-cognitive-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 14px;
+  background: linear-gradient(180deg, rgba(16, 22, 32, 0.96) 0%, rgba(10, 15, 22, 0.96) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-bottom: none;
+  border-top-left-radius: var(--ld-composer-radius, 16px);
+  border-top-right-radius: var(--ld-composer-radius, 16px);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow:
+    0 -4px 18px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(56, 189, 248, 0.45);
+  gap: 12px;
+  animation: ld-bar-slide-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes ld-bar-slide-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ld-cognitive-bar__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ld-cognitive-bar__orb {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ld-cognitive-bar__status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ld-cognitive-bar__phase {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #f1f5f9;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ld-cognitive-bar__detail {
+  font-size: 11px;
+  color: #38bdf8;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ld-cognitive-bar__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ld-cognitive-bar__badge {
+  font-size: 10.5px;
+  font-family: monospace;
+  padding: 2px 7px;
+  border-radius: var(--ld-pill-radius, 9999px);
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: #38bdf8;
+}
+
+.ld-cognitive-bar__stop-btn {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ld-cognitive-bar__stop-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #ffffff;
+}
+
+/* 6. High-Fidelity Thread Composer (Modeled on Kite Thread & Image 1) */
+.ld-thread-composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #141416;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--ld-composer-radius, 20px);
+  box-shadow:
+    0 12px 36px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  padding: 16px 16px 12px;
+  gap: 12px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ld-thread-composer--with-bar {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top-color: rgba(56, 189, 248, 0.3);
+}
+
+.ld-thread-composer__input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: #f1f5f9;
+  font-size: 14.5px;
+  font-family: inherit;
+  line-height: 1.5;
+  padding: 0;
+}
+
+.ld-thread-composer__input::placeholder {
+  color: #64748b;
+}
+
+.ld-thread-composer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ld-thread-composer__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

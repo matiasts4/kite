@@ -50,7 +50,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const [currentWsId, setCurrentWsId] = useState<string | null>(() => {
     return (
       workspaceId ||
-      (typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null)
+      (typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null)
     );
   });
 
@@ -63,7 +63,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   // Auto-select workspace if none is selected
   useEffect(() => {
     if (!currentWsId && workspaces && workspaces.length > 0) {
-      const saved = typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null;
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
       const target = (saved && workspaces.some((w) => w.id === saved)) ? saved : workspaces[0].id;
       setCurrentWsId(target);
       onSelectWorkspace?.(target);
@@ -74,7 +74,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   useEffect(() => {
     if (currentWsId) {
       try {
-        localStorage.setItem('bmone.selectedWorkspaceId', currentWsId);
+        localStorage.setItem('kite.selectedWorkspaceId', currentWsId);
       } catch {}
     }
   }, [currentWsId]);
@@ -113,7 +113,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   // Layout & Visibility preferences with localStorage
   const [layout, setLayout] = useState<'unified' | 'split'>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.layout.v1');
+      const saved = localStorage.getItem('kite.diffs.layout.v1');
       if (saved === 'unified' || saved === 'split') return saved;
     } catch {}
     return 'unified';
@@ -121,7 +121,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   const [wordWrap, setWordWrap] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.wordwrap.v1');
+      const saved = localStorage.getItem('kite.diffs.wordwrap.v1');
       if (saved !== null) return saved === 'true';
     } catch {}
     return true; // Default to true so lines are never clipped!
@@ -129,7 +129,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   const [fileTreeOpen, setFileTreeOpen] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.filetree.v1');
+      const saved = localStorage.getItem('kite.diffs.filetree.v1');
       if (saved !== null) return saved === 'true';
     } catch {}
     return true; // Default to true so changed files are immediately visible!
@@ -137,14 +137,14 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   const [viewMode, setViewMode] = useState<'focused' | 'stream'>(() => {
     try {
-      const saved = localStorage.getItem('bmone.diffs.viewmode.v1');
+      const saved = localStorage.getItem('kite.diffs.viewmode.v1');
       if (saved === 'focused' || saved === 'stream') return saved;
     } catch {}
-    return 'focused'; // Default to focused for fast, responsive single-file review
+    return 'stream'; // Default to stream with all cards collapsed for instant load and easy one-by-one review
   });
 
   const [filter, setFilter] = useState<'all' | 'staged' | 'unstaged'>('all');
-  const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [copiedPath, setCopiedPath] = useState<boolean>(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState<boolean>(false);
 
@@ -197,25 +197,25 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.layout.v1', layout);
+      localStorage.setItem('kite.diffs.layout.v1', layout);
     } catch {}
   }, [layout]);
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.wordwrap.v1', String(wordWrap));
+      localStorage.setItem('kite.diffs.wordwrap.v1', String(wordWrap));
     } catch {}
   }, [wordWrap]);
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.filetree.v1', String(fileTreeOpen));
+      localStorage.setItem('kite.diffs.filetree.v1', String(fileTreeOpen));
     } catch {}
   }, [fileTreeOpen]);
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.diffs.viewmode.v1', viewMode);
+      localStorage.setItem('kite.diffs.viewmode.v1', viewMode);
     } catch {}
   }, [viewMode]);
 
@@ -290,16 +290,14 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     return displayedFiles.filter((f) => f.path.toLowerCase().includes(q));
   }, [displayedFiles, quickJumpFilter]);
 
-  // Keep Stream mode lightweight by collapsing all files except the first one when workspace is loaded with many files
+  // Reset expanded files when switching workspaces so all diffs start collapsed
   const currentWorkspaceRef = useRef<string | null>(null);
   useEffect(() => {
     if (currentWsId && currentWsId !== currentWorkspaceRef.current) {
       currentWorkspaceRef.current = currentWsId;
-      if (displayedFiles.length > 3) {
-        setCollapsedFiles(new Set(displayedFiles.slice(1).map((f) => f.path)));
-      }
+      setExpandedFiles(new Set());
     }
-  }, [currentWsId, displayedFiles]);
+  }, [currentWsId]);
 
   // Pre-load adjacent diffs in background so next/prev switching is 0ms instant
   useEffect(() => {
@@ -316,20 +314,20 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   // Collapse / Expand All toggle (for Stream mode)
   const allCollapsed = useMemo(() => {
-    if (displayedFiles.length === 0) return false;
-    return displayedFiles.every((f) => collapsedFiles.has(f.path));
-  }, [displayedFiles, collapsedFiles]);
+    if (displayedFiles.length === 0) return true;
+    return displayedFiles.every((f) => !expandedFiles.has(f.path));
+  }, [displayedFiles, expandedFiles]);
 
   const toggleAllCollapse = () => {
     if (allCollapsed) {
-      setCollapsedFiles(new Set());
+      setExpandedFiles(new Set(displayedFiles.map((f) => f.path)));
     } else {
-      setCollapsedFiles(new Set(displayedFiles.map((f) => f.path)));
+      setExpandedFiles(new Set());
     }
   };
 
   const toggleFileCollapse = useCallback((path: string) => {
-    setCollapsedFiles((prev) => {
+    setExpandedFiles((prev) => {
       const next = new Set(prev);
       if (next.has(path)) {
         next.delete(path);
@@ -343,15 +341,15 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const handleSelectFileFromTree = (path: string) => {
     setSelectedDiffPath(path);
     // Expand file if collapsed in stream mode
-    setCollapsedFiles((prev) => {
+    setExpandedFiles((prev) => {
       const next = new Set(prev);
-      next.delete(path);
+      next.add(path);
       return next;
     });
     // If in stream mode, scroll to card
     if (viewMode === 'stream') {
       const targetEl = document.getElementById(`diff-file-${encodeURIComponent(path)}`);
-      if (targetEl) {
+      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
         targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     }
@@ -413,7 +411,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                     setCurrentWsId(ws.id);
                     onSelectWorkspace?.(ws.id);
                     try {
-                      localStorage.setItem('bmone.selectedWorkspaceId', ws.id);
+                      localStorage.setItem('kite.selectedWorkspaceId', ws.id);
                     } catch {}
                   }}
                 >
@@ -487,7 +485,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
           />
           <button
             type="button"
-            className="diffs-commit-btn"
+            className="primary-button diffs-commit-btn"
             disabled={!canCommit}
             onClick={handleCommitSubmit}
             title={
@@ -666,7 +664,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                           setCurrentWsId(ws.id);
                           onSelectWorkspace?.(ws.id);
                           try {
-                            localStorage.setItem('bmone.selectedWorkspaceId', ws.id);
+                            localStorage.setItem('kite.selectedWorkspaceId', ws.id);
                           } catch {}
                           setIsFolderMenuOpen(false);
                         }}
@@ -1285,7 +1283,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                 file={file}
                 workspaceId={currentWsId}
                 gitService={gitService}
-                collapsed={collapsedFiles.has(file.path)}
+                collapsed={!expandedFiles.has(file.path)}
                 layout={layout}
                 wordWrap={wordWrap}
                 busy={gitBusy !== null}

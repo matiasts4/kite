@@ -238,15 +238,22 @@ export const FilesView: React.FC<FilesViewProps> = ({
     }
   }, [currentWsId, initWorkspaceFiles]);
 
-  // Window Focus Auto-Refresh
+  // Window Focus Auto-Refresh (debounced to avoid blocking when unminimizing)
   useEffect(() => {
+    let timer: any = null;
     const handleFocus = () => {
       if (currentWsId) {
-        void refreshGit(currentWsId);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          void refreshGit(currentWsId);
+        }, 1200);
       }
     };
     window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [currentWsId, refreshGit]);
 
   // Menu State Sync
@@ -495,6 +502,65 @@ export const FilesView: React.FC<FilesViewProps> = ({
       window.removeEventListener(OPEN_RIGHT_DOCK_FILE_EVENT, handleFilePreviewEvent);
     };
   }, [openCandidate]);
+
+  // Files view state persistence (active file and open tabs)
+  const isRestoringTabsRef = useRef(false);
+  const restoredWorkspaceRef = useRef<string | null>(null);
+
+  // 1. Restore tabs when workspace resource is ready
+  useEffect(() => {
+    if (!currentWsId || !resourceId || restoredWorkspaceRef.current === currentWsId) return;
+    restoredWorkspaceRef.current = currentWsId;
+
+    try {
+      const raw = localStorage.getItem(`kite.files.viewState.${currentWsId}`);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.openRelativePaths) || parsed.openRelativePaths.length === 0) return;
+
+      if (parsed.isEditMode !== undefined) {
+        setIsEditMode(parsed.isEditMode);
+      }
+
+      isRestoringTabsRef.current = true;
+      void (async () => {
+        try {
+          for (const candidate of parsed.openRelativePaths) {
+            await openCandidate({
+              candidate,
+              workspaceId: currentWsId,
+              collapseTree: false,
+            });
+          }
+          if (parsed.activeRelativePath) {
+            setOpenFiles((currentTabs) => {
+              const match = currentTabs.find((t) => t.relativePath === parsed.activeRelativePath);
+              if (match) {
+                setActiveFileId(match.entryId);
+              }
+              return currentTabs;
+            });
+          }
+        } finally {
+          isRestoringTabsRef.current = false;
+        }
+      })();
+    } catch {}
+  }, [currentWsId, resourceId, openCandidate]);
+
+  // 2. Persist tabs & active file whenever they change
+  useEffect(() => {
+    if (!currentWsId || isRestoringTabsRef.current) return;
+    try {
+      const active = openFiles.find((f) => f.entryId === activeFileId);
+      const stateToStore = {
+        activeRelativePath: active?.relativePath || null,
+        openRelativePaths: openFiles.map((f) => f.relativePath),
+        isEditMode,
+      };
+      localStorage.setItem(`kite.files.viewState.${currentWsId}`, JSON.stringify(stateToStore));
+    } catch {}
+  }, [currentWsId, openFiles, activeFileId, isEditMode]);
 
   const handleCloseTab = (entryIdToClose: string) => {
     setOpenFiles((prev) => {

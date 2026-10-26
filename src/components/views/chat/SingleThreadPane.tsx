@@ -6,6 +6,7 @@ import {
   PanelRightIcon,
   CloseIcon,
   CheckIcon,
+  FileCodeIcon,
 } from './ChatIcons';
 import {
   ExtendedChatThread,
@@ -21,6 +22,10 @@ import { BrandLogo } from '../../ui/BrandLogo';
 import { invokeCommand } from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
 import { ChatComposer } from './ChatComposer';
+import { SessionLifecycleBar } from './SessionLifecycleBar';
+import { declarationFromCatalog } from './driverDeclaration';
+import { getSavedSelectedModel, getSavedSelectedAgent } from './modelPersistence';
+import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
 import { ThreadInspector } from './ThreadInspector';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
@@ -40,6 +45,11 @@ export interface SingleThreadPaneProps {
   attachments: ChatAttachment[];
   liveRunsCount: number;
   dynamicModels: ModelOption[];
+  dynamicAgents?: any[];
+  /** Declaration supplied by the session layer for this thread. */
+  driverDeclaration?: DriverDeclaration | null;
+  /** Projection supplied by the session layer for this thread. */
+  session?: SessionProjection | null;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
@@ -67,7 +77,7 @@ export interface SingleThreadPaneProps {
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }) => void;
+  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null }) => void;
   onApprovalDecision: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
   embedded?: boolean;
 }
@@ -87,6 +97,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   attachments,
   liveRunsCount: _liveRunsCount,
   dynamicModels,
+  dynamicAgents = [],
+  driverDeclaration,
+  session,
   editingTitleId,
   titleInput,
   onFocus,
@@ -114,6 +127,21 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     currentWorkspace?.displayName ||
     currentWorkspace?.name ||
     (thread.workspaceId || workspaceId ? 'Workspace' : null);
+
+  const effectiveModel = thread.model || getSavedSelectedModel(thread.provider);
+  const effectiveAgent = (thread as any).agent || (thread as any).workMode || getSavedSelectedAgent(thread.provider) || null;
+
+  const declaration = React.useMemo(
+    () =>
+      driverDeclaration ??
+      declarationFromCatalog({
+        provider: thread.provider,
+        selectedModel: effectiveModel,
+        dynamicModels,
+        dynamicAgents,
+      }),
+    [driverDeclaration, thread.provider, effectiveModel, dynamicModels, dynamicAgents]
+  );
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [showsChanges, setShowsChanges] = useState(false);
@@ -153,19 +181,20 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   }, []);
 
   const atLiveEdgeRef = useRef(true);
-  const motionClassFor = useTranscriptMotion(
+  const enterFor = useTranscriptMotion(
     thread.id,
     thread.items.map((item) => item.id),
   );
   useTranscriptLiveEdge(transcriptRef, thread.id, atLiveEdgeRef);
 
   const providerMeta = (PROVIDER_CATALOG as Record<string, any>)[thread.provider] || PROVIDER_CATALOG.claude;
-  const models: ModelOption[] = providerMeta.isDynamic && dynamicModels.length > 0 ? dynamicModels : providerMeta.models;
-  const currentModelOption = models.find((m) => m.id === thread.model);
-  const currentModelName = currentModelOption?.name || thread.model || providerMeta.defaultModel;
+  const currentModelOption = dynamicModels.find((m) => m.id === thread.model);
+  const currentModelName = currentModelOption?.name || (thread.model ? thread.model : 'Automatic');
 
   const totalTokens = (thread.usage?.inputTokens || 0) + (thread.usage?.outputTokens || 0);
   const activePlan = getActivePlan(thread);
+  const [dismissedPlanIds, setDismissedPlanIds] = useState<Set<string>>(new Set());
+  const isPlanDismissed = activePlan ? dismissedPlanIds.has(activePlan.id) : false;
 
   const formatElapsed = (secs: number): string => {
     if (secs < 60) return `${secs}s`;
@@ -416,14 +445,19 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                           key={row.id}
                           items={row.items}
                           running={running}
-                          motionClassFor={motionClassFor}
+                          enterFor={enterFor}
                         />
                       ) : (
                         <ChatItemRow
                           key={row.item.id}
                           item={row.item}
                           threadId={thread.id}
-                          motionClass={motionClassFor(row.item.id)}
+                          enter={enterFor(row.item.id)}
+                          onEditUserMessage={(text) => {
+                            onChangePrompt(text);
+                            const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+                            el?.focus();
+                          }}
                         />
                       )
                     )}
@@ -509,16 +543,47 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             ) : null}
 
             {/* Composer Area with Proposed Plan Panel mounted directly above */}
-            {activePlan && (
+            {activePlan && !isPlanDismissed && (
               <div style={{ width: '100%', display: 'flex', justifyContent: 'center', padding: '0 var(--space-6)', boxSizing: 'border-box' }}>
                 <ChatPlanPanel
                   key={`plan-${thread.id}-${activePlan.id}`}
                   plan={activePlan}
                   disabled={running || thread.status === 'waiting'}
                   onSend={(text, planAction) => onSend(text, planAction)}
+                  onDismiss={() => setDismissedPlanIds((prev) => new Set(prev).add(activePlan.id))}
                 />
               </div>
             )}
+            {activePlan && isPlanDismissed && (
+              <div style={{ width: '100%', display: 'flex', justifyContent: 'center', padding: '0 var(--space-6) 6px', boxSizing: 'border-box' }}>
+                <button
+                  type="button"
+                  onClick={() => setDismissedPlanIds((prev) => {
+                    const next = new Set(prev);
+                    next.delete(activePlan.id);
+                    return next;
+                  })}
+                  style={{
+                    background: 'var(--chip-fill)',
+                    border: '1px solid var(--block-stroke)',
+                    borderRadius: 'var(--radius-pill, 999px)',
+                    padding: '3px 10px',
+                    fontSize: '11px',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                  title="Mostrar artefacto oculto"
+                >
+                  <FileCodeIcon size={11} />
+                  <span>Ver artefacto: {activePlan.status === 'ready' ? 'Proposed Plan' : activePlan.status}</span>
+                </button>
+              </div>
+            )}
+
+            {session && <SessionLifecycleBar projection={session} />}
 
             <ChatComposer
               threadId={thread.id}
@@ -528,13 +593,15 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               threadMode={thread.mode}
               threadPlan={thread.plan}
               threadProvider={thread.provider}
-              threadModel={thread.model}
+              threadModel={effectiveModel}
               threadEffort={thread.effort}
+              threadAgent={effectiveAgent}
+              threadConnectionId={thread.connectionId ?? null}
               running={running}
               prompt={prompt}
               attachments={attachments}
               totalTokens={totalTokens}
-              dynamicModels={dynamicModels}
+              declaration={declaration}
               isRefreshingModels={isRefreshingModels}
               onRefreshModels={onRefreshModels}
               onChangePrompt={onChangePrompt}
@@ -545,7 +612,8 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               onStagePaths={onStagePaths}
               onRemoveAttachment={onRemoveAttachment}
               onUpdateConfig={onUpdateConfig}
-              pendingApproval={thread.pendingApproval}
+              onSelectConnection={(connectionId) => onUpdateConfig({ connectionId })}
+              pendingApproval={session?.pendingApprovals[0] ?? thread.pendingApproval}
               onApprovalDecision={onApprovalDecision}
             />
 

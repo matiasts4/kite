@@ -1,7 +1,7 @@
 // Kite Code — ODD Task Store (Outcome-Driven Development)
 // File-based task repository under <workspace>/.kite/tasks/<slug>.md
 //
-// Follows the Gentle AI / gentle-shell benchmarked principle:
+// Follows benchmarked non-blocking task runner principles:
 // "Pass spec by reference, never paraphrase. Subagents read .kite/tasks/<slug>.md verbatim."
 
 use serde::{Deserialize, Serialize};

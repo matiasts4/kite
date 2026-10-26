@@ -17,6 +17,16 @@ struct QuotaCache {
 
 static CACHE: Mutex<Option<QuotaCache>> = Mutex::new(None);
 const CACHE_TTL_SECS: u64 = 180;
+// OpenCode Go exposes short-lived 5-hour windows; refresh it more aggressively.
+const OPENCODE_CACHE_TTL_SECS: u64 = 60;
+
+fn cache_ttl_secs(provider: &str) -> u64 {
+    if provider == "opencode" {
+        OPENCODE_CACHE_TTL_SECS
+    } else {
+        CACHE_TTL_SECS
+    }
+}
 static IS_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn quota_cache_path() -> PathBuf {
@@ -36,6 +46,15 @@ fn load_persisted_cache() -> HashMap<String, (Instant, ProviderQuotaStatus)> {
     if let Ok(data) = std::fs::read(&p) {
         if let Ok(saved) = serde_json::from_slice::<HashMap<String, ProviderQuotaStatus>>(&data) {
             for (k, v) in saved {
+                // Drop pre-v2 OpenCode entries: they reported a fake 0% without calling the API.
+                if k == "opencode"
+                    && v.metadata
+                        .get("quotaSchema")
+                        .and_then(|value| value.as_i64())
+                        != Some(2)
+                {
+                    continue;
+                }
                 map.insert(k, (Instant::now(), v));
             }
         }
@@ -65,6 +84,20 @@ pub fn get_cached_provider_status(provider: &str) -> Option<ProviderQuotaStatus>
     cache.entries.get(provider).map(|(_, s)| s.clone())
 }
 
+pub fn invalidate_provider_cache(provider: &str) {
+    if let Ok(mut cache_guard) = CACHE.lock() {
+        if cache_guard.is_none() {
+            *cache_guard = Some(QuotaCache {
+                entries: load_persisted_cache(),
+            });
+        }
+        if let Some(ref mut cache) = *cache_guard {
+            cache.entries.remove(provider);
+            save_persisted_cache(cache);
+        }
+    }
+}
+
 
 pub fn fetch_single_provider(p: &str) -> ProviderQuotaStatus {
     match p {
@@ -90,7 +123,7 @@ fn provider_name(p: &str) -> &str {
         "qoder" => "Qoder",
         "claude" => "Claude",
         "codex" => "Codex",
-        "opencode" => "OpenCode",
+        "opencode" => "OpenCode Go",
         "grok" => "Grok",
         "gemini" => "Gemini",
         "cursor" => "Cursor",
@@ -140,7 +173,15 @@ fn build_cache_result(providers: &[&str]) -> Value {
 }
 
 #[tauri::command]
-pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
+pub async fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
+    tokio::task::spawn_blocking(move || {
+        get_subscription_quotas_direct(request, force)
+    })
+    .await
+    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+}
+
+pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool>) -> Value {
     let is_force = force.unwrap_or(false)
         || request
             .as_ref()
@@ -201,7 +242,7 @@ pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> V
             let needs_fetch = if is_force {
                 true
             } else if let Some((fetched_at, _)) = cache.entries.get(p) {
-                fetched_at.elapsed() > Duration::from_secs(CACHE_TTL_SECS)
+                fetched_at.elapsed() > Duration::from_secs(cache_ttl_secs(p))
             } else {
                 true
             };

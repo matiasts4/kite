@@ -363,7 +363,7 @@ export const UsageDashboardModal: React.FC<UsageDashboardModalProps> = ({ isOpen
 
           <div className="usage-dash__actions">
             {scanning && (
-              <span className="usage-dash__scanning">
+              <span className="usage-dash__scanning" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                 <svg
                   className="animate-spin"
                   width="12"

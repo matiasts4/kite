@@ -1,7 +1,8 @@
-import React, { useRef, useId, useEffect, useLayoutEffect, useState } from 'react';
+import React, { useRef, useId, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { usePresence } from '../../motion/usePresence';
-import { motionSurfaceClass } from '../../motion/surface';
+import { AnimatePresence, motion } from 'motion/react';
+import { surfaceMotion } from '../../motion/standard/surfaces';
+import { springs } from '../../motion/standard/tokens';
 
 export interface SheetButtonProps {
   label: string;
@@ -33,6 +34,8 @@ function getUiScale(el: HTMLElement | null): number {
   return Number.isFinite(val) && val > 0 ? val : 1;
 }
 
+const DIALOG_MOTION = surfaceMotion('dialog');
+
 export const Sheet: React.FC<SheetProps> = ({
   open,
   title,
@@ -48,31 +51,42 @@ export const Sheet: React.FC<SheetProps> = ({
   initialFocus = 'first',
 }) => {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
-  const sheetPresence = usePresence(open);
+  const lastDialogRef = useRef<HTMLDialogElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const [scale, setScale] = useState(1);
   const titleId = useId();
   const descId = useId();
   const cancelRef = useRef(onCancel);
   cancelRef.current = onCancel;
 
+  const attachDialog = useCallback((node: HTMLDialogElement | null) => {
+    dialogRef.current = node;
+    // Keep the node after React detaches it: the exit finishes in the same
+    // commit that removes the dialog, so `dialogRef` is already null by then.
+    if (node) lastDialogRef.current = node;
+  }, []);
+
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
-    if (!open || !sheetPresence.mounted || !dialog) return;
+    if (!open || !dialog) return;
 
     setScale(getUiScale(dialog));
-    if (!dialog.open) {
-      dialog.showModal();
-      if (initialFocus === 'primary') {
-        dialog.querySelector<HTMLButtonElement>('.ui-sheet__footer button[type="submit"]:not(:disabled)')?.focus({ preventScroll: true });
-      }
-    }
-  }, [open, sheetPresence.mounted, initialFocus]);
+    if (dialog.open) return;
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (sheetPresence.mounted || !dialog?.open) return;
-    dialog.close();
-  }, [sheetPresence.mounted]);
+    // `<dialog>.close()` restores focus to whatever was focused before
+    // `showModal()`. Keep that element: the element leaves the DOM before the
+    // browser can do it for us once the exit has played.
+    const active = document.activeElement;
+    returnFocusRef.current =
+      active instanceof HTMLElement && active !== document.body && !dialog.contains(active)
+        ? active
+        : null;
+
+    dialog.showModal();
+    if (initialFocus === 'primary') {
+      dialog.querySelector<HTMLButtonElement>('.ui-sheet__footer button[type="submit"]:not(:disabled)')?.focus({ preventScroll: true });
+    }
+  }, [open, initialFocus]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -87,11 +101,22 @@ export const Sheet: React.FC<SheetProps> = ({
     return () => {
       dialog.removeEventListener('cancel', handleCancel);
     };
+    // Re-bind when the dialog element mounts with `open`.
+  }, [open]);
+
+  const handleExitComplete = useCallback(() => {
+    const dialog = lastDialogRef.current;
+    lastDialogRef.current = null;
+    if (dialog?.open) dialog.close();
+
+    const previous = returnFocusRef.current;
+    returnFocusRef.current = null;
+    if (!previous?.isConnected) return;
+    // Only restore when nothing else claimed the focus while closing.
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) return;
+    previous.focus({ preventScroll: true });
   }, []);
-
-  if (!sheetPresence.mounted) return null;
-
-  const sheetMotion = motionSurfaceClass(sheetPresence.phase, 'modal');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,17 +128,19 @@ export const Sheet: React.FC<SheetProps> = ({
   const style: React.CSSProperties = {
     '--sheet-width': `${width}px`,
     '--sheet-scale': String(scale),
+    // Motion owns the entrance and exit; the legacy `ui-sheet-in` keyframes
+    // would otherwise fight the animated transform.
+    animation: 'none',
     ...(height !== undefined ? { height: `${height}px` } : {}),
   } as React.CSSProperties;
 
-  const content = (
-    <dialog
-      ref={dialogRef}
-      className={
-        className
-          ? `ui-sheet ${className}${sheetMotion ? ` ${sheetMotion}` : ''}`
-          : `ui-sheet${sheetMotion ? ` ${sheetMotion}` : ''}`
-      }
+  const sheet = (
+    <motion.dialog
+      key="sheet"
+      {...DIALOG_MOTION}
+      transition={springs.dialog}
+      ref={attachDialog}
+      className={className ? `ui-sheet ${className}` : 'ui-sheet'}
       style={style}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabel ? undefined : titleId}
@@ -156,10 +183,13 @@ export const Sheet: React.FC<SheetProps> = ({
           </footer>
         )}
       </form>
-    </dialog>
+    </motion.dialog>
   );
 
-  return typeof document !== 'undefined'
-    ? createPortal(content, document.querySelector('.app-frame--scaled') ?? document.body)
-    : content;
+  if (typeof document === 'undefined') return open ? sheet : null;
+
+  return createPortal(
+    <AnimatePresence onExitComplete={handleExitComplete}>{open ? sheet : null}</AnimatePresence>,
+    document.querySelector('.app-frame--scaled') ?? document.body
+  );
 };

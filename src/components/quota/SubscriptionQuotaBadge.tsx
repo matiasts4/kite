@@ -8,8 +8,7 @@ import {
   resolveDisplayProvider,
   QUOTA_PREFS_CHANGED_EVENT,
 } from '../../lib/quota/quotaManager';
-import { useResetCountdownClock } from '../../lib/quota/useResetCountdownClock';
-import { type ProviderQuotaStatus, PROVIDER_LABELS } from '../../lib/quota/types';
+import { type ProviderQuotaStatus, PROVIDERS, PROVIDER_LABELS, resolveEnabledProviderIds } from '../../lib/quota/types';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { usePresence } from '../../motion/usePresence';
 
@@ -69,9 +68,19 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
     return null;
   }
 
+  const enabledProviderIds = resolveEnabledProviderIds(prefs);
+
   const detected = detectProviderFromSession(activeEngine || activeSessionTitle);
-  const displayProvider = selectedProvider || resolveDisplayProvider(prefs, detected, quotas);
-  const currentQuota = quotas[displayProvider] || null;
+  const displayProvider =
+    selectedProvider && enabledProviderIds.includes(selectedProvider)
+      ? selectedProvider
+      : resolveDisplayProvider(prefs, detected, quotas);
+
+  // Keep the pill visible even with zero providers: it is the entry point to
+  // add them from the quota popover.
+  const popoverProvider = displayProvider || PROVIDERS.ANTIGRAVITY;
+
+  const currentQuota = displayProvider ? quotas[displayProvider] || null : null;
 
   const hasData = Boolean(
     currentQuota &&
@@ -82,9 +91,7 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
 
   const remPct = hasData ? currentQuota?.primaryRemainingPercent ?? 100 : null;
   const usedPct = hasData ? currentQuota?.primaryUsagePercent ?? (100 - (remPct ?? 100)) : null;
-  const label = PROVIDER_LABELS[displayProvider] || displayProvider;
-
-  const shortReset = useResetCountdownClock(currentQuota?.timeUntilResetMs);
+  const label = displayProvider ? PROVIDER_LABELS[displayProvider] || displayProvider : 'Cuotas';
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -103,8 +110,10 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
   };
 
   const windowLabel = currentQuota?.metadata?.primaryWindowLabel || (currentQuota?.metadata?.primaryWindow === '5h' ? '5h' : null);
-  const badgeTitle = hasData
-    ? `${label}${windowLabel ? ` (${windowLabel})` : ''}: ${remPct}% de cuota restante.${shortReset ? ` Resetea en ${shortReset}.` : ''}${currentQuota?.error ? ` (${currentQuota.error})` : ''} Clic para ver detalles y límites.`
+  const badgeTitle = !displayProvider
+    ? 'Cuotas de suscripción IA: agregá un proveedor para empezar'
+    : hasData
+    ? `${label}${windowLabel ? ` (${windowLabel})` : ''}: ${remPct}% de cuota restante.${currentQuota?.error ? ` (${currentQuota.error})` : ''} Clic para ver detalles y límites.`
     : currentQuota?.error || 'Comprobando cuota de suscripción IA...';
 
   const isUsedMode = prefs.displayMode === 'percent_used';
@@ -128,10 +137,10 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
           display: 'inline-flex',
           alignItems: 'center',
           gap: '6px',
-          padding: '0 8px',
+          padding: '0 10px',
           height: '24px',
           width: 'auto',
-          borderRadius: 'var(--radius-chip, 6px)',
+          borderRadius: '9999px',
           border: '1px solid var(--block-stroke)',
           backgroundColor: isOpen ? 'var(--block-stroke)' : 'var(--block-fill)',
           color: 'var(--text-primary, var(--text-primary))',
@@ -146,16 +155,50 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
         }}
       >
         {/* Brand Logo Icon */}
-        <BrandLogo engine={displayProvider} size={13} />
+        {displayProvider ? (
+          <span style={{ display: 'inline-flex', alignItems: 'center', animation: isRefreshing ? 'spin 1s linear infinite' : 'none' }}>
+            <BrandLogo engine={displayProvider} size={13} />
+          </span>
+        ) : (
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              <circle cx="12" cy="12" r="9" />
+              <line x1="12" y1="8" x2="12" y2="16" />
+              <line x1="8" y1="12" x2="16" y2="12" />
+            </svg>
+          )}
 
-        <QuotaProgressRing
-          percentage={remPct ?? 100}
-          size={13}
-          strokeWidth={2}
-          dimmed={!hasData}
-        />
+        {displayProvider ? (
+          <QuotaProgressRing
+            percentage={remPct ?? 100}
+            size={13}
+            strokeWidth={2}
+            dimmed={!hasData}
+          />
+        ) : null}
 
-        {hasData && remPct != null ? (
+        {!displayProvider ? (
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: '10px',
+              color: 'var(--text-secondary)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Cuotas
+          </span>
+        ) : hasData && remPct != null ? (
           <span
             style={{
               fontWeight: 700,
@@ -183,34 +226,12 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
             --
           </span>
         )}
-
-        {shortReset && (
-          <span
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '3px',
-              fontSize: '10px',
-              color: 'var(--text-secondary, var(--text-secondary))',
-              borderLeft: '1px solid var(--block-stroke)',
-              paddingLeft: '6px',
-              fontVariantNumeric: 'tabular-nums',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-            <span>{shortReset}</span>
-          </span>
-        )}
       </button>
 
       {popoverPresence.mounted && (
         <SubscriptionQuotaPopover
           allQuotas={quotas}
-          selectedProvider={displayProvider}
+          selectedProvider={popoverProvider}
           onSelectProvider={(id) => setSelectedProvider(id)}
           onRefresh={handleRefresh}
           isRefreshing={isRefreshing}

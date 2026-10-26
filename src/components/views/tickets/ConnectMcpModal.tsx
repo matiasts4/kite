@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Sheet } from '../../ui/Sheet';
+import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 import { TicketConnection, TicketSnapshot, formatMcpToml } from './types';
 
 export interface ConnectMcpModalProps {
@@ -143,6 +144,7 @@ export const ConnectMcpModal: React.FC<ConnectMcpModalProps> = ({
                   setCopied(false);
                 }}
               >
+                {format === 'json' ? <SegmentedIndicator group="mcp-format" /> : null}
                 <span className="ui-segmented__label" data-label="JSON">
                   JSON
                 </span>
@@ -156,6 +158,7 @@ export const ConnectMcpModal: React.FC<ConnectMcpModalProps> = ({
                   setCopied(false);
                 }}
               >
+                {format === 'codex' ? <SegmentedIndicator group="mcp-format" /> : null}
                 <span className="ui-segmented__label" data-label="Codex TOML">
                   Codex TOML
                 </span>

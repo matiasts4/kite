@@ -89,11 +89,12 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     });
   });
 
-  it('renders ZedTab inside Settings with OpenCode Multi-Model Gateway and zero emojis', () => {
+  it('renders ZedTab inside Settings with OpenCode Go and zero emojis', () => {
     const { container } = render(<ZedTab />);
 
     expect(screen.getByText(/Operador y Asistente de IA/i)).toBeInTheDocument();
     expect(screen.getByText(/Canal y Pasarela de Proveedor IA/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^OpenCode Go/ }));
     expect(screen.getAllByText(/DeepSeek.*4\.1.*Flash/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Rendimiento y Latencia por Proveedor/i)).toBeInTheDocument();
 
@@ -106,10 +107,11 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     const user = userEvent.setup();
     render(<ZedTab />);
 
+    await user.click(screen.getByRole('button', { name: /^OpenCode Go/ }));
     await user.click(screen.getByRole('combobox', { name: 'Modelo de OpenCode' }));
     await user.type(screen.getByRole('combobox', { name: 'Buscar modelo' }), 'kimi');
 
-    expect(screen.getByRole('option', { name: /kimi/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('option', { name: /kimi/i }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('option', { name: /deepseek/i })).not.toBeInTheDocument();
   });
 

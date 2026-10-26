@@ -57,7 +57,7 @@ fn derive_user_bound_key() -> [u8; 32] {
 }
 
 /// Encrypts plaintext bytes using a keystream derived from the user-bound key.
-fn encrypt_secret(plain: &str) -> String {
+pub(crate) fn encrypt_secret(plain: &str) -> String {
     let key = derive_user_bound_key();
     let plain_bytes = plain.as_bytes();
     let mut cipher = Vec::with_capacity(plain_bytes.len());
@@ -93,7 +93,7 @@ fn encrypt_secret(plain: &str) -> String {
 }
 
 /// Decrypts ciphertext string using the user-bound key.
-fn decrypt_secret(cipher_b64: &str) -> Option<String> {
+pub(crate) fn decrypt_secret(cipher_b64: &str) -> Option<String> {
     let trimmed = cipher_b64.trim();
     if trimmed.is_empty() {
         return None;
@@ -226,7 +226,7 @@ fn provider_env_vars(provider: &str) -> &'static [&'static str] {
         "deepseek" => &["DEEPSEEK_API_KEY"],
         "grok" => &["GROK_API_KEY", "XAI_API_KEY"],
         "grok_transcription" => &["GROK_TRANSCRIPTION_API_KEY", "GROK_API_KEY", "XAI_API_KEY"],
-        "opencode" => &["OPENCODE_API_KEY", "OPENCODE_GO_AUTH_COOKIE"],
+        "opencode" => &["OPENCODE_API_KEY"],
         "vercel" => &["VERCEL_API_KEY", "VERCEL_AI_GATEWAY_TOKEN"],
         "cloudflare" => &["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_AUTH_TOKEN"],
         "cloudflare_account_id" => &["CLOUDFLARE_ACCOUNT_ID"],
@@ -353,11 +353,25 @@ pub fn save_provider_credential(request: Option<Value>) -> Value {
     }
 
     match set_vault_credential(provider, key) {
-        Ok(_) => json!({
-            "success": true,
-            "provider": provider,
-            "preview": mask_key_preview(key)
-        }),
+        Ok(_) => {
+            // The key is already in the vault; also record the chat connection
+            // both builds share. A failure here must not look like a failed
+            // save of the key itself.
+            if let Err(error) = crate::connections::sync_api_key_connection(provider, key) {
+                return json!({
+                    "success": false,
+                    "provider": provider,
+                    "error": format!(
+                        "The key was saved to the local vault, but the shared connection registry could not be updated: {error}"
+                    )
+                });
+            }
+            json!({
+                "success": true,
+                "provider": provider,
+                "preview": mask_key_preview(key)
+            })
+        }
         Err(e) => json!({ "success": false, "error": e }),
     }
 }

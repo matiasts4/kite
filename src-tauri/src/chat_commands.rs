@@ -1,8 +1,9 @@
 use crate::chat::{
     apply_launch_choices, archived_at_ms, cancel_turn, configure_thread, create_thread, history, live_turns,
-    load_thread, parse_attachments, provider_models, read_turn_updates, release_staged_attachment,
-    remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned, stage_blob_attachment,
-    stage_dropped_path, stage_dropped_paths, start_turn, touch,
+    load_thread, parse_attachments, provider_models, provider_ok, read_turn_updates, recover_thread,
+    release_staged_attachment, remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned,
+    stage_blob_attachment, stage_dropped_path, stage_dropped_paths, start_turn_with_binding, touch,
+    SendBinding, ThreadEventLog,
 };
 use crate::persist::{body, load_grid, persist, save_grid, threads};
 use serde_json::{json, Value};
@@ -27,6 +28,28 @@ pub fn create_general_chat(request: Option<Value>) -> Value {
     thread
 }
 
+fn agent_engine_provider(engine: Option<&str>) -> &'static str {
+    match engine {
+        Some("claude") | Some("claude-code") => "claude",
+        Some("codex") => "codex",
+        Some("cursor") => "cursor",
+        Some("gemini") => "gemini",
+        Some("grok") => "grok",
+        Some("opencode") | Some("open-code") => "opencode",
+        Some("antigravity") | Some("agy") => "antigravity",
+        _ => "antigravity",
+    }
+}
+
+/// A provider explicitly chosen in the agent draft wins over the agent engine.
+/// An invalid or absent choice keeps the engine mapping, then antigravity.
+fn resolve_initial_provider(requested: Option<&str>, engine: Option<&str>) -> String {
+    match requested {
+        Some(provider) if provider_ok(provider) => provider.to_string(),
+        _ => agent_engine_provider(engine).to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn create_agent_chat(request: Option<Value>) -> Value {
     let req = body(&request);
@@ -40,22 +63,11 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
         items.iter().find(|a| a.id == agent_id).cloned()
     };
 
-    let initial_provider = if let Some(ref agent) = agent_opt {
-        match agent.engine.as_str() {
-            "claude" | "claude-code" => "claude",
-            "codex" => "codex",
-            "cursor" => "cursor",
-            "gemini" => "gemini",
-            "grok" => "grok",
-            "opencode" | "open-code" => "opencode",
-            "antigravity" | "agy" => "antigravity",
-            _ => "antigravity",
-        }
-    } else {
-        "antigravity"
-    };
+    let requested_provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str());
+    let engine = agent_opt.as_ref().map(|agent| agent.engine.as_str());
+    let initial_provider = resolve_initial_provider(requested_provider, engine);
 
-    let mut thread = create_thread(Some(agent_id), "New Agent Chat", initial_provider, None);
+    let mut thread = create_thread(Some(agent_id), "New Agent Chat", &initial_provider, None);
 
     if let Some(agent) = agent_opt {
         if let Some(mode) = agent.default_mode {
@@ -71,6 +83,21 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
             thread["providerOptions"] = json!(agent.default_provider_options);
         }
         crate::chat::replace_thread(&thread);
+    }
+
+    let requested_mode = req.and_then(|r| r.get("mode")).and_then(|v| v.as_str());
+    let requested_model = req.and_then(|r| r.get("model"));
+    if requested_mode.is_some() || requested_model.is_some() {
+        let mut patch = serde_json::Map::new();
+        patch.insert("provider".into(), json!(initial_provider));
+        if let Some(mode) = requested_mode {
+            patch.insert("mode".into(), json!(mode));
+        }
+        if let Some(model) = requested_model {
+            patch.insert("model".into(), model.clone());
+        }
+        let thread_id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        return configure_thread(thread_id, &Value::Object(patch));
     }
 
     thread
@@ -91,6 +118,41 @@ pub fn load_agent_chat_thread(request: Option<Value>) -> Value {
     let agent_id = req.and_then(|r| r.get("agentId")).and_then(|v| v.as_str()).unwrap_or("c3333333-3333-4333-8333-333333333333");
     let thread_id = req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()).unwrap_or("11111111-1111-4111-8111-111111111111");
     load_thread(thread_id, Some(agent_id), "Agent Chat Thread")
+}
+
+/// Reopens a thread from its durable event log without starting a provider.
+///
+/// The recovered thread falls back to the stored compatibility snapshot when
+/// the log is absent or unreadable. The response separates "a provider handle
+/// exists" from "the renderer may resume": a session is offered only when the
+/// recovered thread carries a provider-issued handle.
+#[tauri::command]
+pub fn recover_chat_thread(request: Option<Value>) -> Value {
+    let Some(thread_id) = request_thread_id(&request) else {
+        return json!({
+            "threadId": Value::Null,
+            "thread": Value::Null,
+            "events": [],
+            "source": "snapshot",
+            "resumeAvailable": false,
+            "resumeHandle": Value::Null,
+            "diagnostic": "a thread id is required",
+            "readOnly": true
+        });
+    };
+    let path = ThreadEventLog::default_path(&thread_id);
+    let recovered = recover_thread(&thread_id, &path);
+    let resume_available = recovered.resume_available();
+    json!({
+        "threadId": recovered.thread_id,
+        "thread": recovered.thread,
+        "events": recovered.events,
+        "source": recovered.source.as_str(),
+        "resumeAvailable": resume_available,
+        "resumeHandle": recovered.resume_handle,
+        "diagnostic": recovered.diagnostic,
+        "readOnly": true
+    })
 }
 
 #[tauri::command]
@@ -326,6 +388,16 @@ pub fn list_chat_provider_models(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub fn list_provider_agents(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "provider": provider,
+        "agents": crate::chat::models::provider_agents(provider),
+    })
+}
+
+#[tauri::command]
 pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
     // Snapshot active runs under live_turns lock, then drop live_turns BEFORE acquiring threads
     let active_runs: Vec<(String, Option<String>, Option<String>, i64)> = {
@@ -390,6 +462,64 @@ pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
     active
 }
 
+#[tauri::command]
+pub fn get_chat_session_status(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = match req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim(),
+        _ => return json!({ "error": "threadId is required" }),
+    };
+
+    let session_status = crate::chat::runtime::session_manager()
+        .lock()
+        .unwrap()
+        .status(thread_id);
+
+    if let Some(record) = session_status {
+        json!({
+            "threadId": thread_id,
+            "state": record.state.as_str(),
+            "mode": record.mode.as_str(),
+            "isWarm": record.is_warm(),
+            "isIdle": record.is_idle(),
+            "hasResumeHandle": record.resume_handle.is_some(),
+            "resumeHandle": record.resume_handle,
+            "lastActiveAtMs": record.last_active_at_ms,
+        })
+    } else {
+        let provider_session_id = {
+            let list = threads().lock().unwrap();
+            list.iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                .and_then(|t| t.get("providerSessionId").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        };
+
+        if let Some(handle) = provider_session_id {
+            json!({
+                "threadId": thread_id,
+                "state": "reaped",
+                "mode": "chat",
+                "isWarm": false,
+                "isIdle": false,
+                "hasResumeHandle": true,
+                "resumeHandle": handle,
+                "lastActiveAtMs": 0,
+            })
+        } else {
+            json!({
+                "threadId": thread_id,
+                "state": "closed",
+                "mode": "chat",
+                "isWarm": false,
+                "isIdle": false,
+                "hasResumeHandle": false,
+                "resumeHandle": Value::Null,
+                "lastActiveAtMs": 0,
+            })
+        }
+    }
+}
+
 fn handle_plan_action(thread_id: &str, plan_action: Option<&Value>) {
     let Some(action) = plan_action else { return };
     let kind = action.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -425,6 +555,24 @@ fn handle_plan_action(thread_id: &str, plan_action: Option<&Value>) {
     }
 }
 
+fn read_send_text(request: Option<&Value>, key: &str) -> Option<String> {
+    request
+        .and_then(|req| req.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// A send names the connection and the endpoint it wants only when the UI has
+/// them. Absent values keep the local CLI's own account and defaults.
+fn send_binding(request: Option<&Value>) -> SendBinding {
+    SendBinding {
+        connection_id: read_send_text(request, "connectionId"),
+        supported_endpoint: read_send_text(request, "supportedEndpoint"),
+    }
+}
+
 #[tauri::command]
 pub fn start_chat_turn(request: Option<Value>) -> Value {
     let req = body(&request);
@@ -433,7 +581,8 @@ pub fn start_chat_turn(request: Option<Value>) -> Value {
     apply_launch_choices(thread_id, req);
     handle_plan_action(thread_id, req.and_then(|r| r.get("planAction")));
     let attachments = parse_attachments(req);
-    start_turn(thread_id, None, prompt, attachments, None)
+    let binding = send_binding(req);
+    start_turn_with_binding(thread_id, None, prompt, attachments, None, Some(&binding))
 }
 
 #[tauri::command]
@@ -445,7 +594,8 @@ pub fn start_agent_chat_turn(request: Option<Value>) -> Value {
     apply_launch_choices(thread_id, req);
     handle_plan_action(thread_id, req.and_then(|r| r.get("planAction")));
     let attachments = parse_attachments(req);
-    start_turn(thread_id, Some(agent_id), prompt, attachments, None)
+    let binding = send_binding(req);
+    start_turn_with_binding(thread_id, Some(agent_id), prompt, attachments, None, Some(&binding))
 }
 
 #[tauri::command]
@@ -772,6 +922,51 @@ mod tests {
             .iter()
             .all(|thread| thread.get("id").and_then(|value| value.as_str()) != Some(thread_id.as_str()));
         assert!(gone);
+    }
+
+    #[test]
+    fn requested_provider_wins_over_agent_engine() {
+        assert_eq!(
+            resolve_initial_provider(Some("claude"), Some("codex")),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn agent_engine_provider_applies_without_requested_provider() {
+        assert_eq!(resolve_initial_provider(None, Some("codex")), "codex");
+        assert_eq!(
+            resolve_initial_provider(None, Some("claude-code")),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn unknown_requested_provider_falls_back_to_agent_engine() {
+        assert_eq!(
+            resolve_initial_provider(Some("not-a-provider"), Some("gemini")),
+            "gemini"
+        );
+    }
+
+    #[test]
+    fn missing_agent_engine_falls_back_to_antigravity() {
+        assert_eq!(resolve_initial_provider(None, None), "antigravity");
+        assert_eq!(
+            resolve_initial_provider(Some("not-a-provider"), None),
+            "antigravity"
+        );
+    }
+
+    #[test]
+    fn test_get_chat_session_status_command() {
+        let missing = get_chat_session_status(None);
+        assert!(missing.get("error").is_some());
+
+        let unknown = get_chat_session_status(Some(json!({ "threadId": "non-existent-thread-xyz" })));
+        assert_eq!(unknown["state"], "closed");
+        assert_eq!(unknown["isWarm"], false);
+        assert_eq!(unknown["hasResumeHandle"], false);
     }
 }
 

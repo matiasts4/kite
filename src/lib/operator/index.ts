@@ -13,7 +13,7 @@ import { executePlan, composeReplyFromReceipts } from './executor';
 import { ttsNarrator } from './ttsNarrator';
 import { loadOperatorConfig } from './operatorConfig';
 import { getActiveAgentTerminals } from '../terminalRegistry';
-import type { PlannerProvider } from './providers/types';
+import type { PlannerProvider, ProviderMessage } from './providers/types';
 import { resolvePlannerProvider } from './providers/resolvePlanner';
 
 export { resolvePlannerProvider } from './providers/resolvePlanner';
@@ -41,6 +41,8 @@ export interface RunOperatorTurnOptions {
   muted?: boolean;
   turnId?: string;
   context?: TurnContext;
+  /** Prior user and assistant messages from the operator run, oldest first. */
+  history?: ProviderMessage[];
 }
 
 export interface OperatorTurnResult {
@@ -135,7 +137,7 @@ export async function runOperatorTurn(
         actions: plan.actions,
       });
     } else {
-      plan = await planTurnLLM(input, provider, context, turnId);
+      plan = await planTurnLLM(input, provider, context, turnId, options.history);
     }
 
     // 2. Execute actions and collect verified receipts

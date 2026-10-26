@@ -45,6 +45,8 @@ pub mod operator_runtime;
 pub mod audio_ducking;
 pub mod agent_inbox;
 pub mod credentials;
+pub mod connections;
+pub mod plugins;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -54,6 +56,7 @@ use odd_tasks::*;
 use operator_runtime::*;
 use audio_ducking::*;
 use agent_inbox::*;
+use connections::*;
 use credentials::*;
 
 use account_switcher::*;
@@ -91,6 +94,9 @@ fn register_windows_shutdown_handler() {
     unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 2 || ctrl_type == 5 || ctrl_type == 6 {
             crate::terminal::snapshot_and_shutdown_all_terminals("windows_ctrl_shutdown");
+            if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                manager.stop_all();
+            }
         }
         0
     }
@@ -196,6 +202,10 @@ fn main() {
         }
     }
 
+    // The installed and dev builds share one connection registry. Whichever
+    // opens first imports the per-install vaults and account profiles once.
+    crate::connections::ensure_shared_registry();
+
     persist::workspaces();
 
     #[allow(unused_mut)]
@@ -221,13 +231,18 @@ fn main() {
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
             log_trace("Setup hook running");
-            if cfg!(debug_assertions) {
-                if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window("main") {
+                if cfg!(debug_assertions) {
                     let _ = w.set_title("Kite Code (Dev)");
                 }
-            } else {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
+            crate::chat::persistent::start_idle_reaper();
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
             for (label, w) in &windows {
@@ -236,7 +251,6 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            log_trace(&format!("WindowEvent on {}: {:?}", window.label(), event));
             if window.label() == "main" {
                 if matches!(
                     event,
@@ -244,6 +258,9 @@ fn main() {
                 ) {
                     crate::terminal::snapshot_and_shutdown_all_terminals("main_window_close");
                     crate::audio_ducking::restore_audio_immediate();
+                    if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                        manager.stop_all();
+                    }
                 }
             }
         })
@@ -322,9 +339,11 @@ fn main() {
             draft_agent_with_ai,
             ensure_files_resource,
             get_agent_availability,
+            get_chat_session_status,
             get_subscription_quotas,
-            save_opencode_cookie,
-            clear_opencode_cookie,
+            opencode_go_credential_status,
+            save_opencode_api_key,
+            clear_opencode_api_key,
             insert_terminal_drop_paths,
             insert_terminal_files_entry,
             install_agent_starter,
@@ -338,12 +357,14 @@ fn main() {
             list_archived_chats,
             list_chat_provider_models,
             list_chat_summaries,
+            list_connections,
             list_dictation_input_devices,
             list_files_directory,
             list_launch_presets,
             list_live_chat_runs,
             list_prompts,
             list_provider_mcp_servers,
+            list_provider_agents,
             list_routines,
             list_terminal_profiles,
             load_agent_chat_thread,
@@ -391,6 +412,7 @@ fn main() {
             read_workspace_changes,
             read_workspace_file_diff,
             reconnect_ssh_workspace,
+            recover_chat_thread,
             release_chat_attachment,
             remove_agent_skill,
             remove_workspace_from_list,
@@ -485,6 +507,7 @@ fn main() {
             updater_update_and_restart,
             get_app_version,
             list_saved_accounts,
+            list_detected_cli_accounts,
             save_current_account_profile,
             switch_account_profile,
             delete_account_profile,
@@ -510,6 +533,10 @@ fn main() {
             save_provider_credential,
             delete_provider_credential,
             migrate_localstorage_credentials,
+            plugins::plugin_connections,
+            plugins::plugin_connection_action,
+            plugins::get_plugin_config,
+            plugins::save_plugin_config,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
@@ -533,19 +560,23 @@ fn main() {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
                 crate::audio_ducking::restore_audio_immediate();
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit_requested");
+                if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                    manager.stop_all();
+                }
             }
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, ensuring all terminals are snapshotted");
                 crate::audio_ducking::restore_audio_immediate();
                 crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit");
+                if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                    manager.stop_all();
+                }
             }
             tauri::RunEvent::MainEventsCleared => {
                 // Do NOT log MainEventsCleared. It triggers dozens of times per second,
                 // and writing synchronously to app.log on disk blocks the main UI message pump.
             }
-            other => {
-                log_trace(&format!("RunEvent: {:?}", other));
-            }
+            _other => {}
         }
     });
 }

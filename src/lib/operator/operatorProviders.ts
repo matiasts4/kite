@@ -1,9 +1,15 @@
-import { invokeCommand } from '../ipc';
+import {
+  invokeCommand,
+  isTauriEnvironment,
+  listConnections,
+  type ConnectionSummary,
+} from '../ipc';
 import type { OperatorAction } from './operatorBrain';
 import { resolveVerifiedModel } from './providers/resolvePlanner';
 import {
   buildZedSystemInstructions,
   getActiveModelForProvider,
+  getOrCreateOpenCodeSessionId,
   loadOperatorConfig,
   operatorHttpFetch,
   recordOperatorLatency,
@@ -13,6 +19,72 @@ import {
   type OperatorProviderId,
   type OperatorTaskType,
 } from './operatorConfig';
+
+/**
+ * Chat endpoints the Zed operator can actually spawn, per driver. A verified
+ * quota route for the same driver never qualifies, and an auth method with no
+ * spawn in this surface (such as ACP today) does not either.
+ */
+const ZED_CHAT_ENDPOINTS_BY_DRIVER: Partial<Record<string, readonly string[]>> = {
+  opencode: ['https://opencode.ai/inference/go/openai/v1/chat/completions'],
+  antigravity: ['cli:agy -p'],
+  grok: ['https://api.x.ai/v1/chat/completions'],
+};
+
+/** Drivers the Zed operator can call directly, mapped to the provider row the
+ * settings surface shows. Other driver kinds may have verified endpoints but no
+ * editor provider row. */
+const ZED_PROVIDER_BY_DRIVER: Partial<Record<string, OperatorProviderId>> = {
+  opencode: 'opencode',
+  antigravity: 'antigravity',
+  grok: 'grok',
+};
+
+const ZED_CHAT_ENDPOINT_IDS = new Set(
+  Object.values(ZED_CHAT_ENDPOINTS_BY_DRIVER).flatMap((endpoints) => endpoints ?? [])
+);
+
+export function isVerifiedChatEndpoint(endpointId: string): boolean {
+  return ZED_CHAT_ENDPOINT_IDS.has(endpointId.trim());
+}
+
+/**
+ * Projects the shared connection registry onto the Zed chat surface. A
+ * connection is listed only when one of its own chat endpoints is verified; the
+ * driver id alone never qualifies it.
+ */
+export function zedChatConnections(connections: ConnectionSummary[]): ConnectionSummary[] {
+  return connections.filter((connection) => {
+    const chatEndpoints = ZED_CHAT_ENDPOINTS_BY_DRIVER[connection.driverKind];
+    if (!chatEndpoints) return false;
+    return connection.endpoints.some(
+      (endpoint) => endpoint.ok && chatEndpoints.includes(endpoint.endpointId.trim())
+    );
+  });
+}
+
+export function zedChatProviderIdsForConnections(
+  connections: ConnectionSummary[]
+): OperatorProviderId[] {
+  const providerIds: OperatorProviderId[] = [];
+  for (const connection of zedChatConnections(connections)) {
+    const providerId = ZED_PROVIDER_BY_DRIVER[connection.driverKind];
+    if (providerId && !providerIds.includes(providerId)) {
+      providerIds.push(providerId);
+    }
+  }
+  return providerIds;
+}
+
+export async function listZedChatConnections(): Promise<ConnectionSummary[]> {
+  try {
+    return zedChatConnections(await listConnections());
+  } catch {
+    // A browser build, or a test double without the registry reader, shows no
+    // rows instead of claiming a connection.
+    return [];
+  }
+}
 
 export interface ProviderExecutionResult {
   provider: OperatorProviderId;
@@ -124,29 +196,43 @@ async function callOpenAICompatibleEndpoint(
   model: string,
   userInput: string,
   config: OperatorProviderConfig,
-  workspaceContext?: string
+  workspaceContext?: string,
+  options?: { sessionId?: string; credentialProvider?: 'opencode' }
 ): Promise<{ reply: string; actions: OperatorAction[]; rawContent: string }> {
   const normalizedBase = baseUrl.replace(/\/+$/, '');
   const endpoint = normalizedBase.endsWith('/chat/completions')
     ? normalizedBase
     : `${normalizedBase}/chat/completions`;
 
-  const response = await operatorHttpFetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const key = apiKey.trim();
+  if (key) {
+    headers.Authorization = `Bearer ${key}`;
+  }
+  const sessionId = options?.sessionId?.trim();
+  if (sessionId) {
+    headers['x-opencode-session'] = sessionId;
+  }
+
+  const response = await operatorHttpFetch(
+    endpoint,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        temperature: 0.1,
+        max_tokens: 450,
+        messages: [
+          { role: 'system', content: buildOperatorSystemPrompt(config, workspaceContext) },
+          { role: 'user', content: userInput },
+        ],
+      }),
     },
-    body: JSON.stringify({
-      model,
-      temperature: 0.1,
-      max_tokens: 450,
-      messages: [
-        { role: 'system', content: buildOperatorSystemPrompt(config, workspaceContext) },
-        { role: 'user', content: userInput },
-      ],
-    }),
-  });
+    { credentialProvider: options?.credentialProvider }
+  );
 
   if (!response.ok) {
     let errorDetail = '';
@@ -220,7 +306,13 @@ export async function queryOperatorLLM(
 ): Promise<OperatorLLMQueryResult> {
   const config = configOverride ?? loadOperatorConfig();
   const provider = providerOverride ?? config.activeProvider;
-  const model = getActiveModelForProvider(config, provider);
+  const rawModel = getActiveModelForProvider(config, provider);
+  // OpenCode Go accepts the live catalog ids; other providers keep their
+  // existing verified-model behavior.
+  const model =
+    provider === 'opencode'
+      ? resolveVerifiedModel('opencode', rawModel, 'fast')
+      : rawModel;
   const startTime = performance.now();
 
   if (provider === 'local') {
@@ -244,9 +336,12 @@ export async function queryOperatorLLM(
 
   try {
     if (provider === 'opencode') {
-      if (!config.opencodeApiKey.trim()) {
+      // Inside Tauri the native proxy can read the Go token from the local
+      // OpenCode CLI store, so an empty field is valid. Browser/dev builds
+      // still need an explicit key.
+      if (!config.opencodeApiKey.trim() && !isTauriEnvironment()) {
         const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
-        const errMsg = 'Falta la API Key de OpenCode en Configuraciones -> Asistente Zed.';
+        const errMsg = 'Falta la API Key de OpenCode Go en Configuraciones -> Asistente Zed.';
         recordOperatorLatency({
           provider: 'opencode',
           model,
@@ -269,7 +364,12 @@ export async function queryOperatorLLM(
         config.opencodeApiKey.trim(),
         model,
         prompt,
-        config
+        config,
+        undefined,
+        {
+          sessionId: getOrCreateOpenCodeSessionId(config),
+          credentialProvider: 'opencode',
+        }
       );
       const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
       recordOperatorLatency({
@@ -597,8 +697,8 @@ export async function dispatchOperatorWithProvider(
     let remoteResult: { reply: string; actions: OperatorAction[]; rawContent?: string };
 
     if (provider === 'opencode') {
-      if (!config.opencodeApiKey.trim()) {
-        throw new Error('Falta configurar la API Key de OpenCode en Configuraciones -> Asistente Zed.');
+      if (!config.opencodeApiKey.trim() && !isTauriEnvironment()) {
+        throw new Error('Falta configurar la API Key de OpenCode Go en Configuraciones -> Asistente Zed.');
       }
       const verifiedModel = resolveVerifiedModel('opencode', config.opencodeModel, 'fast');
       remoteResult = await callOpenAICompatibleEndpoint(
@@ -607,7 +707,11 @@ export async function dispatchOperatorWithProvider(
         verifiedModel,
         userInput,
         config,
-        workspaceContext
+        workspaceContext,
+        {
+          sessionId: getOrCreateOpenCodeSessionId(config),
+          credentialProvider: 'opencode',
+        }
       );
     } else if (provider === 'vercel') {
       if (!config.vercelApiKey.trim()) {

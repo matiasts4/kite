@@ -1,5 +1,6 @@
 import React, { useId } from 'react';
 import { IconCross, IconFlag, IconPause, IconPlay, IconRotateCcw } from './appIcons';
+import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 import {
   clampMinutes,
   describeDuration,
@@ -233,6 +234,7 @@ export const FocusTimerApp: React.FC = () => {
               onClick={() => focusTimerStore.setMode(mode.id)}
               type="button"
             >
+              {state.mode === mode.id ? <SegmentedIndicator group="focus-timer-modes" /> : null}
               <span>{mode.label}</span>
             </button>
           ))}

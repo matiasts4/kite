@@ -1,4 +1,6 @@
 import React, { useState, useId, useEffect, useRef } from 'react';
+import { motion } from 'motion/react';
+import { tweens } from '../../../motion/standard/tokens';
 import {
   ChevronRightIcon,
   TerminalIcon,
@@ -210,11 +212,12 @@ export const ChatWorkEntry: React.FC<{
   item: ChatItem;
   running?: boolean;
   stepIndex?: number;
-  motionClass?: string;
+  /** True when this row is new and should animate in. */
+  enter?: boolean;
 }> = ({
   item,
   running,
-  motionClass,
+  enter = false,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -253,13 +256,17 @@ export const ChatWorkEntry: React.FC<{
     isRunning ? 'chat-work-entry--running' : '',
     isCompleted ? 'chat-work-entry--completed' : '',
     isFailed ? 'chat-work-entry--failed' : '',
-    motionClass,
   ]
     .filter(Boolean)
     .join(' ');
 
   return (
-    <div className={className}>
+    <motion.div
+      className={className}
+      initial={enter ? { opacity: 0, y: 4 } : false}
+      animate={{ opacity: 1, y: 0 }}
+      transition={tweens.reveal}
+    >
       <button
         type="button"
         aria-expanded={hasText ? expanded : undefined}
@@ -405,15 +412,15 @@ export const ChatWorkEntry: React.FC<{
           </div>
         </div>
       )}
-    </div>
+    </motion.div>
   );
 };
 
 export const ChatWorkGroup: React.FC<{
   items: ChatItem[];
   running?: boolean;
-  motionClassFor?: (id: string) => string;
-}> = ({ items, running, motionClassFor }) => {
+  enterFor?: (id: string) => boolean;
+}> = ({ items, running, enterFor }) => {
   const [expanded, setExpanded] = useState(false);
   const hiddenCount = Math.max(0, items.length - 1);
   const visibleItems = expanded ? items : items.slice(-1);
@@ -434,39 +441,32 @@ export const ChatWorkGroup: React.FC<{
           onClick={() => setExpanded((v) => !v)}
         >
           <ChevronRightIcon
-            size={9}
+            size={10}
             strokeWidth={2.5}
             className={`chat-chevron chat-chevron--flip ${expanded ? 'chat-chevron--open' : ''}`}
           />
-          <span>
+          <span className="chat-work-group__label">
             {expanded
-              ? 'Collapse tool pipeline'
-              : `+${hiddenCount} previous ${hiddenCount === 1 ? 'action' : 'actions'}`}
+              ? `Ocultar registro de acciones (${items.length})`
+              : `+${hiddenCount} ${hiddenCount === 1 ? 'acción anterior' : 'acciones anteriores'}`}
           </span>
-          <span className="chat-work-group__dots" aria-hidden="true">
-            {items.slice(0, 8).map((it) => {
-              const failed = it.status === 'failed' || (it.exitCode !== null && it.exitCode !== undefined && it.exitCode !== 0);
-              const active = it.streaming || it.status === 'running';
-              return (
-                <i
-                  key={it.id}
-                  className={`chat-work-group__dot ${
-                    failed
-                      ? 'chat-work-group__dot--failed'
-                      : active
-                        ? 'chat-work-group__dot--running'
-                        : 'chat-work-group__dot--completed'
-                  }`}
-                />
-              );
-            })}
-          </span>
-          <span className="chat-work-group__summary">
-            {runningCount > 0
-              ? `${completedCount}/${items.length} done`
-              : failedCount > 0
-                ? `${failedCount} failed`
-                : `${items.length} completed`}
+          <span className="chat-work-group__badges" aria-hidden="true">
+            {runningCount > 0 && (
+              <span className="chat-work-group__badge chat-work-group__badge--running">
+                <span className="chat-work-group__pulse" />
+                {completedCount}/{items.length}
+              </span>
+            )}
+            {failedCount > 0 && (
+              <span className="chat-work-group__badge chat-work-group__badge--failed">
+                {failedCount} {failedCount === 1 ? 'fallo' : 'fallos'}
+              </span>
+            )}
+            {runningCount === 0 && failedCount === 0 && (
+              <span className="chat-work-group__badge chat-work-group__badge--done">
+                ✓ {items.length} completadas
+              </span>
+            )}
           </span>
         </button>
       )}
@@ -477,7 +477,7 @@ export const ChatWorkGroup: React.FC<{
             item={item}
             running={(running && item.streaming) || item.streaming}
             stepIndex={idx}
-            motionClass={motionClassFor?.(item.id)}
+            enter={enterFor?.(item.id) ?? false}
           />
         ))}
       </div>
@@ -485,13 +485,22 @@ export const ChatWorkGroup: React.FC<{
   );
 };
 
-export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionClass?: string }> = ({
+export const ChatItemRow: React.FC<{
+  item: ChatItem;
+  threadId?: string;
+  /** True when this row is new and should animate in. */
+  enter?: boolean;
+  onEditUserMessage?: (text: string) => void;
+}> = ({
   item,
   threadId,
-  motionClass = '',
+  enter = false,
+  onEditUserMessage,
 }) => {
   const [folded, setFolded] = useState(false);
   const [expandedReasoning, setExpandedReasoning] = useState(false);
+  const [copiedUser, setCopiedUser] = useState(false);
+  const [copiedAssistant, setCopiedAssistant] = useState(false);
   const reasoningDuration = useLiveDuration(
     item.kind === 'reasoning' && item.streaming,
     item.createdAtUnixMs,
@@ -502,11 +511,39 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
   if (item.kind === 'user') {
     const isLong = item.text.length > 500;
     return (
-      <article
-        className={`chat-turn chat-turn--user chat-user-row ${folded ? 'chat-user-row--folded' : ''}${
-          motionClass ? ` ${motionClass}` : ''
-        }`}
+      <motion.article
+        className={`chat-turn chat-turn--user chat-user-row ${folded ? 'chat-user-row--folded' : ''}`}
+        initial={enter ? { opacity: 0, y: 4 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
       >
+        <div className="chat-turn__actions">
+          <button
+            type="button"
+            className="chat-turn__action-btn"
+            title={copiedUser ? 'Copiado!' : 'Copiar mensaje'}
+            onClick={() => {
+              navigator.clipboard?.writeText(item.text);
+              setCopiedUser(true);
+              setTimeout(() => setCopiedUser(false), 1500);
+            }}
+          >
+            {copiedUser ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+            <span>{copiedUser ? 'Copiado' : 'Copiar'}</span>
+          </button>
+          {onEditUserMessage && (
+            <button
+              type="button"
+              className="chat-turn__action-btn"
+              title="Volver al mensaje y reescribirlo"
+              onClick={() => onEditUserMessage(item.text)}
+            >
+              <PencilIcon size={12} />
+              <span>Editar</span>
+            </button>
+          )}
+        </div>
+
         {/* User Attachments */}
         {item.attachments && item.attachments.length > 0 && (
           <ul className="chat-attachments">
@@ -530,26 +567,63 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
             {folded ? 'Show more' : 'Show less'}
           </button>
         )}
-      </article>
+      </motion.article>
     );
   }
 
   // Assistant row: no assistant label or timestamp header
   if (item.kind === 'assistant') {
-    const cleanText = item.text.includes('<proposed_plan>') && item.text.includes('</proposed_plan>')
+    const rawText = item.text.includes('<proposed_plan>') && item.text.includes('</proposed_plan>')
       ? item.text.replace('<proposed_plan>', '\n').replace('</proposed_plan>', '\n')
       : item.text;
+
+    // Filter out any leaked protocol JSON blobs (e.g. {"type":"step-finish",...})
+    const cleanText = rawText
+      .split('\n')
+      .filter((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          if (
+            trimmed.includes('"type"') &&
+            (trimmed.includes('"step-finish"') ||
+              trimmed.includes('"step_finish"') ||
+              trimmed.includes('"tool-call"') ||
+              trimmed.includes('"tokens"') ||
+              trimmed.includes('"sessionID"'))
+          ) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .join('\n');
+
     return (
-      <div
-        className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}${
-          motionClass ? ` ${motionClass}` : ''
-        }`}
+      <motion.div
+        className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}`}
+        initial={enter ? { opacity: 0, y: 4 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
       >
-        <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
-        {item.streaming && (
-          <span className="chat-turn__streaming-cursor" title="Streaming response…" />
+        {!item.streaming && cleanText.trim().length > 0 && (
+          <div className="chat-turn__actions">
+            <button
+              type="button"
+              className="chat-turn__action-btn"
+              title={copiedAssistant ? 'Copiado!' : 'Copiar respuesta'}
+              onClick={() => {
+                navigator.clipboard?.writeText(cleanText);
+                setCopiedAssistant(true);
+                setTimeout(() => setCopiedAssistant(false), 1500);
+              }}
+            >
+              {copiedAssistant ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+              <span>{copiedAssistant ? 'Copiado' : 'Copiar'}</span>
+            </button>
+          </div>
         )}
-      </div>
+        <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
+      </motion.div>
     );
   }
 
@@ -557,10 +631,11 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
   if (item.kind === 'reasoning') {
     const thoughtSummary = liveThoughtLine(item.text);
     return (
-      <div
-        className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}${
-          motionClass ? ` ${motionClass}` : ''
-        }`}
+      <motion.div
+        className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}`}
+        initial={enter ? { opacity: 0, y: 4 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
       >
         <button
           type="button"
@@ -597,13 +672,13 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
             </div>
           </div>
         </div>
-      </div>
+      </motion.div>
     );
   }
 
   // Tool / Command Work Row (rendered individually if not grouped)
   if (item.kind === 'tool' || item.kind === 'command') {
-    return <ChatWorkEntry item={item} running={item.streaming} />;
+    return <ChatWorkEntry item={item} running={item.streaming} enter={enter} />;
   }
 
   // Error Row

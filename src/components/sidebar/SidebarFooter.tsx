@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import { usePresence } from '../../motion/usePresence';
-import { motionSurfaceClass } from '../../motion/surface';
+import { MOTION_EXIT_MS } from '../../motion/contract';
+import { surfaceMotion } from '../../motion/standard/surfaces';
 import { SunIcon, MoonIcon, SettingsIcon } from './sidebarIcons';
 import type { ContextMenuState } from './types';
 import { UpdateDetailCard, UpdateCircularButton } from './UpdatePill';
@@ -19,6 +21,9 @@ export interface SidebarFooterProps {
 
 export const SidebarFooter: React.FC<SidebarFooterProps> = ({
   accountName,
+  accountTier,
+  accountTierPaid,
+  creditsLabel,
   appearance,
   onToggleAppearance,
   onOpenSettings,
@@ -68,6 +73,31 @@ export const SidebarFooter: React.FC<SidebarFooterProps> = ({
             >
               {accountName || 'Kite'}
             </span>
+            {(accountTier || creditsLabel) && (
+              <span
+                className="account-row__meta"
+                style={{
+                  fontSize: '10px',
+                  lineHeight: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  color: accountTierPaid ? 'var(--accent, #5c8fff)' : 'var(--text-secondary)',
+                  fontWeight: 600,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {accountTier && <span>{accountTier}</span>}
+                {accountTier && creditsLabel && <span style={{ opacity: 0.5 }}>·</span>}
+                {creditsLabel && (
+                  <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
+                    {creditsLabel}
+                  </span>
+                )}
+              </span>
+            )}
           </span>
         </button>
 
@@ -120,11 +150,14 @@ export const SidebarContextMenu: React.FC<SidebarContextMenuProps> = ({ contextM
   const menuEstimatedHeight = 280;
   const x = Math.min(Math.max(heldMenu.x, 8), window.innerWidth - menuWidth - 8);
   const y = Math.min(Math.max(heldMenu.y, 8), window.innerHeight - menuEstimatedHeight - 8);
-  const menuMotion = motionSurfaceClass(menuPresence.phase, 'popover');
+  // Grow from the trigger corner even when the menu is clamped into the viewport.
+  const originX = Math.max(0, heldMenu.x - x);
+  const originY = Math.max(0, heldMenu.y - y);
 
   const menuElement = (
-    <div
-      className={`ui-menu scroll-quiet${menuMotion ? ` ${menuMotion}` : ''}`}
+    <motion.div
+      {...surfaceMotion('menu', { exitMs: MOTION_EXIT_MS })}
+      className="ui-menu scroll-quiet"
       role="menu"
       style={
         {
@@ -132,7 +165,8 @@ export const SidebarContextMenu: React.FC<SidebarContextMenuProps> = ({ contextM
           left: x,
           top: y,
           zIndex: 99999,
-          '--menu-origin': 'top left',
+          transformOrigin: `${originX}px ${originY}px`,
+          animation: 'none',
         } as React.CSSProperties
       }
     >
@@ -184,8 +218,15 @@ export const SidebarContextMenu: React.FC<SidebarContextMenuProps> = ({ contextM
           ))}
         </React.Fragment>
       ))}
-    </div>
+    </motion.div>
   );
 
-  return typeof document !== 'undefined' ? createPortal(menuElement, document.body) : menuElement;
+  return typeof document !== 'undefined' ? (
+    createPortal(
+      <AnimatePresence>{menuPresence.phase === 'in' && menuElement}</AnimatePresence>,
+      document.body
+    )
+  ) : (
+    menuElement
+  );
 };

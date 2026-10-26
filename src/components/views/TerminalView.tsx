@@ -730,7 +730,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           } else if (hasRecentUserInput) {
             nextDelay = 40;
           } else {
-            nextDelay = 90;
+            nextDelay = 220;
           }
         }
       } catch {
@@ -928,8 +928,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   rows: rows,
                 },
           );
-      if (opts?.restart && term && !started?.attachedToExisting) {
-        term.clear();
+      if (term && !started?.attachedToExisting) {
+        term.reset();
+        lastColsRef.current = null;
+        lastRowsRef.current = null;
+        fitTerminal(true);
       } else if (!hadLiveElement && started?.scrollbackBase64 && term) {
         const historyBytes = base64ToUint8Array(started.scrollbackBase64);
         if (historyBytes.length > 0) {
@@ -988,9 +991,57 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (chrome !== 'pane') return;
     const onCommand = (event: Event) => {
       const detail = (event as CustomEvent<{ sessionId?: string; command?: string }>).detail;
-      if (!detail?.sessionId) return;
-      const addressed = restartedSessions.get(detail.sessionId) ?? detail.sessionId;
-      if (detail.sessionId !== sessionIdRef.current && addressed !== sessionIdRef.current && detail.sessionId !== propSessionId) return;
+      if (!detail) return;
+      const addressed = detail.sessionId ? (restartedSessions.get(detail.sessionId) ?? detail.sessionId) : null;
+      const isTargeted = detail.sessionId && (
+        detail.sessionId === sessionIdRef.current ||
+        addressed === sessionIdRef.current ||
+        detail.sessionId === propSessionId
+      );
+      const isGlobalAgentRefresh = !detail.sessionId && (
+        detail.command === 'restart-agent' || detail.command === 'refresh-all'
+      );
+
+      if (!isTargeted && !isGlobalAgentRefresh) return;
+
+      if (detail.command === 'restart-agent') {
+        const term = termRef.current;
+        if (term) {
+          term.reset();
+        }
+        lastColsRef.current = null;
+        lastRowsRef.current = null;
+        const currentId = sessionIdRef.current;
+        if (currentId) {
+          stopPolling();
+          setStatus('connecting');
+          setExitCode(null);
+          const cols = term?.cols || 80;
+          const rows = term?.rows || 24;
+          const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
+          invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>('attach_terminal', {
+            sessionId: currentId,
+            owner,
+            engine: engineRef.current,
+            workspaceId,
+            paneId: paneIdRef.current,
+            columns: cols,
+            rows: rows,
+          })
+            .then((started) => {
+              if (term && started?.attachedToExisting) {
+                term.reset();
+              }
+              setStatus('running');
+              startPolling(currentId);
+              fitTerminal(true);
+            })
+            .catch(() => {
+              void startSession(engineRef.current);
+            });
+        }
+        return;
+      }
       if (detail.command === 'clear') handleClear();
       if (detail.command === 'restart') void startSession(engineRef.current, { restart: true });
       if (detail.command === 'interrupt') {

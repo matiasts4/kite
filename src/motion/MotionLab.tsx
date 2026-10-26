@@ -588,18 +588,23 @@ export const MotionLab: React.FC = () => {
               no se tocan.
             </p>
           </div>
-          <label className="motion-lab__switch">
-            <input
-              type="checkbox"
-              checked={reduced}
-              onChange={(event) => {
-                const next = event.target.checked;
-                document.documentElement.dataset.motion = next ? 'reduce' : 'full';
-                setReduced(next);
-              }}
-            />
-            Reduced motion
-          </label>
+          <div className="motion-lab__header-actions">
+            <label className="motion-lab__switch">
+              <input
+                type="checkbox"
+                checked={reduced}
+                onChange={(event) => {
+                  const next = event.target.checked;
+                  document.documentElement.dataset.motion = next ? 'reduce' : 'full';
+                  setReduced(next);
+                }}
+              />
+              Reduced motion
+            </label>
+            <a className="motion-lab__button" href="?animate">
+              Comparar con Animate UI
+            </a>
+          </div>
         </header>
         <AppIntroDemo />
         <PopoverDemo />

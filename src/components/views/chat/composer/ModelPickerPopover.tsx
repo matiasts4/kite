@@ -1,51 +1,39 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { CheckIcon, SearchIcon } from '../ChatIcons';
-import { BrandLogo } from '../../../ui/BrandLogo';
-import {
-  AUTOMATIC_MODEL_ID,
-  PROVIDER_CATALOG,
-  type ChatProvider,
-} from '../types';
-import type { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
+import React, {
+  useState,
+  useRef,
+  useMemo,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+} from 'react';
+import { createPortal } from 'react-dom';
+import { ChatProvider, AUTOMATIC_MODEL_ID } from '../types';
+import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
+import { BrandLogo } from '../../agents/engineMetadata';
+import { SearchIcon, CheckIcon } from '../ChatIcons';
 import { ComposerControl, ComposerControlChevron } from './ComposerControl';
+import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
 
-const FAVORITES_STORAGE_KEY = 'kite.modelFavorites.v1';
+const DEFAULT_PROVIDERS: Record<string, { label: string; vendor: string }> = {
+  claude: { label: 'Anthropic', vendor: 'Anthropic PBC' },
+  openai: { label: 'OpenAI', vendor: 'OpenAI LLC' },
+  gemini: { label: 'Google DeepMind', vendor: 'Google LLC' },
+  deepseek: { label: 'DeepSeek', vendor: 'DeepSeek AI' },
+  openrouter: { label: 'OpenRouter', vendor: 'OpenRouter Inc.' },
+  xai: { label: 'xAI', vendor: 'xAI Corp.' },
+  ollama: { label: 'Ollama', vendor: 'Local Runtime' },
+};
 
-interface FavoriteModelEntry {
-  provider: ChatProvider;
-  modelId: string;
-}
+// AUTOMATIC_MODEL_ID is imported from ../types
 
-function loadFavorites(): FavoriteModelEntry[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is FavoriteModelEntry =>
-        item && typeof item.provider === 'string' && typeof item.modelId === 'string'
-    );
-  } catch {
-    return [];
-  }
-}
-
-function saveFavorites(favorites: FavoriteModelEntry[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
-  } catch {
-    // Ignore storage write errors
-  }
-}
-
-const StarSvg: React.FC<{ filled?: boolean; className?: string }> = ({
+const StarSvg: React.FC<{ filled?: boolean; className?: string; size?: number }> = ({
   filled = false,
-  className = 'size-3.5',
+  className = '',
+  size = 14,
 }) => (
   <svg
+    width={size}
+    height={size}
     viewBox="0 0 24 24"
     fill={filled ? 'currentColor' : 'none'}
     stroke="currentColor"
@@ -59,24 +47,38 @@ const StarSvg: React.FC<{ filled?: boolean; className?: string }> = ({
   </svg>
 );
 
+interface FavoriteModelEntry {
+  provider: ChatProvider;
+  modelId: string;
+}
+
+const STORAGE_KEY = 'kite_favorite_models_v1';
+
+function loadFavorites(): FavoriteModelEntry[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFavorites(favs: FavoriteModelEntry[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(favs));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 function getModelBadge(model: DriverChoice): string | null {
-  const lowerId = model.id.toLowerCase();
-  const lowerLabel = model.label.toLowerCase();
   if (model.id === AUTOMATIC_MODEL_ID) return 'Default';
-  if (
-    lowerId.includes('flash') ||
-    lowerId.includes('haiku') ||
-    lowerId.includes('mini') ||
-    lowerLabel.includes('fast')
-  ) {
+  const label = model.label.toLowerCase();
+  const id = model.id.toLowerCase();
+  if (label.includes('flash') || label.includes('haiku') || label.includes('mini') || label.includes('speed')) {
     return 'Fast';
   }
-  if (
-    lowerId.includes('opus') ||
-    lowerId.includes('pro') ||
-    lowerId.includes('max') ||
-    lowerLabel.includes('max')
-  ) {
+  if (label.includes('opus') || label.includes('max') || id.includes('opus') || id.includes('deepseek-r1')) {
     return 'Max';
   }
   return null;
@@ -93,6 +95,9 @@ export interface ModelPickerPopoverProps {
   onSelectProvider: (provider: ChatProvider) => void;
 }
 
+const PANEL_WIDTH = 384;
+const PANEL_HEIGHT = 352;
+
 export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
   provider,
   model,
@@ -107,13 +112,26 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [activeRailTab, setActiveRailTab] = useState<'favorites' | ChatProvider>(provider);
   const [favorites, setFavorites] = useState<FavoriteModelEntry[]>(() => loadFavorites());
+  const [coords, setCoords] = useState<PopoverCoords | null>(null);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setActiveRailTab(provider);
   }, [provider]);
+
+  const updatePosition = useCallback(() => {
+    if (!triggerRef.current) return;
+    setCoords(getAnchoredPopoverCoords(triggerRef.current, PANEL_WIDTH, PANEL_HEIGHT, 8, 'top'));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (isOpen) {
+      updatePosition();
+    }
+  }, [isOpen, updatePosition]);
 
   useEffect(() => {
     if (isOpen) {
@@ -125,11 +143,17 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
     }
   }, [isOpen, provider, ensureDynamicModels]);
 
-  // Close on outside click
+  // Close on outside click or escape
   useEffect(() => {
     if (!isOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        triggerRef.current &&
+        !triggerRef.current.contains(target) &&
+        panelRef.current &&
+        !panelRef.current.contains(target)
+      ) {
         setIsOpen(false);
       }
     };
@@ -140,35 +164,37 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
     };
     document.addEventListener('mousedown', handleClickOutside);
     document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', updatePosition);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', updatePosition);
     };
-  }, [isOpen]);
+  }, [isOpen, updatePosition]);
 
   const providers = useMemo<DriverChoice[]>(() => {
     if (declaration.providers && declaration.providers.length > 0) {
       return declaration.providers;
     }
-    return (Object.keys(PROVIDER_CATALOG) as ChatProvider[]).map((id) => ({
+    return (Object.keys(DEFAULT_PROVIDERS) as ChatProvider[]).map((id) => ({
       id,
-      label: PROVIDER_CATALOG[id].label,
-      detail: PROVIDER_CATALOG[id].vendor,
-      engine: PROVIDER_CATALOG[id].engineId ?? id,
+      label: DEFAULT_PROVIDERS[id]?.label ?? id,
+      detail: DEFAULT_PROVIDERS[id]?.vendor ?? '',
+      engine: id,
     }));
   }, [declaration.providers]);
 
   const activeProviderRow =
-    providers.find((row) => row.id === provider) ??
+    providers.find((row: DriverChoice) => row.id === provider) ??
     ({
       id: provider,
-      label: PROVIDER_CATALOG[provider]?.label ?? declaration.driver,
-      engine: PROVIDER_CATALOG[provider]?.engineId ?? declaration.driver,
+      label: DEFAULT_PROVIDERS[provider]?.label ?? declaration.driver,
+      engine: declaration.driver,
     } as DriverChoice);
 
   const models = declaration.models ?? [];
   const currentModelId = model || AUTOMATIC_MODEL_ID;
-  const currentModelOption = models.find((m) => m.id === currentModelId);
+  const currentModelOption = models.find((m: DriverChoice) => m.id === currentModelId);
   const currentModelName =
     !model || model === AUTOMATIC_MODEL_ID
       ? 'Automatic'
@@ -214,7 +240,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
 
     const q = searchQuery.toLowerCase().trim();
     return list.filter(
-      (m) =>
+      (m: DriverChoice) =>
         m.label.toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q) ||
         (m.detail && m.detail.toLowerCase().includes(q))
@@ -234,208 +260,228 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
     providers.find((row) => row.id === activeRailTab) ?? activeProviderRow;
 
   return (
-    <div ref={containerRef} className="relative inline-block">
+    <>
       {/* Trigger Pill */}
       <ComposerControl
+        ref={triggerRef}
         role="combobox"
         aria-label="Model"
         aria-expanded={isOpen}
         title={modelReason || `Model: ${currentModelName}`}
         disabled={disabled || models.length === 0}
         data-state={isOpen ? 'open' : 'closed'}
-        onClick={() => setIsOpen((prev) => !prev)}
+        onClick={() => {
+          if (!disabled && models.length > 0) {
+            setIsOpen((prev) => !prev);
+          }
+        }}
       >
-        <BrandLogo
-          engine={activeProviderRow.engine ?? activeProviderRow.id}
-          label={activeProviderRow.label}
-          size={14}
-          className="shrink-0"
-        />
-        <span className="truncate max-w-[150px] text-foreground font-medium">
+        <span className="shrink-0 inline-flex items-center">
+          <BrandLogo
+            engine={activeProviderRow.engine ?? activeProviderRow.id}
+            label={activeProviderRow.label}
+            size={14}
+          />
+        </span>
+        <span className="truncate max-w-[150px] font-medium text-foreground">
           {modelTriggerLabel}
         </span>
         <ComposerControlChevron />
       </ComposerControl>
 
-      {/* Popover Card (Two Columns: Left Provider Rail + Right Searchable Model List) */}
-      {isOpen && !disabled && (
-        <div
-          role="dialog"
-          aria-label="Select model and provider"
-          className="absolute bottom-[calc(100%+8px)] left-0 w-[360px] h-[340px] rounded-dialog border border-border bg-surface-elevated/95 backdrop-blur-xl shadow-2xl flex flex-row overflow-hidden z-50 animate-in fade-in zoom-in-95 duration-100"
-        >
-          {/* Left Vertical Provider Rail */}
-          <div className="w-11 bg-surface/50 border-r border-border p-1.5 flex flex-col items-center gap-1 shrink-0">
-            {/* Favorites Star Tab */}
-            <button
-              type="button"
-              title="Favorite Models"
-              aria-label="Favorite Models"
-              onClick={() => setActiveRailTab('favorites')}
-              className={`relative size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-colors ${
-                activeRailTab === 'favorites'
-                  ? 'bg-selected-row text-warning'
-                  : 'text-icon-muted hover:text-foreground hover:bg-hover-row'
-              }`}
-            >
-              {activeRailTab === 'favorites' && (
-                <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-primary rounded-full" />
-              )}
-              <StarSvg filled={activeRailTab === 'favorites'} className="size-4" />
-            </button>
+      {/* Floating Two-Column Popover Card via Portal */}
+      {isOpen &&
+        coords &&
+        createPortal(
+          <div
+            ref={panelRef}
+            role="dialog"
+            aria-label="Select model and provider"
+            className="kite-floating-card kite-model-picker-card"
+            style={{
+              left: `${coords.left}px`,
+              top: `${coords.top}px`,
+            }}
+          >
+            {/* Left Rail: Favorites + Providers */}
+            <div className="kite-model-rail">
+              {/* Favorites Star Tab */}
+              <button
+                type="button"
+                title="Favorite Models"
+                aria-label="Favorite Models"
+                onClick={() => setActiveRailTab('favorites')}
+                className={`kite-model-rail-btn ${
+                  activeRailTab === 'favorites' ? 'kite-model-rail-btn--active' : ''
+                }`}
+                style={{ color: activeRailTab === 'favorites' ? '#eab308' : undefined }}
+              >
+                {activeRailTab === 'favorites' && <span className="kite-model-rail-indicator" />}
+                <StarSvg filled={activeRailTab === 'favorites'} size={15} />
+              </button>
 
-            <span className="w-6 h-px bg-border my-0.5 shrink-0" aria-hidden="true" />
+              <span className="kite-model-rail-divider" aria-hidden="true" />
 
-            {/* Provider Icons List */}
-            <div className="flex-1 overflow-y-auto flex flex-col items-center gap-1 w-full no-scrollbar">
-              {providers.map((p) => {
-                const isTabActive = activeRailTab === p.id;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    title={p.label}
-                    aria-label={p.label}
-                    onClick={() => {
-                      setActiveRailTab(p.id as ChatProvider);
-                      if (p.id !== provider) {
-                        onSelectProvider(p.id as ChatProvider);
-                      }
-                    }}
-                    className={`relative size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-colors ${
-                      isTabActive
-                        ? 'bg-selected-row text-foreground'
-                        : 'text-icon-muted hover:text-foreground hover:bg-hover-row'
-                    }`}
-                  >
-                    {isTabActive && (
-                      <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-primary rounded-full" />
-                    )}
-                    <BrandLogo
-                      engine={p.engine ?? p.id}
-                      label={p.label}
-                      size={16}
-                      className="size-4 shrink-0"
-                    />
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Right Model List Column */}
-          <div className="flex-1 flex flex-col min-w-0 bg-popover/80">
-            {/* Search Input Bar */}
-            <div className="h-9 px-2.5 border-b border-border flex items-center gap-2 shrink-0">
-              <SearchIcon size={14} className="text-muted-foreground shrink-0" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search models..."
-                aria-label="Search models"
-                className="w-full bg-transparent border-0 text-xs text-foreground placeholder:text-muted-foreground outline-none"
-              />
-            </div>
-
-            {/* Subheader */}
-            <div className="px-2.5 pt-2 pb-1 flex items-center justify-between text-2xs font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
-              <span>
-                {activeRailTab === 'favorites'
-                  ? 'Favorite Models'
-                  : `${activeTabProviderRow.label} Models`}
-              </span>
-              {activeTabProviderRow.detail && activeRailTab !== 'favorites' && (
-                <span className="font-normal normal-case text-muted-foreground truncate max-w-[120px]">
-                  {activeTabProviderRow.detail}
-                </span>
-              )}
-            </div>
-
-            {/* Scrollable Model Options */}
-            <div
-              role="listbox"
-              aria-label={`${activeTabProviderRow.label} Models`}
-              className="flex-1 overflow-y-auto p-1.5 flex flex-col gap-0.5"
-            >
-              {displayedModels.length > 0 ? (
-                displayedModels.map((item) => {
-                  const isSelected = item.id === currentModelId;
-                  const favored = isFavorite(provider, item.id);
-                  const badge = getModelBadge(item);
-
+              {/* Provider Buttons */}
+              <div className="kite-model-rail-list">
+                {providers.map((p) => {
+                  const isTabActive = activeRailTab === p.id;
                   return (
-                    <div
-                      key={item.id}
-                      role="option"
-                      aria-selected={isSelected}
-                      tabIndex={0}
-                      onClick={() => handleSelectModelRow(item.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleSelectModelRow(item.id);
+                    <button
+                      key={p.id}
+                      type="button"
+                      title={p.label}
+                      aria-label={p.label}
+                      onClick={() => {
+                        setActiveRailTab(p.id as ChatProvider);
+                        if (p.id !== provider) {
+                          onSelectProvider(p.id as ChatProvider);
                         }
                       }}
-                      className={`h-8 px-2.5 rounded-control flex items-center justify-between gap-2 text-xs cursor-pointer transition-colors group shrink-0 ${
-                        isSelected
-                          ? 'bg-selected-row text-foreground'
-                          : 'text-secondary-label hover:text-foreground hover:bg-hover-row'
+                      className={`kite-model-rail-btn ${
+                        isTabActive ? 'kite-model-rail-btn--active' : ''
                       }`}
                     >
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                      {isTabActive && <span className="kite-model-rail-indicator" />}
+                      <span className="shrink-0 inline-flex items-center">
                         <BrandLogo
-                          engine={activeTabProviderRow.engine ?? activeTabProviderRow.id}
-                          label={activeTabProviderRow.label}
-                          size={14}
-                          className="size-3.5 shrink-0"
+                          engine={p.engine ?? p.id}
+                          label={p.label}
+                          size={15}
                         />
-                        <span className="truncate font-medium text-foreground">
-                          {item.label}
-                        </span>
-                        {badge && (
-                          <span className="text-2xs px-1.5 py-0.5 rounded-xs bg-surface-elevated text-secondary-label shrink-0">
-                            {badge}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {isSelected && (
-                          <CheckIcon size={14} className="size-3.5 text-primary shrink-0" />
-                        )}
-                        {item.id !== AUTOMATIC_MODEL_ID && (
-                          <button
-                            type="button"
-                            aria-label={
-                              favored
-                                ? `Unfavorite ${item.label}`
-                                : `Favorite ${item.label}`
-                            }
-                            onClick={(e) => toggleFavorite(e, provider, item.id)}
-                            className={`size-5 rounded-xs inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-opacity ${
-                              favored
-                                ? 'opacity-100 text-warning'
-                                : 'opacity-0 group-hover:opacity-100 text-icon-muted hover:text-foreground'
-                            }`}
-                          >
-                            <StarSvg filled={favored} className="size-3" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
+                      </span>
+                    </button>
                   );
-                })
-              ) : (
-                <div className="py-8 px-3 text-center text-xs text-muted-foreground">
-                  No matching models found.
-                </div>
-              )}
+                })}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
-    </div>
+
+            {/* Right Panel: Search Bar + Model Options */}
+            <div className="kite-model-content">
+              {/* Search Bar */}
+              <div className="kite-model-search-wrap">
+                <SearchIcon size={14} className="text-muted-foreground shrink-0" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search models..."
+                  aria-label="Search models"
+                  className="kite-model-search-input"
+                />
+              </div>
+
+              {/* Category Header */}
+              <div className="kite-model-section-header">
+                <span>
+                  {activeRailTab === 'favorites'
+                    ? 'Favorite Models'
+                    : `${activeTabProviderRow.label} Models`}
+                </span>
+                {activeTabProviderRow.detail && activeRailTab !== 'favorites' && (
+                  <span
+                    style={{
+                      fontWeight: 400,
+                      textTransform: 'none',
+                      color: 'var(--muted-foreground)',
+                    }}
+                  >
+                    {activeTabProviderRow.detail}
+                  </span>
+                )}
+              </div>
+
+              {/* Model Options List */}
+              <div
+                role="listbox"
+                aria-label={`${activeTabProviderRow.label} Models`}
+                className="kite-model-list"
+              >
+                {displayedModels.length > 0 ? (
+                  displayedModels.map((item: DriverChoice) => {
+                    const isSelected = item.id === currentModelId;
+                    const favored = isFavorite(provider, item.id);
+                    const badge = getModelBadge(item);
+
+                    return (
+                      <div
+                        key={item.id}
+                        role="option"
+                        aria-selected={isSelected}
+                        tabIndex={0}
+                        onClick={() => handleSelectModelRow(item.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleSelectModelRow(item.id);
+                          }
+                        }}
+                        className={`kite-model-item ${
+                          isSelected ? 'kite-model-item--selected' : ''
+                        }`}
+                      >
+                        <div className="kite-model-item-left">
+                          <span className="shrink-0 inline-flex items-center">
+                            <BrandLogo
+                              engine={activeTabProviderRow.engine ?? activeTabProviderRow.id}
+                              label={activeTabProviderRow.label}
+                              size={14}
+                            />
+                          </span>
+                          <span className="kite-model-item-label">{item.label}</span>
+                          {badge && <span className="kite-model-item-badge">{badge}</span>}
+                        </div>
+
+                        <div className="kite-model-item-right">
+                          {isSelected && (
+                            <CheckIcon
+                              size={14}
+                              className="shrink-0"
+                              style={{ color: 'var(--primary, #3b82f6)' }}
+                            />
+                          )}
+                          {item.id !== AUTOMATIC_MODEL_ID && (
+                            <button
+                              type="button"
+                              aria-label={
+                                favored
+                                  ? `Unfavorite ${item.label}`
+                                  : `Favorite ${item.label}`
+                              }
+                              onClick={(e) => toggleFavorite(e, provider, item.id)}
+                              className={`kite-model-star-btn ${
+                                favored ? 'kite-model-star-btn--fav' : ''
+                              }`}
+                            >
+                              <StarSvg filled={favored} size={13} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div
+                    style={{
+                      padding: '2rem 1rem',
+                      textAlign: 'center',
+                      fontSize: '0.75rem',
+                      color: 'var(--muted-foreground, #71717a)',
+                    }}
+                  >
+                    {searchQuery.trim()
+                      ? `No models match "${searchQuery}"`
+                      : activeRailTab === 'favorites'
+                      ? 'No favorite models saved yet. Click the star on any model to save it here.'
+                      : 'No models available'}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 };

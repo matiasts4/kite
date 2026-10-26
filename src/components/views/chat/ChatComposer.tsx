@@ -2,14 +2,10 @@ import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import './composer/composer.css';
 import {
   StopIcon,
-  PaperclipIcon,
   CloseIcon,
   FileCodeIcon,
   ArrowUpIcon,
   MicIcon,
-  LockIcon,
-  PenLineIcon,
-  SparklesIcon,
   BotIcon,
   PencilRulerIcon,
 } from './ChatIcons';
@@ -32,10 +28,13 @@ import {
   type ConnectionCandidate,
 } from './connectionBinding';
 import { ComposerSurface } from './composer/ComposerSurface';
-import { ComposerControl, ComposerControlSeparator, ComposerControlIcon, ComposerControlChevron } from './composer/ComposerControl';
+import { ComposerControl, ComposerControlSeparator, ComposerControlIcon } from './composer/ComposerControl';
 import { ModelPickerPopover } from './composer/ModelPickerPopover';
 import { EffortSliderPopover } from './composer/EffortSliderPopover';
 import { ComposerContextStrip } from './composer/ComposerContextStrip';
+import { AttachMenuPopover } from './composer/AttachMenuPopover';
+import { PermissionPickerPopover } from './composer/PermissionPickerPopover';
+import { ConnectionPickerPopover } from './composer/ConnectionPickerPopover';
 
 export interface ChatComposerProps {
   threadId: string;
@@ -51,6 +50,9 @@ export interface ChatComposerProps {
   threadItems?: ChatItem[];
   threadBranch?: string | null;
   threadWorkspaceName?: string | null;
+  branches?: string[];
+  onSwitchBranch?: (branch: string) => void;
+  onCreateBranch?: (branch: string) => void;
   declaration: DriverDeclaration;
   running: boolean;
   prompt: string;
@@ -142,6 +144,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadItems = [],
   threadBranch,
   threadWorkspaceName,
+  branches = [],
+  onSwitchBranch,
+  onCreateBranch,
   declaration,
   running,
   prompt,
@@ -164,13 +169,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const footerRef = useRef<HTMLDivElement>(null);
 
   const [connectionCandidates, setConnectionCandidates] = useState<ConnectionCandidate[]>([]);
-  const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false);
-  const [isConnectionMenuOpen, setIsConnectionMenuOpen] = useState(false);
-  const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
-
-  const permissionMenuRef = useRef<HTMLDivElement>(null);
-  const connectionMenuRef = useRef<HTMLDivElement>(null);
-  const attachMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -218,24 +216,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       el.style.height = `${Math.min(240, Math.max(52, el.scrollHeight))}px`;
     }
   }, [prompt]);
-
-  // Click outside listener for dropdowns
-  useEffect(() => {
-    if (!isPermissionMenuOpen && !isConnectionMenuOpen && !isAttachMenuOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      if (permissionMenuRef.current && !permissionMenuRef.current.contains(e.target as Node)) {
-        setIsPermissionMenuOpen(false);
-      }
-      if (connectionMenuRef.current && !connectionMenuRef.current.contains(e.target as Node)) {
-        setIsConnectionMenuOpen(false);
-      }
-      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
-        setIsAttachMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isPermissionMenuOpen, isConnectionMenuOpen, isAttachMenuOpen]);
 
   // Load dictation availability on mount
   useEffect(() => {
@@ -475,13 +455,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const permissions = declaration.permission ?? [];
   const permissionDeclared = isControlDeclared(declaration.permission);
   const permissionReason = permissionDeclared ? null : undeclaredReason(declaration, 'permission');
-  const activePermission = permissions.find((p) => p.id === threadMode);
-  const permissionLabel = activePermission?.label || threadMode;
 
   const canSend = Boolean(prompt.trim() || attachments.length > 0);
-  const selectedConnection = connectionCandidates.find(
-    (candidate) => candidate.connectionId === threadConnectionId
-  );
 
   const composerPlaceholder = agentName
     ? running
@@ -660,155 +635,37 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
             <ComposerControlSeparator />
 
-            {/* Runtime / Permission Mode Selector */}
-            <div ref={permissionMenuRef} className="relative inline-block">
-              <ComposerControl
-                role="combobox"
-                aria-label="Permission"
-                aria-expanded={isPermissionMenuOpen}
-                disabled={running || !permissionDeclared}
-                title={permissionReason ?? 'Permission mode'}
-                onClick={() => setIsPermissionMenuOpen((prev) => !prev)}
-              >
-                <ComposerControlIcon
-                  icon={
-                    threadMode === 'fullAccess'
-                      ? SparklesIcon
-                      : threadMode === 'readOnly'
-                      ? LockIcon
-                      : PenLineIcon
-                  }
-                  size={14}
-                  className="opacity-80"
-                />
-                <span className="truncate max-w-[110px]">{permissionLabel}</span>
-                <ComposerControlChevron />
-              </ComposerControl>
-
-              {permissionReason && <ControlReason reason={permissionReason} />}
-
-              {isPermissionMenuOpen && (
-                <div
-                  role="listbox"
-                  aria-label="Permission mode"
-                  className="absolute bottom-[calc(100%+6px)] left-0 w-60 rounded-card border border-border bg-surface-elevated/95 backdrop-blur-md shadow-xl p-1 z-50 flex flex-col gap-0.5"
-                >
-                  {permissions.map((p) => {
-                    const isSelected = p.id === threadMode;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        role="option"
-                        aria-selected={isSelected}
-                        onClick={() => {
-                          onUpdateConfig({ mode: p.id as ChatMode });
-                          setIsPermissionMenuOpen(false);
-                        }}
-                        className={`px-2.5 py-1.5 rounded-sm flex flex-col text-left cursor-pointer border-0 transition-colors ${
-                          isSelected
-                            ? 'bg-selected-row text-foreground'
-                            : 'bg-transparent text-secondary-label hover:text-foreground hover:bg-hover-row'
-                        }`}
-                      >
-                        <span className="text-xs font-medium text-foreground">{p.label}</span>
-                        {p.detail && (
-                          <span className="text-2xs text-muted-foreground mt-0.5">{p.detail}</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+            {/* Runtime / Permission Mode Popover */}
+            <PermissionPickerPopover
+              threadMode={threadMode}
+              permissions={permissions}
+              permissionDeclared={permissionDeclared}
+              permissionReason={permissionReason}
+              disabled={running}
+              onSelectPermission={(mode) => onUpdateConfig({ mode })}
+            />
 
             {/* Connection Selector (when multiple accounts verified the spawn endpoint) */}
             {connectionCandidates.length > 1 && onSelectConnection && (
               <>
                 <ComposerControlSeparator />
-                <div ref={connectionMenuRef} className="relative inline-block">
-                  <ComposerControl
-                    role="combobox"
-                    aria-label="Connection"
-                    aria-expanded={isConnectionMenuOpen}
-                    disabled={running}
-                    onClick={() => setIsConnectionMenuOpen((prev) => !prev)}
-                  >
-                    <span className="truncate max-w-[120px]">
-                      {selectedConnection?.displayName ?? 'Choose connection'}
-                    </span>
-                    <ComposerControlChevron />
-                  </ComposerControl>
-
-                  {isConnectionMenuOpen && (
-                    <div
-                      role="listbox"
-                      aria-label="Account connection"
-                      className="absolute bottom-[calc(100%+6px)] left-0 w-52 rounded-card border border-border bg-surface-elevated/95 backdrop-blur-md shadow-xl p-1 z-50 flex flex-col gap-0.5"
-                    >
-                      {connectionCandidates.map((c) => (
-                        <button
-                          key={c.connectionId}
-                          type="button"
-                          onClick={() => {
-                            onSelectConnection(c.connectionId);
-                            setIsConnectionMenuOpen(false);
-                          }}
-                          className="px-2 py-1.5 rounded-sm flex flex-col text-left cursor-pointer border-0 bg-transparent text-secondary-label hover:text-foreground hover:bg-hover-row transition-colors"
-                        >
-                          <span className="text-xs font-medium text-foreground">{c.displayName}</span>
-                          <span className="text-2xs text-muted-foreground">{c.supportedEndpoint}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                <ConnectionPickerPopover
+                  threadConnectionId={threadConnectionId ?? null}
+                  candidates={connectionCandidates}
+                  disabled={running}
+                  onSelectConnection={onSelectConnection}
+                />
               </>
             )}
           </div>
 
           {/* Right Actions */}
           <div className="kite-composer-footer-right">
-            {/* Attachment Button */}
-            <div ref={attachMenuRef} className="relative inline-block">
-              <button
-                type="button"
-                title="Attach files or a folder"
-                aria-label="Attach to message"
-                disabled={running}
-                onClick={() => setIsAttachMenuOpen((prev) => !prev)}
-                className="size-8 rounded-control inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-hover-row border-0 bg-transparent cursor-pointer transition-colors"
-              >
-                <PaperclipIcon size={15} />
-              </button>
-
-              {isAttachMenuOpen && (
-                <div className="absolute bottom-[calc(100%+6px)] right-0 w-44 rounded-card border border-border bg-surface-elevated/95 backdrop-blur-md shadow-xl p-1 z-50 flex flex-col gap-0.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onPickAttachments('files');
-                      setIsAttachMenuOpen(false);
-                    }}
-                    className="h-7 px-2 rounded-sm flex items-center gap-2 text-xs text-secondary-label hover:text-foreground hover:bg-hover-row text-left cursor-pointer border-0 bg-transparent transition-colors"
-                  >
-                    <FileCodeIcon size={13} className="text-icon-muted" />
-                    <span>Add files…</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onPickAttachments('folder');
-                      setIsAttachMenuOpen(false);
-                    }}
-                    className="h-7 px-2 rounded-sm flex items-center gap-2 text-xs text-secondary-label hover:text-foreground hover:bg-hover-row text-left cursor-pointer border-0 bg-transparent transition-colors"
-                  >
-                    <PaperclipIcon size={13} className="text-icon-muted" />
-                    <span>Add folder…</span>
-                  </button>
-                </div>
-              )}
-            </div>
+            {/* Attachment Button with Popover */}
+            <AttachMenuPopover
+              disabled={running}
+              onPickAttachments={onPickAttachments}
+            />
 
             {/* Dictation Button */}
             <button
@@ -892,11 +749,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       {/* Tier 2: Recessed Lower Context Strip */}
       <ComposerContextStrip
         currentBranch={threadBranch || 'main'}
+        branches={branches}
         currentWorkspace={threadWorkspaceName || 'Local'}
-        onSelectBranch={(branch) => {
-          // If branch selection needs to be dispatched, SingleThreadPane handles it
-          console.log('[ComposerContextStrip] Selected branch:', branch);
-        }}
+        onSelectBranch={onSwitchBranch}
+        onCreateBranch={onCreateBranch}
       />
     </div>
   );

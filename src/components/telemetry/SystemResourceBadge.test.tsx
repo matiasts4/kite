@@ -41,6 +41,13 @@ vi.mock('../../lib/ipc', () => ({
         { id: 'webview', label: 'Motor UI (WebView2 / GPU)', memoryBytes: 275 * 1024 * 1024, processCount: 1 },
         { id: 'terminals', label: 'Terminales PTY & Agentes', memoryBytes: 120 * 1024 * 1024, processCount: 3 },
       ],
+      processes: [
+        { pid: 5120, name: 'kite-code.exe', label: 'Núcleo Kite Code (Tauri Host)', category: 'core', memoryBytes: 85 * 1024 * 1024, privateBytes: 55 * 1024 * 1024 },
+        { pid: 5124, name: 'msedgewebview2.exe', label: 'Motor UI (WebView2)', category: 'webview', memoryBytes: 275 * 1024 * 1024, privateBytes: 160 * 1024 * 1024 },
+        { pid: 6100, name: 'node.exe', label: 'Antigravity CLI Agent', category: 'terminals', memoryBytes: 80 * 1024 * 1024, privateBytes: 60 * 1024 * 1024 },
+        { pid: 6105, name: 'powershell.exe', label: 'PowerShell Shell', category: 'terminals', memoryBytes: 30 * 1024 * 1024, privateBytes: 20 * 1024 * 1024 },
+        { pid: 6110, name: 'conhost.exe', label: 'Host de consola Windows (ConPTY)', category: 'terminals', memoryBytes: 10 * 1024 * 1024, privateBytes: 6 * 1024 * 1024 },
+      ],
     },
   }),
   isTauriEnvironment: vi.fn().mockReturnValue(true),
@@ -95,6 +102,30 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     // Toggle badge display mode to RAM + CPU
     await user.click(screen.getByRole('button', { name: 'RAM + CPU' }));
     expect(badgeBtn).toHaveTextContent('3.4%');
+  });
+
+  it('displays detailed process breakdown and private memory in the RAM tab', async () => {
+    const user = userEvent.setup();
+    render(<SystemResourceBadge />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('system-resource-ram-value')).toHaveTextContent('480 MB');
+    });
+
+    const badgeBtn = screen.getByTestId('system-resource-badge');
+    await user.click(badgeBtn);
+
+    // Switch to RAM tab
+    await user.click(screen.getByRole('tab', { name: 'RAM' }));
+
+    // Verifies explanatory note is displayed
+    expect(screen.getByText(/¿Por qué varía el consumo\?/i)).toBeInTheDocument();
+    expect(screen.getByText(/Subprocesos Activos/i)).toBeInTheDocument();
+
+    // Verifies individual processes are listed
+    expect(screen.getByText('PID 6100')).toBeInTheDocument();
+    expect(screen.getByText(/Antigravity CLI Agent/i)).toBeInTheDocument();
+    expect(screen.getByText('PID 5120')).toBeInTheDocument();
   });
 
   it('evaluates memory state relative to the machine capacity', async () => {

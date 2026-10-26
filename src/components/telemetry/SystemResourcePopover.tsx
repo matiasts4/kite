@@ -160,6 +160,8 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<ResourceTab>('overview');
+  const [procCategoryFilter, setProcCategoryFilter] = useState<'all' | 'terminals' | 'webview' | 'core'>('all');
+  const [procSearchQuery, setProcSearchQuery] = useState<string>('');
   const [uiFps, setUiFps] = useState<number>(60);
 
   // Measure live UI frame rate while popover is open
@@ -489,7 +491,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           paddingRight: '2px',
         }}
       >
-        {/* HERO CARD: App Total RAM (Always visible in Overview & Memory) */}
+        {/* HERO CARD: App Total RAM (Visible in Overview & Memory) */}
         {(activeTab === 'overview' || activeTab === 'memory') && (
           <div
             style={{
@@ -550,6 +552,11 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                   >
                     {snapshot.memory.appShareOfSystemPercent}% de{' '}
                     {formatBytes(snapshot.memory.systemTotalBytes, 0)} del sistema
+                    {snapshot.memory.appPrivateBytes != null && (
+                      <span style={{ color: 'var(--accent, #5c8fff)', marginLeft: '6px' }}>
+                        · {formatBytes(snapshot.memory.appPrivateBytes)} priv.
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -566,6 +573,26 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                 </span>
               </div>
             </div>
+
+            {/* Explanatory note in Memory Tab */}
+            {activeTab === 'memory' && (
+              <div
+                style={{
+                  fontSize: '10px',
+                  lineHeight: 1.45,
+                  color: 'var(--text-secondary)',
+                  padding: '7px 9px',
+                  borderRadius: 'var(--control-radius, 8px)',
+                  backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.03))',
+                  border: '1px solid var(--block-stroke)',
+                }}
+              >
+                <strong style={{ color: 'var(--text-primary)' }}>¿Por qué varía el consumo?</strong> La{' '}
+                <em>Memoria Privada</em> es la RAM exclusiva reservada por Kite y los agentes. El{' '}
+                <em>Working Set</em> incluye páginas compartidas de Windows y Chromium multi-contadas por
+                proceso, y varía bruscamente al nacer o morir subprocesos de compilación o tests.
+              </div>
+            )}
 
             {/* Process Tree Breakdown */}
             <div
@@ -654,6 +681,32 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                 );
               })}
 
+              {/* Jump to memory deep dive from overview */}
+              {activeTab === 'overview' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('memory')}
+                  style={{
+                    marginTop: '4px',
+                    padding: '6px 9px',
+                    borderRadius: 'var(--control-radius, 8px)',
+                    border: '1px solid var(--block-stroke)',
+                    backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.02))',
+                    color: 'var(--accent, #5c8fff)',
+                    fontSize: '11px',
+                    fontWeight: 500,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    transition: 'all 120ms ease',
+                  }}
+                >
+                  <span>Ver desglose de subprocesos ({snapshot.runtime.processes?.length || snapshot.runtime.processCount} activos)</span>
+                  <span style={{ fontSize: '12px' }}>→</span>
+                </button>
+              )}
+
               {/* System Host RAM bar */}
               <div
                 style={{
@@ -698,6 +751,291 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* DETAILED PROCESS BREAKDOWN (Exclusively in Memory Tab) */}
+        {activeTab === 'memory' && (
+          <div
+            style={{
+              backgroundColor: 'var(--block-fill)',
+              border: '1px solid var(--block-stroke)',
+              borderRadius: '10px',
+              padding: '12px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                Subprocesos Activos ({snapshot.runtime.processes?.length || snapshot.runtime.processCount})
+              </div>
+              <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+                Ordenados por consumo
+              </div>
+            </div>
+
+            {/* Filter pills & search */}
+            {(() => {
+              const allProcs = snapshot.runtime.processes || [];
+              const termCount = allProcs.filter((p) => p.category === 'terminals').length;
+              const webCount = allProcs.filter((p) => p.category === 'webview').length;
+              const coreCount = allProcs.filter((p) => p.category === 'core').length;
+
+              const filtered = allProcs.filter((p) => {
+                if (procCategoryFilter !== 'all' && p.category !== procCategoryFilter) return false;
+                if (procSearchQuery.trim()) {
+                  const q = procSearchQuery.toLowerCase();
+                  return (
+                    p.name.toLowerCase().includes(q) ||
+                    (p.label && p.label.toLowerCase().includes(q)) ||
+                    String(p.pid).includes(q)
+                  );
+                }
+                return true;
+              });
+
+              return (
+                <>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {(
+                      [
+                        { id: 'all', label: `Todos (${allProcs.length})` },
+                        { id: 'terminals', label: `Terminales & Agentes (${termCount})` },
+                        { id: 'webview', label: `Motor UI (${webCount})` },
+                        { id: 'core', label: `Núcleo (${coreCount})` },
+                      ] as const
+                    ).map((filter) => {
+                      const isSel = procCategoryFilter === filter.id;
+                      return (
+                        <button
+                          key={filter.id}
+                          type="button"
+                          onClick={() => setProcCategoryFilter(filter.id)}
+                          style={{
+                            padding: '3px 8px',
+                            height: '24px',
+                            borderRadius: 'var(--vl-radius-sm, 6px)',
+                            fontSize: '10px',
+                            fontWeight: isSel ? 600 : 500,
+                            border: isSel
+                              ? '1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.35))'
+                              : '1px solid var(--block-stroke)',
+                            backgroundColor: isSel
+                              ? 'var(--accent-tint, rgba(92, 143, 255, 0.14))'
+                              : 'transparent',
+                            color: isSel ? 'var(--accent, #5c8fff)' : 'var(--text-secondary)',
+                            cursor: 'pointer',
+                            transition: 'all 120ms ease',
+                          }}
+                        >
+                          {filter.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {allProcs.length > 3 && (
+                    <input
+                      type="text"
+                      placeholder="Filtrar por PID o nombre de proceso..."
+                      value={procSearchQuery}
+                      onChange={(e) => setProcSearchQuery(e.target.value)}
+                      style={{
+                        width: '100%',
+                        height: '26px',
+                        borderRadius: 'var(--control-radius, 8px)',
+                        border: '1px solid var(--block-stroke)',
+                        backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.03))',
+                        color: 'var(--text-primary)',
+                        fontSize: '11px',
+                        padding: '0 8px',
+                        outline: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Process list */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '5px',
+                      maxHeight: '230px',
+                      overflowY: 'auto',
+                      paddingRight: '2px',
+                    }}
+                  >
+                    {filtered.length === 0 ? (
+                      <div
+                        style={{
+                          padding: '16px',
+                          textAlign: 'center',
+                          color: 'var(--text-secondary)',
+                          fontSize: '11px',
+                        }}
+                      >
+                        No se encontraron subprocesos activos para este filtro.
+                      </div>
+                    ) : (
+                      filtered.map((proc) => {
+                        const pctOfApp =
+                          snapshot.memory.appTotalBytes > 0
+                            ? Math.round((proc.memoryBytes / snapshot.memory.appTotalBytes) * 100)
+                            : 0;
+                        const catColor =
+                          proc.category === 'terminals'
+                            ? '#f59e0b'
+                            : proc.category === 'webview'
+                            ? 'var(--status-running, #34c759)'
+                            : 'var(--accent, #5c8fff)';
+                        const catBadge =
+                          proc.category === 'terminals'
+                            ? 'Agente / PTY'
+                            : proc.category === 'webview'
+                            ? 'WebView2'
+                            : 'Host';
+
+                        return (
+                          <div
+                            key={proc.pid}
+                            style={{
+                              padding: '6px 8px',
+                              borderRadius: 'var(--control-radius, 8px)',
+                              backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.025))',
+                              border: '1px solid var(--block-stroke)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '4px',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                fontSize: '11px',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                                <span
+                                  style={{
+                                    fontSize: '9px',
+                                    fontWeight: 700,
+                                    fontVariantNumeric: 'tabular-nums',
+                                    padding: '1px 5px',
+                                    borderRadius: 'var(--vl-radius-xs, 4px)',
+                                    backgroundColor: 'var(--block-stroke)',
+                                    color: 'var(--text-secondary)',
+                                  }}
+                                >
+                                  PID {proc.pid}
+                                </span>
+                                <span
+                                  style={{
+                                    fontWeight: 600,
+                                    color: 'var(--text-primary)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                  title={proc.name}
+                                >
+                                  {proc.name}
+                                </span>
+                                {proc.label && (
+                                  <span
+                                    style={{
+                                      fontSize: '10px',
+                                      color: 'var(--text-secondary)',
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    · {proc.label}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                <span
+                                  style={{
+                                    fontSize: '9px',
+                                    fontWeight: 600,
+                                    padding: '1px 5px',
+                                    borderRadius: 'var(--vl-radius-xs, 4px)',
+                                    color: catColor,
+                                    backgroundColor: 'color-mix(in srgb, currentColor 12%, transparent)',
+                                  }}
+                                >
+                                  {catBadge}
+                                </span>
+                                <span
+                                  style={{
+                                    fontWeight: 700,
+                                    fontVariantNumeric: 'tabular-nums',
+                                    color: 'var(--text-primary)',
+                                  }}
+                                >
+                                  {formatBytes(proc.memoryBytes)}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                fontSize: '10px',
+                                color: 'var(--text-secondary)',
+                              }}
+                            >
+                              <span>
+                                {pctOfApp}% de la app
+                                {proc.privateBytes != null && (
+                                  <span style={{ marginLeft: '4px' }}>
+                                    · {formatBytes(proc.privateBytes)} privada
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+
+                            <div
+                              style={{
+                                height: '3px',
+                                borderRadius: '999px',
+                                backgroundColor: 'color-mix(in srgb, var(--text-secondary) 14%, transparent)',
+                                overflow: 'hidden',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  height: '100%',
+                                  width: `${Math.max(2, Math.min(100, pctOfApp))}%`,
+                                  backgroundColor: catColor,
+                                  borderRadius: '999px',
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         )}
 

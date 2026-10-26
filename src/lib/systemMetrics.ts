@@ -9,7 +9,18 @@ export interface ProcessGroupBreakdown {
   id: 'core' | 'webview' | 'terminals' | 'js_heap';
   label: string;
   memoryBytes: number;
+  privateBytes?: number;
   processCount: number;
+}
+
+export interface DetailedProcessMetric {
+  pid: number;
+  parentPid?: number;
+  name: string;
+  label?: string;
+  category: 'core' | 'webview' | 'terminals';
+  memoryBytes: number;
+  privateBytes?: number;
 }
 
 export interface SystemMetricsSnapshot {
@@ -19,6 +30,7 @@ export interface SystemMetricsSnapshot {
   ipcLatencyMs: number;
   memory: {
     appTotalBytes: number;
+    appPrivateBytes?: number;
     appCoreBytes: number;
     appTerminalsBytes: number;
     jsHeapUsedBytes: number | null;
@@ -48,6 +60,7 @@ export interface SystemMetricsSnapshot {
     activeTerminals: number;
     processCount: number;
     breakdown: ProcessGroupBreakdown[];
+    processes?: DetailedProcessMetric[];
   };
 }
 
@@ -241,6 +254,7 @@ function buildFallbackSnapshot(ipcLatencyMs: number): SystemMetricsSnapshot {
   const webviewBytes = heap.used ? Math.max(heap.used * 2.4, 240 * 1024 * 1024) : 284 * 1024 * 1024;
   const terminalsBytes = activeTerminals * 54 * 1024 * 1024;
   const appTotalBytes = Math.round(coreBytes + webviewBytes + terminalsBytes);
+  const appPrivateBytes = Math.round(coreBytes * 0.7 + webviewBytes * 0.52 + terminalsBytes * 0.65);
 
   const navMemGb =
     typeof navigator !== 'undefined' && typeof (navigator as any).deviceMemory === 'number'
@@ -257,6 +271,44 @@ function buildFallbackSnapshot(ipcLatencyMs: number): SystemMetricsSnapshot {
 
   const appShare = Math.round((appTotalBytes / sysTotalBytes) * 1000) / 10;
 
+  const fallbackProcesses: DetailedProcessMetric[] = [
+    {
+      pid: 4120,
+      name: 'kite-code.exe',
+      label: 'Núcleo Kite Code (Tauri Host)',
+      category: 'core',
+      memoryBytes: coreBytes,
+      privateBytes: Math.round(coreBytes * 0.7),
+    },
+    {
+      pid: 4124,
+      name: 'msedgewebview2.exe',
+      label: 'Motor UI (WebView2 Renderer)',
+      category: 'webview',
+      memoryBytes: Math.round(webviewBytes * 0.65),
+      privateBytes: Math.round(webviewBytes * 0.4),
+    },
+    {
+      pid: 4128,
+      name: 'msedgewebview2.exe',
+      label: 'Motor UI (GPU Process)',
+      category: 'webview',
+      memoryBytes: Math.round(webviewBytes * 0.35),
+      privateBytes: Math.round(webviewBytes * 0.12),
+    },
+  ];
+
+  if (activeTerminals > 0) {
+    fallbackProcesses.push({
+      pid: 4890,
+      name: 'node.exe',
+      label: 'Antigravity CLI Agent',
+      category: 'terminals',
+      memoryBytes: terminalsBytes,
+      privateBytes: Math.round(terminalsBytes * 0.65),
+    });
+  }
+
   return {
     timestampMs: Date.now(),
     pid: 4120,
@@ -264,6 +316,7 @@ function buildFallbackSnapshot(ipcLatencyMs: number): SystemMetricsSnapshot {
     ipcLatencyMs,
     memory: {
       appTotalBytes,
+      appPrivateBytes,
       appCoreBytes: Math.round(coreBytes + webviewBytes),
       appTerminalsBytes: terminalsBytes,
       jsHeapUsedBytes: heap.used,
@@ -297,21 +350,25 @@ function buildFallbackSnapshot(ipcLatencyMs: number): SystemMetricsSnapshot {
           id: 'core',
           label: 'Núcleo Rust (Tauri Host)',
           memoryBytes: coreBytes,
+          privateBytes: Math.round(coreBytes * 0.7),
           processCount: 1,
         },
         {
           id: 'webview',
           label: 'Motor UI (WebView2 / GPU)',
           memoryBytes: Math.round(webviewBytes),
-          processCount: 1,
+          privateBytes: Math.round(webviewBytes * 0.52),
+          processCount: 2,
         },
         {
           id: 'terminals',
           label: 'Terminales PTY & Agentes',
           memoryBytes: terminalsBytes,
+          privateBytes: Math.round(terminalsBytes * 0.65),
           processCount: activeTerminals,
         },
       ],
+      processes: fallbackProcesses,
     },
   };
 }
@@ -351,7 +408,22 @@ export async function fetchSystemMetricsSnapshot(): Promise<SystemMetricsSnapsho
         id: item.id || 'core',
         label: String(item.label || 'Proceso'),
         memoryBytes: Number(item.memoryBytes || 0),
+        privateBytes: item.privateBytes != null ? Number(item.privateBytes) : undefined,
         processCount: Number(item.processCount || 0),
+      }))
+    : [];
+
+  const processes: DetailedProcessMetric[] = Array.isArray(runtime.processes)
+    ? runtime.processes.map((item: any) => ({
+        pid: Number(item.pid || 0),
+        parentPid: item.parentPid != null ? Number(item.parentPid) : undefined,
+        name: String(item.name || 'proc'),
+        label: item.label ? String(item.label) : undefined,
+        category: (['core', 'webview', 'terminals'].includes(item.category)
+          ? item.category
+          : 'terminals') as 'core' | 'webview' | 'terminals',
+        memoryBytes: Number(item.memoryBytes || 0),
+        privateBytes: item.privateBytes != null ? Number(item.privateBytes) : undefined,
       }))
     : [];
 
@@ -362,6 +434,7 @@ export async function fetchSystemMetricsSnapshot(): Promise<SystemMetricsSnapsho
     ipcLatencyMs,
     memory: {
       appTotalBytes,
+      appPrivateBytes: mem.appPrivateBytes != null ? Number(mem.appPrivateBytes) : undefined,
       appCoreBytes: Number(mem.appCoreBytes || appTotalBytes),
       appTerminalsBytes: Number(mem.appTerminalsBytes || 0),
       jsHeapUsedBytes: heap.used,
@@ -395,6 +468,7 @@ export async function fetchSystemMetricsSnapshot(): Promise<SystemMetricsSnapsho
       activeTerminals,
       processCount: Number(runtime.processCount || 1),
       breakdown,
+      processes,
     },
   };
 }

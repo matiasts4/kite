@@ -174,18 +174,55 @@ mod win_metrics {
         name: String,
     }
 
-    fn query_process_mem_and_cpu(pid: u32) -> (u64, u64) {
+    fn infer_process_label(name: &str) -> &'static str {
+        let lower = name.to_lowercase();
+        if lower.contains("node") {
+            "Node.js Runtime / CLI Tool"
+        } else if lower.contains("rustc") {
+            "Compilador Rust (rustc)"
+        } else if lower.contains("cargo") {
+            "Gestor de paquetes Cargo"
+        } else if lower.contains("powershell") {
+            "PowerShell Shell"
+        } else if lower.contains("cmd") {
+            "CMD Símbolo del Sistema"
+        } else if lower.contains("conhost") {
+            "Host de consola Windows (ConPTY)"
+        } else if lower.contains("agy") {
+            "Antigravity CLI Agent"
+        } else if lower.contains("claude") {
+            "Claude Code Agent"
+        } else if lower.contains("opencode") {
+            "OpenCode Agent"
+        } else if lower.contains("gemini") {
+            "Gemini Agent CLI"
+        } else if lower.contains("python") {
+            "Python Runtime"
+        } else if lower.contains("git") {
+            "Control de versiones Git"
+        } else if lower.contains("esbuild") || lower.contains("vite") || lower.contains("webpack") {
+            "Bundler / Dev Server"
+        } else if lower.contains("msedgewebview2") || lower.contains("webview") {
+            "Motor UI (WebView2)"
+        } else if lower.contains("kite") {
+            "Núcleo Kite Code (Tauri Host)"
+        } else {
+            "Subproceso PTY / Agente"
+        }
+    }
+
+    fn query_process_mem_and_cpu(pid: u32) -> (u64, u64, u64) {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle == 0 || handle == INVALID_HANDLE_VALUE {
-                return (0, 0);
+                return (0, 0, 0);
             }
             let mut mem: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
             mem.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
-            let mem_bytes = if K32GetProcessMemoryInfo(handle, &mut mem, mem.cb) != 0 {
-                mem.working_set_size as u64
+            let (working_set_bytes, private_bytes) = if K32GetProcessMemoryInfo(handle, &mut mem, mem.cb) != 0 {
+                (mem.working_set_size as u64, mem.private_usage as u64)
             } else {
-                0
+                (0, 0)
             };
 
             let mut creation = FILETIME::default();
@@ -199,7 +236,7 @@ mod win_metrics {
             };
 
             let _ = CloseHandle(handle);
-            (mem_bytes, cpu_ticks)
+            (working_set_bytes, private_bytes, cpu_ticks)
         }
     }
 
@@ -286,32 +323,61 @@ mod win_metrics {
         // 2. Process Tree Memory & CPU ticks
         let tree = collect_process_tree(root_pid);
         let mut core_bytes = 0u64;
+        let mut core_private_bytes = 0u64;
         let mut core_count = 0usize;
         let mut webview_bytes = 0u64;
+        let mut webview_private_bytes = 0u64;
         let mut webview_count = 0usize;
         let mut terminals_bytes = 0u64;
+        let mut terminals_private_bytes = 0u64;
         let mut terminals_count = 0usize;
         let mut current_proc_times: HashMap<u32, u64> = HashMap::new();
+        let mut detailed_processes: Vec<Value> = Vec::with_capacity(tree.len());
 
         for node in &tree {
-            let (mem, cpu_ticks) = query_process_mem_and_cpu(node.pid);
+            let (mem, priv_mem, cpu_ticks) = query_process_mem_and_cpu(node.pid);
             current_proc_times.insert(node.pid, cpu_ticks);
 
-            if node.pid == root_pid || node.name.contains("kite") {
+            let (category, label) = if node.pid == root_pid || node.name.contains("kite") {
                 core_bytes = core_bytes.saturating_add(mem);
+                core_private_bytes = core_private_bytes.saturating_add(priv_mem);
                 core_count += 1;
+                ("core", infer_process_label(&node.name))
             } else if node.name.contains("webview") || node.name.contains("msedge") {
                 webview_bytes = webview_bytes.saturating_add(mem);
+                webview_private_bytes = webview_private_bytes.saturating_add(priv_mem);
                 webview_count += 1;
+                ("webview", infer_process_label(&node.name))
             } else {
                 terminals_bytes = terminals_bytes.saturating_add(mem);
+                terminals_private_bytes = terminals_private_bytes.saturating_add(priv_mem);
                 terminals_count += 1;
-            }
+                ("terminals", infer_process_label(&node.name))
+            };
+
+            detailed_processes.push(json!({
+                "pid": node.pid,
+                "parentPid": node.parent_pid,
+                "name": node.name,
+                "label": label,
+                "category": category,
+                "memoryBytes": mem,
+                "privateBytes": priv_mem,
+            }));
         }
+
+        detailed_processes.sort_by(|a, b| {
+            let b_bytes = b["memoryBytes"].as_u64().unwrap_or(0);
+            let a_bytes = a["memoryBytes"].as_u64().unwrap_or(0);
+            b_bytes.cmp(&a_bytes)
+        });
 
         let app_total_bytes = core_bytes
             .saturating_add(webview_bytes)
             .saturating_add(terminals_bytes);
+        let app_private_bytes = core_private_bytes
+            .saturating_add(webview_private_bytes)
+            .saturating_add(terminals_private_bytes);
 
         // 3. System & App CPU % calculation
         let (sys_idle, sys_kernel, sys_user) = unsafe {
@@ -464,6 +530,7 @@ mod win_metrics {
             "uptimeSeconds": uptime_secs,
             "memory": {
                 "appTotalBytes": app_total_bytes,
+                "appPrivateBytes": app_private_bytes,
                 "appCoreBytes": core_bytes.saturating_add(webview_bytes),
                 "appTerminalsBytes": terminals_bytes,
                 "systemTotalBytes": sys_total_mem,
@@ -495,21 +562,25 @@ mod win_metrics {
                         "id": "core",
                         "label": "Núcleo Rust (Tauri Host)",
                         "memoryBytes": core_bytes,
+                        "privateBytes": core_private_bytes,
                         "processCount": core_count
                     },
                     {
                         "id": "webview",
                         "label": "Motor UI (WebView2 / GPU)",
                         "memoryBytes": webview_bytes,
+                        "privateBytes": webview_private_bytes,
                         "processCount": webview_count
                     },
                     {
                         "id": "terminals",
                         "label": "Terminales PTY & Agentes",
                         "memoryBytes": terminals_bytes,
+                        "privateBytes": terminals_private_bytes,
                         "processCount": terminals_count
                     }
-                ]
+                ],
+                "processes": detailed_processes
             }
         })
     }
@@ -535,8 +606,11 @@ mod fallback_metrics {
         let app_cache_bytes = measure_app_cache_bytes();
 
         let app_core_bytes: u64 = 340 * 1024 * 1024;
+        let app_core_private: u64 = 190 * 1024 * 1024;
         let app_terminals_bytes: u64 = (active_terminals as u64) * 58 * 1024 * 1024;
+        let app_terminals_private: u64 = (active_terminals as u64) * 36 * 1024 * 1024;
         let app_total_bytes = app_core_bytes + app_terminals_bytes;
+        let app_private_bytes = app_core_private + app_terminals_private;
         let sys_total: u64 = 16 * 1024 * 1024 * 1024;
         let sys_used: u64 = 7 * 1024 * 1024 * 1024;
         let sys_avail = sys_total - sys_used;
@@ -547,6 +621,7 @@ mod fallback_metrics {
             "uptimeSeconds": uptime_secs,
             "memory": {
                 "appTotalBytes": app_total_bytes,
+                "appPrivateBytes": app_private_bytes,
                 "appCoreBytes": app_core_bytes,
                 "appTerminalsBytes": app_terminals_bytes,
                 "systemTotalBytes": sys_total,
@@ -578,19 +653,42 @@ mod fallback_metrics {
                         "id": "core",
                         "label": "Núcleo Rust (Tauri Host)",
                         "memoryBytes": 64 * 1024 * 1024,
+                        "privateBytes": 42 * 1024 * 1024,
                         "processCount": 1
                     },
                     {
                         "id": "webview",
                         "label": "Motor UI (WebView / GPU)",
                         "memoryBytes": 276 * 1024 * 1024,
+                        "privateBytes": 148 * 1024 * 1024,
                         "processCount": 1
                     },
                     {
                         "id": "terminals",
                         "label": "Terminales PTY & Agentes",
                         "memoryBytes": app_terminals_bytes,
+                        "privateBytes": app_terminals_private,
                         "processCount": active_terminals
+                    }
+                ],
+                "processes": [
+                    {
+                        "pid": root_pid,
+                        "parentPid": 0,
+                        "name": "kite-code",
+                        "label": "Núcleo Kite Code (Tauri Host)",
+                        "category": "core",
+                        "memoryBytes": 64 * 1024 * 1024,
+                        "privateBytes": 42 * 1024 * 1024
+                    },
+                    {
+                        "pid": root_pid + 1,
+                        "parentPid": root_pid,
+                        "name": "webview-render",
+                        "label": "Motor UI (WebView / GPU)",
+                        "category": "webview",
+                        "memoryBytes": 276 * 1024 * 1024,
+                        "privateBytes": 148 * 1024 * 1024
                     }
                 ]
             }

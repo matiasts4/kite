@@ -111,6 +111,9 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         agentId={agentId}
         agentName={agentName || 'Agent'}
         engineLabel={engineLabel || 'Agent'}
+        workspaceId={workspaceId}
+        workspaces={props.workspaces}
+        workspaceName={props.workspaceName}
         defaultProvider={session.defaultProvider}
         draftProvider={session.draftConfig.provider}
         draftMode={session.draftConfig.mode}

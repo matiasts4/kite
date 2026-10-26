@@ -59,6 +59,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [optimisticIndex, setOptimisticIndex] = useState<number | null>(null);
   const [coords, setCoords] = useState<PopoverCoords | null>(null);
 
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -88,11 +89,19 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
     return fallbackIdx >= 0 ? fallbackIdx : Math.min(1, steps.length - 1);
   }, [steps, effectiveEffortId]);
 
-  const activeStep = steps[activeIndex] || steps[0];
+  // Keep optimistic state synced with external prop updates when not dragging
+  useEffect(() => {
+    if (!isDragging) {
+      setOptimisticIndex(null);
+    }
+  }, [effectiveEffortId, isDragging]);
+
+  const displayIndex = optimisticIndex !== null ? optimisticIndex : activeIndex;
+  const activeStep = steps[displayIndex] || steps[0];
   const activeLabel =
     SPANISH_EFFORT_LABELS[activeStep.id.toLowerCase()] || activeStep.label;
 
-  const percent = steps.length > 1 ? (activeIndex / (steps.length - 1)) * 100 : 50;
+  const percent = steps.length > 1 ? (displayIndex / (steps.length - 1)) * 100 : 50;
 
   const updatePosition = useCallback(() => {
     if (!triggerRef.current) return;
@@ -139,6 +148,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
       const clamped = Math.max(0, Math.min(index, steps.length - 1));
       const target = steps[clamped];
       if (target) {
+        setOptimisticIndex(clamped);
         onChangeEffort(target.id);
       }
     },
@@ -150,25 +160,33 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
     e.preventDefault();
     setIsDragging(true);
 
-    const updateFromPosition = (clientX: number) => {
-      if (!trackRef.current) return;
+    const computeIndex = (clientX: number) => {
+      if (!trackRef.current) return displayIndex;
       const rect = trackRef.current.getBoundingClientRect();
       const relativeX = clientX - rect.left;
       const ratio = Math.max(0, Math.min(relativeX / rect.width, 1));
-      const targetIndex = Math.round(ratio * (steps.length - 1));
-      handleSelectIndex(targetIndex);
+      return Math.max(0, Math.min(Math.round(ratio * (steps.length - 1)), steps.length - 1));
     };
 
-    updateFromPosition(e.clientX);
+    let currentIndex = computeIndex(e.clientX);
+    setOptimisticIndex(currentIndex);
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      updateFromPosition(moveEvent.clientX);
+      const nextIndex = computeIndex(moveEvent.clientX);
+      if (nextIndex !== currentIndex) {
+        currentIndex = nextIndex;
+        setOptimisticIndex(nextIndex);
+      }
     };
 
     const handlePointerUp = () => {
       setIsDragging(false);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      const target = steps[currentIndex];
+      if (target) {
+        onChangeEffort(target.id);
+      }
     };
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -177,6 +195,8 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
 
   const handleReset = (e: React.MouseEvent) => {
     e.stopPropagation();
+    const defaultIdx = steps.findIndex((s) => s.id === defaultStepId);
+    if (defaultIdx >= 0) setOptimisticIndex(defaultIdx);
     onChangeEffort(defaultStepId);
   };
 
@@ -257,16 +277,16 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
               aria-label="Reasoning effort"
               aria-valuemin={0}
               aria-valuemax={steps.length - 1}
-              aria-valuenow={activeIndex}
+              aria-valuenow={displayIndex}
               aria-valuetext={activeLabel}
               onPointerDown={handleTrackPointerDown}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
                   e.preventDefault();
-                  handleSelectIndex(activeIndex + 1);
+                  handleSelectIndex(displayIndex + 1);
                 } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
                   e.preventDefault();
-                  handleSelectIndex(activeIndex - 1);
+                  handleSelectIndex(displayIndex - 1);
                 } else if (e.key === 'Home') {
                   e.preventDefault();
                   handleSelectIndex(0);
@@ -275,7 +295,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
                   handleSelectIndex(steps.length - 1);
                 }
               }}
-              className="kite-effort-track-wrap"
+              className={`kite-effort-track-wrap ${isDragging ? 'kite-effort-track-wrap--dragging' : ''}`}
             >
               {/* Blue Filled Progress */}
               <div
@@ -290,7 +310,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
                     key={s.id}
                     className="kite-effort-dot"
                     style={{
-                      opacity: idx <= activeIndex ? 0.9 : 0.35,
+                      opacity: idx <= displayIndex ? 0.9 : 0.35,
                     }}
                   />
                 ))}

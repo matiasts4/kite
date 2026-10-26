@@ -127,12 +127,13 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   isRefreshingModels,
   onRefreshModels,
 }) => {
-  const currentWorkspace = workspaces?.find((w) => w.id === (thread.workspaceId || workspaceId));
+  const activeWsId = thread.workspaceId || workspaceId;
+  const currentWorkspace = workspaces?.find((w) => w.id === activeWsId);
   const effectiveWorkspaceName =
-    workspaceName ||
     currentWorkspace?.displayName ||
     currentWorkspace?.name ||
-    (thread.workspaceId || workspaceId ? 'Workspace' : null);
+    workspaceName ||
+    (activeWsId ? 'Workspace' : null);
 
   const effectiveModel = thread.model || getSavedSelectedModel(thread.provider);
   const effectiveAgent = (thread as any).agent || (thread as any).workMode || getSavedSelectedAgent(thread.provider) || null;
@@ -209,20 +210,22 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     try {
       const res = await switchWorkspaceBranch(wsId, b);
       if (res?.current) setGitBranch(res.current);
+      if (res?.branches) setBranches(res.branches);
       setBranchDropdownOpen(false);
     } catch (err: any) {
       setBranchError(err?.message || `Failed to switch to ${b}`);
     }
   };
 
-  const handleCreateBranch = async () => {
+  const handleCreateBranch = async (branchName?: string) => {
     const wsId = thread.workspaceId || workspaceId;
-    const name = newBranchInput.trim();
+    const name = (typeof branchName === 'string' && branchName.trim()) ? branchName.trim() : newBranchInput.trim();
     if (!wsId || !name) return;
     setBranchError(null);
     try {
       const res = await createWorkspaceBranch(wsId, name);
       if (res?.current) setGitBranch(res.current);
+      if (res?.branches) setBranches(res.branches);
       setNewBranchInput('');
       setIsCreatingBranch(false);
       setBranchDropdownOpen(false);
@@ -280,6 +283,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     if (!wsId) {
       setIsRepo(false);
       setGitBranch(null);
+      setBranches([]);
       return;
     }
     let active = true;
@@ -293,6 +297,15 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
         if (res.branch) setGitBranch(res.branch);
       })
       .catch(() => {});
+
+    void listWorkspaceBranches(wsId)
+      .then((res) => {
+        if (!active || !res) return;
+        if (res.branches) setBranches(res.branches);
+        if (res.current) setGitBranch(res.current);
+      })
+      .catch(() => {});
+
     return () => {
       active = false;
     };
@@ -842,7 +855,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               threadConnectionId={thread.connectionId ?? null}
               threadBranch={gitBranch}
               branches={branches}
-              threadWorkspaceName={thread.workspaceId || 'Local'}
+              threadWorkspaceName={effectiveWorkspaceName || 'Local'}
+              workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
+              onSelectWorkspace={(wsId) => onUpdateConfig({ workspaceId: wsId })}
               onSwitchBranch={handleSwitchBranch}
               onCreateBranch={handleCreateBranch}
               running={running}

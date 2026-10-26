@@ -50,9 +50,11 @@ export interface ChatComposerProps {
   threadItems?: ChatItem[];
   threadBranch?: string | null;
   threadWorkspaceName?: string | null;
+  workspaces?: Array<{ id: string; name: string }>;
   branches?: string[];
   onSwitchBranch?: (branch: string) => void;
   onCreateBranch?: (branch: string) => void;
+  onSelectWorkspace?: (wsId: string) => void;
   declaration: DriverDeclaration;
   running: boolean;
   prompt: string;
@@ -144,9 +146,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadItems = [],
   threadBranch,
   threadWorkspaceName,
+  workspaces,
   branches = [],
   onSwitchBranch,
   onCreateBranch,
+  onSelectWorkspace,
   declaration,
   running,
   prompt,
@@ -751,8 +755,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         currentBranch={threadBranch || 'main'}
         branches={branches}
         currentWorkspace={threadWorkspaceName || 'Local'}
+        workspaces={workspaces}
         onSelectBranch={onSwitchBranch}
         onCreateBranch={onCreateBranch}
+        onSelectWorkspace={onSelectWorkspace}
       />
     </div>
   );

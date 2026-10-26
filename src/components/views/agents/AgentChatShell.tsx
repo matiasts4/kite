@@ -19,7 +19,7 @@ import {
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
-import { invokeCommand } from '../../../lib/ipc';
+import { invokeCommand, listWorkspaceBranches, switchWorkspaceBranch, createWorkspaceBranch } from '../../../lib/ipc';
 import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 import type {
   ExtendedChatThread,
@@ -50,6 +50,9 @@ export interface AgentChatSurfaceProps {
   agentId: string;
   agentName: string;
   engineLabel: string;
+  workspaceId?: string | null;
+  workspaces?: any[];
+  workspaceName?: string;
   defaultProvider?: ChatProvider;
   /** Draft config used by the composer only while no thread exists yet. */
   draftProvider?: ChatProvider;
@@ -95,6 +98,7 @@ export interface AgentChatSurfaceProps {
     plan?: boolean;
     agent?: string | null;
     connectionId?: string | null;
+    workspaceId?: string | null;
   }) => void;
   onApprovalDecision?: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
 }
@@ -115,6 +119,9 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   agentId,
   agentName,
   engineLabel,
+  workspaceId,
+  workspaces,
+  workspaceName,
   defaultProvider,
   draftProvider,
   draftMode,
@@ -152,6 +159,72 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   onUpdateConfig,
   onApprovalDecision,
 }) => {
+  const effectiveWsId = activeThread?.workspaceId || workspaceId;
+  const currentWorkspace = workspaces?.find((w) => w.id === effectiveWsId);
+  const effectiveWorkspaceName =
+    currentWorkspace?.displayName ||
+    currentWorkspace?.name ||
+    workspaceName ||
+    (effectiveWsId ? 'Workspace' : null);
+
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
+  const [branches, setBranches] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!effectiveWsId) {
+      setGitBranch(null);
+      setBranches([]);
+      return;
+    }
+    let active = true;
+    void invokeCommand<{ isRepo: boolean; branch?: string }>(
+      'read_workspace_changes',
+      { workspaceId: effectiveWsId }
+    )
+      .then((res) => {
+        if (!active || !res) return;
+        if (res.branch) setGitBranch(res.branch);
+      })
+      .catch(() => {});
+
+    void listWorkspaceBranches(effectiveWsId)
+      .then((res) => {
+        if (!active || !res) return;
+        if (res.branches) setBranches(res.branches);
+        if (res.current) setGitBranch(res.current);
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [effectiveWsId]);
+
+  const handleSwitchBranch = async (b: string) => {
+    if (!effectiveWsId) return;
+    try {
+      const res = await switchWorkspaceBranch(effectiveWsId, b);
+      if (res?.current) setGitBranch(res.current);
+      if (res?.branches) setBranches(res.branches);
+    } catch (err) {
+      console.error('[AgentChatShell] failed to switch branch:', err);
+    }
+  };
+
+  const handleCreateBranch = async (name: string) => {
+    if (!effectiveWsId || !name.trim()) return;
+    try {
+      const res = await createWorkspaceBranch(effectiveWsId, name.trim());
+      if (res?.current) setGitBranch(res.current);
+      if (res?.branches) setBranches(res.branches);
+    } catch (err) {
+      console.error('[AgentChatShell] failed to create branch:', err);
+    }
+  };
+
+  const handleSelectWorkspace = (wsId: string) => {
+    onUpdateConfig({ workspaceId: wsId });
+  };
   const savedProvider = getSavedSelectedProvider();
   const effectiveProvider: ChatProvider =
     activeThread?.provider ??
@@ -630,6 +703,13 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             threadEffort={activeThread ? activeThread.effort || null : draftEffort ?? null}
             threadPlan={activeThread ? Boolean((activeThread as any).plan) : false}
             threadAgent={effectiveAgent}
+            threadBranch={gitBranch}
+            branches={branches}
+            threadWorkspaceName={effectiveWorkspaceName || 'Local'}
+            workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
+            onSwitchBranch={handleSwitchBranch}
+            onCreateBranch={handleCreateBranch}
+            onSelectWorkspace={handleSelectWorkspace}
             running={running}
             prompt={prompt}
             attachments={attachments}

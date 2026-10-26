@@ -345,6 +345,11 @@
   background: #e4e4e7;
 }
 
+.kite-effort-track-wrap--dragging .kite-effort-track-progress,
+.kite-effort-track-wrap--dragging .kite-effort-thumb {
+  transition: none !important;
+}
+
 .kite-effort-track-progress {
   position: absolute;
   left: 0;

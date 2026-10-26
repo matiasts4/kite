@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FolderIcon,
@@ -133,13 +133,15 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
     };
   }, [isEnvOpen, isBranchOpen, updatePositions]);
 
-  const effectiveBranches =
-    branches.length > 0
-      ? branches
-      : ['main', 'master', 'develop', currentBranch || 'main'];
-  const uniqueBranches = Array.from(new Set(effectiveBranches));
+  const effectiveBranches = useMemo<string[]>(() => {
+    const list: string[] = [...branches];
+    if (currentBranch && !list.includes(currentBranch)) {
+      list.unshift(currentBranch);
+    }
+    return list.length > 0 ? Array.from(new Set(list)) : [currentBranch || 'main'];
+  }, [branches, currentBranch]);
 
-  const filteredBranches = uniqueBranches.filter((b) =>
+  const filteredBranches = effectiveBranches.filter((b: string) =>
     b.toLowerCase().includes(branchSearch.toLowerCase().trim())
   );
 
@@ -234,20 +236,29 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
                   >
                     Workspaces
                   </div>
-                  {workspaces.map((ws) => (
-                    <button
-                      key={ws.id}
-                      type="button"
-                      className="kite-context-menu-item"
-                      onClick={() => {
-                        onSelectWorkspace?.(ws.id);
-                        setIsEnvOpen(false);
-                      }}
-                    >
-                      <FolderIcon size={12} className="shrink-0 text-icon-muted" />
-                      <span className="kite-context-menu-item-text">{ws.name}</span>
-                    </button>
-                  ))}
+                  {workspaces.map((ws) => {
+                    const isSelected =
+                      currentWorkspace === ws.name || currentWorkspace === ws.id;
+                    return (
+                      <button
+                        key={ws.id}
+                        type="button"
+                        className={`kite-context-menu-item ${
+                          isSelected ? 'kite-context-menu-item--selected' : ''
+                        }`}
+                        onClick={() => {
+                          onSelectWorkspace?.(ws.id);
+                          setIsEnvOpen(false);
+                        }}
+                      >
+                        <FolderIcon size={12} className="shrink-0 text-icon-muted" />
+                        <span className="kite-context-menu-item-text">{ws.name}</span>
+                        {isSelected && (
+                          <CheckIcon size={13} className="shrink-0 text-primary" />
+                        )}
+                      </button>
+                    );
+                  })}
                 </>
               )}
             </div>,
@@ -299,7 +310,7 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
 
               {/* Branch Items List */}
               <div className="kite-context-menu-list">
-                {filteredBranches.map((b) => {
+                {filteredBranches.map((b: string) => {
                   const isCurrent = b === currentBranch;
                   return (
                     <button
@@ -324,8 +335,8 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
 
                 {/* Option to create new branch if search does not match */}
                 {branchSearch.trim() &&
-                  !uniqueBranches.some(
-                    (b) => b.toLowerCase() === branchSearch.trim().toLowerCase()
+                  !effectiveBranches.some(
+                    (b: string) => b.toLowerCase() === branchSearch.trim().toLowerCase()
                   ) && (
                     <button
                       type="button"

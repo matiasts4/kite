@@ -161,7 +161,7 @@ export function useChatSession({
     refreshModels,
   } = useChatModels();
 
-  const { dynamicAgentsMap, ensureDynamicAgents } = useChatAgents(defaultProvider);
+  const { dynamicAgentsMap, ensureDynamicAgents, refreshAgents } = useChatAgents(defaultProvider);
 
   const isMountedRef = useRef(true);
   const activePollRunsRef = useRef<Set<string>>(new Set());
@@ -1039,6 +1039,8 @@ export function useChatSession({
     attachmentsMap,
     dynamicModelsMap,
     dynamicAgentsMap,
+    ensureDynamicAgents,
+    refreshAgents,
     isRefreshingModels,
     refreshModels,
     setFocusedThreadId,

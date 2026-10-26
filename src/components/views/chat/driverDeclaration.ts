@@ -78,8 +78,8 @@ export function declarationFromCatalog({
         plan: Boolean(a.plan),
       }))
     : [
-        { id: 'plan', label: 'Plan', detail: 'Reads and plans, changes nothing', plan: true },
         { id: 'build', label: 'Build', detail: 'Works with the permission mode below', plan: false },
+        { id: 'plan', label: 'Plan', detail: 'Reads and plans, changes nothing', plan: true },
       ];
 
   return {

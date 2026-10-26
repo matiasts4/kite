@@ -9,7 +9,8 @@ export function getAnchoredPopoverCoords(
   panelWidth: number,
   panelHeight: number,
   gap: number = 8,
-  prefer: 'top' | 'bottom' = 'top'
+  prefer: 'top' | 'bottom' = 'top',
+  align: 'left' | 'center' = 'left'
 ): PopoverCoords {
   const scaledHost = triggerEl.closest('.app-frame--scaled') as HTMLElement | null;
   const hostRect = scaledHost?.getBoundingClientRect();
@@ -37,9 +38,14 @@ export function getAnchoredPopoverCoords(
     bottom: (window.innerHeight - originY) / scale,
   };
 
+  const targetLeft =
+    align === 'center'
+      ? bounds.left + bounds.width / 2 - panelWidth / 2
+      : bounds.left;
+
   const left = Math.max(
     viewport.left + 12,
-    Math.min(bounds.left, viewport.right - panelWidth - 12)
+    Math.min(targetLeft, viewport.right - panelWidth - 12)
   );
 
   const spaceAbove = bounds.top - viewport.top - gap;

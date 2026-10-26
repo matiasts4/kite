@@ -138,6 +138,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         totalTokens={totalTokens}
         dynamicModels={dynamicModels}
         dynamicAgents={dynamicAgents}
+        ensureDynamicAgents={session.ensureDynamicAgents}
         driverDeclaration={
           activeThreadId ? props.driverDeclarations?.[activeThreadId] ?? null : null
         }
@@ -250,6 +251,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
       liveRunsCount={session.liveRuns.length}
       dynamicModelsMap={session.dynamicModelsMap}
       dynamicAgentsMap={session.dynamicAgentsMap}
+      ensureDynamicAgents={session.ensureDynamicAgents}
       sessionProjections={props.sessionProjections}
       driverDeclarations={props.driverDeclarations}
       isRefreshingModels={session.isRefreshingModels}

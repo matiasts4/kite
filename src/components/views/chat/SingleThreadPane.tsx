@@ -52,6 +52,7 @@ export interface SingleThreadPaneProps {
   liveRunsCount: number;
   dynamicModels: ModelOption[];
   dynamicAgents?: any[];
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
   /** Declaration supplied by the session layer for this thread. */
   driverDeclaration?: DriverDeclaration | null;
   /** Projection supplied by the session layer for this thread. */
@@ -104,6 +105,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   liveRunsCount: _liveRunsCount,
   dynamicModels,
   dynamicAgents = [],
+  ensureDynamicAgents,
   driverDeclaration,
   session,
   editingTitleId,
@@ -865,6 +867,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               attachments={attachments}
               totalTokens={totalTokens}
               declaration={declaration}
+              ensureDynamicAgents={ensureDynamicAgents}
               isRefreshingModels={isRefreshingModels}
               onRefreshModels={onRefreshModels}
               onChangePrompt={onChangePrompt}

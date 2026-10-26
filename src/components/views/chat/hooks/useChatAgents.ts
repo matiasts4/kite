@@ -12,12 +12,22 @@ export interface WorkModeOption {
 
 type ProviderAgentsResponse = { provider: string; agents: WorkModeOption[] };
 
+const ALL_PROVIDERS: ChatProvider[] = [
+  'antigravity',
+  'claude',
+  'codex',
+  'grok',
+  'opencode',
+  'cursor',
+  'gemini',
+];
+
 export function useChatAgents(activeProvider?: ChatProvider) {
   const [dynamicAgentsMap, setDynamicAgentsMap] = useState<Record<string, WorkModeOption[]>>({});
   const requestedAgentsRef = useRef<Set<string>>(new Set());
 
-  const fetchDynamicAgents = useCallback(async (provider: ChatProvider) => {
-    if (requestedAgentsRef.current.has(provider)) return;
+  const fetchDynamicAgents = useCallback(async (provider: ChatProvider, force = false) => {
+    if (!force && requestedAgentsRef.current.has(provider)) return;
     requestedAgentsRef.current.add(provider);
     try {
       const res = await invokeCommand<ProviderAgentsResponse>('list_provider_agents', {
@@ -31,13 +41,17 @@ export function useChatAgents(activeProvider?: ChatProvider) {
     }
   }, []);
 
-  // Fetch agents for the active provider on mount and when provider changes
+  // Preload agents across all known providers on mount so switching is instant
+  useEffect(() => {
+    ALL_PROVIDERS.forEach((p) => {
+      void fetchDynamicAgents(p);
+    });
+  }, [fetchDynamicAgents]);
+
   useEffect(() => {
     if (activeProvider) {
       void fetchDynamicAgents(activeProvider);
     }
-    // Also preload OpenCode agents if not yet fetched since OpenCode has custom agents
-    void fetchDynamicAgents('opencode');
   }, [activeProvider, fetchDynamicAgents]);
 
   const ensureDynamicAgents = useCallback(
@@ -47,9 +61,23 @@ export function useChatAgents(activeProvider?: ChatProvider) {
     [fetchDynamicAgents]
   );
 
+  const refreshAgents = useCallback(
+    async (provider?: ChatProvider) => {
+      if (provider) {
+        requestedAgentsRef.current.delete(provider);
+        await fetchDynamicAgents(provider, true);
+      } else {
+        requestedAgentsRef.current.clear();
+        await Promise.all(ALL_PROVIDERS.map((p) => fetchDynamicAgents(p, true)));
+      }
+    },
+    [fetchDynamicAgents]
+  );
+
   return {
     dynamicAgentsMap,
     fetchDynamicAgents,
     ensureDynamicAgents,
+    refreshAgents,
   };
 }

@@ -47,7 +47,7 @@ const SPANISH_EFFORT_LABELS: Record<string, string> = {
 };
 
 const PANEL_WIDTH = 272;
-const PANEL_HEIGHT = 140;
+const PANEL_HEIGHT = 92;
 
 export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
   effort,
@@ -101,11 +101,12 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
   const activeLabel =
     SPANISH_EFFORT_LABELS[activeStep.id.toLowerCase()] || activeStep.label;
 
-  const percent = steps.length > 1 ? (displayIndex / (steps.length - 1)) * 100 : 50;
+  const stepRatio = steps.length > 1 ? displayIndex / (steps.length - 1) : 0.5;
 
   const updatePosition = useCallback(() => {
     if (!triggerRef.current) return;
-    setCoords(getAnchoredPopoverCoords(triggerRef.current, PANEL_WIDTH, PANEL_HEIGHT, 8, 'top'));
+    const measuredHeight = panelRef.current?.offsetHeight || PANEL_HEIGHT;
+    setCoords(getAnchoredPopoverCoords(triggerRef.current, PANEL_WIDTH, measuredHeight, 8, 'top', 'center'));
   }, []);
 
   useLayoutEffect(() => {
@@ -163,8 +164,11 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
     const computeIndex = (clientX: number) => {
       if (!trackRef.current) return displayIndex;
       const rect = trackRef.current.getBoundingClientRect();
-      const relativeX = clientX - rect.left;
-      const ratio = Math.max(0, Math.min(relativeX / rect.width, 1));
+      const innerLeft = rect.left + 12;
+      const innerWidth = rect.width - 24;
+      if (innerWidth <= 0) return 0;
+      const relativeX = clientX - innerLeft;
+      const ratio = Math.max(0, Math.min(relativeX / innerWidth, 1));
       return Math.max(0, Math.min(Math.round(ratio * (steps.length - 1)), steps.length - 1));
     };
 
@@ -220,7 +224,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
         }}
       >
         <ComposerControlIcon icon={ZapIcon} size={14} className="text-primary" />
-        <span className="truncate max-w-[120px]">{activeLabel}</span>
+        <span className="kite-composer-control-label">{activeLabel}</span>
         <ComposerControlChevron />
       </ComposerControl>
 
@@ -300,27 +304,34 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
               {/* Blue Filled Progress */}
               <div
                 className="kite-effort-track-progress"
-                style={{ width: `${percent}%` }}
+                style={{
+                  width: `calc(12px + (100% - 24px) * ${stepRatio})`,
+                }}
               />
 
               {/* Discrete Step Dots */}
               <div className="kite-effort-dots-row">
-                {steps.map((s: DriverChoice, idx: number) => (
-                  <span
-                    key={s.id}
-                    className="kite-effort-dot"
-                    style={{
-                      opacity: idx <= displayIndex ? 0.9 : 0.35,
-                    }}
-                  />
-                ))}
+                {steps.map((s: DriverChoice, idx: number) => {
+                  const dotRatio = steps.length > 1 ? idx / (steps.length - 1) : 0.5;
+                  const isPassed = idx <= displayIndex;
+                  return (
+                    <span
+                      key={s.id}
+                      className="kite-effort-dot"
+                      style={{
+                        left: `calc(12px + (100% - 24px) * ${dotRatio})`,
+                        opacity: isPassed ? 0.95 : 0.35,
+                      }}
+                    />
+                  );
+                })}
               </div>
 
               {/* Draggable Circle Thumb */}
               <div
                 className="kite-effort-thumb"
                 style={{
-                  left: `${percent}%`,
+                  left: `calc(12px + (100% - 24px) * ${stepRatio})`,
                   cursor: isDragging ? 'grabbing' : 'grab',
                 }}
               />

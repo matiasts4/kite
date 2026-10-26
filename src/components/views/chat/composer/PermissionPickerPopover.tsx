@@ -89,7 +89,7 @@ export const PermissionPickerPopover: React.FC<PermissionPickerPopoverProps> = (
         }}
       >
         <LockIcon size={13} className="shrink-0 text-muted-foreground" />
-        <span className="truncate max-w-[140px] font-medium">{permissionLabel}</span>
+        <span className="kite-composer-control-label font-medium">{permissionLabel}</span>
         <ComposerControlChevron />
       </ComposerControl>
 

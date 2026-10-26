@@ -283,7 +283,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
             size={14}
           />
         </span>
-        <span className="truncate max-w-[150px] font-medium text-foreground">
+        <span className="kite-composer-control-label font-medium text-foreground" title={modelTriggerLabel}>
           {modelTriggerLabel}
         </span>
         <ComposerControlChevron />

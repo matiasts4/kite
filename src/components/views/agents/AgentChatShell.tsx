@@ -70,6 +70,7 @@ export interface AgentChatSurfaceProps {
   totalTokens: number;
   dynamicModels: ModelOption[];
   dynamicAgents?: any[];
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
   /** Declaration supplied by the session layer for the active thread. */
   driverDeclaration?: DriverDeclaration | null;
   /** Projection supplied by the session layer for the active thread. */
@@ -138,6 +139,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   totalTokens,
   dynamicModels,
   dynamicAgents = [],
+  ensureDynamicAgents,
   driverDeclaration,
   session,
   isRefreshingModels,
@@ -715,6 +717,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             attachments={attachments}
             totalTokens={totalTokens}
             declaration={declaration}
+            ensureDynamicAgents={ensureDynamicAgents}
             isRefreshingModels={isRefreshingModels}
             onRefreshModels={onRefreshModels}
             onChangePrompt={onChangePrompt}

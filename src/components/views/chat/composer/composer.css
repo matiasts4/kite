@@ -107,8 +107,9 @@
   align-items: center;
   gap: 0.25rem;
   flex-wrap: nowrap; /* No wrapping to keep single clean bar */
-  overflow-x: auto;
+  overflow: hidden; /* Prevent horizontal scrollbars completely */
   min-width: 0;
+  flex: 1;
 }
 
 .kite-composer-footer-left::-webkit-scrollbar {
@@ -143,6 +144,16 @@
   transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
   flex-shrink: 0;
   box-sizing: border-box;
+  max-width: 220px;
+}
+
+.kite-composer-control-label {
+  display: inline-block;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 .kite-composer-control-pill:hover:not(:disabled),
@@ -256,10 +267,10 @@
 /* 8. Reasoning Effort Discrete Slider Card (From Screenshot) */
 .kite-effort-slider-card {
   width: 17rem; /* 272px */
-  padding: 0.875rem 1rem 1rem;
+  padding: 0.75rem 0.875rem 0.875rem;
   display: flex;
   flex-direction: column;
-  gap: 0.875rem;
+  gap: 0.75rem;
   user-select: none;
 }
 
@@ -330,15 +341,14 @@
 .kite-effort-track-wrap {
   position: relative;
   width: 100%;
-  height: 1.5rem; /* 24px */
+  height: 1.375rem; /* 22px */
   border-radius: 9999px;
-  background: #202026;
+  background: #23232a;
   display: flex;
   align-items: center;
   cursor: pointer;
-  padding: 0 0.875rem;
   box-sizing: border-box;
-  overflow: hidden;
+  overflow: visible;
 }
 
 [data-theme='light'] .kite-effort-track-wrap {
@@ -358,24 +368,25 @@
   background: var(--primary, #3b82f6);
   border-radius: 9999px 0 0 9999px;
   pointer-events: none;
-  transition: width 0.12s cubic-bezier(0.2, 0, 0, 1);
+  transition: width 0.16s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .kite-effort-dots-row {
-  position: relative;
+  position: absolute;
+  inset: 0;
   z-index: 2;
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   pointer-events: none;
 }
 
 .kite-effort-dot {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.35);
+  transition: opacity 0.16s ease, background-color 0.16s ease;
 }
 
 [data-theme='light'] .kite-effort-dot {
@@ -390,10 +401,10 @@
   height: 1.25rem; /* 20px */
   border-radius: 50%;
   background: #ffffff;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(0, 0, 0, 0.08);
   transform: translate(-50%, -50%);
   cursor: grab;
-  transition: left 0.12s cubic-bezier(0.2, 0, 0, 1), transform 0.1s ease;
+  transition: left 0.16s cubic-bezier(0.2, 0, 0, 1), transform 0.1s ease;
 }
 
 .kite-effort-thumb:active {

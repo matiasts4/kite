@@ -30,6 +30,7 @@ export interface ThreadGridProps {
   sessionProjections?: Record<string, SessionProjection> | null;
   /** Driver declarations supplied by the caller, keyed by thread id. */
   driverDeclarations?: Record<string, DriverDeclaration> | null;
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   activeDropdown: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
@@ -155,6 +156,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   liveRunsCount,
   dynamicModelsMap,
   dynamicAgentsMap,
+  ensureDynamicAgents,
   sessionProjections,
   driverDeclarations,
   isRefreshingModels,
@@ -369,6 +371,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 liveRunsCount={liveRunsCount}
                 dynamicModels={dynamicModelsMap[thread.provider] || []}
                 dynamicAgents={dynamicAgentsMap?.[thread.provider] || []}
+                ensureDynamicAgents={ensureDynamicAgents}
                 driverDeclaration={driverDeclarations?.[tid] ?? null}
                 session={sessionProjections?.[tid] ?? null}
                 isRefreshingModels={isRefreshingModels}

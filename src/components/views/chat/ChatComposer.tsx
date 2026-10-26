@@ -6,8 +6,6 @@ import {
   FileCodeIcon,
   ArrowUpIcon,
   MicIcon,
-  BotIcon,
-  PencilRulerIcon,
 } from './ChatIcons';
 import {
   ChatProvider,
@@ -28,12 +26,13 @@ import {
   type ConnectionCandidate,
 } from './connectionBinding';
 import { ComposerSurface } from './composer/ComposerSurface';
-import { ComposerControl, ComposerControlSeparator, ComposerControlIcon } from './composer/ComposerControl';
+import { ComposerControlSeparator } from './composer/ComposerControl';
 import { ModelPickerPopover } from './composer/ModelPickerPopover';
 import { EffortSliderPopover } from './composer/EffortSliderPopover';
 import { ComposerContextStrip } from './composer/ComposerContextStrip';
 import { AttachMenuPopover } from './composer/AttachMenuPopover';
 import { PermissionPickerPopover } from './composer/PermissionPickerPopover';
+import { WorkModePickerPopover } from './composer/WorkModePickerPopover';
 import { ConnectionPickerPopover } from './composer/ConnectionPickerPopover';
 
 export interface ChatComposerProps {
@@ -63,6 +62,7 @@ export interface ChatComposerProps {
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   ensureDynamicModels?: (provider: ChatProvider) => void;
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
   pendingApproval?: ApprovalRequest | null;
   onChangePrompt: (val: string) => void;
@@ -141,7 +141,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadProvider,
   threadModel,
   threadEffort,
-  threadAgent: _threadAgent,
+  threadAgent,
   threadConnectionId,
   threadItems = [],
   threadBranch,
@@ -157,6 +157,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   attachments,
   totalTokens,
   ensureDynamicModels,
+  ensureDynamicAgents,
   pendingApproval,
   onChangePrompt,
   onSend,
@@ -186,7 +187,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   useEffect(() => {
     ensureDynamicModels?.(threadProvider);
-  }, [ensureDynamicModels, threadProvider]);
+    ensureDynamicAgents?.(threadProvider);
+  }, [ensureDynamicModels, ensureDynamicAgents, threadProvider]);
 
   const [dropKind, setDropKind] = useState<'attach' | 'mention' | 'prompt' | null>(null);
 
@@ -621,21 +623,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
             <ComposerControlSeparator />
 
-            {/* Interaction Mode: Plan vs Build */}
-            <ComposerControl
-              active={Boolean(threadPlan)}
+            {/* Work Mode & Dynamic Agents Popover */}
+            <WorkModePickerPopover
+              workModes={declaration.workMode || []}
+              currentAgent={threadAgent}
+              currentPlan={threadPlan}
+              currentMode={threadMode}
               disabled={running}
-              title={threadPlan ? 'Planning Mode: plan created before editing' : 'Build Mode: direct execution'}
-              aria-label={threadPlan ? 'Plan mode' : 'Build mode'}
-              onClick={() => onUpdateConfig({ plan: !threadPlan })}
-            >
-              <ComposerControlIcon
-                icon={threadPlan ? PencilRulerIcon : BotIcon}
-                size={14}
-                className={threadPlan ? 'text-primary' : 'text-muted-foreground'}
-              />
-              <span>{threadPlan ? 'Plan' : 'Build'}</span>
-            </ComposerControl>
+              onSelectWorkMode={(patch) => onUpdateConfig(patch)}
+            />
 
             <ComposerControlSeparator />
 
@@ -646,7 +642,13 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               permissionDeclared={permissionDeclared}
               permissionReason={permissionReason}
               disabled={running}
-              onSelectPermission={(mode) => onUpdateConfig({ mode })}
+              onSelectPermission={(mode) =>
+                onUpdateConfig({
+                  mode,
+                  plan: mode === 'readOnly',
+                  ...(mode === 'readOnly' ? {} : { agent: null }),
+                })
+              }
             />
 
             {/* Connection Selector (when multiple accounts verified the spawn endpoint) */}

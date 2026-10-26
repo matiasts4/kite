@@ -31,10 +31,34 @@ export interface EffortChoice {
   detail?: string;
 }
 
+export const SPANISH_EFFORT_LABELS: Record<string, string> = {
+  none: 'Desactivado',
+  minimal: 'Mínimo',
+  low: 'Bajo',
+  medium: 'Medio',
+  high: 'Alto',
+  xhigh: 'Muy Alto',
+  'extra-high': 'Muy Alto',
+  'very-high': 'Muy Alto',
+  max: 'Máximo',
+};
+
+export const SPANISH_EFFORT_DETAILS: Record<string, string> = {
+  none: 'Sin razonamiento adicional',
+  minimal: 'Razonamiento ultrarrápido para respuestas directas',
+  low: 'Respuestas rápidas con razonamiento enfocado',
+  medium: 'Razonamiento balanceado para tareas cotidianas',
+  high: 'Razonamiento profundo y análisis exhaustivo',
+  xhigh: 'Razonamiento intensivo y verificación en múltiples pasos',
+  'extra-high': 'Razonamiento intensivo y verificación en múltiples pasos',
+  'very-high': 'Razonamiento intensivo y verificación en múltiples pasos',
+  max: 'Capacidad máxima de computación y verificación formal',
+};
+
 export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
-  { id: 'low', label: 'Low', detail: 'Faster replies with focused thinking' },
-  { id: 'medium', label: 'Medium', detail: 'Balanced reasoning for everyday coding' },
-  { id: 'high', label: 'High', detail: 'Deep multi-step reasoning and verification' },
+  { id: 'low', label: 'Bajo', detail: 'Respuestas rápidas con razonamiento enfocado' },
+  { id: 'medium', label: 'Medio', detail: 'Razonamiento balanceado para tareas cotidianas' },
+  { id: 'high', label: 'Alto', detail: 'Razonamiento profundo y análisis exhaustivo' },
 ];
 
 export interface ExtendedChatThread extends ChatThread {
@@ -72,6 +96,8 @@ export interface ModelOption {
   name: string;
   description?: string;
   supportsEffort?: boolean;
+  effortLevels?: (EffortChoice | string)[];
+  defaultEffort?: string | null;
 }
 
 export interface LiveChatRun {

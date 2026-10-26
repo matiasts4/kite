@@ -8,6 +8,7 @@ import React, {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
+import { SPANISH_EFFORT_LABELS } from '../types';
 import { ZapIcon, ChevronRightIcon } from '../ChatIcons';
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
@@ -39,13 +40,6 @@ export interface EffortSliderPopoverProps {
   onChangeEffort: (effortId: string) => void;
 }
 
-const SPANISH_EFFORT_LABELS: Record<string, string> = {
-  low: 'Bajo',
-  medium: 'Medio',
-  high: 'Alto',
-  max: 'Máximo',
-};
-
 const PANEL_WIDTH = 272;
 const PANEL_HEIGHT = 92;
 
@@ -71,14 +65,16 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
       return declaration.effort;
     }
     return [
-      { id: 'low', label: 'Bajo', detail: 'Fast responses with minimal reasoning' },
-      { id: 'medium', label: 'Medio', detail: 'Balanced reasoning effort for standard tasks' },
-      { id: 'high', label: 'Alto', detail: 'Deep reasoning and thorough code analysis' },
-      { id: 'max', label: 'Máximo', detail: 'Maximum reasoning and exhaustive verification' },
+      { id: 'low', label: 'Bajo', detail: 'Respuestas rápidas con razonamiento enfocado' },
+      { id: 'medium', label: 'Medio', detail: 'Razonamiento balanceado para tareas cotidianas' },
+      { id: 'high', label: 'Alto', detail: 'Razonamiento profundo y análisis exhaustivo' },
+      { id: 'max', label: 'Máximo', detail: 'Capacidad máxima de computación y verificación formal' },
     ];
   }, [declaration.effort]);
 
-  const defaultStepId = declaration.defaultEffort || 'medium';
+  const defaultStepId =
+    declaration.defaultEffort ||
+    (steps.find((s) => s.id === 'medium')?.id || steps[0]?.id || 'medium');
   const effectiveEffortId = effort || defaultStepId;
 
   const activeIndex = useMemo(() => {

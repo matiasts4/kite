@@ -5,6 +5,7 @@ import type { AvatarChoice } from '../../AgentAvatar';
 import { AgentAvatarCustomizer } from './AgentAvatarCustomizer';
 import { SelectMenu } from '../../ui/SelectMenu';
 import { EffortPicker } from '../chat/EffortPicker';
+import { resolveEffortChoicesForModel } from '../chat/driverDeclaration';
 import {
   BrandLogo,
   TEAMMATE_ENGINE_IDS,
@@ -804,9 +805,11 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
                           label="Reasoning effort"
                           detail="How much reasoning this model uses before it answers."
                           disabled={readOnly || saving}
+                          choices={resolveEffortChoicesForModel(selectedLiveModel)?.choices}
                           value={
                             settingsDraft.defaultEffort ||
                             settingsDraft.defaultProviderOptions?.find((o: any) => o.effort)?.effort ||
+                            resolveEffortChoicesForModel(selectedLiveModel)?.defaultEffort ||
                             'medium'
                           }
                           onSelect={(effortId) => {

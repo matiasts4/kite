@@ -151,19 +151,17 @@ pub fn fetch_antigravity_models_dynamic() -> Vec<Value> {
     query_agy_models_cli().unwrap_or_default()
 }
 
-pub fn query_agy_models_cli() -> Option<Vec<Value>> {
-    let program = resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"])?;
-    if std::env::var("AGY_CLI_DISABLE_AUTO_UPDATE").is_err() {
-        std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+pub fn parse_agy_models(raw: &str) -> Vec<Value> {
+    struct ModelEntry {
+        base_id: String,
+        clean_name: String,
+        description: &'static str,
+        tiers: Vec<String>,
+        has_known_effort: bool,
     }
-    let out = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(8)).ok()?;
-    if !out.success() {
-        return None;
-    }
-    let raw = out.stdout_lossy();
 
-    let mut parsed: Vec<Value> = Vec::new();
-    let mut seen_base_ids = std::collections::HashSet::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut map: HashMap<String, ModelEntry> = HashMap::new();
 
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -187,28 +185,29 @@ pub fn query_agy_models_cli() -> Option<Vec<Value>> {
             continue;
         }
 
-        let (base_id, has_effort_suffix) = if let Some(stripped) = raw_id.strip_suffix("-high") {
-            (stripped, true)
+        let (base_id, effort_tier) = if let Some(stripped) = raw_id.strip_suffix("-high") {
+            (stripped, Some("high"))
         } else if let Some(stripped) = raw_id.strip_suffix("-medium") {
-            (stripped, true)
+            (stripped, Some("medium"))
         } else if let Some(stripped) = raw_id.strip_suffix("-low") {
-            (stripped, true)
+            (stripped, Some("low"))
         } else if let Some(stripped) = raw_id.strip_suffix("-xhigh") {
-            (stripped, true)
+            (stripped, Some("xhigh"))
         } else if let Some(stripped) = raw_id.strip_suffix("-max") {
-            (stripped, true)
+            (stripped, Some("max"))
+        } else if let Some(stripped) = raw_id.strip_suffix("-minimal") {
+            (stripped, Some("minimal"))
         } else {
-            (raw_id, false)
+            (raw_id, None)
         };
-
-        if !seen_base_ids.insert(base_id.to_string()) {
-            continue;
-        }
 
         let clean_name = raw_name
             .replace(" (High)", "")
             .replace(" (Medium)", "")
             .replace(" (Low)", "")
+            .replace(" (X-High)", "")
+            .replace(" (Max)", "")
+            .replace(" (Minimal)", "")
             .replace(" (Adaptive)", "");
 
         let id_lower = base_id.to_lowercase();
@@ -226,20 +225,83 @@ pub fn query_agy_models_cli() -> Option<Vec<Value>> {
             "Antigravity live model"
         };
 
-        let supports_effort = has_effort_suffix
+        let has_known_effort = effort_tier.is_some()
             || id_lower.contains("gemini")
             || id_lower.contains("claude")
             || id_lower.contains("argon")
             || id_lower.contains("flash");
 
-        parsed.push(model_row(base_id, &clean_name, description, supports_effort));
+        let entry = map.entry(base_id.to_string()).or_insert_with(|| {
+            order.push(base_id.to_string());
+            ModelEntry {
+                base_id: base_id.to_string(),
+                clean_name,
+                description,
+                tiers: Vec::new(),
+                has_known_effort,
+            }
+        });
+
+        if let Some(tier) = effort_tier {
+            if !entry.tiers.iter().any(|t| t == tier) {
+                entry.tiers.push(tier.to_string());
+            }
+        }
     }
 
-    if parsed.is_empty() {
+    let mut result = Vec::new();
+    for id in order {
+        if let Some(mut entry) = map.remove(&id) {
+            if entry.tiers.is_empty() && entry.has_known_effort {
+                let id_lower = entry.base_id.to_lowercase();
+                if id_lower.contains("gemini") || id_lower.contains("argon") {
+                    entry.tiers = vec!["minimal".into(), "low".into(), "medium".into(), "high".into()];
+                } else if id_lower.contains("claude") {
+                    entry.tiers = vec!["low".into(), "medium".into(), "high".into(), "max".into()];
+                } else {
+                    entry.tiers = vec!["low".into(), "medium".into(), "high".into()];
+                }
+            }
+
+            sort_effort_levels(&mut entry.tiers);
+
+            let supports_effort = !entry.tiers.is_empty();
+            let default_effort: Option<String> = if entry.tiers.iter().any(|t| t == "medium") {
+                Some("medium".to_string())
+            } else {
+                entry.tiers.first().cloned()
+            };
+
+            result.push(model_row(
+                &entry.base_id,
+                &entry.clean_name,
+                entry.description,
+                supports_effort,
+                if supports_effort { Some(entry.tiers) } else { None },
+                default_effort.as_deref(),
+            ));
+        }
+    }
+
+    result
+}
+
+pub fn query_agy_models_cli() -> Option<Vec<Value>> {
+    let program = resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"])?;
+    if std::env::var("AGY_CLI_DISABLE_AUTO_UPDATE").is_err() {
+        std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    }
+    let out = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(8)).ok()?;
+    if !out.success() {
         return None;
     }
-
-    Some(parsed)
+    let raw = out.stdout_lossy();
+    let models = parse_agy_models(&raw);
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
 }
 
 /// Codex has no model-list command wired here. The configured `model` key in
@@ -279,7 +341,21 @@ pub fn parse_grok_models(raw: &str) -> Vec<Value> {
         if id.is_empty() || !model_id_ok(id) || !seen.insert(id.to_string()) {
             continue;
         }
-        models.push(model_row(id, id, "Listed by the Grok CLI", true));
+        let is_reasoning = id.to_lowercase().contains("reasoning");
+        let effort_levels = if is_reasoning {
+            Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
+        } else {
+            None
+        };
+        let default_effort = if is_reasoning { Some("medium") } else { None };
+        models.push(model_row(
+            id,
+            id,
+            "Listed by the Grok CLI",
+            is_reasoning,
+            effort_levels,
+            default_effort,
+        ));
     }
     models
 }
@@ -320,6 +396,8 @@ pub fn parse_cursor_models(raw: &str) -> Vec<Value> {
             name.trim(),
             "Listed by the Cursor Agent CLI",
             false,
+            None,
+            None,
         ));
         if models.len() >= 400 {
             break;
@@ -328,24 +406,97 @@ pub fn parse_cursor_models(raw: &str) -> Vec<Value> {
     models
 }
 
-pub fn model_row(id: &str, name: &str, description: &str, supports_effort: bool) -> Value {
-    json!({
+pub fn sort_effort_levels(levels: &mut [String]) {
+    fn rank(s: &str) -> i32 {
+        match s.to_lowercase().as_str() {
+            "none" | "off" => 0,
+            "minimal" | "min" => 1,
+            "low" => 2,
+            "medium" | "med" => 3,
+            "high" => 4,
+            "xhigh" | "extra-high" | "extra_high" | "very-high" => 5,
+            "max" | "maximum" => 6,
+            _ => 10,
+        }
+    }
+    levels.sort_by(|a, b| {
+        let ra = rank(a);
+        let rb = rank(b);
+        if ra != rb {
+            ra.cmp(&rb)
+        } else {
+            a.cmp(b)
+        }
+    });
+}
+
+pub fn model_row(
+    id: &str,
+    name: &str,
+    description: &str,
+    supports_effort: bool,
+    effort_levels: Option<Vec<String>>,
+    default_effort: Option<&str>,
+) -> Value {
+    let mut obj = json!({
         "id": id,
         "name": name,
         "description": description,
         "supportsEffort": supports_effort,
-    })
+    });
+    if let Some(levels) = effort_levels {
+        if !levels.is_empty() {
+            obj["effortLevels"] = json!(levels);
+        }
+    }
+    if let Some(def) = default_effort {
+        obj["defaultEffort"] = json!(def);
+    }
+    obj
 }
 
 pub fn fetch_opencode_models_dynamic() -> Vec<Value> {
     query_opencode_models_cli().unwrap_or_default()
 }
 
+pub fn read_opencode_config() -> Option<Value> {
+    let mut candidates = Vec::new();
+    if let Ok(user) = std::env::var("USERPROFILE") {
+        candidates.push(std::path::PathBuf::from(&user).join(".config").join("opencode").join("opencode.json"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.json"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(std::path::PathBuf::from(&local).join("opencode").join("opencode.json"));
+    }
+    candidates.push(std::path::PathBuf::from(".opencode").join("opencode.json"));
+
+    for path in candidates {
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parses the CLI's `provider/model` lines into catalog rows. Pure, so it is
 /// testable without spawning the CLI.
 pub fn parse_opencode_models(raw: &str) -> Vec<Value> {
+    let config = read_opencode_config();
+    parse_opencode_models_inner(raw, config.as_ref())
+}
+
+pub fn parse_opencode_models_inner(raw: &str, config: Option<&Value>) -> Vec<Value> {
     let mut seen = std::collections::HashSet::new();
     let mut models = Vec::new();
+    let root_model = config.and_then(|c| c.get("model")).and_then(|v| v.as_str());
+    let root_variant = config.and_then(|c| c.get("variant")).and_then(|v| v.as_str());
+
     for line in raw.lines() {
         let id = line.trim();
         if id.is_empty() || !id.contains('/') || id.chars().any(char::is_whitespace) {
@@ -354,12 +505,74 @@ pub fn parse_opencode_models(raw: &str) -> Vec<Value> {
         if !model_id_ok(id) || !seen.insert(id.to_string()) {
             continue;
         }
-        let provider = id.split_once('/').map(|(provider, _)| provider).unwrap_or("");
+        let (provider, model_part) = id.split_once('/').unwrap_or(("", id));
+
+        // Check if opencode.json defines this model under provider.<provider>.models.<model_part>
+        let config_model_entry = config
+            .and_then(|c| c.get("provider"))
+            .and_then(|p| p.get(provider))
+            .and_then(|p_obj| p_obj.get("models"))
+            .and_then(|m_obj| m_obj.get(model_part));
+
+        let display_name = config_model_entry
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(id);
+
+        let mut variants = Vec::new();
+        if let Some(variants_obj) = config_model_entry.and_then(|m| m.get("variants")).and_then(|v| v.as_object()) {
+            for key in variants_obj.keys() {
+                variants.push(key.clone());
+            }
+        }
+
+        let is_root_configured = root_model == Some(id);
+        let id_lower = id.to_lowercase();
+
+        // If no explicit variants were configured, check if this is a known reasoning model
+        if variants.is_empty() {
+            if is_root_configured && root_variant.is_some() {
+                variants.push(root_variant.unwrap().to_string());
+                variants.push("low".to_string());
+                variants.push("medium".to_string());
+                variants.push("high".to_string());
+            } else if id_lower.contains("o1") || id_lower.contains("o3") || id_lower.contains("o4") || id_lower.contains("reasoning") {
+                variants = vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()];
+            } else if id_lower.contains("claude") && (id_lower.contains("thinking") || id_lower.contains("opus") || id_lower.contains("sonnet-4") || id_lower.contains("3-7")) {
+                variants = vec!["low".into(), "medium".into(), "high".into(), "max".into()];
+            } else if id_lower.contains("deepseek") || id_lower.contains("r1") {
+                variants = vec!["low".into(), "medium".into(), "high".into(), "max".into()];
+            } else if id_lower.contains("gemini") && (id_lower.contains("3") || id_lower.contains("4") || id_lower.contains("argon") || id_lower.contains("pro")) {
+                variants = vec!["minimal".into(), "low".into(), "medium".into(), "high".into()];
+            }
+        }
+
+        variants.sort();
+        variants.dedup();
+        sort_effort_levels(&mut variants);
+
+        let supports_effort = !variants.is_empty();
+        let default_effort: Option<String> = if let Some(rv) = root_variant {
+            if is_root_configured || variants.iter().any(|v| v == rv) {
+                Some(rv.to_string())
+            } else if variants.iter().any(|v| v == "medium") {
+                Some("medium".to_string())
+            } else {
+                variants.first().cloned()
+            }
+        } else if variants.iter().any(|v| v == "medium") {
+            Some("medium".to_string())
+        } else {
+            variants.first().cloned()
+        };
+
         models.push(model_row(
             id,
-            id,
+            display_name,
             &format!("{provider} through the OpenCode CLI"),
-            false,
+            supports_effort,
+            if supports_effort { Some(variants) } else { None },
+            default_effort.as_deref(),
         ));
         if models.len() >= 400 {
             break;
@@ -557,6 +770,100 @@ mod tests {
             assert!(agents.iter().any(|a| a.get("id").and_then(|v| v.as_str()) == Some("gentle-orchestrator")));
         }
     }
+
+    #[test]
+    fn sorts_effort_levels_in_canonical_progression() {
+        let mut tiers = vec![
+            "high".to_string(),
+            "max".to_string(),
+            "minimal".to_string(),
+            "low".to_string(),
+            "xhigh".to_string(),
+            "medium".to_string(),
+        ];
+        sort_effort_levels(&mut tiers);
+        assert_eq!(
+            tiers,
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+    }
+
+    #[test]
+    fn parses_agy_models_merging_effort_suffixes() {
+        let raw = "gemini-4-argon-medium\tGemini 4 Argon (Medium)\ngemini-4-argon-high\tGemini 4 Argon (High)\ngemini-4-argon-low\tGemini 4 Argon (Low)\n";
+        let parsed = parse_agy_models(raw);
+        assert_eq!(parsed.len(), 1);
+        let model = &parsed[0];
+        assert_eq!(model.get("id").and_then(|v| v.as_str()), Some("gemini-4-argon"));
+        assert_eq!(model.get("supportsEffort").and_then(|v| v.as_bool()), Some(true));
+        let levels: Vec<&str> = model
+            .get("effortLevels")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(levels, vec!["low", "medium", "high"]);
+        assert_eq!(model.get("defaultEffort").and_then(|v| v.as_str()), Some("medium"));
+    }
+
+    #[test]
+    fn parses_opencode_models_with_custom_variants_and_names() {
+        let config = json!({
+            "provider": {
+                "google": {
+                    "models": {
+                        "gemini-3-flash": {
+                            "name": "Gemini 3 Flash Custom",
+                            "variants": {
+                                "high": { "thinkingLevel": "high" },
+                                "low": { "thinkingLevel": "low" },
+                                "minimal": { "thinkingLevel": "minimal" },
+                                "medium": { "thinkingLevel": "medium" }
+                            }
+                        },
+                        "claude-opus-thinking": {
+                            "name": "Claude Opus Thinking",
+                            "variants": {
+                                "low": {},
+                                "max": {}
+                            }
+                        }
+                    }
+                }
+            },
+            "model": "google/gemini-3-flash",
+            "variant": "high"
+        });
+
+        let raw = "google/gemini-3-flash\ngoogle/claude-opus-thinking\n";
+        let models = parse_opencode_models_inner(raw, Some(&config));
+        assert_eq!(models.len(), 2);
+
+        let flash = &models[0];
+        assert_eq!(flash.get("name").and_then(|v| v.as_str()), Some("Gemini 3 Flash Custom"));
+        assert_eq!(flash.get("supportsEffort").and_then(|v| v.as_bool()), Some(true));
+        let flash_levels: Vec<&str> = flash
+            .get("effortLevels")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(flash_levels, vec!["minimal", "low", "medium", "high"]);
+        assert_eq!(flash.get("defaultEffort").and_then(|v| v.as_str()), Some("high"));
+
+        let opus = &models[1];
+        assert_eq!(opus.get("name").and_then(|v| v.as_str()), Some("Claude Opus Thinking"));
+        let opus_levels: Vec<&str> = opus
+            .get("effortLevels")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(opus_levels, vec!["low", "max"]);
+    }
 }
 
 pub fn provider_agents(provider: &str) -> Vec<Value> {
@@ -597,80 +904,59 @@ pub fn provider_agents(provider: &str) -> Vec<Value> {
 }
 
 fn read_opencode_config_agents() -> Option<Vec<Value>> {
-    let mut candidates = Vec::new();
-    if let Ok(user) = std::env::var("USERPROFILE") {
-        candidates.push(std::path::PathBuf::from(&user).join(".config").join("opencode").join("opencode.json"));
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.json"));
-    }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        candidates.push(std::path::PathBuf::from(&local).join("opencode").join("opencode.json"));
-    }
-    candidates.push(std::path::PathBuf::from(".opencode").join("opencode.json"));
-
-    for path in candidates {
-        if path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                    if let Some(agents_obj) = val.get("agent").and_then(|v| v.as_object()) {
-                        let mut list = Vec::new();
-                        for (key, agent_data) in agents_obj {
-                            let hidden = agent_data
-                                .get("hidden")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            if hidden {
-                                continue;
-                            }
-                            let desc = agent_data
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let mode = agent_data
-                                .get("mode")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("subagent");
-                            let model = agent_data
-                                .get("model")
-                                .and_then(|v| v.as_str());
-
-                            // Generate human-friendly label
-                            let label = key
-                                .split(&['-', '_'][..])
-                                .map(|w| {
-                                    let mut chars = w.chars();
-                                    match chars.next() {
-                                        None => String::new(),
-                                        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" ");
-
-                            let detail = if !desc.is_empty() {
-                                desc.to_string()
-                            } else {
-                                format!("Mode: {mode}")
-                            };
-
-                            let mut entry = json!({
-                                "id": key,
-                                "label": label,
-                                "detail": detail,
-                                "plan": false,
-                                "mode": mode,
-                            });
-                            if let Some(m) = model {
-                                entry["model"] = json!(m);
-                            }
-                            list.push(entry);
-                        }
-                        return Some(list);
-                    }
-                }
-            }
+    let val = read_opencode_config()?;
+    let agents_obj = val.get("agent").and_then(|v| v.as_object())?;
+    let mut list = Vec::new();
+    for (key, agent_data) in agents_obj {
+        let hidden = agent_data
+            .get("hidden")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if hidden {
+            continue;
         }
+        let desc = agent_data
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mode = agent_data
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("subagent");
+        let model = agent_data
+            .get("model")
+            .and_then(|v| v.as_str());
+
+        // Generate human-friendly label
+        let label = key
+            .split(&['-', '_'][..])
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let detail = if !desc.is_empty() {
+            desc.to_string()
+        } else {
+            format!("Mode: {mode}")
+        };
+
+        let mut entry = json!({
+            "id": key,
+            "label": label,
+            "detail": detail,
+            "plan": false,
+            "mode": mode,
+        });
+        if let Some(m) = model {
+            entry["model"] = json!(m);
+        }
+        list.push(entry);
     }
-    None
+    Some(list)
 }

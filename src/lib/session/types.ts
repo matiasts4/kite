@@ -198,6 +198,8 @@ export interface DriverChoice {
 export interface DriverModelChoice extends DriverChoice {
   /** Display hint only. The declaration itself is authoritative. */
   supportsEffort?: boolean;
+  effortLevels?: (DriverChoice | string)[];
+  defaultEffort?: string | null;
 }
 
 export interface DriverWorkModeChoice extends DriverChoice {

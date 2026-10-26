@@ -1,12 +1,17 @@
 import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
+import './composer/composer.css';
 import {
   StopIcon,
   PaperclipIcon,
   CloseIcon,
-  CompassIcon,
   FileCodeIcon,
   ArrowUpIcon,
   MicIcon,
+  LockIcon,
+  PenLineIcon,
+  SparklesIcon,
+  BotIcon,
+  PencilRulerIcon,
 } from './ChatIcons';
 import {
   ChatProvider,
@@ -20,14 +25,17 @@ import {
 import type { ChatItem } from '../../../types';
 import { isControlDeclared, isProviderDeclared, undeclaredReason } from '../../../lib/session/declaration';
 import type { DriverDeclaration } from '../../../lib/session/types';
-import { SelectMenu } from '../../ui/SelectMenu';
-import { EffortPicker } from './EffortPicker';
 import { ChatApprovalCard } from './ChatApprovalCard';
 import { invokeCommand, listConnections } from '../../../lib/ipc';
 import {
   verifiedSpawnConnections,
   type ConnectionCandidate,
 } from './connectionBinding';
+import { ComposerSurface } from './composer/ComposerSurface';
+import { ComposerControl, ComposerControlSeparator, ComposerControlIcon, ComposerControlChevron } from './composer/ComposerControl';
+import { ModelPickerPopover } from './composer/ModelPickerPopover';
+import { EffortSliderPopover } from './composer/EffortSliderPopover';
+import { ComposerContextStrip } from './composer/ComposerContextStrip';
 
 export interface ChatComposerProps {
   threadId: string;
@@ -41,16 +49,15 @@ export interface ChatComposerProps {
   threadAgent?: string | null;
   threadConnectionId?: string | null;
   threadItems?: ChatItem[];
+  threadBranch?: string | null;
+  threadWorkspaceName?: string | null;
   declaration: DriverDeclaration;
   running: boolean;
   prompt: string;
   attachments: ChatAttachment[];
   totalTokens: number;
-  /** Accepted for existing callers; the model menu no longer renders a refresh action. */
   isRefreshingModels?: boolean;
-  /** Accepted for existing callers; the model menu no longer renders a refresh action. */
   onRefreshModels?: (provider: ChatProvider) => void;
-  /** Loads a provider's live models on demand. Deduplicated per mounted chat session. */
   ensureDynamicModels?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
   pendingApproval?: ApprovalRequest | null;
@@ -62,7 +69,15 @@ export interface ChatComposerProps {
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null }) => void;
+  onUpdateConfig: (patch: {
+    provider?: ChatProvider;
+    mode?: ChatMode;
+    model?: string | null;
+    effort?: string | null;
+    plan?: boolean;
+    agent?: string | null;
+    connectionId?: string | null;
+  }) => void;
   onSelectConnection?: (connectionId: string) => void;
   onApprovalDecision?: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
@@ -109,7 +124,6 @@ function isPlainKey(e: React.KeyboardEvent): boolean {
   return !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
 }
 
-/** Makes the reason for an undeclared control available beyond its tooltip. */
 const ControlReason: React.FC<{ reason: string }> = ({ reason }) => (
   <span className="sr-only">{reason}</span>
 );
@@ -123,9 +137,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadProvider,
   threadModel,
   threadEffort,
-  threadAgent,
+  threadAgent: _threadAgent,
   threadConnectionId,
   threadItems = [],
+  threadBranch,
+  threadWorkspaceName,
   declaration,
   running,
   prompt,
@@ -148,9 +164,14 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const footerRef = useRef<HTMLDivElement>(null);
 
   const [connectionCandidates, setConnectionCandidates] = useState<ConnectionCandidate[]>([]);
+  const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false);
+  const [isConnectionMenuOpen, setIsConnectionMenuOpen] = useState(false);
+  const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
 
-  // A connection appears here only when it verified this provider's local spawn
-  // endpoint. With none or one the send binding is resolved without asking.
+  const permissionMenuRef = useRef<HTMLDivElement>(null);
+  const connectionMenuRef = useRef<HTMLDivElement>(null);
+  const attachMenuRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     let active = true;
     void listConnections().then((connections) => {
@@ -161,12 +182,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     };
   }, [threadProvider]);
 
-  // The model menu is populated in the background; the composer never waits on it.
   useEffect(() => {
     ensureDynamicModels?.(threadProvider);
   }, [ensureDynamicModels, threadProvider]);
 
-  // Drag & drop drop-hint state ('attach' | 'mention' | 'prompt' | null)
   const [dropKind, setDropKind] = useState<'attach' | 'mention' | 'prompt' | null>(null);
 
   // Dictation state
@@ -195,10 +214,28 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (el) {
-      el.style.height = '62px';
-      el.style.height = `${Math.min(240, Math.max(62, el.scrollHeight))}px`;
+      el.style.height = '52px';
+      el.style.height = `${Math.min(240, Math.max(52, el.scrollHeight))}px`;
     }
   }, [prompt]);
+
+  // Click outside listener for dropdowns
+  useEffect(() => {
+    if (!isPermissionMenuOpen && !isConnectionMenuOpen && !isAttachMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (permissionMenuRef.current && !permissionMenuRef.current.contains(e.target as Node)) {
+        setIsPermissionMenuOpen(false);
+      }
+      if (connectionMenuRef.current && !connectionMenuRef.current.contains(e.target as Node)) {
+        setIsConnectionMenuOpen(false);
+      }
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+        setIsAttachMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [isPermissionMenuOpen, isConnectionMenuOpen, isAttachMenuOpen]);
 
   // Load dictation availability on mount
   useEffect(() => {
@@ -420,41 +457,26 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     return false;
   };
 
-  const providers = declaration.providers;
   const providerDeclared = isProviderDeclared(declaration, threadProvider);
-  const providerRow = providers.find((row) => row.id === threadProvider) ?? null;
   const providerReason = providerDeclared ? null : undeclaredReason(declaration, 'provider');
 
-  const models = declaration.models;
+  const models = declaration.models ?? [];
   const liveModels = models.filter((model) => model.id !== AUTOMATIC_MODEL_ID);
-  const modelsDeclared = models.length > 0;
-  const modelReason =
-    liveModels.length > 0 ? null : undeclaredReason(declaration, 'model');
+  const modelReason = liveModels.length > 0 ? null : undeclaredReason(declaration, 'model');
   const currentModelOption = models.find((model) => model.id === threadModel);
   const currentModelName =
     !threadModel || threadModel === AUTOMATIC_MODEL_ID
       ? 'Automatic'
       : currentModelOption?.label || threadModel;
-  const modelTriggerLabel = currentModelName.replace(/^Claude /u, '');
 
-  const effortChoices = declaration.effort ?? [];
   const effortDeclared = isControlDeclared(declaration.effort);
   const effortReason = effortDeclared ? null : undeclaredReason(declaration, 'effort');
-  const effortValue = threadEffort || declaration.defaultEffort || null;
 
   const permissions = declaration.permission ?? [];
   const permissionDeclared = isControlDeclared(declaration.permission);
   const permissionReason = permissionDeclared ? null : undeclaredReason(declaration, 'permission');
-  const permissionLabel =
-    permissions.find((permission) => permission.id === threadMode)?.label || threadMode;
-
-  const workModes = declaration.workMode ?? [];
-  const workModeDeclared = isControlDeclared(declaration.workMode);
-  const workModeReason = workModeDeclared ? null : undeclaredReason(declaration, 'workMode');
-  const selectedWorkMode =
-    workModes.find((mode) => (threadAgent ? mode.id === threadAgent : false)) ??
-    workModes.find((mode) => mode.plan === Boolean(threadPlan)) ??
-    null;
+  const activePermission = permissions.find((p) => p.id === threadMode);
+  const permissionLabel = activePermission?.label || threadMode;
 
   const canSend = Boolean(prompt.trim() || attachments.length > 0);
   const selectedConnection = connectionCandidates.find(
@@ -476,76 +498,58 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     : 'Ask anything, or describe the change…';
 
   return (
-    <div
-      className="chat-thread-layout__composer"
-      style={{ width: '100%', boxSizing: 'border-box', alignItems: 'stretch' }}
-      onDragOver={(event) => {
-        if (running) return;
-        const kind = getDropKind(event);
-        if (kind !== null) {
-          event.preventDefault();
-        }
-      }}
-    >
-      {/* Approval Card integrated into Composer */}
+    <div className="kite-composer-shell" style={{ boxSizing: 'border-box' }}>
+      {/* Approval Card integrated above Composer */}
       {pendingApproval && onApprovalDecision && (
-        <div style={{ width: '100%', maxWidth: 'var(--chat-column, 720px)', margin: '0 auto 10px' }}>
-          <ChatApprovalCard
-            approval={pendingApproval}
-            onDecision={onApprovalDecision}
-          />
+        <div className="w-full max-w-[var(--chat-content-max-width,46rem)] mx-auto mb-2">
+          <ChatApprovalCard approval={pendingApproval} onDecision={onApprovalDecision} />
         </div>
       )}
 
-      <div
-        className="chat-composer composer"
-        style={{ width: '100%', maxWidth: 'var(--chat-column, 720px)', margin: '0 auto', boxSizing: 'border-box' }}
-        data-drop={dropKind ?? undefined}
+      {/* Tier 1: Main Floating Glass Card */}
+      <ComposerSurface.Main
+        onDragOver={(event) => {
+          if (running) return;
+          const kind = getDropKind(event);
+          if (kind !== null) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+            setDropKind(kind);
+          }
+        }}
         onDragLeave={(e) => {
           const rel = e.relatedTarget;
           if (rel instanceof Node && e.currentTarget.contains(rel)) return;
           setDropKind(null);
         }}
-        onDragOver={(e) => {
-          const kind = getDropKind(e);
-          if (kind !== null) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'copy';
-            setDropKind(kind);
-          }
-        }}
-        onPointerDown={(e) => {
-          const t = e.target as HTMLElement;
-          if (t === e.currentTarget || t === footerRef.current || t.classList.contains('chat-composer__spacer')) {
-            e.preventDefault();
-            textareaRef.current?.focus();
-          }
-        }}
         onDrop={handleDrop}
       >
-        {/* Staged attachments */}
+        {/* Attachment chips */}
         {attachments.length > 0 && (
-          <div className="chat-composer__attachment-area">
-            <ul className="chat-composer__attachments">
-              {attachments.map((att) => (
-                <li key={att.resourceId} className="chat-composer__attachment">
-                  <FileCodeIcon size={13} style={{ color: 'var(--text-secondary)' }} />
-                  <span title={att.displayName}>{att.displayName}</span>
-                  {att.byteSize && <small style={{ color: 'var(--text-faint)' }}>{formatBytes(att.byteSize)}</small>}
-                  <button
-                    type="button"
-                    onClick={() => onRemoveAttachment(att.resourceId)}
-                    title="Remove attachment"
-                  >
-                    <CloseIcon size={12} />
-                  </button>
-                </li>
-              ))}
-            </ul>
+          <div className="kite-composer-attachments">
+            {attachments.map((att) => (
+              <div key={att.resourceId} className="kite-composer-attachment-chip">
+                <FileCodeIcon size={13} className="text-muted-foreground shrink-0" />
+                <span title={att.displayName}>{att.displayName}</span>
+                {att.byteSize && (
+                  <span className="text-2xs opacity-60 shrink-0">
+                    {formatBytes(att.byteSize)}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onRemoveAttachment(att.resourceId)}
+                  title="Remove attachment"
+                  className="size-4 rounded-xs inline-flex items-center justify-center text-muted-foreground hover:text-foreground border-0 bg-transparent cursor-pointer ml-0.5"
+                >
+                  <CloseIcon size={11} />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
-        {/* Input textarea */}
+        {/* Textarea Input */}
         <textarea
           ref={textareaRef}
           data-testid={agentName ? 'agent-chat-input' : undefined}
@@ -592,11 +596,12 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           }}
           placeholder={composerPlaceholder}
           rows={2}
+          className="kite-composer-textarea"
         />
 
         {/* Drop Hint */}
         {dropKind && (
-          <span aria-hidden="true" className="chat-composer__drop-hint">
+          <span className="absolute top-2 right-2 px-2.5 py-0.5 rounded-full bg-primary text-white text-2xs font-semibold pointer-events-none z-20">
             {dropKind === 'mention'
               ? 'Drop to mention'
               : dropKind === 'prompt'
@@ -605,162 +610,209 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           </span>
         )}
 
-        {/* Composer footer */}
-        <div className="chat-composer__footer" ref={footerRef}>
-          <div className="chat-composer__controls">
-            {/* Attach button: fits strictly in 28px (:first-child > .select-menu-trigger--toolbar) */}
-            <SelectMenu
-              variant="toolbar"
-              label="Attach"
-              help="Attach files or a folder"
-              triggerIcon={<PaperclipIcon size={14} />}
-              panelTitle="Attach to message"
-              panelDetail="A folder lets the agent read everything inside it."
+        {/* Footer Bar */}
+        <div ref={footerRef} className="kite-composer-footer">
+          {/* Left Controls */}
+          <div className="kite-composer-footer-left">
+            {/* Model & Provider Picker Popover */}
+            <ModelPickerPopover
+              provider={threadProvider}
+              model={threadModel}
+              declaration={declaration}
               disabled={running}
-              rows={[
-                { id: 'files', title: 'Add files…', detail: 'Choose one or more files.' },
-                { id: 'folder', title: 'Add folder…', detail: 'The agent can read everything inside the folder.' },
-              ]}
-              onSelect={(kind) => onPickAttachments(kind as 'files' | 'folder')}
+              modelReason={modelReason}
+              ensureDynamicModels={ensureDynamicModels}
+              onSelectModel={(modelId) => onUpdateConfig({ model: modelId })}
+              onSelectProvider={(provider) => onUpdateConfig({ provider })}
+            />
+            {modelReason && <ControlReason reason={modelReason} />}
+            {providerReason && <ControlReason reason={providerReason} />}
+
+            <ComposerControlSeparator />
+
+            {/* Effort Slider Popover (Exact Codex Discrete Slider Card) */}
+            <EffortSliderPopover
+              effort={threadEffort}
+              modelName={currentModelName}
+              declaration={declaration}
+              disabled={running}
+              unlistedReason={effortReason}
+              onChangeEffort={(effortId) => onUpdateConfig({ effort: effortId })}
             />
 
-            {/* Work mode: wrapped in span.chat-composer__mode to avoid 28px child rule */}
-            <span
-              className="chat-composer__mode"
-              data-execution={threadPlan ? 'plan' : selectedWorkMode?.id ?? 'build'}
+            <ComposerControlSeparator />
+
+            {/* Interaction Mode: Plan vs Build */}
+            <ComposerControl
+              active={Boolean(threadPlan)}
+              disabled={running}
+              title={threadPlan ? 'Planning Mode: plan created before editing' : 'Build Mode: direct execution'}
+              aria-label={threadPlan ? 'Plan mode' : 'Build mode'}
+              onClick={() => onUpdateConfig({ plan: !threadPlan })}
             >
-              <SelectMenu
-                variant="toolbar"
-                label="Work mode"
-                help={workModeReason ?? 'How this session approaches the task'}
-                triggerIcon={<CompassIcon size={12} />}
-                triggerLabel={selectedWorkMode?.label ?? (threadPlan ? 'Plan' : 'Work mode')}
-                disabled={running || !workModeDeclared}
-                value={selectedWorkMode?.id ?? ''}
-                panelTitle="Work mode"
-                rows={workModes.map((mode) => ({
-                  id: mode.id,
-                  title: mode.label,
-                  detail: mode.detail,
-                }))}
-                onSelect={(modeId) => {
-                  const mode = workModes.find((candidate) => candidate.id === modeId);
-                  if (mode) onUpdateConfig({ plan: mode.plan, agent: mode.id });
-                }}
+              <ComposerControlIcon
+                icon={threadPlan ? PencilRulerIcon : BotIcon}
+                size={14}
+                className={threadPlan ? 'text-primary' : 'text-muted-foreground'}
               />
-            </span>
-            {workModeReason && <ControlReason reason={workModeReason} />}
+              <span>{threadPlan ? 'Plan' : 'Build'}</span>
+            </ComposerControl>
 
-            {/* Permission is the driver's own "how much without asking" switch. */}
-            <span className="chat-composer__mode" data-execution={threadMode}>
-              <SelectMenu
-                variant="toolbar"
-                label="Permission"
-                help={permissionReason ?? 'How much this session may do without asking'}
-                triggerLabel={permissionLabel}
+            <ComposerControlSeparator />
+
+            {/* Runtime / Permission Mode Selector */}
+            <div ref={permissionMenuRef} className="relative inline-block">
+              <ComposerControl
+                role="combobox"
+                aria-label="Permission"
+                aria-expanded={isPermissionMenuOpen}
                 disabled={running || !permissionDeclared}
-                value={threadMode}
-                panelTitle="Permission mode"
-                rows={permissions.map((permission) => ({
-                  id: permission.id,
-                  title: permission.label,
-                  detail: permission.detail,
-                }))}
-                onSelect={(mode) => onUpdateConfig({ mode: mode as ChatMode })}
-              />
-            </span>
-            {permissionReason && <ControlReason reason={permissionReason} />}
+                title={permissionReason ?? 'Permission mode'}
+                onClick={() => setIsPermissionMenuOpen((prev) => !prev)}
+              >
+                <ComposerControlIcon
+                  icon={
+                    threadMode === 'fullAccess'
+                      ? SparklesIcon
+                      : threadMode === 'readOnly'
+                      ? LockIcon
+                      : PenLineIcon
+                  }
+                  size={14}
+                  className="opacity-80"
+                />
+                <span className="truncate max-w-[110px]">{permissionLabel}</span>
+                <ComposerControlChevron />
+              </ComposerControl>
 
+              {permissionReason && <ControlReason reason={permissionReason} />}
+
+              {isPermissionMenuOpen && (
+                <div
+                  role="listbox"
+                  aria-label="Permission mode"
+                  className="absolute bottom-[calc(100%+6px)] left-0 w-60 rounded-card border border-border bg-surface-elevated/95 backdrop-blur-md shadow-xl p-1 z-50 flex flex-col gap-0.5"
+                >
+                  {permissions.map((p) => {
+                    const isSelected = p.id === threadMode;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        role="option"
+                        aria-selected={isSelected}
+                        onClick={() => {
+                          onUpdateConfig({ mode: p.id as ChatMode });
+                          setIsPermissionMenuOpen(false);
+                        }}
+                        className={`px-2.5 py-1.5 rounded-sm flex flex-col text-left cursor-pointer border-0 transition-colors ${
+                          isSelected
+                            ? 'bg-selected-row text-foreground'
+                            : 'bg-transparent text-secondary-label hover:text-foreground hover:bg-hover-row'
+                        }`}
+                      >
+                        <span className="text-xs font-medium text-foreground">{p.label}</span>
+                        {p.detail && (
+                          <span className="text-2xs text-muted-foreground mt-0.5">{p.detail}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Connection Selector (when multiple accounts verified the spawn endpoint) */}
             {connectionCandidates.length > 1 && onSelectConnection && (
-              <SelectMenu
-                variant="toolbar"
-                label="Connection"
-                help="Account connection used for this send"
-                triggerLabel={selectedConnection?.displayName ?? 'Choose connection'}
-                disabled={running}
-                value={threadConnectionId ?? ''}
-                panelTitle="Account connection"
-                panelDetail="Each account is verified for its own endpoints."
-                rows={connectionCandidates.map((candidate) => ({
-                  id: candidate.connectionId,
-                  title: candidate.displayName,
-                  detail: candidate.supportedEndpoint,
-                }))}
-                onSelect={onSelectConnection}
-              />
+              <>
+                <ComposerControlSeparator />
+                <div ref={connectionMenuRef} className="relative inline-block">
+                  <ComposerControl
+                    role="combobox"
+                    aria-label="Connection"
+                    aria-expanded={isConnectionMenuOpen}
+                    disabled={running}
+                    onClick={() => setIsConnectionMenuOpen((prev) => !prev)}
+                  >
+                    <span className="truncate max-w-[120px]">
+                      {selectedConnection?.displayName ?? 'Choose connection'}
+                    </span>
+                    <ComposerControlChevron />
+                  </ComposerControl>
+
+                  {isConnectionMenuOpen && (
+                    <div
+                      role="listbox"
+                      aria-label="Account connection"
+                      className="absolute bottom-[calc(100%+6px)] left-0 w-52 rounded-card border border-border bg-surface-elevated/95 backdrop-blur-md shadow-xl p-1 z-50 flex flex-col gap-0.5"
+                    >
+                      {connectionCandidates.map((c) => (
+                        <button
+                          key={c.connectionId}
+                          type="button"
+                          onClick={() => {
+                            onSelectConnection(c.connectionId);
+                            setIsConnectionMenuOpen(false);
+                          }}
+                          className="px-2 py-1.5 rounded-sm flex flex-col text-left cursor-pointer border-0 bg-transparent text-secondary-label hover:text-foreground hover:bg-hover-row transition-colors"
+                        >
+                          <span className="text-xs font-medium text-foreground">{c.displayName}</span>
+                          <span className="text-2xs text-muted-foreground">{c.supportedEndpoint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
 
-          <span className="chat-composer__spacer" />
+          {/* Right Actions */}
+          <div className="kite-composer-footer-right">
+            {/* Attachment Button */}
+            <div ref={attachMenuRef} className="relative inline-block">
+              <button
+                type="button"
+                title="Attach files or a folder"
+                aria-label="Attach to message"
+                disabled={running}
+                onClick={() => setIsAttachMenuOpen((prev) => !prev)}
+                className="size-8 rounded-control inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-hover-row border-0 bg-transparent cursor-pointer transition-colors"
+              >
+                <PaperclipIcon size={15} />
+              </button>
 
-          {/* Token usage counter */}
-          {totalTokens > 0 && (
-            <span className="chat-composer__usage" title="Total tokens in session">
-              {formatTokens(totalTokens)}
-            </span>
-          )}
+              {isAttachMenuOpen && (
+                <div className="absolute bottom-[calc(100%+6px)] right-0 w-44 rounded-card border border-border bg-surface-elevated/95 backdrop-blur-md shadow-xl p-1 z-50 flex flex-col gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPickAttachments('files');
+                      setIsAttachMenuOpen(false);
+                    }}
+                    className="h-7 px-2 rounded-sm flex items-center gap-2 text-xs text-secondary-label hover:text-foreground hover:bg-hover-row text-left cursor-pointer border-0 bg-transparent transition-colors"
+                  >
+                    <FileCodeIcon size={13} className="text-icon-muted" />
+                    <span>Add files…</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPickAttachments('folder');
+                      setIsAttachMenuOpen(false);
+                    }}
+                    className="h-7 px-2 rounded-sm flex items-center gap-2 text-xs text-secondary-label hover:text-foreground hover:bg-hover-row text-left cursor-pointer border-0 bg-transparent transition-colors"
+                  >
+                    <PaperclipIcon size={13} className="text-icon-muted" />
+                    <span>Add folder…</span>
+                  </button>
+                </div>
+              )}
+            </div>
 
-          {/* Engine group: child 1 = Provider (30px), child 2 = Model, child 3 = Effort */}
-          <div className="chat-composer__engine">
-            {/* Child 1: Provider logo only (fits in 30px) */}
-            <SelectMenu
-              variant="toolbar"
-              label="Provider"
-              help={providerReason ?? `Provider · ${providerRow?.label ?? declaration.driver}`}
-              triggerEngine={providerRow?.engine ?? declaration.driver}
-              disabled={running || !providerDeclared}
-              value={threadProvider}
-              panelTitle="AI Provider"
-              rows={providers.map((provider) => ({
-                id: provider.id,
-                title: provider.label,
-                detail: provider.detail,
-                engine: provider.engine ?? provider.id,
-              }))}
-              onSelect={(provider) => onUpdateConfig({ provider: provider as ChatProvider })}
-            />
-
-            {/* Child 2: Model selector with label */}
-            <SelectMenu
-              variant="toolbar"
-              label="Model"
-              help={modelReason ?? 'Model'}
-              searchable
-              triggerLabel={modelTriggerLabel}
-              disabled={running || !modelsDeclared}
-              value={threadModel || AUTOMATIC_MODEL_ID}
-              panelTitle={`${providerRow?.label ?? declaration.driver} Models`}
-              panelEngine={providerRow?.engine ?? declaration.driver}
-              rows={models.map((model) => ({
-                id: model.id,
-                title: model.label,
-                detail: model.detail,
-              }))}
-              onSelect={(model) => {
-                onUpdateConfig({ model: model === AUTOMATIC_MODEL_ID ? null : model });
-              }}
-            />
-
-            {/* Child 3: EffortPicker (declared levels only) */}
-            <EffortPicker
-              choices={effortChoices}
-              value={effortValue}
-              disabled={running || !effortDeclared}
-              help={effortReason ?? undefined}
-              placement="top"
-              onSelect={(val) => onUpdateConfig({ effort: val })}
-            />
-          </div>
-          {providerReason && <ControlReason reason={providerReason} />}
-          {modelReason && <ControlReason reason={modelReason} />}
-          {effortReason && <ControlReason reason={effortReason} />}
-
-          {/* Dictation Control Button */}
-          <span className="dictation-control">
+            {/* Dictation Button */}
             <button
               type="button"
-              className="dictation-control__button"
-              data-recording={dictationState === 'recording' || undefined}
               disabled={
                 running ||
                 (dictationAvailability !== null &&
@@ -776,14 +828,19 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                   : dictationError || 'Dictate message'
               }
               aria-label={dictationState === 'recording' ? 'Finish dictation' : 'Dictate message'}
+              className={`size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-colors ${
+                dictationState === 'recording'
+                  ? 'bg-destructive/20 text-destructive'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-hover-row'
+              }`}
             >
               {dictationState === 'recording' ? (
-                <StopIcon size={10} />
+                <StopIcon size={11} />
               ) : dictationState === 'transcribing' ? (
                 <svg
                   className="animate-spin"
-                  width="12"
-                  height="12"
+                  width="13"
+                  height="13"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -793,45 +850,54 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                   <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
                 </svg>
               ) : (
-                <MicIcon size={12} />
+                <MicIcon size={14} />
               )}
             </button>
-            <span aria-live="polite" className="sr-only" role="status">
-              {dictationState === 'recording' ? 'Listening. Press again to transcribe.' : 'Dictate message'}
-            </span>
-            {dictationError && (
-              <span className="dictation-control__error" role="alert">
-                {dictationError}
+
+            {/* Token Counter */}
+            {totalTokens > 0 && (
+              <span className="text-2xs font-mono text-muted-foreground px-1 select-none">
+                {formatTokens(totalTokens)}
               </span>
             )}
-          </span>
 
-          {/* Send or Stop Button */}
-          {running ? (
-            <button
-              type="button"
-              aria-label="Stop generation"
-              title="Stop execution"
-              className="chat-composer__stop"
-              onClick={onStop}
-            >
-              <StopIcon size={10} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              aria-label="Send message"
-              title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
-              disabled={!canSend}
-              className="chat-composer__send"
-              data-testid={agentName ? 'agent-chat-send' : undefined}
-              onClick={onSend}
-            >
-              <ArrowUpIcon size={16} />
-            </button>
-          )}
+            {/* Circular Send / Stop Primary Button */}
+            {running ? (
+              <button
+                type="button"
+                aria-label="Stop generation"
+                title="Stop execution"
+                onClick={onStop}
+                className="kite-composer-action-btn kite-composer-action-btn--stop"
+              >
+                <StopIcon size={11} className="fill-current" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="Send message"
+                title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
+                disabled={!canSend}
+                data-testid={agentName ? 'agent-chat-send' : undefined}
+                onClick={onSend}
+                className="kite-composer-action-btn kite-composer-action-btn--send"
+              >
+                <ArrowUpIcon size={16} />
+              </button>
+            )}
+          </div>
         </div>
-      </div>
-  </div>
+      </ComposerSurface.Main>
+
+      {/* Tier 2: Recessed Lower Context Strip */}
+      <ComposerContextStrip
+        currentBranch={threadBranch || 'main'}
+        currentWorkspace={threadWorkspaceName || 'Local'}
+        onSelectBranch={(branch) => {
+          // If branch selection needs to be dispatched, SingleThreadPane handles it
+          console.log('[ComposerContextStrip] Selected branch:', branch);
+        }}
+      />
+    </div>
   );
 };

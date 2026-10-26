@@ -1,0 +1,358 @@
+/* ==========================================================================
+   Kite Code — Chat Composer Design System
+   Modern Autonomous Coding Client Standard (Two-Tier Glass Architecture)
+   ========================================================================== */
+
+/* 1. Main Composer Container & Glass Surfaces */
+.kite-composer-shell {
+  width: 100%;
+  max-width: var(--chat-content-max-width, 46rem);
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0 1rem 0.75rem;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.kite-composer-main {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  border-radius: 1.5rem; /* 24px */
+  background: color-mix(in srgb, var(--surface-raised, var(--surface, #18181b)) 82%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.08)));
+  box-shadow: 0 18px 42px -18px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.kite-composer-main:focus-within {
+  border-color: color-mix(in srgb, var(--primary, #3b82f6) 40%, var(--border, rgba(255, 255, 255, 0.15)));
+}
+
+[data-theme='light'] .kite-composer-main {
+  background: color-mix(in srgb, var(--surface-raised, #ffffff) 88%, transparent);
+  border-color: var(--border, rgba(0, 0, 0, 0.1));
+  box-shadow: 0 16px 36px -18px rgba(15, 23, 42, 0.18), 0 2px 6px rgba(15, 23, 42, 0.06);
+}
+
+/* 2. Textarea Area */
+.kite-composer-textarea {
+  width: 100%;
+  min-height: 52px;
+  max-height: 220px;
+  resize: none;
+  background: transparent;
+  border: 0;
+  padding: 0.875rem 1rem 0.25rem;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: var(--text-primary, #f4f4f5);
+  outline: none;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.kite-composer-textarea::placeholder {
+  color: var(--muted-foreground, var(--text-faint, #71717a));
+}
+
+/* 3. Attachment Chips */
+.kite-composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.25rem;
+}
+
+.kite-composer-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 1.75rem; /* 28px */
+  padding: 0 0.625rem;
+  border-radius: var(--control-radius, 8px);
+  background: var(--surface, #1e1e24);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  font-size: 0.75rem;
+  color: var(--text-primary, #f4f4f5);
+  max-width: 220px;
+}
+
+.kite-composer-attachment-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 4. Footer Bar */
+.kite-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0.75rem 0.625rem;
+}
+
+.kite-composer-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.kite-composer-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+/* 5. Control Pills (ComposerControl) */
+.kite-composer-control-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  height: 1.75rem; /* 28px */
+  padding: 0 0.625rem;
+  border-radius: var(--control-radius, 8px);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--secondary-label, var(--text-secondary, #a1a1aa));
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  outline: none;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  flex-shrink: 0;
+}
+
+.kite-composer-control-pill:hover:not(:disabled),
+.kite-composer-control-pill[data-state='open'] {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f4f4f5);
+}
+
+.kite-composer-control-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.kite-composer-control-pill--active {
+  background: color-mix(in srgb, var(--primary, #3b82f6) 15%, transparent);
+  color: var(--primary, #3b82f6);
+  border-color: color-mix(in srgb, var(--primary, #3b82f6) 25%, transparent);
+}
+
+.kite-composer-control-separator {
+  width: 1px;
+  height: 0.875rem; /* 14px */
+  background: var(--border, rgba(255, 255, 255, 0.1));
+  margin: 0 0.125rem;
+  flex-shrink: 0;
+}
+
+/* 6. Recessed Lower Context Strip (BranchToolbar) */
+.kite-composer-context-strip {
+  position: relative;
+  z-index: 0;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: -0.875rem; /* -14px recessed overlap */
+  width: calc(100% - 2.5rem);
+  padding: 1.125rem 0.75rem 0.375rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-radius: 0 0 1rem 1rem; /* rounded-b-2xl */
+  border: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.08)));
+  border-top: none;
+  background: color-mix(in srgb, var(--surface, #111111) 75%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  font-size: 0.75rem;
+  color: var(--secondary-label, var(--text-secondary, #a1a1aa));
+}
+
+[data-theme='light'] .kite-composer-context-strip {
+  background: color-mix(in srgb, var(--surface, #f4f4f5) 85%, transparent);
+  border-color: var(--border, rgba(0, 0, 0, 0.1));
+}
+
+/* 7. Reasoning Effort Discrete Slider Card (From User Screenshot) */
+.kite-effort-slider-card {
+  width: 17rem; /* 272px */
+  padding: 0.875rem 1rem 1rem;
+  border-radius: 1rem; /* 16px */
+  background: color-mix(in srgb, var(--surface-elevated, var(--popover, #1c1c22)) 96%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  user-select: none;
+  z-index: 60;
+}
+
+[data-theme='light'] .kite-effort-slider-card {
+  background: color-mix(in srgb, #ffffff 98%, transparent);
+  border-color: var(--border, rgba(0, 0, 0, 0.12));
+  box-shadow: 0 16px 36px -12px rgba(15, 23, 42, 0.16);
+}
+
+.kite-effort-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.kite-effort-title-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  flex: 1;
+}
+
+.kite-effort-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--primary, #3b82f6);
+  line-height: 1.25;
+}
+
+.kite-effort-subtitle {
+  font-size: 0.6875rem;
+  color: var(--muted-foreground, #71717a);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.125rem;
+}
+
+/* Discrete Slider Track & Dots */
+.kite-effort-track-wrap {
+  position: relative;
+  width: 100%;
+  height: 1.75rem; /* 28px */
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--surface, #111111) 90%, #ffffff 10%);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 0 0.875rem;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+[data-theme='light'] .kite-effort-track-wrap {
+  background: color-mix(in srgb, var(--surface, #e4e4e7) 90%, #000000 10%);
+}
+
+.kite-effort-track-progress {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--primary, #3b82f6);
+  border-radius: 9999px 0 0 9999px;
+  pointer-events: none;
+  transition: width 0.12s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.kite-effort-dots-row {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.kite-effort-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.4);
+  transition: background-color 0.15s ease;
+}
+
+[data-theme='light'] .kite-effort-dot {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.kite-effort-thumb {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  width: 1.375rem; /* 22px */
+  height: 1.375rem; /* 22px */
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  cursor: grab;
+  transition: left 0.12s cubic-bezier(0.2, 0, 0, 1), transform 0.1s ease;
+}
+
+.kite-effort-thumb:active {
+  cursor: grabbing;
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+/* 8. Circular Send / Stop Action Button */
+.kite-composer-action-btn {
+  width: 2rem; /* 32px */
+  height: 2rem; /* 32px */
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.1s ease, background-color 0.15s ease, opacity 0.15s ease;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.kite-composer-action-btn:active {
+  transform: scale(0.94);
+}
+
+.kite-composer-action-btn--send {
+  background: var(--message-action, var(--text-primary, #ffffff));
+  color: var(--message-action-foreground, var(--canvas, #000000));
+}
+
+.kite-composer-action-btn--send:hover:not(:disabled) {
+  background: var(--message-action-hover, #e4e4e7);
+}
+
+.kite-composer-action-btn--send:disabled {
+  background: color-mix(in srgb, var(--surface-raised, #27272a) 60%, transparent);
+  color: var(--muted-foreground, #71717a);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.kite-composer-action-btn--stop {
+  background: var(--destructive, #ef4444);
+  color: #ffffff;
+}
+
+.kite-composer-action-btn--stop:hover {
+  background: color-mix(in srgb, var(--destructive, #ef4444) 85%, #000000);
+}

@@ -539,3 +539,57 @@ export const MicIcon = createIcon(
   2,
   "none"
 );
+
+
+export const LockIcon = createIcon(
+  14,
+  <>
+    <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+export const PenLineIcon = createIcon(
+  14,
+  <>
+    <path d="M12 20h9" />
+    <path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+export const SparklesIcon = createIcon(
+  14,
+  <>
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+    <path d="M5 3v4" />
+    <path d="M19 17v4" />
+    <path d="M3 5h4" />
+    <path d="M17 19h4" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+export const PencilRulerIcon = createIcon(
+  14,
+  <>
+    <path d="m15 5 4 4" />
+    <path d="M13 7 8.7 2.7a2.41 2.41 0 0 0-3.4 0L2.7 5.3a2.41 2.41 0 0 0 0 3.4L7 13" />
+    <path d="m8 6 2-2" />
+    <path d="m2 18 3-3" />
+    <path d="m5 15 3-3" />
+    <path d="m8 12 3-3" />
+    <path d="m11 9 3-3" />
+    <path d="M13 13 8.7 17.3a2.41 2.41 0 0 0 0 3.4l2.6 2.6a2.41 2.41 0 0 0 3.4 0L19 19" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);

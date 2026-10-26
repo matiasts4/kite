@@ -33,6 +33,34 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.38',
+    tag: 'v0.1.38',
+    date: 'Oct 25, 2026',
+    title: 'Gestión de Ramas Git en Hilos, Selector de Workspace y Optimización del Chat',
+    items: [
+      {
+        kind: 'added',
+        description: 'Selector interactivo de ramas Git con búsqueda y creación instantánea de nuevas ramas',
+      },
+      {
+        kind: 'added',
+        description: 'Selector desplegable de proyecto (workspace) en la cabecera para reasignar hilos de trabajo',
+      },
+      {
+        kind: 'changed',
+        description: 'Edición y guardado in-place del título del chat mediante clic directo',
+      },
+      {
+        kind: 'changed',
+        description: 'Reemplazo del icono de nuevo chat por un icono de suma intuitivo',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminación del panel lateral ThreadInspector y simplificación del frame de chat',
+      },
+    ],
+  },
+  {
     version: '0.1.37',
     tag: 'v0.1.37',
     date: 'Oct 25, 2026',

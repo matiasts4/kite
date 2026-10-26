@@ -231,6 +231,15 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
         }
         thread["provider"] = json!(provider);
         thread["mode"] = json!(mode);
+        if let Some(ws) = patch.get("workspaceId") {
+            thread["workspaceId"] = if ws.is_null() {
+                Value::Null
+            } else if let Some(ws_str) = ws.as_str() {
+                if ws_str.is_empty() { Value::Null } else { json!(ws_str) }
+            } else {
+                ws.clone()
+            };
+        }
         *last_provider().lock().unwrap() =
             thread["provider"].as_str().unwrap_or("antigravity").to_string();
         touch(thread);

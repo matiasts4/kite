@@ -59,7 +59,7 @@ export interface ThreadGridProps {
   onDropdownToggle: (threadId: string, type: 'provider' | 'model' | 'mode') => void;
   onUpdateConfig: (
     threadId: string,
-    patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; connectionId?: string | null }
+    patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; connectionId?: string | null; agent?: string | null; workspaceId?: string | null }
   ) => void;
   onApprovalDecision: (
     threadId: string,

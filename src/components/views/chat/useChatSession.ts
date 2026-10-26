@@ -773,6 +773,7 @@ export function useChatSession({
       plan?: boolean;
       agent?: string | null;
       connectionId?: string | null;
+      workspaceId?: string | null;
     }
   ) => {
     const thread = threadsMap[threadId];
@@ -793,7 +794,8 @@ export function useChatSession({
       patch.model === undefined &&
       patch.effort === undefined &&
       patch.plan === undefined &&
-      patch.agent === undefined;
+      patch.agent === undefined &&
+      patch.workspaceId === undefined;
 
     if (patch.connectionId !== undefined) {
       await selectThreadConnection(threadId, patch.connectionId);
@@ -819,6 +821,7 @@ export function useChatSession({
         plan: patch.plan !== undefined ? patch.plan : thread.plan,
         agent: agent ?? (thread as any).agent ?? (thread as any).workMode,
         providerOptions: effort ? [{ id: 'effort', value: effort }] : undefined,
+        workspaceId: patch.workspaceId !== undefined ? patch.workspaceId : (thread.workspaceId ?? null),
       });
       if (agentId && (patch.provider !== undefined || patch.model !== undefined)) {
         updated = await invokeCommand<ExtendedChatThread>('set_agent_chat_model', {
@@ -846,6 +849,8 @@ export function useChatSession({
         ...prev,
         [threadId]: mergedThread,
       }));
+      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? mergedThread : t)));
+      notifyThreadsChanged();
 
       void fetchDynamicModels(provider);
       void ensureDynamicAgents(provider);

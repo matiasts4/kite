@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.38] - 2026-10-26
+
+> Gestión de Ramas Git en Hilos, Selector de Workspace y Optimización del Chat
+
+### Added
+- Selector interactivo de ramas Git con búsqueda y creación instantánea de nuevas ramas
+- Selector desplegable de proyecto (workspace) en la cabecera para reasignar hilos de trabajo
+
+### Changed
+- Edición y guardado in-place del título del chat mediante clic directo
+- Reemplazo del icono de nuevo chat por un icono de suma intuitivo
+
+### Fixed
+- Eliminación del panel lateral ThreadInspector y simplificación del frame de chat
+
+---
+
 ## [0.1.37] - 2026-10-25
 
 > Conmutación Asíncrona de Cuentas, Restauración de Sesiones y Estabilidad de Terminal

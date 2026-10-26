@@ -1,12 +1,14 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
   FolderIcon,
   GitBranchIcon,
-  SquarePenIcon,
-  PanelRightIcon,
+  PlusIcon,
   CloseIcon,
   CheckIcon,
   FileCodeIcon,
+  ChevronDownIcon,
+  SearchIcon,
+  PencilIcon,
 } from './ChatIcons';
 import {
   ExtendedChatThread,
@@ -19,7 +21,12 @@ import {
   getActivePlan,
 } from './types';
 import { BrandLogo } from '../../ui/BrandLogo';
-import { invokeCommand } from '../../../lib/ipc';
+import {
+  invokeCommand,
+  listWorkspaceBranches,
+  switchWorkspaceBranch,
+  createWorkspaceBranch,
+} from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
 import { ChatComposer } from './ChatComposer';
 import { SessionLifecycleBar } from './SessionLifecycleBar';
@@ -27,7 +34,6 @@ import { declarationFromCatalog } from './driverDeclaration';
 import { getSavedSelectedModel, getSavedSelectedAgent } from './modelPersistence';
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
-import { ThreadInspector } from './ThreadInspector';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 
@@ -77,7 +83,7 @@ export interface SingleThreadPaneProps {
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null }) => void;
+  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null; workspaceId?: string | null }) => void;
   onApprovalDecision: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
   embedded?: boolean;
 }
@@ -144,12 +150,92 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   );
 
   const transcriptRef = useRef<HTMLDivElement>(null);
-  const [showsChanges, setShowsChanges] = useState(false);
+  const [isRepo, setIsRepo] = useState(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [elapsedSecs, setElapsedSecs] = useState<number>(0);
   const [visibleLimit, setVisibleLimit] = useState<number>(200);
-  const [inspectorTab, setInspectorTab] = useState<'changes' | 'files' | 'browser'>('changes');
-  const [inspectorFilePath, setInspectorFilePath] = useState<string | undefined>(undefined);
+
+  // Workspace dropdown state
+  const [wsDropdownOpen, setWsDropdownOpen] = useState(false);
+  const wsDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Git branch dropdown state
+  const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [branchSearch, setBranchSearch] = useState('');
+  const [isCreatingBranch, setIsCreatingBranch] = useState(false);
+  const [newBranchInput, setNewBranchInput] = useState('');
+  const [branchError, setBranchError] = useState<string | null>(null);
+  const branchDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Click outside to close popovers
+  useEffect(() => {
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (wsDropdownRef.current && !wsDropdownRef.current.contains(target)) {
+        setWsDropdownOpen(false);
+      }
+      if (branchDropdownRef.current && !branchDropdownRef.current.contains(target)) {
+        setBranchDropdownOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handleGlobalClick);
+    return () => window.removeEventListener('mousedown', handleGlobalClick);
+  }, []);
+
+  const loadBranches = useCallback(async () => {
+    const wsId = thread.workspaceId || workspaceId;
+    if (!wsId) return;
+    setBranchesLoading(true);
+    setBranchError(null);
+    try {
+      const res = await listWorkspaceBranches(wsId);
+      if (res) {
+        setBranches(res.branches || []);
+        if (res.current) setGitBranch(res.current);
+      }
+    } catch (err: any) {
+      setBranchError(err?.message || 'Failed to list branches');
+    } finally {
+      setBranchesLoading(false);
+    }
+  }, [thread.workspaceId, workspaceId]);
+
+  const handleSwitchBranch = async (b: string) => {
+    const wsId = thread.workspaceId || workspaceId;
+    if (!wsId) return;
+    setBranchError(null);
+    try {
+      const res = await switchWorkspaceBranch(wsId, b);
+      if (res?.current) setGitBranch(res.current);
+      setBranchDropdownOpen(false);
+    } catch (err: any) {
+      setBranchError(err?.message || `Failed to switch to ${b}`);
+    }
+  };
+
+  const handleCreateBranch = async () => {
+    const wsId = thread.workspaceId || workspaceId;
+    const name = newBranchInput.trim();
+    if (!wsId || !name) return;
+    setBranchError(null);
+    try {
+      const res = await createWorkspaceBranch(wsId, name);
+      if (res?.current) setGitBranch(res.current);
+      setNewBranchInput('');
+      setIsCreatingBranch(false);
+      setBranchDropdownOpen(false);
+    } catch (err: any) {
+      setBranchError(err?.message || `Failed to create ${name}`);
+    }
+  };
+
+  const filteredBranches = React.useMemo(() => {
+    const q = branchSearch.trim().toLowerCase();
+    if (!q) return branches;
+    return branches.filter((b) => b.toLowerCase().includes(q));
+  }, [branches, branchSearch]);
 
   // Live timer every 1s when running or waiting
   useEffect(() => {
@@ -165,20 +251,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     }, 1000);
     return () => clearInterval(timer);
   }, [running, thread.status]);
-
-  // Listen for open-inspector-file custom event
-  useEffect(() => {
-    const handleOpenFile = (e: Event) => {
-      const detail = (e as CustomEvent<{ path?: string }>).detail;
-      if (detail?.path) {
-        setInspectorTab('files');
-        setInspectorFilePath(detail.path);
-        setShowsChanges(true);
-      }
-    };
-    window.addEventListener('kite:open-inspector-file', handleOpenFile);
-    return () => window.removeEventListener('kite:open-inspector-file', handleOpenFile);
-  }, []);
 
   const atLiveEdgeRef = useRef(true);
   const enterFor = useTranscriptMotion(
@@ -206,6 +278,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   useEffect(() => {
     const wsId = thread.workspaceId || workspaceId;
     if (!wsId) {
+      setIsRepo(false);
       setGitBranch(null);
       return;
     }
@@ -216,6 +289,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     )
       .then((res) => {
         if (!active || !res) return;
+        setIsRepo(Boolean(res.isRepo));
         if (res.branch) setGitBranch(res.branch);
       })
       .catch(() => {});
@@ -251,18 +325,195 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
       {!agentName && !embedded && (
         <header className="chat-thread-header" role="toolbar" aria-label="Thread header">
           <div className="chat-thread-header__place">
-            <FolderIcon size={14} style={{ color: 'var(--text-secondary)' }} />
-            <strong title={effectiveWorkspaceName ? `Active Workspace: ${effectiveWorkspaceName}` : 'Kite General'}>
-              {effectiveWorkspaceName ?? 'No folder'}
-            </strong>
+            {/* Workspace / Project selector */}
+            <div className="chat-thread-header__menu-wrap" ref={wsDropdownRef}>
+              <button
+                type="button"
+                className={`chat-thread-header__ws-btn${wsDropdownOpen ? ' chat-thread-header__ws-btn--active' : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setWsDropdownOpen((v) => !v);
+                  setBranchDropdownOpen(false);
+                }}
+                title={effectiveWorkspaceName ? `Active project: ${effectiveWorkspaceName} (Click to switch)` : 'Select project folder'}
+              >
+                <FolderIcon size={13} style={{ color: 'var(--text-secondary)' }} />
+                <strong>{effectiveWorkspaceName ?? 'No folder'}</strong>
+                <ChevronDownIcon size={10} className={`chat-thread-header__chevron${wsDropdownOpen ? ' chat-thread-header__chevron--open' : ''}`} />
+              </button>
 
-            {gitBranch ? (
-              <span className="chat-thread-header__branch">
-                <GitBranchIcon size={10} />
-                <span>{gitBranch}</span>
-              </span>
-            ) : null}
+              {wsDropdownOpen && (
+                <div className="chat-thread-header__menu" onClick={(e) => e.stopPropagation()}>
+                  <div className="chat-thread-header__menu-header">Select Project</div>
+                  <div className="chat-thread-header__menu-list">
+                    {workspaces && workspaces.length > 0 ? (
+                      workspaces.map((ws) => {
+                        const isSelected = ws.id === (thread.workspaceId || workspaceId);
+                        return (
+                          <button
+                            key={ws.id}
+                            type="button"
+                            className={`chat-thread-header__menu-item${isSelected ? ' chat-thread-header__menu-item--selected' : ''}`}
+                            onClick={() => {
+                              onUpdateConfig({ workspaceId: ws.id });
+                              setWsDropdownOpen(false);
+                            }}
+                          >
+                            <FolderIcon size={13} />
+                            <span className="chat-thread-header__menu-item-text">{ws.displayName || ws.name || ws.id}</span>
+                            {isSelected && <CheckIcon size={12} className="chat-thread-header__menu-item-check" />}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="chat-thread-header__menu-empty">No projects found</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
 
+            {/* Git Branch Selector & Creator */}
+            {(isRepo || gitBranch) && (
+              <div className="chat-thread-header__menu-wrap" ref={branchDropdownRef}>
+                <button
+                  type="button"
+                  className={`chat-thread-header__branch-btn${branchDropdownOpen ? ' chat-thread-header__branch-btn--active' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const next = !branchDropdownOpen;
+                    setBranchDropdownOpen(next);
+                    setWsDropdownOpen(false);
+                    if (next) {
+                      setBranchSearch('');
+                      setIsCreatingBranch(false);
+                      setNewBranchInput('');
+                      void loadBranches();
+                    }
+                  }}
+                  title={`Git Branch: ${gitBranch || 'detached'} (Click to switch or create)`}
+                >
+                  <GitBranchIcon size={11} />
+                  <span>{gitBranch || 'branch'}</span>
+                  <ChevronDownIcon size={10} className={`chat-thread-header__chevron${branchDropdownOpen ? ' chat-thread-header__chevron--open' : ''}`} />
+                </button>
+
+                {branchDropdownOpen && (
+                  <div className="chat-thread-header__menu chat-thread-header__menu--branch" onClick={(e) => e.stopPropagation()}>
+                    <div className="chat-thread-header__menu-header">
+                      <span>Git Branches</span>
+                      {!isCreatingBranch && (
+                        <button
+                          type="button"
+                          className="chat-thread-header__menu-action-btn"
+                          onClick={() => {
+                            setIsCreatingBranch(true);
+                            setBranchError(null);
+                          }}
+                          title="Create new branch"
+                        >
+                          <PlusIcon size={10} />
+                          <span>New</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {branchError && (
+                      <div className="chat-thread-header__menu-error">
+                        {branchError}
+                      </div>
+                    )}
+
+                    {isCreatingBranch ? (
+                      <div className="chat-thread-header__create-branch-box">
+                        <input
+                          type="text"
+                          placeholder="branch-name"
+                          value={newBranchInput}
+                          autoFocus
+                          onChange={(e) => setNewBranchInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void handleCreateBranch();
+                            if (e.key === 'Escape') setIsCreatingBranch(false);
+                          }}
+                        />
+                        <div className="chat-thread-header__create-branch-actions">
+                          <button
+                            type="button"
+                            className="primary-button"
+                            onClick={() => void handleCreateBranch()}
+                            disabled={!newBranchInput.trim()}
+                          >
+                            Create
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => setIsCreatingBranch(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="chat-thread-header__menu-search">
+                          <SearchIcon size={12} />
+                          <input
+                            type="text"
+                            placeholder="Filter branches..."
+                            value={branchSearch}
+                            autoFocus
+                            onChange={(e) => setBranchSearch(e.target.value)}
+                          />
+                        </div>
+
+                        <div className="chat-thread-header__menu-list">
+                          {branchesLoading ? (
+                            <div className="chat-thread-header__menu-loading">Loading branches...</div>
+                          ) : filteredBranches.length > 0 ? (
+                            filteredBranches.map((b) => {
+                              const isCurrent = b === gitBranch;
+                              return (
+                                <button
+                                  key={b}
+                                  type="button"
+                                  className={`chat-thread-header__menu-item${isCurrent ? ' chat-thread-header__menu-item--selected' : ''}`}
+                                  onClick={() => void handleSwitchBranch(b)}
+                                >
+                                  <GitBranchIcon size={12} />
+                                  <span className="chat-thread-header__menu-item-text">{b}</span>
+                                  {isCurrent && <CheckIcon size={12} className="chat-thread-header__menu-item-check" />}
+                                </button>
+                              );
+                            })
+                          ) : (
+                            <div className="chat-thread-header__menu-empty">
+                              {branchSearch.trim() ? (
+                                <button
+                                  type="button"
+                                  className="chat-thread-header__create-from-search-btn"
+                                  onClick={() => {
+                                    setNewBranchInput(branchSearch.trim());
+                                    setIsCreatingBranch(true);
+                                  }}
+                                >
+                                  Create branch "{branchSearch.trim()}"
+                                </button>
+                              ) : (
+                                'No branches found'
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Chat Title with inline rename */}
             {editingTitleId === thread.id ? (
               <div
                 className="chat-rail-rename chat-rail-rename--row"
@@ -272,7 +523,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                   type="text"
                   value={titleInput}
                   autoFocus
+                  onFocus={(e) => e.currentTarget.select()}
                   onChange={(e) => onChangeTitleInput(e.target.value)}
+                  onBlur={onSaveRename}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') onSaveRename();
                     if (e.key === 'Escape') onCancelRename();
@@ -280,6 +533,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 />
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={onSaveRename}
                   title="Save title"
                 >
@@ -287,6 +541,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 </button>
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={onCancelRename}
                   title="Cancel"
                 >
@@ -295,12 +550,12 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               </div>
             ) : (
               <div
-                className="chat-thread-header__title"
-                style={{ cursor: 'pointer' }}
+                className="chat-thread-header__title-wrap"
                 onClick={() => onStartRename(thread.id, thread.title)}
-                title="Click to rename"
+                title="Click to rename chat"
               >
-                <span>{thread.title || 'Chat Thread'}</span>
+                <span className="chat-thread-header__title-text">{thread.title || 'Chat Thread'}</span>
+                <PencilIcon size={11} className="chat-thread-header__title-icon" />
               </div>
             )}
           </div>
@@ -355,19 +610,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               title="New thread"
               onClick={onNewThread}
             >
-              <SquarePenIcon size={13} />
-            </button>
-
-            {/* Changes / Inspector toggle */}
-            <button
-              type="button"
-              className={`chrome-button${showsChanges ? ' chrome-button--active' : ''}`}
-              data-changes-toggle
-              aria-label="Show inspector"
-              title={showsChanges ? 'Hide changes panel' : 'View file changes and diffs'}
-              onClick={() => setShowsChanges((v) => !v)}
-            >
-              <PanelRightIcon size={13} />
+              <PlusIcon size={13} />
             </button>
 
             {/* Close pane if in multi-pane view */}
@@ -386,7 +629,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
         </header>
       )}
 
-      {/* Frame containing Main Transcript and Lateral ThreadInspector */}
+      {/* Frame containing Main Transcript */}
       <div className="chat-thread-frame">
         <div className="chat-thread-main">
           <div className={`chat-thread-layout${isDraft ? ' chat-thread-layout--draft' : ''}`}>
@@ -620,17 +863,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             <div aria-hidden="true" className="chat-thread-layout__tail" />
           </div>
         </div>
-
-        {/* Lateral Inspector Panel */}
-        <ThreadInspector
-          threadId={thread.id}
-          workspaceId={thread.workspaceId || workspaceId}
-          workspaceName={effectiveWorkspaceName ?? undefined}
-          isOpen={showsChanges}
-          initialTab={inspectorTab}
-          initialFilePath={inspectorFilePath}
-          onClose={() => setShowsChanges(false)}
-        />
       </div>
     </section>
   );

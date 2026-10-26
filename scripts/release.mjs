@@ -100,18 +100,18 @@ function parseNotesToItems(rawNotes) {
     let kind = 'changed';
     let clean = line;
 
-    if (/^(fix|fixed|bugfix|correccion|corregido)[:\s-]/i.test(line)) {
+    if (/^(fixed|fix|bugfix|correccion|corregido)[:\s-]/i.test(line)) {
       kind = 'fixed';
-      clean = line.replace(/^(fix|fixed|bugfix|correccion|corregido)[:\s-]*/i, '').trim();
-    } else if (/^(feat|feature|add|added|nuevo|anadido|añadido)[:\s-]/i.test(line)) {
+      clean = line.replace(/^(fixed|fix|bugfix|correccion|corregido)[:\s-]*/i, '').trim();
+    } else if (/^(added|add|feature|feat|nuevo|anadido|añadido)[:\s-]/i.test(line)) {
       kind = 'added';
-      clean = line.replace(/^(feat|feature|add|added|nuevo|anadido|añadido)[:\s-]*/i, '').trim();
+      clean = line.replace(/^(added|add|feature|feat|nuevo|anadido|añadido)[:\s-]*/i, '').trim();
     } else if (/^(security|seguridad|sec)[:\s-]/i.test(line)) {
       kind = 'security';
       clean = line.replace(/^(security|seguridad|sec)[:\s-]*/i, '').trim();
-    } else if (/^(change|changed|update|updated|refactor|cambio)[:\s-]/i.test(line)) {
+    } else if (/^(changed|change|updated|update|refactor|cambio)[:\s-]/i.test(line)) {
       kind = 'changed';
-      clean = line.replace(/^(change|changed|update|updated|refactor|cambio)[:\s-]*/i, '').trim();
+      clean = line.replace(/^(changed|change|updated|update|refactor|cambio)[:\s-]*/i, '').trim();
     }
     if (clean) items.push({ kind, description: clean });
   }

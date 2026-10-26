@@ -852,6 +852,23 @@ export async function readWorkspaceChanges(workspaceId: string): Promise<Workspa
   return invokeCommand<WorkspaceChanges>('read_workspace_changes', { workspaceId });
 }
 
+export interface WorkspaceBranches {
+  current: string | null;
+  branches: string[];
+}
+
+export async function listWorkspaceBranches(workspaceId: string): Promise<WorkspaceBranches> {
+  return invokeCommand<WorkspaceBranches>('list_workspace_branches', { workspaceId });
+}
+
+export async function switchWorkspaceBranch(workspaceId: string, branch: string): Promise<WorkspaceBranches> {
+  return invokeCommand<WorkspaceBranches>('switch_workspace_branch', { workspaceId, branch });
+}
+
+export async function createWorkspaceBranch(workspaceId: string, branch: string): Promise<WorkspaceBranches> {
+  return invokeCommand<WorkspaceBranches>('create_workspace_branch', { workspaceId, branch });
+}
+
 export async function readWorkspaceFileDiff(
   workspaceId: string,
   path: string,

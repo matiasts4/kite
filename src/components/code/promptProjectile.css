@@ -1,4 +1,4 @@
-/* Kite — prompt injection slip (orb / parent terminal → target terminal) */
+/* Kite — prompt projectile (Zed orb / source terminal → target terminal) */
 
 .prompt-projectile-overlay {
   position: fixed;
@@ -16,17 +16,47 @@
   pointer-events: none;
 }
 
+/* Projectile head — the capsule rides with this transform, so keep it GPU-only. */
 .prompt-injection-dot {
   position: absolute;
   top: 0;
   left: 0;
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--pill-radius);
   background: var(--accent, #8eb6ff);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent, #8eb6ff) 75%, transparent);
+  box-shadow:
+    0 0 10px color-mix(in srgb, var(--accent, #8eb6ff) 75%, transparent),
+    0 0 22px color-mix(in srgb, var(--accent, #8eb6ff) 35%, transparent);
   pointer-events: none;
   will-change: transform;
+}
+
+/* Prompt capsule chip: the compact "what is flying" badge above the head. */
+.prompt-injection-capsule {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  padding: 3px 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent, #8eb6ff) 58%, transparent);
+  border-radius: var(--pill-radius);
+  background: color-mix(in srgb, var(--surface-overlay, #101418) 84%, transparent);
+  color: var(--text-primary, #f3f6fb);
+  font-size: 11px;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transform: translate3d(-50%, 0, 0);
+  box-shadow:
+    0 0 12px color-mix(in srgb, var(--accent, #8eb6ff) 38%, transparent),
+    0 2px 8px rgb(0 0 0 / 35%);
+  will-change: transform;
+  animation: prompt-capsule-in 0.16s ease-out both;
 }
 
 .prompt-injection-ring-host {
@@ -45,10 +75,16 @@
   width: 40px;
   height: 40px;
   margin: -20px 0 0 -20px;
-  border: 1.5px solid rgba(56, 189, 248, 0.55);
-  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--accent, #38bdf8) 60%, transparent);
+  border-radius: var(--pill-radius);
   pointer-events: none;
-  animation: prompt-injection-ring-once 0.48s ease-out forwards;
+  animation: prompt-injection-ring-once 0.48s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Departure pulse: the source terminal recoils when the prompt leaves. */
+.prompt-injection-ring--launch {
+  border-color: color-mix(in srgb, var(--accent, #38bdf8) 42%, transparent);
+  animation: prompt-injection-ring-launch 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 @keyframes prompt-injection-ring-once {
@@ -58,6 +94,40 @@
   }
   100% {
     transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+@keyframes prompt-injection-ring-launch {
+  0% {
+    transform: scale(0.3);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@keyframes prompt-capsule-in {
+  0% {
+    transform: translate3d(-50%, 4px, 0);
+    opacity: 0;
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-injection-capsule,
+  .prompt-injection-ring {
+    animation: none;
+    transition: none;
+  }
+
+  .prompt-injection-ring {
     opacity: 0;
   }
 }

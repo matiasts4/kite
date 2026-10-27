@@ -3,12 +3,34 @@
 // emits durable run ledger events, and falls back gracefully with explicit reasons.
 
 import { buildOperatorSystemPrompt } from './prompt';
-import { planTurnHeuristic } from './heuristic';
+import { planTurnHeuristic, isNegatedTerminalImperative } from './heuristic';
 import { detectPromptEcho, isPredominantlyEnglish, sanitizeReply } from './sanitize';
 import { ActionSchema, type OperatorPlan, type TurnContext, type OperatorContractAction } from '../contract';
 import type { PlannerProvider, ProviderMessage } from '../providers/types';
 import { emitTrace } from '../trace/trace';
 import { runLedger } from '../runLedger';
+
+const EXPLICIT_CLOSE_REASON = 'filtered-unsafe-close';
+
+// Explicit close verbs the user must have written before any close action is allowed.
+const EXPLICIT_CLOSE_VERB_RE =
+  /(?<![a-záéíóúñ])(?:cierra|cerrar|cierre|cierres|cierren|ci[eé]rral[ao]s?|ci[eé]rrenl[ao]s?|ci[eé]rrel[ao]s?|ci[eé]rrame|cerr[aá]l[ao]s?|cerr[aá]me|sierra|serrar|sierre|sierres|sierren|si[eé]rral[ao]s?|close|kill|mata|matar|mates|maten|m[aá]tal[ao]s?|m[aá]tenl[ao]s?|termina|terminar|termines|terminen|term[ií]nal[ao]s?|elimina|eliminar|elimines|eliminen|elim[ií]nal[ao]s?|apaga|apagar|apagues|apaguen|ap[aá]gal[ao]s?|borra|borrar|borres|borren)(?![a-záéíóúñ])/i;
+
+/**
+ * A close action is only allowed when the user explicitly asked to close something
+ * and did not negate the order ("no cierres las terminales").
+ */
+function allowsCloseAction(userInput?: string): boolean {
+  if (!userInput) return true;
+  if (isNegatedTerminalImperative(userInput)) return false;
+  return EXPLICIT_CLOSE_VERB_RE.test(userInput);
+}
+
+function logFilteredClose(userInput?: string): void {
+  console.warn(
+    `[Operator Safety] Acción destructiva 'close_terminals' bloqueada: el prompt ("${userInput}") no contiene una orden explícita de cierre.`
+  );
+}
 
 function extractJsonFromModelOutput(raw: string): any {
   if (!raw || !raw.trim()) return null;
@@ -92,24 +114,24 @@ function parseAndValidateModelPlan(
   const rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
   const validatedActions: OperatorContractAction[] = [];
 
-  const hasCloseVerb = userInput
-    ? /(?<![a-záéíóúñ])(?:cierra|cerrar|cierre|cierres|cierren|ci[eé]rral[ao]s?|ci[eé]rrenl[ao]s?|ci[eé]rrel[ao]s?|ci[eé]rrame|cerr[aá]l[ao]s?|cerr[aá]me|sierra|serrar|sierre|sierres|sierren|si[eé]rral[ao]s?|close|kill|mata|matar|mates|maten|m[aá]tal[ao]s?|m[aá]tenl[ao]s?|termina|terminar|termines|terminen|term[ií]nal[ao]s?|elimina|eliminar|elimines|eliminen|elim[ií]nal[ao]s?|apaga|apagar|apagues|apaguen|ap[aá]gal[ao]s?|borra|borrar|borres|borren)(?![a-záéíóúñ])/i.test(userInput)
-    : true;
+  const closeAllowed = allowsCloseAction(userInput);
+  let filteredUnsafeClose = false;
 
   for (const act of rawActions) {
     const validated = ActionSchema.parse(act);
     // Defense-in-depth safety guardrail:
-    if (validated.type === 'close_terminals' && !hasCloseVerb) {
-      console.warn(
-        `[Operator Safety] Acción destructiva 'close_terminals' bloqueada: el prompt ("${userInput}") no contiene verbos explícitos de cierre.`
-      );
+    if (validated.type === 'close_terminals' && !closeAllowed) {
+      filteredUnsafeClose = true;
+      logFilteredClose(userInput);
       continue;
     }
     validatedActions.push(validated);
   }
 
   const reply = sanitizeReply(
-    candidateReply,
+    filteredUnsafeClose && validatedActions.length === 0
+      ? 'No ejecuté el cierre porque la orden no lo pedía explícitamente.'
+      : candidateReply,
     'Acción planificada con éxito.'
   );
 
@@ -118,6 +140,7 @@ function parseAndValidateModelPlan(
     actions: validatedActions,
     reply,
     answer: typeof parsed.answer === 'string' ? parsed.answer : undefined,
+    ...(filteredUnsafeClose ? { fallbackReason: EXPLICIT_CLOSE_REASON } : {}),
   };
 
   return { plan, actions: validatedActions, reply };
@@ -182,20 +205,34 @@ export async function planTurnLLM(
 
     // If native tool calls were returned, validate and construct plan directly
     if (res.toolCalls && res.toolCalls.length > 0) {
+      const closeAllowed = allowsCloseAction(input);
       const validatedActions: OperatorContractAction[] = [];
+      let filteredUnsafeClose = false;
+
       for (const tc of res.toolCalls) {
         const candidate = {
           type: tc.name,
           ...(typeof tc.arguments === 'object' && tc.arguments !== null ? tc.arguments : {}),
         };
         const validated = ActionSchema.parse(candidate);
+        // Native tool calls must not bypass the close safety guard.
+        if (validated.type === 'close_terminals' && !closeAllowed) {
+          filteredUnsafeClose = true;
+          logFilteredClose(input);
+          continue;
+        }
         validatedActions.push(validated);
       }
 
       const plan: OperatorPlan = {
         strategy: 'llm',
         actions: validatedActions,
-        reply: sanitizeReply(res.rawText || 'Acción planificada con éxito.'),
+        reply: sanitizeReply(
+          filteredUnsafeClose && validatedActions.length === 0
+            ? 'No ejecuté el cierre porque la orden no lo pedía explícitamente.'
+            : res.rawText || 'Acción planificada con éxito.'
+        ),
+        ...(filteredUnsafeClose ? { fallbackReason: EXPLICIT_CLOSE_REASON } : {}),
       };
 
       emitTrace({
@@ -206,6 +243,7 @@ export async function planTurnLLM(
         model: modelName,
         latencyMs,
         actions: validatedActions,
+        fallbackReason: plan.fallbackReason,
         rawModelOutputTruncated: rawOutput.slice(0, 2000),
       });
 

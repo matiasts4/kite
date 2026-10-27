@@ -45,6 +45,7 @@ import {
 } from './lib/ipc';
 import { isBrowserTestLane } from './lib/browserTestLane';
 import { loadOperatorConfig, saveOperatorConfig } from './lib/operator/operatorConfig';
+import { startProactiveAgentWatcher } from './lib/operator/proactiveWatcher';
 import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
 import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
 import { AppIntro } from './motion/AppIntro';
@@ -518,18 +519,34 @@ export const App: React.FC = () => {
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
   }, []);
 
+  // S6: speak a concise Spanish status and raise the attention badge when an agent finishes.
+  useEffect(() => startProactiveAgentWatcher(), []);
+
   useEffect(() => {
     const handleNavigate = (e: Event) => {
-      const custom = e as CustomEvent<WorkMode>;
-      if (custom.detail && ['agent', 'code', 'chat'].includes(custom.detail)) {
-        setWorkMode(custom.detail);
+      const custom = e as CustomEvent<WorkMode | { mode?: string }>;
+      const raw =
+        typeof custom.detail === 'string' ? custom.detail : custom.detail?.mode;
+      // Operator view modes use surface names (agents/threads); the app uses its own.
+      const modeAlias: Record<string, WorkMode> = {
+        agents: 'agent',
+        agent: 'agent',
+        threads: 'chat',
+        chat: 'chat',
+        code: 'code',
+      };
+      const nextMode = raw ? modeAlias[raw] : undefined;
+      if (nextMode) {
+        setWorkMode(nextMode);
         setSettingsOpen(false);
       }
     };
     const handleSelectWorkspace = (e: Event) => {
-      const custom = e as CustomEvent<string>;
-      if (custom.detail) {
-        setSelectedWorkspaceId(custom.detail);
+      const custom = e as CustomEvent<string | { workspaceId?: string }>;
+      const workspaceId =
+        typeof custom.detail === 'string' ? custom.detail : custom.detail?.workspaceId;
+      if (workspaceId) {
+        setSelectedWorkspaceId(workspaceId);
       }
     };
     window.addEventListener('kite:navigate-mode', handleNavigate);

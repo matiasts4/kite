@@ -1698,6 +1698,9 @@ pub fn terminate_terminal(request: serde_json::Value) -> serde_json::Value {
         let mut map = get_terminals().lock().unwrap();
         map.remove(session_id)
     };
+    // Callers must know whether a live session actually existed; an idempotent
+    // second close must not be reported as a successful termination.
+    let existed = instance.is_some();
 
     if let Some(inst) = instance {
         if preserve_state {
@@ -1728,7 +1731,7 @@ pub fn terminate_terminal(request: serde_json::Value) -> serde_json::Value {
         remove_persisted_terminal_session(session_id);
     }
 
-    serde_json::json!({ "terminated": true })
+    serde_json::json!({ "terminated": existed, "sessionId": session_id })
 }
 
 #[tauri::command]
@@ -2788,11 +2791,12 @@ mod tests {
         }));
         assert!(resize_res.is_null());
 
-        // Terminating non-existent session returns terminated: true
+        // Terminating a non-existent session reports that no live session was terminated
         let term_res = terminate_terminal(serde_json::json!({
             "sessionId": fake_id
         }));
-        assert_eq!(term_res["terminated"], true);
+        assert_eq!(term_res["terminated"], false);
+        assert_eq!(term_res["sessionId"], fake_id);
 
         // Reading non-existent session returns idle
         let read_res = read_terminal_output(serde_json::json!({

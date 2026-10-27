@@ -26,6 +26,8 @@ export interface TurnStartTraceEvent extends BaseTraceEvent {
   source?: 'voz' | 'texto' | 'sugerencia' | 'shortcut';
   mode?: string;
   workspaceId?: string;
+  workspaceName?: string;
+  workspacePath?: string;
 }
 
 export interface PlanCreatedTraceEvent extends BaseTraceEvent {
@@ -35,6 +37,8 @@ export interface PlanCreatedTraceEvent extends BaseTraceEvent {
   model?: string;
   latencyMs?: number;
   actions?: unknown[];
+  answer?: string;
+  reply?: string;
   rawModelOutputTruncated?: string;
   fallbackReason?: string;
 }
@@ -65,6 +69,7 @@ export interface UiAckTraceEvent extends BaseTraceEvent {
 export interface ActionVerifyTraceEvent extends BaseTraceEvent {
   ev: 'action.verify';
   actionIdx: number;
+  actionType?: string;
   expected?: Record<string, unknown>;
   observed?: Record<string, unknown>;
   ok: boolean;
@@ -77,6 +82,7 @@ export interface ActionEndTraceEvent extends BaseTraceEvent {
   actionIdx: number;
   type: string;
   status: 'success' | 'failed';
+  summaryEs?: string;
   error?: string;
   ms?: number;
 }
@@ -127,12 +133,44 @@ export interface OperatorTurnTrace {
   source?: 'voz' | 'texto' | 'sugerencia' | 'shortcut';
   mode?: string;
   workspaceId?: string;
+  workspaceName?: string;
+  workspacePath?: string;
   strategy?: 'llm' | 'heuristic' | 'heuristic-fallback';
   provider?: string;
   model?: string;
+  plan?: OperatorPlanTrace;
+  receipts?: ActionReceiptTraceEntry[];
   reply?: string;
   overallSuccess?: boolean;
   durationMs?: number;
   error?: string;
   events: TraceEvent[];
+}
+
+/** Folding of the `plan.created` event into the turn trace. */
+export interface OperatorPlanTrace {
+  strategy: string;
+  actions: Array<Record<string, unknown>>;
+  answer?: string;
+  reply?: string;
+  fallbackReason?: string;
+}
+
+/** Post-condition verification attached to a single executed action. */
+export interface ActionReceiptVerification {
+  ok: boolean;
+  expected?: Record<string, unknown>;
+  observed?: Record<string, unknown>;
+  error?: string;
+}
+
+/** Folding of the `action.verify` / `action.end` events into the turn trace. */
+export interface ActionReceiptTraceEntry {
+  actionIdx: number;
+  type: string;
+  ok: boolean;
+  summaryEs?: string;
+  error?: string;
+  durationMs?: number;
+  verification?: ActionReceiptVerification;
 }

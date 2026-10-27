@@ -159,6 +159,8 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
         className={`code-pane-panel${isFocused ? ' code-pane-panel--focused' : ''}${isSpotlighted ? ' code-pane-panel--beacon-a' : ''}${occupant.kind === 'terminal' ? ' motion-terminal-in' : ''}`}
         onClick={() => onFocusLeaf(node.id)}
         data-leaf-id={node.id}
+        data-pane-id={node.id}
+        data-session-id={occupant.kind === 'terminal' ? occupant.sessionId : undefined}
         data-occupant-kind={occupant.kind}
         data-testid={occupant.kind === 'terminal' ? 'terminal-pane' : undefined}
         style={{ position: 'relative' }}

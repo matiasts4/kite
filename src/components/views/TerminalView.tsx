@@ -179,6 +179,9 @@ type LiveTerminal = { term: Terminal; fit: FitAddon };
 const liveTerms = new Map<string, LiveTerminal>();
 const restartedSessions = new Map<string, string>();
 
+/** Arrival wave length when a thrown prompt lands in this terminal. */
+const TERMINAL_IMPACT_PULSE_MS = 460;
+
 function isAgentEngine(engine: string): boolean {
   return engine !== '' && engine !== 'powershell' && engine !== 'terminal';
 }
@@ -274,6 +277,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [status, setStatus] = useState<'idle' | 'connecting' | 'running' | 'exited' | 'terminated'>('idle');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [isReceivingPrompt, setIsReceivingPrompt] = useState(false);
+  const [isImpactPulse, setIsImpactPulse] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -298,6 +302,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isAtBottomRef = useRef<boolean>(true);
   const linesFromBottomRef = useRef<number>(0);
   const isResizingRef = useRef<boolean>(false);
+  const impactTimerRef = useRef<number | null>(null);
 
   if (propPaneId && paneIdRef.current !== propPaneId) {
     paneIdRef.current = propPaneId;
@@ -308,6 +313,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   engineRef.current = engine;
   sessionIdRef.current = liveSessionRef.current || sessionId;
+
+  const triggerImpactPulse = useCallback(() => {
+    setIsImpactPulse(true);
+    if (impactTimerRef.current !== null) {
+      window.clearTimeout(impactTimerRef.current);
+    }
+    impactTimerRef.current = window.setTimeout(() => {
+      impactTimerRef.current = null;
+      setIsImpactPulse(false);
+    }, TERMINAL_IMPACT_PULSE_MS);
+  }, []);
 
   useEffect(() => {
     onStatusChange?.(status);
@@ -1095,6 +1111,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       if (!matchesSession && !matchesPane) return;
 
+      triggerImpactPulse();
       setIsReceivingPrompt(true);
 
       // Wait until terminal is ready / running
@@ -1146,7 +1163,39 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       cancelled = true;
       window.removeEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
     };
-  }, [propSessionId, status]);
+  }, [propSessionId, status, triggerImpactPulse]);
+
+  // ── Arrival wave: the thrown prompt landed in this terminal ──
+  useEffect(() => {
+    const handlePromptLanded = (e: Event) => {
+      const detail = (e as CustomEvent<{
+        sessionId?: string;
+        targetPaneId?: string;
+      }>).detail;
+      if (!detail) return;
+
+      const currentSid = sessionIdRef.current || propSessionId;
+      const currentPid = paneIdRef.current;
+      const matchesSession =
+        detail.sessionId &&
+        (detail.sessionId === currentSid ||
+          detail.sessionId === propSessionId ||
+          restartedSessions.get(detail.sessionId) === currentSid);
+      const matchesPane = detail.targetPaneId && detail.targetPaneId === currentPid;
+
+      if (!matchesSession && !matchesPane) return;
+      triggerImpactPulse();
+    };
+
+    window.addEventListener('kite:prompt-landed', handlePromptLanded);
+    return () => {
+      window.removeEventListener('kite:prompt-landed', handlePromptLanded);
+      if (impactTimerRef.current !== null) {
+        window.clearTimeout(impactTimerRef.current);
+        impactTimerRef.current = null;
+      }
+    };
+  }, [propSessionId, triggerImpactPulse]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -1270,6 +1319,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       className={`terminal-view-container${compact ? ' terminal-view-container--compact' : ''}${
         chrome === 'pane' ? ' terminal-view-container--pane' : ''
       }`}
+      data-session-id={sessionId || propSessionId || undefined}
+      data-pane-id={paneIdRef.current}
       onDragOver={(event) => {
         if (Array.from(event.dataTransfer.types).includes('application/x-kite-files-entry')) {
           event.preventDefault();
@@ -1422,7 +1473,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       {/* Terminal Canvas Host */}
       <div
-        className={`terminal-canvas-area ${isReceivingPrompt ? 'terminal-canvas-area--receiving' : ''}`}
+        className={[
+          'terminal-canvas-area',
+          isReceivingPrompt ? 'terminal-canvas-area--receiving' : '',
+          isImpactPulse ? 'terminal-canvas-area--impact' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
         onClick={() => termRef.current?.focus()}
       >
         <div ref={containerRef} className="terminal-surface-host" />

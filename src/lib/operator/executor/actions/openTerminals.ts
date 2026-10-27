@@ -15,7 +15,7 @@ export async function executeOpenTerminalsAction(
   actionIdx: number = 0
 ): Promise<ActionReceipt> {
   const count = Math.max(1, Math.min(8, args.count || 1));
-  const engine = args.engine || 'grok';
+  const engine = args.engine || 'powershell';
   const prompts = args.prompts || [];
 
   // Snapshot active sessions before spawn

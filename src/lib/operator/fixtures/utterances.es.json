@@ -12,7 +12,7 @@
   {
     "id": "spawn-connective-y",
     "input": "Abre una terminal y busca los errores en el proyecto",
-    "expected": { "type": "open_terminals", "count": 1, "engine": "grok", "prompts": ["busca los errores en el proyecto"] }
+    "expected": { "type": "open_terminals", "count": 1, "engine": "powershell", "prompts": ["busca los errores en el proyecto"] }
   },
   {
     "id": "spawn-stt-dot-subjunctive-grok-test",
@@ -102,7 +102,7 @@
   {
     "id": "spawn-stt-dot-one",
     "input": "abre una. Terminal y compila",
-    "expected": { "type": "open_terminals", "count": 1, "engine": "grok", "prompts": ["compila"] }
+    "expected": { "type": "open_terminals", "count": 1, "engine": "powershell", "prompts": ["compila"] }
   },
   {
     "id": "close-finished-direct",
@@ -212,7 +212,7 @@
   {
     "id": "close-index-panel-1",
     "input": "cierra el panel 1",
-    "expected": { "type": "close_terminals", "target": "1" }
+    "expectNegative": true
   },
   {
     "id": "summarize-terminal-2",

@@ -18,7 +18,8 @@ export type Engine = z.infer<typeof EngineSchema>;
 export const OpenTerminalsActionSchema = z.object({
   type: z.literal('open_terminals'),
   count: z.number().int().min(1).max(8).default(1),
-  engine: EngineSchema.default('grok'),
+  // A plain terminal request is a shell pane, never an unrequested AI agent (S3).
+  engine: EngineSchema.default('powershell'),
   prompts: z.array(z.string()).optional(),
 });
 
@@ -54,6 +55,33 @@ export const StopSpeakingActionSchema = z.object({
   type: z.literal('stop_speaking'),
 });
 
+// S7 — multi-agent ODD handoff and terminal-to-terminal piping.
+export const HandoffToAgentActionSchema = z.object({
+  type: z.literal('handoff_to_agent'),
+  sourceTarget: z.union([z.string(), z.number()]).default(1),
+  targetEngine: EngineSchema.optional(),
+  targetSession: z.union([z.string(), z.number()]).optional(),
+  spawnNew: z.boolean().default(true),
+  artifactKind: z.enum(['odd', 'output']).default('odd'),
+  customPrompt: z.string().optional(),
+});
+
+// S8 — spatial control of panes (equalize, split, focus, zoom).
+export const ManagePaneLayoutActionSchema = z.object({
+  type: z.literal('manage_pane_layout'),
+  operation: z
+    .enum(['equalize', 'split-horizontal', 'split-vertical', 'focus', 'zoom'])
+    .default('equalize'),
+  target: z.union([z.string(), z.number()]).optional(),
+});
+
+// S9 — workspace switching and view-mode navigation only (no sidebar close, no Git quick actions).
+export const SwitchWorkspaceActionSchema = z.object({
+  type: z.literal('switch_workspace'),
+  workspaceQuery: z.string().min(1),
+  viewMode: z.enum(['agents', 'code', 'threads']).optional(),
+});
+
 export const ActionSchema = z.discriminatedUnion('type', [
   OpenTerminalsActionSchema,
   CloseTerminalsActionSchema,
@@ -62,9 +90,17 @@ export const ActionSchema = z.discriminatedUnion('type', [
   NarrateSummaryActionSchema,
   SpawnSubagentActionSchema,
   StopSpeakingActionSchema,
+  HandoffToAgentActionSchema,
+  ManagePaneLayoutActionSchema,
+  SwitchWorkspaceActionSchema,
 ]);
 
 export type OperatorContractAction = z.infer<typeof ActionSchema>;
+export type HandoffToAgentAction = z.infer<typeof HandoffToAgentActionSchema>;
+export type ManagePaneLayoutAction = z.infer<typeof ManagePaneLayoutActionSchema>;
+export type SwitchWorkspaceAction = z.infer<typeof SwitchWorkspaceActionSchema>;
+export type PaneLayoutOperation = ManagePaneLayoutAction['operation'];
+export type WorkspaceViewMode = NonNullable<SwitchWorkspaceAction['viewMode']>;
 
 export const PlanStrategySchema = z.enum(['llm', 'heuristic', 'heuristic-fallback']);
 export type PlanStrategy = z.infer<typeof PlanStrategySchema>;
@@ -124,7 +160,7 @@ export const OPERATOR_NATIVE_TOOLS = [
         type: 'object',
         properties: {
           count: { type: 'integer', minimum: 1, maximum: 8, default: 1 },
-          engine: { type: 'string', enum: ['grok', 'claude', 'codex', 'powershell', 'antigravity', 'opencode'], default: 'grok' },
+          engine: { type: 'string', enum: ['grok', 'claude', 'codex', 'powershell', 'antigravity', 'opencode'], default: 'powershell' },
           prompts: { type: 'array', items: { type: 'string' } },
         },
         required: ['count'],
@@ -214,4 +250,72 @@ export const OPERATOR_NATIVE_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'handoff_to_agent',
+      description:
+        'Hand a source terminal artifact (ODD document or terminal output) to another agent terminal, spawning a new agent when requested.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sourceTarget: { type: ['string', 'number'], default: 1 },
+          targetEngine: {
+            type: 'string',
+            enum: ['grok', 'claude', 'codex', 'powershell', 'antigravity', 'opencode'],
+          },
+          targetSession: { type: ['string', 'number'] },
+          spawnNew: { type: 'boolean', default: true },
+          artifactKind: { type: 'string', enum: ['odd', 'output'], default: 'odd' },
+          customPrompt: { type: 'string' },
+        },
+        required: ['sourceTarget'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'manage_pane_layout',
+      description:
+        'Control pane geometry: equalize all panes to the same dimensions, split, focus or zoom a pane.',
+      parameters: {
+        type: 'object',
+        properties: {
+          operation: {
+            type: 'string',
+            enum: ['equalize', 'split-horizontal', 'split-vertical', 'focus', 'zoom'],
+            default: 'equalize',
+          },
+          target: { type: ['string', 'number'] },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'switch_workspace',
+      description: 'Switch to another workspace by name and optionally change the view mode.',
+      parameters: {
+        type: 'object',
+        properties: {
+          workspaceQuery: { type: 'string' },
+          viewMode: { type: 'string', enum: ['agents', 'code', 'threads'] },
+        },
+        required: ['workspaceQuery'],
+      },
+    },
+  },
 ];
+
+// The OpenAI-compatible and Anthropic tool payloads are projections of the single
+// source of truth above, so provider defaults (open_terminals.engine = 'powershell')
+// can never drift apart again.
+export const OPERATOR_TOOLS_OPENAI = OPERATOR_NATIVE_TOOLS;
+
+export const OPERATOR_TOOLS_ANTHROPIC = OPERATOR_NATIVE_TOOLS.map((tool) => ({
+  name: tool.function.name,
+  description: tool.function.description,
+  input_schema: tool.function.parameters,
+}));

@@ -47,15 +47,23 @@ export function pulseZedOrb(): void {
   window.dispatchEvent(new CustomEvent('kite:zed-orb-ack'));
 }
 
-export interface PromptFlightDetail {
+export interface PromptProjectileDispatchDetail {
   targetPaneId?: string;
-  targetSessionId: string;
+  targetSessionId?: string;
+  /** Legacy alias for `targetSessionId`; kept for dispatchers that name the session directly. */
+  sessionId?: string;
   sourcePaneId?: string;
   sourceSessionId?: string;
   agentName?: string;
   engine?: string;
   prompt: string;
+  /** Short badge shown on the in-flight capsule. Falls back to a prompt snippet. */
+  label?: string;
+  /** Per-shot spacing for broadcast volleys. */
+  staggerMs?: number;
 }
+
+export type PromptFlightDetail = PromptProjectileDispatchDetail;
 
 const PANE_READY_TIMEOUT_MS = 800;
 
@@ -68,15 +76,24 @@ export function dispatchPromptWhenPaneReady(detail: PromptFlightDetail): void {
   };
 
   const paneId = detail.targetPaneId;
-  if (!paneId) {
+  const sessionId = detail.targetSessionId ?? detail.sessionId;
+  if (!paneId && !sessionId) {
     fire();
     return;
   }
 
+  const readySelectors = [
+    paneId ? `[data-leaf-id="${paneId}"]` : null,
+    paneId ? `[data-pane-id="${paneId}"]` : null,
+    sessionId ? `[data-session-id="${sessionId}"]` : null,
+    sessionId ? `[data-leaf-session="${sessionId}"]` : null,
+  ].filter((selector): selector is string => selector !== null);
+
+  const isReady = () => readySelectors.some((selector) => document.querySelector(selector) !== null);
+
   const started = performance.now();
   const tick = () => {
-    const ready = document.querySelector(`[data-leaf-id="${paneId}"]`);
-    if (ready || performance.now() - started >= PANE_READY_TIMEOUT_MS) {
+    if (isReady() || performance.now() - started >= PANE_READY_TIMEOUT_MS) {
       fire();
       return;
     }

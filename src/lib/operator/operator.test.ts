@@ -9,12 +9,19 @@ import {
 import { cleanTextForSpeech } from './ttsNarrator';
 import { formatSummaryForSpeech, extractOutcomeFromBuffer } from './sessionContextHub';
 import { appOperatorController } from './appOperatorController';
+import { runLedger } from './runLedger';
+import { planTurnLLM } from './planner/llm';
 import { saveOperatorConfig, DEFAULT_OPERATOR_CONFIG } from './operatorConfig';
 import * as operatorProvidersModule from './operatorProviders';
 import * as terminalRegistry from '../terminalRegistry';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock('./planner/llm', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./planner/llm')>()),
+  planTurnLLM: vi.fn(),
 }));
 
 describe('Operator Assistant & TTS', () => {
@@ -473,6 +480,31 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
       expect(res.success).toBe(false);
       expect(res.message).toContain('No se encontraron terminales');
     });
+
+    it('still closes every open terminal for the generic wildcard target', async () => {
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-1', engine: 'grok', title: 'T1', state: 'idle', updatedAt: 100, latestLine: null, who: 'Orion' },
+        { sessionId: 'term-2', engine: 'antigravity', title: 'T2', state: 'working', updatedAt: 100, latestLine: null, who: 'Nova' },
+      ]);
+
+      const res = await appOperatorController.closeTerminals('todas');
+      expect(res.success).toBe(true);
+      expect(res.data?.closedSessionIds).toEqual(['term-1', 'term-2']);
+    });
+  });
+
+  describe('appOperatorController.injectPrompt', () => {
+    it('writes the prompt through write_terminal when no terminal pane is mounted', async () => {
+      const { invokeCommand } = await import('../ipc');
+
+      const res = await appOperatorController.injectPrompt('term-1', 'corre los tests');
+
+      expect(res.success).toBe(true);
+      expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith(
+        'write_terminal',
+        expect.objectContaining({ sessionId: 'term-1' })
+      );
+    });
   });
 
   describe('resolvePlannerProvider', () => {
@@ -535,6 +567,70 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
       expect(ctx.activeTerminals![1].sessionId).toBe('term-a2');
       expect(ctx.activeTerminals![1].idx).toBe(2);
     });
+  });
+});
+
+describe('runOperatorTurn — negation short-circuit & run ledger closure', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([]);
+  });
+
+  it('keeps a negated terminal imperative on the heuristic refusal plan instead of escalating to the LLM', async () => {
+    const { runOperatorTurn } = await import('./index');
+    vi.mocked(planTurnLLM).mockResolvedValue({ strategy: 'llm', actions: [], answer: 'ok' });
+
+    const res = await runOperatorTurn('no cierres las terminales', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-negation-1',
+    });
+
+    expect(planTurnLLM).not.toHaveBeenCalled();
+    expect(res.plan.actions).toEqual([]);
+    expect(res.strategy).toBe('heuristic');
+    expect(res.reply.toLowerCase()).toContain('terminal');
+    expect(res.receipts).toEqual([]);
+  });
+
+  it('closes the run ledger run opened while planning the turn', async () => {
+    const { runOperatorTurn } = await import('./index');
+    vi.mocked(planTurnLLM).mockImplementationOnce(async (input, _provider, _context, turnId) => {
+      const runId = turnId || 'llm-plan-run';
+      if (!runLedger.getRun(runId)) {
+        runLedger.startRun(input, { runId, taskType: 'llm_plan' });
+      }
+      return { strategy: 'llm', actions: [], answer: 'Todo listo.' };
+    });
+
+    const res = await runOperatorTurn('hola, ¿cómo vamos?', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-ledger-1',
+    });
+
+    const run = runLedger.getRun('turn-ledger-1');
+    expect(res.turnId).toBe('turn-ledger-1');
+    expect(run).toBeDefined();
+    expect(typeof run?.completedAt).toBe('number');
+    expect(run?.outcome).toBe('success');
+  });
+
+  it('records a quota failure on the turn when the model does not answer', async () => {
+    const { runOperatorTurn } = await import('./index');
+    const { getTurnTrace } = await import('./trace/trace');
+    vi.mocked(planTurnLLM).mockResolvedValue({
+      strategy: 'heuristic-fallback',
+      actions: [],
+      fallbackReason: 'Error HTTP 402 desde https://api.example/chat/completions: insufficient_quota',
+    });
+
+    const res = await runOperatorTurn('hola, ¿cómo vamos?', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-quota-1',
+    });
+
+    expect(res.overallSuccess).toBe(false);
+    expect(getTurnTrace('turn-quota-1')?.error).toMatch(/sin cuota/i);
   });
 });
 

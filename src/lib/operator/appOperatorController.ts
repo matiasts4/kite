@@ -19,6 +19,17 @@ import { ttsNarrator } from './ttsNarrator';
 import { interpretAndEnrichPrompt } from './planner/promptInterpreter';
 import { runLedger } from './runLedger';
 import { planTurnHeuristic, detectEngineFromText } from './planner/heuristic';
+import { suppressProactiveAnnouncement } from './proactiveWatcher';
+import { pulseZedOrb } from '../../motion/contract';
+
+export interface InjectPromptOptions {
+  runId?: string;
+  /** Terminal that threw the prompt; the projectile flies from it (S5/S7). */
+  sourceSessionId?: string;
+  sourcePaneId?: string;
+  /** Badge shown on the in-flight projectile capsule. */
+  label?: string;
+}
 
 export interface SpawnTerminalsOptions {
   count: number;
@@ -28,6 +39,10 @@ export interface SpawnTerminalsOptions {
   workspaceId?: string;
   titlePrefix?: string;
   runId?: string;
+  /** Session that originated the request; the prompt projectile flies out of it (S5/S7). */
+  sourceSessionId?: string;
+  /** Badge shown on the in-flight projectile capsule. */
+  projectileLabel?: string;
 }
 
 export interface OperatorExecutionResult {
@@ -97,7 +112,8 @@ class AppOperatorController {
   public async spawnTerminals(options: SpawnTerminalsOptions): Promise<OperatorExecutionResult> {
     const startTime = Date.now();
     const count = Math.max(1, Math.min(options.count || 1, 10));
-    const engine = options.engine || 'grok';
+    // S3: a plain terminal request is a shell pane, never an unrequested AI agent.
+    const engine = options.engine || 'powershell';
     const autoApprove = options.autoApprove ?? true;
     const isShell = engine === 'powershell' || engine === 'terminal';
     const spawnedIds: string[] = [];
@@ -153,6 +169,8 @@ class AppOperatorController {
               autoApprove,
               title,
               workspaceId: options.workspaceId,
+              sourceSessionId: options.sourceSessionId,
+              label: options.projectileLabel,
             },
           })
         );
@@ -203,8 +221,16 @@ class AppOperatorController {
 
   /**
    * Injects a prompt into a running terminal via PTY write.
+   * When the target pane is mounted, the Prompt-Throw projectile delivers the text
+   * through `kite:terminal-staged-prompt` so the flight is always visible (S5).
    */
-  public async injectPrompt(sessionId: string, prompt: string, runId?: string): Promise<OperatorExecutionResult> {
+  public async injectPrompt(
+    sessionId: string,
+    prompt: string,
+    options?: InjectPromptOptions
+  ): Promise<OperatorExecutionResult> {
+    const runId = options?.runId;
+
     if (!sessionId || !prompt) {
       if (runId) {
         runLedger.recordToolEnd(runId, {
@@ -221,13 +247,39 @@ class AppOperatorController {
       runLedger.recordToolStart(runId, { name: 'inject_prompt' });
     }
 
+    const hasLiveReceiver =
+      typeof document !== 'undefined' &&
+      document.querySelector(`.terminal-view-container[data-session-id="${sessionId}"]`) !== null;
+
+    if (typeof window !== 'undefined') {
+      if (!options?.sourceSessionId && !options?.sourcePaneId) {
+        pulseZedOrb();
+      }
+      window.dispatchEvent(
+        new CustomEvent('kite:dispatch-prompt-projectile', {
+          detail: {
+            sessionId,
+            targetSessionId: sessionId,
+            sourceSessionId: options?.sourceSessionId,
+            sourcePaneId: options?.sourcePaneId,
+            prompt,
+            label: options?.label,
+          },
+        })
+      );
+    }
+
     const input = prompt.endsWith('\r') || prompt.endsWith('\n') ? prompt : `${prompt}\r\n`;
 
     try {
-      await invokeCommand('write_terminal', {
-        sessionId,
-        input,
-      });
+      // A mounted terminal receiver types the prompt when the projectile lands; writing
+      // here as well would execute the same instruction twice.
+      if (!hasLiveReceiver) {
+        await invokeCommand('write_terminal', {
+          sessionId,
+          input,
+        });
+      }
 
       if (runId) {
         runLedger.recordTerminalExec(runId, {
@@ -296,6 +348,25 @@ class AppOperatorController {
       if (/^\d+$/.test(norm)) {
         const idx = parseInt(norm, 10) - 1;
         if (terminals[idx]) return [terminals[idx].sessionId];
+        return [];
+      }
+
+      // Exact sessionId match
+      const exactId = terminals.find((t) => t.sessionId === trimmed || t.sessionId.toLowerCase() === norm);
+      if (exactId) return [exactId.sessionId];
+
+      // S4: provider/engine filters win over generic wildcards, so
+      // "cierra las terminales abiertas de antigravity" never closes every open pane.
+      const matchedEngine = detectEngineFromText(norm);
+      if (matchedEngine) {
+        const matching = terminals.filter(
+          (t) =>
+            (t.engine && t.engine.toLowerCase() === matchedEngine) ||
+            (t.who && t.who.toLowerCase().includes(matchedEngine)) ||
+            (t.title && cleanAgentTitle(t.title).toLowerCase().includes(matchedEngine)) ||
+            (t.title && detectEngineFromText(t.title) === matchedEngine)
+        );
+        if (matching.length > 0) return matching.map((t) => t.sessionId);
       }
 
       // Keyword matching
@@ -343,23 +414,7 @@ class AppOperatorController {
         return last ? [last.sessionId] : [];
       }
 
-      // Exact sessionId match
-      const exactId = terminals.find((t) => t.sessionId === trimmed || t.sessionId.toLowerCase() === norm);
-      if (exactId) return [exactId.sessionId];
-
-      // Engine matching via detectEngineFromText
-      const matchedEngine = detectEngineFromText(norm);
-      if (matchedEngine) {
-        const matching = terminals.filter(
-          (t) =>
-            (t.engine && t.engine.toLowerCase() === matchedEngine) ||
-            (t.who && t.who.toLowerCase().includes(matchedEngine)) ||
-            (t.title && cleanAgentTitle(t.title).toLowerCase().includes(matchedEngine)) ||
-            (t.title && detectEngineFromText(t.title) === matchedEngine)
-        );
-        if (matching.length > 0) return matching.map((t) => t.sessionId);
-      }
-
+      // Agent/terminal name matching (engine words already resolved above).
       // Exact match on who, cleaned title, or raw title (case-insensitive)
       const exactName = terminals.find((t) => 
         (t.who && t.who.toLowerCase() === norm) || 
@@ -412,9 +467,10 @@ class AppOperatorController {
       toClose = resolveSingleTarget(target);
     }
 
-    // Apply countLimit if provided (e.g. "cierra 1 de las terminales de antigravity")
+    // Apply countLimit if provided (e.g. "cierra 1 de las de antigravity"): keep the
+    // first N matches in terminal order, not the last ones.
     if (countLimit && countLimit > 0 && toClose.length > countLimit) {
-      toClose = toClose.slice(-countLimit);
+      toClose = toClose.slice(0, countLimit);
     }
 
     if (toClose.length === 0) {
@@ -433,12 +489,28 @@ class AppOperatorController {
       };
     }
 
+    const closedIds: string[] = [];
+    const failedIds: string[] = [];
+
     for (const id of toClose) {
+      // A deliberate close must never look like an agent that just finished (S6).
+      suppressProactiveAnnouncement(id);
+
+      try {
+        // S1/S4: only a resolved terminate IPC proves the session is gone.
+        await invokeCommand('terminate_terminal', {
+          sessionId: id,
+          owner: 'operator',
+        });
+      } catch (err) {
+        failedIds.push(id);
+        console.warn('[Operator] terminate_terminal failed:', id, err);
+        continue;
+      }
+
       markTerminalExited(id);
-      await invokeCommand('terminate_terminal', {
-        sessionId: id,
-        owner: 'operator',
-      }).catch(() => {});
+      closedIds.push(id);
+
       if (runId) {
         runLedger.recordTerminalExec(runId, {
           terminalId: id,
@@ -455,6 +527,21 @@ class AppOperatorController {
       }
     }
 
+    if (closedIds.length === 0) {
+      if (runId) {
+        runLedger.recordToolEnd(runId, {
+          name: 'close_terminals',
+          ok: false,
+          error: `No se pudo terminar ninguna de las terminales seleccionadas (${failedIds.join(', ')}).`,
+        });
+      }
+      return {
+        success: false,
+        message: `No se pudo cerrar ninguna terminal: ${failedIds.join(', ')}.`,
+        data: { closedIds, closedSessionIds: closedIds, failedIds },
+      };
+    }
+
     if (runId) {
       runLedger.recordToolEnd(runId, {
         name: 'close_terminals',
@@ -465,8 +552,8 @@ class AppOperatorController {
 
     return {
       success: true,
-      message: `Se ${toClose.length === 1 ? 'cerró 1 terminal' : `cerraron ${toClose.length} terminales`}.`,
-      data: { closedIds: toClose, closedSessionIds: toClose },
+      message: `Se ${closedIds.length === 1 ? 'cerró 1 terminal' : `cerraron ${closedIds.length} terminales`}.`,
+      data: { closedIds, closedSessionIds: closedIds, failedIds },
     };
   }
 
@@ -474,17 +561,26 @@ class AppOperatorController {
    * Opens a URL in the browser surface.
    */
   public async openBrowser(url: string, runId?: string): Promise<OperatorExecutionResult> {
+    const formattedUrl = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+
     if (runId) {
       runLedger.recordToolStart(runId, { name: 'open_browser' });
     }
-    const formattedUrl = /^https?:\/\//i.test(url) ? url : `https://${url}`;
 
     try {
-      await invokeCommand('open_browser', { url: formattedUrl }).catch(() => {
-        if (typeof window !== 'undefined') {
-          window.open(formattedUrl, '_blank');
+      // `open_external_link` is the real Tauri command; the rest are layered fallbacks
+      // for builds/surfaces where that command is unavailable.
+      try {
+        await invokeCommand('open_external_link', { url: formattedUrl });
+      } catch {
+        try {
+          await invokeCommand('open_browser', { url: formattedUrl });
+        } catch {
+          if (typeof window !== 'undefined') {
+            window.open(formattedUrl, '_blank');
+          }
         }
-      });
+      }
 
       if (runId) {
         runLedger.recordToolEnd(runId, { name: 'open_browser', ok: true });
@@ -680,7 +776,7 @@ class AppOperatorController {
         overallSuccess = overallSuccess && res.success;
         messages.push(res.message);
       } else if (action.type === 'inject_prompt') {
-        const res = await this.injectPrompt(String(action.target), action.prompt, runId);
+        const res = await this.injectPrompt(String(action.target), action.prompt, { runId });
         overallSuccess = overallSuccess && res.success;
         messages.push(res.message);
       } else if (action.type === 'open_browser') {

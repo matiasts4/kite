@@ -7,14 +7,16 @@ import {
   type ActionReceipt,
 } from './contract';
 import { emitTrace } from './trace/trace';
-import { planTurnHeuristic } from './planner/heuristic';
+import { planTurnHeuristic, isNegatedTerminalImperative } from './planner/heuristic';
 import { planTurnLLM } from './planner/llm';
 import { executePlan, composeReplyFromReceipts } from './executor';
 import { ttsNarrator } from './ttsNarrator';
 import { loadOperatorConfig } from './operatorConfig';
+import { runLedger } from './runLedger';
 import { getActiveAgentTerminals } from '../terminalRegistry';
 import type { PlannerProvider, ProviderMessage } from './providers/types';
 import { resolvePlannerProvider } from './providers/resolvePlanner';
+import { zedAssistantFailureMessage } from './assistantFailureNotice';
 
 export { resolvePlannerProvider } from './providers/resolvePlanner';
 
@@ -148,12 +150,16 @@ export async function runOperatorTurn(
     // If the heuristic detects deterministic action intent, execute immediately without 3-4s cloud delay
     let plan: OperatorPlan;
     let fastPlan = planTurnHeuristic(input);
+    // S4: a negated imperative ("no cierres las terminales") is already answered by the
+    // heuristic refusal plan and must never be escalated to the LLM.
+    const negatedTerminalImperative = isNegatedTerminalImperative(input);
     const hasDeterministicActions =
       fastPlan.strategy === 'heuristic' &&
       fastPlan.actions.length > 0;
 
     // Avoid LLM mis-plans (p. ej. abrir Grok) cuando claramente pidieron narrar/resumir.
     if (
+      !negatedTerminalImperative &&
       !hasDeterministicActions &&
       /resum(?:e|ir|en|o|a|i)\b|resumen\b|\bnarr(?:a|ame|ar)\b|com[eé]ntame|cu[eé]ntame|qu[eé]\s+hay|qu[eé]\s+hab[ií]a/i.test(
         input
@@ -170,7 +176,8 @@ export async function runOperatorTurn(
     }
 
     const useFastPlan =
-      fastPlan.strategy === 'heuristic' && fastPlan.actions.length > 0;
+      (fastPlan.strategy === 'heuristic' && fastPlan.actions.length > 0) ||
+      negatedTerminalImperative;
 
     if (provider.id === 'local' || useFastPlan) {
       plan = fastPlan;
@@ -210,12 +217,24 @@ export async function runOperatorTurn(
     }
 
     const durationMs = Date.now() - startTime;
+    const providerFailure = zedAssistantFailureMessage({
+      strategy: plan.strategy,
+      fallbackReason: plan.fallbackReason,
+      actionCount: plan.actions.length,
+    });
 
     emitTrace({
       turnId,
       ev: 'turn.end',
       overallSuccess,
       durationMs,
+      ...(providerFailure ? { error: providerFailure } : {}),
+    });
+
+    // S1: a run ledger run opened while planning (e.g. `llm_plan`) is closed here.
+    runLedger.completeRun(turnId, {
+      reply,
+      outcome: overallSuccess ? 'success' : 'failure',
     });
 
     return {
@@ -232,13 +251,19 @@ export async function runOperatorTurn(
   } catch (err: any) {
     const errorMsg = err?.message || 'Error inesperado durante la ejecución del turno';
     const durationMs = Date.now() - startTime;
+    const providerFailure =
+      zedAssistantFailureMessage({
+        strategy: 'heuristic-fallback',
+        fallbackReason: errorMsg,
+        actionCount: 1,
+      }) ?? errorMsg;
 
     const fallbackReceipt: ActionReceipt = {
       actionIdx: 0,
       type: 'unknown',
       ok: false,
       error: errorMsg,
-      summaryEs: `No se pudo completar la operación: ${errorMsg}`,
+      summaryEs: providerFailure,
     };
 
     const fallbackPlan: OperatorPlan = {
@@ -253,7 +278,13 @@ export async function runOperatorTurn(
       ev: 'turn.end',
       overallSuccess: false,
       durationMs,
-      error: errorMsg,
+      error: providerFailure,
+    });
+
+    runLedger.completeRun(turnId, {
+      reply: fallbackReceipt.summaryEs,
+      outcome: 'failure',
+      errorCategory: 'operator_turn_error',
     });
 
     return {

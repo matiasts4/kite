@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { TerminalView } from '../TerminalView';
 import { SquareTerminalIcon } from '../../code/codeIcons';
 import { invokeCommand } from '../../../lib/ipc';
+import { markTerminalExited } from '../../../lib/terminalRegistry';
+import { suppressProactiveAnnouncement } from '../../../lib/operator/proactiveWatcher';
 import {
   BrandLogo,
   getEngineDisplayName,
@@ -108,8 +110,12 @@ export const AgentTerminalPane: React.FC<AgentTerminalPaneProps> = ({
     if (!sessionId || stopping) return;
     setStopping(true);
     setInlineError(null);
+    // A deliberate stop is not an agent finishing: never announce it (S6).
+    suppressProactiveAnnouncement(sessionId);
     try {
       await invokeCommand('terminate_terminal', { sessionId, owner: 'user' });
+      // S4: keep the registry synchronized only after the IPC confirms the exit.
+      markTerminalExited(sessionId);
       if (sessions.get(key) === sessionId) sessions.delete(key);
       setSessionId(null);
       setPhase('suspended');
@@ -198,7 +204,7 @@ export const AgentTerminalPane: React.FC<AgentTerminalPaneProps> = ({
           : 'Terminal running';
 
   return (
-    <div className="agent-terminal" data-state={phase}>
+    <div className="agent-terminal" data-state={phase} data-session-id={sessionId || undefined}>
       {notice}
       <div className="agent-terminal__live">
         <div className="agent-terminal__toolbar">

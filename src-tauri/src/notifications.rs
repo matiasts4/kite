@@ -2,6 +2,7 @@ use crate::persist::{body, db_connection, notifications, persist, revision_count
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
+use uuid::Uuid;
 
 struct NotificationCenter {
     authorization: String,
@@ -147,9 +148,114 @@ pub fn notifications_poll(_request: Option<Value>) -> Value {
     make_notifications_snapshot()
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Normalizes the `payload` object carried by `notifications_report_attention`.
+/// Returns `None` when the caller supplied nothing actionable so the command stays
+/// backward-compatible with plain snapshot polling.
+fn attention_payload(request: &Option<Value>) -> Option<Value> {
+    let req = body(request)?;
+    let raw = req.get("payload")?;
+    let payload = match raw {
+        Value::String(text) => serde_json::from_str::<Value>(text).ok()?,
+        other => other.clone(),
+    };
+    if !payload.is_object() {
+        return None;
+    }
+    if payload
+        .as_object()
+        .map(|object| object.is_empty())
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    Some(payload)
+}
+
 #[tauri::command]
-pub fn notifications_report_attention(_request: Option<Value>) -> Value {
-    make_notifications_snapshot()
+pub fn notifications_report_attention(request: Option<Value>) -> Value {
+    let Some(payload) = attention_payload(&request) else {
+        return make_notifications_snapshot();
+    };
+
+    let kind = payload
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("settled");
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let detail = payload
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let session_id = payload
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let workspace_id = payload
+        .get("workspaceId")
+        .and_then(|v| v.as_str())
+        .map(|value| value.to_string());
+
+    if title.is_empty() && detail.is_empty() {
+        return make_notifications_snapshot();
+    }
+
+    let target_id = if session_id.is_empty() {
+        workspace_id.unwrap_or_else(|| "terminal".to_string())
+    } else {
+        session_id
+    };
+
+    let (record_kind, waiting_for_input) = match kind {
+        "needs_input" | "needsInput" => (
+            json!({ "kind": "needsInput", "requestKind": "question" }),
+            true,
+        ),
+        "error" | "failed" => (json!({ "kind": "settled", "outcome": "failed" }), false),
+        _ => (json!({ "kind": "settled", "outcome": "completed" }), false),
+    };
+
+    let notice = json!({
+        "id": Uuid::new_v4().to_string(),
+        "runId": Value::Null,
+        "target": { "source": "terminal", "id": target_id },
+        "profileId": Value::Null,
+        "routineId": Value::Null,
+        "kind": record_kind,
+        "title": title,
+        "body": detail,
+        "resolution": Value::Null,
+        "createdAtUnixMs": now_ms(),
+        "isRead": false,
+        "isWaitingForInput": waiting_for_input
+    });
+
+    {
+        let mut items = notifications().lock().unwrap();
+        items.insert(0, notice);
+        if items.len() > 100 {
+            items.truncate(100);
+        }
+    }
+
+    let snapshot = make_notifications_snapshot();
+    persist();
+    snapshot
 }
 
 #[tauri::command]

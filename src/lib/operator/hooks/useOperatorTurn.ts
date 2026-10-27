@@ -105,15 +105,15 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
         setStage('speaking');
         setStageLabel(getStageLabelEs('speaking'));
       } else if (ev.ev === 'turn.end') {
+        if (ev.error) {
+          toast.error('Asistente Zed', ev.error);
+        }
         if (ev.overallSuccess) {
           setStage('done');
           setStageLabel(getStageLabelEs('done'));
         } else {
           setStage('error');
           setStageLabel(getStageLabelEs('error', ev.error));
-          if (ev.error) {
-            toast.error('Asistente Zed', ev.error);
-          }
         }
 
         // Return to idle after 4.5 seconds

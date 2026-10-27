@@ -966,9 +966,12 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       workspaceId?: string;
       sourceSessionId?: string;
       sourcePaneId?: string;
+      label?: string;
+      projectileLabel?: string;
     }) => {
       const paneId = globalThis.crypto.randomUUID();
-      const wireEngine = detail.engine || 'grok';
+      // S3: a spawn without an explicit engine is a shell pane, never a silent Grok launch.
+      const wireEngine = detail.engine || 'powershell';
       const isShell = wireEngine === 'powershell' || wireEngine === 'terminal';
 
       let agentName = detail.agentName;
@@ -984,21 +987,28 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       const finalTitle = detail.title || (agentName ? `${agentName} (${wireEngine})` : `Terminal (${wireEngine})`);
       const leafLabel = agentName || cleanAgentTitle(finalTitle);
 
-      await invokeCommand('start_terminal', {
-        sessionId: detail.sessionId,
-        engine: wireEngine,
-        workspaceId: selectedWorkspace?.id || null,
-        paneId,
-        columns: 80,
-        rows: 24,
-        confirmedByBuilder: true,
-        agentName: agentName || undefined,
-        displayName: leafLabel,
-        initialPrompt: undefined, // Let terminal start interactively; staged delivery writes prompt visibly
-        autoApprove: detail.autoApprove ?? true,
-      }).catch((err) => console.warn('[ODD] Failed to start terminal:', err));
+      try {
+        await invokeCommand('start_terminal', {
+          sessionId: detail.sessionId,
+          engine: wireEngine,
+          workspaceId: selectedWorkspace?.id || null,
+          paneId,
+          columns: 80,
+          rows: 24,
+          confirmedByBuilder: true,
+          agentName: agentName || undefined,
+          displayName: leafLabel,
+          initialPrompt: undefined, // Let terminal start interactively; staged delivery writes prompt visibly
+          autoApprove: detail.autoApprove ?? true,
+        });
+      } catch (err) {
+        console.warn('[ODD] Failed to start terminal:', err);
+        // S1: without a live PTY there is no terminal to register or to lay out.
+        throw err;
+      }
 
-      // Immediately register in terminalRegistry so verification and active lists know it is alive
+      // S1: the registry only learns about a terminal once the PTY IPC resolved, so a
+      // failed spawn can never masquerade as a live agent in verification.
       registerSpawnedTerminal(detail.sessionId, {
         workspaceId: selectedWorkspace?.id || null,
         workspaceName: selectedWorkspace?.displayName,
@@ -1050,6 +1060,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
             prompt: detail.initialPrompt,
             sourceSessionId: detail.sourceSessionId,
             sourcePaneId: detail.sourcePaneId,
+            label: detail.label ?? detail.projectileLabel,
           });
         }
         return;
@@ -1080,6 +1091,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           prompt: detail.initialPrompt,
           sourceSessionId: detail.sourceSessionId,
           sourcePaneId: detail.sourcePaneId,
+          label: detail.label ?? detail.projectileLabel,
         });
       }
     };
@@ -1097,11 +1109,21 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         taskSlug?: string;
         sourceSessionId?: string;
         sourcePaneId?: string;
+        label?: string;
+        projectileLabel?: string;
       }>;
       const detail = customEvent.detail;
       if (!detail) return;
+      // S9: a spawn requested while the workspace switch is still propagating must not be
+      // dropped; the pane lands in the workspace tree that is currently rendered.
       if (detail.workspaceId && selectedWorkspace && detail.workspaceId !== selectedWorkspace.id) {
-        return;
+        console.debug(
+          '[ODD] Spawn for workspace',
+          detail.workspaceId,
+          'arrived while',
+          selectedWorkspace.id,
+          'is active; spawning in the active tree.'
+        );
       }
 
       spawnQueueRef.current = spawnQueueRef.current
@@ -1175,6 +1197,84 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       fullscreenLeafId: nextFs,
     });
   };
+
+  // S8 — operator-driven pane layout: equalize, split, focus and zoom the pane grid.
+  // No dependency array: the listener always sees the latest layout and handlers.
+  useEffect(() => {
+    const resolveLeafId = (tab: WorkspaceTab, target?: string | number): string => {
+      const leaves = getAllLeaves(tab.root);
+      const fallback = tab.focusedLeafId || tab.root.id;
+
+      if (typeof target === 'number') {
+        return leaves[Math.floor(target) - 1]?.id || fallback;
+      }
+
+      if (typeof target === 'string' && target.trim()) {
+        const norm = target.trim().toLowerCase();
+        if (/^\d+$/.test(norm)) {
+          const byIndex = leaves[parseInt(norm, 10) - 1];
+          if (byIndex) return byIndex.id;
+        }
+        const byId = leaves.find((leaf) => leaf.id === target || leaf.id.toLowerCase() === norm);
+        if (byId) return byId.id;
+        const byOccupant = leaves.find((leaf) => {
+          if (leaf.occupant.kind !== 'terminal') return false;
+          const occ = leaf.occupant;
+          return (
+            occ.sessionId.toLowerCase() === norm ||
+            Boolean(occ.label?.toLowerCase().includes(norm)) ||
+            Boolean(occ.runtime?.agentName?.toLowerCase().includes(norm)) ||
+            Boolean(occ.runtime?.displayName?.toLowerCase().includes(norm))
+          );
+        });
+        if (byOccupant) return byOccupant.id;
+      }
+
+      return fallback;
+    };
+
+    const handleOperatorPaneLayout = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{ operation?: string; target?: string | number; workspaceId?: string }>
+      ).detail;
+      if (!detail?.operation) return;
+
+      const current = latestLayoutRef.current;
+      const tab = current.tabs.find((t) => t.id === current.activeTabId) || current.tabs[0];
+      if (!tab) return;
+
+      if (detail.operation === 'equalize') {
+        handleEqualize();
+        return;
+      }
+
+      const leafId = resolveLeafId(tab, detail.target);
+
+      if (detail.operation === 'split-horizontal' || detail.operation === 'split-vertical') {
+        handleSplitLeaf(leafId, detail.operation === 'split-horizontal' ? 'horizontal' : 'vertical');
+        return;
+      }
+
+      if (detail.operation === 'focus') {
+        setFocusedLeafId(leafId);
+        setSpotlightLeafId(leafId);
+        if (spotlightTimerRef.current) {
+          clearTimeout(spotlightTimerRef.current);
+        }
+        spotlightTimerRef.current = setTimeout(() => {
+          setSpotlightLeafId(null);
+        }, 2500);
+        return;
+      }
+
+      if (detail.operation === 'zoom') {
+        handleToggleFullscreen(leafId);
+      }
+    };
+
+    window.addEventListener('kite:operator-pane-layout', handleOperatorPaneLayout);
+    return () => window.removeEventListener('kite:operator-pane-layout', handleOperatorPaneLayout);
+  });
 
   const handleDividerPointerDown = (
     e: React.PointerEvent,

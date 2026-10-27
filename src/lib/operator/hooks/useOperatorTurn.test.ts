@@ -10,9 +10,10 @@ import {
   OPERATOR_TURN_TIMEOUT_MESSAGE,
 } from './useOperatorTurnLogic';
 import { useOperatorTurn } from './useOperatorTurn';
-import { getTurnTraces } from '../trace/trace';
+import { getTurnTraces, subscribeTrace } from '../trace/trace';
 import { runOperatorTurn } from '../index';
-import type { OperatorTurnTrace } from '../trace/types';
+import { toast } from '../../toast';
+import type { OperatorTurnTrace, TraceEvent } from '../trace/types';
 
 vi.mock('../trace/trace', () => ({
   getTurnTraces: vi.fn(),
@@ -24,6 +25,15 @@ vi.mock('../trace/trace', () => ({
 
 vi.mock('../index', () => ({
   runOperatorTurn: vi.fn(),
+}));
+
+vi.mock('../../toast', () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
 }));
 
 function makeTrace(
@@ -243,8 +253,21 @@ describe('useOperatorTurn logic', () => {
 describe('useOperatorTurn hook', () => {
   const runOperatorTurnMock = vi.mocked(runOperatorTurn);
   const getTurnTracesMock = vi.mocked(getTurnTraces);
+  const subscribeTraceMock = vi.mocked(subscribeTrace);
+
+  function emitTurnEnd(listener: ((ev: TraceEvent) => void) | undefined, event: Partial<TraceEvent> & { ev: 'turn.end' }) {
+    listener?.({
+      turnId: 'turn-quota',
+      ts: 1,
+      seq: 1,
+      overallSuccess: false,
+      ...event,
+    } as TraceEvent);
+  }
 
   beforeEach(() => {
+    vi.mocked(toast.error).mockClear();
+    subscribeTraceMock.mockImplementation(() => () => {});
     runOperatorTurnMock.mockReset();
     runOperatorTurnMock.mockResolvedValue({
       turnId: 'turn-result',
@@ -279,5 +302,66 @@ describe('useOperatorTurn hook', () => {
         { role: 'assistant', content: 'Listo.' },
       ],
     });
+  });
+
+  it('shows an error toast when the assistant ends without a response', () => {
+    let listener: ((ev: TraceEvent) => void) | undefined;
+    subscribeTraceMock.mockImplementation((cb) => {
+      listener = cb;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useOperatorTurn('ws-1'));
+    const notice =
+      'El modelo del asistente se quedó sin cuota. No hubo respuesta y la orden no se procesó.';
+
+    act(() => {
+      emitTurnEnd(listener, { ev: 'turn.end', overallSuccess: false, error: notice });
+    });
+
+    expect(toast.error).toHaveBeenCalledWith('Asistente Zed', notice);
+    expect(result.current.stage).toBe('error');
+    expect(result.current.stageLabel).toContain('sin cuota');
+  });
+
+  it('shows a quota toast when the model failed even if the turn still finished', () => {
+    let listener: ((ev: TraceEvent) => void) | undefined;
+    subscribeTraceMock.mockImplementation((cb) => {
+      listener = cb;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useOperatorTurn('ws-1'));
+
+    act(() => {
+      emitTurnEnd(listener, {
+        ev: 'turn.end',
+        overallSuccess: true,
+        error: 'El modelo del asistente se quedó sin cuota.',
+      });
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(
+      'Asistente Zed',
+      'El modelo del asistente se quedó sin cuota.'
+    );
+    expect(result.current.stage).toBe('done');
+  });
+
+  it('does not toast a turn that finished without an error', () => {
+    let listener: ((ev: TraceEvent) => void) | undefined;
+    subscribeTraceMock.mockImplementation((cb) => {
+      listener = cb;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useOperatorTurn('ws-1'));
+
+    act(() => {
+      emitTurnEnd(listener, { ev: 'turn.end', overallSuccess: true });
+    });
+
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(result.current.stage).toBe('done');
   });
 });

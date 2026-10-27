@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { toast } from '../../toast';
+import { ttsNarrator } from '../ttsNarrator';
 import {
   startOperatorListening,
   stopOperatorListening,
@@ -64,6 +66,7 @@ export function useOperatorVoice({
     }
     setError(msg);
     if (msg) {
+      toast.error('Asistente Zed', msg);
       errorTimerRef.current = window.setTimeout(() => {
         setError(null);
         errorTimerRef.current = null;
@@ -91,6 +94,9 @@ export function useOperatorVoice({
   }, []);
 
   const startListening = useCallback(async () => {
+    // Unconditionally stop any ongoing TTS speech immediately (barge-in / user interruption)
+    ttsNarrator.stop();
+
     if (!isVoiceRecognitionSupported()) {
       setErrorWithAutoClear('El reconocimiento de voz no está disponible en este entorno.');
       return;

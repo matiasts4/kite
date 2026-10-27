@@ -172,4 +172,86 @@ describe('Heuristic Planner — Fixtures & Utterances', () => {
     expect((plan.actions[0] as any).target).toBe('active');
     expect((plan.actions[0] as any).prompt).toMatch(/grok/i);
   });
+
+  it('defaults to powershell for generic terminals without prompt, and grok for explicit agents or prompt', () => {
+    const plan1 = planTurnHeuristic('Abre dos terminales');
+    expect(plan1.actions).toHaveLength(1);
+    expect(plan1.actions[0].type).toBe('open_terminals');
+    expect((plan1.actions[0] as any).engine).toBe('powershell');
+    expect((plan1.actions[0] as any).count).toBe(2);
+
+    const plan2 = planTurnHeuristic('Abre dos agentes');
+    expect(plan2.actions).toHaveLength(1);
+    expect(plan2.actions[0].type).toBe('open_terminals');
+    expect((plan2.actions[0] as any).engine).toBe('grok');
+    expect((plan2.actions[0] as any).count).toBe(2);
+
+    const plan3 = planTurnHeuristic('abre una terminal y ejecuta git status');
+    expect(plan3.actions).toHaveLength(1);
+    expect(plan3.actions[0].type).toBe('open_terminals');
+    expect((plan3.actions[0] as any).engine).toBe('grok');
+  });
+
+  it('correctly parses quantifiers and engines for close_terminals', () => {
+    const plan1 = planTurnHeuristic('Cierra una de las terminales de anti-gravity');
+    expect(plan1.actions).toHaveLength(1);
+    expect(plan1.actions[0].type).toBe('close_terminals');
+    expect((plan1.actions[0] as any).target).toBe('antigravity');
+    expect((plan1.actions[0] as any).count).toBe(1);
+    expect(plan1.reply).toContain('una terminal de antigravity');
+
+    const plan2 = planTurnHeuristic('Cierra 2 terminales de grok');
+    expect(plan2.actions).toHaveLength(1);
+    expect(plan2.actions[0].type).toBe('close_terminals');
+    expect((plan2.actions[0] as any).target).toBe('grok');
+    expect((plan2.actions[0] as any).count).toBe(2);
+    expect(plan2.reply).toContain('2 terminales de grok');
+  });
+
+  it('correctly handles subjunctive cierres and abiertas phrases', () => {
+    const plan1 = planTurnHeuristic('Quiero que cierres las dos terminales que están abiertas actualmente');
+    expect(plan1.actions).toHaveLength(1);
+    expect(plan1.actions[0].type).toBe('close_terminals');
+    expect((plan1.actions[0] as any).target).toBe('all');
+    expect((plan1.actions[0] as any).count).toBe(2);
+
+    const plan2 = planTurnHeuristic('Quiero que cierres el agente Atlas');
+    expect(plan2.actions).toHaveLength(1);
+    expect(plan2.actions[0].type).toBe('close_terminals');
+    expect((plan2.actions[0] as any).target).toBe('Atlas');
+
+    const plan3 = planTurnHeuristic('cierra las terminales abiertas');
+    expect(plan3.actions).toHaveLength(1);
+    expect(plan3.actions[0].type).toBe('close_terminals');
+    expect((plan3.actions[0] as any).target).toBe('all');
+  });
+
+  it('does not spawn terminal when user asks count question with lanzados', () => {
+    const plan = planTurnHeuristic('¿Cuántos agentes hay lanzados actualmente?');
+    expect(plan.actions.find((a) => a.type === 'open_terminals')).toBeUndefined();
+  });
+
+  it('correctly parses compound terminal targets (e.g. terminal 1 y 2)', () => {
+    const plan1 = planTurnHeuristic('Quiero que cierres la terminal uno y dos');
+    expect(plan1.actions).toHaveLength(1);
+    expect(plan1.actions[0].type).toBe('close_terminals');
+    expect((plan1.actions[0] as any).target).toBe('1, 2');
+    expect(plan1.reply).toContain('las terminales 1 y 2');
+
+    const plan2 = planTurnHeuristic('cierra las terminales 1 y 2');
+    expect(plan2.actions).toHaveLength(1);
+    expect(plan2.actions[0].type).toBe('close_terminals');
+    expect((plan2.actions[0] as any).target).toBe('1, 2');
+
+    const plan3 = planTurnHeuristic('Quiero que cierres las dos terminales que están vacías, que es la terminal uno y dos');
+    expect(plan3.actions).toHaveLength(1);
+    expect(plan3.actions[0].type).toBe('close_terminals');
+    expect((plan3.actions[0] as any).target).toBe('1, 2');
+
+    const plan4 = planTurnHeuristic('cierra las dos terminales vacías');
+    expect(plan4.actions).toHaveLength(1);
+    expect(plan4.actions[0].type).toBe('close_terminals');
+    expect((plan4.actions[0] as any).target).toBe('idle');
+    expect((plan4.actions[0] as any).count).toBe(2);
+  });
 });

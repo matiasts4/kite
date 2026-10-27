@@ -1,0 +1,92 @@
+/* ============================================================================
+   Kite Sileo Toast System Styles
+   Seamlessly integrates Sileo physics-based toasts with Kite's visual language
+   ============================================================================ */
+
+@import 'sileo/styles.css';
+
+:root {
+  --sileo-width: 360px;
+  --sileo-height: 42px;
+  --sileo-duration: 520ms;
+
+  /* State colors aligned with Kite palette */
+  --sileo-state-success: #10b981;
+  --sileo-state-loading: #94a3b8;
+  --sileo-state-error: #f43f5e;
+  --sileo-state-warning: #f59e0b;
+  --sileo-state-info: #38bdf8;
+  --sileo-state-action: #818cf8;
+}
+
+/* Ensure viewport sits above all modals, terminal drawers and titlebars */
+[data-sileo-viewport] {
+  z-index: 10000 !important;
+  font-family: inherit;
+}
+
+/* Toast drop-shadow for native desktop depth */
+[data-sileo-toast] {
+  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.45)) drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
+  user-select: none;
+}
+
+/* Typography refinement */
+[data-sileo-title] {
+  font-size: 0.8125rem;
+  letter-spacing: -0.01em;
+  font-weight: 550;
+}
+
+[data-sileo-description] {
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  letter-spacing: -0.005em;
+  padding: 0.875rem 1rem 1rem 1rem;
+}
+
+/* Kite Button sizing and radius standards (AGENTS.md) */
+[data-sileo-button] {
+  border-radius: var(--control-radius, 8px) !important;
+  height: var(--vl-control-sm, 28px) !important;
+  padding: 0 12px !important;
+  font-size: 0.75rem !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  transition: transform 120ms ease, background-color 150ms ease, opacity 120ms ease;
+}
+
+[data-sileo-button]:hover {
+  transform: translateY(-0.5px);
+  filter: brightness(1.08);
+}
+
+[data-sileo-button]:active {
+  transform: translateY(0.5px);
+  filter: brightness(0.96);
+}
+
+/* Dark mode styling overrides for obsidian capsule aesthetics */
+[data-sileo-viewport][data-theme="dark"] [data-sileo-description] {
+  color: rgba(255, 255, 255, 0.72) !important;
+}
+
+[data-sileo-viewport][data-theme="dark"] [data-sileo-title] {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+[data-sileo-viewport][data-theme="light"] [data-sileo-description] {
+  color: rgba(0, 0, 0, 0.68) !important;
+}
+
+/* Reduced motion accessibility */
+@media (prefers-reduced-motion: reduce) {
+  [data-sileo-toast] {
+    transition: opacity 150ms ease !important;
+  }
+}

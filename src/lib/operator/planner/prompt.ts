@@ -44,6 +44,11 @@ REGLAS CRÍTICAS:
    - El campo reply de narrate_summary es solo una confirmación breve. El mismo proveedor configurado resume el buffer al ejecutar la acción; no inventes el contenido de la terminal en reply.
    - Abrir o lanzar una terminal nueva sigue siendo open_terminals, con el motor y la tarea en prompts.
    - Si ORDENA ejecutar algo en la terminal ya abierta, usa {"type": "inject_prompt", "target": "active", "prompt": "<comando>"} para el motor solicitado (ej: "agy" para AntiGravity, "claude", "grok", etc.) o la tarea en dicha terminal existente.
+10. AISLAMIENTO Y CONTEXTO DE PROYECTO (WORKSPACE SCOPING):
+   - Estás operando EXCLUSIVAMENTE dentro del proyecto o workspace actual indicado en el CONTEXTO ACTUAL DEL SISTEMA.
+   - La lista de terminales corresponde ÚNICAMENTE a las terminales abiertas en este proyecto actual.
+   - Si el usuario te pregunta por terminales, agentes, proyectos o estado, responde basándote ÚNICAMENTE en este proyecto actual.
+   - NUNCA menciones, cierres ni inventes terminales de otros proyectos o workspaces.
 
 ESQUEMA JSON PERMITIDO:
 {
@@ -99,6 +104,10 @@ Entrada: "cierra la terminal 2"
 Salida:
 {"reply": "Cerrando la terminal 2.", "actions": [{"type": "close_terminals", "target": 2}]}
 
+Entrada: "cierra la terminal uno y dos"
+Salida:
+{"reply": "Cerrando las terminales 1 y 2.", "actions": [{"type": "close_terminals", "target": "1, 2"}]}
+
 Entrada: "léeme el resumen"
 Salida:
 {"reply": "Leyendo el resumen de las terminales activas.", "actions": [{"type": "narrate_summary"}]}
@@ -108,7 +117,8 @@ Salida:
 {"reply": "¡Hola! Estoy listo para gestionar tus terminales y agentes. ¿Qué necesitas hacer?", "actions": [], "answer": "¡Hola! Estoy listo para gestionar tus terminales y agentes. ¿Qué necesitas hacer?"}
 
 CONTEXTO ACTUAL DEL SISTEMA:
+Proyecto actual: ${context?.workspaceName ? `"${context.workspaceName}"` : 'Proyecto activo'}${context?.workspacePath ? ` (Ruta: ${context.workspacePath})` : ''}${context?.workspaceId ? ` [ID: ${context.workspaceId}]` : ''}
 Modo actual: ${context?.mode || 'code'}
-Terminales activas:
+Terminales abiertas en este proyecto:
 ${terminalsDesc}`;
 }

@@ -3,6 +3,7 @@
 // and trace timeline inspection.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { toast } from '../../toast';
 import {
   runOperatorTurn,
   type OperatorTurnResult,
@@ -110,6 +111,9 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
         } else {
           setStage('error');
           setStageLabel(getStageLabelEs('error', ev.error));
+          if (ev.error) {
+            toast.error('Asistente Zed', ev.error);
+          }
         }
 
         // Return to idle after 4.5 seconds
@@ -163,6 +167,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
                 : String(err);
           setStage('error');
           setStageLabel(getStageLabelEs('error', detail));
+          toast.error('Asistente Zed', detail);
           if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
           resetTimerRef.current = window.setTimeout(() => {
             setStage('idle');

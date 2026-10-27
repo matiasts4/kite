@@ -57,11 +57,16 @@
   {
     "id": "spawn-single-terminal",
     "input": "abre una terminal",
-    "expected": { "type": "open_terminals", "count": 1, "engine": "grok" }
+    "expected": { "type": "open_terminals", "count": 1, "engine": "powershell" }
   },
   {
     "id": "spawn-default-engine",
     "input": "abre 2 terminales",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "powershell" }
+  },
+  {
+    "id": "spawn-explicit-agents",
+    "input": "abre 2 agentes",
     "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
   },
   {
@@ -148,6 +153,16 @@
     "id": "close-named-orion",
     "input": "Cierra Orion",
     "expected": { "type": "close_terminals", "target": "Orion" }
+  },
+  {
+    "id": "close-quantifier-antigravity",
+    "input": "cierra una de las terminales de anti-gravity",
+    "expected": { "type": "close_terminals", "target": "antigravity", "count": 1 }
+  },
+  {
+    "id": "close-quantifier-grok",
+    "input": "cierra 2 terminales de grok",
+    "expected": { "type": "close_terminals", "target": "grok", "count": 2 }
   },
   {
     "id": "close-named-seseo-orion",
@@ -282,17 +297,17 @@
   {
     "id": "spawn-lanza-las-dos-terminales-pedi",
     "input": "lanza las dos terminales que le pedí",
-    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+    "expected": { "type": "open_terminals", "count": 2, "engine": "powershell" }
   },
   {
     "id": "spawn-lanza-las-2-terminales",
     "input": "lanza las 2 terminales",
-    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+    "expected": { "type": "open_terminals", "count": 2, "engine": "powershell" }
   },
   {
     "id": "spawn-abre-las-dos-terminales",
     "input": "abre las dos terminales",
-    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+    "expected": { "type": "open_terminals", "count": 2, "engine": "powershell" }
   },
   {
     "id": "negative-greeting-hola",

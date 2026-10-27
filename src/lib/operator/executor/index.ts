@@ -75,11 +75,11 @@ export async function executePlan(
           break;
 
         case 'close_terminals':
-          receipt = await executeCloseTerminalsAction(action, idx);
+          receipt = await executeCloseTerminalsAction(action, idx, context);
           break;
 
         case 'inject_prompt':
-          receipt = await executeInjectPromptAction(action, idx);
+          receipt = await executeInjectPromptAction(action, idx, context);
           break;
 
         case 'open_browser':
@@ -87,7 +87,7 @@ export async function executePlan(
           break;
 
         case 'narrate_summary':
-          receipt = await executeNarrateAction(action, idx);
+          receipt = await executeNarrateAction(action, idx, context);
           break;
 
         case 'spawn_subagent':

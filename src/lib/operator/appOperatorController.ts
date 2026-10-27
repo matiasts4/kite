@@ -18,7 +18,7 @@ import { summarizeTerminalsWithProvider } from './planner/terminalSummary';
 import { ttsNarrator } from './ttsNarrator';
 import { interpretAndEnrichPrompt } from './planner/promptInterpreter';
 import { runLedger } from './runLedger';
-import { planTurnHeuristic } from './planner/heuristic';
+import { planTurnHeuristic, detectEngineFromText } from './planner/heuristic';
 
 export interface SpawnTerminalsOptions {
   count: number;
@@ -263,17 +263,22 @@ class AppOperatorController {
   }
 
   /**
-   * Closes terminals matching a target ('finished', 'idle', 'all', 'active', 'last', an agent name, session ID, 1-based index, or an array of targets).
+   * Closes terminals matching a target ('finished', 'idle', 'all', 'active', 'last', an agent name, engine name, session ID, 1-based index, or an array of targets).
    */
   public async closeTerminals(
-    target: 'finished' | 'idle' | 'all' | 'active' | 'last' | string | string[] | number,
-    runId?: string
+    target: 'finished' | 'idle' | 'all' | 'active' | 'last' | string | number | (string | number)[],
+    runId?: string,
+    countLimit?: number,
+    workspaceId?: string
   ): Promise<OperatorExecutionResult> {
     if (runId) {
       runLedger.recordToolStart(runId, { name: 'close_terminals' });
     }
 
-    const terminals = getActiveAgentTerminals();
+    const allTerminals = getActiveAgentTerminals();
+    const terminals = workspaceId
+      ? allTerminals.filter((t) => !t.workspaceId || t.workspaceId === workspaceId)
+      : allTerminals;
     let toClose: string[] = [];
 
     const resolveSingleTarget = (raw: string | number): string[] => {
@@ -294,16 +299,43 @@ class AppOperatorController {
       }
 
       // Keyword matching
-      if (norm === 'all' || norm === 'todas' || norm === 'todos' || norm === 'todo') {
+      if (
+        norm === 'all' ||
+        norm === 'todas' ||
+        norm === 'todos' ||
+        norm === 'todo' ||
+        norm === 'abiertas' ||
+        norm === 'abiertos' ||
+        norm === 'abierta' ||
+        norm === 'abierto' ||
+        norm.includes('abiertas') ||
+        norm.includes('abiertos')
+      ) {
         return terminals.map((t) => t.sessionId);
       }
       if (norm === 'finished' || norm === 'terminadas' || norm === 'terminados' || norm === 'done') {
         return terminals.filter((t) => t.state === 'done' || t.state === 'exited').map((t) => t.sessionId);
       }
-      if (norm === 'idle' || norm === 'inactivas' || norm === 'inactivos' || norm === 'inactiva' || norm === 'inactivo') {
+      if (
+        norm === 'idle' ||
+        norm === 'inactivas' ||
+        norm === 'inactivos' ||
+        norm === 'inactiva' ||
+        norm === 'inactivo' ||
+        norm === 'vacías' ||
+        norm === 'vacias' ||
+        norm === 'vacía' ||
+        norm === 'vacia'
+      ) {
         return terminals.filter((t) => t.state === 'idle' || t.state === 'exited').map((t) => t.sessionId);
       }
-      if (norm === 'active' || norm === 'activas' || norm === 'activos' || norm === 'activa' || norm === 'activo') {
+      if (
+        norm === 'active' ||
+        norm === 'activas' ||
+        norm === 'activos' ||
+        norm === 'activa' ||
+        norm === 'activo'
+      ) {
         return terminals.filter((t) => t.state === 'working' || t.state === 'waitingForYou' || t.state === 'idle').map((t) => t.sessionId);
       }
       if (norm === 'last' || norm === 'ultima' || norm === 'última' || norm === 'ultimo' || norm === 'último') {
@@ -315,6 +347,19 @@ class AppOperatorController {
       const exactId = terminals.find((t) => t.sessionId === trimmed || t.sessionId.toLowerCase() === norm);
       if (exactId) return [exactId.sessionId];
 
+      // Engine matching via detectEngineFromText
+      const matchedEngine = detectEngineFromText(norm);
+      if (matchedEngine) {
+        const matching = terminals.filter(
+          (t) =>
+            (t.engine && t.engine.toLowerCase() === matchedEngine) ||
+            (t.who && t.who.toLowerCase().includes(matchedEngine)) ||
+            (t.title && cleanAgentTitle(t.title).toLowerCase().includes(matchedEngine)) ||
+            (t.title && detectEngineFromText(t.title) === matchedEngine)
+        );
+        if (matching.length > 0) return matching.map((t) => t.sessionId);
+      }
+
       // Exact match on who, cleaned title, or raw title (case-insensitive)
       const exactName = terminals.find((t) => 
         (t.who && t.who.toLowerCase() === norm) || 
@@ -324,15 +369,18 @@ class AppOperatorController {
       if (exactName) return [exactName.sessionId];
 
       // Partial substring match on who, title, or engine
-      const partialMatch = terminals.find((t) =>
+      const partialMatches = terminals.filter((t) =>
         (t.who && t.who.toLowerCase().includes(norm)) ||
         (t.title && t.title.toLowerCase().includes(norm)) ||
         (t.engine && t.engine.toLowerCase().includes(norm))
       );
-      if (partialMatch) return [partialMatch.sessionId];
+      if (partialMatches.length > 0) return partialMatches.map((t) => t.sessionId);
 
-      // Fallback: if it looks like a raw session ID
-      if (trimmed.startsWith('term-') || trimmed.includes('-')) {
+      // Fallback: if it looks like a valid raw session ID (term-..., agent-term-..., session-... or UUID)
+      if (
+        /^(?:term-|agent-term-|session-)[a-zA-Z0-9_-]+$/i.test(trimmed) ||
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)
+      ) {
         return [trimmed];
       }
 
@@ -347,39 +395,41 @@ class AppOperatorController {
         }
       }
       toClose = Array.from(ids);
+    } else if (typeof target === 'string' && (target.includes(',') || /\s+(?:y|and)\s+/i.test(target))) {
+      const parts = target.split(/(?:\s*,\s*|\s+y\s+|\s+and\s+)/i).map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        const ids = new Set<string>();
+        for (const item of parts) {
+          for (const id of resolveSingleTarget(item)) {
+            ids.add(id);
+          }
+        }
+        toClose = Array.from(ids);
+      } else {
+        toClose = resolveSingleTarget(target);
+      }
     } else {
       toClose = resolveSingleTarget(target);
     }
 
+    // Apply countLimit if provided (e.g. "cierra 1 de las terminales de antigravity")
+    if (countLimit && countLimit > 0 && toClose.length > countLimit) {
+      toClose = toClose.slice(-countLimit);
+    }
+
     if (toClose.length === 0) {
-      const fallbackTargets = Array.isArray(target) ? target : typeof target === 'string' ? [target] : [];
-      let dispatchedAny = false;
-      if (typeof window !== 'undefined') {
-        for (const t of fallbackTargets) {
-          const trimmed = String(t || '').trim();
-          if (trimmed) {
-            window.dispatchEvent(
-              new CustomEvent('kite:terminate-agent', {
-                detail: { name: trimmed, leafId: trimmed },
-              })
-            );
-            dispatchedAny = true;
-          }
-        }
-      }
+      const targetLabel = Array.isArray(target) ? target.join(', ') : String(target);
       if (runId) {
-        runLedger.recordToolEnd(runId, { name: 'close_terminals', ok: true });
-      }
-      if (dispatchedAny) {
-        return {
-          success: true,
-          message: `No se encontraron terminales registradas para "${fallbackTargets.join(', ')}", pero se envió la solicitud de cierre a la interfaz.`,
-          data: { target },
-        };
+        runLedger.recordToolEnd(runId, {
+          name: 'close_terminals',
+          ok: false,
+          error: `No se encontraron terminales activas que coincidan con "${targetLabel}".`,
+        });
       }
       return {
-        success: true,
-        message: 'No se encontraron terminales que cumplan el criterio para cerrar.',
+        success: false,
+        message: `No se encontraron terminales activas que coincidan con "${targetLabel}".`,
+        data: { target, closedSessionIds: [] },
       };
     }
 
@@ -461,21 +511,25 @@ class AppOperatorController {
   }
 
   /**
-   * Obtains a structured context summary of active terminal(s).
+   * Obtains a structured context summary of active terminal(s), optionally scoped to a workspace.
    */
-  public getTerminalContext(sessionId?: string): TerminalContextSummary[] {
+  public getTerminalContext(sessionId?: string, workspaceId?: string): TerminalContextSummary[] {
     if (sessionId) {
       const summary = getTerminalSummary(sessionId);
       return summary ? [summary] : [];
     }
-    return getAllTerminalsSummary();
+    return getAllTerminalsSummary(workspaceId);
   }
 
   /**
    * Narrates the active terminal context aloud using TTS.
    */
-  public async narrateSummary(sessionId?: string, _lang: 'es' | 'en' = 'es'): Promise<OperatorExecutionResult> {
-    const summaries = this.getTerminalContext(sessionId);
+  public async narrateSummary(
+    sessionId?: string,
+    _lang: 'es' | 'en' = 'es',
+    workspaceId?: string
+  ): Promise<OperatorExecutionResult> {
+    const summaries = this.getTerminalContext(sessionId, workspaceId);
     if (summaries.length === 0) {
       return {
         success: true,
@@ -622,7 +676,7 @@ class AppOperatorController {
         overallSuccess = overallSuccess && res.success;
         messages.push(res.message);
       } else if (action.type === 'close_terminals') {
-        const res = await this.closeTerminals(action.target, runId);
+        const res = await this.closeTerminals(action.target, runId, undefined, options?.workspaceId);
         overallSuccess = overallSuccess && res.success;
         messages.push(res.message);
       } else if (action.type === 'inject_prompt') {

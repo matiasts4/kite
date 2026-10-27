@@ -443,11 +443,34 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
       expect(res.data?.closedSessionIds).toEqual(['term-2']);
     });
 
+    it('closes multiple terminals atomically when compound target is passed (e.g. "1, 2" or array)', async () => {
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-1', engine: 'grok', title: 'Terminal 1', state: 'idle', updatedAt: 100, latestLine: null, who: 'Orion' },
+        { sessionId: 'term-2', engine: 'grok', title: 'Terminal 2', state: 'idle', updatedAt: 100, latestLine: null, who: 'Nova' },
+      ]);
+
+      const res = await appOperatorController.closeTerminals('1, 2');
+      expect(res.success).toBe(true);
+      expect(res.data?.closedSessionIds).toEqual(['term-1', 'term-2']);
+    });
+
+    it('scopes closing to the specified workspaceId avoiding cross-project termination', async () => {
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-ws1', engine: 'grok', title: 'T1', state: 'idle', updatedAt: 100, latestLine: null, who: 'Orion', workspaceId: 'ws-1' },
+        { sessionId: 'term-ws2', engine: 'antigravity', title: 'T2', state: 'idle', updatedAt: 100, latestLine: null, who: 'Nova', workspaceId: 'ws-2' },
+      ]);
+
+      // When scoped to ws-2, index 1 corresponds to term-ws2
+      const res = await appOperatorController.closeTerminals(1, undefined, undefined, 'ws-2');
+      expect(res.success).toBe(true);
+      expect(res.data?.closedSessionIds).toEqual(['term-ws2']);
+    });
+
     it('returns empty message if target not found', async () => {
       vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([]);
 
       const res = await appOperatorController.closeTerminals('Inexistente');
-      expect(res.success).toBe(true);
+      expect(res.success).toBe(false);
       expect(res.message).toContain('No se encontraron terminales');
     });
   });
@@ -481,6 +504,36 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
       expect(provider.baseUrl).toBe(
         'https://gateway.ai.cloudflare.com/v1/b5166808e3e6d420747e65b040d267df/my-gateway/workers-ai'
       );
+    });
+  });
+
+  describe('captureCurrentTurnContext workspace scoping', () => {
+    it('filters active terminals strictly to the selected workspace and maps relative indices', async () => {
+      const { captureCurrentTurnContext } = await import('./index');
+      localStorage.setItem('kite.selectedWorkspaceId', 'ws-alpha');
+      localStorage.setItem(
+        'kite.cached_workspaces',
+        JSON.stringify([
+          { id: 'ws-alpha', displayName: 'Alpha Project', path: '/code/alpha' },
+          { id: 'ws-beta', displayName: 'Beta Project', path: '/code/beta' },
+        ])
+      );
+
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-b1', engine: 'claude', title: 'Beta 1', state: 'working', updatedAt: 100, latestLine: null, who: 'Echo', workspaceId: 'ws-beta' },
+        { sessionId: 'term-a1', engine: 'antigravity', title: 'Alpha 1', state: 'idle', updatedAt: 200, latestLine: null, who: 'Orion', workspaceId: 'ws-alpha' },
+        { sessionId: 'term-a2', engine: 'grok', title: 'Alpha 2', state: 'idle', updatedAt: 300, latestLine: null, who: 'Nova', workspaceId: 'ws-alpha' },
+      ]);
+
+      const ctx = captureCurrentTurnContext('code', 'ws-alpha');
+      expect(ctx.workspaceId).toBe('ws-alpha');
+      expect(ctx.workspaceName).toBe('Alpha Project');
+      expect(ctx.workspacePath).toBe('/code/alpha');
+      expect(ctx.activeTerminals).toHaveLength(2);
+      expect(ctx.activeTerminals![0].sessionId).toBe('term-a1');
+      expect(ctx.activeTerminals![0].idx).toBe(1);
+      expect(ctx.activeTerminals![1].sessionId).toBe('term-a2');
+      expect(ctx.activeTerminals![1].idx).toBe(2);
     });
   });
 });

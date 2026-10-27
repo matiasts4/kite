@@ -20,6 +20,7 @@ export interface LegacyOperatorIntent {
   prompt?: string;
   prompts?: string[];
   target?: string | number;
+  targets?: (string | number)[];
   url?: string;
   terminalIndex?: number;
   cli?: string;
@@ -92,15 +93,39 @@ export function parseNumberWord(word: string): number {
     seis: 6,
     siete: 7,
     ocho: 8,
+    nueve: 9,
+    diez: 10,
     one: 1,
     two: 2,
     three: 3,
     four: 4,
     five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
   };
   const parsed = parseInt(word, 10);
   if (!Number.isNaN(parsed)) return parsed;
   return map[word.toLowerCase()] || 1;
+}
+
+export function extractTerminalIndices(text: string): number[] {
+  if (!text) return [];
+  // Matches tokens like: "terminal 1", "terminales 1 y 2", "la terminal uno y dos", "la 1 y la 2", "1 y 2"
+  const regex = /(?<![a-záéíóúñ])(?:terminal(?:es)?\s*)?(?:(?:la|el)\s*)?(\d+|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|one|two|three|four|five|six|seven|eight|nine|ten)(?![a-záéíóúñ])/gi;
+  const matches = Array.from(text.matchAll(regex));
+  if (matches.length === 0) return [];
+
+  const indices: number[] = [];
+  for (const m of matches) {
+    const val = parseNumberWord(m[1]);
+    if (val > 0 && !indices.includes(val)) {
+      indices.push(val);
+    }
+  }
+  return indices;
 }
 
 export function normalizeInputForIntent(raw: string): string {
@@ -199,10 +224,10 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
 
   // 4. Close terminals / agents (handles seseo: sierra, serrar, and named agents e.g. "Orion")
   const closeMatch = text.match(
-    /\b(?:cierra|cerrar|cierre|cierren|sierra|serrar|sierre|sierren|close|kill|mata|matar|maten|termina|terminar|terminen|elimina|eliminar|eliminen|apaga|apagar|apaguen)\b(?:\s+(?:a|al|el|la|los|las|the))?(?:\s+(.+))?$/i
+    /(?<![a-záéíóúñ])(?:cierra|cerrar|cierre|cierres|cierren|ci[eé]rral[ao]s?|ci[eé]rrenl[ao]s?|ci[eé]rrel[ao]s?|ci[eé]rrame|cerr[aá]l[ao]s?|sierra|serrar|sierre|sierres|sierren|close|kill|mata|matar|mates|maten|m[aá]tal[ao]s?|m[aá]tenl[ao]s?|termina|terminar|termines|terminen|term[ií]nal[ao]s?|elimina|eliminar|elimines|eliminen|elim[ií]nal[ao]s?|apaga|apagar|apagues|apaguen|ap[aá]gal[ao]s?|borra|borrar|borres|borren)(?![a-záéíóúñ])(?:\s+(?:a|al|el|la|los|las|the))?(?:\s+(.+))?$/i
   );
   if (closeMatch) {
-    const rawTarget = (closeMatch[1] || '').trim();
+    const rawTarget = (closeMatch[1] || '').replace(/[.,;!?]+$/, '').trim();
     const targetLower = rawTarget.toLowerCase();
 
     // Check if user meant close browser or session logout
@@ -225,10 +250,69 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         targetLower === 'terminales' ||
         targetLower === 'las terminales' ||
         targetLower === 'los terminales' ||
-        /^las?\s+terminales$/.test(targetLower)
+        targetLower === 'las abiertas' ||
+        targetLower === 'todas las terminales' ||
+        /^(?:(?:las?|los?|todas?\s+las?)\s+)?terminales(?:\s+(?:abiertas?|que\s+est[aá]n\s+abiertas?|en\s+ejecuci[oó]n))?$/i.test(targetLower) ||
+        /^(?:(?:las?|los?)\s+)?(?:que\s+(?:est[aá]n\s+)?abiertas?|abiertas?)$/i.test(targetLower)
       ) {
         return { kind: 'CLOSE_TERMINALS', target: 'all' };
       }
+
+      // Check for quantifier patterns: e.g. "una de las terminales de anti-gravity", "2 terminales de grok", "una de las terminales", "las dos terminales que están abiertas"
+      const quantifierMatch = rawTarget.match(
+        /^(?:(?:las?|los?|unas?|unos?)\s+)?(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|\d+)\s+(?:de\s+(?:las?|los?)\s+)?(?:terminales?|agentes?|consolas?|paneles?|procesos?)?(?:\s*(?:de|con|en)\s+(.+)|(?:\s+(.+)))?$/i
+      );
+      if (quantifierMatch) {
+        const count = parseNumberWord(quantifierMatch[1]);
+        const remainder = (quantifierMatch[2] || quantifierMatch[3] || '').trim();
+        const remainderLower = remainder.toLowerCase();
+
+        if (
+          !remainder ||
+          /^(?:que\s+(?:est[aá]n\s+)?(?:abiertas?|activas?|corriendo|en\s+ejecuci[oó]n|en\s+espera)?(?:\s+actualmente)?|actuales|actualmente|abiertas?|activas?|que\s+tengo(?:\s+abiertas?)?|que\s+hay(?:\s+abiertas?)?|que\s+le\s+ped[ií]|que\s+ped[ií]|que\s+abriste)$/i.test(remainderLower)
+        ) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'all' };
+        }
+        // If remainder contains explicit indices: e.g. "que están vacías, que es la terminal uno y dos"
+        const subIndices = extractTerminalIndices(remainder);
+        if (subIndices.length > 1) {
+          return {
+            kind: 'CLOSE_TERMINALS',
+            count: subIndices.length,
+            target: subIndices.join(', '),
+            targets: subIndices.map(String),
+          };
+        }
+        if (
+          remainderLower.includes('terminada') ||
+          remainderLower.includes('finished') ||
+          remainderLower.includes('completada') ||
+          remainderLower.includes('done')
+        ) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'finished' };
+        }
+        if (
+          remainderLower.includes('inactiva') ||
+          remainderLower.includes('idle') ||
+          remainderLower.includes('vacía') ||
+          remainderLower.includes('vacia')
+        ) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'idle' };
+        }
+        if (remainderLower.includes('activa') || remainderLower.includes('active')) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'active' };
+        }
+        const engine = detectEngineFromText(remainder);
+        if (engine) {
+          return { kind: 'CLOSE_TERMINALS', count, target: engine };
+        }
+        const cleanedRemainder = remainder
+          .replace(/^(?:terminal|terminales|agente|agentes|proceso|sesi[oó]n|de)\s+/i, '')
+          .replace(/[.,;!?]+$/, '')
+          .trim();
+        return { kind: 'CLOSE_TERMINALS', count, target: cleanedRemainder || 'all' };
+      }
+
       if (
         targetLower.includes('terminada') ||
         targetLower.includes('finished') ||
@@ -237,7 +321,12 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
       ) {
         return { kind: 'CLOSE_TERMINALS', target: 'finished' };
       }
-      if (targetLower.includes('inactiva') || targetLower.includes('idle')) {
+      if (
+        targetLower.includes('inactiva') ||
+        targetLower.includes('idle') ||
+        targetLower.includes('vacía') ||
+        targetLower.includes('vacia')
+      ) {
         return { kind: 'CLOSE_TERMINALS', target: 'idle' };
       }
       if (
@@ -258,17 +347,29 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         return { kind: 'CLOSE_TERMINALS', target: 'last' };
       }
 
-      // Check numeric terminal (e.g. "terminal 2", "terminal dos", "panel 1")
-      const numMatch = rawTarget.match(
-        /(?:terminal|pantalla|panel)?\s*(\d+|uno|dos|tres|cuatro|cinco|one|two|three|four|five)$/i
-      );
-      if (numMatch && numMatch[1]) {
-        return { kind: 'CLOSE_TERMINALS', target: String(parseNumberWord(numMatch[1])) };
+      // Check numeric terminals (single or compound: e.g. "terminal 2", "terminal uno y dos", "terminales 1 y 2", "la 1 y la 2")
+      const rawIndices = extractTerminalIndices(rawTarget);
+      if (rawIndices.length > 1) {
+        return {
+          kind: 'CLOSE_TERMINALS',
+          count: rawIndices.length,
+          target: rawIndices.join(', '),
+          targets: rawIndices.map(String),
+        };
+      }
+      if (rawIndices.length === 1 && !detectEngineFromText(rawTarget)) {
+        return { kind: 'CLOSE_TERMINALS', target: String(rawIndices[0]) };
       }
 
-      // Clean prefix if it says "terminal Orion" or "agente Orion"
+      // Check engine directly from rawTarget (e.g. "terminal de antigravity", "antigravity", "grok")
+      const engineTarget = detectEngineFromText(rawTarget);
+      if (engineTarget) {
+        return { kind: 'CLOSE_TERMINALS', target: engineTarget };
+      }
+
+      // Clean prefix if it says "terminal Orion" or "agente Orion" or "terminal de Orion"
       const cleanedTarget = rawTarget
-        .replace(/^(?:terminal|terminales|agente|agentes|proceso|sesi[oó]n)\s+/i, '')
+        .replace(/^(?:terminal|terminales|agente|agentes|proceso|sesi[oó]n)\s+(?:de\s+)?/i, '')
         .replace(/[.,;!?]+$/, '')
         .trim();
 
@@ -396,11 +497,13 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   }
 
   // 7. Spawn terminals
+  const hasQuestionForCount = /(?<![a-záéíóúñ])(?:cu[aá]ntos?|cu[aá]ntas?|cu[aá]l\s+es\s+la\s+cantidad|qu[eé]\s+cantidad)(?![a-záéíóúñ])/i.test(lower);
   if (
-    /(?:abre|abrir|abriera|abrieras|abriese|abriesen|abrir[ií]a|abrime|ábreme|abrí|abran|abras|crea|crear|crees|creas|levanta|levantar|levantes|inicia|iniciar|inicies|pon|poner|pongas|open|spawn|lanza|lanzar|lances|lanzame|lánzame)/i.test(
+    !hasQuestionForCount &&
+    /(?<![a-záéíóúñ])(?:abre|abrir|abriera|abrieras|abriese|abriesen|abrir[ií]a|abrime|ábreme|abrí|abran|abras|crea|crear|crees|creas|levanta|levantar|levantes|inicia|iniciar|inicies|pon|poner|pongas|open|spawn|lanza|lanzar|lances|lanzame|lánzame)(?![a-záéíóúñ])/i.test(
       lower
     ) &&
-    /(?:terminal|terminales|agente|agentes|consola|consolas)/i.test(lower)
+    /(?<![a-záéíóúñ])(?:terminal|terminales|agente|agentes|consola|consolas)(?![a-záéíóúñ])/i.test(lower)
   ) {
     let count = 1;
     const countMatch = lower.match(
@@ -421,9 +524,6 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
     if (hasSecondAgentRef) {
       count = Math.max(count, 2);
     }
-
-    const detectedEngine = detectEngineFromText(lower);
-    const engine = detectedEngine || 'grok';
 
     // Extract prompt/task with subordinate clause support
     let prompt: string | undefined;
@@ -452,6 +552,10 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         prompt = connectiveMatch[1].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
       }
     }
+
+    const detectedEngine = detectEngineFromText(lower);
+    const isExplicitAgent = /\b(?:agente|agentes|subagente|subagentes)\b/i.test(lower);
+    const engine = detectedEngine || (isExplicitAgent || prompt ? 'grok' : 'powershell');
 
     let prompts: string[] | undefined;
     if (prompt) {
@@ -512,18 +616,27 @@ export function planTurnHeuristic(input: string): OperatorPlan {
 
     case 'CLOSE_TERMINALS': {
       const target = intent.target || 'finished';
+      const count = intent.count;
       let desc = String(target);
-      if (target === 'finished') desc = 'las terminales terminadas';
-      else if (target === 'idle') desc = 'las terminales inactivas';
-      else if (target === 'all') desc = 'todas las terminales';
-      else if (target === 'active') desc = 'las terminales activas';
+      if (intent.targets && intent.targets.length > 1) {
+        desc = `las terminales ${intent.targets.join(' y ')}`;
+      } else if (target === 'finished') desc = count === 1 ? 'una terminal terminada' : count ? `${count} terminales terminadas` : 'las terminales terminadas';
+      else if (target === 'idle') desc = count === 1 ? 'una terminal inactiva' : count ? `${count} terminales inactivas` : 'las terminales inactivas';
+      else if (target === 'all') desc = count === 1 ? 'una terminal' : count ? `${count} terminales` : 'todas las terminales';
+      else if (target === 'active') desc = count === 1 ? 'una terminal activa' : count ? `${count} terminales activas` : 'las terminales activas';
       else if (target === 'last') desc = 'la última terminal';
       else if (typeof target === 'number' || /^\d+$/.test(String(target))) desc = `la terminal ${target}`;
-      else desc = `el agente ${target}`;
+      else desc = count === 1 ? `una terminal de ${target}` : count ? `${count} terminales de ${target}` : `el agente ${target}`;
 
       return {
         strategy: 'heuristic',
-        actions: [{ type: 'close_terminals', target }],
+        actions: [
+          {
+            type: 'close_terminals',
+            target: intent.targets && intent.targets.length > 1 ? intent.targets.join(', ') : target,
+            ...(count ? { count } : {}),
+          },
+        ],
         reply: `Cerrando ${desc}.`,
       };
     }

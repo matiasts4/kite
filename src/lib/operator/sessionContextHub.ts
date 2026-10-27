@@ -92,10 +92,13 @@ export function getTerminalSummary(sessionId: string): TerminalContextSummary | 
 }
 
 /**
- * Retrieves context summaries for all active terminal sessions.
+ * Retrieves context summaries for all active terminal sessions, optionally scoped to a workspace.
  */
-export function getAllTerminalsSummary(): TerminalContextSummary[] {
-  const terminals = getActiveAgentTerminals();
+export function getAllTerminalsSummary(workspaceId?: string): TerminalContextSummary[] {
+  const allTerminals = getActiveAgentTerminals();
+  const terminals = workspaceId
+    ? allTerminals.filter((t) => !t.workspaceId || t.workspaceId === workspaceId)
+    : allTerminals;
   return terminals.map((term) => {
     const buffer = getTerminalRollingBuffer(term.sessionId);
     const outcome = extractOutcomeFromBuffer(buffer, term.latestLine);

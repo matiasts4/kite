@@ -24,7 +24,8 @@ export const OpenTerminalsActionSchema = z.object({
 
 export const CloseTerminalsActionSchema = z.object({
   type: z.literal('close_terminals'),
-  target: z.union([z.string(), z.number()]).default('finished'),
+  target: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).default('finished'),
+  count: z.number().int().min(1).optional(),
 });
 
 export const InjectPromptActionSchema = z.object({
@@ -98,6 +99,8 @@ export interface ActionReceipt {
 
 export interface TurnContext {
   workspaceId?: string;
+  workspaceName?: string;
+  workspacePath?: string;
   mode?: string;
   activeTerminals?: Array<{
     sessionId: string;
@@ -106,6 +109,8 @@ export interface TurnContext {
     title?: string;
     state?: string;
     latestLine?: string;
+    idx?: number;
+    workspaceId?: string;
   }>;
 }
 
@@ -135,6 +140,7 @@ export const OPERATOR_NATIVE_TOOLS = [
         type: 'object',
         properties: {
           target: { type: ['string', 'number'], default: 'finished' },
+          count: { type: 'integer', minimum: 1, description: 'Optional number of matching terminals to close' },
         },
         required: ['target'],
       },

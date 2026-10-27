@@ -1,8 +1,11 @@
 // Kite Code — TTS Narrator
 // Speech synthesis engine for reading agent outputs, terminal summaries, and operator feedback aloud.
-// Uses native Web Speech API with smart speech-cleaning filters, persona voice modulation,
-// and high-fidelity natural neural voice prioritization.
+// Supports:
+//  1. High-fidelity Neural Streaming via ElevenLabs (eleven_v4_turbo / eleven_flash_v2_5) with zero-latency abort.
+//  2. Native Web Speech API fallback with smart speech-cleaning filters, persona voice modulation,
+//     and natural neural voice prioritization.
 import { sanitizeReply } from './planner/sanitize';
+import { loadOperatorConfig } from './operatorConfig';
 
 export interface TTSOptions {
   lang?: string; // Default: 'es-ES' or 'en-US'
@@ -10,6 +13,12 @@ export interface TTSOptions {
   pitch?: number; // 0.8 - 1.2, default: 1.0
   volume?: number; // 0 - 1.0, default: 1.0
   voiceName?: string; // Persona name ('Ara', 'Rex', 'Eve', 'Leo', 'Sal') or exact system voice name
+  engine?: 'browser' | 'elevenlabs';
+  elevenlabsApiKey?: string;
+  elevenlabsModel?: string;
+  elevenlabsVoiceId?: string;
+  elevenlabsStability?: number;
+  elevenlabsSimilarity?: number;
   onStart?: () => void;
   onEnd?: () => void;
   onError?: (err: any) => void;
@@ -204,15 +213,24 @@ export function resolveBestVoice(
 class TTSNarrator {
   private speaking = false;
   private activeUtterance: SpeechSynthesisUtterance | null = null;
+  private activeAudio: HTMLAudioElement | null = null;
+  private activeAudioUrl: string | null = null;
+  private activeAbortController: AbortController | null = null;
   private safetyTimer: any = null;
+  private generation = 0;
 
   public isAvailable(): boolean {
-    return typeof window !== 'undefined' && 'speechSynthesis' in window;
+    if (typeof window === 'undefined') return false;
+    return 'speechSynthesis' in window || typeof Audio !== 'undefined';
   }
 
   public isSpeaking(): boolean {
-    if (!this.isAvailable()) return false;
-    return window.speechSynthesis.speaking || this.speaking || Boolean(this.activeUtterance);
+    if (this.speaking) return true;
+    if (this.activeAudio && !this.activeAudio.paused && !this.activeAudio.ended) return true;
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      return window.speechSynthesis.speaking || Boolean(this.activeUtterance);
+    }
+    return false;
   }
 
   public async getAvailableVoices(): Promise<SpeechSynthesisVoice[]> {
@@ -220,54 +238,265 @@ class TTSNarrator {
   }
 
   public stop(): void {
+    this.generation++;
+    if (this.activeAbortController) {
+      try {
+        this.activeAbortController.abort();
+      } catch {}
+      this.activeAbortController = null;
+    }
+    if (this.activeAudio) {
+      try {
+        this.activeAudio.pause();
+        this.activeAudio.currentTime = 0;
+        this.activeAudio.src = '';
+      } catch {}
+      this.activeAudio = null;
+    }
+    if (this.activeAudioUrl) {
+      try {
+        URL.revokeObjectURL(this.activeAudioUrl);
+      } catch {}
+      this.activeAudioUrl = null;
+    }
     if (this.safetyTimer) {
       clearTimeout(this.safetyTimer);
       this.safetyTimer = null;
     }
     this.speaking = false;
     this.activeUtterance = null;
-    if (!this.isAvailable()) return;
-    try {
-      window.speechSynthesis.cancel();
-    } catch {}
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }
   }
 
   public pause(): void {
-    if (!this.isAvailable()) return;
-    try {
-      window.speechSynthesis.pause();
-    } catch {}
+    if (this.activeAudio) {
+      try {
+        this.activeAudio.pause();
+      } catch {}
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.pause();
+      } catch {}
+    }
   }
 
   public resume(): void {
-    if (!this.isAvailable()) return;
-    try {
-      window.speechSynthesis.resume();
-    } catch {}
+    if (this.activeAudio) {
+      try {
+        this.activeAudio.play();
+      } catch {}
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.resume();
+      } catch {}
+    }
   }
 
   public async speak(text: string, optionsOrLang: TTSOptions | string = {}): Promise<void> {
     const options: TTSOptions =
       typeof optionsOrLang === 'string' ? { lang: optionsOrLang } : optionsOrLang;
-    if (!this.isAvailable()) {
-      options.onError?.(new Error('SpeechSynthesis no disponible'));
-      return;
-    }
 
-    // Cancel any previous speech
+    // Cancel any previous speech and record generation
     this.stop();
+    const myGen = this.generation;
 
     // Sanitize to prevent prompt echo, code fences or noise from reaching TTS
     const sanitized = sanitizeReply(text, '');
     const textToSpeak = cleanTextForSpeech(sanitized);
     if (!textToSpeak) return;
 
-    // Get available voices
-    const voices = await getAvailableVoices();
+    let config: any = null;
+    try {
+      config = loadOperatorConfig();
+    } catch {}
 
-    return new Promise((resolve) => {
+    const engine = options.engine || config?.ttsEngine || 'browser';
+    const apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+
+    if (engine === 'elevenlabs' && apiKey.length > 0) {
+      try {
+        await this.speakElevenLabs(textToSpeak, options, config, myGen);
+        return;
+      } catch (err: any) {
+        // If interrupted, stopped by user, or superseded, NEVER fall back to local voice!
+        if (
+          this.generation !== myGen ||
+          err?.name === 'AbortError' ||
+          err?.code === 20 ||
+          err?.type === 'error' ||
+          (typeof err?.message === 'string' &&
+            (err.message.includes('interrupted') ||
+              err.message.includes('abort') ||
+              err.message.includes('pause')))
+        ) {
+          return;
+        }
+        console.warn(
+          '[TTSNarrator] Error en ElevenLabs TTS streaming, activando fallback a voz nativa:',
+          err
+        );
+      }
+    }
+
+    // Never fall back to browser voice if user requested to stop or interrupt
+    if (this.generation !== myGen) {
+      return;
+    }
+
+    return this.speakBrowser(textToSpeak, options, myGen);
+  }
+
+  private async speakElevenLabs(
+    textToSpeak: string,
+    options: TTSOptions,
+    config: any,
+    myGen: number
+  ): Promise<void> {
+    if (this.generation !== myGen) return;
+
+    const apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+    const voiceId = options.elevenlabsVoiceId || config?.elevenlabsVoiceId || '21m00Tcm4TlvDq8ikWAM';
+    const model = options.elevenlabsModel || config?.elevenlabsModel || 'eleven_v4_turbo';
+    const stability = options.elevenlabsStability ?? config?.elevenlabsStability ?? 0.5;
+    const similarity = options.elevenlabsSimilarity ?? config?.elevenlabsSimilarity ?? 0.8;
+    const speed = options.rate ?? config?.ttsRate ?? 1.0;
+
+    const controller = new AbortController();
+    this.activeAbortController = controller;
+
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
+      voiceId
+    )}/stream?output_format=mp3_44100_128`;
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xi-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        text: textToSpeak,
+        model_id: model,
+        voice_settings: {
+          stability,
+          similarity_boost: similarity,
+          speed,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (this.generation !== myGen || controller.signal.aborted) return;
+
+    if (!res.ok) {
+      throw new Error(`ElevenLabs API devolvió HTTP ${res.status}: ${res.statusText}`);
+    }
+
+    const blob = await res.blob();
+    if (this.generation !== myGen || controller.signal.aborted) return;
+
+    if (typeof Audio === 'undefined') {
+      options.onStart?.();
+      options.onEnd?.();
+      return;
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      if (this.generation !== myGen || controller.signal.aborted) {
+        resolve();
+        return;
+      }
+
+      const audioUrl = URL.createObjectURL(blob);
+      this.activeAudioUrl = audioUrl;
+      const audio = new Audio(audioUrl);
+      this.activeAudio = audio;
+      audio.volume = options.volume ?? 1.0;
+
+      let finished = false;
+      const cleanup = () => {
+        if (finished) return;
+        finished = true;
+        this.speaking = false;
+        if (this.activeAudio === audio) {
+          this.activeAudio = null;
+        }
+        if (this.activeAudioUrl === audioUrl) {
+          try {
+            URL.revokeObjectURL(audioUrl);
+          } catch {}
+          this.activeAudioUrl = null;
+        }
+        if (this.activeAbortController === controller) {
+          this.activeAbortController = null;
+        }
+      };
+
+      audio.onplay = () => {
+        if (this.generation !== myGen || controller.signal.aborted) {
+          cleanup();
+          try {
+            audio.pause();
+          } catch {}
+          resolve();
+          return;
+        }
+        this.speaking = true;
+        options.onStart?.();
+      };
+
+      audio.onended = () => {
+        cleanup();
+        options.onEnd?.();
+        resolve();
+      };
+
+      audio.onerror = (e) => {
+        cleanup();
+        // If interrupted or stopped by user, resolve silently without triggering browser fallback
+        if (this.generation !== myGen || controller.signal.aborted) {
+          resolve();
+          return;
+        }
+        options.onError?.(e);
+        reject(e);
+      };
+
+      audio.play().catch((playErr) => {
+        cleanup();
+        // If interrupted or stopped by user, resolve silently without triggering browser fallback
+        if (this.generation !== myGen || controller.signal.aborted) {
+          resolve();
+          return;
+        }
+        reject(playErr);
+      });
+    });
+  }
+
+  private async speakBrowser(
+    textToSpeak: string,
+    options: TTSOptions,
+    myGen?: number
+  ): Promise<void> {
+    if (myGen !== undefined && this.generation !== myGen) return;
+
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      options.onError?.(new Error('SpeechSynthesis no disponible en este entorno'));
+      return;
+    }
+
+    const voices = await getAvailableVoices();
+    if (myGen !== undefined && this.generation !== myGen) return;
+
+    return new Promise<void>((resolve) => {
       const utterance = new SpeechSynthesisUtterance(textToSpeak);
-      // Keep persistent reference on class to prevent Chromium/WebView2 GC from dropping utterance before onend
       this.activeUtterance = utterance;
 
       const lang =
@@ -277,13 +506,11 @@ class TTSNarrator {
           : 'en-US');
       utterance.lang = lang;
 
-      // Resolve voice and persona pitch/rate modulation
       const selectedVoice = resolveBestVoice(voices, options.voiceName, lang);
       if (selectedVoice) {
         utterance.voice = selectedVoice;
       }
 
-      // Compute adjusted pitch and rate for natural inflection
       const profileKey = Object.keys(PERSONA_VOICE_PROFILES).find(
         (k) => k.toLowerCase() === (options.voiceName || 'Ara').toLowerCase()
       );
@@ -292,7 +519,6 @@ class TTSNarrator {
       const baseRate = options.rate ?? 1.0;
       const basePitch = options.pitch ?? 1.0;
 
-      // Natural speech rate between 0.75 and 1.45, pitch between 0.8 and 1.3
       const tunedRate = Math.min(1.45, Math.max(0.75, baseRate * profile.rateMultiplier));
       const tunedPitch = Math.min(1.3, Math.max(0.8, basePitch * profile.pitchMultiplier));
 
@@ -313,7 +539,6 @@ class TTSNarrator {
         resolve();
       };
 
-      // Safety timeout: Chromium sometimes never calls onend if audio output glitches
       const maxMs = Math.max(3000, Math.ceil((textToSpeak.length / 7) * 1000) + 3000);
       this.safetyTimer = setTimeout(() => {
         if (!finished) {
@@ -336,6 +561,11 @@ class TTSNarrator {
         options.onError?.(e);
         finish();
       };
+
+      if (myGen !== undefined && this.generation !== myGen) {
+        finish();
+        return;
+      }
 
       try {
         window.speechSynthesis.speak(utterance);

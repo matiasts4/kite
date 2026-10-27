@@ -412,6 +412,12 @@ export interface OperatorProviderConfig {
   ttsEnabled: boolean;
   ttsLanguage: string;
   ttsRate: number;
+  ttsEngine?: 'browser' | 'elevenlabs';
+  elevenlabsApiKey?: string;
+  elevenlabsModel?: string;
+  elevenlabsVoiceId?: string;
+  elevenlabsStability?: number;
+  elevenlabsSimilarity?: number;
   // Zed Persona & Memory settings
   persona: ZedPersonaConfig;
 }
@@ -504,8 +510,30 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   ttsEnabled: true,
   ttsLanguage: 'es-ES',
   ttsRate: 1.05,
+  ttsEngine: 'browser',
+  elevenlabsApiKey: '',
+  elevenlabsModel: 'eleven_v4_turbo',
+  elevenlabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
+  elevenlabsStability: 0.5,
+  elevenlabsSimilarity: 0.8,
   persona: DEFAULT_ZED_PERSONA,
 };
+
+export const ELEVENLABS_TTS_MODELS = [
+  { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo — Ultrarrápido (~100ms, agentes de voz)' },
+  { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5 — Mínima latencia (~75ms)' },
+  { id: 'eleven_v4', label: 'Eleven v4 — Máxima fidelidad expresiva (narración)' },
+  { id: 'eleven_multilingual_v2', label: 'Eleven Multilingual v2 — Estándar previo' },
+] as const;
+
+export const ELEVENLABS_CURATED_VOICES = [
+  { id: '21m00Tcm4TlvDq8ikWAM', label: 'Rachel — Serena y profesional' },
+  { id: 'pNInz6obpgDQGcFmaJgB', label: 'Adam — Firme y técnico' },
+  { id: 'ErXwobaYiN019PkySvjV', label: 'Antoni — Expresivo y dinámico' },
+  { id: 'IKne3meq5aSn9XLyUdCD', label: 'Charlie — Directo y analítico' },
+  { id: 'JBFqnCBsd6RMkjVDRZzb', label: 'George — Cálido y reflexivo' },
+  { id: 'EXAVITQu4vr4xnSDxMaL', label: 'Sarah — Ágil y conversacional' },
+] as const;
 
 const SEED_VERSION_KEY = 'kite_operator_seed_v4';
 

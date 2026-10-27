@@ -3,13 +3,17 @@
 import { appOperatorController } from '../../appOperatorController';
 import { getActiveAgentTerminals } from '../../../terminalRegistry';
 import { cleanAgentTitle } from '../../../agentNames';
-import type { ActionReceipt } from '../../contract';
+import type { ActionReceipt, TurnContext } from '../../contract';
 
 export async function executeInjectPromptAction(
   args: { target: string | number; prompt: string },
-  actionIdx: number = 0
+  actionIdx: number = 0,
+  context?: TurnContext
 ): Promise<ActionReceipt> {
-  const terminals = getActiveAgentTerminals();
+  const allTerminals = getActiveAgentTerminals();
+  const terminals = context?.workspaceId
+    ? allTerminals.filter((t) => !t.workspaceId || t.workspaceId === context.workspaceId)
+    : allTerminals;
   let targetSessionId: string | undefined;
 
   if (typeof args.target === 'number') {

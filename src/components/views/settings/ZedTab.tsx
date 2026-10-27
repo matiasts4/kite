@@ -10,6 +10,7 @@ import {
   type TranscriptionTestSession,
 } from '../../../lib/operator/voice/zedVoice';
 import { ttsNarrator, getAvailableVoices } from '../../../lib/operator/ttsNarrator';
+import { toast } from '../../../lib/toast';
 import {
   OperatorConfig,
   OperatorProviderId,
@@ -231,8 +232,17 @@ export const ZedTab: React.FC = () => {
           voiceName: persona.voice,
           rate: config.ttsRate || 1.0,
           lang: persona.language === 'en' ? 'en-US' : 'es-ES',
+          engine: config.ttsEngine,
+          elevenlabsApiKey: config.elevenlabsApiKey,
+          elevenlabsModel: config.elevenlabsModel,
+          elevenlabsVoiceId: config.elevenlabsVoiceId,
+          elevenlabsStability: config.elevenlabsStability,
+          elevenlabsSimilarity: config.elevenlabsSimilarity,
           onEnd: () => setTestingVoice(false),
-          onError: () => setTestingVoice(false),
+          onError: () => {
+            setTestingVoice(false);
+            toast.error('Prueba de voz fallida', 'Verifica la clave de ElevenLabs o el dispositivo de audio.');
+          },
         });
       } else {
         setTestingVoice(false);
@@ -317,6 +327,7 @@ export const ZedTab: React.FC = () => {
       localStorage.setItem('kite_grok_transcription_api_key', grokTransKey.trim());
       handleFieldChange('grokTranscriptionApiKey', grokTransKey.trim());
       setGrokTransSaved(true);
+      toast.success('Clave de Grok guardada', 'Configuración de transcripción actualizada.');
       setTimeout(() => setGrokTransSaved(false), 2000);
     } catch {}
   };

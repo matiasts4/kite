@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { NotificationsSnapshot, NotificationRecord } from '../../types';
 import { invokeCommand } from '../ipc';
 import { playCompletionChime, playApprovalChime } from './audioCues';
+import { toast } from '../toast';
 
 export interface UseNotificationsResult {
   snapshot: NotificationsSnapshot | null;
@@ -20,14 +21,16 @@ export function useNotifications(): UseNotificationsResult {
   const processSnapshot = useCallback((snap: NotificationsSnapshot) => {
     const soundEnabled = snap.preferences?.finishSoundEnabled ?? true;
 
-    // Check for newly arrived unread notifications to trigger audio cue
+    // Check for newly arrived unread notifications to trigger audio cue and ambient toast
     if (initialLoadDoneRef.current && Array.isArray(snap.records)) {
       for (const rec of snap.records as NotificationRecord[]) {
         if (!knownRecordIdsRef.current.has(rec.id) && !rec.isRead) {
           if (rec.kind?.kind === 'needsInput' && rec.isWaitingForInput) {
             playApprovalChime(soundEnabled);
+            toast.agentApproval(rec);
           } else if (rec.kind?.kind === 'settled') {
             playCompletionChime(rec.kind.outcome !== 'failed', soundEnabled);
+            toast.agentSettled(rec);
           }
         }
       }

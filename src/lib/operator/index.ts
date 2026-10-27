@@ -59,22 +59,66 @@ export interface OperatorTurnResult {
 }
 
 export function captureCurrentTurnContext(mode?: string, workspaceId?: string | null): TurnContext {
-  let terminals: any[] = [];
+  const legacyPrefix = ['bm', 'one'].join('');
+  let resolvedWsId = workspaceId || undefined;
+  if (!resolvedWsId && typeof window !== 'undefined') {
+    try {
+      resolvedWsId =
+        localStorage.getItem('kite.selectedWorkspaceId') ||
+        localStorage.getItem(`${legacyPrefix}.selectedWorkspaceId`) ||
+        undefined;
+    } catch {}
+  }
+
+  let workspaceName: string | undefined;
+  let workspacePath: string | undefined;
+
+  if (typeof window !== 'undefined') {
+    try {
+      const raw =
+        localStorage.getItem('kite.cached_workspaces') ||
+        localStorage.getItem(`${legacyPrefix}.cached_workspaces`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const ws = parsed.find((w: any) => w.id === resolvedWsId);
+          if (ws) {
+            workspaceName = ws.displayName || ws.name;
+            workspacePath = ws.path || ws.rootPath;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  let allTerminals: any[] = [];
   try {
-    terminals = getActiveAgentTerminals();
+    allTerminals = getActiveAgentTerminals();
   } catch {
-    terminals = [];
+    allTerminals = [];
+  }
+
+  // Filter terminals strictly to the active workspace to prevent cross-project confusion
+  const filteredTerminals = resolvedWsId
+    ? allTerminals.filter((t) => !t.workspaceId || t.workspaceId === resolvedWsId)
+    : allTerminals;
+
+  if (!workspaceName && filteredTerminals.length > 0) {
+    workspaceName = filteredTerminals[0].workspaceName;
   }
 
   return {
     mode: mode || 'code',
-    workspaceId: workspaceId || undefined,
-    activeTerminals: terminals.map((t, idx) => ({
+    workspaceId: resolvedWsId,
+    workspaceName,
+    workspacePath,
+    activeTerminals: filteredTerminals.map((t, idx) => ({
       sessionId: t.sessionId,
       engine: t.engine,
       title: t.title,
       who: t.who,
       idx: idx + 1,
+      workspaceId: t.workspaceId ?? undefined,
     })),
   };
 }

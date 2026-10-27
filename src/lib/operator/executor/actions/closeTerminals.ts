@@ -3,15 +3,21 @@
 
 import { appOperatorController } from '../../appOperatorController';
 import { verifyCloseTerminals } from '../../verify/postconditions';
-import type { ActionReceipt } from '../../contract';
+import type { ActionReceipt, TurnContext } from '../../contract';
 
 export async function executeCloseTerminalsAction(
-  args: { target: string | number },
-  actionIdx: number = 0
+  args: { target: string | number | (string | number)[]; count?: number },
+  actionIdx: number = 0,
+  context?: TurnContext
 ): Promise<ActionReceipt> {
   const target = args.target || 'finished';
 
-  const res = await appOperatorController.closeTerminals(target as any);
+  const res = await appOperatorController.closeTerminals(
+    target as any,
+    undefined,
+    args.count,
+    context?.workspaceId
+  );
 
   if (!res.success) {
     return {
@@ -29,8 +35,9 @@ export async function executeCloseTerminalsAction(
     return {
       actionIdx,
       type: 'close_terminals',
-      ok: true,
+      ok: false,
       summaryEs: res.message || `No se encontraron terminales para cerrar con el criterio «${target}».`,
+      error: res.message || `No se encontraron terminales para cerrar con el criterio «${target}».`,
       data: { closedCount: 0 },
     };
   }

@@ -8,7 +8,12 @@ import {
   type TranscriptionTestResult,
   type TranscriptionTestSession,
 } from '../../../lib/operator/voice/zedVoice';
+import {
+  loadOperatorConfig,
+  saveOperatorConfig,
+} from '../../../lib/operator/operatorConfig';
 import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
+import { toast } from '../../../lib/toast';
 
 interface VoiceTabProps {
   dictationSettings: DictationSettings;
@@ -42,6 +47,10 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
   });
   const [showKey, setShowKey] = useState(false);
   const [savedBadge, setSavedBadge] = useState(false);
+  const [operatorCfg, setOperatorCfg] = useState(() => loadOperatorConfig());
+  const [elevenKeyInput, setElevenKeyInput] = useState(() => operatorCfg.elevenlabsApiKey || '');
+  const [showElevenKey, setShowElevenKey] = useState(false);
+  const [savedElevenBadge, setSavedElevenBadge] = useState(false);
   const [isTestingMic, setIsTestingMic] = useState(false);
   const [testMicLevel, setTestMicLevel] = useState(0);
   const [micTestError, setMicTestError] = useState<string | null>(null);
@@ -202,10 +211,26 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
     try {
       localStorage.setItem('kite_grok_transcription_api_key', grokKeyInput.trim());
       setSavedBadge(true);
+      toast.success('Clave API guardada', 'Configuración de dictado y transcripción actualizada.');
       setTimeout(() => setSavedBadge(false), 2000);
     } catch {
-      // ignore
+      toast.error('Error al guardar', 'No se pudo guardar la clave API en almacenamiento local.');
     }
+  };
+
+  const handleSaveElevenKey = () => {
+    const updated = saveOperatorConfig({
+      elevenlabsApiKey: elevenKeyInput.trim(),
+    });
+    setOperatorCfg(updated);
+    setSavedElevenBadge(true);
+    toast.success('Clave de ElevenLabs guardada', 'El sintetizador de voz usará las credenciales configuradas.');
+    setTimeout(() => setSavedElevenBadge(false), 2000);
+  };
+
+  const handleToggleTtsEngine = (engine: 'browser' | 'elevenlabs') => {
+    const updated = saveOperatorConfig({ ttsEngine: engine });
+    setOperatorCfg(updated);
   };
 
   return (
@@ -639,7 +664,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
               <h3 className="settings-row__title">Respuesta por voz (TTS)</h3>
               <p>
                 El Asistente narra en español el resultado verificado de las acciones realizadas a través
-                de la síntesis de voz del sistema.
+                de la síntesis de voz del sistema o ElevenLabs Neural Streaming.
               </p>
             </div>
             <div className="settings-row__control">
@@ -659,6 +684,77 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
               </button>
             </div>
           </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Motor de Síntesis de Voz (TTS)</h3>
+              <p>
+                Elige entre la síntesis local del navegador o el streaming neuronal de ElevenLabs (v4 Turbo).
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <fieldset aria-label="Motor de Síntesis de Voz" className="ui-segmented">
+                <button
+                  type="button"
+                  aria-pressed={operatorCfg.ttsEngine !== 'elevenlabs'}
+                  className="ui-segmented__item"
+                  onClick={() => handleToggleTtsEngine('browser')}
+                >
+                  {operatorCfg.ttsEngine !== 'elevenlabs' && (
+                    <SegmentedIndicator group="voice-tab-tts-engine" />
+                  )}
+                  <span>Nativo (Sistema)</span>
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={operatorCfg.ttsEngine === 'elevenlabs'}
+                  className="ui-segmented__item"
+                  onClick={() => handleToggleTtsEngine('elevenlabs')}
+                >
+                  {operatorCfg.ttsEngine === 'elevenlabs' && (
+                    <SegmentedIndicator group="voice-tab-tts-engine" />
+                  )}
+                  <span>ElevenLabs Neural</span>
+                </button>
+              </fieldset>
+            </div>
+          </div>
+
+          {operatorCfg.ttsEngine === 'elevenlabs' && (
+            <div className="ui-card__row settings-row">
+              <div className="settings-row__copy">
+                <h3 className="settings-row__title">ElevenLabs API Key</h3>
+                <p>
+                  Clave de API de ElevenLabs para streaming de voz neuronal de baja latencia (~100ms).
+                </p>
+              </div>
+              <div className="settings-row__control" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <input
+                  type={showElevenKey ? 'text' : 'password'}
+                  className="settings-control ui-input"
+                  style={{ width: '220px', fontFamily: 'monospace', fontSize: '12px' }}
+                  placeholder="xi_..."
+                  value={elevenKeyInput}
+                  onChange={(e) => setElevenKeyInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="settings-control ui-button"
+                  onClick={() => setShowElevenKey(!showElevenKey)}
+                  title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
+                >
+                  {showElevenKey ? 'Ocultar' : 'Ver'}
+                </button>
+                <button
+                  type="button"
+                  className="settings-control ui-button ui-button--primary"
+                  onClick={handleSaveElevenKey}
+                >
+                  {savedElevenBadge ? 'Guardado ✓' : 'Guardar'}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">

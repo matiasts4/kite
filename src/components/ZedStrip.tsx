@@ -198,10 +198,10 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
 
   // Toggle voice dictation
   const handleToggleVoice = useCallback(async () => {
-    if (speakingTts) {
-      ttsNarrator.stop();
-      setSpeakingTts(false);
-    }
+    // Unconditionally stop TTS on user interruption
+    ttsNarrator.stop();
+    setSpeakingTts(false);
+
     if (call.muted && onToggleMute) {
       onToggleMute();
     }
@@ -214,7 +214,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     }
     turn.resetStage();
     await voice.startListening();
-  }, [voice, speakingTts, call.muted, onToggleMute, turn]);
+  }, [voice, call.muted, onToggleMute, turn]);
 
   // Handle speaker toggle (TTS aloud narration)
   const handleToggleSpeaker = useCallback(() => {
@@ -256,10 +256,8 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       holdTimer = setTimeout(async () => {
         if (!hasDragged) {
           isHoldingToTalk = true;
-          if (speakingTts) {
-            ttsNarrator.stop();
-            setSpeakingTts(false);
-          }
+          ttsNarrator.stop();
+          setSpeakingTts(false);
           if (call.muted && onToggleMute) {
             onToggleMute();
           }

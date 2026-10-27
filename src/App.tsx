@@ -19,6 +19,7 @@ import { ArchivedChatsModal } from './components/views/modals/ArchivedChatsModal
 import { SshWorkspaceModal } from './components/views/modals/SshWorkspaceModal';
 import { NotificationsView } from './components/views/NotificationsView';
 import { useNotifications } from './lib/notifications/useNotifications';
+import { Toaster, registerToastNavigator } from './lib/toast';
 import { ResumeHost } from './components/modals/ResumeHost';
 import { PromptProjectileOverlay } from './components/code/PromptProjectileOverlay';
 import type { Workspace, AgentProfile, BootstrapResponse } from './types';
@@ -215,6 +216,27 @@ export const App: React.FC = () => {
   const [notificationsAnchor, setNotificationsAnchor] = useState<DOMRect | null>(null);
   const [workspaceSessions, setWorkspaceSessions] = useState<Record<string, WorkspaceSessionTab[]>>({});
   const [requestedCodeTabId, setRequestedCodeTabId] = useState<string | null>(null);
+
+  useEffect(() => {
+    return registerToastNavigator({
+      onNavigateAgent: (id) => {
+        setSelectedAgentId(id);
+        setWorkMode('agent');
+      },
+      onNavigateThread: (threadId, agentId) => {
+        if (agentId) {
+          setSelectedAgentId(agentId);
+          setWorkMode('agent');
+        } else {
+          setWorkMode('code');
+        }
+        setSelectedThreadId(threadId);
+      },
+      onNavigateMode: (m) => {
+        setWorkMode(m);
+      },
+    });
+  }, []);
 
   const handleCodeSessions = useCallback((workspaceId: string, sessions: WorkspaceSessionTab[]) => {
     setWorkspaceSessions((prev) => {
@@ -1372,6 +1394,9 @@ export const App: React.FC = () => {
         <ResumeHost />
 
         <AppIntro open={!introDismissed} />
+
+        {/* Ambient Sileo Toast System */}
+        <Toaster position="bottom-right" theme="dark" offset={{ bottom: 24, right: 24 }} />
       </div>
     </div>
   );

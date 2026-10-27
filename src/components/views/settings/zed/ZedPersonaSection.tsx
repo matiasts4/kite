@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ZedPersonaConfig,
   OperatorConfig,
+  ELEVENLABS_TTS_MODELS,
+  ELEVENLABS_CURATED_VOICES,
 } from '../../../../lib/operator/operatorConfig';
 import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
 
@@ -46,16 +48,22 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
   onTestVoice,
   openingPreview,
 }) => {
+  const [showElevenKey, setShowElevenKey] = useState(false);
+  const isEleven = config.ttsEngine === 'elevenlabs';
+  const isCuratedVoice = ELEVENLABS_CURATED_VOICES.some((v) => v.id === config.elevenlabsVoiceId);
+  const [customVoiceActive, setCustomVoiceActive] = useState(!isCuratedVoice && Boolean(config.elevenlabsVoiceId));
+
   return (
     <section className="settings-group">
       <h2 className="settings-group__title">Identidad y Comportamiento de Zed</h2>
       <div className="ui-card">
+        {/* Nombre del asistente */}
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
-            <h3 className="settings-row__title">Nombre y Voz</h3>
-            <p>Nombre con el que responde el asistente, perfil de voz o voz instalada del sistema.</p>
+            <h3 className="settings-row__title">Nombre del Asistente</h3>
+            <p>Nombre con el que responde el asistente en los saludos e interfaces.</p>
           </div>
-          <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="settings-row__control">
             <input
               type="text"
               className="zed-settings__input"
@@ -63,96 +71,287 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
               maxLength={32}
               onChange={(e) => onPersonaChange('name', e.target.value)}
               placeholder="Zed"
-              style={{ width: 110 }}
+              style={{ width: 140 }}
               aria-label="Nombre del asistente"
             />
-            <select
-              className="settings-control ui-button zed-settings__select"
-              value={persona.voice}
-              onChange={(e) => onPersonaChange('voice', e.target.value)}
-              style={{
-                height: '32px',
-                padding: '0 10px',
-                fontSize: '12px',
-                borderRadius: 'var(--radius-chip, 6px)',
-                background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                color: '#f4f4f6',
-                colorScheme: 'dark',
-                maxWidth: '240px',
-              }}
-              aria-label="Voz del asistente"
-            >
-              <optgroup label="Perfiles de Voz Zed" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                {VOICE_OPTIONS.map((v) => (
-                  <option
-                    key={v.id}
-                    value={v.id}
-                    style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
+          </div>
+        </div>
+
+        {/* Motor de Síntesis (TTS Engine) */}
+        <div className="ui-card__row settings-row">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Motor de Síntesis de Voz (TTS)</h3>
+            <p>Elige entre la síntesis local del navegador o el streaming neuronal de ElevenLabs.</p>
+          </div>
+          <div className="settings-row__control">
+            <fieldset aria-label="Motor de Síntesis de Voz" className="ui-segmented">
+              <button
+                type="button"
+                aria-pressed={!isEleven}
+                className="ui-segmented__item"
+                onClick={() => onFieldChange('ttsEngine', 'browser')}
+              >
+                {!isEleven && <SegmentedIndicator group="settings-zed-tts-engine" />}
+                <span>Nativo (Sistema)</span>
+              </button>
+              <button
+                type="button"
+                aria-pressed={isEleven}
+                className="ui-segmented__item"
+                onClick={() => onFieldChange('ttsEngine', 'elevenlabs')}
+              >
+                {isEleven && <SegmentedIndicator group="settings-zed-tts-engine" />}
+                <span>ElevenLabs Neural (v4 Turbo)</span>
+              </button>
+            </fieldset>
+          </div>
+        </div>
+
+        {/* Configuración de ElevenLabs */}
+        {isEleven ? (
+          <>
+            <div className="ui-card__row settings-row">
+              <div className="settings-row__copy">
+                <h3 className="settings-row__title">Clave de API ElevenLabs</h3>
+                <p>Requerida para streaming de audio de alta fidelidad (~100ms de latencia).</p>
+              </div>
+              <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type={showElevenKey ? 'text' : 'password'}
+                  className="zed-settings__input"
+                  value={config.elevenlabsApiKey || ''}
+                  onChange={(e) => onFieldChange('elevenlabsApiKey', e.target.value)}
+                  placeholder="xi_..."
+                  style={{ width: 220, fontFamily: 'monospace', fontSize: 12 }}
+                  aria-label="Clave de API ElevenLabs"
+                />
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setShowElevenKey(!showElevenKey)}
+                  style={{ height: 32, padding: '0 10px', fontSize: 12 }}
+                  title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
+                >
+                  {showElevenKey ? 'Ocultar' : 'Ver'}
+                </button>
+              </div>
+            </div>
+
+            <div className="ui-card__row settings-row">
+              <div className="settings-row__copy">
+                <h3 className="settings-row__title">Modelo y Voz ElevenLabs</h3>
+                <p>Selecciona el modelo optimizado de baja latencia y el timbre de voz deseado.</p>
+              </div>
+              <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {/* Selector de modelo */}
+                <select
+                  className="settings-control ui-button zed-settings__select"
+                  value={config.elevenlabsModel || 'eleven_v4_turbo'}
+                  onChange={(e) => onFieldChange('elevenlabsModel', e.target.value)}
+                  style={{
+                    height: '32px',
+                    padding: '0 10px',
+                    fontSize: '12px',
+                    borderRadius: 'var(--radius-chip, 6px)',
+                    background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
+                    border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
+                    color: '#f4f4f6',
+                    colorScheme: 'dark',
+                    maxWidth: '220px',
+                  }}
+                  aria-label="Modelo de ElevenLabs"
+                >
+                  {ELEVENLABS_TTS_MODELS.map((m) => (
+                    <option key={m.id} value={m.id} style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Selector de voz */}
+                <select
+                  className="settings-control ui-button zed-settings__select"
+                  value={customVoiceActive ? 'custom' : (config.elevenlabsVoiceId || '21m00Tcm4TlvDq8ikWAM')}
+                  onChange={(e) => {
+                    if (e.target.value === 'custom') {
+                      setCustomVoiceActive(true);
+                    } else {
+                      setCustomVoiceActive(false);
+                      onFieldChange('elevenlabsVoiceId', e.target.value);
+                    }
+                  }}
+                  style={{
+                    height: '32px',
+                    padding: '0 10px',
+                    fontSize: '12px',
+                    borderRadius: 'var(--radius-chip, 6px)',
+                    background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
+                    border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
+                    color: '#f4f4f6',
+                    colorScheme: 'dark',
+                    maxWidth: '200px',
+                  }}
+                  aria-label="Voz de ElevenLabs"
+                >
+                  <optgroup label="Voces Curadas" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
+                    {ELEVENLABS_CURATED_VOICES.map((v) => (
+                      <option key={v.id} value={v.id} style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Personalizada" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
+                    <option value="custom" style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
+                      ID Personalizado...
+                    </option>
+                  </optgroup>
+                </select>
+
+                {customVoiceActive && (
+                  <input
+                    type="text"
+                    className="zed-settings__input"
+                    value={config.elevenlabsVoiceId || ''}
+                    onChange={(e) => onFieldChange('elevenlabsVoiceId', e.target.value)}
+                    placeholder="Voice ID (ej. 21m00T...)"
+                    style={{ width: 150, fontSize: 12, fontFamily: 'monospace' }}
+                    aria-label="Voice ID personalizado"
+                  />
+                )}
+
+                {/* Botón de prueba */}
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={onTestVoice}
+                  style={{
+                    height: '32px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '0 12px',
+                    fontSize: '12px',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title="Probar streaming de voz con ElevenLabs"
+                >
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                   >
-                    {v.label}
-                  </option>
-                ))}
-              </optgroup>
-              {systemVoices.length > 0 && (
-                <optgroup label="Voces del Sistema" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                  {systemVoices.map((v) => (
+                    {testingVoice ? (
+                      <rect x="6" y="6" width="12" height="12" />
+                    ) : (
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    )}
+                  </svg>
+                  <span>{testingVoice ? 'Detener' : 'Probar voz'}</span>
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          /* Configuración Nativa del Sistema */
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Voz del Asistente (Sistema)</h3>
+              <p>Perfil de voz emulada o voz instalada en el sistema operativo.</p>
+            </div>
+            <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select
+                className="settings-control ui-button zed-settings__select"
+                value={persona.voice}
+                onChange={(e) => onPersonaChange('voice', e.target.value)}
+                style={{
+                  height: '32px',
+                  padding: '0 10px',
+                  fontSize: '12px',
+                  borderRadius: 'var(--radius-chip, 6px)',
+                  background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
+                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
+                  color: '#f4f4f6',
+                  colorScheme: 'dark',
+                  maxWidth: '240px',
+                }}
+                aria-label="Voz del asistente"
+              >
+                <optgroup label="Perfiles de Voz Zed" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
+                  {VOICE_OPTIONS.map((v) => (
                     <option
-                      key={v.name}
-                      value={v.name}
+                      key={v.id}
+                      value={v.id}
                       style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
                     >
-                      {v.name} ({v.lang})
+                      {v.label}
                     </option>
                   ))}
                 </optgroup>
-              )}
-              {!VOICE_OPTIONS.some((o) => o.id === persona.voice) &&
-                !systemVoices.some((v) => v.name === persona.voice) &&
-                persona.voice && (
-                  <option
-                    value={persona.voice}
-                    style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                  >
-                    {persona.voice} (actual)
-                  </option>
+                {systemVoices.length > 0 && (
+                  <optgroup label="Voces del Sistema" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
+                    {systemVoices.map((v) => (
+                      <option
+                        key={v.name}
+                        value={v.name}
+                        style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
+                      >
+                        {v.name} ({v.lang})
+                      </option>
+                    ))}
+                  </optgroup>
                 )}
-            </select>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={onTestVoice}
-              style={{
-                height: '32px',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '0 12px',
-                fontSize: '12px',
-                whiteSpace: 'nowrap',
-              }}
-              title="Probar cómo suena la voz seleccionada"
-            >
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+                {!VOICE_OPTIONS.some((o) => o.id === persona.voice) &&
+                  !systemVoices.some((v) => v.name === persona.voice) &&
+                  persona.voice && (
+                    <option
+                      value={persona.voice}
+                      style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
+                    >
+                      {persona.voice} (actual)
+                    </option>
+                  )}
+              </select>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onTestVoice}
+                style={{
+                  height: '32px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '0 12px',
+                  fontSize: '12px',
+                  whiteSpace: 'nowrap',
+                }}
+                title="Probar cómo suena la voz seleccionada"
               >
-                {testingVoice ? (
-                  <rect x="6" y="6" width="12" height="12" />
-                ) : (
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                )}
-              </svg>
-              <span>{testingVoice ? 'Detener' : 'Probar voz'}</span>
-            </button>
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  {testingVoice ? (
+                    <rect x="6" y="6" width="12" height="12" />
+                  ) : (
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  )}
+                </svg>
+                <span>{testingVoice ? 'Detener' : 'Probar voz'}</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">

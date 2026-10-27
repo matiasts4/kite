@@ -732,28 +732,49 @@ async function transcribeOperatorAudioBlob(audioBlob: Blob): Promise<string> {
   let grokKey = '';
   let grokBaseUrl = 'https://api.x.ai/v1';
   let grokModel = 'grok-voice-transcribe-2.0';
+  let cfAccount = '';
+  let cfToken = '';
   try {
     const config = loadOperatorConfig();
     grokKey = config.grokTranscriptionApiKey || config.grokApiKey || '';
     grokBaseUrl = config.grokTranscriptionBaseUrl || config.grokBaseUrl || 'https://api.x.ai/v1';
     grokModel = config.grokTranscriptionModel || 'grok-voice-transcribe-2.0';
+    cfAccount = config.cloudflareAccountId || '';
+    cfToken = config.cloudflareApiToken || '';
     if (!grokKey && typeof localStorage !== 'undefined') {
       grokKey = localStorage.getItem('kite_grok_transcription_api_key') || '';
     }
   } catch {}
 
-  if (grokKey && audioBlob.size > 200) {
+  const hasGrok = Boolean(grokKey && grokKey.trim().length > 0);
+  const hasCf = Boolean(cfAccount.trim() && cfToken.trim());
+
+  if (!hasGrok && !hasCf) {
+    throw new Error(
+      'Falta configurar la API Key de Grok (xAI) o las credenciales de Cloudflare Whisper para la transcripción de voz en los Ajustes del Asistente.'
+    );
+  }
+
+  let grokErr: unknown = null;
+  if (hasGrok && audioBlob.size > 200) {
     try {
       return await transcribeWithGrokCloud(audioBlob, grokKey, grokBaseUrl, grokModel);
     } catch (err) {
-      console.warn('[ZedVoice] Grok Cloud avisó error, usando Cloudflare Whisper:', err);
+      grokErr = err;
+      console.warn('[ZedVoice] Grok Cloud avisó error, probando Cloudflare Whisper como respaldo:', err);
     }
   }
 
-  const config = loadOperatorConfig();
-  const cfAccount = config.cloudflareAccountId || '';
-  const cfToken = config.cloudflareApiToken || '';
-  return transcribeWithCloudflareWhisper(audioBlob, cfAccount, cfToken);
+  if (hasCf) {
+    return transcribeWithCloudflareWhisper(audioBlob, cfAccount, cfToken);
+  }
+
+  if (grokErr) {
+    const errMsg = (grokErr as Error)?.message || String(grokErr);
+    throw new Error(`Falló la transcripción con Grok (${errMsg}) y no hay credenciales de Cloudflare Whisper como respaldo.`);
+  }
+
+  throw new Error('Falta configurar la API Key de Grok o credenciales de transcripción válidas.');
 }
 
 function resetSilenceTimer(): void {

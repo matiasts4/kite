@@ -93,7 +93,7 @@ function parseAndValidateModelPlan(
   const validatedActions: OperatorContractAction[] = [];
 
   const hasCloseVerb = userInput
-    ? /\b(?:cierra|cerrar|cierre|cierren|sierra|serrar|sierre|sierren|close|kill|mata|matar|maten|termina|terminar|terminen|elimina|eliminar|eliminen|apaga|apagar|apaguen)\b/i.test(userInput)
+    ? /(?<![a-záéíóúñ])(?:cierra|cerrar|cierre|cierres|cierren|ci[eé]rral[ao]s?|ci[eé]rrenl[ao]s?|ci[eé]rrel[ao]s?|ci[eé]rrame|cerr[aá]l[ao]s?|cerr[aá]me|sierra|serrar|sierre|sierres|sierren|si[eé]rral[ao]s?|close|kill|mata|matar|mates|maten|m[aá]tal[ao]s?|m[aá]tenl[ao]s?|termina|terminar|termines|terminen|term[ií]nal[ao]s?|elimina|eliminar|elimines|eliminen|elim[ií]nal[ao]s?|apaga|apagar|apagues|apaguen|ap[aá]gal[ao]s?|borra|borrar|borres|borren)(?![a-záéíóúñ])/i.test(userInput)
     : true;
 
   for (const act of rawActions) {

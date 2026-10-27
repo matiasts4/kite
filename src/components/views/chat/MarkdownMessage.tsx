@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { CheckIcon, CopyIcon } from './ChatIcons';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
 import { MermaidDiagram } from '../../ui/MermaidDiagram';
+import { toast } from '../../../lib/toast';
 
 function isFilePathCandidate(text: string): boolean {
   let trimmed = text.trim();
@@ -67,7 +68,7 @@ const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => 
           type="button"
           className="md-codeblock__copy"
           onClick={() => {
-            void navigator.clipboard.writeText(code);
+            void toast.copy(code, `Copiado bloque ${lang || 'código'}`);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
           }}

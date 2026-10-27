@@ -33,6 +33,42 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.39',
+    tag: 'v0.1.39',
+    date: 'Oct 27, 2026',
+    title: 'Voz Hiperrealista ElevenLabs para Zed, Composer Moderno y Control de Razonamiento',
+    items: [
+      {
+        kind: 'added',
+        description: 'Integración de ElevenLabs Streaming TTS para el asistente Zed con soporte v4 turbo y fallback nativo',
+      },
+      {
+        kind: 'added',
+        description: 'Selector y control de esfuerzo de razonamiento dinámico por modelo en el composer',
+      },
+      {
+        kind: 'added',
+        description: 'Configuración de voces curadas y personalizadas en Ajustes > Voz y Zed',
+      },
+      {
+        kind: 'added',
+        description: 'Sistema integrado de notificaciones toast flotantes con Sileo',
+      },
+      {
+        kind: 'added',
+        description: 'Telemetría de sistema con desglose granular de subprocesos y memoria privada',
+      },
+      {
+        kind: 'fixed',
+        description: 'Sincronización de repositorios y ramas Git entre vistas de Agente e Hilos sin desfase',
+      },
+      {
+        kind: 'fixed',
+        description: 'Posicionamiento anclado mediante portales y scroll optimizado en selectores de modelos',
+      },
+    ],
+  },
+  {
     version: '0.1.38',
     tag: 'v0.1.38',
     date: 'Oct 25, 2026',

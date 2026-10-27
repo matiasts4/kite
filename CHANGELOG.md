@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.39] - 2026-10-27
+
+> Voz Hiperrealista ElevenLabs para Zed, Composer Moderno y Control de Razonamiento
+
+### Added
+- Integración de ElevenLabs Streaming TTS para el asistente Zed con soporte v4 turbo y fallback nativo
+- Selector y control de esfuerzo de razonamiento dinámico por modelo en el composer
+- Configuración de voces curadas y personalizadas en Ajustes > Voz y Zed
+- Sistema integrado de notificaciones toast flotantes con Sileo
+- Telemetría de sistema con desglose granular de subprocesos y memoria privada
+
+### Fixed
+- Sincronización de repositorios y ramas Git entre vistas de Agente e Hilos sin desfase
+- Posicionamiento anclado mediante portales y scroll optimizado en selectores de modelos
+
+---
+
 ## [0.1.38] - 2026-10-26
 
 > Gestión de Ramas Git en Hilos, Selector de Workspace y Optimización del Chat

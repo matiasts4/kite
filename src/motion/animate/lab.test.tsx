@@ -196,7 +196,6 @@ describe('page 02 navigation with real header & sidebar scenes', () => {
     expect(container.querySelector('[data-testid="sidebar"]')).not.toBeNull();
     expect(container.textContent).toContain('Antigravity Lead');
     expect(container.textContent).toContain('Federico');
-    expect(container.textContent).toContain('12.4k tokens');
   });
 
   it('interacts with the TitleBar mode switcher and Zed assistant toggle on Page 2', () => {

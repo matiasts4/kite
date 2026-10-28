@@ -1,3 +1,5 @@
+import { waitForTerminalReady } from '../lib/terminalRegistry';
+
 /** Motion contract: transform and opacity only. No animation library. */
 
 export const MOTION_ENTER_MS = 180;
@@ -94,7 +96,14 @@ export function dispatchPromptWhenPaneReady(detail: PromptFlightDetail): void {
   const started = performance.now();
   const tick = () => {
     if (isReady() || performance.now() - started >= PANE_READY_TIMEOUT_MS) {
-      fire();
+      if (sessionId) {
+        // Pane is ready in DOM; now await terminal readiness reactively before launching projectile
+        void waitForTerminalReady(sessionId).then(() => {
+          fire();
+        });
+      } else {
+        fire();
+      }
       return;
     }
     requestAnimationFrame(tick);

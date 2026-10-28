@@ -453,6 +453,24 @@ fn resolve_engine_program(engine: &str) -> Option<String> {
     None
 }
 
+const AGENT_TERMINAL_TERM: &str = "xterm-256color";
+const AGENT_TERMINAL_UTF8_PREAMBLE: &str =
+    "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); chcp 65001 > $null; $env:TERM = 'xterm-256color';";
+
+fn build_agent_launch_command(program: &str, agent_args: &[String]) -> String {
+    let quoted_program = program.replace('\'', "''");
+    let quoted_args: Vec<String> = agent_args
+        .iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+        .collect();
+    let launch = if quoted_args.is_empty() {
+        format!("& '{quoted_program}'")
+    } else {
+        format!("& '{quoted_program}' {}", quoted_args.join(" "))
+    };
+    format!("{AGENT_TERMINAL_UTF8_PREAMBLE} {launch}")
+}
+
 /// Builds the CLI arguments for launching or resuming an AI agent engine.
 /// Note: We intentionally avoid `--continue` / `resume --last` when `provider_session_id` is `None`,
 /// because in multi-pane workspaces `--continue` causes panes without a bound ID to hijack
@@ -797,6 +815,7 @@ pub fn spawn_session_with_options(
     let mut initial_provider_id: Option<String> = None;
     let mut initial_detected_agent: Option<String> = None;
 
+    let mut agent_terminal = false;
     let mut cmd = if let Some(ref hybrid_agent) = hybrid_agent_opt {
         // Hybrid shell resume: open PowerShell in the saved CWD and automatically invoke the agent's resume command
         let (agent_args, bound_id) = build_agent_cli_args_ext(
@@ -814,16 +833,8 @@ pub fn spawn_session_with_options(
         let mut c = CommandBuilder::new("powershell.exe");
         c.cwd(&target_dir);
         if let Some(program) = resolve_engine_program(hybrid_agent) {
-            let quoted_prog = program.replace('\'', "''");
-            let quoted_args: Vec<String> = agent_args
-                .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "''")))
-                .collect();
-            let launch_cmd = if quoted_args.is_empty() {
-                format!("& '{quoted_prog}'")
-            } else {
-                format!("& '{quoted_prog}' {}", quoted_args.join(" "))
-            };
+            agent_terminal = true;
+            let launch_cmd = build_agent_launch_command(&program, &agent_args);
             c.args([
                 "-NoLogo",
                 "-NoExit",
@@ -835,6 +846,7 @@ pub fn spawn_session_with_options(
         }
         c
     } else if let Some(program) = resolve_engine_program(engine) {
+        agent_terminal = true;
         let (agent_args, bound_id) = build_agent_cli_args_ext(
             engine,
             session_id,
@@ -848,16 +860,7 @@ pub fn spawn_session_with_options(
         initial_detected_agent = Some(canonical_agent_engine(engine));
         let mut c = CommandBuilder::new("powershell.exe");
         c.cwd(&target_dir);
-        let quoted = program.replace('\'', "''");
-        let quoted_args: Vec<String> = agent_args
-            .iter()
-            .map(|a| format!("'{}'", a.replace('\'', "''")))
-            .collect();
-        let launch = if quoted_args.is_empty() {
-            format!("& '{quoted}'")
-        } else {
-            format!("& '{quoted}' {}", quoted_args.join(" "))
-        };
+        let launch = build_agent_launch_command(&program, &agent_args);
         c.args([
             "-NoLogo",
             "-NoExit",
@@ -889,6 +892,9 @@ pub fn spawn_session_with_options(
     cmd.env("KITE_ENV", "1");
     cmd.env("KITE_SESSION_ID", session_id);
     cmd.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    if agent_terminal {
+        cmd.env("TERM", AGENT_TERMINAL_TERM);
+    }
     if let Some(ref ws_id) = options.workspace_id {
         cmd.env("KITE_WORKSPACE_ID", ws_id);
     }
@@ -2455,6 +2461,19 @@ pub fn respawn_provider_terminals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_launch_command_normalizes_utf8_console_and_term() {
+        let command = build_agent_launch_command(
+            r"C:\Program Files\OpenCode\opencode.exe",
+            &["--prompt".to_string(), "box ▣".to_string()],
+        );
+
+        assert!(command.contains("$OutputEncoding = [Console]::OutputEncoding"));
+        assert!(command.contains("chcp 65001 > $null"));
+        assert!(command.contains("$env:TERM = 'xterm-256color'"));
+        assert!(command.contains("& 'C:\\Program Files\\OpenCode\\opencode.exe' '--prompt' 'box ▣'"));
+    }
 
     #[test]
     fn test_build_agent_cli_args_resume_flags() {

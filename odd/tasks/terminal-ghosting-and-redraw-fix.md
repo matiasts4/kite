@@ -176,11 +176,22 @@ How to check:
 
 ### E4 — Encoding, only if characters still collide
 
-Only if the grid is stable and in-place updates still merge glyphs.
+Status: implemented in this change. Visual pass is open.
+
+Files: `src-tauri/src/terminal.rs`, this document.
+
+Rationale: agent CLIs now receive a stable UTF-8 console and terminal type from
+inside the child PowerShell/ConPTY session. Generic PowerShell terminals keep
+their existing startup path, and E1's settled geometry is unchanged.
 
 - Set UTF-8 for the spawned console (`chcp 65001` inside that PTY, not the parent shell).
 - Set `TERM=xterm-256color`.
 - Re-check one emoji or box-drawing update. Do not bundle this with E1.
+
+Rollback: remove the E4 changes from `src-tauri/src/terminal.rs` (the
+`AGENT_TERMINAL_*` constants, `build_agent_launch_command`, the agent-only
+environment assignment, and its focused test) and restore this section to its
+pre-E4 text. Do not revert E1, E2, or E3 geometry/rendering changes.
 
 ---
 

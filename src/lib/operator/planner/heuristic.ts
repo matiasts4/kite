@@ -740,18 +740,31 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
 // ---------------------------------------------------------------------------
 
 const HANDOFF_VERB_SOURCE =
-  'p[aá]sa(?:le|les|lo|la|r)?|p[aá]sales|entrega(?:le|les|lo|la|r)?|delega(?:le|les|lo|la|r)?|env[ií]a(?:le|les|lo|la)?|manda(?:le|les|lo|la)?|traspasa(?:le|les)?|comparte(?:le|les)?|deriva(?:le|les)?|handoff';
+  'p[aá]sa(?:le|les|lo|la|r|s|n)?|pases?|pasen?|entrega(?:le|les|lo|la|r|s|n)?|entregu?es?|entregu?en?|delega(?:le|les|lo|la|r|s|n)?|delegu?es?|delegu?en?|env[ií]a(?:le|les|lo|la|r|s|n)?|manda(?:le|les|lo|la|r|s|n)?|traspasa(?:le|les|r|s|n)?|comparte(?:le|les|r|s|n)?|deriva(?:le|les|r|s|n)?|handoff';
 
 const HANDOFF_ARTIFACT_SOURCE =
-  'odd|o\\.d\\.d\\.|tarea|plan|salida|output|respuesta|resumen|contexto|conversaci[oó]n|buffer|trabajo';
+  'odd|o\\.d\\.d\\.|tarea|plan|planeaci[oó]n|salida|output|respuesta|resumen|contexto|conversaci[oó]n|buffer|trabajo';
 
-const HANDOFF_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})\\s+(?:de|del)\\s+(.+?)\\s+(?:hacia|para|al|a)\\s+(.+)$`,
+const HANDOFF_SOURCE_CONNECTOR =
+  '(?:de|del|del?\\s+agente|que\\s+(?:hizo|cre[oó]|gener[oó]|arm[oó]|dej[oó]))';
+
+const HANDOFF_WITH_SOURCE_RE = new RegExp(
+  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})\\s+(?:${HANDOFF_SOURCE_CONNECTOR})\\s+(.+?)\\s+(?:hacia|para|al|a)\\s+(.+)$`,
+  'i'
+);
+
+const HANDOFF_DIRECT_RE = new RegExp(
+  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})\\s+(?:hacia|para|al|a)\\s+(.+)$`,
+  'i'
+);
+
+const HANDOFF_INVERTED_RE = new RegExp(
+  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:hacia|para|al|a)\\s+(.+?)\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})(?:\\s+(?:${HANDOFF_SOURCE_CONNECTOR})\\s+(.+))?$`,
   'i'
 );
 
 const NEW_TARGET_RE =
-  /(?<![a-záéíóúñ])(?:nuev[oa]s?|otr[oa]s?|que\s+abrir[aá]s|que\s+abras|que\s+crear[aá]s|que\s+crees|que\s+lanzar[aá]s|que\s+lances|abrir[aá]s|crear[aá]s)(?![a-záéíóúñ])/i;
+  /(?<![a-záéíóúñ])(?:nuev[oa]s?|otr[oa]s?|que\s+abrir[aá]s|que\s+abras|que\s+crear[aá]s|que\s+crees|que\s+lanzar[aá]s|que\s+lances|abrir[aá]s|crear[aá]s|sesi[oó]n)(?![a-záéíóúñ])/i;
 
 function parseExplicitSessionRef(phrase: string): string | number | undefined {
   const clean = phrase.trim().replace(/[.,;!?]+$/, '').trim();
@@ -771,43 +784,79 @@ function parseExplicitSessionRef(phrase: string): string | number | undefined {
 }
 
 function parseHandoffSource(phrase: string): string | number | undefined {
-  const explicit = parseExplicitSessionRef(phrase);
+  if (!phrase) return 'active';
+  const clean = phrase.trim().replace(/[.,;!?]+$/, '').trim();
+  if (!clean) return 'active';
+
+  const lower = clean.toLowerCase();
+  if (
+    /^(?:este|esta|actual|activo|activa)(?:\s+(?:agente|terminal|consola|pane|sesi[oó]n))?$/i.test(lower) ||
+    /^(?:el\s+agente\s+actual|la\s+terminal\s+actual)$/i.test(lower)
+  ) {
+    return 'active';
+  }
+
+  const explicit = parseExplicitSessionRef(clean);
   if (explicit !== undefined) return explicit;
 
-  const engine = detectEngineFromText(phrase);
+  const engine = detectEngineFromText(clean);
   if (engine) return engine;
 
-  const stripped = phrase
-    .trim()
-    .replace(/[.,;!?]+$/, '')
+  const stripped = clean
     .replace(/^(?:la|el|los|las)\s+/i, '')
+    .replace(/^(?:que\s+(?:hizo|cre[oó]|gener[oó]|arm[oó]|dej[oó]))\s+/i, '')
     .replace(/^(?:terminal|terminales|agente|agentes|consola|consolas|sesi[oó]n)(?:\s+(?:de|del))?\s*/i, '')
     .trim();
-  if (!stripped) return undefined;
+  if (!stripped) return 'active';
   if (/^\d+$/.test(stripped)) return Number(stripped);
   return stripped.toLowerCase();
 }
 
 /**
  * Parses a Spanish multi-agent handoff request, e.g.
- * "pásale el ODD de la terminal 1 a un nuevo agente de claude".
+ * "pásale el ODD de la terminal 1 a un nuevo agente de claude",
+ * "entrega el ODD que hizo el agente Orion a una nueva sesión de Grok", or
+ * "pásale el ODD a un nuevo agente de grok".
  */
 export function parseHandoffIntent(text: string): HandoffToAgentAction | null {
   if (!text) return null;
   const normalized = normalizeInputForIntent(text);
-  const match = normalized.match(HANDOFF_RE);
-  if (!match) return null;
 
-  const sourcePhrase = (match[1] || '').trim();
-  const targetPhrase = (match[2] || '').trim();
-  if (!sourcePhrase || !targetPhrase) return null;
+  let sourcePhrase = '';
+  let targetPhrase = '';
+  let fullMatchText = '';
 
-  const sourceTarget = parseHandoffSource(sourcePhrase) ?? 1;
+  const withSourceMatch = normalized.match(HANDOFF_WITH_SOURCE_RE);
+  if (withSourceMatch) {
+    sourcePhrase = (withSourceMatch[1] || '').trim();
+    targetPhrase = (withSourceMatch[2] || '').trim();
+    fullMatchText = withSourceMatch[0];
+  } else {
+    const directMatch = normalized.match(HANDOFF_DIRECT_RE);
+    if (directMatch) {
+      sourcePhrase = 'active';
+      targetPhrase = (directMatch[1] || '').trim();
+      fullMatchText = directMatch[0];
+    } else {
+      const invertedMatch = normalized.match(HANDOFF_INVERTED_RE);
+      if (invertedMatch) {
+        targetPhrase = (invertedMatch[1] || '').trim();
+        sourcePhrase = (invertedMatch[2] || 'active').trim();
+        fullMatchText = invertedMatch[0];
+      }
+    }
+  }
+
+  if (!targetPhrase) return null;
+
+  const sourceTarget = parseHandoffSource(sourcePhrase) ?? 'active';
   const targetEngine = detectEngineFromText(targetPhrase);
   const targetSession = parseExplicitSessionRef(targetPhrase);
   const spawnNew = NEW_TARGET_RE.test(targetPhrase) || targetSession === undefined;
   const artifactKind: HandoffToAgentAction['artifactKind'] =
-    /(?<![a-záéíóúñ])odd(?![a-záéíóúñ])/i.test(match[0]) ? 'odd' : 'output';
+    /(?<![a-záéíóúñ])(?:odd|plan|planeaci[oó]n|tarea)(?![a-záéíóúñ])/i.test(fullMatchText)
+      ? 'odd'
+      : 'output';
 
   return {
     type: 'handoff_to_agent',
@@ -822,9 +871,11 @@ export function parseHandoffIntent(text: string): HandoffToAgentAction | null {
 function describeHandoff(action: HandoffToAgentAction): string {
   const artifact = action.artifactKind === 'odd' ? 'el ODD' : 'la salida';
   const source =
-    typeof action.sourceTarget === 'number'
-      ? `la terminal ${action.sourceTarget}`
-      : `la terminal "${action.sourceTarget}"`;
+    action.sourceTarget === 'active'
+      ? 'la terminal activa'
+      : typeof action.sourceTarget === 'number'
+        ? `la terminal ${action.sourceTarget}`
+        : `el agente "${action.sourceTarget}"`;
   let target: string;
   if (action.spawnNew) {
     target = `un nuevo agente${action.targetEngine ? ` de ${action.targetEngine}` : ''}`;

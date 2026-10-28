@@ -38,12 +38,28 @@ function matchesTerminal(terminal: ActiveAgentTerminal, query: string): boolean 
   return Boolean(engineFromQuery && terminal.engine === engineFromQuery);
 }
 
+function findTerminalWithOdd(terminals: ActiveAgentTerminal[]): ActiveAgentTerminal | undefined {
+  for (const t of terminals) {
+    const buf = readBuffer(t).replace(/\\/g, '/');
+    if (ODD_PATH_RE.test(buf)) {
+      return t;
+    }
+  }
+  return undefined;
+}
+
 /** Resolves a 1-based index, engine name, codename or title to one active terminal. */
 function resolveTerminal(
   terminals: ActiveAgentTerminal[],
   target: string | number | undefined
 ): ActiveAgentTerminal | undefined {
-  if (target === undefined || target === null) return terminals[0];
+  if (terminals.length === 0) return undefined;
+
+  if (target === undefined || target === null || target === 'active' || target === 'actual') {
+    const withOdd = findTerminalWithOdd(terminals);
+    if (withOdd) return withOdd;
+    return terminals[0];
+  }
 
   if (typeof target === 'number') {
     return terminals[Math.floor(target) - 1];
@@ -54,19 +70,33 @@ function resolveTerminal(
     return terminals[parseInt(trimmed, 10) - 1];
   }
 
-  const engine = detectEngineFromText(trimmed);
+  const cleanTarget = trimmed
+    .replace(/^(?:la|el|los|las)\s+/i, '')
+    .replace(/^(?:terminal|terminales|agente|agentes|consola|consolas|sesi[oó]n)(?:\s+(?:de|del))?\s*/i, '')
+    .trim();
+
+  const engine = detectEngineFromText(cleanTarget) || detectEngineFromText(trimmed);
   if (engine) {
     const byEngine = terminals.find((t) => t.engine === engine);
     if (byEngine) return byEngine;
   }
 
-  const exact = terminals.find((t) => matchesTerminal(t, trimmed));
+  const exact = terminals.find(
+    (t) =>
+      matchesTerminal(t, cleanTarget) ||
+      matchesTerminal(t, trimmed)
+  );
   if (exact) return exact;
 
   const engineOnly = trimmed.match(/^(?:de|del)\s+(.+)$/i);
   if (engineOnly) {
-    return terminals.find((t) => matchesTerminal(t, engineOnly[1]));
+    const match = terminals.find((t) => matchesTerminal(t, engineOnly[1]));
+    if (match) return match;
   }
+
+  // Graceful fallback: if an agent name was not found directly, but only one terminal has an ODD
+  const withOdd = findTerminalWithOdd(terminals);
+  if (withOdd) return withOdd;
 
   return undefined;
 }
@@ -86,7 +116,7 @@ export async function executeHandoffToAgentAction(
 ): Promise<ActionReceipt> {
   const startedAt = Date.now();
   const terminals = workspaceTerminals(context);
-  const source = resolveTerminal(terminals, args.sourceTarget);
+  let source = resolveTerminal(terminals, args.sourceTarget);
 
   if (!source) {
     return {
@@ -99,9 +129,21 @@ export async function executeHandoffToAgentAction(
     };
   }
 
-  const bufferText = readBuffer(source);
-  const normalizedBuffer = bufferText.replace(/\\/g, '/');
-  const oddPath = normalizedBuffer.match(ODD_PATH_RE)?.[0];
+  let bufferText = readBuffer(source);
+  let normalizedBuffer = bufferText.replace(/\\/g, '/');
+  let oddPath = normalizedBuffer.match(ODD_PATH_RE)?.[0];
+
+  // If the picked source doesn't have an ODD in its buffer, but another terminal does, prefer the one with the ODD!
+  if (!oddPath && (args.sourceTarget === 'active' || args.sourceTarget === 1 || args.sourceTarget === undefined)) {
+    const candidate = findTerminalWithOdd(terminals);
+    if (candidate && candidate.sessionId !== source.sessionId) {
+      source = candidate;
+      bufferText = readBuffer(source);
+      normalizedBuffer = bufferText.replace(/\\/g, '/');
+      oddPath = normalizedBuffer.match(ODD_PATH_RE)?.[0];
+    }
+  }
+
   const sourceLabel = source.who || cleanAgentTitle(source.title || '') || source.sessionId;
 
   const handoffPrompt = oddPath
@@ -177,7 +219,7 @@ export async function executeHandoffToAgentAction(
     type: 'handoff_to_agent',
     ok: true,
     summaryEs: oddPath
-      ? `Transferí el ODD de ${sourceLabel} a un nuevo agente de ${targetEngine}.`
+      ? `Transferí el ODD (${oddPath.split('/').pop()}) de ${sourceLabel} a un nuevo agente de ${targetEngine}.`
       : `Transferí el trabajo de ${sourceLabel} a un nuevo agente de ${targetEngine}.`,
     data: {
       sourceSessionId: source.sessionId,

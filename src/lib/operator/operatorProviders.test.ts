@@ -368,6 +368,7 @@ describe('Operator Providers & Latency Benchmarks', () => {
           headers: expect.objectContaining({
             Authorization: 'Bearer cf-tok-456',
           }),
+          body: expect.stringContaining('"model":"@cf/meta/llama-3.1-8b-instruct"'),
         })
       );
     });

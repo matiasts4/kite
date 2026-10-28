@@ -67,16 +67,9 @@ export function resolveVerifiedModel(
 
   const requested = requestedModel?.trim();
   if (requested) {
-    // OpenCode Go adds and rotates models frequently; the live catalog is the
-    // source of truth (see fetchOpenCodeGoModels). Quarantining unknown ids
-    // silently downgraded the user's selection to a different model.
-    if (provider === 'opencode' || catalog.verified.includes(requested)) {
-      return requested;
-    }
-    console.warn(
-      `[ModelResolver] Quarantined unverified model ID "${requested}" for provider "${provider}". Using verified ${tier} model "${catalog[tier]}".`
-    );
-    return catalog[tier];
+    // The settings catalog is the source of truth. Replacing an explicit id
+    // with the fast default sent a different model than the one the user picked.
+    return requested;
   }
 
   return catalog[tier];

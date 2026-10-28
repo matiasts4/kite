@@ -365,6 +365,39 @@ describe('T4 / S7 — multi-agent ODD handoff', () => {
     expect(action.spawnNew).toBe(false);
     expect(action.artifactKind).toBe('output');
   });
+
+  it('hands off an ODD using natural phrasing: "que hizo el agente Orion a una nueva sesión de Grok"', () => {
+    const action = planTurnHeuristic(
+      'entrega el ODD que hizo el agente Orion a una nueva sesión de Grok'
+    ).actions[0] as any;
+    expect(action.type).toBe('handoff_to_agent');
+    expect(action.sourceTarget).toBe('orion');
+    expect(action.targetEngine).toBe('grok');
+    expect(action.spawnNew).toBe(true);
+    expect(action.artifactKind).toBe('odd');
+  });
+
+  it('hands off an ODD without an explicit source, defaulting to active terminal', () => {
+    const action = planTurnHeuristic(
+      'pásale el ODD a una nueva sesión de Grok'
+    ).actions[0] as any;
+    expect(action.type).toBe('handoff_to_agent');
+    expect(action.sourceTarget).toBe('active');
+    expect(action.targetEngine).toBe('grok');
+    expect(action.spawnNew).toBe(true);
+    expect(action.artifactKind).toBe('odd');
+  });
+
+  it('hands off planning referring to "este agente" to opencode', () => {
+    const action = planTurnHeuristic(
+      'pásale la planeación de este agente a opencode'
+    ).actions[0] as any;
+    expect(action.type).toBe('handoff_to_agent');
+    expect(action.sourceTarget).toBe('active');
+    expect(action.targetEngine).toBe('opencode');
+    expect(action.spawnNew).toBe(true);
+    expect(action.artifactKind).toBe('odd');
+  });
 });
 
 describe('T4 / S8 — spatial pane control', () => {

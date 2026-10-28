@@ -406,6 +406,63 @@ describe('T5/S7 — handoff_to_agent', () => {
       expect.objectContaining({ sourceSessionId: 'term-planner-1' })
     );
   });
+
+  it('automatically resolves the terminal that has an ODD when sourceTarget is "active"', async () => {
+    vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+      {
+        sessionId: 'term-shell-1',
+        who: 'Terminal 1',
+        title: 'Terminal 1',
+        engine: 'powershell',
+        state: 'idle',
+        latestLine: 'PS C:\\>',
+        updatedAt: 10,
+      },
+      {
+        sessionId: 'term-orion-1',
+        who: 'Orion',
+        title: 'Orion (antigravity)',
+        engine: 'antigravity',
+        state: 'waitingForYou',
+        latestLine: 'Listo para implementar',
+        updatedAt: 20,
+      },
+    ] as any);
+    vi.spyOn(terminalRegistry, 'getTerminalRollingBuffer').mockImplementation((id: string) => {
+      if (id === 'term-orion-1') {
+        return 'Generé la especificación en odd/tasks/settings-consolidation-and-overhaul.md';
+      }
+      return 'Get-Process';
+    });
+
+    const spawnDetails: any[] = [];
+    const onSpawn = (e: Event) => spawnDetails.push((e as CustomEvent).detail);
+    window.addEventListener('kite:spawn-agent-terminal', onSpawn);
+
+    const plan: OperatorPlan = {
+      strategy: 'heuristic',
+      actions: [
+        {
+          type: 'handoff_to_agent',
+          sourceTarget: 'active',
+          targetEngine: 'grok',
+          spawnNew: true,
+          artifactKind: 'odd',
+        },
+      ],
+    };
+
+    const res = await executePlan(plan, { workspaceId: 'ws-1' });
+    window.removeEventListener('kite:spawn-agent-terminal', onSpawn);
+
+    expect(res.overallSuccess).toBe(true);
+    expect(spawnDetails).toHaveLength(1);
+    expect(spawnDetails[0].engine).toBe('grok');
+    expect(spawnDetails[0].sourceSessionId).toBe('term-orion-1');
+    expect(spawnDetails[0].initialPrompt).toContain('settings-consolidation-and-overhaul.md');
+    expect(res.receipts[0].summaryEs).toContain('Orion');
+    expect(res.receipts[0].summaryEs).toContain('settings-consolidation-and-overhaul.md');
+  });
 });
 
 describe('T5/S8 — manage_pane_layout', () => {

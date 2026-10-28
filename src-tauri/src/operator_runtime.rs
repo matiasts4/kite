@@ -423,8 +423,23 @@ pub fn operator_trace_path() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn operator_trace_append(line: String) -> Result<(), String> {
+pub fn operator_trace_append(line: Option<String>, request: Option<Value>) -> Result<(), String> {
     use std::io::Write;
+    let line_str = if let Some(l) = line {
+        l
+    } else if let Some(req) = request {
+        if let Some(s) = req.as_str() {
+            s.to_string()
+        } else {
+            req.get("line")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "Missing 'line' field in request".to_string())?
+        }
+    } else {
+        return Err("Missing 'line' argument".to_string());
+    };
+
     let dir = crate::persist::roaming_app_dir().join("operator-traces");
     if !dir.exists() {
         let _ = std::fs::create_dir_all(&dir);
@@ -437,9 +452,9 @@ pub fn operator_trace_append(line: String) -> Result<(), String> {
         .open(&file_path)
         .map_err(|e| format!("Failed to open operator trace file: {e}"))?;
 
-    let final_line = match serde_json::from_str::<Value>(&line) {
-        Ok(val) => serde_json::to_string(&redact_secrets_native(val)).unwrap_or(line),
-        Err(_) => line,
+    let final_line = match serde_json::from_str::<Value>(&line_str) {
+        Ok(val) => serde_json::to_string(&redact_secrets_native(val)).unwrap_or(line_str),
+        Err(_) => line_str,
     };
 
     writeln!(file, "{}", final_line.trim_end())

@@ -1,6 +1,6 @@
 # Terminal Ghosting and Redraw — Attempt Log
 
-Status: E1 implemented, waiting for a visual check. No Rust change.
+Status: E1 follow-up — new panes stayed blank because the PTY was spawned before the view measured. Slot reservation no longer starts the process. Visual pass is open again.
 Branch: `feat/ui-composer`.
 Rule: one hypothesis per commit. Do not mix this work with unrelated dirty files.
 
@@ -115,13 +115,21 @@ What landed:
 
 Pass: Grok and OpenCode welcome screens are coherent with three terminals in one view, before any manual resize.
 
+Visual result (2026-10-28): fail, but not the torn frame. New Vega, Titan, and Terminal panes opened with a blue cursor on a black surface and no CLI text. The header dot was already green. Terminals that had been open before the restart painted again. OpenCode among those still ghosts. Grok among those does not, so far.
+
+Cause: `launch_workspace_terminals` spawned the ConPTY immediately at 80×24, before the pane existed. E1 then waited for a stable host and called `attach_terminal`. The process was already alive, so attach drained the welcome frame into scrollback. The view skips that scrollback whenever `attachedToExisting` is true, and it only polls bytes that arrive afterwards. PowerShell does not reprint its prompt. A same-size resize does not make the TUI draw again. The session is running. The screen never received the first frame.
+
+Reconnected sessions took the other branch. After a process restart the old PTY is gone, so attach spawns while the view is already polling. That is why those four came back and the new ones did not.
+
+Follow-up in this commit: `launch_workspace_terminals` only reserves the session id, pane id, and label. It does not start a process. `attach_terminal` performs the only spawn, and it receives the measured columns and rows. The 80×24 fields on the launch request are ignored.
+
 How to check, without mixing other branch work:
 
-1. Stay on `feat/ui-composer`. This attempt does not need a Rust rebuild or a Vite cache wipe.
+1. Stay on `feat/ui-composer`. This follow-up changes Rust. `npm run app` rebuilds the debug binary when `src-tauri/src` is newer. No Vite cache wipe.
 2. Close the current dev window. `npm run app` stops the previous debug process and opens a new one against the Vite server on port 1420.
-3. Open **new** Grok and OpenCode terminals after that launch. Sessions that were already painting before the restart can keep a torn frame in the PTY.
+3. Open **new** Grok and OpenCode terminals after that launch. The panes that are empty in the current window were started by the old binary. Judge the ones created after this relaunch.
 4. Put three terminals in one view. The welcome screen should be readable before any manual resize. "Starting ConPTY session..." may show for a fraction of a second while the pane settles. That wait is this attempt.
-5. If the frame is still torn on a brand-new terminal, E1 failed. Do not continue to E2 on that result.
+5. If a brand-new terminal is blank or still torn, E1 failed. Do not continue to E2 on that result.
 
 ### E2 — One settled resize, no local repaint fight
 
@@ -154,4 +162,4 @@ Only if the grid is stable and in-place updates still merge glyphs.
 
 ## Rollback
 
-Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. Later experiments must say which commit to revert.
+Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. E1's stable-host wait is `5ffdb58`. The blank-pane follow-up is the commit that stops `launch_workspace_terminals` from spawning. Revert that commit to restore the early 80×24 spawn. Later experiments must say which commit to revert.

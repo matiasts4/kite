@@ -1759,7 +1759,11 @@ pub fn launch_workspace_terminals(request: serde_json::Value) -> serde_json::Val
         .unwrap_or("terminal");
 
     let seats = req.get("seats").and_then(|s| s.as_array());
-    let workspace_id = extract_workspace_id(req);
+    // Do not spawn here. The pane does not exist yet, so the only size we
+    // could pass is 80×24. The view attaches after the host settles and
+    // `attach_terminal` spawns at that grid. Spawning early let the CLI paint
+    // into a buffer the view then drained and dropped, which left a blank
+    // cursor on an otherwise running session.
 
     static CODENAME_COUNTER: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
@@ -1810,21 +1814,6 @@ pub fn launch_workspace_terminals(request: serde_json::Value) -> serde_json::Val
             .filter(|s| !s.is_empty() && *s != "Terminal" && *s != engine)
             .map(|s| s.to_string())
             .unwrap_or_else(|| work_title.clone());
-
-        let cwd = workspace_cwd(req);
-        spawn_session_with_options(
-            &session_id,
-            &cwd,
-            engine,
-            SpawnOptions {
-                cols: 80,
-                rows: 24,
-                workspace_id: workspace_id.clone(),
-                pane_id: Some(pane_id.clone()),
-                mode: SpawnMode::Fresh,
-                ..Default::default()
-            },
-        );
 
         slots.push(serde_json::json!({
             "index": i,

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import { Terminal } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import { CanvasAddon } from 'xterm-addon-canvas';
+import { WebglAddon } from 'xterm-addon-webgl';
 import { invokeCommand } from '../../lib/ipc';
 import {
   recordTerminalOutput,
@@ -184,7 +186,9 @@ function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
-type LiveTerminal = { term: Terminal; fit: FitAddon };
+type BitmapKind = 'webgl' | 'canvas';
+type BitmapRenderer = { kind: BitmapKind; dispose: () => void };
+type LiveTerminal = { term: Terminal; fit: FitAddon; renderer: BitmapRenderer | null };
 const liveTerms = new Map<string, LiveTerminal>();
 const restartedSessions = new Map<string, string>();
 
@@ -249,6 +253,83 @@ function terminalParking(): HTMLElement {
   return node;
 }
 
+function isLiveTerminalVisible(live: LiveTerminal): boolean {
+  const el = live.term.element;
+  if (!el || !el.isConnected) return false;
+  return !el.closest('#terminal-parking');
+}
+
+function visibleTerminalCount(): number {
+  let count = 0;
+  for (const live of liveTerms.values()) {
+    if (isLiveTerminalVisible(live)) count += 1;
+  }
+  return count;
+}
+
+function releaseBitmapRenderer(live: LiveTerminal) {
+  const previous = live.renderer;
+  live.renderer = null;
+  try {
+    previous?.dispose();
+  } catch {
+    // The addon can already be disposed after a context loss.
+  }
+}
+
+/** One visible pane uses WebGL. Two or more stay on Canvas so none falls back to the DOM renderer. */
+function attachBitmapRenderer(live: LiveTerminal, kind: BitmapKind) {
+  if (live.renderer?.kind === kind) return;
+  releaseBitmapRenderer(live);
+  let attached = false;
+  if (kind === 'webgl') {
+    try {
+      const addon = new WebglAddon();
+      const loss = addon.onContextLoss(() => {
+        loss.dispose();
+        attachBitmapRenderer(live, 'canvas');
+      });
+      live.term.loadAddon(addon);
+      live.renderer = {
+        kind: 'webgl',
+        dispose: () => {
+          loss.dispose();
+          addon.dispose();
+        },
+      };
+      attached = true;
+    } catch (err) {
+      console.warn('[terminal] WebGL renderer unavailable', err);
+    }
+  }
+  if (!attached) {
+    try {
+      const addon = new CanvasAddon();
+      live.term.loadAddon(addon);
+      live.renderer = { kind: 'canvas', dispose: () => addon.dispose() };
+    } catch (err) {
+      console.warn('[terminal] canvas renderer unavailable', err);
+    }
+  }
+  if (!live.renderer || !isLiveTerminalVisible(live)) return;
+  try {
+    live.fit.fit();
+  } catch {
+    // The host can be mid-layout. The settled fit still runs after open.
+  }
+}
+
+function syncVisibleBitmapRenderers() {
+  const kind: BitmapKind = visibleTerminalCount() <= 1 ? 'webgl' : 'canvas';
+  for (const live of liveTerms.values()) {
+    if (!isLiveTerminalVisible(live)) {
+      releaseBitmapRenderer(live);
+      continue;
+    }
+    attachBitmapRenderer(live, kind);
+  }
+}
+
 /** Kill the PTY and drop the screen. Only an explicit close or Restart should call this. */
 export function releaseTerminal(sessionId: string) {
   markTerminalExited(sessionId);
@@ -257,6 +338,7 @@ export function releaseTerminal(sessionId: string) {
     markTerminalExited(id);
     const live = liveTerms.get(id);
     if (live) {
+      releaseBitmapRenderer(live);
       live.term.dispose();
       liveTerms.delete(id);
     }
@@ -267,6 +349,7 @@ export function releaseTerminal(sessionId: string) {
     }).catch(() => {});
   }
   restartedSessions.delete(sessionId);
+  syncVisibleBitmapRenderers();
 }
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
@@ -520,6 +603,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       containerRef.current.replaceChildren(existing.term.element);
       termRef.current = existing.term;
       fitAddonRef.current = existing.fit;
+      syncVisibleBitmapRenderers();
       requestAnimationFrame(() => {
         if (!termRef.current) return;
         if (isAtBottomRef.current || linesFromBottomRef.current <= 3) {
@@ -569,7 +653,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       lineHeight: 1,
       minimumContrastRatio: 4.5,
       customGlyphs: true,
-      rescaleOverlappingGlyphs: true,
       cursorBlink: false,
       cursorStyle: 'bar',
       convertEol: false,
@@ -724,7 +807,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
-    if (key) liveTerms.set(key, { term, fit: fitAddon });
+    if (key) liveTerms.set(key, { term, fit: fitAddon, renderer: null });
+    syncVisibleBitmapRenderers();
 
     return term;
   }, [propSessionId]);
@@ -1366,6 +1450,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       termRef.current = null;
       fitAddonRef.current = null;
+      syncVisibleBitmapRenderers();
     };
     // The session stays alive across splits and mode switches. This effect
     // rebinds the existing screen; it must not follow callback identity.

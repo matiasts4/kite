@@ -32,6 +32,14 @@ Also rejected, and not applied as the fix: a minimum pane width, and assuming th
 
 Do not open this OpenCode session for normal use, and do not open it to decide whether a terminal change worked. Use a new OpenCode session, or any session that has stayed coherent.
 
+## Bitmap renderer
+
+The DOM renderer is what slices block art and keeps a bad alternate-screen frame. One visible pane now uses the WebGL renderer. Two or more visible panes use the canvas renderer on every visible pane. A lost WebGL context stays on canvas. Parked panes release the bitmap addon so they do not keep a second GPU context.
+
+This does not change spawn timing, console encoding, or `lineHeight` (still `1`). `rescaleOverlappingGlyphs` is not part of this terminal stack.
+
+Pass: open the session that paints the artifacts. One pane and several panes must stay coherent. If the artifacts remain, this attempt failed. Do not follow it with another line-height or spawn change.
+
 ## Later debug, when it starts
 
-One question: what this session writes that a healthy OpenCode session does not. Capture the output, compare, then change one thing. Do not start from another renderer, another line height, or another spawn timer. Those already ran against this sample and did not isolate it.
+If the bitmap renderer does not clear that session, the next question is what it writes that a healthy OpenCode session does not. Capture the output, compare, then change one thing. Do not repeat WebGL on every pane, another line height, or another spawn timer. Those already ran against this sample and did not isolate it.

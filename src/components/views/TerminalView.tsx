@@ -2,7 +2,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { invokeCommand } from '../../lib/ipc';
-import { recordTerminalOutput, markTerminalExited } from '../../lib/terminalRegistry';
+import {
+  recordTerminalOutput,
+  markTerminalExited,
+  waitForTerminalReady,
+  markTerminalPromptInjected,
+} from '../../lib/terminalRegistry';
 import { openFileInRightDock } from '../../lib/filePreviewNav';
 import {
   extractTerminalLinks,
@@ -422,6 +427,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const restoreScroll = () => {
         if (!termRef.current) return;
+        // In alternate screen buffer (TUIs like OpenCode, vim, nano), baseY is 0 and scrolling must not be forced
+        if (termRef.current.buffer.active.type === 'alternate') {
+          termRef.current.refresh(0, termRef.current.rows - 1);
+          return;
+        }
         if (wasAtBottom) {
           termRef.current.scrollToBottom();
         } else {
@@ -432,9 +442,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       restoreScroll();
       requestAnimationFrame(restoreScroll);
-      setTimeout(restoreScroll, 50);
-      setTimeout(restoreScroll, 150);
-      setTimeout(restoreScroll, 300);
 
       const cols = term.cols;
       const rows = term.rows;
@@ -457,6 +464,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         })
           .then(() => {
             restoreScroll();
+            termRef.current?.refresh(0, termRef.current.rows - 1);
           })
           .catch(() => {});
       };
@@ -471,7 +479,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         if (resizeTimerRef.current !== null) {
           clearTimeout(resizeTimerRef.current);
         }
-        resizeTimerRef.current = window.setTimeout(sendResize, 100);
+        // Swift 20ms debounce so ConPTY geometry matches before fast-starting CLI outputs banners
+        resizeTimerRef.current = window.setTimeout(sendResize, 20);
       }
     } catch {}
   }, []);
@@ -914,9 +923,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       term.focus();
     }
 
+    // Probe real container dimensions before spawning ConPTY to eliminate 80x24 mismatch
+    if (term && fitAddonRef.current && containerRef.current && containerRef.current.clientWidth > 0) {
+      try {
+        fitAddonRef.current.fit();
+      } catch {}
+    }
+
     try {
-      const cols = term?.cols || 80;
-      const rows = term?.rows || 24;
+      const cols = term?.cols && term.cols > 0 ? term.cols : 80;
+      const rows = term?.rows && term.rows > 0 ? term.rows : 24;
+      lastColsRef.current = cols;
+      lastRowsRef.current = rows;
 
       const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
       const started = restartedAgent
@@ -945,9 +963,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 },
           );
       if (term && !started?.attachedToExisting) {
-        term.reset();
-        lastColsRef.current = null;
-        lastRowsRef.current = null;
+        if (opts?.restart) {
+          term.reset();
+        }
         fitTerminal(true);
       } else if (!hadLiveElement && started?.scrollbackBase64 && term) {
         const historyBytes = base64ToUint8Array(started.scrollbackBase64);
@@ -1059,6 +1077,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
       if (detail.command === 'clear') handleClear();
+      if (detail.command === 'refresh' || detail.command === 'redraw') {
+        const term = termRef.current;
+        if (term) {
+          fitTerminal(true);
+          term.refresh(0, term.rows - 1);
+          if (sessionIdRef.current) {
+            void invokeCommand('resize_terminal', {
+              sessionId: sessionIdRef.current,
+              columns: term.cols,
+              rows: term.rows,
+            }).catch(() => {});
+          }
+        }
+        return;
+      }
       if (detail.command === 'restart') void startSession(engineRef.current, { restart: true });
       if (detail.command === 'interrupt') {
         void invokeCommand('write_terminal', {
@@ -1114,17 +1147,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       triggerImpactPulse();
       setIsReceivingPrompt(true);
 
-      // Wait until terminal is ready / running
-      let checks = 0;
-      while (status === 'connecting' && checks < 25 && !cancelled) {
-        await new Promise((r) => setTimeout(r, 80));
-        checks++;
+      const sid = sessionIdRef.current || propSessionId;
+      if (!sid) {
+        setIsReceivingPrompt(false);
+        return;
       }
 
+      // Reactive gate: wait until the terminal/agent is genuinely ready to receive input
+      await waitForTerminalReady(sid, { timeoutMs: 12000 });
       if (cancelled) return;
-
-      const sid = sessionIdRef.current || propSessionId;
-      if (!sid) return;
 
       // Stream text directly into PTY stdin in fast natural chunks so it appears typed at the CLI prompt
       const text = detail.prompt;
@@ -1149,6 +1180,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         input: '\r\n',
         owner: 'user',
       }).catch(() => {});
+
+      // Mark the prompt as injected so subsequent activity is tracked as real work
+      markTerminalPromptInjected(sid);
 
       setTimeout(() => {
         if (!cancelled) {
@@ -1480,7 +1514,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         ]
           .filter(Boolean)
           .join(' ')}
-        onClick={() => termRef.current?.focus()}
+        onClick={() => {
+          termRef.current?.focus();
+          if (termRef.current?.buffer.active.type === 'alternate') {
+            termRef.current.refresh(0, termRef.current.rows - 1);
+          }
+        }}
       >
         <div ref={containerRef} className="terminal-surface-host" />
 

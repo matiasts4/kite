@@ -48,6 +48,264 @@ fn now_unix_ms() -> i64 {
         .as_millis() as i64
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct TerminalAnsiMarkerCounts {
+    #[serde(rename = "dec2026Start")]
+    dec_2026_start: usize,
+    #[serde(rename = "dec2026End")]
+    dec_2026_end: usize,
+    #[serde(rename = "altScreen1049Start")]
+    alt_screen_1049_start: usize,
+    #[serde(rename = "altScreen1049End")]
+    alt_screen_1049_end: usize,
+    #[serde(rename = "carriageReturn")]
+    carriage_return: usize,
+    #[serde(rename = "eraseJ")]
+    erase_j: usize,
+    #[serde(rename = "eraseK")]
+    erase_k: usize,
+    #[serde(rename = "cursorShow")]
+    cursor_show: usize,
+    #[serde(rename = "cursorHide")]
+    cursor_hide: usize,
+    osc: usize,
+}
+
+fn scan_terminal_ansi_markers(
+    pending: &mut Vec<u8>,
+    bytes: &[u8],
+) -> TerminalAnsiMarkerCounts {
+    let mut data = std::mem::take(pending);
+    data.extend_from_slice(bytes);
+    let mut counts = TerminalAnsiMarkerCounts::default();
+    let mut index = 0;
+    while index < data.len() {
+        if data[index] != 0x1b {
+            if data[index] == b'\r' {
+                counts.carriage_return += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if index + 1 >= data.len() {
+            *pending = data[index..].to_vec();
+            break;
+        }
+        if data[index + 1] == b']' {
+            let mut cursor = index + 2;
+            let mut terminator_len = None;
+            while cursor < data.len() {
+                if data[cursor] == 0x07 {
+                    terminator_len = Some(1);
+                    break;
+                }
+                if data[cursor] == 0x1b && cursor + 1 < data.len() && data[cursor + 1] == b'\\' {
+                    terminator_len = Some(2);
+                    break;
+                }
+                cursor += 1;
+            }
+            let Some(length) = terminator_len else {
+                *pending = data[index..].to_vec();
+                break;
+            };
+            counts.osc += 1;
+            index = cursor + length;
+            continue;
+        }
+        if data[index + 1] != b'[' {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 2;
+        while cursor < data.len() && !(0x40..=0x7e).contains(&data[cursor]) {
+            cursor += 1;
+        }
+        if cursor == data.len() {
+            *pending = data[index..].to_vec();
+            break;
+        }
+        let sequence = &data[index..=cursor];
+        match sequence {
+            b"\x1b[?2026h" => counts.dec_2026_start += 1,
+            b"\x1b[?2026l" => counts.dec_2026_end += 1,
+            b"\x1b[?1049h" => counts.alt_screen_1049_start += 1,
+            b"\x1b[?1049l" => counts.alt_screen_1049_end += 1,
+            b"\x1b[?25h" | b"\x1b[25h" => counts.cursor_show += 1,
+            b"\x1b[?25l" | b"\x1b[25l" => counts.cursor_hide += 1,
+            _ => {
+                if data[cursor] == b'J' {
+                    counts.erase_j += 1;
+                } else if data[cursor] == b'K' {
+                    counts.erase_k += 1;
+                }
+            }
+        }
+        index = cursor + 1;
+    }
+    counts
+}
+
+fn count_terminal_ansi_markers(bytes: &[u8]) -> TerminalAnsiMarkerCounts {
+    let mut pending = Vec::new();
+    scan_terminal_ansi_markers(&mut pending, bytes)
+}
+
+fn terminal_capture_safe_filename(session_id: &str) -> String {
+    let safe_id: String = session_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_id = if safe_id.is_empty() { "session" } else { &safe_id };
+    format!("{safe_id}.jsonl")
+}
+
+fn terminal_capture_dir() -> Option<std::path::PathBuf> {
+    let value = std::env::var_os("KITE_TERMINAL_CAPTURE_DIR")?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(value))
+}
+
+fn append_terminal_capture_record(session_id: &str, record: serde_json::Value) {
+    let Some(directory) = terminal_capture_dir() else {
+        return;
+    };
+    static CAPTURE_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    let lock = CAPTURE_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let path = directory.join(terminal_capture_safe_filename(session_id));
+    static INITIALIZED_FILES: std::sync::OnceLock<Mutex<HashSet<std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    let initialized = INITIALIZED_FILES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut initialized_guard = initialized
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !initialized_guard.contains(&path) {
+        let Ok(_) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+        else {
+            return;
+        };
+        initialized_guard.insert(path.clone());
+    }
+    drop(initialized_guard);
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_vec(&record) else {
+        return;
+    };
+    line.push(b'\n');
+    let _ = file.write_all(&line);
+}
+
+fn capture_terminal_lifecycle(
+    session_id: &str,
+    attached_to_existing: bool,
+    requested_engine: Option<&str>,
+    restore_kind: &str,
+    scrollback_bytes: Option<usize>,
+) {
+    let Some(_) = terminal_capture_dir() else {
+        return;
+    };
+    let (effective_engine, provider_session_id, workspace_id, pane_id, columns, rows) = {
+        let map = get_terminals().lock().ok();
+        let Some(map) = map else { return };
+        let Some(instance) = map.get(session_id) else { return };
+        (
+            instance.engine.clone(),
+            instance.provider_session_id.lock().ok().and_then(|id| id.clone()),
+            instance.workspace_id.lock().ok().and_then(|id| id.clone()),
+            instance.pane_id.lock().ok().and_then(|id| id.clone()),
+            instance.cols.load(Ordering::Relaxed),
+            instance.rows.load(Ordering::Relaxed),
+        )
+    };
+    append_terminal_capture_record(
+        session_id,
+        serde_json::json!({
+            "kind": "lifecycle",
+            "sessionId": session_id,
+            "attachedToExisting": attached_to_existing,
+            "requestedEngine": requested_engine,
+            "effectiveEngine": effective_engine,
+            "providerSessionId": provider_session_id,
+            "workspaceId": workspace_id,
+            "paneId": pane_id,
+            "columns": columns,
+            "rows": rows,
+            "restoreKind": restore_kind,
+            "scrollbackBytes": scrollback_bytes,
+            "resume": restore_kind == "restoredFromDisk",
+            "capturedAtUnixMs": now_unix_ms(),
+        }),
+    );
+}
+
+fn capture_terminal_output(
+    session_id: &str,
+    instance: &TerminalInstance,
+    bytes: &[u8],
+    captured_at_unix_ms: i64,
+) -> u64 {
+    if bytes.is_empty() {
+        return instance.sequence.fetch_add(1, Ordering::SeqCst);
+    }
+    if terminal_capture_dir().is_none() {
+        return instance.sequence.fetch_add(1, Ordering::SeqCst);
+    }
+    let sequence = instance.sequence.fetch_add(1, Ordering::SeqCst);
+    let provider_session_id = instance
+        .provider_session_id
+        .lock()
+        .ok()
+        .and_then(|id| id.clone());
+    let workspace_id = instance.workspace_id.lock().ok().and_then(|id| id.clone());
+    let pane_id = instance.pane_id.lock().ok().and_then(|id| id.clone());
+    let ansi_markers = instance
+        .ansi_scan_tail
+        .lock()
+        .map(|mut pending| scan_terminal_ansi_markers(&mut pending, bytes))
+        .unwrap_or_default();
+    append_terminal_capture_record(
+        session_id,
+        serde_json::json!({
+            "kind": "output",
+            "sessionId": session_id,
+            "engine": instance.engine.clone(),
+            "providerSessionId": provider_session_id,
+            "workspaceId": workspace_id,
+            "paneId": pane_id,
+            "columns": instance.cols.load(Ordering::Relaxed),
+            "rows": instance.rows.load(Ordering::Relaxed),
+            "capturedAtUnixMs": captured_at_unix_ms,
+            "sequence": sequence,
+            "byteOffset": instance
+                .output_byte_offset
+                .fetch_add(bytes.len() as u64, Ordering::SeqCst),
+            "byteLength": bytes.len(),
+            "rawBytesBase64": to_base64(bytes),
+            "ansiMarkers": ansi_markers,
+        }),
+    );
+    sequence
+}
+
 pub fn terminal_scrollback_dir() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
     let folder = if cfg!(debug_assertions) {
@@ -154,6 +412,9 @@ pub struct TerminalInstance {
     pub buffer: Arc<Mutex<Vec<u8>>>,
     pub scrollback: Arc<Mutex<Vec<u8>>>,
     pub sequence: AtomicU64,
+    pub output_byte_offset: AtomicU64,
+    pub output_capture_order: Mutex<()>,
+    pub ansi_scan_tail: Mutex<Vec<u8>>,
     pub cwd: String,
     pub live_cwd: Arc<Mutex<String>>,
     pub engine: String,
@@ -983,6 +1244,9 @@ pub fn spawn_session_with_options(
         buffer,
         scrollback,
         sequence: AtomicU64::new(0),
+        output_byte_offset: AtomicU64::new(0),
+        output_capture_order: Mutex::new(()),
+        ansi_scan_tail: Mutex::new(Vec::new()),
         cwd: target_dir_str.clone(),
         live_cwd,
         engine: engine.to_string(),
@@ -1054,7 +1318,7 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
     let cols = req.get("columns").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
     let rows = req.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
 
-    {
+    let existing_scrollback = {
         let map = get_terminals().lock().unwrap();
         if let Some(inst) = map.get(&session_id) {
             if let Some(ref ws_id) = workspace_id {
@@ -1072,14 +1336,26 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
                 }
             }
             let sb = drain_buffer_into_scrollback(&session_id, inst);
-            return serde_json::json!({
-                "sessionId": session_id,
-                "attachedToExisting": true,
-                "scrollbackBase64": sb.as_deref().map(to_base64),
-                "host": { "backend": "conpty", "buildNumber": 22631 },
-                "restore": { "kind": "reattached" }
-            });
+            Some(sb)
+        } else {
+            None
         }
+    };
+    if let Some(sb) = existing_scrollback {
+        capture_terminal_lifecycle(
+            &session_id,
+            true,
+            Some(engine),
+            "reattached",
+            sb.as_ref().map(Vec::len),
+        );
+        return serde_json::json!({
+            "sessionId": session_id,
+            "attachedToExisting": true,
+            "scrollbackBase64": sb.as_deref().map(to_base64),
+            "host": { "backend": "conpty", "buildNumber": 22631 },
+            "restore": { "kind": "reattached" }
+        });
     }
 
     let initial_prompt = req
@@ -1112,7 +1388,15 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
         },
     );
 
-    let disk_scrollback = read_scrollback_file(&session_id).map(|b| to_base64(&b));
+    let disk_scrollback_bytes = read_scrollback_file(&session_id);
+    let disk_scrollback = disk_scrollback_bytes.as_deref().map(to_base64);
+    capture_terminal_lifecycle(
+        &session_id,
+        false,
+        Some(engine),
+        "startedFresh",
+        disk_scrollback_bytes.as_ref().map(Vec::len),
+    );
 
     serde_json::json!({
         "sessionId": session_id,
@@ -1134,6 +1418,10 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
 
     let workspace_id = extract_workspace_id(req);
     let pane_id = extract_pane_id(req);
+    let requested_engine = req
+        .get("engine")
+        .and_then(|value| value.as_str())
+        .filter(|engine| !engine.is_empty());
 
     let (attached_to_existing, initial_scrollback) = {
         let mut map = get_terminals().lock().unwrap();
@@ -1170,6 +1458,7 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
         }
     };
 
+    let mut scrollback_byte_len = initial_scrollback.as_ref().map(Vec::len);
     let scrollback_base64 = if attached_to_existing {
         initial_scrollback.as_deref().map(to_base64)
     } else {
@@ -1179,6 +1468,7 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
         let claimed_ids = get_globally_claimed_provider_ids(&session_id);
 
         let disk_bytes = read_scrollback_file(&session_id);
+        scrollback_byte_len = disk_bytes.as_ref().map(Vec::len);
         let persisted = get_persisted_terminal_session(&session_id);
         let default_cwd = workspace_cwd(req);
         let cwd = persisted
@@ -1304,6 +1594,18 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
         }
     };
 
+    capture_terminal_lifecycle(
+        &session_id,
+        attached_to_existing,
+        requested_engine,
+        if attached_to_existing {
+            "reattached"
+        } else {
+            "restoredFromDisk"
+        },
+        scrollback_byte_len,
+    );
+
     serde_json::json!({
         "sessionId": session_id,
         "attachedToExisting": attached_to_existing,
@@ -1323,6 +1625,15 @@ pub fn read_terminal_output(request: serde_json::Value) -> serde_json::Value {
     };
 
     if let Some(inst) = instance {
+        let _capture_order = if terminal_capture_dir().is_some() {
+            Some(
+                inst.output_capture_order
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )
+        } else {
+            None
+        };
         let mut bytes = Vec::new();
         if let Ok(mut buf) = inst.buffer.lock() {
             if !buf.is_empty() {
@@ -1375,7 +1686,7 @@ pub fn read_terminal_output(request: serde_json::Value) -> serde_json::Value {
         }
 
         if !bytes.is_empty() {
-            let seq = inst.sequence.fetch_add(1, Ordering::SeqCst);
+            let seq = capture_terminal_output(&session_id, &inst, &bytes, now);
             return serde_json::json!({
                 "kind": "output",
                 "sequence": seq,
@@ -2868,5 +3179,52 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(staged_path);
+    }
+
+    #[test]
+    fn terminal_capture_safe_filename_is_path_safe() {
+        assert_eq!(
+            terminal_capture_safe_filename(r"agent:session/test\\1?*"),
+            "agent_session_test__1__.jsonl"
+        );
+        assert_eq!(terminal_capture_safe_filename(""), "session.jsonl");
+    }
+
+    #[test]
+    fn terminal_capture_counts_key_ansi_markers() {
+        let bytes = b"\x1b[?2026h\x1b[?2026l\x1b[?1049h\x1b[?1049l\r\x1b[2J\x1b[K\x1b[?25h\x1b[25l\x1b]0;title\x07";
+        let counts = count_terminal_ansi_markers(bytes);
+        assert_eq!(counts.dec_2026_start, 1);
+        assert_eq!(counts.dec_2026_end, 1);
+        assert_eq!(counts.alt_screen_1049_start, 1);
+        assert_eq!(counts.alt_screen_1049_end, 1);
+        assert_eq!(counts.carriage_return, 1);
+        assert_eq!(counts.erase_j, 1);
+        assert_eq!(counts.erase_k, 1);
+        assert_eq!(counts.cursor_show, 1);
+        assert_eq!(counts.cursor_hide, 1);
+        assert_eq!(counts.osc, 1);
+    }
+
+    #[test]
+    fn terminal_capture_scanner_carries_split_sequences() {
+        let mut pending = Vec::new();
+        let first = scan_terminal_ansi_markers(&mut pending, b"\x1b[?2026");
+        assert_eq!(first, TerminalAnsiMarkerCounts::default());
+        assert!(!pending.is_empty());
+        let second = scan_terminal_ansi_markers(&mut pending, b"h\x1b]title");
+        assert_eq!(second.dec_2026_start, 1);
+        assert_eq!(second.osc, 0);
+        let third = scan_terminal_ansi_markers(&mut pending, b"\x07");
+        assert_eq!(third.osc, 1);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn terminal_capture_marker_schema_uses_stable_keys() {
+        let value = serde_json::to_value(count_terminal_ansi_markers(b"\x1b[?2026h")).unwrap();
+        assert_eq!(value["dec2026Start"], 1);
+        assert!(value.get("eraseJ").is_some());
+        assert!(value.get("cursorHide").is_some());
     }
 }

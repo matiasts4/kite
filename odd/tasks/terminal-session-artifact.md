@@ -23,6 +23,7 @@ Each row is one commit on `feat/ui-composer`. Do not score a new attempt by open
 | `19a291b` | Paint with the WebGL renderer. | Did not remove the artifacts. |
 | `e4fd0f3` | Revert the WebGL renderer. | Back to the DOM renderer. |
 | `2053249` | UTF-8 console and `TERM=xterm-256color` for agent launches. | Not a separate visual pass. Do not treat it as the cause or the cure. |
+| `b775ada` | xterm 5.3. One visible pane uses WebGL. Two or more visible panes use canvas on every pane. A lost WebGL context stays on canvas. | Visual pass on 28 October 2026. The same artifacts remain. |
 
 Also rejected, and not applied as the fix: a minimum pane width, and assuming the parent console code page is the cause.
 
@@ -34,12 +35,27 @@ Do not open this OpenCode session for normal use, and do not open it to decide w
 
 ## Bitmap renderer
 
-The DOM renderer is what slices block art and keeps a bad alternate-screen frame. One visible pane now uses the WebGL renderer. Two or more visible panes use the canvas renderer on every visible pane. A lost WebGL context stays on canvas. Parked panes release the bitmap addon so they do not keep a second GPU context.
+`b775ada` paints one visible pane with WebGL and two or more visible panes with canvas. Parked panes release the addon. Spawn timing, console encoding, and `lineHeight` stayed at their previous values.
 
-This does not change spawn timing, console encoding, or `lineHeight` (still `1`). `rescaleOverlappingGlyphs` is not part of this terminal stack.
-
-Pass: open the session that paints the artifacts. One pane and several panes must stay coherent. If the artifacts remain, this attempt failed. Do not follow it with another line-height or spawn change.
+Visual pass on 28 October 2026, with the session that paints the artifacts: the same errors remain. This attempt failed. Do not follow it with another line height, another spawn timer, or WebGL on every pane.
 
 ## Later debug, when it starts
 
-If the bitmap renderer does not clear that session, the next question is what it writes that a healthy OpenCode session does not. Capture the output, compare, then change one thing. Do not repeat WebGL on every pane, another line height, or another spawn timer. Those already ran against this sample and did not isolate it.
+The next question is what this session writes that a healthy OpenCode session does not. Capture the output, compare, then change one thing.
+
+## Opt-in diagnostic capture
+
+Capture is disabled unless the environment variable is set for the Kite process. In PowerShell, set a dedicated directory before launching the app:
+
+```powershell
+$captureDir = Join-Path $env:TEMP "kite-terminal-capture"
+New-Item -ItemType Directory -Force $captureDir | Out-Null
+$env:KITE_TERMINAL_CAPTURE_DIR = $captureDir
+& "E:\path\to\Kite.exe"
+```
+
+Each session writes one JSONL file below that directory. Records include the exact output bytes (base64), dimensions, sequence, lifecycle/attach metadata, and counts of selected ANSI markers. **Captures can contain prompts, command output, file paths, tokens, or other secrets. Treat the directory as sensitive and delete it after the comparison.** Do not enable this in normal use or share capture files without reviewing their contents.
+
+For a healthy-vs-poisoned comparison, use a new coherent session as the healthy sample and the known artifact-producing session as the poisoned sample. Keep the pane size and interaction sequence the same, collect both JSONL files, then compare byte lengths, sequence boundaries, and ANSI marker counts before inspecting decoded bytes. Do not use visual output alone as the diagnosis, and do not change terminal rendering while collecting the pair.
+
+Rollback is deliberately narrow: remove the capture helpers and capture fields from `src-tauri/src/terminal.rs`, then remove this section from the task document. The default behavior (capture disabled and unchanged terminal bytes) remains the rollback baseline.

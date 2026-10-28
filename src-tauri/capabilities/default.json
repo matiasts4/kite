@@ -24,6 +24,7 @@
     "core:window:allow-set-always-on-top",
     "core:event:default",
     "opener:default",
+    "opener:allow-open-path",
     "dialog:default",
     "updater:default",
     "process:allow-restart"

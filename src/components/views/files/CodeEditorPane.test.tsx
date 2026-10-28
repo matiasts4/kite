@@ -158,4 +158,62 @@ describe('CodeEditorPane', () => {
     expect(screen.getByRole('button', { name: /outline/i })).toBeInTheDocument();
     expect(screen.getByText('Preview')).toBeInTheDocument();
   });
+
+  it('renders unsupported card for binary/media files with Reveal and Open Default App actions', () => {
+    const mediaFile: OpenFileTab = {
+      entryId: 'video.mp4',
+      name: 'demo-walkthrough.mp4',
+      relativePath: 'media/demo-walkthrough.mp4',
+      revision: '',
+      draftText: '',
+      initialText: '',
+      isUnsupportedBinary: true,
+    };
+
+    const onRevealInExplorer = vi.fn();
+    const onOpenInDefaultApp = vi.fn();
+
+    render(
+      <CodeEditorPane
+        openFiles={[mediaFile]}
+        activeFileId="video.mp4"
+        activeTab={mediaFile}
+        isModified={false}
+        isSaving={false}
+        autoSave={false}
+        isEditMode={false}
+        fileError={null}
+        loadingContent={false}
+        onSelectTab={vi.fn()}
+        onCloseTab={vi.fn()}
+        onSave={vi.fn()}
+        onToggleAutoSave={vi.fn()}
+        onToggleEditMode={vi.fn()}
+        onDiscardAndReload={vi.fn()}
+        onReloadFromDisk={vi.fn()}
+        onDraftChange={vi.fn()}
+        onRevealInExplorer={onRevealInExplorer}
+        onOpenInDefaultApp={onOpenInDefaultApp}
+      />
+    );
+
+    expect(screen.getAllByText('demo-walkthrough.mp4').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('media/demo-walkthrough.mp4').length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getByText(/This binary or media file cannot be previewed directly in Kite/i)
+    ).toBeInTheDocument();
+
+    // Action buttons in unsupported card
+    const revealBtns = screen.getAllByRole('button', { name: /reveal/i });
+    expect(revealBtns.length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(revealBtns[revealBtns.length - 1]);
+    expect(onRevealInExplorer).toHaveBeenCalledWith('media/demo-walkthrough.mp4');
+
+    const openBtns = screen.getAllByRole('button', { name: /open/i });
+    expect(openBtns.length).toBeGreaterThanOrEqual(1);
+    // Find the one that specifically opens default app
+    const openDefaultAppBtn = screen.getByRole('button', { name: /open in default app/i });
+    fireEvent.click(openDefaultAppBtn);
+    expect(onOpenInDefaultApp).toHaveBeenCalledWith('media/demo-walkthrough.mp4');
+  });
 });

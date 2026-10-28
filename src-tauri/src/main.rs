@@ -436,6 +436,8 @@ fn main() {
             resume_prompt_answer,
             retry_agent_draft_cleanup,
             reveal_workspace,
+            reveal_file,
+            open_file_default,
             run_routine_now,
             save_files_text,
             save_launch_preset,

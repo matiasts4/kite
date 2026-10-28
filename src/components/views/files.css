@@ -236,6 +236,96 @@
   font-size: var(--text-caption);
 }
 
+/* Unsupported media or binary preview card */
+.files-unsupported-surface {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: var(--pane);
+  overflow: auto;
+}
+
+.files-unsupported-card {
+  max-width: 440px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--space-6) var(--space-5);
+  background: var(--raised-fill, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow-raised, none);
+}
+
+.files-unsupported-icon-wrap {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--control-radius);
+  background: var(--block-fill, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent, #5c8fff);
+  margin-bottom: var(--space-3);
+}
+
+.files-unsupported-title {
+  font-family: var(--font-display, inherit);
+  font-size: var(--text-title, 16px);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--text-primary);
+  margin: 0 0 var(--space-1);
+  word-break: break-all;
+  line-height: var(--leading-title, 22px);
+}
+
+.files-unsupported-path {
+  font-family: var(--font-mono);
+  font-size: var(--text-meta, 11px);
+  color: var(--text-faint);
+  margin: 0 0 var(--space-3);
+  word-break: break-all;
+  max-width: 100%;
+}
+
+.files-unsupported-desc {
+  font-size: var(--text-body, 13px);
+  line-height: var(--leading-body, 19px);
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-5);
+  max-width: 360px;
+}
+
+.files-unsupported-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.files-unsupported-btn {
+  height: var(--vl-control-md, 32px);
+  min-height: var(--vl-control-md, 32px);
+  border-radius: var(--control-radius);
+  padding: 0 var(--space-4);
+  font-size: var(--text-row, 12px);
+  font-weight: var(--weight-medium, 500);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 /* ==========================================================================
    Markdown Preview Text Selection & Styling
    ========================================================================== */

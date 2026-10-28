@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import type { FilesEntry } from '../../../types';
 import {
   FolderIcon,
@@ -6,7 +6,13 @@ import {
   ChevronRightIcon,
   ChevronDownIcon,
   getFileIcon,
+  FolderSearchIcon,
+  ExternalLinkIcon,
+  CopyIcon,
 } from './FileIcons';
+import { SidebarContextMenu } from '../../sidebar/SidebarFooter';
+import type { ContextMenuState, MenuItem } from '../../sidebar/types';
+import { getRevealTitle } from './CodeEditorPane';
 
 export interface FlatTreeItem {
   entry: FilesEntry;
@@ -36,6 +42,8 @@ export interface FilesTreePanelProps {
   onToggleFolder: (folderEntryId: string, folderRelativePath: string) => void;
   onOpenFile: (entry: FilesEntry, parentPath?: string) => void;
   onSplitterPointerDown: (e: React.PointerEvent) => void;
+  onRevealFile?: (relativePath: string) => void;
+  onOpenDefaultApp?: (relativePath: string) => void;
 }
 
 export const FilesTreePanel: React.FC<FilesTreePanelProps> = ({
@@ -51,8 +59,89 @@ export const FilesTreePanel: React.FC<FilesTreePanelProps> = ({
   onToggleFolder,
   onOpenFile,
   onSplitterPointerDown,
+  onRevealFile,
+  onOpenDefaultApp,
 }) => {
   const treeButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('.ui-menu')) return;
+      setContextMenu(null);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    const handleResize = () => {
+      setContextMenu(null);
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [contextMenu]);
+
+  const handleContextMenu = (e: React.MouseEvent, entry: FilesEntry, relativePath: string) => {
+    const isDir = entry.kind === 'directory';
+    const revealTitle = getRevealTitle();
+
+    const primaryActions: MenuItem[] = [
+      {
+        id: 'reveal-in-explorer',
+        title: revealTitle,
+        icon: <FolderSearchIcon size={14} />,
+        action: () => {
+          onRevealFile?.(relativePath);
+        },
+      },
+    ];
+
+    if (!isDir) {
+      primaryActions.push({
+        id: 'open-default-app',
+        title: 'Open with Default App',
+        icon: <ExternalLinkIcon size={14} />,
+        action: () => {
+          onOpenDefaultApp?.(relativePath);
+        },
+      });
+    }
+
+    const secondaryActions: MenuItem[] = [
+      {
+        id: 'copy-relative-path',
+        title: 'Copy Relative Path',
+        icon: <CopyIcon size={14} />,
+        action: () => {
+          void navigator.clipboard?.writeText(relativePath);
+        },
+      },
+    ];
+
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      header: {
+        title: entry.displayName,
+        subtitle: relativePath,
+      },
+      sections: [primaryActions, secondaryActions],
+      targetId: entry.entryId,
+    });
+  };
 
   // Flattened Tree Items for Keyboard Navigation
   const flatVisibleItems: FlatTreeItem[] = useMemo(() => {
@@ -241,6 +330,17 @@ export const FilesTreePanel: React.FC<FilesTreePanelProps> = ({
                 onOpenFile(entry, currentPath);
               }
             }}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              if (!isDir && onOpenDefaultApp) {
+                onOpenDefaultApp(pathForEntry);
+              }
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              handleContextMenu(e, entry, pathForEntry);
+            }}
             title={
               entry.byteSize !== undefined
                 ? `${entry.displayName} · ${formatBytes(entry.byteSize)}`
@@ -309,6 +409,11 @@ export const FilesTreePanel: React.FC<FilesTreePanelProps> = ({
       <div
         className="files-splitter"
         onPointerDown={onSplitterPointerDown}
+      />
+
+      <SidebarContextMenu
+        contextMenu={contextMenu}
+        onClose={() => setContextMenu(null)}
       />
     </>
   );

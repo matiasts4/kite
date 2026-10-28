@@ -319,6 +319,28 @@ export async function closeFilesResource(resourceId: string): Promise<{ closed: 
   return invokeCommand<{ closed: boolean }>('close_files_resource', { resourceId });
 }
 
+export async function revealFile(params: {
+  workspaceId?: string | null;
+  relativePath?: string;
+  path?: string;
+}): Promise<void> {
+  return invokeCommand<void>('reveal_file', {
+    supportedSchemaVersion: 1,
+    ...params,
+  });
+}
+
+export async function openFileDefault(params: {
+  workspaceId?: string | null;
+  relativePath?: string;
+  path?: string;
+}): Promise<void> {
+  return invokeCommand<void>('open_file_default', {
+    supportedSchemaVersion: 1,
+    ...params,
+  });
+}
+
 // Browser Surface
 export interface BrowserOwnerRef {
   workspaceId: string;

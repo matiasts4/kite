@@ -9,9 +9,21 @@ import {
   PencilIcon,
   CodeIcon,
   ListTreeIcon,
+  ExternalLinkIcon,
+  FolderSearchIcon,
+  getFileIcon,
 } from './FileIcons';
 import { tokenizeLine } from './syntax';
 import { MarkdownPreviewPane } from './MarkdownPreviewPane';
+
+export function getRevealTitle(): string {
+  if (typeof navigator !== 'undefined') {
+    const ua = navigator.userAgent || '';
+    if (/Macintosh|Mac OS X/i.test(ua)) return 'Reveal in Finder';
+    if (/Linux/i.test(ua)) return 'Open in File Manager';
+  }
+  return 'Reveal in File Explorer';
+}
 
 export interface OpenFileTab {
   entryId: string;
@@ -24,6 +36,7 @@ export interface OpenFileTab {
   lineEnding?: string;
   previewData?: { mime: string; base64: string } | null;
   isPreview?: boolean;
+  isUnsupportedBinary?: boolean;
 }
 
 interface CodeEditorPaneProps {
@@ -47,6 +60,8 @@ interface CodeEditorPaneProps {
   onReloadFromDisk: () => void;
   onDraftChange: (text: string) => void;
   onNavigateInternalFile?: (path: string) => void;
+  onRevealInExplorer?: (relativePath: string) => void;
+  onOpenInDefaultApp?: (relativePath: string) => void;
 }
 
 export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
@@ -70,6 +85,8 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
   onReloadFromDisk,
   onDraftChange,
   onNavigateInternalFile,
+  onRevealInExplorer,
+  onOpenInDefaultApp,
 }) => {
   const gutterRef = useRef<HTMLPreElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -175,7 +192,9 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                 <CloseIcon size={10} />
               </button>
               <span className="files-doc-status" style={{ fontSize: '11px', color: 'var(--text-muted, #888)', whiteSpace: 'nowrap', marginLeft: '2px', flexShrink: 0 }}>
-                {activeTab.previewData
+                {activeTab.isUnsupportedBinary
+                  ? 'Binary / Media'
+                  : activeTab.previewData
                   ? activeTab.previewData.mime.startsWith('image/')
                     ? `Image (${activeTab.previewData.mime.replace('image/', '').replace('+xml', '').toUpperCase()})`
                     : activeTab.previewData.mime === 'application/pdf'
@@ -257,7 +276,49 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
                 </button>
               )}
 
-              {!activeTab.previewData && (
+              {onRevealInExplorer && (
+                <button
+                  type="button"
+                  onClick={() => onRevealInExplorer(activeTab.relativePath)}
+                  className="files-toolbar-btn"
+                  title={getRevealTitle()}
+                  style={{
+                    height: '24px',
+                    padding: '0 8px',
+                    fontSize: '11px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    borderRadius: 'var(--radius-chip, 4px)',
+                  }}
+                >
+                  <FolderSearchIcon size={12} />
+                  <span>Reveal</span>
+                </button>
+              )}
+
+              {onOpenInDefaultApp && (
+                <button
+                  type="button"
+                  onClick={() => onOpenInDefaultApp(activeTab.relativePath)}
+                  className="files-toolbar-btn"
+                  title="Open with system default application"
+                  style={{
+                    height: '24px',
+                    padding: '0 8px',
+                    fontSize: '11px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    borderRadius: 'var(--radius-chip, 4px)',
+                  }}
+                >
+                  <ExternalLinkIcon size={12} />
+                  <span>Open</span>
+                </button>
+              )}
+
+              {!activeTab.previewData && !activeTab.isUnsupportedBinary && (
                 <button
                   type="button"
                   onClick={onToggleEditMode}
@@ -399,6 +460,43 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
             </div>
           )}
         </div>
+      ) : activeTab.isUnsupportedBinary ? (
+        <div className="files-unsupported-surface">
+          <div className="files-unsupported-card">
+            <div className="files-unsupported-icon-wrap">
+              {getFileIcon(activeTab.name, 44)}
+            </div>
+            <h3 className="files-unsupported-title">{activeTab.name}</h3>
+            <p className="files-unsupported-path">{activeTab.relativePath}</p>
+            <p className="files-unsupported-desc">
+              This binary or media file cannot be previewed directly in Kite. You can reveal it in your system file manager or open it with your system's default application.
+            </p>
+            <div className="files-unsupported-actions">
+              {onRevealInExplorer && (
+                <button
+                  type="button"
+                  onClick={() => onRevealInExplorer(activeTab.relativePath)}
+                  className="files-unsupported-btn primary-button"
+                  title={getRevealTitle()}
+                >
+                  <FolderSearchIcon size={14} />
+                  <span>{getRevealTitle()}</span>
+                </button>
+              )}
+              {onOpenInDefaultApp && (
+                <button
+                  type="button"
+                  onClick={() => onOpenInDefaultApp(activeTab.relativePath)}
+                  className="files-unsupported-btn chrome-button"
+                  title="Open with system default application"
+                >
+                  <ExternalLinkIcon size={14} />
+                  <span>Open in Default App</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       ) : isEditMode ? (
         <div className="files-edit-area">
           <pre
@@ -480,7 +578,9 @@ export const CodeEditorPane: React.FC<CodeEditorPaneProps> = ({
             </span>
           )}
           <span className="files-status-position">
-            {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {activeTab.name}
+            {activeTab.isUnsupportedBinary
+              ? `Binary / Media · ${activeTab.name}`
+              : `${lineCount} ${lineCount === 1 ? 'line' : 'lines'} · ${activeTab.name}`}
           </span>
         </div>
       </footer>

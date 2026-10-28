@@ -7,7 +7,7 @@ import type {
   FilesPreviewResponse,
   BootstrapResponse,
 } from '../../types';
-import { invokeCommand } from '../../lib/ipc';
+import { invokeCommand, revealFile, openFileDefault } from '../../lib/ipc';
 import { toHex64String, isValidRevision64 } from './files/syntax';
 import { FolderIcon } from './files/FileIcons';
 import { CodeEditorPane, OpenFileTab } from './files/CodeEditorPane';
@@ -409,8 +409,30 @@ export const FilesView: React.FC<FilesViewProps> = ({
             setLoadingContent(false);
             return;
           } catch {
-            // Fall back to text
+            // Fall back to other handlers
           }
+        }
+
+        const isNonTextMediaOrBinary = /\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v|3gp|mp3|wav|ogg|flac|aac|m4a|wma|opus|zip|tar|gz|bz2|xz|7z|rar|iso|dmg|exe|dll|so|dylib|bin|wasm|docx?|xlsx?|pptx?)$/i.test(
+          link.displayName
+        );
+
+        if (isNonTextMediaOrBinary) {
+          const newTab: OpenFileTab = {
+            entryId: link.entryId,
+            name: link.displayName,
+            relativePath: link.relativePath,
+            revision: '',
+            draftText: '',
+            initialText: '',
+            previewData: null,
+            isUnsupportedBinary: true,
+          };
+
+          setOpenFiles((prev) => [...prev, newTab]);
+          setActiveFileId(link.entryId);
+          setLoadingContent(false);
+          return;
         }
 
         try {
@@ -435,7 +457,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
 
           setOpenFiles((prev) => [...prev, newTab]);
           setActiveFileId(link.entryId);
-        } catch (err: unknown) {
+        } catch {
           try {
             const preview = await invokeCommand<FilesPreviewResponse>('read_files_preview', {
               supportedSchemaVersion: 1,
@@ -457,8 +479,20 @@ export const FilesView: React.FC<FilesViewProps> = ({
             setOpenFiles((prev) => [...prev, newTab]);
             setActiveFileId(link.entryId);
           } catch {
-            const errObj = err as { message?: string };
-            setFileError(errObj?.message || `Failed to open file: ${link.displayName}`);
+            // If neither text nor preview worked, open as unsupported binary card with quick actions
+            const newTab: OpenFileTab = {
+              entryId: link.entryId,
+              name: link.displayName,
+              relativePath: link.relativePath,
+              revision: '',
+              draftText: '',
+              initialText: '',
+              previewData: null,
+              isUnsupportedBinary: true,
+            };
+
+            setOpenFiles((prev) => [...prev, newTab]);
+            setActiveFileId(link.entryId);
           }
         }
       } catch (err: unknown) {
@@ -481,6 +515,22 @@ export const FilesView: React.FC<FilesViewProps> = ({
       });
     },
     [currentWsId, openCandidate]
+  );
+
+  const handleRevealFile = useCallback(
+    (relPath: string) => {
+      if (!currentWsId) return;
+      void revealFile({ workspaceId: currentWsId, relativePath: relPath });
+    },
+    [currentWsId]
+  );
+
+  const handleOpenDefaultApp = useCallback(
+    (relPath: string) => {
+      if (!currentWsId) return;
+      void openFileDefault({ workspaceId: currentWsId, relativePath: relPath });
+    },
+    [currentWsId]
   );
 
   // Listen to navigation bus for file preview requests (from terminal, chat, etc.)
@@ -631,7 +681,16 @@ export const FilesView: React.FC<FilesViewProps> = ({
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    const handleSaveFileEvent = () => {
+      if (activeTab && isModified && !isSaving) {
+        void handleSave();
+      }
+    };
+    window.addEventListener('kite:save-file', handleSaveFileEvent);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('kite:save-file', handleSaveFileEvent);
+    };
   }, [activeTab, isModified, isSaving, handleSave]);
 
   useEffect(() => {
@@ -867,6 +926,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
               onToggleFolder={handleToggleFolder}
               onOpenFile={handleOpenFile}
               onSplitterPointerDown={handleSplitterPointerDown}
+              onRevealFile={handleRevealFile}
+              onOpenDefaultApp={handleOpenDefaultApp}
             />
           )}
 
@@ -951,6 +1012,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
                   );
                 }
               }}
+              onRevealInExplorer={handleRevealFile}
+              onOpenInDefaultApp={handleOpenDefaultApp}
             />
           </div>
         </div>

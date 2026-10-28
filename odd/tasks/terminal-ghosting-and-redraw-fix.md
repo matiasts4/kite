@@ -1,6 +1,6 @@
 # Terminal Ghosting and Redraw — Attempt Log
 
-Status: S-launch passed on 2026-10-28 (three-up Grok + OpenCode, coherent first frame). S-ghost is the open bug. E2 stops local repaints from freezing a damaged OpenCode frame.
+Status: S-launch passed. E2 did not clear S-ghost. E3 sets the cell line height to 1 so block art has no gap between rows. Visual pass for that is open.
 Branch: `feat/ui-composer`.
 Rule: one hypothesis per commit. Do not mix this work with unrelated dirty files.
 
@@ -147,7 +147,7 @@ What this changes:
 - Automatic `term.refresh()` is gone, including the alt-screen path and the click-to-refresh on the canvas. Refresh paints whatever xterm already stored. OpenCode will not reconstruct that frame.
 - A manual redraw command does not refresh locally. It steps the PTY one row away and back, so OpenCode gets a real size change and repaints. A same-size resize is not enough.
 
-Pass: use one OpenCode session for several minutes, with normal output, and old rows do not stay pinned. A resize is not required to read the screen. If characters still collide on a grid that never changed size, that is E3, not another refresh.
+Pass: use one OpenCode session for several minutes, with normal output, and old rows do not stay pinned. A resize is not required to read the screen. If characters still collide on a grid that never changed size, that is encoding, not another refresh.
 
 How to check:
 
@@ -156,7 +156,25 @@ How to check:
 3. Open a new OpenCode terminal. Confirm the first frame is still coherent (S-launch must not regress).
 4. Use that session for several minutes. Stuck headers, leftover tables, and merged words are an E2 failure.
 
-### E3 — Encoding, only if characters still collide
+Visual result (2026-10-28): fail. Four panes, Grok still coherent. OpenCode's splash mark is sliced by horizontal gaps through the block letters. The footer reads like `Juump to latest` on the OpenCode panes. E2 stopped the local refresh. The gaps are still in the cell itself.
+
+### E3 — Cell height matches the glyph
+
+Status: implemented in this commit. Visual pass is open.
+
+`lineHeight` was `1.16`. xterm multiplies the measured glyph height by that value, so each row is taller than the glyph. OpenCode draws its mark with block characters that are meant to touch the next row. The extra space reads as slices through the letters. A resize does not remove it, because the next frame uses the same cell height.
+
+What this changes: `lineHeight` is `1`. Letter spacing stays `0`. ConPTY mode, custom glyphs, and the E2 write/fit behavior stay as they are.
+
+Pass: a new OpenCode pane shows a solid mark, and `Jump to latest` is one word. If the mark is solid and a character is still doubled after several minutes, that leftover is encoding (the old E3), not another line-height tweak.
+
+How to check:
+
+1. Stay on `feat/ui-composer`. TypeScript only. No Rust rebuild and no Vite cache wipe.
+2. Close Kite. `npm run app` from `E:\kite`.
+3. Open a new OpenCode terminal. Judge the mark and the footer before any manual resize.
+
+### E4 — Encoding, only if characters still collide
 
 Only if the grid is stable and in-place updates still merge glyphs.
 
@@ -176,4 +194,4 @@ Only if the grid is stable and in-place updates still merge glyphs.
 
 ## Rollback
 
-Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. E1's stable-host wait is `5ffdb58`. The blank-pane follow-up is `41c1d60`. Revert `41c1d60` to restore the early 80×24 spawn. E2 is the commit that stops automatic `term.refresh()` and defers fit until the polled write finishes. Revert that commit to restore local alt-screen refresh. Later experiments must say which commit to revert.
+Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. E1's stable-host wait is `5ffdb58`. The blank-pane follow-up is `41c1d60`. Revert `41c1d60` to restore the early 80×24 spawn. E2 is `7d649d8`. Revert it to restore local alt-screen refresh. E3 is the commit that sets `lineHeight` to `1`. Revert it to restore `1.16`. Later experiments must say which commit to revert.

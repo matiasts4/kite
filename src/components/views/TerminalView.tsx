@@ -564,7 +564,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       fontWeight: '400',
       fontWeightBold: '600',
       letterSpacing: 0,
-      lineHeight: 1.16,
+      // Block art is drawn edge to edge. A taller line leaves a gap between
+      // rows, which slices the OpenCode mark and pulls strokes into the next cell.
+      lineHeight: 1,
       minimumContrastRatio: 4.5,
       customGlyphs: true,
       rescaleOverlappingGlyphs: true,

@@ -9,16 +9,21 @@ import {
   BellIcon,
   MicIcon,
   AudioWaveformIcon,
-  UsersIcon,
   PuzzleIcon,
-  SmartphoneNfcIcon,
   ScrollTextIcon,
-  CircleUserRoundIcon,
   GaugeIcon,
 } from './settings/icons';
 import { invokeCommand } from '../../lib/ipc';
 import { OPEN_SETTINGS_EVENT, type OpenSettingsDetail } from '../../lib/settingsNav';
 import { normalizeLegacySettingsTabId } from '../../lib/kiteLegacyIds';
+import {
+  readDiagnosticsEnabled,
+  readKitePref,
+  readShowPaneContext,
+  writeDiagnosticsEnabled,
+  writeKitePref,
+} from '../../lib/kitePrefs';
+import { SelectMenu } from '../ui/SelectMenu';
 import {
   SettingsTabId,
   SettingsTabConfig,
@@ -33,12 +38,10 @@ import {
 import { GeneralTab } from './settings/GeneralTab';
 import { AppearanceTab } from './settings/AppearanceTab';
 import { VoiceTab } from './settings/VoiceTab';
-import { ModelsTab } from './settings/ModelsTab';
 import { KeybindingsTab } from './settings/KeybindingsTab';
 import { AboutTab } from './settings/AboutTab';
 import { TelemetryTab } from './settings/TelemetryTab';
 import { ChangelogTab } from './settings/ChangelogTab';
-import { AccountTab } from './settings/AccountTab';
 import { QuotasTab } from './settings/QuotasTab';
 import { ZedTab } from './settings/ZedTab';
 import { SegmentedIndicator } from '../ui/SegmentedIndicator';
@@ -86,20 +89,24 @@ function notificationAuthorizationDetail(authorization: string, osEnabled: boole
     : 'The bell and the in-app list still work while banners are off.';
 }
 
+const SHELL_ROWS = [
+  { id: 'default', title: 'Por defecto del sistema' },
+  { id: 'powershell', title: 'PowerShell' },
+  { id: 'cmd', title: 'Símbolo del sistema (CMD)' },
+  { id: 'wsl', title: 'WSL · Linux' },
+];
+
 const SETTINGS_TABS: SettingsTabConfig[] = [
-  { id: 'general', label: 'General', blurb: 'Apariencia, terminales y actualizaciones.', icon: SettingsIcon },
+  { id: 'general', label: 'General', blurb: 'Apariencia, autoguardado y actualizaciones de software.', icon: SettingsIcon },
   { id: 'customizations', label: 'Customizations', blurb: 'Temas, colores y aspecto visual.', icon: PaletteIcon },
-  { id: 'terminal', label: 'Terminal', blurb: 'Sesiones de fondo y comportamiento de terminal.', icon: SquareTerminalIcon },
+  { id: 'terminal', label: 'Terminal', blurb: 'Shell por defecto, destino de enlaces web y daemon nativo.', icon: SquareTerminalIcon },
   { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
-  { id: 'voice', label: 'Voice', blurb: 'Transcripción de voz a texto y dictado.', icon: MicIcon, hasDividerBefore: true },
-  { id: 'zed', label: 'Asistente Zed', blurb: 'Asistente esférico Zed, pasarela OpenCode multi-modelo, Grok Cloud, persona y latencia.', icon: AudioWaveformIcon },
-  { id: 'agents', label: 'Agents & Models', blurb: 'Modelos predeterminados y razonamiento.', icon: UsersIcon },
-  { id: 'quotas', label: 'Cuotas y cuentas', blurb: 'Suscripciones de IA, rotación de cuentas y proveedores monitoreados.', icon: GaugeIcon },
+  { id: 'voice', label: 'Voice & Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
+  { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
+  { id: 'quotas', label: 'Cuentas y Proveedores', blurb: 'Bóveda de credenciales, cuentas CLI y límites de cuota.', icon: GaugeIcon },
   { id: 'plugins', label: 'Plugins', blurb: 'Herramientas y servicios para los agentes.', icon: PuzzleIcon },
   { id: 'keybindings', label: 'Shortcuts', blurb: 'Atajos de teclado y comandos rápidos.', icon: SquareTerminalIcon },
-  { id: 'remote', label: 'Remote (v0.2)', blurb: 'Sincronización móvil (en desarrollo activo).', icon: SmartphoneNfcIcon },
   { id: 'changelog', label: 'Changelog', blurb: 'Novedades y notas de cada versión.', icon: ScrollTextIcon, hasDividerBefore: true },
-  { id: 'account', label: 'Account', blurb: 'Perfil y privacidad local.', icon: CircleUserRoundIcon },
 ];
 
 export interface SettingsViewProps {
@@ -119,11 +126,6 @@ export interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   onBack,
   onOpenWhatsNew,
-  accountName = 'Kite User',
-  accountEmail = 'local@kite.dev',
-  accountTier = 'STUDIO EDITION',
-  accountTierPaid = true,
-  creditsLabel = 'Ilimitados',
   mode: propMode,
   palette: propPalette,
   onToggleMode: propOnToggleMode,
@@ -153,11 +155,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     window.addEventListener('kite:theme-changed', handleThemeEvent);
     return () => window.removeEventListener('kite:theme-changed', handleThemeEvent);
   }, []);
-  const [creditsError, setCreditsError] = useState<boolean>(false);
-  const [creditsDetail, setCreditsDetail] = useState<string>(
-    'Modo autónomo local activo con tus suscripciones de IA conectadas.'
-  );
-  const [creditsLoading, setCreditsLoading] = useState<boolean>(false);
+  const [terminalShell, setTerminalShell] = useState<string>(() => readKitePref('terminalShell') || 'default');
   const [terminalWebLinksTarget, setTerminalWebLinksTargetState] = useState<TerminalWebLinksTarget>(() =>
     getTerminalWebLinksTarget()
   );
@@ -174,25 +172,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       window.removeEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
   }, []);
 
-  const handleRetryCredits = useCallback(async () => {
-    setCreditsLoading(true);
-    try {
-      const res = await invokeCommand<{ balance: number }>('credits_balance');
-      if (res && typeof res.balance === 'number') {
-        setCreditsError(false);
-        setCreditsDetail(`Balance de créditos: ${res.balance.toLocaleString()}.`);
-      } else {
-        setCreditsError(false);
-        setCreditsDetail('Edición Local Autónoma. Créditos ilimitados en modo BYOK / Cuentas locales.');
-      }
-    } catch {
-      setCreditsError(false);
-      setCreditsDetail('Edición Local Autónoma. Créditos ilimitados en modo BYOK / Cuentas locales.');
-    } finally {
-      setCreditsLoading(false);
-    }
-  }, []);
-
   // General settings state
   const [autoSaveFiles, setAutoSaveFiles] = useFilesAutoSavePreference();
   const [automaticUpdates, setAutomaticUpdates] = useState<boolean>(true);
@@ -202,7 +181,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [notifAuthorization, setNotifAuthorization] = useState<string>('notDetermined');
 
   // Telemetry local offline state (Zero external network calls)
-  const [telemetryPrefs, setTelemetryPrefs] = useState<TelemetryPrefs>({ diagnostics: false, analytics: false });
+  const [telemetryPrefs, setTelemetryPrefs] = useState<TelemetryPrefs>(() => ({
+    diagnostics: readDiagnosticsEnabled(),
+    analytics: false,
+  }));
   const [telemetryIdentity] = useState<TelemetryIdentity | null>({
     revision: 1,
     ready: true,
@@ -274,14 +256,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     let isMounted = true;
 
     try {
-      const savedPalette = localStorage.getItem('bmone.palette');
+      const savedPalette = readKitePref('palette');
       if (savedPalette) setLocalPalette(savedPalette);
 
-      const savedTheme = localStorage.getItem('bmone.theme') as 'dark' | 'light' | null;
-      if (savedTheme) setLocalMode(savedTheme);
+      const savedTheme = readKitePref('theme') as 'dark' | 'light' | null;
+      if (savedTheme === 'dark' || savedTheme === 'light') setLocalMode(savedTheme);
 
-      const savedTabRaw = localStorage.getItem('bmone.settingsTab');
+      readShowPaneContext();
+      const savedTabRaw = readKitePref('settingsTab');
       const savedTab = normalizeLegacySettingsTabId(savedTabRaw);
+      if (savedTab && savedTab !== savedTabRaw) writeKitePref('settingsTab', savedTab);
       if (savedTab && SETTINGS_TABS.some((t) => t.id === savedTab)) {
         setActiveTab(savedTab as SettingsTabId);
       }
@@ -290,8 +274,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
 
     const onOpenTab = (e: Event) => {
-      const tab = (e as CustomEvent<OpenSettingsDetail>).detail?.tab as SettingsTabId | undefined;
-      if (tab) setActiveTab(tab);
+      const requested = (e as CustomEvent<OpenSettingsDetail>).detail?.tab ?? null;
+      const tab = normalizeLegacySettingsTabId(requested);
+      if (tab) setActiveTab(tab as SettingsTabId);
     };
     window.addEventListener(OPEN_SETTINGS_EVENT, onOpenTab);
 
@@ -370,7 +355,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSelectTab = useCallback((tabId: SettingsTabId) => {
     setActiveTab(tabId);
     try {
-      localStorage.setItem('bmone.settingsTab', tabId);
+      writeKitePref('settingsTab', tabId);
     } catch {
       // Ignore
     }
@@ -405,8 +390,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       propOnSelectTheme(paletteId, themeMode);
     } else {
       try {
-        localStorage.setItem('bmone.palette', paletteId);
-        if (themeMode) localStorage.setItem('bmone.theme', nextMode);
+        writeKitePref('palette', paletteId);
+        if (themeMode) writeKitePref('theme', nextMode);
         document.documentElement.setAttribute('data-palette', paletteId);
         document.documentElement.setAttribute('data-theme', nextMode);
         document.documentElement.classList.toggle('dark', nextMode === 'dark');
@@ -437,7 +422,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleToggleTelemetry = (key: 'analytics' | 'diagnostics') => {
-    setTelemetryPrefs((prev) => ({ ...prev, [key]: !prev[key] }));
+    setTelemetryPrefs((prev) => {
+      const enabled = !prev[key];
+      if (key === 'diagnostics') writeDiagnosticsEnabled(enabled);
+      return { ...prev, [key]: enabled };
+    });
+  };
+
+  const handleTerminalShellChange = (value: string) => {
+    setTerminalShell(value);
+    writeKitePref('terminalShell', value);
   };
 
   const handleCheckUpdate = async () => {
@@ -702,8 +696,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             )}
 
-            {(activeTab === 'models' || activeTab === 'agents') && <ModelsTab />}
-
             {activeTab === 'quotas' && <QuotasTab />}
 
             {activeTab === 'keybindings' && <KeybindingsTab />}
@@ -747,15 +739,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {activeTab === 'terminal' && (
               <>
                 <section className="settings-group">
-                  <h2 className="settings-group__title">Sessions</h2>
+                  <h2 className="settings-group__title">Shell</h2>
                   <div className="ui-card">
                     <div className="ui-card__row settings-row">
                       <div className="settings-row__copy">
-                        <h3 className="settings-row__title">Terminal host runtime</h3>
-                        <p>Integrated native daemon managing active shell sessions and scrollback.</p>
+                        <h3 className="settings-row__title">Shell por defecto</h3>
+                        <p>Intérprete de comandos para las nuevas pestañas de terminal.</p>
                       </div>
-                      <div className="settings-row__control">
-                        <span className="settings-badge" data-tone="running">Online</span>
+                      <div className="settings-row__control settings-row__control--menu">
+                        <SelectMenu
+                          label="Tipo de shell"
+                          variant="field"
+                          className="settings-select"
+                          value={terminalShell}
+                          rows={SHELL_ROWS}
+                          triggerLabel={SHELL_ROWS.find((row) => row.id === terminalShell)?.title ?? 'Por defecto del sistema'}
+                          onSelect={handleTerminalShellChange}
+                        />
                       </div>
                     </div>
                   </div>
@@ -800,6 +800,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                             <span>Navegador externo</span>
                           </button>
                         </fieldset>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-group">
+                  <h2 className="settings-group__title">Sessions</h2>
+                  <div className="ui-card">
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Terminal host runtime</h3>
+                        <p>Integrated native daemon managing active shell sessions and scrollback.</p>
+                      </div>
+                      <div className="settings-row__control">
+                        <span className="settings-badge" data-tone="running">Online</span>
                       </div>
                     </div>
                   </div>
@@ -929,64 +944,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </section>
             )}
 
-            {activeTab === 'remote' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">Conexión con dispositivos móviles</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Sincronización con teléfono móvil</h3>
-                      <p>Control remoto de agentes, notificaciones push y aprobaciones de código en movimiento.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <span className="settings-badge" data-tone="accent">En desarrollo para v0.2.0</span>
-                    </div>
-                  </div>
-                </div>
-                <p className="settings-note">
-                  Todas las aprobaciones y comandos se ejecutan actualmente de forma autónoma en esta ventana de escritorio.
-                </p>
-              </section>
-            )}
 
-            {activeTab === 'import' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">Migración de versiones anteriores</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Importar datos de Kite / Orca</h3>
-                      <p>Detecta y migra chats, bookmarks de workspace y perfiles de versiones anteriores.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <button
-                        className="settings-control ui-button"
-                        type="button"
-                        onClick={() => {
-                          alert('Comprobación completada: No se detectaron instalaciones heredadas con datos pendientes de migrar en este equipo.');
-                        }}
-                      >
-                        Comprobar e Importar
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {activeTab === 'account' && (
-              <AccountTab
-                accountName={accountName}
-                accountEmail={accountEmail}
-                accountTier={accountTier}
-                accountTierPaid={accountTierPaid}
-                creditsLabel={creditsLabel}
-                creditsDetail={creditsDetail}
-                creditsError={creditsError}
-                creditsLoading={creditsLoading}
-                onRetryCredits={handleRetryCredits}
-              />
-            )}
           </div>
         </div>
       </section>

@@ -2,10 +2,15 @@
 
 const LEGACY_OPERATOR_TAB_SLUG = ['b', 'r', 'i', 'd', 'g', 'e'].join('');
 
+const RETIRED_TO_QUOTAS = new Set(['models', 'agents', 'account']);
+const RETIRED_TO_GENERAL = new Set(['remote', 'import']);
+
 /** Maps a saved settings tab id to the current tab id, if needed. */
 export function normalizeLegacySettingsTabId(raw: string | null): string | null {
   if (!raw) return null;
   if (raw === LEGACY_OPERATOR_TAB_SLUG) return 'zed';
+  if (RETIRED_TO_QUOTAS.has(raw)) return 'quotas';
+  if (RETIRED_TO_GENERAL.has(raw)) return 'general';
   return raw;
 }
 

@@ -8,8 +8,10 @@ import {
 } from '../../../lib/ipc';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { AccountSwitcherModal } from '../../quota/AccountSwitcherModal';
+import { SelectMenu } from '../../ui/SelectMenu';
 import { MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
 import { CheckIcon, XIcon } from './icons';
+import { PrivacyPolicyCard } from './PrivacyPolicyCard';
 
 export interface AccountTabProps {
   accountName?: string;
@@ -33,7 +35,6 @@ export const AccountTab: React.FC<AccountTabProps> = ({
   accountName = 'Kite User',
   accountEmail = 'local@kite.dev',
 }) => {
-  const [legalModal, setLegalModal] = useState<'terms' | 'privacy' | null>(null);
   const [googleActive, setGoogleActive] = useState<string | null>(null);
   const [googleAccounts, setGoogleAccounts] = useState<string[]>([]);
   const [isSwitchingGoogle, setIsSwitchingGoogle] = useState(false);
@@ -226,20 +227,22 @@ export const AccountTab: React.FC<AccountTabProps> = ({
 
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
                   {acc.provider === 'antigravity' && googleAccounts.length > 1 && (
-                    <select
-                      className="secondary-button"
-                      style={{ height: '28px', padding: '0 8px', fontSize: '12px', background: 'var(--bg-surface)' }}
-                      value={googleActive || ''}
+                    <SelectMenu
+                      label="Cuenta de Google"
+                      variant="field"
+                      className="settings-select"
+                      value={googleActive || googleAccounts[0]}
                       disabled={isSwitchingGoogle}
-                      onChange={(e) => handleSelectGoogleAccount(e.target.value)}
-                      title="Seleccionar otra cuenta de Google detectada en ~/.gemini"
-                    >
-                      {googleAccounts.map((email) => (
-                        <option key={email} value={email}>
-                          {email} {email === googleActive ? '(Activa)' : ''}
-                        </option>
-                      ))}
-                    </select>
+                      rows={googleAccounts.map((email) => ({
+                        id: email,
+                        title: email,
+                        detail: email === googleActive ? 'Activa' : undefined,
+                      }))}
+                      triggerLabel={googleActive || googleAccounts[0]}
+                      onSelect={(email) => {
+                        void handleSelectGoogleAccount(email);
+                      }}
+                    />
                   )}
 
                   {MULTI_ACCOUNT_PROVIDERS.some((p) => p.id === acc.provider) && (
@@ -270,113 +273,7 @@ export const AccountTab: React.FC<AccountTabProps> = ({
         </div>
       </section>
 
-      {/* 3. Información Legal y Privacidad Local */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Políticas y Privacidad</h2>
-        <div className="ui-card">
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Compromiso de Privacidad Local</h3>
-              <p className="settings-row__detail">
-                Tus credenciales, tokens de IA, historial y código fuente se almacenan exclusivamente en este equipo.
-              </p>
-            </div>
-            <div className="settings-row__control">
-              <button
-                aria-label="Ver política de privacidad"
-                className="secondary-button"
-                onClick={() => setLegalModal('privacy')}
-                type="button"
-                style={{ height: '28px', padding: '0 12px', fontSize: '12px' }}
-              >
-                Ver detalle
-              </button>
-            </div>
-          </div>
-
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Términos de Uso</h3>
-              <p className="settings-row__detail">
-                Uso de software autónomo y responsabilidades en entornos de desarrollo local.
-              </p>
-            </div>
-            <div className="settings-row__control">
-              <button
-                aria-label="Ver términos de uso"
-                className="secondary-button"
-                onClick={() => setLegalModal('terms')}
-                type="button"
-                style={{ height: '28px', padding: '0 12px', fontSize: '12px' }}
-              >
-                Ver detalle
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Modal Informativo Legal */}
-      {legalModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(0,0,0,0.65)',
-            backdropFilter: 'blur(8px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 10000,
-            padding: '20px',
-          }}
-          onClick={() => setLegalModal(null)}
-        >
-          <div
-            style={{
-              backgroundColor: 'var(--menu-glass, #18181b)',
-              border: '1px solid var(--block-stroke)',
-              borderRadius: '12px',
-              padding: '24px',
-              maxWidth: '520px',
-              width: '100%',
-              color: 'var(--text-primary)',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '12px' }}>
-              {legalModal === 'privacy' ? 'Privacidad y Protección de Datos' : 'Términos de Kite'}
-            </h3>
-            <div style={{ fontSize: '13px', lineHeight: 1.6, color: 'var(--text-secondary)', marginBottom: '20px' }}>
-              {legalModal === 'privacy' ? (
-                <p>
-                  Kite funciona bajo una arquitectura <strong>Local-First y Zero-Telemetry</strong>.
-                  Todas las sesiones de agentes, tokens de acceso y código son gestionados por el binario nativo en tu propio dispositivo.
-                  No existe intermediación en la nube para interceptar tus tareas ni recolectar datos de telemetría.
-                </p>
-              ) : (
-                <p>
-                  Kite se proporciona para acelerar flujos de trabajo de ingeniería de software y automatización.
-                  La responsabilidad de ejecución de comandos en terminales y modificación de archivos recae en el usuario,
-                  con confirmación previa requerida para operaciones de riesgo.
-                </p>
-              )}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                type="button"
-                className="ui-button ui-button--primary"
-                onClick={() => setLegalModal(null)}
-                style={{ height: '28px', padding: '0 16px', fontSize: '12px' }}
-              >
-                Entendido
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <PrivacyPolicyCard />
       {switcherProvider && (
         <AccountSwitcherModal
           provider={switcherProvider.id}

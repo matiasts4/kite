@@ -115,26 +115,32 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
 
             <div className="zed-provider__grid">
               <div>
-                <label className="zed-settings__label" style={{ display: 'block', marginBottom: 5 }}>
-                  API Key de OpenCode Go (opcional)
-                </label>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    type={showApiKeys.opencode ? 'text' : 'password'}
-                    className="zed-settings__input"
-                    value={config.opencodeApiKey}
-                    onChange={(e) => onFieldChange('opencodeApiKey', e.target.value)}
-                    placeholder="oc_sk_..."
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => onToggleApiKey('opencode')}
-                    title={showApiKeys.opencode ? 'Ocultar API Key' : 'Mostrar API Key'}
-                  >
-                    {showApiKeys.opencode ? 'Ocultar' : 'Ver'}
-                  </button>
+                <div className="settings-row settings-row--stacked">
+                  <div className="settings-row__copy">
+                    <h3 className="settings-row__title">API Key de OpenCode Go (opcional)</h3>
+                  </div>
+                  <div className="settings-row__control">
+                    <div className="settings-credential">
+                      <input
+                        type={showApiKeys.opencode ? 'text' : 'password'}
+                        className="ui-field"
+                        value={config.opencodeApiKey}
+                        onChange={(e) => onFieldChange('opencodeApiKey', e.target.value)}
+                        placeholder="oc_sk_..."
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label="API Key de OpenCode Go (opcional)"
+                      />
+                      <button
+                        type="button"
+                        className="settings-control ui-button"
+                        onClick={() => onToggleApiKey('opencode')}
+                        title={showApiKeys.opencode ? 'Ocultar API Key' : 'Mostrar API Key'}
+                      >
+                        {showApiKeys.opencode ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 {config.opencodeApiKey ? (
                   <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
@@ -242,26 +248,32 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
 
             <div className="zed-provider__grid">
               <div>
-                <label className="zed-settings__label" style={{ display: 'block', marginBottom: 5 }}>
-                  Vercel AI Gateway API Key
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input
-                    type={showApiKeys.vercel ? 'text' : 'password'}
-                    className="zed-settings__input"
-                    value={config.vercelApiKey}
-                    onChange={(e) => onFieldChange('vercelApiKey', e.target.value)}
-                    placeholder="vck_..."
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => onToggleApiKey('vercel')}
-                    title={showApiKeys.vercel ? 'Ocultar API Key' : 'Mostrar API Key'}
-                  >
-                    {showApiKeys.vercel ? 'Ocultar' : 'Ver'}
-                  </button>
+                <div className="settings-row settings-row--stacked">
+                  <div className="settings-row__copy">
+                    <h3 className="settings-row__title">Vercel AI Gateway API Key</h3>
+                  </div>
+                  <div className="settings-row__control">
+                    <div className="settings-credential">
+                      <input
+                        type={showApiKeys.vercel ? 'text' : 'password'}
+                        className="ui-field"
+                        value={config.vercelApiKey}
+                        onChange={(e) => onFieldChange('vercelApiKey', e.target.value)}
+                        placeholder="vck_..."
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label="Vercel AI Gateway API Key"
+                      />
+                      <button
+                        type="button"
+                        className="settings-control ui-button"
+                        onClick={() => onToggleApiKey('vercel')}
+                        title={showApiKeys.vercel ? 'Ocultar API Key' : 'Mostrar API Key'}
+                      >
+                        {showApiKeys.vercel ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -355,26 +367,32 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
               </div>
 
               <div>
-                <label className="zed-settings__label" style={{ display: 'block', marginBottom: 5 }}>
-                  Cloudflare API Token
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input
-                    type={showApiKeys.cloudflare ? 'text' : 'password'}
-                    className="zed-settings__input"
-                    value={config.cloudflareApiToken}
-                    onChange={(e) => onFieldChange('cloudflareApiToken', e.target.value)}
-                    placeholder="Workers AI Token..."
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => onToggleApiKey('cloudflare')}
-                    title={showApiKeys.cloudflare ? 'Ocultar API Token' : 'Mostrar API Token'}
-                  >
-                    {showApiKeys.cloudflare ? 'Ocultar' : 'Ver'}
-                  </button>
+                <div className="settings-row settings-row--stacked">
+                  <div className="settings-row__copy">
+                    <h3 className="settings-row__title">Cloudflare API Token</h3>
+                  </div>
+                  <div className="settings-row__control">
+                    <div className="settings-credential">
+                      <input
+                        type={showApiKeys.cloudflare ? 'text' : 'password'}
+                        className="ui-field"
+                        value={config.cloudflareApiToken}
+                        onChange={(e) => onFieldChange('cloudflareApiToken', e.target.value)}
+                        placeholder="Workers AI Token..."
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label="Cloudflare API Token"
+                      />
+                      <button
+                        type="button"
+                        className="settings-control ui-button"
+                        onClick={() => onToggleApiKey('cloudflare')}
+                        title={showApiKeys.cloudflare ? 'Ocultar API Token' : 'Mostrar API Token'}
+                      >
+                        {showApiKeys.cloudflare ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -490,26 +508,32 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
 
             <div className="zed-provider__grid">
               <div>
-                <label className="zed-settings__label" style={{ display: 'block', marginBottom: 5 }}>
-                  API Key de xAI
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input
-                    type={showApiKeys.grok ? 'text' : 'password'}
-                    className="zed-settings__input"
-                    value={config.grokApiKey}
-                    onChange={(e) => onFieldChange('grokApiKey', e.target.value)}
-                    placeholder="xai-… (API Key de console.x.ai)"
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => onToggleApiKey('grok')}
-                    title={showApiKeys.grok ? 'Ocultar API Key' : 'Mostrar API Key'}
-                  >
-                    {showApiKeys.grok ? 'Ocultar' : 'Ver'}
-                  </button>
+                <div className="settings-row settings-row--stacked">
+                  <div className="settings-row__copy">
+                    <h3 className="settings-row__title">API Key de xAI</h3>
+                  </div>
+                  <div className="settings-row__control">
+                    <div className="settings-credential">
+                      <input
+                        type={showApiKeys.grok ? 'text' : 'password'}
+                        className="ui-field"
+                        value={config.grokApiKey}
+                        onChange={(e) => onFieldChange('grokApiKey', e.target.value)}
+                        placeholder="xai-… (API Key de console.x.ai)"
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label="API Key de xAI"
+                      />
+                      <button
+                        type="button"
+                        className="settings-control ui-button"
+                        onClick={() => onToggleApiKey('grok')}
+                        title={showApiKeys.grok ? 'Ocultar API Key' : 'Mostrar API Key'}
+                      >
+                        {showApiKeys.grok ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 {config.grokApiKey ? (
                   <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>

@@ -6,6 +6,7 @@ import {
   ELEVENLABS_CURATED_VOICES,
 } from '../../../../lib/operator/operatorConfig';
 import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
+import { SelectMenu, type SelectMenuRow } from '../../../ui/SelectMenu';
 
 export const VOICE_OPTIONS = [
   { id: 'Ara', label: 'Ara — Clara, ágil (recomendada)' },
@@ -20,6 +21,15 @@ export const LANGUAGE_OPTIONS = [
   { id: 'en-US', label: 'English (en-US)' },
   { id: 'pt-BR', label: 'Português (pt-BR)' },
 ];
+
+const SPEED_ROWS: SelectMenuRow[] = Array.from({ length: 11 }, (_, index) => {
+  const id = (0.8 + index * 0.05).toFixed(2);
+  return { id, title: `${id}x` };
+});
+
+function menuTitle(rows: SelectMenuRow[], value: string, fallback: string): string {
+  return rows.find((row) => row.id === value)?.title ?? fallback;
+}
 
 export interface ZedPersonaSectionProps {
   config: OperatorConfig;
@@ -52,6 +62,29 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
   const isEleven = config.ttsEngine === 'elevenlabs';
   const isCuratedVoice = ELEVENLABS_CURATED_VOICES.some((v) => v.id === config.elevenlabsVoiceId);
   const [customVoiceActive, setCustomVoiceActive] = useState(!isCuratedVoice && Boolean(config.elevenlabsVoiceId));
+  const systemVoiceRows: SelectMenuRow[] = [
+    ...VOICE_OPTIONS.map((voice, index) => ({
+      id: voice.id,
+      title: voice.label,
+      sectionTitle: index === 0 ? 'Perfiles de Voz Zed' : undefined,
+    })),
+    ...systemVoices.map((voice, index) => ({
+      id: voice.name,
+      title: `${voice.name} (${voice.lang})`,
+      sectionTitle: index === 0 ? 'Voces del Sistema' : undefined,
+      ruleBefore: index === 0,
+    })),
+  ];
+  if (
+    persona.voice &&
+    !systemVoiceRows.some((row) => row.id === persona.voice)
+  ) {
+    systemVoiceRows.push({ id: persona.voice, title: `${persona.voice} (actual)` });
+  }
+  const speedId = (config.ttsRate || 1).toFixed(2);
+  const speedRows = SPEED_ROWS.some((row) => row.id === speedId)
+    ? SPEED_ROWS
+    : [...SPEED_ROWS, { id: speedId, title: `${speedId}x` }];
 
   return (
     <section className="settings-group">
@@ -110,30 +143,32 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
         {/* Configuración de ElevenLabs */}
         {isEleven ? (
           <>
-            <div className="ui-card__row settings-row">
+            <div className="ui-card__row settings-row settings-row--stacked">
               <div className="settings-row__copy">
                 <h3 className="settings-row__title">Clave de API ElevenLabs</h3>
                 <p>Requerida para streaming de audio de alta fidelidad (~100ms de latencia).</p>
               </div>
-              <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  type={showElevenKey ? 'text' : 'password'}
-                  className="zed-settings__input"
-                  value={config.elevenlabsApiKey || ''}
-                  onChange={(e) => onFieldChange('elevenlabsApiKey', e.target.value)}
-                  placeholder="xi_..."
-                  style={{ width: 220, fontFamily: 'monospace', fontSize: 12 }}
-                  aria-label="Clave de API ElevenLabs"
-                />
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => setShowElevenKey(!showElevenKey)}
-                  style={{ height: 32, padding: '0 10px', fontSize: 12 }}
-                  title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
-                >
-                  {showElevenKey ? 'Ocultar' : 'Ver'}
-                </button>
+              <div className="settings-row__control">
+                <div className="settings-credential">
+                  <input
+                    type={showElevenKey ? 'text' : 'password'}
+                    className="ui-field"
+                    value={config.elevenlabsApiKey || ''}
+                    onChange={(e) => onFieldChange('elevenlabsApiKey', e.target.value)}
+                    placeholder="xi_..."
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-label="Clave de API ElevenLabs"
+                  />
+                  <button
+                    type="button"
+                    className="settings-control ui-button"
+                    onClick={() => setShowElevenKey(!showElevenKey)}
+                    title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
+                  >
+                    {showElevenKey ? 'Ocultar' : 'Ver'}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -143,69 +178,53 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
                 <p>Selecciona el modelo optimizado de baja latencia y el timbre de voz deseado.</p>
               </div>
               <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                {/* Selector de modelo */}
-                <select
-                  className="settings-control ui-button zed-settings__select"
+                <SelectMenu
+                  label="Modelo de ElevenLabs"
+                  variant="field"
+                  className="settings-select"
                   value={config.elevenlabsModel || 'eleven_v4_turbo'}
-                  onChange={(e) => onFieldChange('elevenlabsModel', e.target.value)}
-                  style={{
-                    height: '32px',
-                    padding: '0 10px',
-                    fontSize: '12px',
-                    borderRadius: 'var(--radius-chip, 6px)',
-                    background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                    border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                    color: '#f4f4f6',
-                    colorScheme: 'dark',
-                    maxWidth: '220px',
-                  }}
-                  aria-label="Modelo de ElevenLabs"
-                >
-                  {ELEVENLABS_TTS_MODELS.map((m) => (
-                    <option key={m.id} value={m.id} style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-
-                {/* Selector de voz */}
-                <select
-                  className="settings-control ui-button zed-settings__select"
+                  rows={ELEVENLABS_TTS_MODELS.map((model) => ({ id: model.id, title: model.label }))}
+                  triggerLabel={menuTitle(
+                    ELEVENLABS_TTS_MODELS.map((model) => ({ id: model.id, title: model.label })),
+                    config.elevenlabsModel || 'eleven_v4_turbo',
+                    config.elevenlabsModel || 'eleven_v4_turbo'
+                  )}
+                  onSelect={(id) => onFieldChange('elevenlabsModel', id)}
+                />
+                <SelectMenu
+                  label="Voz de ElevenLabs"
+                  variant="field"
+                  className="settings-select"
                   value={customVoiceActive ? 'custom' : (config.elevenlabsVoiceId || '21m00Tcm4TlvDq8ikWAM')}
-                  onChange={(e) => {
-                    if (e.target.value === 'custom') {
+                  rows={[
+                    ...ELEVENLABS_CURATED_VOICES.map((voice, index) => ({
+                      id: voice.id,
+                      title: voice.label,
+                      sectionTitle: index === 0 ? 'Voces Curadas' : undefined,
+                    })),
+                    {
+                      id: 'custom',
+                      title: 'ID Personalizado...',
+                      sectionTitle: 'Personalizada',
+                      ruleBefore: true,
+                    },
+                  ]}
+                  triggerLabel={
+                    customVoiceActive
+                      ? 'ID Personalizado...'
+                      : ELEVENLABS_CURATED_VOICES.find((voice) => voice.id === config.elevenlabsVoiceId)?.label
+                        || config.elevenlabsVoiceId
+                        || 'Voz'
+                  }
+                  onSelect={(id) => {
+                    if (id === 'custom') {
                       setCustomVoiceActive(true);
-                    } else {
-                      setCustomVoiceActive(false);
-                      onFieldChange('elevenlabsVoiceId', e.target.value);
+                      return;
                     }
+                    setCustomVoiceActive(false);
+                    onFieldChange('elevenlabsVoiceId', id);
                   }}
-                  style={{
-                    height: '32px',
-                    padding: '0 10px',
-                    fontSize: '12px',
-                    borderRadius: 'var(--radius-chip, 6px)',
-                    background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                    border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                    color: '#f4f4f6',
-                    colorScheme: 'dark',
-                    maxWidth: '200px',
-                  }}
-                  aria-label="Voz de ElevenLabs"
-                >
-                  <optgroup label="Voces Curadas" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                    {ELEVENLABS_CURATED_VOICES.map((v) => (
-                      <option key={v.id} value={v.id} style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
-                        {v.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                  <optgroup label="Personalizada" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                    <option value="custom" style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}>
-                      ID Personalizado...
-                    </option>
-                  </optgroup>
-                </select>
+                />
 
                 {customVoiceActive && (
                   <input
@@ -264,58 +283,15 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
               <p>Perfil de voz emulada o voz instalada en el sistema operativo.</p>
             </div>
             <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <select
-                className="settings-control ui-button zed-settings__select"
+              <SelectMenu
+                label="Voz del asistente"
+                variant="field"
+                className="settings-select"
                 value={persona.voice}
-                onChange={(e) => onPersonaChange('voice', e.target.value)}
-                style={{
-                  height: '32px',
-                  padding: '0 10px',
-                  fontSize: '12px',
-                  borderRadius: 'var(--radius-chip, 6px)',
-                  background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                  color: '#f4f4f6',
-                  colorScheme: 'dark',
-                  maxWidth: '240px',
-                }}
-                aria-label="Voz del asistente"
-              >
-                <optgroup label="Perfiles de Voz Zed" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                  {VOICE_OPTIONS.map((v) => (
-                    <option
-                      key={v.id}
-                      value={v.id}
-                      style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                    >
-                      {v.label}
-                    </option>
-                  ))}
-                </optgroup>
-                {systemVoices.length > 0 && (
-                  <optgroup label="Voces del Sistema" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                    {systemVoices.map((v) => (
-                      <option
-                        key={v.name}
-                        value={v.name}
-                        style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                      >
-                        {v.name} ({v.lang})
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {!VOICE_OPTIONS.some((o) => o.id === persona.voice) &&
-                  !systemVoices.some((v) => v.name === persona.voice) &&
-                  persona.voice && (
-                    <option
-                      value={persona.voice}
-                      style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                    >
-                      {persona.voice} (actual)
-                    </option>
-                  )}
-              </select>
+                rows={systemVoiceRows}
+                triggerLabel={menuTitle(systemVoiceRows, persona.voice, persona.voice)}
+                onSelect={(id) => onPersonaChange('voice', id)}
+              />
               <button
                 type="button"
                 className="secondary-button"
@@ -358,20 +334,16 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
             <h3 className="settings-row__title">Velocidad de Voz</h3>
             <p>Ritmo de lectura y cadencia de la síntesis ({((config.ttsRate || 1.0)).toFixed(2)}x).</p>
           </div>
-          <div className="settings-row__control" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <input
-              type="range"
-              min="0.80"
-              max="1.30"
-              step="0.05"
-              value={config.ttsRate || 1.0}
-              onChange={(e) => onFieldChange('ttsRate', parseFloat(e.target.value))}
-              style={{ width: 140, accentColor: 'var(--accent-color, #7c3aed)' }}
-              aria-label="Velocidad de voz"
+          <div className="settings-row__control settings-row__control--menu">
+            <SelectMenu
+              label="Velocidad de voz"
+              variant="field"
+              className="settings-select"
+              value={speedId}
+              rows={speedRows}
+              triggerLabel={menuTitle(speedRows, speedId, `${speedId}x`)}
+              onSelect={(id) => onFieldChange('ttsRate', Number(id))}
             />
-            <span style={{ fontSize: '12px', minWidth: '40px', color: 'var(--text-secondary, #a1a1aa)' }}>
-              {((config.ttsRate || 1.0)).toFixed(2)}x
-            </span>
           </div>
         </div>
 
@@ -454,34 +426,22 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
               placeholder="ej. Alex"
               style={{ width: 150 }}
             />
-            <select
-              className="settings-control ui-button zed-settings__select"
+            <SelectMenu
+              label="Idioma"
+              variant="field"
+              className="settings-select"
               value={persona.language}
-              onChange={(e) => {
-                onPersonaChange('language', e.target.value);
-                onFieldChange('ttsLanguage', e.target.value);
+              rows={LANGUAGE_OPTIONS.map((lang) => ({ id: lang.id, title: lang.label }))}
+              triggerLabel={menuTitle(
+                LANGUAGE_OPTIONS.map((lang) => ({ id: lang.id, title: lang.label })),
+                persona.language,
+                persona.language
+              )}
+              onSelect={(id) => {
+                onPersonaChange('language', id);
+                onFieldChange('ttsLanguage', id);
               }}
-              style={{
-                height: '32px',
-                padding: '0 10px',
-                fontSize: '12px',
-                borderRadius: 'var(--radius-chip, 6px)',
-                background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                color: '#f4f4f6',
-                colorScheme: 'dark',
-              }}
-            >
-              {LANGUAGE_OPTIONS.map((lang) => (
-                <option
-                  key={lang.id}
-                  value={lang.id}
-                  style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                >
-                  {lang.label}
-                </option>
-              ))}
-            </select>
+            />
           </div>
         </div>
 

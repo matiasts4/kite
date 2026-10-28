@@ -1,14 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import {
-  listAudioInputDevices,
-  startMicrophoneTest,
-  releaseOperatorCapture,
-  startTranscriptionTestSession,
-  type AudioInputDeviceInfo,
-  type MicrophoneTester,
-  type TranscriptionTestResult,
-  type TranscriptionTestSession,
-} from '../../../lib/operator/voice/zedVoice';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ttsNarrator, getAvailableVoices } from '../../../lib/operator/ttsNarrator';
 import { toast } from '../../../lib/toast';
 import {
@@ -78,33 +68,6 @@ export const ZedTab: React.FC = () => {
     () => loadModelCatalog('cloudflare')?.savedAt ?? null
   );
   const [syncingCloudflareModels, setSyncingCloudflareModels] = useState(false);
-
-  // Microphone & Audio Settings
-  const [micDevices, setMicDevices] = useState<AudioInputDeviceInfo[]>([]);
-  const [selectedMicId, setSelectedMicId] = useState<string>(() => {
-    try {
-      return localStorage.getItem('kite_selected_mic_device_id') || 'automatic';
-    } catch {
-      return 'automatic';
-    }
-  });
-  const [isTestingMic, setIsTestingMic] = useState(false);
-  const [testMicLevel, setTestMicLevel] = useState(0);
-  const [micTestStatus, setMicTestStatus] = useState<string | null>(null);
-  const micTesterRef = useRef<MicrophoneTester | null>(null);
-  const [grokTransKey, setGrokTransKey] = useState<string>(() => {
-    try {
-      return (
-        loadOperatorConfig().grokTranscriptionApiKey ||
-        localStorage.getItem('kite_grok_transcription_api_key') ||
-        ''
-      );
-    } catch {
-      return '';
-    }
-  });
-  const [showGrokTransKey, setShowGrokTransKey] = useState(false);
-  const [grokTransSaved, setGrokTransSaved] = useState(false);
 
   // Voice synthesis states
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -180,12 +143,6 @@ export const ZedTab: React.FC = () => {
           if (isMounted) setOpenCodeGoCredential({ available: false, source: null });
         });
     }
-    listAudioInputDevices().then((devices) => {
-      if (isMounted) {
-        setMicDevices(devices);
-      }
-    });
-
     const loadVoices = async () => {
       try {
         const getVoicesFn =
@@ -206,10 +163,6 @@ export const ZedTab: React.FC = () => {
 
     return () => {
       isMounted = false;
-      if (micTesterRef.current) {
-        micTesterRef.current.stop();
-        micTesterRef.current = null;
-      }
       if (ttsNarrator && typeof ttsNarrator.stop === 'function') {
         ttsNarrator.stop();
       }
@@ -261,172 +214,6 @@ export const ZedTab: React.FC = () => {
 
   const handleFieldChange = <K extends keyof OperatorConfig>(key: K, value: OperatorConfig[K]) => {
     persistConfig({ ...config, [key]: value });
-  };
-
-  const handleSelectMic = (deviceId: string) => {
-    setSelectedMicId(deviceId);
-    try {
-      localStorage.setItem('kite_selected_mic_device_id', deviceId);
-    } catch {}
-    if (isTestingMic) {
-      if (micTesterRef.current) {
-        micTesterRef.current.stop();
-        micTesterRef.current = null;
-      }
-      startMicrophoneTest(deviceId === 'automatic' ? null : deviceId, (lvl) => {
-        setTestMicLevel(lvl);
-      })
-        .then((tester) => {
-          micTesterRef.current = tester;
-        })
-        .catch(() => {
-          setMicTestStatus('Error al iniciar prueba en el micrófono seleccionado.');
-          setIsTestingMic(false);
-        });
-    }
-  };
-
-  const handleRefreshMicDevices = async () => {
-    const devices = await listAudioInputDevices();
-    setMicDevices(devices);
-  };
-
-  const handleToggleMicTest = async () => {
-    if (isTestingMic) {
-      if (micTesterRef.current) {
-        micTesterRef.current.stop();
-        micTesterRef.current = null;
-      }
-      setIsTestingMic(false);
-      setTestMicLevel(0);
-      setMicTestStatus(null);
-    } else {
-      setMicTestStatus(null);
-      try {
-        await releaseOperatorCapture();
-        const tester = await startMicrophoneTest(
-          selectedMicId === 'automatic' ? null : selectedMicId,
-          (lvl) => {
-            setTestMicLevel(lvl);
-          }
-        );
-        micTesterRef.current = tester;
-        setIsTestingMic(true);
-      } catch (err: any) {
-        setMicTestStatus(
-          err?.message || 'No se pudo acceder al micrófono. Verifica los permisos del sistema.'
-        );
-        setIsTestingMic(false);
-        setTestMicLevel(0);
-      }
-    }
-  };
-
-  const handleSaveGrokTransKey = () => {
-    try {
-      localStorage.setItem('kite_grok_transcription_api_key', grokTransKey.trim());
-      handleFieldChange('grokTranscriptionApiKey', grokTransKey.trim());
-      setGrokTransSaved(true);
-      toast.success('Clave de Grok guardada', 'Configuración de transcripción actualizada.');
-      setTimeout(() => setGrokTransSaved(false), 2000);
-    } catch {}
-  };
-
-  const [transcriptionTestState, setTranscriptionTestState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
-  const [transcriptionTestSeconds, setTranscriptionTestSeconds] = useState(0);
-  const [transcriptionResult, setTranscriptionResult] = useState<TranscriptionTestResult | null>(null);
-  const transcriptionSessionRef = useRef<TranscriptionTestSession | null>(null);
-  const transcriptionTimerRef = useRef<any>(null);
-
-  useEffect(() => {
-    return () => {
-      if (transcriptionSessionRef.current) {
-        transcriptionSessionRef.current.cancel();
-        transcriptionSessionRef.current = null;
-      }
-      if (transcriptionTimerRef.current) {
-        clearInterval(transcriptionTimerRef.current);
-        transcriptionTimerRef.current = null;
-      }
-    };
-  }, []);
-
-  const handleToggleTranscriptionTest = async () => {
-    if (transcriptionTestState === 'recording') {
-      if (transcriptionTimerRef.current) {
-        clearInterval(transcriptionTimerRef.current);
-        transcriptionTimerRef.current = null;
-      }
-      const session = transcriptionSessionRef.current;
-      transcriptionSessionRef.current = null;
-      setTranscriptionTestState('transcribing');
-
-      if (session) {
-        try {
-          const res = await session.stopAndTranscribe();
-          setTranscriptionResult(res);
-        } catch (err: any) {
-          setTranscriptionResult({
-            success: false,
-            error: err?.message || 'Error inesperado al transcribir.',
-            engine: 'Desconocido',
-            latencyMs: 0,
-            durationSecs: transcriptionTestSeconds,
-          });
-        } finally {
-          setTranscriptionTestState('idle');
-        }
-      } else {
-        setTranscriptionTestState('idle');
-      }
-    } else if (transcriptionTestState === 'idle') {
-      setTranscriptionResult(null);
-      setTranscriptionTestSeconds(0);
-      try {
-        await releaseOperatorCapture();
-        const session = await startTranscriptionTestSession(
-          selectedMicId === 'automatic' ? null : selectedMicId
-        );
-        transcriptionSessionRef.current = session;
-        setTranscriptionTestState('recording');
-
-        let elapsed = 0;
-        transcriptionTimerRef.current = setInterval(async () => {
-          elapsed += 1;
-          setTranscriptionTestSeconds(elapsed);
-          if (elapsed >= 8 && transcriptionSessionRef.current) {
-            clearInterval(transcriptionTimerRef.current);
-            transcriptionTimerRef.current = null;
-            const currentSession = transcriptionSessionRef.current;
-            transcriptionSessionRef.current = null;
-            setTranscriptionTestState('transcribing');
-            try {
-              const res = await currentSession.stopAndTranscribe();
-              setTranscriptionResult(res);
-            } catch (err: any) {
-              setTranscriptionResult({
-                success: false,
-                error: err?.message || 'Error al transcribir.',
-                engine: 'Desconocido',
-                latencyMs: 0,
-                durationSecs: elapsed,
-              });
-            } finally {
-              setTranscriptionTestState('idle');
-            }
-          }
-        }, 1000);
-      } catch (err: any) {
-        setTranscriptionResult({
-          success: false,
-          error: err?.message || 'No se pudo acceder al micrófono para la prueba.',
-          engine: 'Desconocido',
-          latencyMs: 0,
-          durationSecs: 0,
-        });
-        setTranscriptionTestState('idle');
-      }
-    }
   };
 
   const handlePersonaChange = <K extends keyof ZedPersonaConfig>(
@@ -597,26 +384,7 @@ export const ZedTab: React.FC = () => {
       />
 
       {/* Section 3: Audio Input & Mic Controls */}
-      <ZedAudioSection
-        micDevices={micDevices}
-        selectedMicId={selectedMicId}
-        onSelectMic={handleSelectMic}
-        onRefreshMicDevices={handleRefreshMicDevices}
-        isTestingMic={isTestingMic}
-        testMicLevel={testMicLevel}
-        micTestStatus={micTestStatus}
-        onToggleMicTest={handleToggleMicTest}
-        transcriptionTestState={transcriptionTestState}
-        transcriptionTestSeconds={transcriptionTestSeconds}
-        onToggleTranscriptionTest={handleToggleTranscriptionTest}
-        transcriptionResult={transcriptionResult}
-        grokTransKey={grokTransKey}
-        onGrokTransKeyChange={setGrokTransKey}
-        showGrokTransKey={showGrokTransKey}
-        onToggleShowGrokTransKey={() => setShowGrokTransKey(!showGrokTransKey)}
-        onSaveGrokTransKey={handleSaveGrokTransKey}
-        grokTransSaved={grokTransSaved}
-      />
+      <ZedAudioSection />
 
       {/* Section 4: Identity & Personality */}
       <ZedPersonaSection

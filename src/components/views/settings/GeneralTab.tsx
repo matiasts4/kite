@@ -1,13 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { SunIcon, MoonIcon, RefreshCwIcon, SquareTerminalIcon } from './icons';
+import React from 'react';
+import { SunIcon, MoonIcon, RefreshCwIcon } from './icons';
 import type { UpdateCheckResult, TelemetryPrefs } from './types';
-import {
-  getTerminalWebLinksTarget,
-  setTerminalWebLinksTarget,
-  TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
-  type TerminalWebLinksTarget,
-} from '../../../lib/terminalLinkNav';
 import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
+import { PrivacyPolicyCard } from './PrivacyPolicyCard';
 
 import { CURRENT_APP_VERSION } from '../../../hooks/useAppUpdater';
 
@@ -44,42 +39,6 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   onUpdateAndRestart,
   onToggleTelemetry,
 }) => {
-  const [terminalShell, setTerminalShell] = useState<string>(() => {
-    try {
-      return localStorage.getItem('bmone.terminalShell') || 'default';
-    } catch {
-      return 'default';
-    }
-  });
-
-  const [webLinksTarget, setWebLinksTarget] = useState<TerminalWebLinksTarget>(() =>
-    getTerminalWebLinksTarget()
-  );
-
-  useEffect(() => {
-    const handleTargetChanged = (e: Event) => {
-      const custom = e as CustomEvent<TerminalWebLinksTarget>;
-      if (custom.detail) {
-        setWebLinksTarget(custom.detail);
-      }
-    };
-    window.addEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
-    return () =>
-      window.removeEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
-  }, []);
-
-  const handleTerminalShellChange = (value: string) => {
-    setTerminalShell(value);
-    try {
-      localStorage.setItem('bmone.terminalShell', value);
-    } catch {}
-  };
-
-  const handleWebLinksTargetChange = (value: TerminalWebLinksTarget) => {
-    setWebLinksTarget(value);
-    setTerminalWebLinksTarget(value);
-  };
-
   return (
     <>
       {/* 1. Appearance Section */}
@@ -121,72 +80,6 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
             </div>
           </div>
 
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Shell de Terminal</h3>
-              <p>El intérprete de comandos por defecto para nuevas pestañas de terminal.</p>
-            </div>
-            <div className="settings-row__control settings-row__control--menu">
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>
-                  <SquareTerminalIcon size={14} />
-                </span>
-                <select
-                  aria-label="Tipo de shell"
-                  className="settings-control ui-button"
-                  onChange={(e) => handleTerminalShellChange(e.target.value)}
-                  value={terminalShell}
-                  style={{
-                    height: '28px',
-                    padding: '0 8px',
-                    fontSize: '12px',
-                    borderRadius: 'var(--radius-chip, 6px)',
-                    background: 'var(--block-fill, rgba(255,255,255,0.05))',
-                    border: '1px solid var(--block-stroke, rgba(255,255,255,0.1))',
-                    color: 'var(--text-primary)',
-                  }}
-                >
-                  <option value="default">Por defecto del sistema</option>
-                  <option value="powershell">PowerShell</option>
-                  <option value="cmd">Símbolo del sistema (CMD)</option>
-                  <option value="wsl">WSL · Linux</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Destino de enlaces web (URLs)</h3>
-              <p>Abre los enlaces web (http/https) de la terminal en el navegador integrado o en tu navegador predeterminado del sistema.</p>
-            </div>
-            <div className="settings-row__control">
-              <fieldset aria-label="Destino de enlaces web" className="ui-segmented">
-                <button
-                  aria-pressed={webLinksTarget === 'internal'}
-                  className="ui-segmented__item"
-                  onClick={() => handleWebLinksTargetChange('internal')}
-                  type="button"
-                >
-                  {webLinksTarget === 'internal' && (
-                    <SegmentedIndicator group="settings-general-links-target" />
-                  )}
-                  <span>Integrado</span>
-                </button>
-                <button
-                  aria-pressed={webLinksTarget === 'external'}
-                  className="ui-segmented__item"
-                  onClick={() => handleWebLinksTargetChange('external')}
-                  type="button"
-                >
-                  {webLinksTarget === 'external' && (
-                    <SegmentedIndicator group="settings-general-links-target" />
-                  )}
-                  <span>Externo</span>
-                </button>
-              </fieldset>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -293,23 +186,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
         </div>
       </section>
 
-      {/* 4. External Integrations */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Integraciones y Estado</h2>
-        <div className="ui-card">
-          <div className="ui-card__row settings-row">
-            <div className="settings-row__copy">
-              <h3 className="settings-row__title">Discord Rich Presence</h3>
-              <p>Muestra tu actividad, workspace y proyecto actual en tu perfil de Discord.</p>
-            </div>
-            <div className="settings-row__control">
-              <span className="settings-badge" data-tone="accent">Próximamente en v0.2</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* 5. Local Privacy & Diagnostics */}
+      {/* Local Privacy & Diagnostics */}
       <section className="settings-group">
         <h2 className="settings-group__title">Privacidad y Diagnósticos</h2>
         <div className="ui-card">
@@ -333,6 +210,8 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
           </div>
         </div>
       </section>
+
+      <PrivacyPolicyCard />
 
       <p className="settings-note settings-footer">Kite Code · Edición Nativa {currentVersion}</p>
     </>

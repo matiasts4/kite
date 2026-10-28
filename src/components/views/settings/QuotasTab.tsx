@@ -103,6 +103,7 @@ export const QuotasTab: React.FC = () => {
   const [expandedWindows, setExpandedWindows] = useState<Record<string, boolean>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [apiKey, setApiKey] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
   const [openCodeStatus, setOpenCodeStatus] = useState<string | null>(null);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
@@ -655,30 +656,43 @@ export const QuotasTab: React.FC = () => {
                             {String(quotas['opencode'].metadata.legacyNote)}
                           </div>
                         ) : null}
-                        <input
-                          className="qt-input"
-                          type="password"
-                          autoComplete="off"
-                          placeholder="API key de OpenCode Go (opcional si OpenCode ya está logueado)"
-                          value={apiKey}
-                          onChange={(e) => setApiKey(e.target.value)}
-                        />
-                        <div className="qt-form__actions">
-                          <button
-                            type="button"
-                            className="qt-button qt-button--primary"
-                            onClick={saveApiKey}
-                          >
-                            Guardar API key
-                          </button>
-                          <button
-                            type="button"
-                            className="qt-button qt-button--ghost"
-                            onClick={clearApiKey}
-                          >
-                            Quitar clave de Kite
-                          </button>
-                          {openCodeStatus ? <span className="qt-hint">{openCodeStatus}</span> : null}
+                        <div className="settings-row settings-row--stacked">
+                          <div className="settings-row__control">
+                            <div className="settings-credential">
+                              <input
+                                className="ui-field"
+                                type={showApiKey ? 'text' : 'password'}
+                                autoComplete="off"
+                                spellCheck={false}
+                                placeholder="API key de OpenCode Go (opcional si OpenCode ya está logueado)"
+                                aria-label="API key de OpenCode Go"
+                                value={apiKey}
+                                onChange={(e) => setApiKey(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="settings-control ui-button"
+                                onClick={() => setShowApiKey((current) => !current)}
+                              >
+                                {showApiKey ? 'Ocultar' : 'Ver'}
+                              </button>
+                              <button
+                                type="button"
+                                className="settings-control ui-button ui-button--primary"
+                                onClick={saveApiKey}
+                              >
+                                Guardar
+                              </button>
+                              <button
+                                type="button"
+                                className="settings-control ui-button"
+                                onClick={clearApiKey}
+                              >
+                                Quitar clave de Kite
+                              </button>
+                            </div>
+                            {openCodeStatus ? <span className="qt-hint">{openCodeStatus}</span> : null}
+                          </div>
                         </div>
                       </div>
                     </div>

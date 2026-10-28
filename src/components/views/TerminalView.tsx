@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import { invokeCommand } from '../../lib/ipc';
 import {
   recordTerminalOutput,
@@ -585,18 +584,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
-    // DOM rows leave a gap through block art. WebGL fills those cells.
-    // A pane that cannot keep a context drops back to DOM on its own.
-    try {
-      const webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => {
-        console.warn('[terminal] WebGL context lost; this pane fell back to the DOM renderer');
-        webglAddon.dispose();
-      });
-      term.loadAddon(webglAddon);
-    } catch (err) {
-      console.warn('[terminal] WebGL renderer unavailable', err);
-    }
 
     term.onScroll(() => {
       if (isResizingRef.current) return;

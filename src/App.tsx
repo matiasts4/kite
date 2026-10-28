@@ -9,6 +9,7 @@ import { CodeWorkspace } from './components/code/CodeWorkspace';
 import { AgentsView } from './components/views/AgentsView';
 import { SettingsView } from './components/views/SettingsView';
 import { OPEN_SETTINGS_EVENT, openSettingsTab } from './lib/settingsNav';
+import { readKitePref, writeKitePref } from './lib/kitePrefs';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from './lib/terminalLinkNav';
 import { ZedStripHost, type ZedCallState } from './components/ZedStrip';
 import { releaseOperatorCapture } from './lib/operator/voice/zedVoice';
@@ -22,6 +23,9 @@ import { useNotifications } from './lib/notifications/useNotifications';
 import { Toaster, registerToastNavigator } from './lib/toast';
 import { ResumeHost } from './components/modals/ResumeHost';
 import { PromptProjectileOverlay } from './components/code/PromptProjectileOverlay';
+import { useGlobalShortcuts } from './lib/shortcuts/useGlobalShortcuts';
+import { getPlatform } from './lib/shortcuts/shortcutsRegistry';
+import { CommandPaletteModal } from './components/modals/CommandPaletteModal';
 import type { Workspace, AgentProfile, BootstrapResponse } from './types';
 import {
   getBootstrap,
@@ -45,7 +49,7 @@ import {
 } from './lib/ipc';
 import { isBrowserTestLane } from './lib/browserTestLane';
 import { loadOperatorConfig, saveOperatorConfig } from './lib/operator/operatorConfig';
-import { startProactiveAgentWatcher } from './lib/operator/proactiveWatcher';
+// import { startProactiveAgentWatcher } from './lib/operator/proactiveWatcher';
 import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
 import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
 import { AppIntro } from './motion/AppIntro';
@@ -113,14 +117,14 @@ export const App: React.FC = () => {
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [appearance, setAppearance] = useState<'dark' | 'light'>(() => {
     try {
-      const saved = localStorage.getItem('bmone.theme');
+      const saved = readKitePref('theme');
       if (saved === 'light' || saved === 'dark') return saved;
     } catch {}
     return 'dark';
   });
   const [palette, setPalette] = useState<string>(() => {
     try {
-      const saved = localStorage.getItem('bmone.palette');
+      const saved = readKitePref('palette');
       if (saved) return saved;
     } catch {}
     return 'kite-dark';
@@ -133,8 +137,8 @@ export const App: React.FC = () => {
     setPalette(effectivePalette);
 
     try {
-      localStorage.setItem('bmone.theme', nextTheme);
-      localStorage.setItem('bmone.palette', effectivePalette);
+      writeKitePref('theme', nextTheme);
+      writeKitePref('palette', effectivePalette);
     } catch {}
 
     document.documentElement.setAttribute('data-theme', nextTheme);
@@ -266,6 +270,8 @@ export const App: React.FC = () => {
   const [isWhatsNewOpen, setIsWhatsNewOpen] = useState<boolean>(false);
   const [isArchivedChatsOpen, setIsArchivedChatsOpen] = useState<boolean>(false);
   const [isSshModalOpen, setIsSshModalOpen] = useState<boolean>(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
+  const appPlatform = getPlatform();
   const [routinesOpen, setRoutinesOpen] = useState<boolean>(false);
   const [zedCallState, setZedCallState] = useState<ZedCallState>({
     isActive: false,
@@ -325,31 +331,8 @@ export const App: React.FC = () => {
     setOperatorOpen((prev) => !prev);
   }, []);
 
-  // Global keyboard shortcuts:
-  // - Ctrl+Shift+K or Cmd+Shift+K: Toggle Asistente Zed (abrir / cerrar)
-  // - Ctrl+Shift+V or Alt+V: Abrir Asistente Zed para dictar si está cerrado
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.repeat) return;
-
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault();
-        setOperatorOpen((prev) => !prev);
-        return;
-      }
-
-      const isVoiceShortcut =
-        ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'v' || e.key === 'V')) ||
-        (e.altKey && (e.key === 'v' || e.key === 'V'));
-
-      if (isVoiceShortcut && !operatorOpen) {
-        e.preventDefault();
-        setOperatorOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [operatorOpen]);
+  // Global keyboard shortcuts: (managed by useGlobalShortcuts)
+// Operator shortcuts are registered in useGlobalShortcuts
 
   const bootstrappedRef = useRef(false);
 
@@ -411,7 +394,7 @@ export const App: React.FC = () => {
           setSidebarVisible(data.preferences.sidebarVisible);
         }
         if (data.preferences.appearance) {
-          const hasLocalTheme = Boolean(localStorage.getItem('bmone.theme'));
+          const hasLocalTheme = Boolean(readKitePref('theme'));
           if (!hasLocalTheme) {
             const app = data.preferences.appearance === 'light' ? 'light' : 'dark';
             const pal =
@@ -484,17 +467,26 @@ export const App: React.FC = () => {
     loadBootstrap();
   }, [loadBootstrap]);
 
-  // Handle global shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Toggle browser/dock with Ctrl+Shift+B
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
-        e.preventDefault();
-        setRightDockVisible((v) => !v);
-      }
-      // Escape closes the topmost overlay
-      if (e.key === 'Escape') {
-        if (isNotificationsOpen) {
+  // Configurable global keyboard shortcuts
+  useGlobalShortcuts({
+    platform: appPlatform,
+    handlers: {
+      'toggle-sidebar': () => {
+        setSidebarVisible((v) => !v);
+      },
+      'open-settings': () => {
+        setSettingsOpen((v) => !v);
+      },
+      'command-palette': () => {
+        setIsCommandPaletteOpen((v) => !v);
+      },
+      'quick-switcher': () => {
+        setIsCommandPaletteOpen((v) => !v);
+      },
+      'back-esc': () => {
+        if (isCommandPaletteOpen) {
+          setIsCommandPaletteOpen(false);
+        } else if (isNotificationsOpen) {
           setIsNotificationsOpen(false);
         } else if (isUsageModalOpen) {
           setIsUsageModalOpen(false);
@@ -504,14 +496,86 @@ export const App: React.FC = () => {
           setIsArchivedChatsOpen(false);
         } else if (isSshModalOpen) {
           setIsSshModalOpen(false);
+        } else if (routinesOpen) {
+          setRoutinesOpen(false);
         } else if (settingsOpen) {
           setSettingsOpen(false);
+        } else if (operatorOpen) {
+          setOperatorOpen(false);
         }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [settingsOpen, isNotificationsOpen, isUsageModalOpen, isWhatsNewOpen, isArchivedChatsOpen, isSshModalOpen]);
+      },
+      'mode-agent': () => {
+        setWorkMode('agent');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+      },
+      'mode-code': () => {
+        setWorkMode('code');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+      },
+      'mode-chat': () => {
+        setWorkMode('chat');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+      },
+      'toggle-dock': () => {
+        setRightDockVisible((v) => !v);
+      },
+      'toggle-diffs': () => {
+        setRightDockVisible(true);
+        window.dispatchEvent(new CustomEvent('kite:open-diffs'));
+      },
+      'toggle-operator': () => {
+        setOperatorOpen((prev) => !prev);
+      },
+      'dictation-toggle': () => {
+        if (!operatorOpen) {
+          setOperatorOpen(true);
+        }
+        window.dispatchEvent(new CustomEvent('kite:toggle-voice'));
+      },
+      'new-terminal': () => {
+        if (workMode !== 'code') {
+          setWorkMode('code');
+          setSettingsOpen(false);
+        }
+        window.dispatchEvent(
+          new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
+        );
+      },
+      'split-vertical': () => {
+        if (workMode !== 'code') {
+          setWorkMode('code');
+          setSettingsOpen(false);
+        }
+        window.dispatchEvent(
+          new CustomEvent('kite:shortcut-pane-action', {
+            detail: { action: 'split-pane', axis: 'vertical' },
+          })
+        );
+      },
+      'split-horizontal': () => {
+        if (workMode !== 'code') {
+          setWorkMode('code');
+          setSettingsOpen(false);
+        }
+        window.dispatchEvent(
+          new CustomEvent('kite:shortcut-pane-action', {
+            detail: { action: 'split-pane', axis: 'horizontal' },
+          })
+        );
+      },
+      'close-pane': () => {
+        window.dispatchEvent(
+          new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'close-pane' } })
+        );
+      },
+      'save-file': () => {
+        window.dispatchEvent(new CustomEvent('kite:save-file'));
+      },
+    },
+  });
 
   useEffect(() => {
     const openSettings = () => setSettingsOpen(true);
@@ -519,8 +583,8 @@ export const App: React.FC = () => {
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
   }, []);
 
-  // S6: speak a concise Spanish status and raise the attention badge when an agent finishes.
-  useEffect(() => startProactiveAgentWatcher(), []);
+  // S6: Proactive agent watcher silenced per user instruction to prevent toast and voice loop on resize
+  // useEffect(() => startProactiveAgentWatcher(), []);
 
   useEffect(() => {
     const handleNavigate = (e: Event) => {
@@ -858,6 +922,7 @@ export const App: React.FC = () => {
             selectedAgentId={selectedAgentId}
             onSessionsChange={handleCodeSessions}
             requestedTabId={requestedCodeTabId}
+            onTabRequestedHandled={() => setRequestedCodeTabId(null)}
           />
         );
       case 'chat':
@@ -937,6 +1002,7 @@ export const App: React.FC = () => {
           }}
           sidebarVisible={sidebarVisible}
           onToggleSidebar={() => setSidebarVisible((v) => !v)}
+          platform={appPlatform}
           browserVisible={rightDockVisible}
           onToggleBrowser={() => setRightDockVisible((v) => !v)}
           operatorVisible={operatorOpen}
@@ -1187,6 +1253,7 @@ export const App: React.FC = () => {
                     selectedAgentId={selectedAgentId}
                     onSessionsChange={handleCodeSessions}
                     requestedTabId={requestedCodeTabId}
+                    onTabRequestedHandled={() => setRequestedCodeTabId(null)}
                     newSessionRequest={newSessionRequest}
                   />
                 </div>
@@ -1253,7 +1320,8 @@ export const App: React.FC = () => {
                 isArchivedChatsOpen ||
                 isSshModalOpen ||
                 isNotificationsOpen ||
-                settingsOpen
+                settingsOpen ||
+                isCommandPaletteOpen
               }
               workspaces={workspaces}
               onSelectWorkspace={setSelectedWorkspaceId}
@@ -1269,6 +1337,67 @@ export const App: React.FC = () => {
         </div>
 
         {/* Auxiliary Dialogs */}
+        <CommandPaletteModal
+          isOpen={isCommandPaletteOpen}
+          onClose={() => setIsCommandPaletteOpen(false)}
+          agents={agents}
+          onLaunchAgent={(engineId, displayName) => {
+            if (workMode !== 'code') {
+              setWorkMode('code');
+              setSettingsOpen(false);
+            }
+            window.dispatchEvent(
+              new CustomEvent('kite:shortcut-pane-action', {
+                detail: { action: 'launch-agent', engineId, engineName: displayName },
+              })
+            );
+          }}
+          onSelectAgent={(agentId) => {
+            setSelectedAgentId(agentId);
+            setWorkMode('agent');
+            setSettingsOpen(false);
+          }}
+          onSelectMode={(mode) => {
+            setWorkMode(mode);
+            setSettingsOpen(false);
+            setRoutinesOpen(false);
+          }}
+          onToggleSidebar={() => setSidebarVisible((v) => !v)}
+          onToggleDock={() => setRightDockVisible((v) => !v)}
+          onToggleOperator={() => setOperatorOpen((prev) => !prev)}
+          onToggleVoice={() => {
+            if (!operatorOpen) setOperatorOpen(true);
+            window.dispatchEvent(new CustomEvent('kite:toggle-voice'));
+          }}
+          onOpenSettings={(tab) => {
+            setSettingsOpen(true);
+            if (tab) openSettingsTab(tab);
+          }}
+          onNewTerminal={() => {
+            if (workMode !== 'code') setWorkMode('code');
+            window.dispatchEvent(
+              new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
+            );
+          }}
+          onSplitPane={(axis) => {
+            if (workMode !== 'code') setWorkMode('code');
+            window.dispatchEvent(
+              new CustomEvent('kite:shortcut-pane-action', {
+                detail: { action: 'split-pane', axis },
+              })
+            );
+          }}
+          onClosePane={() => {
+            window.dispatchEvent(
+              new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'close-pane' } })
+            );
+          }}
+          onSaveFile={() => {
+            window.dispatchEvent(new CustomEvent('kite:save-file'));
+          }}
+          platform={appPlatform}
+        />
+
         <UsageDashboardModal
           isOpen={isUsageModalOpen}
           onClose={() => setIsUsageModalOpen(false)}
@@ -1373,7 +1502,7 @@ export const App: React.FC = () => {
                       setNotificationsAnchor(null);
                       setSettingsOpen(true);
                       try {
-                        localStorage.setItem('bmone.settingsTab', 'notifications');
+                        writeKitePref('settingsTab', 'notifications');
                       } catch (_) {}
                     }}
                   />

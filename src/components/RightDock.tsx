@@ -548,8 +548,21 @@ export const RightDock: React.FC<RightDockProps> = ({
         setActiveTabId('diffs');
       }
     };
+    const handleOpenDiffsEvent = () => {
+      setTabs((prev) => {
+        if (!prev.some((t) => t.id === 'diffs')) {
+          return [...prev, { id: 'diffs', kind: 'diffs' }];
+        }
+        return prev;
+      });
+      setActiveTabId('diffs');
+    };
     window.addEventListener('keydown', handleGlobalShortcuts);
-    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+    window.addEventListener('kite:open-diffs', handleOpenDiffsEvent);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalShortcuts);
+      window.removeEventListener('kite:open-diffs', handleOpenDiffsEvent);
+    };
   }, []);
 
   // Persistence for tabs & active tab

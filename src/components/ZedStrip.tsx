@@ -349,8 +349,15 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       }
     };
 
+    const handleVoiceEvent = () => {
+      handleToggleVoice();
+    };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('kite:toggle-voice', handleVoiceEvent);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('kite:toggle-voice', handleVoiceEvent);
+    };
   }, [handleToggleVoice, onEndCall, voice]);
 
   // Keep orb within bounds on window resize

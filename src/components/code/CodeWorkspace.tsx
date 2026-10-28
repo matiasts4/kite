@@ -197,6 +197,7 @@ export interface CodeWorkspaceProps {
     sessions: Array<{ id: string; title: string; paneCount: number; isActive: boolean }>
   ) => void;
   requestedTabId?: string | null;
+  onTabRequestedHandled?: () => void;
   newSessionRequest?: number;
 }
 
@@ -211,6 +212,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   availability,
   onSessionsChange,
   requestedTabId = null,
+  onTabRequestedHandled,
   newSessionRequest = 0,
 }) => {
   const selectedWorkspace =
@@ -374,13 +376,18 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
   useEffect(() => {
     if (!selectedWorkspace?.id || !onSessionsChange) return;
+    if (layout.workspaceId && layout.workspaceId !== selectedWorkspace.id) return;
+    const resolvedActiveId =
+      layout.tabs.find((t) => t.id === layout.activeTabId)?.id ||
+      layout.tabs[0]?.id ||
+      null;
     onSessionsChange(
       selectedWorkspace.id,
       layout.tabs.map((tab) => ({
         id: tab.id,
         title: tab.title,
         paneCount: countLeaves(tab.root),
-        isActive: tab.id === layout.activeTabId,
+        isActive: tab.id === resolvedActiveId,
       }))
     );
   }, [layout, selectedWorkspace?.id, onSessionsChange]);
@@ -390,10 +397,18 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     const current = latestLayoutRef.current;
     if (current.workspaceId !== selectedWorkspace.id) return;
     const tab = current.tabs.find((item) => item.id === requestedTabId);
-    if (!tab || current.activeTabId === requestedTabId) return;
+    if (!tab) {
+      onTabRequestedHandled?.();
+      return;
+    }
+    if (current.activeTabId === requestedTabId) {
+      onTabRequestedHandled?.();
+      return;
+    }
     setFocusedLeafId(tab.focusedLeafId);
     void persistLayout({ ...current, activeTabId: requestedTabId });
-  }, [requestedTabId, selectedWorkspace?.id, layout, persistLayout]);
+    onTabRequestedHandled?.();
+  }, [requestedTabId, selectedWorkspace?.id, layout, persistLayout, onTabRequestedHandled]);
 
   const handleFocusLeaf = useCallback(
     (leafId: string) => {
@@ -1272,8 +1287,38 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       }
     };
 
+    const handleShortcutPaneAction = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{ action: string; axis?: 'vertical' | 'horizontal' }>
+      ).detail;
+      if (!detail?.action) return;
+
+      const current = latestLayoutRef.current;
+      const tab = current.tabs.find((t) => t.id === current.activeTabId) || current.tabs[0];
+      if (!tab) return;
+
+      if (detail.action === 'new-terminal') {
+        handleLaunchTerminal();
+      } else if (detail.action === 'launch-agent') {
+        const payload = detail as { action: string; engineId?: string; engineName?: string };
+        if (payload.engineId) {
+          handleLaunchAgent(payload.engineId, payload.engineName || payload.engineId);
+        }
+      } else if (detail.action === 'split-pane') {
+        const leafId = focusedLeafId || resolveLeafId(tab);
+        handleSplitLeaf(leafId, detail.axis || 'vertical');
+      } else if (detail.action === 'close-pane') {
+        const leafId = focusedLeafId || resolveLeafId(tab);
+        handleCloseLeaf(leafId);
+      }
+    };
+
     window.addEventListener('kite:operator-pane-layout', handleOperatorPaneLayout);
-    return () => window.removeEventListener('kite:operator-pane-layout', handleOperatorPaneLayout);
+    window.addEventListener('kite:shortcut-pane-action', handleShortcutPaneAction);
+    return () => {
+      window.removeEventListener('kite:operator-pane-layout', handleOperatorPaneLayout);
+      window.removeEventListener('kite:shortcut-pane-action', handleShortcutPaneAction);
+    };
   });
 
   const handleDividerPointerDown = (
@@ -1544,7 +1589,11 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       data-fullscreen={layout.fullscreenLeafId !== null || undefined}
     >
       {layout.tabs.map((tab) => {
-        const isActive = tab.id === layout.activeTabId;
+        const resolvedActiveId =
+          layout.tabs.find((t) => t.id === layout.activeTabId)?.id ||
+          layout.tabs[0]?.id ||
+          null;
+        const isActive = tab.id === resolvedActiveId;
         return (
           <div
             key={tab.id}

@@ -1,6 +1,6 @@
 # Terminal Ghosting and Redraw — Attempt Log
 
-Status: E1 follow-up — new panes stayed blank because the PTY was spawned before the view measured. Slot reservation no longer starts the process. Visual pass is open again.
+Status: S-launch passed on 2026-10-28 (three-up Grok + OpenCode, coherent first frame). S-ghost is the open bug. E2 stops local repaints from freezing a damaged OpenCode frame.
 Branch: `feat/ui-composer`.
 Rule: one hypothesis per commit. Do not mix this work with unrelated dirty files.
 
@@ -94,7 +94,7 @@ A minimum pane width would hide narrow layouts. It would not make a 40-column te
 
 ---
 
-## Next experiments (not started)
+## Experiments
 
 Each one is its own commit on this branch, with the result written back here. Stop after the first experiment that makes S-launch pass, and only then retest S-ghost.
 
@@ -131,16 +131,30 @@ How to check, without mixing other branch work:
 4. Put three terminals in one view. The welcome screen should be readable before any manual resize. "Starting ConPTY session..." may show for a fraction of a second while the pane settles. That wait is this attempt.
 5. If a brand-new terminal is blank or still torn, E1 failed. Do not continue to E2 on that result.
 
+Visual pass (2026-10-28, after `41c1d60`): pass for S-launch. Three panes in one view — Orion running Grok, Vega and Titan running OpenCode — open with aligned text. The Grok welcome menu (`Resume session`, `New worktree`, `Changelog`, `Quit`, `Grok 4.7 is here!`) is intact, including the footer. OpenCode shows a task list and a diff in columns, not torn across the pane. This is the first clean mark. It does not prove S-ghost: that bug shows up after the session has been painting for a while, and a single fresh frame cannot clear it.
+
 ### E2 — One settled resize, no local repaint fight
 
-Only if E1 is clean and OpenCode still ghosts over minutes.
+Status: implemented in this commit. Visual pass for a long OpenCode session is open.
 
-- Keep xterm in ConPTY mode so it does not reflow on its own.
-- After the last size change settles, send one `resize_terminal`.
-- Do not refresh the canvas in the middle of a polled chunk.
-- Confirm a full app redraw happens once. If OpenCode ignores a same-size resize, change the size by a real row or column, not by refreshing xterm.
+S-launch is clean. S-ghost is still the open report: OpenCode keeps stuck headers and merged characters until a manual resize or a remount. Grok redraws full frames, so it sheds the same damage.
 
-Pass: a long OpenCode session no longer keeps stuck headers, and a resize is not required to read the screen.
+What this changes:
+
+- xterm stays in ConPTY mode. It does not reflow on its own.
+- A fit still waits until the host box has settled, then sends one `resize_terminal` when the grid actually changed.
+- That fit waits until the current polled chunk has finished `term.write`. A resize no longer lands in the middle of a frame.
+- Automatic `term.refresh()` is gone, including the alt-screen path and the click-to-refresh on the canvas. Refresh paints whatever xterm already stored. OpenCode will not reconstruct that frame.
+- A manual redraw command does not refresh locally. It steps the PTY one row away and back, so OpenCode gets a real size change and repaints. A same-size resize is not enough.
+
+Pass: use one OpenCode session for several minutes, with normal output, and old rows do not stay pinned. A resize is not required to read the screen. If characters still collide on a grid that never changed size, that is E3, not another refresh.
+
+How to check:
+
+1. Stay on `feat/ui-composer`. This attempt is TypeScript only. No Rust rebuild and no Vite cache wipe.
+2. Close Kite. `npm run app` from `E:\kite`.
+3. Open a new OpenCode terminal. Confirm the first frame is still coherent (S-launch must not regress).
+4. Use that session for several minutes. Stuck headers, leftover tables, and merged words are an E2 failure.
 
 ### E3 — Encoding, only if characters still collide
 
@@ -162,4 +176,4 @@ Only if the grid is stable and in-place updates still merge glyphs.
 
 ## Rollback
 
-Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. E1's stable-host wait is `5ffdb58`. The blank-pane follow-up is the commit that stops `launch_workspace_terminals` from spawning. Revert that commit to restore the early 80×24 spawn. Later experiments must say which commit to revert.
+Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. E1's stable-host wait is `5ffdb58`. The blank-pane follow-up is `41c1d60`. Revert `41c1d60` to restore the early 80×24 spawn. E2 is the commit that stops automatic `term.refresh()` and defers fit until the polled write finishes. Revert that commit to restore local alt-screen refresh. Later experiments must say which commit to revert.

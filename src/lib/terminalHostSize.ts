@@ -10,9 +10,6 @@ export const HOST_CONFIRM_MS = 48;
 /** If the box never repeats, use the latest usable size instead of spawning blind. */
 export const HOST_STABLE_CAP_MS = 800;
 
-/** Skip canvas refresh while the CLI is painting its first frame. */
-export const TERMINAL_FIRST_PAINT_MS = 2000;
-
 export interface HostBox {
   width: number;
   height: number;

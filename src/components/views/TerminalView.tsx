@@ -10,7 +10,6 @@ import {
 } from '../../lib/terminalRegistry';
 import {
   hostBoxIsUsable,
-  TERMINAL_FIRST_PAINT_MS,
   waitForStableHost,
 } from '../../lib/terminalHostSize';
 import { openFileInRightDock } from '../../lib/filePreviewNav';
@@ -297,8 +296,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastColsRef = useRef<number | null>(null);
   const lastRowsRef = useRef<number | null>(null);
   const ptyOpenRef = useRef(false);
-  const suppressRefreshUntilRef = useRef(0);
   const startGenRef = useRef(0);
+  /** Polled chunks still inside xterm.write. A fit waits until this is 0. */
+  const writeActiveRef = useRef(0);
+  const fitDeferredRef = useRef(false);
+  const fitNowRef = useRef<() => void>(() => {});
   const fitWatchRef = useRef(0);
   const scheduleStableFitRef = useRef<() => void>(() => {});
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -383,12 +385,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const triggerImmediatePollRef = useRef<() => void>(() => {});
 
   const enqueueWrite = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
+    writeActiveRef.current += 1;
+    const releaseWrite = () => {
+      writeActiveRef.current = Math.max(0, writeActiveRef.current - 1);
+      if (writeActiveRef.current === 0 && fitDeferredRef.current) {
+        fitDeferredRef.current = false;
+        queueMicrotask(() => fitNowRef.current());
+      }
+    };
     const next = writeQueueRef.current.then(
       () =>
         new Promise<void>((resolve) => {
           const term = termRef.current;
           if (!term) {
             onFlushed?.();
+            releaseWrite();
             resolve();
             return;
           }
@@ -397,6 +408,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             if (!finished) {
               finished = true;
               onFlushed?.();
+              releaseWrite();
               resolve();
             }
           };
@@ -414,7 +426,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }
         })
     );
-    writeQueueRef.current = next.catch(() => {});
+    writeQueueRef.current = next.catch(() => {
+      releaseWrite();
+    });
     return writeQueueRef.current;
   }, []);
 
@@ -422,15 +436,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const host = containerRef.current;
     if (!host || !fitAddonRef.current || !termRef.current || !ptyOpenRef.current) return;
     if (!hostBoxIsUsable(host.clientWidth, host.clientHeight)) return;
+    // A polled chunk owns the frame. Fitting now would SIGWINCH in the middle of it.
+    if (writeActiveRef.current > 0) {
+      fitDeferredRef.current = true;
+      return;
+    }
     try {
       const term = termRef.current;
       const wasAtBottom = isAtBottomRef.current || linesFromBottomRef.current <= 3;
       const savedLinesFromBottom = linesFromBottomRef.current;
-
-      const refreshIfAllowed = (target: Terminal) => {
-        if (Date.now() < suppressRefreshUntilRef.current) return;
-        target.refresh(0, Math.max(0, target.rows - 1));
-      };
 
       isResizingRef.current = true;
       try {
@@ -443,11 +457,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const restoreScroll = () => {
         if (!termRef.current) return;
-        // In alternate screen buffer (TUIs like OpenCode, vim, nano), baseY is 0 and scrolling must not be forced
-        if (termRef.current.buffer.active.type === 'alternate') {
-          refreshIfAllowed(termRef.current);
-          return;
-        }
+        // Alternate screen (OpenCode, Grok, vim) paints its own cells. A local
+        // refresh redraws a damaged buffer and the app never reconstructs it.
+        if (termRef.current.buffer.active.type === 'alternate') return;
         if (wasAtBottom) {
           termRef.current.scrollToBottom();
         } else {
@@ -470,18 +482,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       lastColsRef.current = cols;
       lastRowsRef.current = rows;
+      const sessionId = sessionIdRef.current;
       invokeCommand('resize_terminal', {
-        sessionId: sessionIdRef.current,
+        sessionId,
         columns: cols,
         rows: rows,
       })
         .then(() => {
+          if (sessionIdRef.current !== sessionId) return;
+          if (termRef.current?.buffer.active.type === 'alternate') return;
           restoreScroll();
-          if (termRef.current) refreshIfAllowed(termRef.current);
         })
         .catch(() => {});
     } catch {}
   }, []);
+  fitNowRef.current = fitTerminal;
 
   const scheduleStableFit = useCallback(() => {
     const host = containerRef.current;
@@ -1018,7 +1033,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (!stillCurrent()) return;
 
       ptyOpenRef.current = true;
-      suppressRefreshUntilRef.current = Date.now() + TERMINAL_FIRST_PAINT_MS;
 
       if (term && !started?.attachedToExisting && (hadLiveElement || opts?.restart)) {
         term.reset();
@@ -1143,17 +1157,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (detail.command === 'clear') handleClear();
       if (detail.command === 'refresh' || detail.command === 'redraw') {
         const term = termRef.current;
-        if (term) {
-          suppressRefreshUntilRef.current = 0;
+        const sessionId = sessionIdRef.current;
+        if (term && sessionId && term.cols > 1 && term.rows > 1) {
           fitTerminal();
-          term.refresh(0, term.rows - 1);
-          if (sessionIdRef.current) {
-            void invokeCommand('resize_terminal', {
-              sessionId: sessionIdRef.current,
-              columns: term.cols,
-              rows: term.rows,
-            }).catch(() => {});
-          }
+          // Same-size resize is a no-op for OpenCode. Step one row off and
+          // back so the app repaints. Do not refresh the local canvas: that
+          // freezes the ghosted frame.
+          const cols = term.cols;
+          const rows = term.rows;
+          const nudgedRows = rows > 2 ? rows - 1 : rows + 1;
+          void invokeCommand('resize_terminal', {
+            sessionId,
+            columns: cols,
+            rows: nudgedRows,
+          })
+            .then(() => writeQueueRef.current)
+            .then(() => {
+              if (sessionIdRef.current !== sessionId) return;
+              return invokeCommand('resize_terminal', {
+                sessionId,
+                columns: cols,
+                rows,
+              });
+            })
+            .then(() => {
+              if (sessionIdRef.current !== sessionId) return;
+              lastColsRef.current = cols;
+              lastRowsRef.current = rows;
+            })
+            .catch(() => {});
         }
         return;
       }
@@ -1571,15 +1603,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           .filter(Boolean)
           .join(' ')}
         onClick={() => {
-          const term = termRef.current;
-          term?.focus();
-          if (
-            term &&
-            term.buffer.active.type === 'alternate' &&
-            Date.now() >= suppressRefreshUntilRef.current
-          ) {
-            term.refresh(0, Math.max(0, term.rows - 1));
-          }
+          termRef.current?.focus();
         }}
       >
         <div ref={containerRef} className="terminal-surface-host" />

@@ -15,7 +15,7 @@ vi.mock('../../hooks/useAppUpdater', () => ({
 }));
 
 describe('SidebarFooter Component', () => {
-  it('renders account name, plan tier, and credits when provided', () => {
+  it('renders account name without plan tier or credits', () => {
     const onOpenSettings = vi.fn();
     const onToggleAppearance = vi.fn();
 
@@ -35,9 +35,9 @@ describe('SidebarFooter Component', () => {
     expect(screen.getByText('Kite Developer')).toBeInTheDocument();
     expect(screen.getByText('K')).toBeInTheDocument();
 
-    // Verifies credits and subscription plan are displayed
-    expect(screen.getByText('PRO')).toBeInTheDocument();
-    expect(screen.getByText('10,000')).toBeInTheDocument();
+    // Verifies credits and subscription plan are NOT displayed in the sidebar
+    expect(screen.queryByText('PRO')).not.toBeInTheDocument();
+    expect(screen.queryByText('10,000')).not.toBeInTheDocument();
   });
 
   it('falls back to Kite and K avatar when account name is not provided', () => {

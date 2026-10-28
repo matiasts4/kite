@@ -436,6 +436,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
     const isExpanded = expandedWorkspaces.has(ws.id);
     const sessions = workspaceSessions?.[ws.id] ?? [];
     const sessionCount = sessions.length;
+    const hasExplicitActive = sessions.some((t) => t.isActive === true);
     const isRenaming = renamingWorkspaceId === ws.id;
     const sshInfo = (ws as Workspace & { ssh?: { host: string; folder: string } }).ssh;
 
@@ -605,7 +606,9 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
           {isExpanded && sessions.length > 0 && (
             <fieldset aria-label={`${ws.displayName} tabs`} className="workspace-tabs">
               {sessions.map((tab, tabIndex) => {
-                const isTabActive = tab.isActive ?? isSelected;
+                const isTabActive =
+                  isSelected &&
+                  (hasExplicitActive ? tab.isActive === true : tabIndex === 0);
                 const isTabRenaming = renamingTabId === tab.id;
 
                 if (isTabRenaming) {

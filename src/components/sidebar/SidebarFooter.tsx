@@ -11,8 +11,11 @@ import { useAppUpdater } from '../../hooks/useAppUpdater';
 
 export interface SidebarFooterProps {
   accountName?: string;
+  /** @deprecated Plans and credits are no longer displayed in the sidebar */
   accountTier?: string;
+  /** @deprecated Plans and credits are no longer displayed in the sidebar */
   accountTierPaid?: boolean;
+  /** @deprecated Plans and credits are no longer displayed in the sidebar */
   creditsLabel?: string;
   appearance: 'dark' | 'light';
   onToggleAppearance: () => void;
@@ -21,9 +24,6 @@ export interface SidebarFooterProps {
 
 export const SidebarFooter: React.FC<SidebarFooterProps> = ({
   accountName,
-  accountTier,
-  accountTierPaid,
-  creditsLabel,
   appearance,
   onToggleAppearance,
   onOpenSettings,
@@ -73,31 +73,6 @@ export const SidebarFooter: React.FC<SidebarFooterProps> = ({
             >
               {accountName || 'Kite'}
             </span>
-            {(accountTier || creditsLabel) && (
-              <span
-                className="account-row__meta"
-                style={{
-                  fontSize: '10px',
-                  lineHeight: '12px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  color: accountTierPaid ? 'var(--accent, #5c8fff)' : 'var(--text-secondary)',
-                  fontWeight: 600,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {accountTier && <span>{accountTier}</span>}
-                {accountTier && creditsLabel && <span style={{ opacity: 0.5 }}>·</span>}
-                {creditsLabel && (
-                  <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
-                    {creditsLabel}
-                  </span>
-                )}
-              </span>
-            )}
           </span>
         </button>
 

@@ -1,8 +1,8 @@
 # Terminal Ghosting and Redraw — Attempt Log
 
-Status: S-launch passed. E2 did not clear S-ghost. E3 sets the cell line height to 1 so block art has no gap between rows. Visual pass for that is open.
-Branch: `feat/ui-composer`.
-Rule: one hypothesis per commit. Do not mix this work with unrelated dirty files.
+Status: not a general terminal failure. See `odd/tasks/terminal-session-artifact.md`. One saved OpenCode session reproduces the artifacts in every pane where that session is opened. Other sessions on this branch stay clean. The experiments below were scored while that session was the sample, so they are not a verdict on the rest of the terminal.
+Branch: `feat/ui-composer` at `2053249`.
+Rule: do not reopen that session to judge a new terminal change. If a later pass debugs the session itself, keep one hypothesis per commit.
 
 Visual checks the user cares about:
 

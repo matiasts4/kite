@@ -8,6 +8,11 @@ import {
   waitForTerminalReady,
   markTerminalPromptInjected,
 } from '../../lib/terminalRegistry';
+import {
+  hostBoxIsUsable,
+  TERMINAL_FIRST_PAINT_MS,
+  waitForStableHost,
+} from '../../lib/terminalHostSize';
 import { openFileInRightDock } from '../../lib/filePreviewNav';
 import {
   extractTerminalLinks,
@@ -291,6 +296,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const resizeTimerRef = useRef<number | null>(null);
   const lastColsRef = useRef<number | null>(null);
   const lastRowsRef = useRef<number | null>(null);
+  const ptyOpenRef = useRef(false);
+  const suppressRefreshUntilRef = useRef(0);
+  const startGenRef = useRef(0);
+  const fitWatchRef = useRef(0);
+  const scheduleStableFitRef = useRef<() => void>(() => {});
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const utf8DecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
   const onDataDisposableRef = useRef<{ dispose: () => void } | null>(null);
@@ -408,13 +418,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return writeQueueRef.current;
   }, []);
 
-  const fitTerminal = useCallback((immediate = false) => {
-    if (!containerRef.current || !fitAddonRef.current || !termRef.current) return;
-    if (containerRef.current.clientWidth === 0 || containerRef.current.clientHeight === 0) return;
+  const fitTerminal = useCallback(() => {
+    const host = containerRef.current;
+    if (!host || !fitAddonRef.current || !termRef.current || !ptyOpenRef.current) return;
+    if (!hostBoxIsUsable(host.clientWidth, host.clientHeight)) return;
     try {
       const term = termRef.current;
       const wasAtBottom = isAtBottomRef.current || linesFromBottomRef.current <= 3;
       const savedLinesFromBottom = linesFromBottomRef.current;
+
+      const refreshIfAllowed = (target: Terminal) => {
+        if (Date.now() < suppressRefreshUntilRef.current) return;
+        target.refresh(0, Math.max(0, target.rows - 1));
+      };
 
       isResizingRef.current = true;
       try {
@@ -429,7 +445,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         if (!termRef.current) return;
         // In alternate screen buffer (TUIs like OpenCode, vim, nano), baseY is 0 and scrolling must not be forced
         if (termRef.current.buffer.active.type === 'alternate') {
-          termRef.current.refresh(0, termRef.current.rows - 1);
+          refreshIfAllowed(termRef.current);
           return;
         }
         if (wasAtBottom) {
@@ -448,42 +464,38 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (cols <= 0 || rows <= 0 || !sessionIdRef.current) return;
       if (cols === lastColsRef.current && rows === lastRowsRef.current) return;
 
-      const sendResize = () => {
+      if (resizeTimerRef.current !== null) {
+        clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
-        if (!termRef.current || !sessionIdRef.current) return;
-        const c = termRef.current.cols;
-        const r = termRef.current.rows;
-        if (c <= 0 || r <= 0) return;
-        if (c === lastColsRef.current && r === lastRowsRef.current) return;
-        lastColsRef.current = c;
-        lastRowsRef.current = r;
-        invokeCommand('resize_terminal', {
-          sessionId: sessionIdRef.current,
-          columns: c,
-          rows: r,
-        })
-          .then(() => {
-            restoreScroll();
-            termRef.current?.refresh(0, termRef.current.rows - 1);
-          })
-          .catch(() => {});
-      };
-
-      if (immediate || lastColsRef.current === null) {
-        if (resizeTimerRef.current !== null) {
-          clearTimeout(resizeTimerRef.current);
-          resizeTimerRef.current = null;
-        }
-        sendResize();
-      } else {
-        if (resizeTimerRef.current !== null) {
-          clearTimeout(resizeTimerRef.current);
-        }
-        // Swift 20ms debounce so ConPTY geometry matches before fast-starting CLI outputs banners
-        resizeTimerRef.current = window.setTimeout(sendResize, 20);
       }
+      lastColsRef.current = cols;
+      lastRowsRef.current = rows;
+      invokeCommand('resize_terminal', {
+        sessionId: sessionIdRef.current,
+        columns: cols,
+        rows: rows,
+      })
+        .then(() => {
+          restoreScroll();
+          if (termRef.current) refreshIfAllowed(termRef.current);
+        })
+        .catch(() => {});
     } catch {}
   }, []);
+
+  const scheduleStableFit = useCallback(() => {
+    const host = containerRef.current;
+    if (!host || !ptyOpenRef.current) return;
+    const watch = ++fitWatchRef.current;
+    void waitForStableHost(
+      host,
+      () => fitWatchRef.current !== watch || !isMountedRef.current,
+    ).then((box) => {
+      if (!box || fitWatchRef.current !== watch || !ptyOpenRef.current) return;
+      fitTerminal();
+    });
+  }, [fitTerminal]);
+  scheduleStableFitRef.current = scheduleStableFit;
 
   const initTerminal = useCallback((sessionKey?: string) => {
     if (!containerRef.current) return null;
@@ -780,17 +792,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [stopPolling, enqueueWrite, workspaceId, initialEngine, customTitle]);
 
   const startSession = useCallback(async (selectedEngine?: string, opts?: { restart?: boolean }) => {
+    const gen = ++startGenRef.current;
+    fitWatchRef.current += 1;
+    ptyOpenRef.current = false;
+    const stillCurrent = () => isMountedRef.current && startGenRef.current === gen;
+
     stopPolling();
 
     const currentEngine = selectedEngine ?? engineRef.current;
     const previousSessionId = propSessionId || sessionIdRef.current || `term-${Date.now()}`;
     let newSessionId = previousSessionId;
-    let restartedAgent = false;
+    let pendingAgentRestart: { previousSessionId: string; nextSessionId: string } | null = null;
 
     if (opts?.restart && isAgentEngine(currentEngine)) {
       const nextSessionId = globalThis.crypto.randomUUID();
-      const cols = termRef.current?.cols || 80;
-      const rows = termRef.current?.rows || 24;
       const live = liveTerms.get(previousSessionId);
       if (live) {
         live.term.dispose();
@@ -800,29 +815,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         termRef.current = null;
         fitAddonRef.current = null;
       }
-      try {
-        await invokeCommand('restart_agent_terminal_for_autopilot', {
-          oldSessionId: previousSessionId,
-          newSessionId: nextSessionId,
-          agentId: agentIdRef.current,
-          paneId: paneIdRef.current,
-          runId: globalThis.crypto.randomUUID(),
-          generation: generationRef.current,
-          prompt: `Continue with ${currentEngine}`.slice(0, 2000),
-          columns: cols,
-          rows: rows,
-        });
-        generationRef.current += 1;
-        restartedSessions.set(previousSessionId, nextSessionId);
-        if (propSessionId) restartedSessions.set(propSessionId, nextSessionId);
-        newSessionId = nextSessionId;
-        restartedAgent = true;
-      } catch (err) {
-        console.error('Failed to restart agent terminal:', err);
-      }
+      pendingAgentRestart = { previousSessionId, nextSessionId };
+      newSessionId = nextSessionId;
     }
 
-    if (opts?.restart && !restartedAgent) {
+    if (opts?.restart && !pendingAgentRestart) {
       const live = liveTerms.get(previousSessionId);
       if (live) {
         live.term.dispose();
@@ -923,22 +920,78 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       term.focus();
     }
 
-    // Probe real container dimensions before spawning ConPTY to eliminate 80x24 mismatch
-    if (term && fitAddonRef.current && containerRef.current && containerRef.current.clientWidth > 0) {
-      try {
-        fitAddonRef.current.fit();
-      } catch {}
+    if (!stillCurrent()) return;
+
+    const host = containerRef.current;
+    if (!host || !term || !fitAddonRef.current) {
+      if (stillCurrent()) setStatus('idle');
+      return;
     }
 
     try {
-      const cols = term?.cols && term.cols > 0 ? term.cols : 80;
-      const rows = term?.rows && term.rows > 0 ? term.rows : 24;
-      lastColsRef.current = cols;
-      lastRowsRef.current = rows;
+      const fontsReady = document.fonts?.ready;
+      if (fontsReady) {
+        await Promise.race([
+          fontsReady.then(() => undefined).catch(() => undefined),
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 400);
+          }),
+        ]);
+      }
+      if (!stillCurrent()) return;
+
+      const readGrid = () => {
+        if (!fitAddonRef.current || !termRef.current) return null;
+        try {
+          fitAddonRef.current.fit();
+        } catch {
+          return null;
+        }
+        const cols = termRef.current.cols;
+        const rows = termRef.current.rows;
+        if (cols <= 0 || rows <= 0) return null;
+        return { cols, rows };
+      };
+
+      let grid: { cols: number; rows: number } | null = null;
+      while (stillCurrent() && !grid) {
+        const stable = await waitForStableHost(host, () => !stillCurrent());
+        if (!stillCurrent()) return;
+        if (!stable) continue;
+        grid = readGrid();
+      }
+      if (!grid || !stillCurrent()) return;
+
+      lastColsRef.current = grid.cols;
+      lastRowsRef.current = grid.rows;
 
       const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
+      let restartedAgent = false;
+      if (pendingAgentRestart) {
+        try {
+          await invokeCommand('restart_agent_terminal_for_autopilot', {
+            oldSessionId: pendingAgentRestart.previousSessionId,
+            newSessionId: pendingAgentRestart.nextSessionId,
+            agentId: agentIdRef.current,
+            paneId: paneIdRef.current,
+            runId: globalThis.crypto.randomUUID(),
+            generation: generationRef.current,
+            prompt: `Continue with ${currentEngine}`.slice(0, 2000),
+            columns: grid.cols,
+            rows: grid.rows,
+          });
+          generationRef.current += 1;
+          restartedSessions.set(pendingAgentRestart.previousSessionId, pendingAgentRestart.nextSessionId);
+          if (propSessionId) {
+            restartedSessions.set(propSessionId, pendingAgentRestart.nextSessionId);
+          }
+          restartedAgent = true;
+        } catch (err) {
+          console.error('Failed to restart agent terminal:', err);
+        }
+      }
       const started = restartedAgent
-        ? { attachedToExisting: false, scrollbackBase64: undefined }
+        ? { attachedToExisting: false, scrollbackBase64: undefined as string | undefined }
         : await invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>(
             propSessionId && !opts?.restart ? 'attach_terminal' : 'start_terminal',
             propSessionId && !opts?.restart
@@ -948,8 +1001,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   engine: currentEngine,
                   workspaceId,
                   paneId: paneIdRef.current,
-                  columns: cols,
-                  rows: rows,
+                  columns: grid.cols,
+                  rows: grid.rows,
                 }
               : {
                   sessionId: newSessionId,
@@ -958,25 +1011,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   workspaceId,
                   paneId: paneIdRef.current,
                   confirmedByBuilder: true,
-                  columns: cols,
-                  rows: rows,
+                  columns: grid.cols,
+                  rows: grid.rows,
                 },
           );
-      if (term && !started?.attachedToExisting) {
-        if (opts?.restart) {
-          term.reset();
-        }
-        fitTerminal(true);
+      if (!stillCurrent()) return;
+
+      ptyOpenRef.current = true;
+      suppressRefreshUntilRef.current = Date.now() + TERMINAL_FIRST_PAINT_MS;
+
+      if (term && !started?.attachedToExisting && (hadLiveElement || opts?.restart)) {
+        term.reset();
+      }
+      if (started?.attachedToExisting) {
+        void invokeCommand('resize_terminal', {
+          sessionId: newSessionId,
+          columns: grid.cols,
+          rows: grid.rows,
+        }).catch(() => {});
       } else if (!hadLiveElement && started?.scrollbackBase64 && term) {
         const historyBytes = base64ToUint8Array(started.scrollbackBase64);
         if (historyBytes.length > 0) {
-          await enqueueWrite(historyBytes, () => {
-            fitTerminal();
-          });
+          await enqueueWrite(historyBytes);
+          if (!stillCurrent()) return;
         }
       }
 
-      if (!isMountedRef.current || sessionIdRef.current !== newSessionId) {
+      scheduleStableFitRef.current();
+
+      if (!stillCurrent()) {
         return;
       }
 
@@ -995,7 +1058,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         term?.write(`\r\n\x1b[31m[Failed to start ConPTY terminal: ${err?.message || err}]\x1b[0m\r\n`);
       }
     }
-  }, [workspaceId, propSessionId, initTerminal, startPolling, stopPolling, fitTerminal]);
+  }, [workspaceId, propSessionId, initTerminal, startPolling, stopPolling]);
 
   const terminateSession = useCallback(async () => {
     stopPolling();
@@ -1067,8 +1130,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 term.reset();
               }
               setStatus('running');
+              ptyOpenRef.current = true;
               startPolling(currentId);
-              fitTerminal(true);
+              scheduleStableFitRef.current();
             })
             .catch(() => {
               void startSession(engineRef.current);
@@ -1080,7 +1144,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (detail.command === 'refresh' || detail.command === 'redraw') {
         const term = termRef.current;
         if (term) {
-          fitTerminal(true);
+          suppressRefreshUntilRef.current = 0;
+          fitTerminal();
           term.refresh(0, term.rows - 1);
           if (sessionIdRef.current) {
             void invokeCommand('resize_terminal', {
@@ -1236,12 +1301,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     liveSessionRef.current = propSessionId || liveSessionRef.current;
     void startSession();
 
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
-          fitTerminal();
-        }
-      }
+    const ro = new ResizeObserver(() => {
+      scheduleStableFitRef.current();
     });
 
     if (containerRef.current) {
@@ -1249,19 +1310,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
 
     const handleWindowResize = () => {
-      fitTerminal();
+      scheduleStableFitRef.current();
     };
     window.addEventListener('resize', handleWindowResize);
 
-    const fitTimers = [
-      setTimeout(() => fitTerminal(true), 50),
-      setTimeout(() => fitTerminal(true), 150),
-      setTimeout(() => fitTerminal(true), 400),
-      setTimeout(() => fitTerminal(true), 900),
-    ];
-
     return () => {
-      fitTimers.forEach(clearTimeout);
+      startGenRef.current += 1;
+      fitWatchRef.current += 1;
+      ptyOpenRef.current = false;
       isMountedRef.current = false;
       window.removeEventListener('resize', handleWindowResize);
       ro.disconnect();
@@ -1515,9 +1571,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           .filter(Boolean)
           .join(' ')}
         onClick={() => {
-          termRef.current?.focus();
-          if (termRef.current?.buffer.active.type === 'alternate') {
-            termRef.current.refresh(0, termRef.current.rows - 1);
+          const term = termRef.current;
+          term?.focus();
+          if (
+            term &&
+            term.buffer.active.type === 'alternate' &&
+            Date.now() >= suppressRefreshUntilRef.current
+          ) {
+            term.refresh(0, Math.max(0, term.rows - 1));
           }
         }}
       >

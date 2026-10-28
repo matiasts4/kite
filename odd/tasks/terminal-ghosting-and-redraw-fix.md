@@ -1,112 +1,157 @@
-# Terminal Ghosting Elimination, Geometry Synchronization & Redraw Engine
+# Terminal Ghosting and Redraw — Attempt Log
 
-Objective: Eliminate visual ghosting, overlapping text, and stuck banner artifacts in ConPTY terminal sessions (notably interactive TUIs like OpenCode, Claude Code, and agent panes) caused by initial geometry desynchronization, CSS scale transform during mount, and delayed resize notifications.
-Branch: `feat/ui-composer` (working branch; isolated commits for easy inspection and rollback).
-Test runner: `npx vitest run`; typecheck: `npx tsc --noEmit`; audit: `node .kite/sanitizer/audit-references.mjs --check`.
+Status: E1 implemented, waiting for a visual check. No Rust change.
+Branch: `feat/ui-composer`.
+Rule: one hypothesis per commit. Do not mix this work with unrelated dirty files.
 
----
+Visual checks the user cares about:
 
-## 1. Context & Problem Statement
-
-### Observed Symptom
-In terminal panes running interactive CLI agents or TUIs (such as `OpenCode` or agent sessions), visual artifacts ("ghost text") appear on screen:
-- Banners, tables (such as shortcuts tables `Terminal & Código | Guardar archivo activo | Ctrl+S / Cmd+S | Activo`), or status indicators from previous steps remain frozen at the top or overlaid across newer command outputs (`### 3. Verificación de calidad y tests...`).
-- When the user manually resizes or expands the terminal pane, all ghost artifacts vanish immediately and the true screen renders cleanly.
-- Switching away (e.g. to Agent or Thread view) and back to Code also temporarily clears the artifacts because the terminal element is reparented and `fitTerminal` is retriggered.
-
-### Root Cause Analysis
-
-1. **Initial ConPTY Geometry Desynchronization (80×24 Default vs. Real Pane Width)**:
-   - When `start_terminal` was invoked, ConPTY was spawned with a fallback of 80 columns and 24 rows before the container DOM layout had settled or before `fitAddon.fit()` had inspected the actual container width.
-   - For split panes and agent panels (typically 50–65 columns wide), OpenCode starts running immediately, outputting headers, tables, and banners formatted for an 80-column terminal.
-   - Because `xterm.js` has only ~60 columns, it soft-wraps 80-character lines across multiple visual lines.
-
-2. **Broken ANSI Relative Cursor Positioning on Soft-Wrapped Lines**:
-   - Interactive TUIs like OpenCode update the screen in-place using ANSI escape sequences such as `\x1b[1A` (cursor UP 1 line) and `\x1b[2K` (clear line).
-   - When OpenCode prints an 80-char line, it believes it occupies 1 logical line.
-   - In xterm, that line wrapped onto 2 lines. When OpenCode moves the cursor up 1 line to erase it, the cursor lands on line 2 (the wrapped tail) rather than line 1.
-   - Line 1 is never erased. It stays in the xterm buffer permanently as an orphan "ghost line".
-   - Subsequent outputs print beneath or over these orphan lines, causing overlapping text.
-
-3. **Subpixel Measurement Distortion from CSS Scale Animation**:
-   - `terminal.css` declared `@keyframes terminal-view-fade-in` with `transform: scale(0.995)` to `scale(1)`.
-   - During the 200ms animation, `fitAddon` measures character cell dimensions (`_charSizeService.measure()`) via `getBoundingClientRect()`.
-   - The CSS transform causes fractional pixel widths (e.g., 7.96px instead of 8.00px), corrupting cell dimensions and resulting in incorrect column/row calculations during initial render.
-
-4. **100ms Debounce Lag on ConPTY Resize**:
-   - In `TerminalView.tsx`, `fitTerminal` used a 100ms timer to debounce resize calls to ConPTY.
-   - During those 100ms, `xterm.js` was already resized to the pane width, but ConPTY and the spawned CLI were still running at 80 columns. The initial banner was outputted and corrupted during this 100ms window.
-
-5. **Scroll Restoration on Alternate Screen Buffer**:
-   - `restoreScroll()` indiscriminately called `scrollToBottom()` and `scrollToLine()` multiple times during resize, even when the terminal was in the alternate screen buffer (`term.buffer.active.type === 'alternate'`) where `baseY === 0`, inducing viewport shifts while the TUI was actively painting.
+1. A new Grok or OpenCode terminal must open coherent in a narrow pane, including when three terminals share one view.
+2. OpenCode must stay coherent over minutes. Ghost lines, stuck headers, and character collisions must not accumulate.
 
 ---
 
-## 2. Technical Specifications (S1–S5)
+## Symptom log
 
-### S1. Neutral Mount Animation (Eliminate CSS Scale Transform)
-- Modify `@keyframes terminal-view-fade-in` in `src/components/views/terminal.css` to animate pure `opacity` from 0 to 1 without `transform: scale(...)`.
-- This ensures that character cell measurements (`charSizeService`) and container bounding rects are exact 1:1 pixel measurements from the first frame.
+### S-launch — scrambled first frame (regression, confirmed 2026-10-28)
 
-### S2. Synchronous Pre-Spawn Container Geometry Measurement
-- In `startSession` within `src/components/views/TerminalView.tsx`, probe `containerRef.current` and invoke `fitAddon.fit()` synchronously before dispatching `start_terminal`.
-- If the container already has layout dimensions (`clientWidth > 0`), use the exact measured `term.cols` and `term.rows` instead of defaulting to 80×24.
-- Update `lastColsRef.current` and `lastRowsRef.current` immediately so ConPTY is spawned with the true pane geometry from byte zero.
+Opening Grok or OpenCode in a tight pane paints a broken welcome screen. Text from the same TUI frame overlaps, clips, and lands in the wrong columns. Example: the Grok welcome menu (`Resume session`, `Changelog`, `Quit`, `New worktree`) is torn apart, and the footer `Grok 4.` is cut off.
 
-### S3. Low-Latency Geometry Synchronization (Adaptive Debounce)
-- In `fitTerminal`, dispatch resize to ConPTY immediately (or within a 20ms frame) during the initial layout stabilization phase rather than waiting 100ms.
-- Retain debounced updates for continuous mouse-drag splitter adjustments, but ensure the initial geometry sync happens before the CLI outputs its welcome banner.
+User report after the geometry commit:
 
-### S4. Buffer-Aware Scroll Restoration
-- Check `term.buffer.active.type` in `restoreScroll()`:
-  - When `term.buffer.active.type === 'alternate'` (e.g., OpenCode, vim, nano, htop), skip `scrollToBottom()`/`scrollToLine()` and instead call `term.refresh(0, term.rows - 1)` to clear any dirty renderer cells.
-  - When in `'normal'` buffer, preserve standard scroll position without triggering redundant delayed timers.
+- Three terminals in one view open this way for both Grok and OpenCode.
+- A later resize plus real use can heal Grok.
+- The same gesture does not heal OpenCode.
 
-### S5. Explicit Redraw / Refresh Mechanism
-- Add `kite:terminal-command` action `refresh` / `redraw`:
-  - Triggers `fitTerminal(true)`, `term.refresh(0, term.rows - 1)`, and sends `resize_terminal` to ConPTY to force a full redraw on demand.
-- In `terminal-canvas-area`, on click / focus, when in the alternate buffer, call `term.refresh(0, term.rows - 1)` to wipe away any transient visual glitches.
+This is a first-paint geometry failure. The TUI addressed cells for one size. The visible grid was another size. Relative cursor moves then stack fragments on top of each other.
+
+### S-ghost — artifacts over time (original bug, still open)
+
+Before the launch regression, OpenCode sessions accumulated ghosting during normal use:
+
+- A previous table or header stayed pinned over newer output.
+- In-place updates collided (`Notfrbidden` style merges).
+- A manual resize, or leaving the view and coming back, cleared the ghosts because that path refits and the app repaints.
+
+Grok tends to redraw a full frame, so it self-heals. OpenCode updates damaged cells only, so a bad frame sticks.
+
+### S-noise — resize announced as "agent finished" (separate)
+
+ConPTY dumps the screen on resize. The activity tracker treated that dump as new work and the proactive watcher spoke or toasted. That is not a pixel bug. The watcher call is currently commented out in the dirty `src/App.tsx`. Leave that decision out of render commits.
 
 ---
 
-## 3. Files Modified
+## Attempt 1 — committed, did not fix, launch got worse
 
-| File | Change Scope |
+Commit: `986e308` `fix(terminal): eliminate ghost text and synchronize ConPTY geometry` (2026-10-28).
+
+Files: `src/components/views/TerminalView.tsx`, `src/components/views/terminal.css`, this document.
+
+What it changed:
+
+- Removed `transform: scale(0.995)` from the terminal fade-in, so cell measurement is not taken under a CSS scale.
+- Called `fit()` once before `start_terminal` / `attach_terminal` when `clientWidth > 0`, and stored that size in `lastColsRef` / `lastRowsRef`.
+- Shortened the resize debounce from 100ms to 20ms.
+- On the alternate screen, `restoreScroll()` now calls `term.refresh()` and skips `scrollToBottom()`.
+- Stopped calling `term.reset()` on a fresh start. Reset remains only for an explicit restart.
+- Added a `refresh` / `redraw` terminal command.
+
+Why this misses the screenshot:
+
+- `clientWidth > 0` is not a stable size. With three terminals, the first measure often happens before the split finishes. That transient size is what the PTY and the TUI paint.
+- Storing `lastCols` before the follow-up `fitTerminal(true)` makes that call a no-op when the cols have not changed yet. The corrective SIGWINCH never goes out.
+- Timers at 50, 150, 400, and 900ms still call `fitTerminal(true)` while the welcome frame is painting. Each one can change ConPTY geometry mid-draw.
+- `term.refresh()` redraws whatever xterm already stored. It does not ask OpenCode or Grok to repaint. On OpenCode it freezes the torn frame.
+- Removing `term.reset()` lets a parked xterm reuse a previous grid for a new PTY.
+
+The scale removal is still reasonable. It is not sufficient, and the pre-spawn fit as written is the likely cause of S-launch.
+
+---
+
+## Dirty work that is not this fix
+
+Do not stage these into a terminal-render commit.
+
+| Path | What it is |
 | :--- | :--- |
-| `src/components/views/terminal.css` | Replaced `transform: scale(0.995)` with pure opacity fade-in to prevent character sizing distortion. |
-| `src/components/views/TerminalView.tsx` | Added pre-spawn geometry probe, adaptive 20ms resize dispatch, buffer-aware scroll restoration, and explicit redraw handler. |
-| `odd/tasks/terminal-ghosting-and-redraw-fix.md` | Dedicated architecture and restoration record. |
+| `src/lib/terminalRegistry.ts` and `src/lib/terminalRegistry.test.ts` | Prompt-ready detection and `waitForTerminalReady`. Changes when a prompt is considered delivered. Does not change pixels. |
+| `src/App.tsx` | `startProactiveAgentWatcher()` commented out, mixed with other uncommitted app work. |
+| Rest of the working tree | Composer, settings, files view, operator. Unrelated. |
+
+An earlier uncommitted rewrite of this document proposed code page 850, `TERM` / `LANG`, and a minimum pane width as the main fix. Those were not applied. They do not explain a welcome screen that heals for Grok after one real resize. Keep them as later experiments only if a stable grid still shows character drift.
 
 ---
 
-## 4. Verification & Testing
+## Ranked causes
 
-1. **TypeScript compilation**:
-   ```bash
-   npx tsc --noEmit
-   ```
-2. **Terminal unit tests**:
-   ```bash
-   npx vitest run src/lib/terminalLinkNav.test.ts src/lib/terminalRegistry.test.ts
-   ```
-3. **Reference Sanitizer Audit**:
-   ```bash
-   node .kite/sanitizer/audit-references.mjs --check
-   ```
-4. **Visual Behavior Check**:
-   - Open an agent pane with OpenCode in a narrow or split view.
-   - Confirm that the banner and shortcuts table wrap cleanly according to the real pane width.
-   - Confirm that when tools or sub-processes execute, previous headers do not remain pinned or overlaid.
-   - Confirm that clicking into the terminal or triggering a refresh leaves zero visual artifacts.
+1. **Unstable size at spawn (S-launch).** The PTY is opened on a transient grid. The TUI paints with cursor addressing. A later shrink wraps those addresses and the lines overlap. Grok heals because a real resize plus input redraws the whole screen. OpenCode does not, because it only patches cells.
+2. **Resize storms during the first second (S-launch and S-ghost).** Four delayed fits plus a 20ms debounce deliver several SIGWINCHs while the banner is still being written. A delta TUI cannot reconstruct from a partial ConPTY redraw.
+3. **`refresh()` paints the damaged buffer (S-ghost sticks).** It clears renderer dirt. It does not clear logical ghosts left by a soft-wrap plus cursor-up (`CSI A` / `CSI 2K`) when the app and xterm disagreed on width.
+4. **Soft-wrap ghosts after the grid is wrong even once (S-ghost).** If OpenCode believes a row is one line and xterm wrapped it, cursor-up erases only the tail. The head stays forever. This matches the original "resize clears it" report.
+5. **Width disagreement on symbols (only if 1–4 are fixed and `Notfrbidden` remains).** UTF-8 versus the console code page, or emoji width, shifts later in-place writes. Not the first experiment.
+
+A minimum pane width would hide narrow layouts. It would not make a 40-column terminal a correct 40-column terminal. Do not use it as the fix.
 
 ---
 
-## 5. Rollback / Restoration Guide
+## Next experiments (not started)
 
-If for any reason this fix needs to be inspected, isolated, or reverted independently:
-1. All changes are strictly confined to `src/components/views/terminal.css` and `src/components/views/TerminalView.tsx`.
-2. To revert this fix using git:
-   ```bash
-   git checkout origin/feat/ui-composer -- src/components/views/terminal.css src/components/views/TerminalView.tsx
-   ```
-   Or revert the specific commit titled `fix(terminal): eliminate ghost text and synchronize ConPTY geometry`.
+Each one is its own commit on this branch, with the result written back here. Stop after the first experiment that makes S-launch pass, and only then retest S-ghost.
+
+### E1 — Spawn only on a stable grid
+
+Status: implemented in this commit. Visual pass is still open.
+
+Intent: the first byte the CLI paints must use the size the user actually sees.
+
+What landed:
+
+- `src/lib/terminalHostSize.ts` waits until two samples of the host agree, confirms that box about 48ms later, and refuses a host smaller than 48px. If the box never repeats, the 800ms cap uses the latest usable size. It does not fall back to 80×24.
+- `startSession` waits for that box, fits xterm, and only then starts or attaches the PTY. Agent restart waits the same way before `restart_agent_terminal_for_autopilot`.
+- A living PTY that ignored the attach size gets one `resize_terminal` at the measured grid.
+- The 50/150/400/900ms fit burst and the 20ms resize debounce are gone. Later resizes go through the same stable wait, and only if cols or rows changed.
+- Automatic `term.refresh()` is skipped for 2s after open. A manual redraw command still refreshes.
+- `term.reset()` runs when a parked xterm is bound to a new PTY.
+
+Pass: Grok and OpenCode welcome screens are coherent with three terminals in one view, before any manual resize.
+
+How to check, without mixing other branch work:
+
+1. Stay on `feat/ui-composer`. This attempt does not need a Rust rebuild or a Vite cache wipe.
+2. Close the current dev window. `npm run app` stops the previous debug process and opens a new one against the Vite server on port 1420.
+3. Open **new** Grok and OpenCode terminals after that launch. Sessions that were already painting before the restart can keep a torn frame in the PTY.
+4. Put three terminals in one view. The welcome screen should be readable before any manual resize. "Starting ConPTY session..." may show for a fraction of a second while the pane settles. That wait is this attempt.
+5. If the frame is still torn on a brand-new terminal, E1 failed. Do not continue to E2 on that result.
+
+### E2 — One settled resize, no local repaint fight
+
+Only if E1 is clean and OpenCode still ghosts over minutes.
+
+- Keep xterm in ConPTY mode so it does not reflow on its own.
+- After the last size change settles, send one `resize_terminal`.
+- Do not refresh the canvas in the middle of a polled chunk.
+- Confirm a full app redraw happens once. If OpenCode ignores a same-size resize, change the size by a real row or column, not by refreshing xterm.
+
+Pass: a long OpenCode session no longer keeps stuck headers, and a resize is not required to read the screen.
+
+### E3 — Encoding, only if characters still collide
+
+Only if the grid is stable and in-place updates still merge glyphs.
+
+- Set UTF-8 for the spawned console (`chcp 65001` inside that PTY, not the parent shell).
+- Set `TERM=xterm-256color`.
+- Re-check one emoji or box-drawing update. Do not bundle this with E1.
+
+---
+
+## Verification when an experiment lands
+
+- `npx tsc --noEmit`
+- `npx vitest run src/lib/terminalLinkNav.test.ts src/lib/terminalRegistry.test.ts`
+- `node .kite/sanitizer/audit-references.mjs --check`
+- Manual: three agent terminals in one view, Grok and OpenCode, no manual resize.
+- Manual: use OpenCode for several minutes and confirm old rows do not remain pinned.
+
+## Rollback
+
+Attempt 1 is exactly `986e308`. Revert that commit to return to the pre-geometry behavior. Later experiments must say which commit to revert.

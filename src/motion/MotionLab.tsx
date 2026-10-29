@@ -58,7 +58,7 @@ function AppIntroDemo() {
       >
         Repetir intro
       </button>
-      <AppIntro key={run} open={open} />
+      <AppIntro key={run} open={open} animateIn />
     </section>
   );
 }

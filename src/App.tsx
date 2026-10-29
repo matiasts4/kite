@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar, WorkMode } from './components/Sidebar';
 import type { WorkspaceSessionTab, ChatThreadSummary } from './components/sidebar/types';
@@ -52,7 +52,7 @@ import { loadOperatorConfig, saveOperatorConfig } from './lib/operator/operatorC
 // import { startProactiveAgentWatcher } from './lib/operator/proactiveWatcher';
 import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
 import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
-import { AppIntro } from './motion/AppIntro';
+import { AppIntro, releaseBootCover } from './motion/AppIntro';
 import { AnimatePresence, motion } from 'motion/react';
 import { surfaceMotion } from './motion/standard/surfaces';
 
@@ -304,6 +304,11 @@ export const App: React.FC = () => {
     const timer = window.setTimeout(() => setIntroDismissed(true), wait);
     return () => window.clearTimeout(timer);
   }, [bootReady, introDismissed]);
+
+  useLayoutEffect(() => {
+    if (!introDismissed) return;
+    releaseBootCover();
+  }, [introDismissed]);
 
   // Kite Operator Assistant Bar state (floating top bar)
   // By default, the assistant does NOT appear as a floating pill upon application launch.

@@ -4,9 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kite Code</title>
+    <link rel="stylesheet" href="./src/boot.css" />
     <script src="/tauri-web-ipc.js"></script>
   </head>
   <body class="kite-app select-none overflow-hidden m-0 p-0 font-sans antialiased">
+    <div id="boot" class="boot" role="status" aria-label="Starting Kite">
+      <div class="boot-panel">
+        <img src="/assets/kite-symbol.svg" alt="" width="56" height="56" />
+        <span class="boot-title">Kite</span>
+        <p class="boot-hint">Preparing your workspace…</p>
+      </div>
+      <p class="boot-support">
+        <strong>Still starting</strong>
+        <span class="boot-secondary">Kite is still preparing your workspace.</span>
+      </p>
+    </div>
     <div id="root" class="h-screen w-screen flex flex-col"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

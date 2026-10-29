@@ -31,7 +31,7 @@ The window shows the Code empty state (title bar, sidebar, agent launcher) for a
 ## Tasks
 
 - [x] T1. Cover startup from first HTML paint through the intro handoff.
-- [ ] T2. Verify typecheck and focused tests.
+- [x] T2. Verify typecheck and focused tests.
 
 ## Acceptance
 
@@ -49,8 +49,9 @@ The window shows the Code empty state (title bar, sidebar, agent launcher) for a
 ## Progress
 
 - T1 done. Static `#boot` cover, `#root` hidden until release, production intro `initial={false}`, release in `useLayoutEffect`. Parent correction: stylesheet href is `./src/boot.css` so Vite emits it in the packaged build. Absolute `/src/boot.css` 404s after `vite build`.
-- T2 pending.
+- T2 done. `npx tsc --noEmit` passed. `npx vitest run src/motion/AppIntro.test.tsx` passed, 3 tests.
+- Commit: `ccaac258db9e767c9ce06331160fc6dbc9a9a5d7` (`fix(splash): keep the logo covering the window until the intro is ready`).
 
 ## Next step
 
-Verify typecheck and focused intro tests.
+Relaunch the desktop app and confirm the Code workspace no longer flashes before the logo.

@@ -14,6 +14,7 @@ $SrcDir = Join-Path $ProjectRoot "src"
 # Configure temporary build directory on drive E: to guarantee ample space during compilation
 $env:TEMP = "E:\Temp"
 $env:TMP = "E:\Temp"
+$env:WEBVIEW2_USER_DATA_FOLDER = "$env:LOCALAPPDATA\dev.kite.code.dev\EBWebView"
 
 # 1. Clean up old DEV processes and locks (preserves installed production app)
 Write-Host "[1/4] Limpiando instancias de desarrollo previas y bloqueos WebView2..." -ForegroundColor Cyan
@@ -41,30 +42,31 @@ if (Test-Path $devEbLockPath) {
 # 2. Check if Vite is running on port 1420, if not start it
 Write-Host "[2/4] Verificando servidor frontend en http://127.0.0.1:1420..." -ForegroundColor Cyan
 $viteRunning = $false
-try {
-    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-    if ($resp.StatusCode -eq 200) { $viteRunning = $true }
-} catch {}
+if (-not $Rebuild) {
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($resp.StatusCode -eq 200) { $viteRunning = $true }
+    } catch {}
+}
 
 if (-not $viteRunning) {
+    # Terminate any stale Vite processes on port 1420
+    Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*vite*") -and ($_.CommandLine -notlike "*launch-desktop-app*") } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
     Write-Host "Iniciando servidor Vite..." -ForegroundColor Yellow
     $viteProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run dev" -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
     
-    # Wait for Vite to be ready (up to 30s)
+    # Wait for Vite to be ready and responsive (up to 30s)
     $retries = 60
     while ($retries -gt 0) {
         Start-Sleep -Milliseconds 500
         try {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            $connect = $tcp.BeginConnect("127.0.0.1", 1420, $null, $null)
-            $wait = $connect.AsyncWaitHandle.WaitOne(400, $false)
-            if ($wait) {
-                $tcp.EndConnect($connect)
-                $tcp.Close()
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
+            if ($resp.StatusCode -eq 200) {
                 $viteRunning = $true
                 break
             }
-            $tcp.Close()
         } catch {}
         $retries--
     }
@@ -74,7 +76,7 @@ if (-not $viteRunning) {
     }
     Write-Host "Servidor Vite listo en http://127.0.0.1:1420." -ForegroundColor Green
 } else {
-    Write-Host "Servidor Vite ya activo." -ForegroundColor Green
+    Write-Host "Servidor Vite ya activo y respondiendo." -ForegroundColor Green
 }
 
 # 3. Compile C# InteractiveLauncher for WinSta0\Default

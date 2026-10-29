@@ -228,11 +228,20 @@ export function splitAlternateScreenEnterChunk(
   return { splitBeforeChunkOffset: splitOffset, nextTail };
 }
 
-const CSI_ERASE_IN_DISPLAY_OR_LINE_RE = /\x1b\[\??[0-9;]*[JK]/;
+const CSI_ERASE_IN_DISPLAY_OR_LINE_RE = /\x1b\[\??[0-9;]*[JKX]/;
+const CSI_REWRITE_OR_CURSOR_RE = /\x1b\[[?>=]?[0-9;:]*[JKXPLMST@HfGABCDEFda`e]|\x1b[78M]/;
+const NON_ASCII_RE = /[\u0080-\uffff]/;
 const CSI_SGR_RE = /\x1b\[([0-9;:]*)m/g;
 const EMOJI_PRESENTATION_RE = /\p{Emoji_Presentation}/u;
+const CROSS_CHUNK_SCAN_TAIL_LENGTH = 24;
 
-export function hasBareCarriageReturn(data: string): boolean {
+export function hasBareCarriageReturn(
+  data: string,
+  previousEndsWithCarriageReturn = false,
+): boolean {
+  if (previousEndsWithCarriageReturn && data.length > 0 && data.charCodeAt(0) !== 10) {
+    return true;
+  }
   for (let i = 0; i < data.length; i += 1) {
     if (data.charCodeAt(i) === 13 && data.charCodeAt(i + 1) !== 10) {
       return true;
@@ -241,11 +250,18 @@ export function hasBareCarriageReturn(data: string): boolean {
   return false;
 }
 
-export function foregroundRewriteOutputPrefersRenderRefresh(data: string): boolean {
+export function foregroundRewriteOutputPrefersRenderRefresh(
+  data: string,
+  options: {
+    previousEndsWithCarriageReturn?: boolean;
+    previousScanTail?: string;
+  } = {},
+): boolean {
+  const combined = options.previousScanTail ? `${options.previousScanTail}${data}` : data;
   return (
     data.includes('\b') ||
-    hasBareCarriageReturn(data) ||
-    CSI_ERASE_IN_DISPLAY_OR_LINE_RE.test(data)
+    hasBareCarriageReturn(data, options.previousEndsWithCarriageReturn) ||
+    CSI_REWRITE_OR_CURSOR_RE.test(combined)
   );
 }
 
@@ -305,27 +321,58 @@ export function hasComplexOrWideUnicode(data: string): boolean {
   return false;
 }
 
-export function foregroundRendererRiskOutputPrefersRenderRefresh(data: string): boolean {
-  return hasSgrBackgroundColor(data) || hasComplexOrWideUnicode(data);
+export function foregroundRendererRiskOutputPrefersRenderRefresh(
+  data: string,
+  previousScanTail = '',
+): boolean {
+  const combined = previousScanTail ? `${previousScanTail}${data}` : data;
+  return hasSgrBackgroundColor(combined) || hasComplexOrWideUnicode(data);
+}
+
+export interface ForegroundOutputScanState {
+  endsWithCarriageReturn: boolean;
+  scanTail: string;
 }
 
 export function classifyForegroundOutputRefresh(
   data: string,
   options: {
     isWindowsConpty?: boolean;
+    scanState?: ForegroundOutputScanState;
   } = {},
 ): {
   forceViewportRefresh: boolean;
   followupViewportRefresh: boolean;
+  clearTextureAtlasOnFollowup: boolean;
   stripTransientCursorShows: boolean;
 } {
   const isWindowsConpty = options.isWindowsConpty ?? true;
-  const inPlaceRewrite = isWindowsConpty && foregroundRewriteOutputPrefersRenderRefresh(data);
-  const rendererRisk = foregroundRendererRiskOutputPrefersRenderRefresh(data);
+  const previousEndsWithCr = options.scanState?.endsWithCarriageReturn ?? false;
+  const previousScanTail = options.scanState?.scanTail ?? '';
+  const combined = previousScanTail ? `${previousScanTail}${data}` : data;
+
+  const inPlaceRewrite =
+    isWindowsConpty &&
+    foregroundRewriteOutputPrefersRenderRefresh(data, {
+      previousEndsWithCarriageReturn: previousEndsWithCr,
+      previousScanTail,
+    });
+  const rendererRisk = foregroundRendererRiskOutputPrefersRenderRefresh(data, previousScanTail);
+  const clearTextureAtlasOnFollowup =
+    isWindowsConpty &&
+    NON_ASCII_RE.test(data) &&
+    (hasBareCarriageReturn(data, previousEndsWithCr) || CSI_ERASE_IN_DISPLAY_OR_LINE_RE.test(combined));
+
+  if (options.scanState && data.length > 0) {
+    options.scanState.endsWithCarriageReturn = data.charCodeAt(data.length - 1) === 13;
+    options.scanState.scanTail = combined.slice(-CROSS_CHUNK_SCAN_TAIL_LENGTH);
+  }
+
   const forceViewportRefresh = inPlaceRewrite || rendererRisk;
   return {
     forceViewportRefresh,
-    followupViewportRefresh: isWindowsConpty && inPlaceRewrite,
+    followupViewportRefresh: (isWindowsConpty && inPlaceRewrite) || clearTextureAtlasOnFollowup,
+    clearTextureAtlasOnFollowup,
     stripTransientCursorShows: shouldStripTransientCursorShows(data),
   };
 }
@@ -485,6 +532,8 @@ function executeViewportRefresh(
   } catch {}
 }
 
+const pendingAtlasClears = new WeakSet<Terminal>();
+
 function cancelFollowupViewportRefresh(term: Terminal): void {
   const existing = followupRefreshHandles.get(term);
   if (!existing) return;
@@ -496,28 +545,45 @@ function cancelFollowupViewportRefresh(term: Terminal): void {
   }
 }
 
-function scheduleFollowupViewportRefresh(
+function flushFollowupRefresh(
   term: Terminal,
   shouldRefreshSynchronously?: () => boolean,
 ): void {
+  followupRefreshHandles.delete(term);
+  if (pendingAtlasClears.has(term)) {
+    pendingAtlasClears.delete(term);
+    try {
+      term.clearTextureAtlas?.();
+    } catch {}
+  }
+  executeViewportRefresh(term, shouldRefreshSynchronously?.() ?? true);
+}
+
+function scheduleFollowupViewportRefresh(
+  term: Terminal,
+  shouldRefreshSynchronously?: () => boolean,
+  clearTextureAtlas = false,
+): void {
+  if (clearTextureAtlas) {
+    pendingAtlasClears.add(term);
+  }
   cancelFollowupViewportRefresh(term);
   if (typeof requestAnimationFrame === 'function') {
     const id = requestAnimationFrame(() => {
-      followupRefreshHandles.delete(term);
-      executeViewportRefresh(term, shouldRefreshSynchronously?.() ?? true);
+      flushFollowupRefresh(term, shouldRefreshSynchronously);
     });
     followupRefreshHandles.set(term, { kind: 'raf', id });
     return;
   }
   const id = window.setTimeout(() => {
-    followupRefreshHandles.delete(term);
-    executeViewportRefresh(term, shouldRefreshSynchronously?.() ?? true);
+    flushFollowupRefresh(term, shouldRefreshSynchronously);
   }, 16);
   followupRefreshHandles.set(term, { kind: 'timeout', id });
 }
 
 export function disposeTerminalRefreshTracking(term: Terminal): void {
   cancelFollowupViewportRefresh(term);
+  pendingAtlasClears.delete(term);
   const tracker = refreshTrackers.get(term);
   if (tracker) {
     try {
@@ -533,6 +599,7 @@ export function writeTerminalOutputWithRefresh(
   options: {
     forceViewportRefresh?: boolean;
     followupViewportRefresh?: boolean;
+    clearTextureAtlasOnFollowup?: boolean;
     shouldRefreshViewportSynchronously?: () => boolean;
     onParsed?: () => void;
   } = {},
@@ -547,8 +614,16 @@ export function writeTerminalOutputWithRefresh(
       const sync = options.shouldRefreshViewportSynchronously?.() ?? true;
       const range = resolveRefreshRowRange(term, before, after);
       executeViewportRefresh(term, sync, range);
-      if (options.followupViewportRefresh || didViewportScrollChange(before, after)) {
-        scheduleFollowupViewportRefresh(term, options.shouldRefreshViewportSynchronously);
+      if (
+        options.followupViewportRefresh ||
+        options.clearTextureAtlasOnFollowup ||
+        didViewportScrollChange(before, after)
+      ) {
+        scheduleFollowupViewportRefresh(
+          term,
+          options.shouldRefreshViewportSynchronously,
+          Boolean(options.clearTextureAtlasOnFollowup),
+        );
       }
     }
     options.onParsed?.();

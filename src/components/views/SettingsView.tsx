@@ -56,6 +56,16 @@ import {
   TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
   type TerminalWebLinksTarget,
 } from '../../lib/terminalLinkNav';
+import {
+  getTerminalAppearancePrefs,
+  setTerminalAppearancePrefs,
+  TERMINAL_APPEARANCE_CHANGED_EVENT,
+  TERMINAL_FONT_OPTIONS,
+  TERMINAL_LINE_HEIGHT_PRESETS,
+  DEFAULT_TERMINAL_APPEARANCE_PREFS,
+  type TerminalAppearancePrefs,
+  type TerminalFontFamilyId,
+} from '../../lib/terminalAppearancePrefs';
 import { playCompletionChime } from '../../lib/notifications/audioCues';
 import './settings.css';
 
@@ -96,10 +106,16 @@ const SHELL_ROWS = [
   { id: 'wsl', title: 'WSL · Linux' },
 ];
 
+const FONT_FAMILY_ROWS = TERMINAL_FONT_OPTIONS.map((f) => ({
+  id: f.id,
+  title: f.label,
+  detail: f.id === 'cascadia' ? 'Por defecto' : undefined,
+}));
+
 const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'general', label: 'General', blurb: 'Apariencia, autoguardado y actualizaciones de software.', icon: SettingsIcon },
   { id: 'customizations', label: 'Customizations', blurb: 'Temas, colores y aspecto visual.', icon: PaletteIcon },
-  { id: 'terminal', label: 'Terminal', blurb: 'Shell por defecto, destino de enlaces web y daemon nativo.', icon: SquareTerminalIcon },
+  { id: 'terminal', label: 'Terminal', blurb: 'Apariencia, tipografía, motor de renderizado, shell y enlaces web.', icon: SquareTerminalIcon },
   { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
   { id: 'voice', label: 'Voice & Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
   { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
@@ -159,6 +175,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [terminalWebLinksTarget, setTerminalWebLinksTargetState] = useState<TerminalWebLinksTarget>(() =>
     getTerminalWebLinksTarget()
   );
+  const [terminalAppearance, setTerminalAppearance] = useState<TerminalAppearancePrefs>(() =>
+    getTerminalAppearancePrefs()
+  );
 
   useEffect(() => {
     const handleTargetChanged = (e: Event) => {
@@ -170,6 +189,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     window.addEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
     return () =>
       window.removeEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
+  }, []);
+
+  useEffect(() => {
+    const handleAppearanceChanged = (e: Event) => {
+      const custom = e as CustomEvent<TerminalAppearancePrefs>;
+      if (custom.detail) {
+        setTerminalAppearance(custom.detail);
+      }
+    };
+    window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, handleAppearanceChanged);
+    return () =>
+      window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, handleAppearanceChanged);
+  }, []);
+
+  const handleUpdateTerminalAppearance = useCallback((patch: Partial<TerminalAppearancePrefs>) => {
+    const next = setTerminalAppearancePrefs(patch);
+    setTerminalAppearance(next);
   }, []);
 
   // General settings state
@@ -738,6 +774,187 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             {activeTab === 'terminal' && (
               <>
+                <section className="settings-group">
+                  <h2 className="settings-group__title">Apariencia y Tipografía</h2>
+                  <div className="ui-card">
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Motor de renderizado</h3>
+                        <p>DOM usa el suavizado nativo ClearType del sistema (aspecto clásico). WebGL acelera el dibujado en GPU.</p>
+                      </div>
+                      <div className="settings-row__control">
+                        <fieldset aria-label="Motor de renderizado" className="ui-segmented">
+                          <button
+                            aria-pressed={terminalAppearance.renderer === 'dom'}
+                            className="ui-segmented__item"
+                            onClick={() => handleUpdateTerminalAppearance({ renderer: 'dom' })}
+                            type="button"
+                          >
+                            {terminalAppearance.renderer === 'dom' && (
+                              <SegmentedIndicator group="settings-terminal-renderer" />
+                            )}
+                            <span>DOM · Clásico</span>
+                          </button>
+                          <button
+                            aria-pressed={terminalAppearance.renderer === 'webgl'}
+                            className="ui-segmented__item"
+                            onClick={() => handleUpdateTerminalAppearance({ renderer: 'webgl' })}
+                            type="button"
+                          >
+                            {terminalAppearance.renderer === 'webgl' && (
+                              <SegmentedIndicator group="settings-terminal-renderer" />
+                            )}
+                            <span>WebGL · GPU</span>
+                          </button>
+                        </fieldset>
+                      </div>
+                    </div>
+
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Familia tipográfica</h3>
+                        <p>Fuente monoespaciada utilizada en todas las terminales integradas.</p>
+                      </div>
+                      <div className="settings-row__control settings-row__control--menu">
+                        <SelectMenu
+                          label="Familia tipográfica"
+                          variant="field"
+                          className="settings-select"
+                          value={terminalAppearance.fontFamilyId}
+                          rows={FONT_FAMILY_ROWS}
+                          triggerLabel={FONT_FAMILY_ROWS.find((row) => row.id === terminalAppearance.fontFamilyId)?.title ?? 'Cascadia Mono (Clásico)'}
+                          onSelect={(id) => handleUpdateTerminalAppearance({ fontFamilyId: id as TerminalFontFamilyId })}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Tamaño de fuente</h3>
+                        <p>Tamaño base del texto en píxeles (10 px – 22 px).</p>
+                      </div>
+                      <div className="settings-row__control" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <fieldset aria-label="Ajustar tamaño de fuente" className="ui-segmented">
+                          <button
+                            type="button"
+                            className="ui-segmented__item"
+                            disabled={terminalAppearance.fontSize <= 10}
+                            onClick={() => handleUpdateTerminalAppearance({ fontSize: terminalAppearance.fontSize - 1 })}
+                            aria-label="Reducir tamaño de fuente"
+                            style={{ minWidth: '32px', padding: '0 8px' }}
+                          >
+                            -
+                          </button>
+                          <span
+                            className="ui-segmented__item"
+                            style={{
+                              minWidth: '56px',
+                              cursor: 'default',
+                              fontVariantNumeric: 'tabular-nums',
+                              fontWeight: 600,
+                              userSelect: 'none',
+                            }}
+                          >
+                            {terminalAppearance.fontSize} px
+                          </span>
+                          <button
+                            type="button"
+                            className="ui-segmented__item"
+                            disabled={terminalAppearance.fontSize >= 22}
+                            onClick={() => handleUpdateTerminalAppearance({ fontSize: terminalAppearance.fontSize + 1 })}
+                            aria-label="Aumentar tamaño de fuente"
+                            style={{ minWidth: '32px', padding: '0 8px' }}
+                          >
+                            +
+                          </button>
+                        </fieldset>
+                        {terminalAppearance.fontSize !== DEFAULT_TERMINAL_APPEARANCE_PREFS.fontSize && (
+                          <button
+                            type="button"
+                            className="settings-control ui-button"
+                            onClick={() => handleUpdateTerminalAppearance({ fontSize: DEFAULT_TERMINAL_APPEARANCE_PREFS.fontSize })}
+                            title="Restablecer tamaño por defecto"
+                          >
+                            Restablecer
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Altura de línea</h3>
+                        <p>Espaciado vertical entre filas. El modo Clásico (1.16) mantiene la proporción original.</p>
+                      </div>
+                      <div className="settings-row__control">
+                        <fieldset aria-label="Altura de línea" className="ui-segmented">
+                          {TERMINAL_LINE_HEIGHT_PRESETS.map((preset) => {
+                            const isSelected = Math.abs(terminalAppearance.lineHeight - preset.value) < 0.001;
+                            return (
+                              <button
+                                key={preset.value}
+                                aria-pressed={isSelected}
+                                className="ui-segmented__item"
+                                onClick={() => handleUpdateTerminalAppearance({ lineHeight: preset.value })}
+                                type="button"
+                              >
+                                {isSelected && (
+                                  <SegmentedIndicator group="settings-terminal-line-height" />
+                                )}
+                                <span>{preset.label}</span>
+                              </button>
+                            );
+                          })}
+                        </fieldset>
+                      </div>
+                    </div>
+
+                    <div className="ui-card__row settings-row">
+                      <div className="settings-row__copy">
+                        <h3 className="settings-row__title">Estilo del cursor</h3>
+                        <p>Forma visual del cursor activo en la terminal.</p>
+                      </div>
+                      <div className="settings-row__control">
+                        <fieldset aria-label="Estilo del cursor" className="ui-segmented">
+                          <button
+                            aria-pressed={terminalAppearance.cursorStyle === 'bar'}
+                            className="ui-segmented__item"
+                            onClick={() => handleUpdateTerminalAppearance({ cursorStyle: 'bar' })}
+                            type="button"
+                          >
+                            {terminalAppearance.cursorStyle === 'bar' && (
+                              <SegmentedIndicator group="settings-terminal-cursor-style" />
+                            )}
+                            <span>Barra</span>
+                          </button>
+                          <button
+                            aria-pressed={terminalAppearance.cursorStyle === 'block'}
+                            className="ui-segmented__item"
+                            onClick={() => handleUpdateTerminalAppearance({ cursorStyle: 'block' })}
+                            type="button"
+                          >
+                            {terminalAppearance.cursorStyle === 'block' && (
+                              <SegmentedIndicator group="settings-terminal-cursor-style" />
+                            )}
+                            <span>Bloque</span>
+                          </button>
+                          <button
+                            aria-pressed={terminalAppearance.cursorStyle === 'underline'}
+                            className="ui-segmented__item"
+                            onClick={() => handleUpdateTerminalAppearance({ cursorStyle: 'underline' })}
+                            type="button"
+                          >
+                            {terminalAppearance.cursorStyle === 'underline' && (
+                              <SegmentedIndicator group="settings-terminal-cursor-style" />
+                            )}
+                            <span>Subrayado</span>
+                          </button>
+                        </fieldset>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
                 <section className="settings-group">
                   <h2 className="settings-group__title">Shell</h2>
                   <div className="ui-card">

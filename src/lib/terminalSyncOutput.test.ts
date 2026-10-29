@@ -125,4 +125,54 @@ describe('terminalSyncOutput', () => {
     expect(coreRefresh).toHaveBeenCalledWith(0, 29, true);
     vi.restoreAllMocks();
   });
+
+  it('detects cursor-positioned border clears, split CSI sequences across chunks, and atlas clear on non-ASCII rewrites', () => {
+    // Cursor-positioned overwrite with spaces (e.g. clearing left/right TUI borders)
+    const borderClearPlan = classifyForegroundOutputRefresh('\x1b[12;1H\x1b[0m   ');
+    expect(borderClearPlan.forceViewportRefresh).toBe(true);
+    expect(borderClearPlan.followupViewportRefresh).toBe(true);
+
+    // Split CSI cursor positioning across two PTY chunks
+    const scanState = { endsWithCarriageReturn: false, scanTail: '' };
+    classifyForegroundOutputRefresh('prefix\x1b[14;', { scanState });
+    const splitPlan = classifyForegroundOutputRefresh('1H   ', { scanState });
+    expect(splitPlan.forceViewportRefresh).toBe(true);
+    expect(splitPlan.followupViewportRefresh).toBe(true);
+
+    // Non-ASCII box-drawing/block rewrite schedules texture atlas flush on follow-up RAF
+    const nonAsciiRewrite = classifyForegroundOutputRefresh('\x1b[2K\r│ status █');
+    expect(nonAsciiRewrite.clearTextureAtlasOnFollowup).toBe(true);
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+    const clearTextureAtlas = vi.fn();
+    const coreRefresh = vi.fn();
+    const term = {
+      rows: 24,
+      clearTextureAtlas,
+      buffer: {
+        active: { type: 'alternate', cursorY: 2, baseY: 0, viewportY: 0 },
+      },
+      _core: { refresh: coreRefresh },
+      write: (_data: string, cb?: () => void) => cb?.(),
+    } as any;
+
+    writeTerminalOutputWithRefresh(term, '\x1b[2K\r│ status █', {
+      forceViewportRefresh: true,
+      followupViewportRefresh: true,
+      clearTextureAtlasOnFollowup: true,
+      shouldRefreshViewportSynchronously: () => true,
+    });
+
+    expect(clearTextureAtlas).not.toHaveBeenCalled();
+    rafCallbacks[0](performance.now());
+    expect(clearTextureAtlas).toHaveBeenCalledTimes(1);
+    expect(coreRefresh).toHaveBeenCalledWith(0, 23, true);
+    vi.restoreAllMocks();
+  });
 });

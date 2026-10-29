@@ -474,20 +474,24 @@ pub fn get_globally_claimed_provider_ids(current_session_id: &str) -> HashSet<St
     claimed
 }
 
-fn drain_buffer_into_scrollback(session_id: &str, inst: &TerminalInstance) -> Option<Vec<u8>> {
-    let mut pending = Vec::new();
-    if let Ok(mut buf) = inst.buffer.lock() {
+fn snapshot_scrollback_for_attach(
+    session_id: &str,
+    inst: &TerminalInstance,
+    preserve_unread_buffer: bool,
+) -> Option<Vec<u8>> {
+    let mut had_pending = false;
+    let buf_guard = inst.buffer.lock().ok();
+    let sb_guard = inst.scrollback.lock().ok();
+    if let Some(mut buf) = buf_guard {
         if !buf.is_empty() {
-            pending = std::mem::take(&mut *buf);
+            had_pending = true;
+            if !preserve_unread_buffer {
+                buf.clear();
+            }
         }
     }
-    if let Ok(mut sb) = inst.scrollback.lock() {
-        if !pending.is_empty() {
-            sb.extend_from_slice(&pending);
-            if sb.len() > MAX_SCROLLBACK_BYTES {
-                let excess = sb.len() - MAX_SCROLLBACK_BYTES;
-                sb.drain(0..excess);
-            }
+    if let Some(sb) = sb_guard {
+        if had_pending && !sb.is_empty() {
             write_scrollback_file(session_id, &sb);
         }
         if sb.is_empty() {
@@ -557,7 +561,7 @@ pub fn try_bind_provider_session_id(session_id: &str, inst: &TerminalInstance) -
     }
 
     // Flush any unread output into scrollback so transcript/scrollback matching has the latest bytes
-    let _ = drain_buffer_into_scrollback(session_id, inst);
+    let _ = snapshot_scrollback_for_attach(session_id, inst, false);
 
     let existing_prov = inst.provider_session_id.lock().ok().and_then(|p| p.clone());
     if let Some(ref pid) = existing_prov {
@@ -1201,16 +1205,20 @@ pub fn spawn_session_with_options(
                     *cwd_guard = osc_dir;
                 }
             }
-            if let Ok(mut b) = buf_reader.lock() {
-                b.extend_from_slice(&temp[..n]);
-            }
-            if let Ok(mut s) = scrollback_reader.lock() {
-                s.extend_from_slice(&temp[..n]);
-                if s.len() > MAX_SCROLLBACK_BYTES {
-                    let excess = s.len() - MAX_SCROLLBACK_BYTES;
-                    s.drain(0..excess);
+            {
+                let mut b_guard = buf_reader.lock().ok();
+                let mut s_guard = scrollback_reader.lock().ok();
+                if let Some(ref mut b) = b_guard {
+                    b.extend_from_slice(&temp[..n]);
                 }
-                dirty = true;
+                if let Some(ref mut s) = s_guard {
+                    s.extend_from_slice(&temp[..n]);
+                    if s.len() > MAX_SCROLLBACK_BYTES {
+                        let excess = s.len() - MAX_SCROLLBACK_BYTES;
+                        s.drain(0..excess);
+                    }
+                    dirty = true;
+                }
             }
             if dirty && last_flush.elapsed() >= std::time::Duration::from_millis(500) {
                 if let Ok(s) = scrollback_reader.lock() {
@@ -1317,6 +1325,10 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
 
     let cols = req.get("columns").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
     let rows = req.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+    let preserve_unread_buffer = req
+        .get("preserveUnreadBuffer")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let existing_scrollback = {
         let map = get_terminals().lock().unwrap();
@@ -1335,7 +1347,7 @@ pub fn start_terminal(request: serde_json::Value) -> serde_json::Value {
                     }
                 }
             }
-            let sb = drain_buffer_into_scrollback(&session_id, inst);
+            let sb = snapshot_scrollback_for_attach(&session_id, inst, preserve_unread_buffer);
             Some(sb)
         } else {
             None
@@ -1422,6 +1434,10 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
         .get("engine")
         .and_then(|value| value.as_str())
         .filter(|engine| !engine.is_empty());
+    let preserve_unread_buffer = req
+        .get("preserveUnreadBuffer")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let (attached_to_existing, initial_scrollback) = {
         let mut map = get_terminals().lock().unwrap();
@@ -1447,7 +1463,7 @@ pub fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
                         }
                     }
                 }
-                let sb = drain_buffer_into_scrollback(&session_id, inst);
+                let sb = snapshot_scrollback_for_attach(&session_id, inst, preserve_unread_buffer);
                 (true, sb)
             } else {
                 map.remove(&session_id);
@@ -1786,6 +1802,7 @@ pub fn resize_terminal(request: serde_json::Value) -> serde_json::Value {
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let cols = req.get("columns").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
     let rows = req.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+    let force = req.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let instance = {
         let map = get_terminals().lock().unwrap();
@@ -1793,14 +1810,16 @@ pub fn resize_terminal(request: serde_json::Value) -> serde_json::Value {
     };
 
     if let Some(inst) = instance {
-        inst.cols.store(cols, Ordering::Relaxed);
-        inst.rows.store(rows, Ordering::Relaxed);
-        let _ = inst.master.lock().unwrap().resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        let prev_cols = inst.cols.swap(cols, Ordering::Relaxed);
+        let prev_rows = inst.rows.swap(rows, Ordering::Relaxed);
+        if force || prev_cols != cols || prev_rows != rows {
+            let _ = inst.master.lock().unwrap().resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
     }
 
     serde_json::Value::Null
@@ -1860,7 +1879,7 @@ pub fn snapshot_and_shutdown_all_terminals(reason: &str) {
 
     for (session_id, inst) in &active_instances {
         // 1. Flush any unread buffer into scrollback and write .scrollback to disk
-        let _ = drain_buffer_into_scrollback(session_id, inst);
+        let _ = snapshot_scrollback_for_attach(session_id, inst, false);
 
         // 2. Inspect child process PID & detect if a manual agent CLI is running inside a shell
         let mut root_pid: Option<u32> = None;
@@ -2581,7 +2600,7 @@ pub fn quiesce_provider_terminals(provider: &str) -> Vec<QuiescedTerminal> {
 
     for (session_id, inst) in &matching_sessions {
         // 1. Drain in-memory buffer into durable scrollback so zero history is lost
-        let _ = drain_buffer_into_scrollback(session_id, inst);
+        let _ = snapshot_scrollback_for_attach(session_id, inst, false);
 
         // 2. Collect child PID
         let mut root_pid: Option<u32> = None;

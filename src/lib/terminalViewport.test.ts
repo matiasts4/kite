@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER,
+  StableCellFitAddon,
+  TERMINAL_SCROLLBAR_WIDTH_PX,
   ZwjAwareUnicode11Provider,
   buildWindowsConptyOptions,
   clampPtyViewportDimensions,
@@ -12,6 +14,7 @@ import {
   repairWebglCanvasForDevicePixelRatio,
   resolveBlockElementGradient,
   safeFitTerminal,
+  scheduleStabilizedFit,
   terminalGridDriftedFromFit,
 } from './terminalViewport';
 
@@ -172,5 +175,78 @@ describe('terminalViewport', () => {
     expect(repaired).toBe(true);
     expect(handleDevicePixelRatioChange).toHaveBeenCalledTimes(1);
     expect(refresh).toHaveBeenCalledWith(0, 23);
+  });
+
+  it('computes stable cell dimensions with 5px scrollbar width without clearing render service', () => {
+    const parent = document.createElement('div');
+    parent.style.width = '805px';
+    parent.style.height = '480px';
+    const element = document.createElement('div');
+    parent.appendChild(element);
+
+    const resize = vi.fn();
+    const clearRenderService = vi.fn();
+    const term = {
+      cols: 80,
+      rows: 24,
+      element,
+      options: {
+        scrollback: 5000,
+        scrollbar: { width: TERMINAL_SCROLLBAR_WIDTH_PX },
+      },
+      dimensions: {
+        device: { cell: { width: 12, height: 24 } },
+        css: { cell: { width: 8.4, height: 16.4 } },
+      },
+      _core: {
+        _renderService: {
+          clear: clearRenderService,
+        },
+      },
+      resize,
+    } as any;
+
+    Object.defineProperty(window, 'devicePixelRatio', {
+      value: 1.5,
+      configurable: true,
+    });
+
+    const addon = new StableCellFitAddon();
+    addon.activate(term);
+    const proposed = addon.proposeDimensions();
+    // (805 - 5px scrollbar) / (12 / 1.5 = 8px) = 100 cols; 480 / (24 / 1.5 = 16px) = 30 rows
+    expect(proposed).toEqual({ cols: 100, rows: 30 });
+
+    addon.fit();
+    expect(resize).toHaveBeenCalledWith(100, 30);
+    expect(clearRenderService).not.toHaveBeenCalled();
+  });
+
+  it('waits for two consecutive matching proposed grids in scheduleStabilizedFit', () => {
+    const callbacks: FrameRequestCallback[] = [];
+    const sequence = [
+      { cols: 92, rows: 30 },
+      { cols: 98, rows: 30 },
+      { cols: 98, rows: 30 },
+    ];
+    let idx = 0;
+    const onSettled = vi.fn();
+
+    scheduleStabilizedFit({
+      propose: () => sequence[Math.min(idx++, sequence.length - 1)],
+      onSettled,
+      requestFrame: (cb) => {
+        callbacks.push(cb);
+        return callbacks.length;
+      },
+      cancelFrame: () => {},
+    });
+
+    callbacks.shift()!(0);
+    expect(onSettled).not.toHaveBeenCalled();
+    callbacks.shift()!(16);
+    expect(onSettled).not.toHaveBeenCalled();
+    callbacks.shift()!(32);
+    expect(onSettled).toHaveBeenCalledTimes(1);
   });
 });

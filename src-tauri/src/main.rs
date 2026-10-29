@@ -166,7 +166,7 @@ fn main() {
             .join("EBWebView");
 
         // Explicitly isolate WebView2 User Data Folder so Dev and Installed never freeze or conflict
-        if std::env::var("WEBVIEW2_USER_DATA_FOLDER").is_err() {
+        if cfg!(debug_assertions) || std::env::var("WEBVIEW2_USER_DATA_FOLDER").is_err() {
             std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_dir);
         }
         log_trace(&format!(

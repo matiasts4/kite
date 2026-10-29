@@ -1,4 +1,4 @@
-import type { FitAddon } from '@xterm/addon-fit';
+import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import type { IUnicodeVersionProvider, Terminal } from '@xterm/xterm';
 
@@ -6,6 +6,7 @@ export const SAFE_FIT_MIN_WIDTH_PX = 48;
 export const SAFE_FIT_MIN_HEIGHT_PX = 24;
 export const SAFE_FIT_MIN_COLS = 8;
 export const SAFE_FIT_MIN_ROWS = 4;
+export const TERMINAL_SCROLLBAR_WIDTH_PX = 5;
 
 export const PTY_VIEWPORT_MIN_COLS = 20;
 export const PTY_VIEWPORT_MIN_ROWS = 8;
@@ -258,10 +259,11 @@ export function attachDomBlockFillCleanup(term: Terminal): () => void {
   const observer = new MutationObserver((records) => {
     const dirtyRows = new Set<HTMLElement>();
     for (const record of records) {
-      const rowTarget =
+      const targetElement =
         record.target instanceof HTMLElement
-          ? record.target.closest('.xterm-rows > div')
-          : null;
+          ? record.target
+          : record.target.parentElement;
+      const rowTarget = targetElement ? targetElement.closest('.xterm-rows > div') : null;
       if (rowTarget instanceof HTMLElement) {
         dirtyRows.add(rowTarget);
         continue;
@@ -288,7 +290,7 @@ export function attachDomBlockFillCleanup(term: Terminal): () => void {
       }
     }
   });
-  observer.observe(element, { childList: true, subtree: true });
+  observer.observe(element, { childList: true, characterData: true, subtree: true });
   return () => observer.disconnect();
 }
 
@@ -338,6 +340,177 @@ function measureHostDimensions(host: HTMLElement): { width: number; height: numb
   const width = rect && rect.width > 0 ? rect.width : host.clientWidth;
   const height = rect && rect.height > 0 ? rect.height : host.clientHeight;
   return { width, height };
+}
+
+interface TerminalRenderDimensions {
+  device?: { cell?: { width?: number; height?: number } };
+  css?: { cell?: { width?: number; height?: number } };
+}
+
+export function getStableCellDimensions(
+  term: Terminal,
+): { width: number; height: number } | null {
+  const internal = term as unknown as {
+    dimensions?: TerminalRenderDimensions;
+    _core?: {
+      _renderService?: {
+        dimensions?: TerminalRenderDimensions;
+      };
+    };
+  };
+  const dims = internal.dimensions ?? internal._core?._renderService?.dimensions;
+  if (!dims) return null;
+  const dpr =
+    term.element?.ownerDocument?.defaultView?.devicePixelRatio ||
+    (typeof window !== 'undefined' ? window.devicePixelRatio : 1) ||
+    1;
+  const devWidth = (dims.device?.cell?.width ?? 0) / dpr;
+  const devHeight = (dims.device?.cell?.height ?? 0) / dpr;
+  if (Number.isFinite(devWidth) && devWidth > 0 && Number.isFinite(devHeight) && devHeight > 0) {
+    return { width: devWidth, height: devHeight };
+  }
+  const cssWidth = dims.css?.cell?.width ?? 0;
+  const cssHeight = dims.css?.cell?.height ?? 0;
+  if (Number.isFinite(cssWidth) && cssWidth > 0 && Number.isFinite(cssHeight) && cssHeight > 0) {
+    return { width: cssWidth, height: cssHeight };
+  }
+  return null;
+}
+
+export class StableCellFitAddon extends FitAddon {
+  private stableTerminal: Terminal | null = null;
+
+  override activate(terminal: Terminal): void {
+    this.stableTerminal = terminal;
+    super.activate(terminal);
+  }
+
+  override fit(): void {
+    const term = this.stableTerminal;
+    const dims = this.proposeDimensions();
+    if (!dims || !term || Number.isNaN(dims.cols) || Number.isNaN(dims.rows)) {
+      return;
+    }
+    if (term.cols !== dims.cols || term.rows !== dims.rows) {
+      term.resize(dims.cols, dims.rows);
+    }
+  }
+
+  override proposeDimensions(): { cols: number; rows: number } | undefined {
+    const term = this.stableTerminal;
+    const element = term?.element;
+    const parent = element?.parentElement;
+    if (!term || !element || !parent) {
+      return undefined;
+    }
+    const cell = getStableCellDimensions(term);
+    if (!cell) {
+      return undefined;
+    }
+    const view =
+      element.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null);
+    const parentStyle =
+      view && typeof view.getComputedStyle === 'function' ? view.getComputedStyle(parent) : null;
+    const elementStyle =
+      view && typeof view.getComputedStyle === 'function' ? view.getComputedStyle(element) : null;
+
+    const styleWidth = parentStyle ? Number.parseInt(parentStyle.getPropertyValue('width'), 10) : 0;
+    const styleHeight = parentStyle
+      ? Number.parseInt(parentStyle.getPropertyValue('height'), 10)
+      : 0;
+    const fallbackHost = measureHostDimensions(parent);
+    const hostWidth = styleWidth > 0 ? styleWidth : Math.trunc(fallbackHost.width);
+    const hostHeight = styleHeight > 0 ? styleHeight : Math.trunc(fallbackHost.height);
+    if (hostWidth <= 0 || hostHeight <= 0) {
+      return undefined;
+    }
+
+    const padTop = elementStyle ? Number.parseInt(elementStyle.getPropertyValue('padding-top'), 10) || 0 : 0;
+    const padRight = elementStyle ? Number.parseInt(elementStyle.getPropertyValue('padding-right'), 10) || 0 : 0;
+    const padBottom = elementStyle ? Number.parseInt(elementStyle.getPropertyValue('padding-bottom'), 10) || 0 : 0;
+    const padLeft = elementStyle ? Number.parseInt(elementStyle.getPropertyValue('padding-left'), 10) || 0 : 0;
+
+    const scrollbarOptions = (
+      term.options as { scrollbar?: { showScrollbar?: boolean; width?: number } }
+    ).scrollbar;
+    const showScrollbar = scrollbarOptions?.showScrollbar ?? true;
+    const scrollbarWidth =
+      term.options.scrollback === 0 || !showScrollbar
+        ? 0
+        : (scrollbarOptions?.width ?? TERMINAL_SCROLLBAR_WIDTH_PX);
+
+    const availableWidth = Math.max(0, hostWidth - padLeft - padRight - scrollbarWidth);
+    const availableHeight = Math.max(0, hostHeight - padTop - padBottom);
+    return {
+      cols: Math.max(2, Math.floor(availableWidth / cell.width)),
+      rows: Math.max(1, Math.floor(availableHeight / cell.height)),
+    };
+  }
+}
+
+export function scheduleStabilizedFit(options: {
+  propose: () => { cols: number; rows: number } | undefined | null;
+  isBlocked?: () => boolean;
+  onSettled: () => void;
+  maxFrames?: number;
+  requestFrame?: (cb: FrameRequestCallback) => number;
+  cancelFrame?: (id: number) => void;
+}): () => void {
+  const maxFrames = Math.max(2, options.maxFrames ?? 8);
+  const requestFrame =
+    options.requestFrame ??
+    (typeof requestAnimationFrame === 'function'
+      ? (cb: FrameRequestCallback) => requestAnimationFrame(cb)
+      : (cb: FrameRequestCallback) => window.setTimeout(() => cb(Date.now()), 16));
+  const cancelFrame =
+    options.cancelFrame ??
+    (typeof cancelAnimationFrame === 'function'
+      ? (id: number) => cancelAnimationFrame(id)
+      : (id: number) => window.clearTimeout(id));
+
+  let frameId: number | null = null;
+  let lastCols: number | null = null;
+  let lastRows: number | null = null;
+  let count = 0;
+
+  const step = () => {
+    frameId = null;
+    if (options.isBlocked?.()) {
+      return;
+    }
+    count += 1;
+    const proposed = options.propose();
+    if (
+      proposed &&
+      Number.isFinite(proposed.cols) &&
+      Number.isFinite(proposed.rows) &&
+      proposed.cols >= SAFE_FIT_MIN_COLS &&
+      proposed.rows >= SAFE_FIT_MIN_ROWS
+    ) {
+      if (proposed.cols === lastCols && proposed.rows === lastRows) {
+        options.onSettled();
+        return;
+      }
+      lastCols = proposed.cols;
+      lastRows = proposed.rows;
+    } else {
+      lastCols = null;
+      lastRows = null;
+    }
+    if (count < maxFrames) {
+      frameId = requestFrame(step);
+    } else if (lastCols !== null && lastRows !== null) {
+      options.onSettled();
+    }
+  };
+
+  frameId = requestFrame(step);
+  return () => {
+    if (frameId !== null) {
+      cancelFrame(frameId);
+      frameId = null;
+    }
+  };
 }
 
 export function terminalGridDriftedFromFit(

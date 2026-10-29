@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import type { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { invokeCommand } from '../../lib/ipc';
 import {
@@ -21,12 +21,16 @@ import {
   reconcilePtySizeAfterSpawn,
   repairWebglCanvasForDevicePixelRatio,
   safeFitTerminal,
+  scheduleStabilizedFit,
+  StableCellFitAddon,
+  TERMINAL_SCROLLBAR_WIDTH_PX,
   terminalGridDriftedFromFit,
 } from '../../lib/terminalViewport';
 import {
   classifyForegroundOutputRefresh,
   createSyncOutputHold,
   disposeTerminalRefreshTracking,
+  type ForegroundOutputScanState,
   splitAlternateScreenEnterChunk,
   stripTransientCursorShows,
   SYNC_OUTPUT_MAX_HOLD_MS,
@@ -38,6 +42,13 @@ import {
   getTerminalWebLinksTarget,
   openTerminalWebLink,
 } from '../../lib/terminalLinkNav';
+import {
+  getTerminalAppearancePrefs,
+  setTerminalAppearancePrefs,
+  resolveTerminalFontFamily,
+  TERMINAL_APPEARANCE_CHANGED_EVENT,
+  type TerminalAppearancePrefs,
+} from '../../lib/terminalAppearancePrefs';
 import './terminal.css';
 
 export interface TerminalViewProps {
@@ -333,6 +344,20 @@ function attachBitmapRenderer(live: LiveTerminal) {
 }
 
 function syncVisibleBitmapRenderers() {
+  const { renderer } = getTerminalAppearancePrefs();
+  if (renderer === 'dom') {
+    for (const live of liveTerms.values()) {
+      const wasBitmap = live.renderer !== null;
+      releaseBitmapRenderer(live);
+      if (wasBitmap && isLiveTerminalVisible(live) && live.term.rows > 0) {
+        try {
+          live.term.refresh(0, live.term.rows - 1);
+        } catch {}
+      }
+    }
+    return;
+  }
+
   for (const live of liveTerms.values()) {
     if (!isLiveTerminalVisible(live)) {
       releaseBitmapRenderer(live);
@@ -391,9 +416,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const pollingRef = useRef<number | null>(null);
   const resizeTimerRef = useRef<number | null>(null);
   const cancelSpawnReconcileRef = useRef<(() => void) | null>(null);
+  const cancelDriftStabilizedFitRef = useRef<(() => void) | null>(null);
   const driftCheckFrameRef = useRef<number | null>(null);
   const lastDriftCheckAtRef = useRef<number>(0);
   const altScreenSplitTailRef = useRef<string>('');
+  const foregroundScanStateRef = useRef<ForegroundOutputScanState>({
+    endsWithCarriageReturn: false,
+    scanTail: '',
+  });
   const writeDecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
   const lastColsRef = useRef<number | null>(null);
   const lastRowsRef = useRef<number | null>(null);
@@ -491,7 +521,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const scheduleForegroundGridDriftCheck = useCallback(() => {
     if (SUPPRESS_FOREGROUND_GRID_DRIFT_REFIT_DIAGNOSTIC) return;
-    if (driftCheckFrameRef.current !== null) return;
+    if (driftCheckFrameRef.current !== null || cancelDriftStabilizedFitRef.current !== null) return;
     const now = performance.now();
     if (now - lastDriftCheckAtRef.current < 250) return;
     driftCheckFrameRef.current = window.requestAnimationFrame(() => {
@@ -501,9 +531,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const fit = fitAddonRef.current;
       const host = containerRef.current;
       if (!term || !fit || !host || !ptyOpenRef.current) return;
-      if (terminalGridDriftedFromFit(term, fit, host)) {
-        fitNowRef.current();
-      }
+      if (typeof term.hasSelection === 'function' && term.hasSelection()) return;
+      if (!terminalGridDriftedFromFit(term, fit, host)) return;
+      cancelDriftStabilizedFitRef.current = scheduleStabilizedFit({
+        propose: () => fitAddonRef.current?.proposeDimensions(),
+        isBlocked: () =>
+          !ptyOpenRef.current ||
+          Boolean(termRef.current && typeof termRef.current.hasSelection === 'function' && termRef.current.hasSelection()),
+        onSettled: () => {
+          cancelDriftStabilizedFitRef.current = null;
+          const currentTerm = termRef.current;
+          const currentFit = fitAddonRef.current;
+          const currentHost = containerRef.current;
+          if (!currentTerm || !currentFit || !currentHost || !ptyOpenRef.current) return;
+          if (terminalGridDriftedFromFit(currentTerm, currentFit, currentHost)) {
+            fitNowRef.current();
+          }
+        },
+      });
     });
   }, []);
 
@@ -552,13 +597,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               cb();
               return;
             }
-            const refreshPlan = classifyForegroundOutputRefresh(chunkText);
+            const refreshPlan = classifyForegroundOutputRefresh(chunkText, {
+              scanState: foregroundScanStateRef.current,
+            });
             const payload = refreshPlan.stripTransientCursorShows
               ? stripTransientCursorShows(chunkText)
               : chunkText;
             writeTerminalOutputWithRefresh(term, payload, {
               forceViewportRefresh: refreshPlan.forceViewportRefresh,
               followupViewportRefresh: refreshPlan.followupViewportRefresh,
+              clearTextureAtlasOnFollowup: refreshPlan.clearTextureAtlasOnFollowup,
               shouldRefreshViewportSynchronously: () => !hasWebglRenderer,
               onParsed: cb,
             });
@@ -720,6 +768,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const key = sessionKey || propSessionId || sessionIdRef.current;
     const existing = key ? liveTerms.get(key) : undefined;
     if (existing?.term.element) {
+      const appearance = getTerminalAppearancePrefs();
+      existing.term.options.fontFamily = resolveTerminalFontFamily(appearance.fontFamilyId);
+      existing.term.options.fontSize = appearance.fontSize;
+      existing.term.options.lineHeight = appearance.lineHeight;
+      existing.term.options.cursorStyle = appearance.cursorStyle;
+      existing.term.options.cursorBlink = appearance.cursorBlink;
       containerRef.current.replaceChildren(existing.term.element);
       termRef.current = existing.term;
       fitAddonRef.current = existing.fit;
@@ -737,6 +791,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
 
     containerRef.current.innerHTML = '';
+
+    const appearance = getTerminalAppearancePrefs();
 
     const term = new Terminal({
       theme: {
@@ -763,25 +819,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         brightCyan: '#8ae8e4',
         brightWhite: '#fafafa',
       },
-      fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
-      fontSize: 13,
+      fontFamily: resolveTerminalFontFamily(appearance.fontFamilyId),
+      fontSize: appearance.fontSize,
       fontWeight: '400',
       fontWeightBold: '600',
       drawBoldTextInBrightColors: true,
       letterSpacing: 0,
-      lineHeight: 1,
+      lineHeight: appearance.lineHeight,
       minimumContrastRatio: 4.5,
       customGlyphs: true,
       rescaleOverlappingGlyphs: false,
-      cursorBlink: false,
-      cursorStyle: 'bar',
+      cursorBlink: appearance.cursorBlink,
+      cursorStyle: appearance.cursorStyle,
       convertEol: false,
       scrollback: 5000,
       allowProposedApi: true,
       windowsPty: buildWindowsConptyOptions(DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER),
     });
+    (term.options as unknown as { scrollbar?: { width?: number } }).scrollbar = {
+      width: TERMINAL_SCROLLBAR_WIDTH_PX,
+    };
 
-    const fitAddon = new FitAddon();
+    const fitAddon = new StableCellFitAddon();
     term.loadAddon(fitAddon);
     activateTerminalUnicodeProvider(term);
     term.open(containerRef.current);
@@ -1017,6 +1076,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     ptyOpenRef.current = false;
     cancelSpawnReconcileRef.current?.();
     cancelSpawnReconcileRef.current = null;
+    cancelDriftStabilizedFitRef.current?.();
+    cancelDriftStabilizedFitRef.current = null;
     const stillCurrent = () => isMountedRef.current && startGenRef.current === gen;
 
     stopPolling();
@@ -1227,6 +1288,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   paneId: paneIdRef.current,
                   columns: grid.cols,
                   rows: grid.rows,
+                  preserveUnreadBuffer: hadLiveElement,
                 }
               : {
                   sessionId: newSessionId,
@@ -1237,6 +1299,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   confirmedByBuilder: true,
                   columns: grid.cols,
                   rows: grid.rows,
+                  preserveUnreadBuffer: hadLiveElement,
                 },
           );
       if (!stillCurrent()) return;
@@ -1245,6 +1308,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       if (term && !started?.attachedToExisting && (hadLiveElement || opts?.restart)) {
         term.reset();
+        foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
+      }
+      if (!hadLiveElement && started?.scrollbackBase64 && term) {
+        const historyBytes = base64ToUint8Array(started.scrollbackBase64);
+        if (historyBytes.length > 0) {
+          await enqueueWrite(historyBytes);
+          if (!stillCurrent()) return;
+        }
       }
       if (started?.attachedToExisting) {
         void invokeCommand('resize_terminal', {
@@ -1252,12 +1323,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           columns: grid.cols,
           rows: grid.rows,
         }).catch(() => {});
-      } else if (!hadLiveElement && started?.scrollbackBase64 && term) {
-        const historyBytes = base64ToUint8Array(started.scrollbackBase64);
-        if (historyBytes.length > 0) {
-          await enqueueWrite(historyBytes);
-          if (!stillCurrent()) return;
-        }
       }
 
       if (fitAddonRef.current) {
@@ -1409,14 +1474,37 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (detail.command === 'font-larger' || detail.command === 'font-smaller') {
         const term = termRef.current;
         if (!term) return;
-        const next = Math.min(22, Math.max(10, (term.options.fontSize ?? 13) + (detail.command === 'font-larger' ? 1 : -1)));
+        const currentSize = term.options.fontSize ?? getTerminalAppearancePrefs().fontSize;
+        const next = Math.min(22, Math.max(10, currentSize + (detail.command === 'font-larger' ? 1 : -1)));
         term.options.fontSize = next;
+        setTerminalAppearancePrefs({ fontSize: next });
         fitTerminal();
       }
     };
     window.addEventListener('kite:terminal-command', onCommand);
     return () => window.removeEventListener('kite:terminal-command', onCommand);
   }, [chrome, handleClear, propSessionId, startSession]);
+
+  useEffect(() => {
+    const onAppearanceChanged = (e: Event) => {
+      const prefs = (e as CustomEvent<TerminalAppearancePrefs>).detail ?? getTerminalAppearancePrefs();
+      const resolvedFont = resolveTerminalFontFamily(prefs.fontFamilyId);
+
+      for (const live of liveTerms.values()) {
+        live.term.options.fontFamily = resolvedFont;
+        live.term.options.fontSize = prefs.fontSize;
+        live.term.options.lineHeight = prefs.lineHeight;
+        live.term.options.cursorStyle = prefs.cursorStyle;
+        live.term.options.cursorBlink = prefs.cursorBlink;
+      }
+
+      syncVisibleBitmapRenderers();
+      fitTerminal();
+    };
+
+    window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
+    return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
+  }, [fitTerminal]);
 
   useEffect(() => {
     if (initialEngine && initialEngine !== engineRef.current) {
@@ -1558,6 +1646,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => {
       cancelSpawnReconcileRef.current?.();
       cancelSpawnReconcileRef.current = null;
+      cancelDriftStabilizedFitRef.current?.();
+      cancelDriftStabilizedFitRef.current = null;
       if (driftCheckFrameRef.current !== null) {
         window.cancelAnimationFrame(driftCheckFrameRef.current);
         driftCheckFrameRef.current = null;

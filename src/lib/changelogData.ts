@@ -33,6 +33,58 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.40',
+    tag: 'v0.1.40',
+    date: 'Oct 28, 2026',
+    title: 'Estabilización ConPTY de Terminal, Paleta de Comandos y Mejoras en Zed',
+    items: [
+      {
+        kind: 'added',
+        description: 'Paleta de comandos integrada y enrutamiento global de atajos de teclado',
+      },
+      {
+        kind: 'added',
+        description: 'Persistencia local de preferencias de tema, paleta de colores y shell predeterminado',
+      },
+      {
+        kind: 'added',
+        description: 'Apertura nativa de archivos y opción de revelado en el explorador del sistema operativo',
+      },
+      {
+        kind: 'added',
+        description: 'Trazabilidad en tiempo real de ejecución del operador y handoff inteligente de terminales para Zed',
+      },
+      {
+        kind: 'added',
+        description: 'Detección de disponibilidad del terminal antes de despachar el proyectil de prompt',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminación de ghosting de texto y sincronización geométrica de ConPTY en el terminal',
+      },
+      {
+        kind: 'fixed',
+        description: 'Renderizado continuo de filas y eliminación de huecos en arte ASCII y caracteres de bloque',
+      },
+      {
+        kind: 'fixed',
+        description: 'Prevención de congelamiento de texto residual al restaurar el buffer alternativo de pantalla',
+      },
+      {
+        kind: 'fixed',
+        description: 'Normalización de codificación de consola para agentes en terminales Windows',
+      },
+      {
+        kind: 'changed',
+        description: 'Consolidación y rediseño unificado de pestañas de configuración y cuentas',
+      },
+      {
+        kind: 'changed',
+        description: 'Indicador activo optimizado para la lista de workspaces y limpieza del panel lateral',
+      },
+    ],
+  },
+  {
     version: '0.1.39',
     tag: 'v0.1.39',
     date: 'Oct 27, 2026',

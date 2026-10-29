@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.40] - 2026-10-28
+
+> Estabilización ConPTY de Terminal, Paleta de Comandos y Mejoras en Zed
+
+### Added
+- Paleta de comandos integrada y enrutamiento global de atajos de teclado
+- Persistencia local de preferencias de tema, paleta de colores y shell predeterminado
+- Apertura nativa de archivos y opción de revelado en el explorador del sistema operativo
+- Trazabilidad en tiempo real de ejecución del operador y handoff inteligente de terminales para Zed
+- Detección de disponibilidad del terminal antes de despachar el proyectil de prompt
+
+### Changed
+- Consolidación y rediseño unificado de pestañas de configuración y cuentas
+- Indicador activo optimizado para la lista de workspaces y limpieza del panel lateral
+
+### Fixed
+- Eliminación de ghosting de texto y sincronización geométrica de ConPTY en el terminal
+- Renderizado continuo de filas y eliminación de huecos en arte ASCII y caracteres de bloque
+- Prevención de congelamiento de texto residual al restaurar el buffer alternativo de pantalla
+- Normalización de codificación de consola para agentes en terminales Windows
+
+---
+
 ## [0.1.39] - 2026-10-27
 
 > Voz Hiperrealista ElevenLabs para Zed, Composer Moderno y Control de Razonamiento

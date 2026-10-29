@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Terminal } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
-import { CanvasAddon } from 'xterm-addon-canvas';
-import { WebglAddon } from 'xterm-addon-webgl';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { invokeCommand } from '../../lib/ipc';
 import {
   recordTerminalOutput,
@@ -14,6 +13,25 @@ import {
   hostBoxIsUsable,
   waitForStableHost,
 } from '../../lib/terminalHostSize';
+import {
+  activateTerminalUnicodeProvider,
+  attachDomBlockFillCleanup,
+  buildWindowsConptyOptions,
+  DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER,
+  reconcilePtySizeAfterSpawn,
+  repairWebglCanvasForDevicePixelRatio,
+  safeFitTerminal,
+  terminalGridDriftedFromFit,
+} from '../../lib/terminalViewport';
+import {
+  classifyForegroundOutputRefresh,
+  createSyncOutputHold,
+  disposeTerminalRefreshTracking,
+  splitAlternateScreenEnterChunk,
+  stripTransientCursorShows,
+  SYNC_OUTPUT_MAX_HOLD_MS,
+  writeTerminalOutputWithRefresh,
+} from '../../lib/terminalSyncOutput';
 import { openFileInRightDock } from '../../lib/filePreviewNav';
 import {
   extractTerminalLinks,
@@ -186,9 +204,13 @@ function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
-type BitmapKind = 'webgl' | 'canvas';
-type BitmapRenderer = { kind: BitmapKind; dispose: () => void };
-type LiveTerminal = { term: Terminal; fit: FitAddon; renderer: BitmapRenderer | null };
+type BitmapRenderer = { kind: 'webgl'; dispose: () => void };
+type LiveTerminal = {
+  term: Terminal;
+  fit: FitAddon;
+  renderer: BitmapRenderer | null;
+  cleanupDomBlockFill?: () => void;
+};
 const liveTerms = new Map<string, LiveTerminal>();
 const restartedSessions = new Map<string, string>();
 
@@ -259,14 +281,6 @@ function isLiveTerminalVisible(live: LiveTerminal): boolean {
   return !el.closest('#terminal-parking');
 }
 
-function visibleTerminalCount(): number {
-  let count = 0;
-  for (const live of liveTerms.values()) {
-    if (isLiveTerminalVisible(live)) count += 1;
-  }
-  return count;
-}
-
 function releaseBitmapRenderer(live: LiveTerminal) {
   const previous = live.renderer;
   live.renderer = null;
@@ -277,56 +291,49 @@ function releaseBitmapRenderer(live: LiveTerminal) {
   }
 }
 
-/** One visible pane uses WebGL. Two or more stay on Canvas so none falls back to the DOM renderer. */
-function attachBitmapRenderer(live: LiveTerminal, kind: BitmapKind) {
-  if (live.renderer?.kind === kind) return;
+function attachBitmapRenderer(live: LiveTerminal) {
+  if (live.renderer?.kind === 'webgl') {
+    repairWebglCanvasForDevicePixelRatio(live.term);
+    return;
+  }
   releaseBitmapRenderer(live);
-  let attached = false;
-  if (kind === 'webgl') {
-    try {
-      const addon = new WebglAddon();
-      const loss = addon.onContextLoss(() => {
-        loss.dispose();
-        attachBitmapRenderer(live, 'canvas');
-      });
-      live.term.loadAddon(addon);
-      live.renderer = {
-        kind: 'webgl',
-        dispose: () => {
-          loss.dispose();
-          addon.dispose();
-        },
-      };
-      attached = true;
-    } catch (err) {
-      console.warn('[terminal] WebGL renderer unavailable', err);
-    }
-  }
-  if (!attached) {
-    try {
-      const addon = new CanvasAddon();
-      live.term.loadAddon(addon);
-      live.renderer = { kind: 'canvas', dispose: () => addon.dispose() };
-    } catch (err) {
-      console.warn('[terminal] canvas renderer unavailable', err);
-    }
-  }
-  if (!live.renderer || !isLiveTerminalVisible(live)) return;
   try {
-    live.fit.fit();
+    const addon = new WebglAddon();
+    const loss = addon.onContextLoss(() => {
+      loss.dispose();
+      releaseBitmapRenderer(live);
+      try {
+        if (live.term.rows > 0) {
+          live.term.refresh(0, live.term.rows - 1);
+        }
+      } catch {}
+    });
+    live.term.loadAddon(addon);
+    live.renderer = {
+      kind: 'webgl',
+      dispose: () => {
+        loss.dispose();
+        addon.dispose();
+      },
+    };
+  } catch (err) {
+    console.warn('[terminal] WebGL renderer unavailable', err);
+  }
+  if (!isLiveTerminalVisible(live)) return;
+  try {
+    safeFitTerminal(live.term, live.fit);
   } catch {
     // The host can be mid-layout. The settled fit still runs after open.
   }
 }
 
 function syncVisibleBitmapRenderers() {
-  const kind: BitmapKind = visibleTerminalCount() <= 1 ? 'webgl' : 'canvas';
   for (const live of liveTerms.values()) {
     if (!isLiveTerminalVisible(live)) {
       releaseBitmapRenderer(live);
       continue;
     }
-    attachBitmapRenderer(live, kind);
+    attachBitmapRenderer(live);
   }
 }
 
@@ -338,6 +345,8 @@ export function releaseTerminal(sessionId: string) {
     markTerminalExited(id);
     const live = liveTerms.get(id);
     if (live) {
+      disposeTerminalRefreshTracking(live.term);
+      live.cleanupDomBlockFill?.();
       releaseBitmapRenderer(live);
       live.term.dispose();
       liveTerms.delete(id);
@@ -376,6 +385,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pollingRef = useRef<number | null>(null);
   const resizeTimerRef = useRef<number | null>(null);
+  const cancelSpawnReconcileRef = useRef<(() => void) | null>(null);
+  const driftCheckFrameRef = useRef<number | null>(null);
+  const lastDriftCheckAtRef = useRef<number>(0);
+  const altScreenSplitTailRef = useRef<string>('');
+  const writeDecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
   const lastColsRef = useRef<number | null>(null);
   const lastRowsRef = useRef<number | null>(null);
   const ptyOpenRef = useRef(false);
@@ -387,6 +401,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const fitWatchRef = useRef(0);
   const scheduleStableFitRef = useRef<() => void>(() => {});
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  /** Joins a synchronized frame so a poll slice is not painted on its own. */
+  const syncHoldRef = useRef(createSyncOutputHold());
+  const syncHoldTimerRef = useRef<number | null>(null);
   const utf8DecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
   const onDataDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const sessionIdRef = useRef<string>(propSessionId || '');
@@ -467,7 +484,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isWindowFocusedRef = useRef<boolean>(true);
   const triggerImmediatePollRef = useRef<() => void>(() => {});
 
-  const enqueueWrite = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
+  const scheduleForegroundGridDriftCheck = useCallback(() => {
+    if (driftCheckFrameRef.current !== null) return;
+    const now = performance.now();
+    if (now - lastDriftCheckAtRef.current < 250) return;
+    driftCheckFrameRef.current = window.requestAnimationFrame(() => {
+      driftCheckFrameRef.current = null;
+      lastDriftCheckAtRef.current = performance.now();
+      const term = termRef.current;
+      const fit = fitAddonRef.current;
+      const host = containerRef.current;
+      if (!term || !fit || !host || !ptyOpenRef.current) return;
+      if (terminalGridDriftedFromFit(term, fit, host)) {
+        fitNowRef.current();
+      }
+    });
+  }, []);
+
+  const writeRaw = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
+    scheduleForegroundGridDriftCheck();
     writeActiveRef.current += 1;
     const releaseWrite = () => {
       writeActiveRef.current = Math.max(0, writeActiveRef.current - 1);
@@ -498,11 +533,63 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           // Hard safety timeout: never allow an unrendered, hidden, or resizing xterm
           // to block the write queue or deadlock the polling tick.
           const timer = setTimeout(done, 100);
-          try {
-            term.write(data, () => {
-              clearTimeout(timer);
-              done();
+
+          const text =
+            typeof data === 'string'
+              ? data
+              : writeDecoderRef.current.decode(data, { stream: true });
+          const live = sessionIdRef.current ? liveTerms.get(sessionIdRef.current) : undefined;
+          const hasWebglRenderer = Boolean(live?.renderer);
+
+          const deliverText = (chunkText: string, cb: () => void) => {
+            if (!chunkText) {
+              cb();
+              return;
+            }
+            const refreshPlan = classifyForegroundOutputRefresh(chunkText);
+            const payload = refreshPlan.stripTransientCursorShows
+              ? stripTransientCursorShows(chunkText)
+              : chunkText;
+            writeTerminalOutputWithRefresh(term, payload, {
+              forceViewportRefresh: refreshPlan.forceViewportRefresh,
+              followupViewportRefresh: refreshPlan.followupViewportRefresh,
+              shouldRefreshViewportSynchronously: () => !hasWebglRenderer,
+              onParsed: cb,
             });
+          };
+
+          try {
+            const hasPendingResize =
+              fitDeferredRef.current ||
+              Boolean(
+                fitAddonRef.current &&
+                  containerRef.current &&
+                  terminalGridDriftedFromFit(term, fitAddonRef.current, containerRef.current),
+              );
+            const split = splitAlternateScreenEnterChunk(
+              text,
+              altScreenSplitTailRef.current,
+              hasPendingResize,
+            );
+            altScreenSplitTailRef.current = split.nextTail;
+
+            if (split.splitBeforeChunkOffset !== null) {
+              const before = text.slice(0, split.splitBeforeChunkOffset);
+              const after = text.slice(split.splitBeforeChunkOffset);
+              deliverText(before, () => {
+                fitDeferredRef.current = false;
+                fitNowRef.current();
+                deliverText(after, () => {
+                  clearTimeout(timer);
+                  done();
+                });
+              });
+            } else {
+              deliverText(text, () => {
+                clearTimeout(timer);
+                done();
+              });
+            }
           } catch {
             clearTimeout(timer);
             done();
@@ -513,14 +600,41 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       releaseWrite();
     });
     return writeQueueRef.current;
-  }, []);
+  }, [scheduleForegroundGridDriftCheck]);
+
+  const enqueueWrite = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
+    const ready = syncHoldRef.current.push(data);
+    if (syncHoldRef.current.pending) {
+      if (syncHoldTimerRef.current === null) {
+        syncHoldTimerRef.current = window.setTimeout(() => {
+          syncHoldTimerRef.current = null;
+          const pending = syncHoldRef.current.flush();
+          if (pending && pending.length > 0) {
+            void writeRaw(pending);
+          }
+        }, SYNC_OUTPUT_MAX_HOLD_MS);
+      }
+    } else if (syncHoldTimerRef.current !== null) {
+      window.clearTimeout(syncHoldTimerRef.current);
+      syncHoldTimerRef.current = null;
+    }
+    if (ready.length === 0) {
+      onFlushed?.();
+      return Promise.resolve();
+    }
+    for (let i = 0; i < ready.length; i += 1) {
+      writeRaw(ready[i], i === ready.length - 1 ? onFlushed : undefined);
+    }
+    return writeQueueRef.current;
+  }, [writeRaw]);
 
   const fitTerminal = useCallback(() => {
     const host = containerRef.current;
     if (!host || !fitAddonRef.current || !termRef.current || !ptyOpenRef.current) return;
     if (!hostBoxIsUsable(host.clientWidth, host.clientHeight)) return;
-    // A polled chunk owns the frame. Fitting now would SIGWINCH in the middle of it.
-    if (writeActiveRef.current > 0) {
+    // A polled chunk or an open synchronized frame owns the screen.
+    // Fitting now would SIGWINCH in the middle of it.
+    if (writeActiveRef.current > 0 || syncHoldRef.current.holding) {
       fitDeferredRef.current = true;
       return;
     }
@@ -530,8 +644,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const savedLinesFromBottom = linesFromBottomRef.current;
 
       isResizingRef.current = true;
+      let grid: { cols: number; rows: number } | null = null;
       try {
-        fitAddonRef.current.fit();
+        grid = safeFitTerminal(term, fitAddonRef.current, host);
       } finally {
         requestAnimationFrame(() => {
           isResizingRef.current = false;
@@ -540,8 +655,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const restoreScroll = () => {
         if (!termRef.current) return;
-        // Alternate screen (OpenCode, Grok, vim) paints its own cells. A local
-        // refresh redraws a damaged buffer and the app never reconstructs it.
         if (termRef.current.buffer.active.type === 'alternate') return;
         if (wasAtBottom) {
           termRef.current.scrollToBottom();
@@ -554,8 +667,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       restoreScroll();
       requestAnimationFrame(restoreScroll);
 
-      const cols = term.cols;
-      const rows = term.rows;
+      const cols = grid?.cols ?? term.cols;
+      const rows = grid?.rows ?? term.rows;
       if (cols <= 0 || rows <= 0 || !sessionIdRef.current) return;
       if (cols === lastColsRef.current && rows === lastRowsRef.current) return;
 
@@ -573,8 +686,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       })
         .then(() => {
           if (sessionIdRef.current !== sessionId) return;
-          if (termRef.current?.buffer.active.type === 'alternate') return;
-          restoreScroll();
+          if (termRef.current?.buffer.active.type !== 'alternate') {
+            restoreScroll();
+          }
         })
         .catch(() => {});
     } catch {}
@@ -647,26 +761,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       fontSize: 13,
       fontWeight: '400',
       fontWeightBold: '600',
+      drawBoldTextInBrightColors: true,
       letterSpacing: 0,
-      // Block art is drawn edge to edge. A taller line leaves a gap between
-      // rows, which slices the OpenCode mark and pulls strokes into the next cell.
       lineHeight: 1,
       minimumContrastRatio: 4.5,
       customGlyphs: true,
+      rescaleOverlappingGlyphs: false,
       cursorBlink: false,
       cursorStyle: 'bar',
       convertEol: false,
       scrollback: 5000,
       allowProposedApi: true,
-      windowsPty: {
-        backend: 'conpty',
-        buildNumber: 22631,
-      },
+      windowsPty: buildWindowsConptyOptions(DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER),
     });
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    activateTerminalUnicodeProvider(term);
     term.open(containerRef.current);
+    const cleanupDomBlockFill = attachDomBlockFillCleanup(term);
 
     term.onScroll(() => {
       if (isResizingRef.current) return;
@@ -677,7 +790,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
 
     try {
-      fitAddon.fit();
+      safeFitTerminal(term, fitAddon, containerRef.current);
     } catch {}
 
     // Register link provider for Ctrl + Left Click file preview and web URL navigation
@@ -807,7 +920,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
-    if (key) liveTerms.set(key, { term, fit: fitAddon, renderer: null });
+    if (key) liveTerms.set(key, { term, fit: fitAddon, renderer: null, cleanupDomBlockFill });
     syncVisibleBitmapRenderers();
 
     return term;
@@ -896,6 +1009,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const gen = ++startGenRef.current;
     fitWatchRef.current += 1;
     ptyOpenRef.current = false;
+    cancelSpawnReconcileRef.current?.();
+    cancelSpawnReconcileRef.current = null;
     const stillCurrent = () => isMountedRef.current && startGenRef.current === gen;
 
     stopPolling();
@@ -909,6 +1024,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const nextSessionId = globalThis.crypto.randomUUID();
       const live = liveTerms.get(previousSessionId);
       if (live) {
+        try {
+          live.renderer?.dispose();
+        } catch {}
+        disposeTerminalRefreshTracking(live.term);
+        live.cleanupDomBlockFill?.();
         live.term.dispose();
         liveTerms.delete(previousSessionId);
       }
@@ -923,6 +1043,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (opts?.restart && !pendingAgentRestart) {
       const live = liveTerms.get(previousSessionId);
       if (live) {
+        try {
+          live.renderer?.dispose();
+        } catch {}
+        disposeTerminalRefreshTracking(live.term);
+        live.cleanupDomBlockFill?.();
         live.term.dispose();
         liveTerms.delete(previousSessionId);
       }
@@ -1043,15 +1168,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const readGrid = () => {
         if (!fitAddonRef.current || !termRef.current) return null;
-        try {
-          fitAddonRef.current.fit();
-        } catch {
-          return null;
-        }
-        const cols = termRef.current.cols;
-        const rows = termRef.current.rows;
-        if (cols <= 0 || rows <= 0) return null;
-        return { cols, rows };
+        return safeFitTerminal(termRef.current, fitAddonRef.current, host);
       };
 
       let grid: { cols: number; rows: number } | null = null;
@@ -1135,6 +1252,29 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           await enqueueWrite(historyBytes);
           if (!stillCurrent()) return;
         }
+      }
+
+      if (fitAddonRef.current) {
+        cancelSpawnReconcileRef.current = reconcilePtySizeAfterSpawn({
+          isCancelled: () => !stillCurrent() || sessionIdRef.current !== newSessionId,
+          fitAndMeasure: () => {
+            if (!termRef.current || !fitAddonRef.current || !containerRef.current) return null;
+            return safeFitTerminal(termRef.current, fitAddonRef.current, containerRef.current);
+          },
+          getAppliedSize: () => ({
+            cols: lastColsRef.current,
+            rows: lastRowsRef.current,
+          }),
+          applySize: (dims) => {
+            lastColsRef.current = dims.cols;
+            lastRowsRef.current = dims.rows;
+            void invokeCommand('resize_terminal', {
+              sessionId: newSessionId,
+              columns: dims.cols,
+              rows: dims.rows,
+            }).catch(() => {});
+          },
+        });
       }
 
       scheduleStableFitRef.current();
@@ -1246,32 +1386,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         const sessionId = sessionIdRef.current;
         if (term && sessionId && term.cols > 1 && term.rows > 1) {
           fitTerminal();
-          // Same-size resize is a no-op for OpenCode. Step one row off and
-          // back so the app repaints. Do not refresh the local canvas: that
-          // freezes the ghosted frame.
-          const cols = term.cols;
-          const rows = term.rows;
-          const nudgedRows = rows > 2 ? rows - 1 : rows + 1;
-          void invokeCommand('resize_terminal', {
-            sessionId,
-            columns: cols,
-            rows: nudgedRows,
-          })
-            .then(() => writeQueueRef.current)
-            .then(() => {
-              if (sessionIdRef.current !== sessionId) return;
-              return invokeCommand('resize_terminal', {
-                sessionId,
-                columns: cols,
-                rows,
-              });
-            })
-            .then(() => {
-              if (sessionIdRef.current !== sessionId) return;
-              lastColsRef.current = cols;
-              lastRowsRef.current = rows;
-            })
-            .catch(() => {});
+          try {
+            term.refresh(0, Math.max(0, term.rows - 1));
+          } catch {}
         }
         return;
       }
@@ -1433,6 +1550,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     window.addEventListener('resize', handleWindowResize);
 
     return () => {
+      cancelSpawnReconcileRef.current?.();
+      cancelSpawnReconcileRef.current = null;
+      if (driftCheckFrameRef.current !== null) {
+        window.cancelAnimationFrame(driftCheckFrameRef.current);
+        driftCheckFrameRef.current = null;
+      }
+      if (syncHoldTimerRef.current !== null) {
+        window.clearTimeout(syncHoldTimerRef.current);
+        syncHoldTimerRef.current = null;
+      }
+      const pendingFrame = syncHoldRef.current.flush();
+      if (pendingFrame && pendingFrame.length > 0 && termRef.current) {
+        try {
+          termRef.current.write(pendingFrame);
+        } catch {
+          /* The pane is going away. Drop the frame rather than throw. */
+        }
+      }
       startGenRef.current += 1;
       fitWatchRef.current += 1;
       ptyOpenRef.current = false;

@@ -1,8 +1,8 @@
 # Terminal Ghosting and Redraw — Attempt Log
 
-Status: not a general terminal failure. See `odd/tasks/terminal-session-artifact.md`. One saved OpenCode session reproduces the artifacts in every pane where that session is opened. Other sessions on this branch stay clean. The experiments below were scored while that session was the sample, so they are not a verdict on the rest of the terminal.
-Branch: `feat/ui-composer` at `2053249`.
-Rule: do not reopen that session to judge a new terminal change. If a later pass debugs the session itself, keep one hypothesis per commit.
+Status: updated on `feat/ui-composer` (28 October 2026); ready for visual verification on the saved OpenCode session. See `odd/tasks/terminal-session-artifact.md` for the root causes and architectural fix (Unicode 11 + `11-zwj` provider, `@xterm/xterm` 6.0.0 + `@xterm/addon-webgl` 0.19.0 with DPR canvas repair, DOM block-fill gradient cleanup, post-spawn/foreground grid drift reconciliation, `\x1b[?1049h` resize split, and targeted ConPTY rewrite row refresh).
+Branch: `feat/ui-composer`. Capture instrument `938bd89` is present. The saved OpenCode output paints with cursor addressing and line clears, not with newlines. Erase-display stays 0.
+Rule: do not reopen that session to judge an unrelated terminal change. Do reopen it when the change is an attempt at this bug. On 28 October 2026 the user rejected, in order, the grid fit, the 160 ms alternate-screen coalesce plus PTY row step, the synchronized-frame hold, and the local alt-screen blank on a column change. None of those are a fix. Keep one hypothesis per commit. The historical sections below stop at the committed attempts. The uncommitted passes are in the session document.
 
 Visual checks the user cares about:
 

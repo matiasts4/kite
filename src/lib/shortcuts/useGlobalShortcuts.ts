@@ -9,7 +9,7 @@ import { ShortcutItem, SupportedPlatform } from './types';
 
 export const SHORTCUT_TRIGGERED_EVENT = 'kite:shortcut-triggered';
 
-export type ShortcutActionHandler = () => void | Promise<void>;
+export type ShortcutActionHandler = () => void | boolean | Promise<void>;
 
 export interface UseGlobalShortcutsOptions {
   handlers?: Partial<Record<string, ShortcutActionHandler>>;
@@ -27,6 +27,11 @@ function isInputElement(target: EventTarget | null): boolean {
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
   if (target.isContentEditable) return true;
   return false;
+}
+
+/** xterm owns bare Escape (for example to leave copy mode). Do not treat the host as an app overlay. */
+function isTerminalTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('.xterm, .terminal-surface__host') !== null;
 }
 
 export function useGlobalShortcuts(options: UseGlobalShortcutsOptions = {}) {
@@ -59,9 +64,34 @@ export function useGlobalShortcuts(options: UseGlobalShortcutsOptions = {}) {
         if (!keys || keys.length === 0) continue;
 
         if (matchesEvent(keys, e, platform)) {
-          // If focus is in an input, don't hijack simple keys unless it's Esc or a major global shortcut
+          // Bare Escape is conditional: the terminal owns it, and overlays consume it only when they actually close.
+          if (item.id === 'back-esc') {
+            if (isTerminalTarget(e.target)) {
+              break;
+            }
+
+            const fn = handlersRef.current[item.id];
+            let consumed = false;
+            if (fn) {
+              try {
+                consumed = fn() === true;
+              } catch (err) {
+                console.error(`Error executing shortcut handler for "${item.id}":`, err);
+              }
+            }
+
+            if (consumed) {
+              e.preventDefault();
+              e.stopPropagation();
+              window.dispatchEvent(
+                new CustomEvent(SHORTCUT_TRIGGERED_EVENT, { detail: { id: item.id } })
+              );
+            }
+            break;
+          }
+
+          // If focus is in an input, don't hijack simple keys unless it's a major global shortcut
           if (targetIsInput) {
-            const isEscape = item.id === 'back-esc';
             const isCommandOrNav = [
               'command-palette',
               'quick-switcher',
@@ -74,7 +104,7 @@ export function useGlobalShortcuts(options: UseGlobalShortcutsOptions = {}) {
               'mode-chat',
             ].includes(item.id);
 
-            if (!isEscape && !isCommandOrNav) {
+            if (!isCommandOrNav) {
               continue;
             }
           }

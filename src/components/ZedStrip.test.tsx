@@ -157,6 +157,22 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     expect(onEndCall).toHaveBeenCalledTimes(1);
   });
 
+  it('does not end the call when Escape is pressed inside the terminal', () => {
+    const onEndCall = vi.fn();
+    render(<ZedStripHost call={activeCall} onEndCall={onEndCall} />);
+
+    const host = document.createElement('div');
+    host.className = 'xterm';
+    const textarea = document.createElement('textarea');
+    host.appendChild(textarea);
+    document.body.appendChild(host);
+
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(onEndCall).not.toHaveBeenCalled();
+
+    document.body.removeChild(host);
+  });
+
   it('provides click-to-speak role and affordance on the sphere handle', () => {
     render(<ZedStripHost call={activeCall} />);
 

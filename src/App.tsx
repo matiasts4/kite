@@ -507,7 +507,10 @@ export const App: React.FC = () => {
           setSettingsOpen(false);
         } else if (operatorOpen) {
           setOperatorOpen(false);
+        } else {
+          return false;
         }
+        return true;
       },
       'mode-agent': () => {
         setWorkMode('agent');

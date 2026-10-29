@@ -128,4 +128,116 @@ describe('useGlobalShortcuts hook', () => {
 
     document.body.removeChild(input);
   });
+
+  it('does not consume Escape when the target is a textarea inside .xterm', () => {
+    const onBackEsc = vi.fn(() => true);
+    const eventListener = vi.fn();
+    window.addEventListener(SHORTCUT_TRIGGERED_EVENT, eventListener);
+
+    renderHook(() =>
+      useGlobalShortcuts({
+        platform: 'windows',
+        handlers: {
+          'back-esc': onBackEsc,
+        },
+      })
+    );
+
+    const host = document.createElement('div');
+    host.className = 'xterm';
+    const textarea = document.createElement('textarea');
+    host.appendChild(textarea);
+    document.body.appendChild(host);
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, 'target', { value: textarea });
+    window.dispatchEvent(event);
+
+    expect(onBackEsc).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expect(eventListener).not.toHaveBeenCalled();
+
+    window.removeEventListener(SHORTCUT_TRIGGERED_EVENT, eventListener);
+    document.body.removeChild(host);
+  });
+
+  it('does not consume Escape when the back-esc handler returns false', () => {
+    const onBackEsc = vi.fn(() => false);
+    renderHook(() =>
+      useGlobalShortcuts({
+        platform: 'windows',
+        handlers: {
+          'back-esc': onBackEsc,
+        },
+      })
+    );
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(onBackEsc).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('consumes Escape when the back-esc handler returns true', () => {
+    const onBackEsc = vi.fn(() => true);
+    renderHook(() =>
+      useGlobalShortcuts({
+        platform: 'windows',
+        handlers: {
+          'back-esc': onBackEsc,
+        },
+      })
+    );
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(onBackEsc).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('still consumes Ctrl+P when the target is inside .xterm', () => {
+    const onCommandPalette = vi.fn();
+    renderHook(() =>
+      useGlobalShortcuts({
+        platform: 'windows',
+        handlers: {
+          'command-palette': onCommandPalette,
+        },
+      })
+    );
+
+    const host = document.createElement('div');
+    host.className = 'xterm';
+    const textarea = document.createElement('textarea');
+    host.appendChild(textarea);
+    document.body.appendChild(host);
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'p',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, 'target', { value: textarea });
+    window.dispatchEvent(event);
+
+    expect(onCommandPalette).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+
+    document.body.removeChild(host);
+  });
 });

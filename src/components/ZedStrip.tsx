@@ -328,8 +328,11 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       // Prevent repeated firing when holding down key
       if (e.repeat) return;
 
-      // Escape: Close/Hide assistant
+      // Escape: Close/Hide assistant, unless the terminal owns the key (copy mode, etc.).
       if (e.key === 'Escape') {
+        if (e.target instanceof Element && e.target.closest('.xterm, .terminal-surface__host')) {
+          return;
+        }
         e.preventDefault();
         ttsNarrator.stop();
         voice.stopListening();

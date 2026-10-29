@@ -33,6 +33,34 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.41',
+    tag: 'v0.1.41',
+    date: 'Oct 29, 2026',
+    title: 'Ajuste Estabilizado de Terminal, Apariencia Personalizable y Enrutamiento de Atajos',
+    items: [
+      {
+        kind: 'added',
+        description: 'personalización de apariencia y tipografía en Settings (modo DOM ClearType vs WebGL GPU)',
+      },
+      {
+        kind: 'added',
+        description: 'cálculo geométrico y ajuste estabilizado de viewport ConPTY con StableCellFitAddon',
+      },
+      {
+        kind: 'fixed',
+        description: 'preservación de buffers al reconectar sesiones PTY activas',
+      },
+      {
+        kind: 'fixed',
+        description: 'delegación de tecla Escape a la terminal sin abortar asistentes u overlays',
+      },
+      {
+        kind: 'fixed',
+        description: 'aislamiento de directorio de datos WebView2 para desarrollo y producción',
+      },
+    ],
+  },
+  {
     version: '0.1.40',
     tag: 'v0.1.40',
     date: 'Oct 28, 2026',

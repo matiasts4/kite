@@ -215,7 +215,7 @@ if (github) {
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const cur = pkg.version.split('.').map(Number);
 let next;
-if (/^\\d+\\.\\d+\\.\\d+$/.test(bumpArg)) next = bumpArg;
+if (/^\d+\.\d+\.\d+$/.test(bumpArg)) next = bumpArg;
 else if (bumpArg === 'major') next = `${cur[0] + 1}.0.0`;
 else if (bumpArg === 'minor') next = `${cur[0]}.${cur[1] + 1}.0`;
 else if (bumpArg === 'patch') next = `${cur[0]}.${cur[1]}.${cur[2] + 1}`;

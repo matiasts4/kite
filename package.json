@@ -1,6 +1,6 @@
 {
   "name": "kite-code",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "Kite Code — Autonomous agentic development environment and native multi-model terminal desktop application",
   "main": "server/server.mjs",
   "type": "module",

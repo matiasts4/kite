@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.41] - 2026-10-29
+
+> Ajuste Estabilizado de Terminal, Apariencia Personalizable y Enrutamiento de Atajos
+
+### Added
+- personalización de apariencia y tipografía en Settings (modo DOM ClearType vs WebGL GPU)
+- cálculo geométrico y ajuste estabilizado de viewport ConPTY con StableCellFitAddon
+
+### Fixed
+- preservación de buffers al reconectar sesiones PTY activas
+- delegación de tecla Escape a la terminal sin abortar asistentes u overlays
+- aislamiento de directorio de datos WebView2 para desarrollo y producción
+
+---
+
 ## [0.1.40] - 2026-10-28
 
 > Estabilización ConPTY de Terminal, Paleta de Comandos y Mejoras en Zed

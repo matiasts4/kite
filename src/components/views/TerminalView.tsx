@@ -214,6 +214,11 @@ type LiveTerminal = {
 const liveTerms = new Map<string, LiveTerminal>();
 const restartedSessions = new Map<string, string>();
 
+// Temporary capture experiment: keep this enabled for one controlled sample to
+// suppress only the foreground grid-drift auto-refit. Initial fits and explicit
+// resize paths remain unchanged. Revert this diagnostic hunk after the sample.
+const SUPPRESS_FOREGROUND_GRID_DRIFT_REFIT_DIAGNOSTIC = true;
+
 /** Arrival wave length when a thrown prompt lands in this terminal. */
 const TERMINAL_IMPACT_PULSE_MS = 460;
 
@@ -485,6 +490,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const triggerImmediatePollRef = useRef<() => void>(() => {});
 
   const scheduleForegroundGridDriftCheck = useCallback(() => {
+    if (SUPPRESS_FOREGROUND_GRID_DRIFT_REFIT_DIAGNOSTIC) return;
     if (driftCheckFrameRef.current !== null) return;
     const now = performance.now();
     if (now - lastDriftCheckAtRef.current < 250) return;

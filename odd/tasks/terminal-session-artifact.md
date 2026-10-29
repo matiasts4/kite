@@ -1,12 +1,33 @@
 # One OpenCode session paints the artifacts
 
-Status: implemented on `feat/ui-composer` (28 October 2026); ready for visual verification against the saved OpenCode session.
+Status: diagnostic follow-up on `feat/ui-composer` (29 October 2026); earlier passes improved redraw and self-correction, but the session-specific artifact is not considered resolved.
 
 The specimen is one saved OpenCode session. Opening it previously painted artifacts in every pane that showed it while ordinary sessions stayed coherent. The same session also reproduced the artifacts on the untouched 25 October tree `df914ea` and on `feat/ui-baseline-1025` at `6a639fe`. Do not use this session to score an unrelated terminal change. Do use it when the change is an attempt at this bug. A clean ordinary session does not prove this bug is gone.
 
 Capture instrument: `938bd89`. It does not change paint. Captures can contain prompts, paths, and secrets. Do not paste decoded terminal text into this file, a commit, or a chat.
 
-## Root causes identified and addressed (28 October 2026)
+## Current diagnostic evidence (29 October 2026)
+
+- Commit `36bab97` added a **temporary foreground grid-drift refit gate** for one controlled sample. The gate suppresses only the automatic foreground drift refit; initial fits and explicit resize paths remain unchanged. It must not ship as a fix and should be reverted after the sample.
+- The redraw work showed measurable improvement and autocorrection after pane resize, split/swap, and repaint activity: the terminal can recover its fitted grid and repaint without requiring a renderer switch. This is evidence that recovery paths help, not proof of a root cause.
+- The failure still reappears after maximizing, minimizing, or entering fullscreen across several sessions. Hovering over OpenCode execution blocks can also bring back thin stripes along the left border.
+- Interpretation remains deliberately cautious: the recurrence may involve mouse/hover input interacting with the TUI, a DOM repaint, or both. No root cause is established from this observation alone.
+
+### Next diagnostic intent
+
+As a precondition, capture mouse and hover transitions and correlate them with
+terminal output and resize events. Use that evidence to run one repaint-only
+experiment that does **not** call `resize_terminal`, separating a DOM repaint
+interaction from PTY/ConPTY geometry changes. The capture is evidence for this
+single experiment, not a second experiment.
+
+Rollback and limits: keep `36bab97` as a time-bounded diagnostic change only; remove its gate after the controlled sample. Do not treat a clean repaint-only sample as a universal fix, and do not infer causality from marker counts without the raw bytes, lifecycle data, and event correlation. Do not modify release/changelog files while this handoff is active.
+
+## Mitigations and hypotheses under investigation (not confirmed root causes)
+
+The items below are attempted mitigations or working hypotheses from the
+28–29 October investigation. They improved specific redraw paths, but none has
+been validated as the root cause of the session-specific artifact.
 
 1. **Unicode 11 + ZWJ emoji width mismatch (`@xterm/addon-unicode11` + `11-zwj`)**:
    - Without `@xterm/addon-unicode11`, xterm defaults to Unicode 6 cell widths (`1` column for many symbols/emojis that modern TUI engines measure as `2` columns, and unjoined widths for ZWJ sequences).
@@ -15,17 +36,61 @@ Capture instrument: `938bd89`. It does not change paint. Captures can contain pr
 2. **Modern `@xterm/xterm` 6.0.0 ConPTY buffer semantics + `@xterm/addon-webgl` 0.19.0**:
    - Restored `@xterm/xterm` `^6.0.0`, `@xterm/addon-fit` `^0.11.0`, `@xterm/addon-unicode11` `^0.9.0`, and `@xterm/addon-webgl` `^0.19.0` with `windowsPty: { backend: 'conpty', buildNumber: 22631 }`, `customGlyphs: true`, and `rescaleOverlappingGlyphs: false`.
    - When the WebGL renderer is active, `repairWebglCanvasForDevicePixelRatio` ensures the backing canvas matches `window.devicePixelRatio` and refreshes the viewport on DPR changes or context loss fallback.
-3. **DOM block-element gradient synthesis (`U+2580..U+2595`)**:
+3. **DOM block-element gradient synthesis (`U+2580..U+2595`) & text node tracking**:
    - When a pane renders through the DOM fallback, font metrics can leave hairline seams across runs of Unicode block elements (`▀`, `▄`, `█`, `▌`, `▐`, `▏`, `▕`, `▔`, `▁`).
-   - `attachDomBlockFillCleanup` in `src/lib/terminalViewport.ts` observes `.xterm-rows` and replaces uniform block-element spans with exact CSS `linear-gradient` fills.
-4. **Post-spawn & foreground grid drift reconciliation**:
+   - `attachDomBlockFillCleanup` in `src/lib/terminalViewport.ts` observes `.xterm-rows` with `{ childList: true, characterData: true, subtree: true }` and replaces uniform block-element spans with exact CSS `linear-gradient` fills, clearing them immediately when text nodes change back to spaces.
+4. **Post-spawn & foreground grid drift reconciliation + Multi-frame stabilized fit**:
    - A capture showed the initial grid staying at `28×33` for 28.3 seconds while the TUI addressed column 57.
-   - `reconcilePtySizeAfterSpawn` now checks the fitted grid across animation frames immediately after PTY spawn, and `scheduleForegroundGridDriftCheck` verifies `terminalGridDriftedFromFit` during foreground output writes.
+   - `reconcilePtySizeAfterSpawn` checks the fitted grid across animation frames immediately after PTY spawn.
+   - `scheduleStabilizedFit` samples `proposeDimensions()` across consecutive animation frames (up to 8 frames) until two consecutive frames match before applying foreground drift adjustments, avoiding intermediate 1-frame layout jitter.
    - In addition, `splitAlternateScreenEnterChunk` splits incoming streams at `\x1b[?1049h` whenever a resize or grid drift is pending so the terminal fits **before** the alternate screen begins painting.
-5. **Targeted ConPTY rewrite & renderer-risk row refresh + transient cursor-show stripping**:
-   - Removed the rejected 160 ms alternate-screen fit delay, the artificial `rows - 1` / `rows` double-resize step, and the local `ALT_SCREEN_BLANK` (`\x1b[2J\x1b[H`) injection.
-   - Kept a 16 ms (`SYNC_OUTPUT_MAX_HOLD_MS`) DEC 2026 synchronized-output hold so split poll chunks within a single frame are written atomically.
-   - `classifyForegroundOutputRefresh` strips transient `\x1b[?25h` cursor shows inside cursor-positioned frames and uses `writeTerminalOutputWithRefresh` to refresh dirty row ranges tracked by `_core._inputHandler.onRequestRefreshRows` (plus one follow-up animation-frame refresh on Windows ConPTY in-place rewrites).
+5. **Targeted ConPTY rewrite & cursor-positioned in-place row refresh**:
+   - Extended `foregroundRewriteOutputPrefersRenderRefresh` in `src/lib/terminalSyncOutput.ts` to detect cursor-positioned in-place rewrites (`H`, `f`, `G`, `A`-`F`, `d`) and erase/delete/insert/scroll sequences (`X`, `P`, `L`, `M`, `S`, `T`), catching box-drawing/border clears using spaces and `\x1b[0m`.
+   - Added cross-chunk state tracking (`ForegroundOutputScanState`) to catch escape sequences split across PTY read chunk boundaries.
+   - Non-ASCII rewrites (`\r` / `\x1b[K` + box-drawing/block characters `│`, `█`) schedule a coalesced texture atlas flush on the follow-up animation frame.
+6. **Backend PTY buffer preservation & idempotent resize (`src-tauri/src/terminal.rs`)**:
+   - Addressed an unrelated buffer preservation issue in `drain_buffer_into_scrollback`: replaced with `snapshot_scrollback_for_attach(&session_id, inst, preserve_unread_buffer)`.
+   - When attaching to an existing live terminal (`preserve_unread_buffer: true`), `inst.buffer` is kept intact so unread bytes accumulated during unmounting/parking are delivered cleanly on the next `read_terminal_output` poll.
+   - `resize_terminal` now compares `prev_cols` and `prev_rows` and skips calling `inst.master.resize()` (`ResizePseudoConsole`) unless dimensions actually changed or `force: true` is passed, preventing redundant ConPTY partial redraw passes.
+   - When mounting fresh (`!hadLiveElement`), `started.scrollbackBase64` is now written to xterm before calling `resize_terminal`.
+7. **`StableCellFitAddon` and 5px scrollbar geometry**:
+   - Replaced default `FitAddon` with `StableCellFitAddon` in `src/lib/terminalViewport.ts`.
+   - Computes cell dimensions via `getStableCellDimensions` (`device.cell.width / dpr`, `device.cell.height / dpr`, fallback to `css.cell`).
+   - Uses `TERMINAL_SCROLLBAR_WIDTH_PX = 5` (matching `.scrollbar.vertical { width: 5px }` in `terminal.css`) instead of subtracting the legacy xterm 5 `14px` scrollbar reservation, eliminating the 9px right-margin column discrepancy.
+   - Overrides `fit()` to resize without calling `_renderService.clear()`.
+
+## Architectural Decision: DOM Clásico vs. WebGL
+
+| Dimension | DOM Clásico (`renderer: 'dom'`) — Recommended Default | GPU / WebGL (`renderer: 'webgl'`) — Optional |
+| :--- | :--- | :--- |
+| **Typography & Crispness** | Native browser text rendering, respects OS font smoothing (ClearType / DirectWrite), pixel-exact match with original Kite baseline. | Rasterized bitmap glyph atlas. Glyphs can appear slightly heavier or fuzzier depending on fractional DPR. |
+| **Multi-pane Stability** | Recommended baseline avoids relying on WebGL context availability; stability still requires validation under the affected session conditions. | Browsers limit active WebGL contexts (~8–16 per process). Context loss can occur when splitting 3+ panes or waking from sleep. |
+| **Border & Seam Quality** | `attachDomBlockFillCleanup` mitigates some block-character seams; it does not prove that DOM repaint is the artifact trigger. | Canvas can reduce some glyph seams, but still requires texture atlas flushes on non-ASCII in-place rewrites. |
+| **Throughput & Performance** | Ample for interactive AI agent CLIs (OpenCode, Grok, Claude, Agy) at 60 fps. Negligible difference for human-speed or agent turn streaming. | Higher max throughput for massive raw dumps (>100,000 lines/sec). |
+| **Configurability** | Available in **Settings -> Terminal** (`TerminalAppearanceSettings`). Default: `renderer: 'dom'`, `lineHeight: 1.16`, `fontFamily: Cascadia Mono`, `fontSize: 13px`. | Toggleable in **Settings -> Terminal -> Renderer: GPU (WebGL)** for power users requiring high-throughput log dumping. |
+
+> [!IMPORTANT]
+> **Recommendation for Kite:** Keep **DOM Clásico** as the recommended baseline renderer (`renderer: 'dom'`) during diagnosis. It preserves the classic Kite aesthetic and avoids making WebGL context availability a prerequisite, but it is not a resolution or proof that the current artifacts are GPU-bound.
+
+---
+
+## Handover Guide for the Next Agent
+
+If the user reports serious errors ("errores bastante graves"), prioritize investigating in this order:
+
+1. **Check Dev Server & Runtime Logs:**
+   - Look at the desktop terminal output or dev console (F12 / DevTools) to see if an uncaught exception occurred in React components (`SettingsView.tsx`, `TerminalView.tsx`, or `ChatComposer.tsx`).
+   - Inspect `%APPDATA%/kite` or `%LOCALAPPDATA%/kite` logs for any panics or unhandled IPC commands.
+2. **Settings State & Storage Migration:**
+   - Check `localStorage.getItem('kite.terminal.appearance')`. If corrupted or containing unexpected values, verify `src/lib/terminalAppearancePrefs.ts` fallbacks gracefully to `DEFAULT_TERMINAL_APPEARANCE_PREFS`.
+3. **Renderer Toggle Verification:**
+   - Verify if the user toggled `renderer: 'webgl'` in Settings. If WebGL is active and fails, `syncVisibleBitmapRenderers()` should cleanly fall back to DOM.
+4. **Verification Commands:**
+   - Typecheck: `npx tsc --noEmit`
+   - Unit tests: `npx vitest run`
+   - Rust backend: `cargo check --manifest-path src-tauri/Cargo.toml`
+   - Sanitizer audit: `node .kite/sanitizer/audit-references.mjs --check` (must always report `[CLEAN]` before commits/pushes).
+
 
 ## What was tried
 
@@ -35,7 +100,7 @@ Committed attempts on `feat/ui-composer`. Each one was judged while this session
 | :--- | :--- | :--- |
 | `986e308` | Fit before spawn, shorter resize debounce, alt-screen `refresh()`, no `reset()` on a fresh start, removed the fade-in scale. | Launch got worse. Torn first frames. |
 | `5ffdb58` | Spawn only after the pane size settles. | New panes stayed blank. The process had already started at 80×24. |
-| `41c1d60` | Reserve the session first. Spawn only when the pane is measured. | Fresh panes opened coherent. This closed the launch regression. It did not explain the session that still ghosts. |
+| `41c1d60` | Reserve the session first. Spawn only when the pane is measured. | Fresh panes opened coherent. This addressed the launch regression, separate from the session artifact. It did not explain the session that still ghosts. |
 | `7d649d8` | Stop local alt-screen refresh. One resize after the write finishes. | OpenCode block marks stayed sliced. |
 | `a19ca9a` | Set `lineHeight` to `1`. | The same sliced mark remained. |
 | `19a291b` | Paint every pane with the WebGL renderer. | Did not remove the artifacts. |
@@ -98,7 +163,7 @@ Facts the next change has to account for:
 - Later growth clears some lines and never the whole display.
 - Grok redraws a full frame on resize and input, so it self-heals. This OpenCode session does not.
 
-S-launch, the scrambled first frame from `986e308`, is closed by `41c1d60`. Do not reopen it while chasing this session.
+S-launch, the scrambled first frame from `986e308`, was addressed by `41c1d60`. Do not reopen it while chasing this session.
 
 ## Launch and capture
 

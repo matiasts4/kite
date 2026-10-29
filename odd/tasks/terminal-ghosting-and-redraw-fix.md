@@ -1,6 +1,6 @@
 # Terminal Ghosting and Redraw — Attempt Log
 
-Status: updated on `feat/ui-composer` (28 October 2026); ready for visual verification on the saved OpenCode session. See `odd/tasks/terminal-session-artifact.md` for the root causes and architectural fix (Unicode 11 + `11-zwj` provider, `@xterm/xterm` 6.0.0 + `@xterm/addon-webgl` 0.19.0 with DPR canvas repair, DOM block-fill gradient cleanup, post-spawn/foreground grid drift reconciliation, `\x1b[?1049h` resize split, and targeted ConPTY rewrite row refresh).
+Status: diagnostic follow-up on `feat/ui-composer` (29 October 2026); historical launch/redraw mitigations are recorded below, but the session-specific artifact remains unresolved. See `odd/tasks/terminal-session-artifact.md` for the current evidence and bounded next step.
 Branch: `feat/ui-composer`. Capture instrument `938bd89` is present. The saved OpenCode output paints with cursor addressing and line clears, not with newlines. Erase-display stays 0.
 Rule: do not reopen that session to judge an unrelated terminal change. Do reopen it when the change is an attempt at this bug. On 28 October 2026 the user rejected, in order, the grid fit, the 160 ms alternate-screen coalesce plus PTY row step, the synchronized-frame hold, and the local alt-screen blank on a column change. None of those are a fix. Keep one hypothesis per commit. The historical sections below stop at the committed attempts. The uncommitted passes are in the session document.
 
@@ -195,10 +195,27 @@ pre-E4 text. Do not revert E1, E2, or E3 geometry/rendering changes.
 
 ---
 
+## Historical mitigation summary (not a final resolution)
+
+The following changes addressed specific launch, buffer, geometry, and redraw
+paths. They are historical mitigations, not confirmed root causes, and they do
+not establish that the session-specific artifact is resolved:
+1. `src-tauri/src/terminal.rs`: `snapshot_scrollback_for_attach` with `preserve_unread_buffer: true` prevents dropping PTY output bytes upon re-attaching; `resize_terminal` ignores no-op calls to avoid redundant Windows ConPTY `ResizePseudoConsole` repaints.
+2. `src/lib/terminalViewport.ts`: `StableCellFitAddon` computes geometry using `device.cell.width / dpr` and 5px scrollbar reservation without clearing render service; `scheduleStabilizedFit` prevents 1-frame layout jitter; `attachDomBlockFillCleanup` handles text node mutations.
+3. `src/lib/terminalSyncOutput.ts`: `foregroundRewriteOutputPrefersRenderRefresh` captures CSI cursor positioning and erase sequences, cross-chunk scan state, and schedules texture atlas flushes for non-ASCII rewrites.
+4. `src/components/views/TerminalView.tsx` & `SettingsView.tsx`: Terminal appearance settings implemented with **DOM Clásico** as default (`13px`, `1.16` line height, `Cascadia Mono`).
+
+Commit `36bab97` added a temporary foreground grid-drift refit gate for one
+controlled sample. It is diagnostic only and must be rolled back after the
+sample. As a precondition, capture input/hover transitions and correlate them
+with output and resize events; the sole next code experiment is repaint-only
+and must not call `resize_terminal`.
+
 ## Verification when an experiment lands
 
 - `npx tsc --noEmit`
-- `npx vitest run src/lib/terminalLinkNav.test.ts src/lib/terminalRegistry.test.ts`
+- `npx vitest run`
+- `cargo check --manifest-path src-tauri/Cargo.toml`
 - `node .kite/sanitizer/audit-references.mjs --check`
 - Manual: three agent terminals in one view, Grok and OpenCode, no manual resize.
 - Manual: use OpenCode for several minutes and confirm old rows do not remain pinned.

@@ -11,15 +11,17 @@ Capture instrument: `938bd89`. It does not change paint. Captures can contain pr
 - Commit `36bab97` added a **temporary foreground grid-drift refit gate** for one controlled sample. The gate suppresses only the automatic foreground drift refit; initial fits and explicit resize paths remain unchanged. It must not ship as a fix and should be reverted after the sample.
 - The redraw work showed measurable improvement and autocorrection after pane resize, split/swap, and repaint activity: the terminal can recover its fitted grid and repaint without requiring a renderer switch. This is evidence that recovery paths help, not proof of a root cause.
 - The failure still reappears after maximizing, minimizing, or entering fullscreen across several sessions. Hovering over OpenCode execution blocks can also bring back thin stripes along the left border.
-- Interpretation remains deliberately cautious: the recurrence may involve mouse/hover input interacting with the TUI, a DOM repaint, or both. No root cause is established from this observation alone.
+- Collapsing a terminal to an extreme narrow width and then expanding it reproduces the artifacts; the capture shows fragments/columns and misaligned blue bars. A narrow pane by itself is not the error—the collapse-to-extreme-width then expand transition is.
+- Interpretation remains deliberately cautious: extreme-resize geometry/reflow is the primary diagnostic cluster, stale DOM repaint is secondary, and there is no new evidence of an ANSI/PTY byte or ordering defect. No root cause is established from these observations alone.
 
 ### Next diagnostic intent
 
-As a precondition, capture mouse and hover transitions and correlate them with
-terminal output and resize events. Use that evidence to run one repaint-only
-experiment that does **not** call `resize_terminal`, separating a DOM repaint
-interaction from PTY/ConPTY geometry changes. The capture is evidence for this
-single experiment, not a second experiment.
+As a precondition, capture mouse/hover and collapse/expand transitions and
+correlate them with terminal output and resize events. Keep exactly one next
+code experiment: a capture-gated repaint-only path that calls neither
+`term.resize` nor `resize_terminal`, separating a DOM repaint interaction from
+PTY/ConPTY geometry changes. The capture is evidence for this single experiment,
+not a second experiment.
 
 Rollback and limits: keep `36bab97` as a time-bounded diagnostic change only; remove its gate after the controlled sample. Do not treat a clean repaint-only sample as a universal fix, and do not infer causality from marker counts without the raw bytes, lifecycle data, and event correlation. Do not modify release/changelog files while this handoff is active.
 

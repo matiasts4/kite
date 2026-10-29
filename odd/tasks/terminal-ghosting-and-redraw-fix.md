@@ -35,6 +35,24 @@ Before the launch regression, OpenCode sessions accumulated ghosting during norm
 
 Grok tends to redraw a full frame, so it self-heals. OpenCode updates damaged cells only, so a bad frame sticks.
 
+### S-collapse-expand — artifacts after extreme resize (new evidence, 2026-10-29)
+
+Collapsing a terminal to an extreme narrow width and then expanding it reproduces
+the artifacts. The captured frame shows fragments/columns and blue bars that are
+misaligned. The narrow pane alone is not the failure; the collapse-to-extreme-
+width then expand transition is. This is a diagnostic observation, not a fix or
+proof that every narrow layout is broken.
+
+Current interpretation is deliberately bounded:
+
+- **Primary cluster:** extreme-resize geometry/reflow.
+- **Secondary cluster:** stale DOM repaint after that transition.
+- **Not newly implicated:** ANSI/PTY bytes or ordering; this observation adds no
+  new evidence for that class.
+
+Keep the next code experiment capture-gated and repaint-only. It must call
+neither `term.resize` nor `resize_terminal`.
+
 ### S-noise — resize announced as "agent finished" (separate)
 
 ConPTY dumps the screen on resize. The activity tracker treated that dump as new work and the proactive watcher spoke or toasted. That is not a pixel bug. The watcher call is currently commented out in the dirty `src/App.tsx`. Leave that decision out of render commits.
@@ -84,11 +102,13 @@ An earlier uncommitted rewrite of this document proposed code page 850, `TERM` /
 
 ## Ranked causes
 
-1. **Unstable size at spawn (S-launch).** The PTY is opened on a transient grid. The TUI paints with cursor addressing. A later shrink wraps those addresses and the lines overlap. Grok heals because a real resize plus input redraws the whole screen. OpenCode does not, because it only patches cells.
-2. **Resize storms during the first second (S-launch and S-ghost).** Four delayed fits plus a 20ms debounce deliver several SIGWINCHs while the banner is still being written. A delta TUI cannot reconstruct from a partial ConPTY redraw.
-3. **`refresh()` paints the damaged buffer (S-ghost sticks).** It clears renderer dirt. It does not clear logical ghosts left by a soft-wrap plus cursor-up (`CSI A` / `CSI 2K`) when the app and xterm disagreed on width.
-4. **Soft-wrap ghosts after the grid is wrong even once (S-ghost).** If OpenCode believes a row is one line and xterm wrapped it, cursor-up erases only the tail. The head stays forever. This matches the original "resize clears it" report.
-5. **Width disagreement on symbols (only if 1–4 are fixed and `Notfrbidden` remains).** UTF-8 versus the console code page, or emoji width, shifts later in-place writes. Not the first experiment.
+1. **Extreme-resize geometry/reflow (new primary cluster, S-collapse-expand).** The collapse-to-extreme-width then expand transition reproduces fragments/columns and misaligned blue bars. A narrow pane by itself is not the error. This is not yet a proven root cause.
+2. **Stale DOM repaint after reflow (secondary cluster, S-collapse-expand).** A repaint may retain stale fragments after the geometry transition; isolate it without resizing the terminal.
+3. **Unstable size at spawn (S-launch).** The PTY is opened on a transient grid. The TUI paints with cursor addressing. A later shrink wraps those addresses and the lines overlap. Grok heals because a real resize plus input redraws the whole screen. OpenCode does not, because it only patches cells.
+4. **Resize storms during the first second (S-launch and S-ghost).** Four delayed fits plus a 20ms debounce deliver several SIGWINCHs while the banner is still being written. A delta TUI cannot reconstruct from a partial ConPTY redraw.
+5. **`refresh()` paints the damaged buffer (S-ghost sticks).** It clears renderer dirt. It does not clear logical ghosts left by a soft-wrap plus cursor-up (`CSI A` / `CSI 2K`) when the app and xterm disagreed on width.
+6. **Soft-wrap ghosts after the grid is wrong even once (S-ghost).** If OpenCode believes a row is one line and xterm wrapped it, cursor-up erases only the tail. The head stays forever. This matches the original "resize clears it" report.
+7. **Width disagreement on symbols (only if 1–6 are fixed and `Notfrbidden` remains).** UTF-8 versus the console code page, or emoji width, shifts later in-place writes. Not the next experiment. No new ANSI/PTY evidence currently elevates this class.
 
 A minimum pane width would hide narrow layouts. It would not make a 40-column terminal a correct 40-column terminal. Do not use it as the fix.
 
@@ -207,9 +227,10 @@ not establish that the session-specific artifact is resolved:
 
 Commit `36bab97` added a temporary foreground grid-drift refit gate for one
 controlled sample. It is diagnostic only and must be rolled back after the
-sample. As a precondition, capture input/hover transitions and correlate them
-with output and resize events; the sole next code experiment is repaint-only
-and must not call `resize_terminal`.
+sample. As a precondition, capture input/hover and collapse/expand transitions
+and correlate them with output and resize events. The sole next code experiment
+is capture-gated and repaint-only; it must call neither `term.resize` nor
+`resize_terminal`.
 
 ## Verification when an experiment lands
 

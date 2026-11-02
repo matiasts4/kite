@@ -33,6 +33,46 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.43',
+    tag: 'v0.1.43',
+    date: 'Nov 2, 2026',
+    title: 'Arquitectura Modular, Estabilización de Terminal y Monitor de Recursos',
+    items: [
+      {
+        kind: 'changed',
+        description: 'Arquitectura modular y desacoplamiento de componentes centrales (TerminalView, TerminalCanvasSurface, CodeWorkspace, RightDock y SystemResourcePopover)',
+      },
+      {
+        kind: 'added',
+        description: 'Módulos dedicados para renderizado de Canvas 2D, seguimiento de ratón, codificación de teclas y sincronización de sesiones PTY',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corrección del desplazamiento de viewport (scrollback) con deltaLines en motor Canvas 2D',
+      },
+      {
+        kind: 'fixed',
+        description: 'Sincronización de redimensionamiento PTY en superficie DOM de xterm',
+      },
+      {
+        kind: 'fixed',
+        description: 'Restauración completa de selección con ratón, auto-scroll y copia al portapapeles en terminal',
+      },
+      {
+        kind: 'fixed',
+        description: 'Soporte nativo para arrastre de archivos y pegado de imágenes en terminal',
+      },
+      {
+        kind: 'fixed',
+        description: 'Persistencia de configuración de filtros y procesos en monitor de recursos del sistema',
+      },
+      {
+        kind: 'changed',
+        description: 'Componentes de cuotas y selector de cuentas desacoplados en submódulos especializados',
+      },
+    ],
+  },
+  {
     version: '0.1.42',
     tag: 'v0.1.42',
     date: 'Nov 01, 2026',

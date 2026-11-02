@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.43] - 2026-11-02
+
+> Arquitectura Modular, Estabilización de Terminal y Monitor de Recursos
+
+### Added
+- Módulos dedicados para renderizado de Canvas 2D, seguimiento de ratón, codificación de teclas y sincronización de sesiones PTY
+
+### Changed
+- Arquitectura modular y desacoplamiento de componentes centrales (TerminalView, TerminalCanvasSurface, CodeWorkspace, RightDock y SystemResourcePopover)
+- Componentes de cuotas y selector de cuentas desacoplados en submódulos especializados
+
+### Fixed
+- Corrección del desplazamiento de viewport (scrollback) con deltaLines en motor Canvas 2D
+- Sincronización de redimensionamiento PTY en superficie DOM de xterm
+- Restauración completa de selección con ratón, auto-scroll y copia al portapapeles en terminal
+- Soporte nativo para arrastre de archivos y pegado de imágenes en terminal
+- Persistencia de configuración de filtros y procesos en monitor de recursos del sistema
+
+---
+
 ## [0.1.42] - 2026-11-01
 
 > Motor de Terminal 2D, Eliminación de Artefactos ConPTY y Streaming Continuo

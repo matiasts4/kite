@@ -248,13 +248,29 @@ export const App: React.FC = () => {
       const current = prev[workspaceId] ?? [];
       const same =
         current.length === sessions.length &&
-        current.every(
-          (item, index) =>
-            item.id === sessions[index]?.id &&
-            item.title === sessions[index]?.title &&
-            item.isActive === sessions[index]?.isActive &&
-            item.paneCount === sessions[index]?.paneCount
-        );
+        current.every((item, index) => {
+          const next = sessions[index];
+          if (!next) return false;
+          if (
+            item.id !== next.id ||
+            item.title !== next.title ||
+            item.isActive !== next.isActive ||
+            item.paneCount !== next.paneCount
+          ) {
+            return false;
+          }
+          const itemPanes = item.panes ?? [];
+          const nextPanes = next.panes ?? [];
+          if (itemPanes.length !== nextPanes.length) return false;
+          return itemPanes.every(
+            (p, pIdx) =>
+              p.id === nextPanes[pIdx]?.id &&
+              p.label === nextPanes[pIdx]?.label &&
+              p.engine === nextPanes[pIdx]?.engine &&
+              p.status === nextPanes[pIdx]?.status &&
+              p.isFocused === nextPanes[pIdx]?.isFocused
+          );
+        });
       if (same) return prev;
       return { ...prev, [workspaceId]: sessions };
     });

@@ -170,4 +170,74 @@ describe('WorkspaceRoster - Behavioral Tests', () => {
     expect(tab2Btn).not.toHaveAttribute('aria-current', 'page');
     expect(tab2Btn?.closest('.workspace-tab-row')).not.toHaveClass('workspace-tab-row--selected');
   });
+  it('renders multi-pane session with disclosure chevron, brand logos, and individual pane sub-tree', async () => {
+    const user = userEvent.setup();
+    const onSelectWorkspaceTab = vi.fn();
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+
+    const multiPaneSessions: Record<string, WorkspaceSessionTab[]> = {
+      'ws-pinned': [
+        {
+          id: 'tab-multi',
+          title: 'Orion (+2)',
+          paneCount: 3,
+          isActive: true,
+          panes: [
+            { id: 'pane-1', kind: 'terminal', label: 'Orion', engine: 'claude', isFocused: true },
+            { id: 'pane-2', kind: 'terminal', label: 'Vega', engine: 'codex', isFocused: false },
+            { id: 'pane-3', kind: 'terminal', label: 'Terminal 1', engine: 'powershell', isFocused: false },
+          ],
+        },
+      ],
+    };
+
+    render(
+      <WorkspaceRoster
+        workspaces={sampleWorkspaces}
+        selectedWorkspaceId="ws-pinned"
+        onSelectWorkspace={vi.fn()}
+        onSelectWorkspaceTab={onSelectWorkspaceTab}
+        workspaceSessions={multiPaneSessions}
+      />
+    );
+
+    // Main session row is rendered
+    expect(screen.getByText('Orion (+2)')).toBeInTheDocument();
+    expect(screen.getByText('3')).toBeInTheDocument();
+
+    // Auto-expanded sub-tree shows each individual terminal pane
+    expect(screen.getByText('Orion')).toBeInTheDocument();
+    expect(screen.getByText('Vega')).toBeInTheDocument();
+    expect(screen.getByText('Terminal 1')).toBeInTheDocument();
+    expect(screen.getByText('claude')).toBeInTheDocument();
+    expect(screen.getByText('codex')).toBeInTheDocument();
+    expect(screen.getByText('shell')).toBeInTheDocument();
+
+    // Clicking an individual pane focuses it via window event
+    const vegaBtn = screen.getByText('Vega').closest('button');
+    expect(vegaBtn).toBeTruthy();
+    await user.click(vegaBtn!);
+
+    expect(onSelectWorkspaceTab).toHaveBeenCalledWith('ws-pinned', 'tab-multi');
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'kite:operator-pane-layout',
+        detail: {
+          operation: 'focus',
+          target: 'pane-2',
+          workspaceId: 'ws-pinned',
+        },
+      })
+    );
+
+    // Toggle collapse/expand button
+    const disclosureBtn = screen.getByLabelText(/Collapse.*terminals/i);
+    await user.click(disclosureBtn);
+
+    // Panes are collapsed
+    expect(screen.queryByText('Vega')).not.toBeInTheDocument();
+
+    dispatchSpy.mockRestore();
+  });
 });
+

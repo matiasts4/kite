@@ -19,12 +19,23 @@ export interface ChatThreadSummary {
   isSettled?: boolean;
 }
 
+export interface WorkspaceSessionPaneInfo {
+  id: string;
+  kind?: 'terminal' | 'thread';
+  label?: string;
+  engine?: string;
+  agentName?: string;
+  status?: 'idle' | 'running' | 'waiting' | 'error';
+  isFocused?: boolean;
+}
+
 export interface WorkspaceSessionTab {
   id: string;
   title: string;
   paneCount?: number;
   status?: 'idle' | 'running' | 'waiting' | 'error';
   isActive?: boolean;
+  panes?: WorkspaceSessionPaneInfo[];
 }
 
 export interface SidebarProps {

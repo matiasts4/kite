@@ -126,7 +126,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
         data-session-id={occupant.kind === 'terminal' ? occupant.sessionId : undefined}
         data-occupant-kind={occupant.kind}
         data-testid={occupant.kind === 'terminal' ? 'terminal-pane' : undefined}
-        style={{ position: 'relative' }}
+        style={{ position: isFullscreen ? undefined : 'relative' }}
       >
         {isSpotlighted && <div className="code-pane-beacon" aria-hidden="true" />}
         <CodePaneHeader

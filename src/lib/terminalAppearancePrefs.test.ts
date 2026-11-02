@@ -78,12 +78,19 @@ describe('terminalAppearancePrefs', () => {
     expect(resolveTerminalFontFamily('non-existent' as any)).toContain('Cascadia Mono');
   });
 
+  it('normalizes legacy webgl renderer to canvas default', () => {
+    const sanitized = sanitizeTerminalAppearancePrefs({
+      renderer: 'webgl',
+    });
+    expect(sanitized.renderer).toBe('canvas');
+  });
+
   it('persists updates and broadcasts change event', () => {
     const handler = vi.fn();
     window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, handler);
 
     const updated = setTerminalAppearancePrefs({
-      renderer: 'webgl',
+      renderer: 'dom',
       fontSize: 16,
       lineHeight: 1.08,
       cursorStyle: 'block',
@@ -92,7 +99,7 @@ describe('terminalAppearancePrefs', () => {
     });
 
     expect(updated).toEqual({
-      renderer: 'webgl',
+      renderer: 'dom',
       fontFamilyId: 'jetbrains',
       fontSize: 16,
       lineHeight: 1.08,
@@ -113,7 +120,7 @@ describe('terminalAppearancePrefs', () => {
 
   it('resets to defaults cleanly', () => {
     setTerminalAppearancePrefs({
-      renderer: 'webgl',
+      renderer: 'dom',
       fontSize: 20,
       lineHeight: 1.0,
       cursorStyle: 'underline',

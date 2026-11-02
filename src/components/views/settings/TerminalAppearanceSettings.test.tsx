@@ -40,21 +40,17 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(cursorBar).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('switches renderer mode between Canvas, DOM and WebGL', async () => {
+  it('switches renderer mode between Canvas (GhostGrid 2D) and DOM (Clásico)', async () => {
     const user = userEvent.setup();
     render(<SettingsView />);
+
+    expect(screen.queryByRole('button', { name: /WebGL/i })).not.toBeInTheDocument();
 
     const domBtn = screen.getByRole('button', { name: /DOM · Clásico/i });
     await user.click(domBtn);
 
     expect(domBtn).toHaveAttribute('aria-pressed', 'true');
     expect(getTerminalAppearancePrefs().renderer).toBe('dom');
-
-    const webglBtn = screen.getByRole('button', { name: /WebGL · GPU/i });
-    await user.click(webglBtn);
-
-    expect(webglBtn).toHaveAttribute('aria-pressed', 'true');
-    expect(getTerminalAppearancePrefs().renderer).toBe('webgl');
 
     const canvasBtn = screen.getByRole('button', { name: /GhostGrid · 2D/i });
     await user.click(canvasBtn);
@@ -133,12 +129,12 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
         fontSize: 18,
         cursorStyle: 'block',
         lineHeight: 1.08,
-        renderer: 'webgl',
+        renderer: 'dom',
       });
     });
 
     expect(await screen.findByText('18 px')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /WebGL · GPU/i })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /DOM · Clásico/i })).toHaveAttribute(
       'aria-pressed',
       'true'
     );

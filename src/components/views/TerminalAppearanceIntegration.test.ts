@@ -55,7 +55,7 @@ describe('Terminal Appearance Configuration & Contract', () => {
       lineHeight: 1.08,
       cursorStyle: 'block',
       cursorBlink: true,
-      renderer: 'webgl',
+      renderer: 'dom',
     });
 
     expect(termMock.options.fontFamily).toBe(

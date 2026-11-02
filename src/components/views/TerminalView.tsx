@@ -1,60 +1,33 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Terminal } from '@xterm/xterm';
-import type { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import { invokeCommand } from '../../lib/ipc';
 import {
-  recordTerminalOutput,
-  markTerminalExited,
   waitForTerminalReady,
   markTerminalPromptInjected,
+  markTerminalExited,
 } from '../../lib/terminalRegistry';
 import {
-  hostBoxIsUsable,
-  waitForSpawnGeometry,
-  waitForStableHost,
-} from '../../lib/terminalHostSize';
-import {
-  activateTerminalUnicodeProvider,
-  attachDomBlockFillCleanup,
-  buildWindowsConptyOptions,
-  DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER,
-  isTerminalDividerDragging,
-  onTerminalDividerDragEnd,
-  reconcilePtySizeAfterSpawn,
-  repairWebglCanvasForDevicePixelRatio,
-  safeFitTerminal,
-  StableCellFitAddon,
-  TERMINAL_SCROLLBAR_WIDTH_PX,
-} from '../../lib/terminalViewport';
-import {
-  classifyForegroundOutputRefresh,
-  createSyncOutputHold,
-  disposeTerminalRefreshTracking,
-  type ForegroundOutputScanState,
-  recoverWebglTextureAtlasIfIdle,
-  splitAlternateScreenEnterChunk,
-  SYNC_OUTPUT_CURSOR_RESTORE_HOLD_MS,
-  SYNC_OUTPUT_MAX_HOLD_MS,
-  writeTerminalOutputWithRefresh,
-} from '../../lib/terminalSyncOutput';
-import { openFileInRightDock } from '../../lib/filePreviewNav';
-import {
-  extractTerminalLinks,
-  getTerminalWebLinksTarget,
-  openTerminalWebLink,
-} from '../../lib/terminalLinkNav';
-import {
   getTerminalAppearancePrefs,
-  getTerminalRendererBadgeLabel,
   setTerminalAppearancePrefs,
-  togglePrimaryTerminalRenderer,
-  resolveTerminalFontFamily,
   TERMINAL_APPEARANCE_CHANGED_EVENT,
   type TerminalAppearancePrefs,
 } from '../../lib/terminalAppearancePrefs';
-import { TerminalCanvasSurface, measureTerminalCanvasGrid } from './TerminalCanvasSurface';
+import { TerminalCanvasSurface } from './TerminalCanvasSurface';
+import { XtermDomSurface, type XtermDomSurfaceHandle } from './terminal/XtermDomSurface';
+import { TerminalToolbar } from './terminal/TerminalToolbar';
+import { RotateCwIcon, SpinnerIcon } from './terminal/terminalIcons';
+import { clipboardImageFormat, extractClipboardImage } from '../../lib/clipboardImage';
+import {
+  restartedSessions,
+  releaseTerminal,
+  terminalOwner,
+} from './terminal/terminalSessionRegistry';
+import { useTerminalSession } from './terminal/useTerminalSession';
 import './terminal.css';
+
+/** Arrival wave length when a thrown prompt lands in this terminal. */
+const TERMINAL_IMPACT_PULSE_MS = 460;
+
+export { releaseTerminal, clipboardImageFormat, extractClipboardImage };
 
 export interface TerminalViewProps {
   workspaceId?: string | null;
@@ -70,434 +43,6 @@ export interface TerminalViewProps {
   onStatusChange?: (status: 'idle' | 'connecting' | 'running' | 'exited' | 'terminated') => void;
 }
 
-// Inline SVG Icons (Cero Lucide, Cero Emojis)
-const TerminalIcon = ({ className = '', size = 14 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <polyline points="4 17 10 11 4 5" />
-    <line x1="12" y1="19" x2="20" y2="19" />
-  </svg>
-);
-
-const FolderIcon = ({ className = '', size = 11 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-  </svg>
-);
-
-const TrashIcon = ({ className = '', size = 13 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M10 11v6" />
-    <path d="M14 11v6" />
-    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-    <path d="M3 6h18" />
-    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-  </svg>
-);
-
-const PlayIcon = ({ className = '', size = 13 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    stroke="currentColor"
-    strokeWidth="1"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" />
-  </svg>
-);
-
-const SquareIcon = ({ className = '', size = 13 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    stroke="currentColor"
-    strokeWidth="1"
-    className={className}
-    aria-hidden="true"
-  >
-    <rect width="16" height="16" x="4" y="4" rx="2" />
-  </svg>
-);
-
-const RotateCwIcon = ({ className = '', size = 13 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
-    <path d="M21 3v5h-5" />
-  </svg>
-);
-
-const SpinnerIcon = ({ className = '', size = 13 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2.5"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={`terminal-spinner ${className}`}
-    aria-hidden="true"
-  >
-    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-  </svg>
-);
-
-const CloseIcon = ({ className = '', size = 12 }: { className?: string; size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 10 10"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M1 1L9 9M9 1L1 9" />
-  </svg>
-);
-
-// Helper function to decode base64 ANSI byte stream into Uint8Array
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
-}
-
-type BitmapRenderer = { kind: 'webgl'; dispose: () => void };
-type LiveTerminal = {
-  term: Terminal;
-  fit: FitAddon;
-  renderer: BitmapRenderer | null;
-  cleanupDomBlockFill?: () => void;
-};
-const liveTerms = new Map<string, LiveTerminal>();
-const restartedSessions = new Map<string, string>();
-
-// Foreground grid-drift auto-refit is enabled with multi-frame stabilized fit
-// to prevent stale ConPTY column geometry during output streaming.
-
-/** Arrival wave length when a thrown prompt lands in this terminal. */
-const TERMINAL_IMPACT_PULSE_MS = 460;
-
-function isAgentEngine(engine: string): boolean {
-  return engine !== '' && engine !== 'powershell' && engine !== 'terminal';
-}
-
-function terminalOwner(workspaceId: string | null | undefined, paneId: string, agentId: string) {
-  if (workspaceId) {
-    return { kind: 'workspace' as const, workspaceId, profile: { kind: 'default' as const } };
-  }
-  return { kind: 'agent' as const, agentId, paneId };
-}
-
-export function clipboardImageFormat(mime: string, fileName?: string): 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | null {
-  const cleanMime = (mime || '').toLowerCase().split(';')[0].trim();
-  if (cleanMime === 'image/png') return 'png';
-  if (cleanMime === 'image/jpeg' || cleanMime === 'image/jpg') return 'jpeg';
-  if (cleanMime === 'image/gif') return 'gif';
-  if (cleanMime === 'image/webp') return 'webp';
-  if (cleanMime === 'image/bmp') return 'bmp';
-  if (fileName) {
-    const ext = fileName.toLowerCase().split('.').pop();
-    if (ext === 'png') return 'png';
-    if (ext === 'jpg' || ext === 'jpeg') return 'jpeg';
-    if (ext === 'gif') return 'gif';
-    if (ext === 'webp') return 'webp';
-    if (ext === 'bmp') return 'bmp';
-  }
-  return null;
-}
-
-export function extractClipboardImage(clipboardData: DataTransfer | null): { file: File; format: 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' } | null {
-  if (!clipboardData) return null;
-  for (const item of Array.from(clipboardData.items ?? [])) {
-    if (item.kind === 'file' || item.type.toLowerCase().startsWith('image/')) {
-      const file = item.getAsFile();
-      if (file) {
-        const format = clipboardImageFormat(file.type || item.type, file.name);
-        if (format) return { file, format };
-      }
-    }
-  }
-  for (const file of Array.from(clipboardData.files ?? [])) {
-    const format = clipboardImageFormat(file.type, file.name);
-    if (format) return { file, format };
-  }
-  return null;
-}
-
-function terminalParking(): HTMLElement {
-  let node = document.getElementById('terminal-parking');
-  if (!node) {
-    node = document.createElement('div');
-    node.id = 'terminal-parking';
-    node.setAttribute('hidden', '');
-    document.body.appendChild(node);
-  }
-  return node;
-}
-
-function isLiveTerminalVisible(live: LiveTerminal): boolean {
-  const el = live.term.element;
-  if (!el || !el.isConnected) return false;
-  if (el.closest('#terminal-parking')) return false;
-  if (el.closest('[aria-hidden="true"]')) return false;
-  return true;
-}
-
-function releaseBitmapRenderer(live: LiveTerminal) {
-  const previous = live.renderer;
-  live.renderer = null;
-  try {
-    previous?.dispose();
-  } catch {
-    // The addon can already be disposed after a context loss.
-  }
-}
-
-function attachBitmapRenderer(live: LiveTerminal) {
-  if (live.renderer?.kind === 'webgl') {
-    repairWebglCanvasForDevicePixelRatio(live.term);
-    recoverWebglTextureAtlasIfIdle(live.term);
-    return;
-  }
-  releaseBitmapRenderer(live);
-  try {
-    const addon = new WebglAddon();
-    const loss = addon.onContextLoss(() => {
-      loss.dispose();
-      releaseBitmapRenderer(live);
-      try {
-        if (live.term.rows > 0) {
-          live.term.refresh(0, live.term.rows - 1);
-        }
-      } catch {}
-    });
-    live.term.loadAddon(addon);
-    live.renderer = {
-      kind: 'webgl',
-      dispose: () => {
-        loss.dispose();
-        addon.dispose();
-      },
-    };
-    repairWebglCanvasForDevicePixelRatio(live.term);
-  } catch (err) {
-    console.warn('[terminal] WebGL renderer unavailable', err);
-  }
-}
-
-function syncVisibleBitmapRenderers() {
-  const { renderer } = getTerminalAppearancePrefs();
-  if (renderer === 'dom' || renderer === 'canvas') {
-    for (const live of liveTerms.values()) {
-      const wasBitmap = live.renderer !== null;
-      releaseBitmapRenderer(live);
-      if (renderer === 'dom' && wasBitmap && isLiveTerminalVisible(live) && live.term.rows > 0) {
-        try {
-          live.term.refresh(0, live.term.rows - 1);
-        } catch {}
-      }
-    }
-    return;
-  }
-
-  for (const live of liveTerms.values()) {
-    if (!isLiveTerminalVisible(live)) {
-      releaseBitmapRenderer(live);
-      continue;
-    }
-    attachBitmapRenderer(live);
-  }
-}
-
-/** Sessions currently mounted in an active TerminalView component. */
-const activeMountedSessions = new Set<string>();
-
-/** Active background polling timers for parked sessions. */
-const parkedPollers = new Map<string, number>();
-
-function startParkedPolling(sessionId: string) {
-  if (
-    !sessionId ||
-    getTerminalAppearancePrefs().renderer === 'canvas' ||
-    parkedPollers.has(sessionId) ||
-    activeMountedSessions.has(sessionId)
-  ) {
-    return;
-  }
-
-  const pollParked = async () => {
-    if (
-      getTerminalAppearancePrefs().renderer === 'canvas' ||
-      activeMountedSessions.has(sessionId) ||
-      !liveTerms.has(sessionId)
-    ) {
-      stopParkedPolling(sessionId);
-      return;
-    }
-
-    let nextDelay = 200;
-    try {
-      const res: any = await invokeCommand('read_terminal_output', {
-        sessionId,
-        owner: 'user',
-      });
-
-      if (
-        getTerminalAppearancePrefs().renderer === 'canvas' ||
-        activeMountedSessions.has(sessionId) ||
-        !liveTerms.has(sessionId)
-      ) {
-        stopParkedPolling(sessionId);
-        return;
-      }
-
-      const live = liveTerms.get(sessionId);
-      if (res?.kind === 'output' && res.bytesBase64) {
-        nextDelay = 80;
-        const bytes = base64ToUint8Array(res.bytesBase64);
-        if (live?.term) {
-          live.term.write(bytes);
-        }
-      } else if (res?.kind === 'exited') {
-        markTerminalExited(sessionId);
-        const code = res.status?.code ?? 0;
-        if (live?.term) {
-          live.term.write(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`);
-        }
-        stopParkedPolling(sessionId);
-        return;
-      } else {
-        nextDelay = 400;
-      }
-    } catch {
-      nextDelay = 600;
-    }
-
-    if (
-      getTerminalAppearancePrefs().renderer !== 'canvas' &&
-      !activeMountedSessions.has(sessionId) &&
-      liveTerms.has(sessionId)
-    ) {
-      const timer = window.setTimeout(pollParked, nextDelay);
-      parkedPollers.set(sessionId, timer);
-    } else {
-      stopParkedPolling(sessionId);
-    }
-  };
-
-  const timer = window.setTimeout(pollParked, 50);
-  parkedPollers.set(sessionId, timer);
-}
-
-function stopParkedPolling(sessionId: string) {
-  const timer = parkedPollers.get(sessionId);
-  if (timer !== undefined) {
-    window.clearTimeout(timer);
-    parkedPollers.delete(sessionId);
-  }
-}
-
-function syncParkedPollers() {
-  if (getTerminalAppearancePrefs().renderer === 'canvas') {
-    for (const sessionId of Array.from(parkedPollers.keys())) {
-      stopParkedPolling(sessionId);
-    }
-    return;
-  }
-  for (const sessionId of liveTerms.keys()) {
-    if (!activeMountedSessions.has(sessionId)) {
-      startParkedPolling(sessionId);
-    } else {
-      stopParkedPolling(sessionId);
-    }
-  }
-}
-
-/** Kill the PTY and drop the screen. Only an explicit close or Restart should call this. */
-export function releaseTerminal(sessionId: string) {
-  markTerminalExited(sessionId);
-  const ids = new Set([sessionId, restartedSessions.get(sessionId) ?? sessionId]);
-  for (const id of ids) {
-    markTerminalExited(id);
-    stopParkedPolling(id);
-    activeMountedSessions.delete(id);
-    const live = liveTerms.get(id);
-    if (live) {
-      disposeTerminalRefreshTracking(live.term);
-      live.cleanupDomBlockFill?.();
-      releaseBitmapRenderer(live);
-      live.term.dispose();
-      liveTerms.delete(id);
-    }
-    if (!id) continue;
-    void invokeCommand('terminate_terminal', {
-      sessionId: id,
-      owner: 'user',
-    }).catch(() => {});
-  }
-  restartedSessions.delete(sessionId);
-  syncVisibleBitmapRenderers();
-}
-
 export const TerminalView: React.FC<TerminalViewProps> = ({
   workspaceId = null,
   paneId: propPaneId,
@@ -510,75 +55,42 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onClose,
   onStatusChange,
 }) => {
-  const [sessionId, setSessionId] = useState<string>(propSessionId || '');
-  const [engine, setEngine] = useState<string>(initialEngine);
-  const [status, setStatus] = useState<'idle' | 'connecting' | 'running' | 'exited' | 'terminated'>('idle');
-  const [exitCode, setExitCode] = useState<number | null>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const xtermHandleRef = useRef<XtermDomSurfaceHandle>(null);
+  const impactTimerRef = useRef<number | null>(null);
+
   const [isReceivingPrompt, setIsReceivingPrompt] = useState(false);
   const [isImpactPulse, setIsImpactPulse] = useState(false);
   const [appearance, setAppearance] = useState<TerminalAppearancePrefs>(() => getTerminalAppearancePrefs());
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
-  const pollingRef = useRef<number | null>(null);
-  const resizeTimerRef = useRef<number | null>(null);
-  const cancelSpawnReconcileRef = useRef<(() => void) | null>(null);
-  const cancelDriftStabilizedFitRef = useRef<(() => void) | null>(null);
-  const driftCheckFrameRef = useRef<number | null>(null);
-  const driftProbeCountRef = useRef<number>(0);
-  const altScreenSplitTailRef = useRef<string>('');
-  const foregroundScanStateRef = useRef<ForegroundOutputScanState>({
-    endsWithCarriageReturn: false,
-    scanTail: '',
+  const {
+    sessionId,
+    engine,
+    setEngine,
+    status,
+    setStatus,
+    exitCode,
+    setExitCode,
+    oscTitle,
+    setOscTitle,
+    startSession,
+    terminateSession,
+    handleClear,
+    interruptSession,
+    sessionIdRef,
+    paneIdRef,
+  } = useTerminalSession({
+    propSessionId,
+    paneId: propPaneId,
+    agentId,
+    workspaceId,
+    initialEngine,
+    surfaceRef,
+    onStatusChange,
   });
-  const writeDecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
-  const lastColsRef = useRef<number | null>(null);
-  // Set when the user switches between the canvas and DOM engines. The next attach seeds
-  // the DOM terminal from the live alternate screen instead of replaying raw history.
-  const resyncFromScreenRef = useRef(false);
-  const lastRowsRef = useRef<number | null>(null);
-  const ptyOpenRef = useRef(false);
-  const startGenRef = useRef(0);
-  /** Polled chunks still inside xterm.write. A fit waits until this is 0. */
-  const writeActiveRef = useRef(0);
-  const fitDeferredRef = useRef(false);
-  const fitNowRef = useRef<() => void>(() => {});
-  const fitWatchRef = useRef(0);
-  const scheduleStableFitRef = useRef<() => void>(() => {});
-  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
-  /** Joins a synchronized frame so a poll slice is not painted on its own. */
-  const syncHoldRef = useRef(createSyncOutputHold({ holdForCursorRestore: false }));
-  const syncHoldTimerRef = useRef<number | null>(null);
-  const resizeInFlightRef = useRef(false);
-  const queuedResizeDimsRef = useRef<{ cols: number; rows: number } | null>(null);
-  const containerResizeDebounceRef = useRef<number | null>(null);
-  const utf8DecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
-  const onDataDisposableRef = useRef<{ dispose: () => void } | null>(null);
-  const sessionIdRef = useRef<string>(propSessionId || '');
-  const isMountedRef = useRef<boolean>(true);
-  const engineRef = useRef<string>(engine);
-  const liveSessionRef = useRef<string>(propSessionId || '');
-  const paneIdRef = useRef<string>(propPaneId || globalThis.crypto.randomUUID());
+
   const agentIdRef = useRef<string>(agentId || globalThis.crypto.randomUUID());
-  const generationRef = useRef(1);
-  const surfaceRef = useRef<HTMLDivElement>(null);
-  const workspaceIdRef = useRef<string | null>(workspaceId);
-  workspaceIdRef.current = workspaceId;
-  const isAtBottomRef = useRef<boolean>(true);
-  const linesFromBottomRef = useRef<number>(0);
-  const isResizingRef = useRef<boolean>(false);
-  const impactTimerRef = useRef<number | null>(null);
-
-  if (propPaneId && paneIdRef.current !== propPaneId) {
-    paneIdRef.current = propPaneId;
-  }
-  if (agentId && agentIdRef.current !== agentId) {
-    agentIdRef.current = agentId;
-  }
-
-  engineRef.current = engine;
-  sessionIdRef.current = liveSessionRef.current || sessionId;
+  if (agentId && agentIdRef.current !== agentId) agentIdRef.current = agentId;
 
   const triggerImpactPulse = useCallback(() => {
     setIsImpactPulse(true);
@@ -591,1438 +103,49 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }, TERMINAL_IMPACT_PULSE_MS);
   }, []);
 
+  // Cleanup timers on unmount
   useEffect(() => {
-    onStatusChange?.(status);
-  }, [status, onStatusChange]);
-
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current !== null) {
-      clearTimeout(pollingRef.current);
-      pollingRef.current = null;
-    }
-    if (resizeTimerRef.current !== null) {
-      clearTimeout(resizeTimerRef.current);
-      resizeTimerRef.current = null;
-    }
-  }, []);
-
-  const stageClipboardBlob = useCallback((blob: Blob, mimeType: string, fileName?: string) => {
-    const session = sessionIdRef.current;
-    if (!session) return false;
-    const format = clipboardImageFormat(mimeType, fileName);
-    if (!format) return false;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      const bytesBase64 = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
-      if (!bytesBase64) return;
-      void invokeCommand('stage_terminal_clipboard_image', {
-        sessionId: sessionIdRef.current || session,
-        owner: terminalOwner(workspaceIdRef.current, paneIdRef.current, agentIdRef.current),
-        format,
-        bytesBase64,
-      }).catch(() => {});
-    };
-    reader.readAsDataURL(blob);
-    return true;
-  }, []);
-  const stageClipboardBlobRef = useRef(stageClipboardBlob);
-  stageClipboardBlobRef.current = stageClipboardBlob;
-
-  const lastUserInputTimeRef = useRef<number>(0);
-  const isWindowFocusedRef = useRef<boolean>(true);
-  const triggerImmediatePollRef = useRef<() => void>(() => {});
-  const [oscTitle, setOscTitle] = useState<string>('');
-
-  const writeRaw = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
-    writeActiveRef.current += 1;
-    const releaseWrite = () => {
-      writeActiveRef.current = Math.max(0, writeActiveRef.current - 1);
-      if (
-        writeActiveRef.current === 0 &&
-        !syncHoldRef.current.holding &&
-        !syncHoldRef.current.pending &&
-        fitDeferredRef.current
-      ) {
-        fitDeferredRef.current = false;
-        queueMicrotask(() => fitNowRef.current());
-      }
-    };
-    const next = writeQueueRef.current.then(
-      () =>
-        new Promise<void>((resolve) => {
-          const term = termRef.current;
-          if (!term) {
-            onFlushed?.();
-            releaseWrite();
-            resolve();
-            return;
-          }
-          let finished = false;
-          const done = () => {
-            if (!finished) {
-              finished = true;
-              onFlushed?.();
-              releaseWrite();
-              resolve();
-            }
-          };
-          const live = sessionIdRef.current ? liveTerms.get(sessionIdRef.current) : undefined;
-          const hasWebglRenderer = Boolean(live?.renderer);
-          const isVisible =
-            typeof document !== 'undefined' &&
-            document.visibilityState === 'visible' &&
-            isWindowFocusedRef.current &&
-            (!live || isLiveTerminalVisible(live));
-
-          // Hard safety timeout: never allow an unrendered, hidden, or resizing xterm
-          // to block the write queue or deadlock the polling tick.
-          const timer = setTimeout(done, isVisible ? 100 : 15);
-
-          const text =
-            typeof data === 'string'
-              ? data
-              : writeDecoderRef.current.decode(data, { stream: true });
-
-          const deliverText = (chunkText: string, cb: () => void) => {
-            if (!chunkText) {
-              cb();
-              return;
-            }
-            if (!isVisible) {
-              term.write(chunkText, cb);
-              return;
-            }
-            const refreshPlan = classifyForegroundOutputRefresh(chunkText, {
-              scanState: foregroundScanStateRef.current,
-            });
-            writeTerminalOutputWithRefresh(term, chunkText, {
-              forceViewportRefresh: refreshPlan.forceViewportRefresh,
-              followupViewportRefresh: refreshPlan.followupViewportRefresh,
-              clearTextureAtlasOnFollowup: refreshPlan.clearTextureAtlasOnFollowup,
-              shouldRefreshViewportSynchronously: () => !hasWebglRenderer,
-              shouldDeferAtlasClear: () =>
-                writeActiveRef.current > 1 || syncHoldRef.current.pending,
-              onParsed: cb,
-            });
-          };
-
-          try {
-            const hasPendingResize = fitDeferredRef.current;
-            const split = splitAlternateScreenEnterChunk(
-              text,
-              altScreenSplitTailRef.current,
-              hasPendingResize,
-            );
-            altScreenSplitTailRef.current = split.nextTail;
-
-            if (split.splitBeforeChunkOffset !== null) {
-              const before = text.slice(0, split.splitBeforeChunkOffset);
-              const after = text.slice(split.splitBeforeChunkOffset);
-              deliverText(before, () => {
-                fitDeferredRef.current = false;
-                fitNowRef.current();
-                deliverText(after, () => {
-                  clearTimeout(timer);
-                  done();
-                });
-              });
-            } else {
-              deliverText(text, () => {
-                clearTimeout(timer);
-                done();
-              });
-            }
-          } catch {
-            clearTimeout(timer);
-            done();
-          }
-        })
-    );
-    writeQueueRef.current = next.catch(() => {
-      releaseWrite();
-    });
-    return writeQueueRef.current;
-  }, []);
-
-  const enqueueWrite = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
-    const ready = syncHoldRef.current.push(data);
-    if (syncHoldRef.current.pending) {
-      if (syncHoldTimerRef.current !== null) {
-        window.clearTimeout(syncHoldTimerRef.current);
-        syncHoldTimerRef.current = null;
-      }
-      const holdDelay = syncHoldRef.current.awaitingCursorRestore
-        ? SYNC_OUTPUT_CURSOR_RESTORE_HOLD_MS
-        : SYNC_OUTPUT_MAX_HOLD_MS;
-      syncHoldTimerRef.current = window.setTimeout(() => {
-        syncHoldTimerRef.current = null;
-        const pending = syncHoldRef.current.flush();
-        if (pending && pending.length > 0) {
-          void writeRaw(pending);
-        } else if (writeActiveRef.current === 0 && fitDeferredRef.current) {
-          fitDeferredRef.current = false;
-          queueMicrotask(() => fitNowRef.current());
-        }
-      }, holdDelay);
-    } else if (syncHoldTimerRef.current !== null) {
-      window.clearTimeout(syncHoldTimerRef.current);
-      syncHoldTimerRef.current = null;
-    }
-    if (ready.length === 0) {
-      onFlushed?.();
-      return Promise.resolve();
-    }
-    for (let i = 0; i < ready.length; i += 1) {
-      writeRaw(ready[i], i === ready.length - 1 ? onFlushed : undefined);
-    }
-    return writeQueueRef.current;
-  }, [writeRaw]);
-
-  const dispatchSerializedResize = useCallback(
-    (sessionId: string, cols: number, rows: number, onComplete?: () => void) => {
-      queuedResizeDimsRef.current = { cols, rows };
-      if (resizeInFlightRef.current) {
-        return;
-      }
-      const step = () => {
-        const nextDims = queuedResizeDimsRef.current;
-        if (!nextDims || sessionIdRef.current !== sessionId) {
-          resizeInFlightRef.current = false;
-          queuedResizeDimsRef.current = null;
-          onComplete?.();
-          return;
-        }
-        queuedResizeDimsRef.current = null;
-        resizeInFlightRef.current = true;
-        invokeCommand('resize_terminal', {
-          sessionId,
-          columns: nextDims.cols,
-          rows: nextDims.rows,
-        })
-          .then(() => {
-            if (queuedResizeDimsRef.current && sessionIdRef.current === sessionId) {
-              step();
-              return;
-            }
-            resizeInFlightRef.current = false;
-            onComplete?.();
-          })
-          .catch(() => {
-            resizeInFlightRef.current = false;
-          });
-      };
-      step();
-    },
-    [],
-  );
-
-  const fitTerminal = useCallback(() => {
-    const host = containerRef.current;
-    if (!host || !fitAddonRef.current || !termRef.current || !ptyOpenRef.current) return;
-    if (!hostBoxIsUsable(host.clientWidth, host.clientHeight)) return;
-    // A polled chunk, open synchronized frame, or active split divider drag owns the screen.
-    // Fitting now would SIGWINCH in the middle of it.
-    if (
-      isTerminalDividerDragging() ||
-      writeActiveRef.current > 0 ||
-      syncHoldRef.current.holding ||
-      syncHoldRef.current.pending
-    ) {
-      fitDeferredRef.current = true;
-      return;
-    }
-    try {
-      const term = termRef.current;
-      const wasAtBottom = isAtBottomRef.current || linesFromBottomRef.current <= 3;
-      const savedLinesFromBottom = linesFromBottomRef.current;
-      const hadPriorDimensions = lastColsRef.current !== null && lastRowsRef.current !== null;
-      const prevCols = lastColsRef.current ?? term.cols;
-      const prevRows = lastRowsRef.current ?? term.rows;
-
-      isResizingRef.current = true;
-      let grid: { cols: number; rows: number } | null = null;
-      try {
-        grid = safeFitTerminal(term, fitAddonRef.current, host);
-      } finally {
-        requestAnimationFrame(() => {
-          isResizingRef.current = false;
-        });
-      }
-
-      const restoreScroll = () => {
-        if (!termRef.current) return;
-        if (termRef.current.buffer.active.type === 'alternate') return;
-        if (!wasAtBottom) {
-          const target = Math.max(0, termRef.current.buffer.active.baseY - savedLinesFromBottom);
-          termRef.current.scrollToLine(target);
-        }
-      };
-
-      restoreScroll();
-      requestAnimationFrame(restoreScroll);
-
-      const cols = grid?.cols ?? term.cols;
-      const rows = grid?.rows ?? term.rows;
-      if (cols <= 0 || rows <= 0 || !sessionIdRef.current) return;
-      if (cols === lastColsRef.current && rows === lastRowsRef.current) return;
-
-      if (resizeTimerRef.current !== null) {
-        clearTimeout(resizeTimerRef.current);
-        resizeTimerRef.current = null;
-      }
-      lastColsRef.current = cols;
-      lastRowsRef.current = rows;
-
-      // When an alternate-screen TUI (which redraws by cursor deltas without CSI 2J)
-      // changes geometry after initial spawn, wipe stale cells from the old bottom bar
-      // so the new ConPTY frame paints onto a clean grid.
-      if (
-        hadPriorDimensions &&
-        (cols !== prevCols || rows !== prevRows) &&
-        term.buffer?.active?.type === 'alternate'
-      ) {
-        try {
-          term.write('\x1b[2J\x1b[H');
-        } catch {}
-      }
-
-      const sessionId = sessionIdRef.current;
-      dispatchSerializedResize(sessionId, cols, rows, () => {
-        if (sessionIdRef.current !== sessionId || !termRef.current) return;
-        if (termRef.current.buffer.active.type !== 'alternate') {
-          restoreScroll();
-        }
-        recoverWebglTextureAtlasIfIdle(
-          termRef.current,
-          () => writeActiveRef.current > 0 || syncHoldRef.current.pending,
-        );
-      });
-    } catch {}
-  }, [dispatchSerializedResize]);
-  fitNowRef.current = fitTerminal;
-
-  const scheduleStableFit = useCallback(() => {
-    const host = containerRef.current;
-    if (!host || !ptyOpenRef.current) return;
-    const watch = ++fitWatchRef.current;
-    void waitForStableHost(
-      host,
-      () => fitWatchRef.current !== watch || !isMountedRef.current,
-    ).then((box) => {
-      if (!box || fitWatchRef.current !== watch || !ptyOpenRef.current) return;
-      fitTerminal();
-    });
-  }, [fitTerminal]);
-  scheduleStableFitRef.current = scheduleStableFit;
-
-  const initTerminal = useCallback((sessionKey?: string) => {
-    if (!containerRef.current) return null;
-    const key = sessionKey || propSessionId || sessionIdRef.current;
-    const existing = key ? liveTerms.get(key) : undefined;
-    if (existing?.term.element) {
-      const appearance = getTerminalAppearancePrefs();
-      existing.term.options.fontFamily = resolveTerminalFontFamily(appearance.fontFamilyId);
-      existing.term.options.fontSize = appearance.fontSize;
-      existing.term.options.lineHeight = appearance.lineHeight;
-      existing.term.options.cursorStyle = appearance.cursorStyle;
-      existing.term.options.cursorBlink = appearance.cursorBlink;
-      if (key) {
-        activeMountedSessions.add(key);
-        stopParkedPolling(key);
-      }
-      containerRef.current.replaceChildren(existing.term.element);
-      termRef.current = existing.term;
-      fitAddonRef.current = existing.fit;
-      syncVisibleBitmapRenderers();
-      requestAnimationFrame(() => {
-        if (!termRef.current) return;
-        try {
-          termRef.current.refresh(0, termRef.current.rows - 1);
-        } catch {}
-        if (isAtBottomRef.current || linesFromBottomRef.current <= 3) {
-          termRef.current.scrollToBottom();
-        } else {
-          const target = Math.max(0, termRef.current.buffer.active.baseY - linesFromBottomRef.current);
-          termRef.current.scrollToLine(target);
-        }
-      });
-      return existing.term;
-    }
-
-    containerRef.current.innerHTML = '';
-
-    const appearance = getTerminalAppearancePrefs();
-
-    const term = new Terminal({
-      theme: {
-        background: '#0a0a0a',
-        foreground: '#fafafa',
-        cursor: '#5c8fff',
-        cursorAccent: '#0a0a0a',
-        selectionBackground: 'rgba(92, 143, 255, 0.30)',
-        selectionForeground: '#fafafa',
-        black: '#171717',
-        red: '#e06c75',
-        green: '#7fd99a',
-        yellow: '#e8c87a',
-        blue: '#5c8fff',
-        magenta: '#d4a08c',
-        cyan: '#5ec8c5',
-        white: '#d4d4d4',
-        brightBlack: '#525252',
-        brightRed: '#ff8a8a',
-        brightGreen: '#a8f0b8',
-        brightYellow: '#ffe08a',
-        brightBlue: '#8ab0ff',
-        brightMagenta: '#e8c4b0',
-        brightCyan: '#8ae8e4',
-        brightWhite: '#fafafa',
-      },
-      fontFamily: resolveTerminalFontFamily(appearance.fontFamilyId),
-      fontSize: appearance.fontSize,
-      fontWeight: '400',
-      fontWeightBold: '600',
-      drawBoldTextInBrightColors: true,
-      letterSpacing: 0,
-      lineHeight: appearance.lineHeight,
-      minimumContrastRatio: 4.5,
-      customGlyphs: true,
-      rescaleOverlappingGlyphs: false,
-      cursorBlink: appearance.cursorBlink,
-      cursorStyle: appearance.cursorStyle,
-      convertEol: false,
-      scrollback: 5000,
-      allowProposedApi: true,
-      windowsPty: buildWindowsConptyOptions(DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER),
-    });
-    (term.options as unknown as { scrollbar?: { width?: number } }).scrollbar = {
-      width: TERMINAL_SCROLLBAR_WIDTH_PX,
-    };
-
-    const fitAddon = new StableCellFitAddon();
-    term.loadAddon(fitAddon);
-    activateTerminalUnicodeProvider(term);
-    // Rust's PTY reader (`TerminalVtEngine`) already replies to DSR/CPR (`CSI 5 n` / `CSI 6 n`)
-    // directly on the PTY thread with sub-millisecond latency. Suppress duplicate xterm.js CPR replies.
-    term.parser.registerCsiHandler({ final: 'n' }, (params) => params[0] === 6 || params[0] === 5);
-    term.open(containerRef.current);
-    const cleanupDomBlockFill = attachDomBlockFillCleanup(term);
-
-    term.onScroll(() => {
-      if (isResizingRef.current) return;
-      const buffer = term.buffer.active;
-      const dist = Math.max(0, buffer.baseY - buffer.viewportY);
-      linesFromBottomRef.current = dist;
-      isAtBottomRef.current = dist <= 3;
-    });
-
-    try {
-      safeFitTerminal(term, fitAddon, containerRef.current);
-    } catch {}
-
-    // Register link provider for Ctrl + Left Click file preview and web URL navigation
-    term.registerLinkProvider({
-      provideLinks(bufferLineNumber, callback) {
-        const buffer = term.buffer.active;
-        const lineIdx = bufferLineNumber - 1;
-        const currentLine = buffer.getLine(lineIdx);
-        if (!currentLine) {
-          callback(undefined);
-          return;
-        }
-
-        // Trace backward to find the beginning of this wrapped logical line
-        let startLineIdx = lineIdx;
-        while (startLineIdx > 0 && buffer.getLine(startLineIdx)?.isWrapped) {
-          startLineIdx--;
-        }
-
-        // Trace forward to find the end of this wrapped logical line
-        let endLineIdx = lineIdx;
-        while (endLineIdx + 1 < buffer.length && buffer.getLine(endLineIdx + 1)?.isWrapped) {
-          endLineIdx++;
-        }
-
-        // Reconstruct the full text across all wrapped physical lines
-        let fullText = '';
-        const lineOffsets: number[] = [];
-
-        for (let y = startLineIdx; y <= endLineIdx; y++) {
-          lineOffsets.push(fullText.length);
-          const l = buffer.getLine(y);
-          if (!l) continue;
-          // Intermediate wrapped lines do not trim whitespace; final line trims right
-          const isLast = y === endLineIdx;
-          fullText += l.translateToString(isLast);
-        }
-
-        if (!fullText.trim()) {
-          callback(undefined);
-          return;
-        }
-
-        const rawLinks = extractTerminalLinks(fullText);
-        if (rawLinks.length === 0) {
-          callback(undefined);
-          return;
-        }
-
-        const links: any[] = [];
-
-        for (const item of rawLinks) {
-          let startY = startLineIdx;
-          let startX = 1;
-          let endY = endLineIdx;
-          let endX = 1;
-
-          for (let i = 0; i < lineOffsets.length; i++) {
-            const y = startLineIdx + i;
-            const lineStart = lineOffsets[i];
-            const lineEnd = i + 1 < lineOffsets.length ? lineOffsets[i + 1] : fullText.length;
-
-            if (item.start >= lineStart && item.start < lineEnd) {
-              startY = y;
-              startX = item.start - lineStart + 1;
-            }
-            if (item.end > lineStart && item.end <= lineEnd) {
-              endY = y;
-              endX = item.end - lineStart + 1;
-            }
-          }
-
-          // Only report links that touch the requested buffer line
-          if (lineIdx >= startY && lineIdx <= endY) {
-            const isWeb = item.kind === 'web';
-            links.push({
-              range: {
-                start: { x: startX, y: startY + 1 },
-                end: { x: endX, y: endY + 1 },
-              },
-              text: item.text,
-              decorations: {
-                pointerCursor: true,
-                underline: true,
-              },
-              hover() {
-                if (term.element) {
-                  if (isWeb) {
-                    const target = getTerminalWebLinksTarget();
-                    term.element.title =
-                      target === 'external'
-                        ? 'Ctrl + Click para abrir en el navegador externo'
-                        : 'Ctrl + Click para abrir en el navegador integrado';
-                  } else {
-                    term.element.title = 'Ctrl + Click para previsualizar archivo';
-                  }
-                }
-              },
-              leave() {
-                if (term.element) {
-                  term.element.title = '';
-                }
-              },
-              activate(event: MouseEvent, clickedText: string) {
-                // Unified behavior: Ctrl + Click izquierdo opens web link or file preview
-                if ((event.ctrlKey || event.metaKey) && event.button === 0) {
-                  event.preventDefault();
-                  const candidate = (clickedText || item.text).trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
-                  if (isWeb) {
-                    openTerminalWebLink(candidate, workspaceIdRef.current);
-                  } else {
-                    openFileInRightDock({
-                      candidate,
-                      workspaceId: workspaceIdRef.current,
-                      collapseTree: true,
-                    });
-                  }
-                }
-              },
-            });
-          }
-        }
-
-        callback(links.length > 0 ? links : undefined);
-      },
-    });
-
-    termRef.current = term;
-    fitAddonRef.current = fitAddon;
-    if (key) liveTerms.set(key, { term, fit: fitAddon, renderer: null, cleanupDomBlockFill });
-    syncVisibleBitmapRenderers();
-
-    return term;
-  }, [propSessionId]);
-
-  const startPolling = useCallback((id: string) => {
-    stopPolling();
-
-    const tick = async () => {
-      if (!isMountedRef.current || sessionIdRef.current !== id) {
-        stopPolling();
-        return;
-      }
-
-      let nextDelay = 40;
-      try {
-        const res: any = await invokeCommand('read_terminal_output', {
-          sessionId: id,
-          owner: 'user',
-        });
-
-        if (!isMountedRef.current || sessionIdRef.current !== id) {
-          return;
-        }
-
-        const now = Date.now();
-        const hasRecentUserInput = now - lastUserInputTimeRef.current < 4000;
-        const live = sessionIdRef.current ? liveTerms.get(sessionIdRef.current) : undefined;
-        const isVisible =
-          typeof document !== 'undefined' &&
-          document.visibilityState === 'visible' &&
-          isWindowFocusedRef.current &&
-          (!live || isLiveTerminalVisible(live));
-
-        if (res?.kind === 'output' && res.bytesBase64) {
-          const bytes = base64ToUint8Array(res.bytesBase64);
-          await enqueueWrite(bytes);
-          // Poll immediately (6ms) when a DEC 2026 frame or cursor restore is held so
-          // closing sequences arrive before the hold timer expires; otherwise 16ms on visible output.
-          nextDelay = syncHoldRef.current.pending ? 6 : isVisible ? 16 : 50;
-          try {
-            const text = utf8DecoderRef.current.decode(bytes, { stream: true });
-            if (text) {
-              recordTerminalOutput(id, text, {
-                workspaceId,
-                engine: engineRef.current || initialEngine,
-                title: customTitle,
-              });
-            }
-          } catch {}
-        } else if (res?.kind === 'exited') {
-          stopPolling();
-          setStatus('exited');
-          markTerminalExited(id);
-          const code = res.status?.code ?? 0;
-          setExitCode(code);
-          await enqueueWrite(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`);
-          return;
-        } else {
-          // Idle state (no new output):
-          if (syncHoldRef.current.pending) {
-            nextDelay = 10;
-          } else if (!isVisible) {
-            nextDelay = 400;
-          } else if (hasRecentUserInput) {
-            nextDelay = 40;
-          } else {
-            nextDelay = 220;
-          }
-        }
-      } catch {
-        nextDelay = 300;
-      }
-
-      if (isMountedRef.current && sessionIdRef.current === id) {
-        pollingRef.current = window.setTimeout(tick, nextDelay);
-      }
-    };
-
-    triggerImmediatePollRef.current = () => {
-      if (!isMountedRef.current || sessionIdRef.current !== id) return;
-      if (pollingRef.current !== null) {
-        clearTimeout(pollingRef.current);
-        pollingRef.current = null;
-      }
-      pollingRef.current = window.setTimeout(tick, 5);
-    };
-
-    pollingRef.current = window.setTimeout(tick, 40);
-  }, [stopPolling, enqueueWrite, workspaceId, initialEngine, customTitle]);
-
-  const startSession = useCallback(async (selectedEngine?: string, opts?: { restart?: boolean }) => {
-    const gen = ++startGenRef.current;
-    fitWatchRef.current += 1;
-    ptyOpenRef.current = false;
-    driftProbeCountRef.current = 0;
-    cancelSpawnReconcileRef.current?.();
-    cancelSpawnReconcileRef.current = null;
-    cancelDriftStabilizedFitRef.current?.();
-    cancelDriftStabilizedFitRef.current = null;
-    const stillCurrent = () => isMountedRef.current && startGenRef.current === gen;
-
-    stopPolling();
-
-    const currentEngine = selectedEngine ?? engineRef.current;
-    const previousSessionId = propSessionId || sessionIdRef.current || `term-${Date.now()}`;
-    let newSessionId = previousSessionId;
-    let pendingAgentRestart: { previousSessionId: string; nextSessionId: string } | null = null;
-
-    if (opts?.restart && isAgentEngine(currentEngine)) {
-      const nextSessionId = globalThis.crypto.randomUUID();
-      stopParkedPolling(previousSessionId);
-      activeMountedSessions.delete(previousSessionId);
-      const live = liveTerms.get(previousSessionId);
-      if (live) {
-        try {
-          live.renderer?.dispose();
-        } catch {}
-        disposeTerminalRefreshTracking(live.term);
-        live.cleanupDomBlockFill?.();
-        live.term.dispose();
-        liveTerms.delete(previousSessionId);
-      }
-      if (termRef.current === live?.term) {
-        termRef.current = null;
-        fitAddonRef.current = null;
-      }
-      pendingAgentRestart = { previousSessionId, nextSessionId };
-      newSessionId = nextSessionId;
-    }
-
-    if (opts?.restart && !pendingAgentRestart) {
-      stopParkedPolling(previousSessionId);
-      activeMountedSessions.delete(previousSessionId);
-      const live = liveTerms.get(previousSessionId);
-      if (live) {
-        try {
-          live.renderer?.dispose();
-        } catch {}
-        disposeTerminalRefreshTracking(live.term);
-        live.cleanupDomBlockFill?.();
-        live.term.dispose();
-        liveTerms.delete(previousSessionId);
-      }
-      if (termRef.current === live?.term) {
-        termRef.current = null;
-        fitAddonRef.current = null;
-      }
-      try {
-        await invokeCommand('terminate_terminal', {
-          sessionId: previousSessionId,
-          owner: 'user',
-        });
-      } catch {}
-    }
-
-    liveSessionRef.current = newSessionId;
-    setSessionId(newSessionId);
-    sessionIdRef.current = newSessionId;
-    activeMountedSessions.add(newSessionId);
-    stopParkedPolling(newSessionId);
-    setStatus('connecting');
-    setExitCode(null);
-
-    const activePrefs = getTerminalAppearancePrefs();
-    if (activePrefs.renderer === 'canvas') {
-      syncVisibleBitmapRenderers();
-      syncParkedPollers();
-      const preliminaryCols = surfaceRef.current
-        ? measureTerminalCanvasGrid(surfaceRef.current, activePrefs).cols
-        : 0;
-      await waitForSpawnGeometry(surfaceRef.current, preliminaryCols, () => !stillCurrent());
-      if (!stillCurrent()) return;
-      const measured = measureTerminalCanvasGrid(surfaceRef.current, activePrefs);
-      lastColsRef.current = measured.cols;
-      lastRowsRef.current = measured.rows;
-      const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
-      try {
-        let restartedAgent = false;
-        if (pendingAgentRestart) {
-          try {
-            await invokeCommand('restart_agent_terminal_for_autopilot', {
-              oldSessionId: pendingAgentRestart.previousSessionId,
-              newSessionId: pendingAgentRestart.nextSessionId,
-              agentId: agentIdRef.current,
-              paneId: paneIdRef.current,
-              runId: globalThis.crypto.randomUUID(),
-              generation: generationRef.current,
-              prompt: `Continue with ${currentEngine}`.slice(0, 2000),
-              columns: measured.cols,
-              rows: measured.rows,
-            });
-            generationRef.current += 1;
-            restartedSessions.set(
-              pendingAgentRestart.previousSessionId,
-              pendingAgentRestart.nextSessionId,
-            );
-            restartedAgent = true;
-          } catch {
-            restartedAgent = false;
-          }
-        }
-        if (!restartedAgent) {
-          await invokeCommand(
-            propSessionId && !opts?.restart ? 'attach_terminal' : 'start_terminal',
-            {
-              sessionId: newSessionId,
-              engine: currentEngine,
-              owner,
-              workspaceId,
-              paneId: paneIdRef.current,
-              confirmedByBuilder: true,
-              columns: measured.cols,
-              rows: measured.rows,
-            }
-          );
-        }
-      } catch (err) {
-        console.warn('Canvas terminal start/attach:', err);
-      }
-      if (stillCurrent()) {
-        ptyOpenRef.current = true;
-        setStatus('running');
-      }
-      return;
-    }
-
-    const hadLiveElement = Boolean(liveTerms.get(newSessionId)?.term.element);
-    let term = termRef.current;
-    if (!term || opts?.restart) {
-      term = initTerminal(newSessionId);
-    }
-
-    if (term) {
-      onDataDisposableRef.current?.dispose();
-      onDataDisposableRef.current = term.onData((data: string) => {
-        lastUserInputTimeRef.current = Date.now();
-        const activeId = sessionIdRef.current || newSessionId;
-        if (!activeId) return;
-        invokeCommand('write_terminal', {
-          sessionId: activeId,
-          owner: 'user',
-          input: data,
-        })
-          .then(() => {
-            // Wake up poller immediately to fetch echoed keystrokes with 0ms perceived lag
-            triggerImmediatePollRef.current();
-          })
-          .catch((err) => {
-            console.error('Failed to write to terminal:', err);
-          });
-      });
-
-      term.attachCustomKeyEventHandler((event) => {
-        if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.altKey) {
-          if (event.key.toLowerCase() === 'c') {
-            const selection = term?.getSelection();
-            if (selection && selection.length > 0) {
-              navigator.clipboard.writeText(selection).catch(() => {});
-              return false;
-            }
-          }
-          if (event.key.toLowerCase() === 'v') {
-            event.preventDefault();
-            const session = sessionIdRef.current;
-            if (!session) return false;
-
-            const pasteTextFallback = () => {
-              navigator.clipboard?.readText?.().then((text) => {
-                if (text && sessionIdRef.current) {
-                  term?.paste(text);
-                }
-              }).catch(() => {});
-            };
-
-            if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
-              navigator.clipboard.read().then(async (items) => {
-                for (const item of items) {
-                  const imageType = item.types.find((t) => t.toLowerCase().startsWith('image/'));
-                  if (imageType) {
-                    try {
-                      const blob = await item.getType(imageType);
-                      if (blob && stageClipboardBlobRef.current(blob, imageType)) {
-                        return;
-                      }
-                    } catch {}
-                  }
-                }
-                pasteTextFallback();
-              }).catch(() => {
-                pasteTextFallback();
-              });
-            } else {
-              pasteTextFallback();
-            }
-            return false;
-          }
-        }
-        return true;
-      });
-
-      term.focus();
-    }
-
-    if (!stillCurrent()) return;
-
-    const host = containerRef.current;
-    if (!host || !term || !fitAddonRef.current) {
-      if (stillCurrent()) setStatus('idle');
-      return;
-    }
-
-    try {
-      const fontsReady = document.fonts?.ready;
-      if (fontsReady) {
-        await Promise.race([
-          fontsReady.then(() => undefined).catch(() => undefined),
-          new Promise<void>((resolve) => {
-            window.setTimeout(resolve, 400);
-          }),
-        ]);
-      }
-      if (!stillCurrent()) return;
-
-      const readGrid = () => {
-        if (!fitAddonRef.current || !termRef.current) return null;
-        return safeFitTerminal(termRef.current, fitAddonRef.current, host);
-      };
-
-      let grid: { cols: number; rows: number } | null = null;
-      while (stillCurrent() && !grid) {
-        const stable = await waitForStableHost(host, () => !stillCurrent());
-        if (!stillCurrent()) return;
-        if (!stable) continue;
-        grid = readGrid();
-      }
-      if (!grid || !stillCurrent()) return;
-      if (grid.cols < 50) {
-        await waitForSpawnGeometry(host, grid.cols, () => !stillCurrent());
-        if (!stillCurrent()) return;
-        const settled = readGrid();
-        if (settled) grid = settled;
-      }
-
-      lastColsRef.current = grid.cols;
-      lastRowsRef.current = grid.rows;
-
-      const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
-      let restartedAgent = false;
-      if (pendingAgentRestart) {
-        try {
-          await invokeCommand('restart_agent_terminal_for_autopilot', {
-            oldSessionId: pendingAgentRestart.previousSessionId,
-            newSessionId: pendingAgentRestart.nextSessionId,
-            agentId: agentIdRef.current,
-            paneId: paneIdRef.current,
-            runId: globalThis.crypto.randomUUID(),
-            generation: generationRef.current,
-            prompt: `Continue with ${currentEngine}`.slice(0, 2000),
-            columns: grid.cols,
-            rows: grid.rows,
-          });
-          generationRef.current += 1;
-          restartedSessions.set(pendingAgentRestart.previousSessionId, pendingAgentRestart.nextSessionId);
-          if (propSessionId) {
-            restartedSessions.set(propSessionId, pendingAgentRestart.nextSessionId);
-          }
-          restartedAgent = true;
-        } catch (err) {
-          console.error('Failed to restart agent terminal:', err);
-        }
-      }
-      const resyncFromScreen = resyncFromScreenRef.current;
-      resyncFromScreenRef.current = false;
-      const started = restartedAgent
-        ? { attachedToExisting: false, screenSeed: false, scrollbackBase64: undefined as string | undefined }
-        : await invokeCommand<{ attachedToExisting?: boolean; screenSeed?: boolean; scrollbackBase64?: string }>(
-            propSessionId && !opts?.restart ? 'attach_terminal' : 'start_terminal',
-            propSessionId && !opts?.restart
-              ? {
-                  sessionId: newSessionId,
-                  owner,
-                  engine: currentEngine,
-                  workspaceId,
-                  paneId: paneIdRef.current,
-                  columns: grid.cols,
-                  rows: grid.rows,
-                  preserveUnreadBuffer: hadLiveElement && !resyncFromScreen,
-                  resyncFromScreen,
-                }
-              : {
-                  sessionId: newSessionId,
-                  engine: currentEngine,
-                  owner,
-                  workspaceId,
-                  paneId: paneIdRef.current,
-                  confirmedByBuilder: true,
-                  columns: grid.cols,
-                  rows: grid.rows,
-                  preserveUnreadBuffer: hadLiveElement && !resyncFromScreen,
-                  resyncFromScreen,
-                },
-          );
-      if (!stillCurrent()) return;
-
-      ptyOpenRef.current = true;
-
-      if (term && !started?.attachedToExisting && (hadLiveElement || opts?.restart)) {
-        term.reset();
-        foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
-      }
-      if (term && started?.screenSeed && started.scrollbackBase64) {
-        // Renderer switch on a TUI: drop whatever this terminal still holds from before
-        // and rebuild it from the live screen at the current grid.
-        term.reset();
-        foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
-        const seedBytes = base64ToUint8Array(started.scrollbackBase64);
-        if (seedBytes.length > 0) {
-          await enqueueWrite(seedBytes);
-          if (!stillCurrent()) return;
-        }
-      } else if ((!hadLiveElement || resyncFromScreen) && started?.scrollbackBase64 && term) {
-        if (resyncFromScreen) {
-          term.reset();
-          foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
-        }
-        const historyBytes = base64ToUint8Array(started.scrollbackBase64);
-        if (historyBytes.length > 0) {
-          await enqueueWrite(historyBytes);
-          if (!stillCurrent()) return;
-        }
-      }
-      if (started?.attachedToExisting) {
-        void invokeCommand('resize_terminal', {
-          sessionId: newSessionId,
-          columns: grid.cols,
-          rows: grid.rows,
-        }).catch(() => {});
-      }
-
-      if (fitAddonRef.current) {
-        cancelSpawnReconcileRef.current = reconcilePtySizeAfterSpawn({
-          isCancelled: () => !stillCurrent() || sessionIdRef.current !== newSessionId,
-          fitAndMeasure: () => {
-            if (!termRef.current || !fitAddonRef.current || !containerRef.current) return null;
-            return safeFitTerminal(termRef.current, fitAddonRef.current, containerRef.current);
-          },
-          getAppliedSize: () => ({
-            cols: lastColsRef.current,
-            rows: lastRowsRef.current,
-          }),
-          applySize: (dims) => {
-            lastColsRef.current = dims.cols;
-            lastRowsRef.current = dims.rows;
-            void invokeCommand('resize_terminal', {
-              sessionId: newSessionId,
-              columns: dims.cols,
-              rows: dims.rows,
-            }).catch(() => {});
-          },
-        });
-      }
-
-      scheduleStableFitRef.current();
-
-      if (!stillCurrent()) {
-        return;
-      }
-
-      setStatus('running');
-      recordTerminalOutput(newSessionId, `> ${currentEngine || 'Antigravity'} active`, {
-        workspaceId,
-        engine: currentEngine || initialEngine,
-        title: customTitle,
-      });
-
-      startPolling(newSessionId);
-    } catch (err: any) {
-      console.error('Failed to start ConPTY session:', err);
-      if (isMountedRef.current && sessionIdRef.current === newSessionId) {
-        setStatus('idle');
-        term?.write(`\r\n\x1b[31m[Failed to start ConPTY terminal: ${err?.message || err}]\x1b[0m\r\n`);
-      }
-    }
-  }, [workspaceId, propSessionId, initTerminal, startPolling, stopPolling]);
-
-  const terminateSession = useCallback(async () => {
-    stopPolling();
-    const idToTerminate = sessionIdRef.current;
-    if (idToTerminate) {
-      try {
-        await invokeCommand('terminate_terminal', {
-          sessionId: idToTerminate,
-          owner: 'user',
-        });
-      } catch (e) {
-        console.error('Failed to terminate session:', e);
-      }
-    }
-    sessionIdRef.current = '';
-    setSessionId('');
-    setStatus('terminated');
-    termRef.current?.write('\r\n\x1b[90m[Session Terminated by User]\x1b[0m\r\n');
-  }, [stopPolling]);
-
-  const handleClear = useCallback(() => {
-    termRef.current?.clear();
-    termRef.current?.focus();
-    const sid = sessionIdRef.current || propSessionId;
-    if (sid) {
-      void invokeCommand('clear_terminal_vt', { sessionId: sid }).catch(() => {});
-    }
-  }, [propSessionId]);
-
-  useEffect(() => {
-    if (chrome !== 'pane') return;
-    const onCommand = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string; command?: string }>).detail;
-      if (!detail) return;
-      const addressed = detail.sessionId ? (restartedSessions.get(detail.sessionId) ?? detail.sessionId) : null;
-      const isTargeted = detail.sessionId && (
-        detail.sessionId === sessionIdRef.current ||
-        addressed === sessionIdRef.current ||
-        detail.sessionId === propSessionId
-      );
-      const isGlobalAgentRefresh = !detail.sessionId && (
-        detail.command === 'restart-agent' || detail.command === 'refresh-all'
-      );
-
-      if (!isTargeted && !isGlobalAgentRefresh) return;
-
-      if (detail.command === 'restart-agent') {
-        const term = termRef.current;
-        if (term) {
-          term.reset();
-        }
-        lastColsRef.current = null;
-        lastRowsRef.current = null;
-        const currentId = sessionIdRef.current;
-        if (currentId) {
-          stopPolling();
-          setStatus('connecting');
-          setExitCode(null);
-          const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
-          void (async () => {
-            let cols = term?.cols || 80;
-            let rows = term?.rows || 24;
-            const host = containerRef.current;
-            if (cols < 50 && host) {
-              await waitForSpawnGeometry(host, cols);
-              fitTerminal();
-              cols = term?.cols || cols;
-              rows = term?.rows || rows;
-            }
-            return invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>('attach_terminal', {
-              sessionId: currentId,
-              owner,
-              engine: engineRef.current,
-              workspaceId,
-              paneId: paneIdRef.current,
-              columns: cols,
-              rows: rows,
-            });
-          })()
-            .then((started) => {
-              if (term && started?.attachedToExisting) {
-                term.reset();
-              }
-              setStatus('running');
-              ptyOpenRef.current = true;
-              startPolling(currentId);
-              scheduleStableFitRef.current();
-            })
-            .catch(() => {
-              void startSession(engineRef.current);
-            });
-        }
-        return;
-      }
-      if (detail.command === 'clear') handleClear();
-      if (detail.command === 'refresh' || detail.command === 'redraw') {
-        const term = termRef.current;
-        const sessionId = sessionIdRef.current;
-        if (term && sessionId && term.cols > 1 && term.rows > 1) {
-          fitTerminal();
-          try {
-            term.refresh(0, Math.max(0, term.rows - 1));
-          } catch {}
-        }
-        return;
-      }
-      if (detail.command === 'restart') void startSession(engineRef.current, { restart: true });
-      if (detail.command === 'interrupt') {
-        void invokeCommand('write_terminal', {
-          sessionId: sessionIdRef.current,
-          owner: 'user',
-          input: '\x03',
-        }).catch(() => {});
-      }
-      if (detail.command === 'font-larger' || detail.command === 'font-smaller') {
-        const term = termRef.current;
-        const currentSize = term?.options.fontSize ?? getTerminalAppearancePrefs().fontSize;
-        const next = Math.min(22, Math.max(10, currentSize + (detail.command === 'font-larger' ? 1 : -1)));
-        if (term) {
-          term.options.fontSize = next;
-        }
-        setTerminalAppearancePrefs({ fontSize: next });
-        fitTerminal();
-      }
-    };
-    window.addEventListener('kite:terminal-command', onCommand);
-    return () => window.removeEventListener('kite:terminal-command', onCommand);
-  }, [chrome, handleClear, propSessionId, startSession]);
-
-  const prevRendererRef = useRef(appearance.renderer);
-
-  useEffect(() => {
-    const onAppearanceChanged = (e: Event) => {
-      const prefs = (e as CustomEvent<TerminalAppearancePrefs>).detail ?? getTerminalAppearancePrefs();
-      const prevRenderer = prevRendererRef.current;
-      prevRendererRef.current = prefs.renderer;
-      setAppearance(prefs);
-      const resolvedFont = resolveTerminalFontFamily(prefs.fontFamilyId);
-
-      for (const live of liveTerms.values()) {
-        live.term.options.fontFamily = resolvedFont;
-        live.term.options.fontSize = prefs.fontSize;
-        live.term.options.lineHeight = prefs.lineHeight;
-        live.term.options.cursorStyle = prefs.cursorStyle;
-        live.term.options.cursorBlink = prefs.cursorBlink;
-      }
-
-      if ((prevRenderer === 'canvas') !== (prefs.renderer === 'canvas')) {
-        resyncFromScreenRef.current = prefs.renderer !== 'canvas';
-        stopPolling();
-        syncVisibleBitmapRenderers();
-        syncParkedPollers();
-        window.requestAnimationFrame(() => {
-          void startSession(engineRef.current);
-        });
-        return;
-      }
-
-      syncVisibleBitmapRenderers();
-      fitTerminal();
-    };
-
-    window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
-    return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
-  }, [fitTerminal, startSession, stopPolling]);
-
-  useEffect(() => {
-    if (initialEngine && initialEngine !== engineRef.current) {
-      engineRef.current = initialEngine;
-      setEngine(initialEngine);
-    }
-  }, [initialEngine]);
-
-  // ── Direct In-Terminal Prompt Delivery (No intermediate popup window) ──
-  useEffect(() => {
-    let cancelled = false;
-
-    const handleStagedPrompt = async (e: Event) => {
-      const detail = (e as CustomEvent<{
-        sessionId?: string;
-        paneId?: string;
-        prompt: string;
-        agentName?: string;
-        engine?: string;
-      }>).detail;
-      if (!detail?.prompt) return;
-
-      const currentSid = sessionIdRef.current || propSessionId;
-      const currentPid = paneIdRef.current;
-      const matchesSession =
-        detail.sessionId &&
-        (detail.sessionId === currentSid ||
-          detail.sessionId === propSessionId ||
-          restartedSessions.get(detail.sessionId) === currentSid);
-      const matchesPane = detail.paneId && detail.paneId === currentPid;
-
-      if (!matchesSession && !matchesPane) return;
-
-      triggerImpactPulse();
-      setIsReceivingPrompt(true);
-
-      const sid = sessionIdRef.current || propSessionId;
-      if (!sid) {
-        setIsReceivingPrompt(false);
-        return;
-      }
-
-      // Reactive gate: wait until the terminal/agent is genuinely ready to receive input
-      await waitForTerminalReady(sid, { timeoutMs: 12000 });
-      if (cancelled) return;
-
-      // Stream text directly into PTY stdin in fast natural chunks so it appears typed at the CLI prompt
-      const text = detail.prompt;
-      const chunkSize = Math.max(3, Math.ceil(text.length / 24));
-      for (let i = 0; i < text.length; i += chunkSize) {
-        if (cancelled) return;
-        const chunk = text.slice(i, i + chunkSize);
-        await invokeCommand('write_terminal', {
-          sessionId: sid,
-          input: chunk,
-          owner: 'user',
-        }).catch(() => {});
-        await new Promise((r) => setTimeout(r, 20));
-      }
-
-      if (cancelled) return;
-
-      // Send Enter key to submit instruction
-      await new Promise((r) => setTimeout(r, 120));
-      await invokeCommand('write_terminal', {
-        sessionId: sid,
-        input: '\r\n',
-        owner: 'user',
-      }).catch(() => {});
-
-      // Mark the prompt as injected so subsequent activity is tracked as real work
-      markTerminalPromptInjected(sid);
-
-      setTimeout(() => {
-        if (!cancelled) {
-          setIsReceivingPrompt(false);
-          termRef.current?.focus();
-        }
-      }, 500);
-    };
-
-    window.addEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
     return () => {
-      cancelled = true;
-      window.removeEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
-    };
-  }, [propSessionId, status, triggerImpactPulse]);
-
-  // ── Arrival wave: the thrown prompt landed in this terminal ──
-  useEffect(() => {
-    const handlePromptLanded = (e: Event) => {
-      const detail = (e as CustomEvent<{
-        sessionId?: string;
-        targetPaneId?: string;
-      }>).detail;
-      if (!detail) return;
-
-      const currentSid = sessionIdRef.current || propSessionId;
-      const currentPid = paneIdRef.current;
-      const matchesSession =
-        detail.sessionId &&
-        (detail.sessionId === currentSid ||
-          detail.sessionId === propSessionId ||
-          restartedSessions.get(detail.sessionId) === currentSid);
-      const matchesPane = detail.targetPaneId && detail.targetPaneId === currentPid;
-
-      if (!matchesSession && !matchesPane) return;
-      triggerImpactPulse();
-    };
-
-    window.addEventListener('kite:prompt-landed', handlePromptLanded);
-    return () => {
-      window.removeEventListener('kite:prompt-landed', handlePromptLanded);
       if (impactTimerRef.current !== null) {
         window.clearTimeout(impactTimerRef.current);
         impactTimerRef.current = null;
       }
     };
-  }, [propSessionId, triggerImpactPulse]);
+  }, []);
 
+  // Launch initial session
   useEffect(() => {
-    isMountedRef.current = true;
-    liveSessionRef.current = propSessionId || liveSessionRef.current;
     void startSession();
+  }, [startSession]);
 
-    const scheduleDebouncedResizeFit = () => {
-      if (containerResizeDebounceRef.current !== null) {
-        window.clearTimeout(containerResizeDebounceRef.current);
-      }
-      containerResizeDebounceRef.current = window.setTimeout(() => {
-        containerResizeDebounceRef.current = null;
-        scheduleStableFitRef.current();
-      }, 150);
-    };
+  // Stage clipboard image
+  const stageClipboardBlob = useCallback(
+    (blob: Blob, mimeType: string, fileName?: string) => {
+      const session = sessionIdRef.current;
+      if (!session) return false;
+      const format = clipboardImageFormat(mimeType, fileName);
+      if (!format) return false;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = typeof reader.result === 'string' ? reader.result : '';
+        const bytesBase64 = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
+        if (!bytesBase64) return;
+        void invokeCommand('stage_terminal_clipboard_image', {
+          sessionId: sessionIdRef.current || session,
+          owner: terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current),
+          format,
+          bytesBase64,
+        }).catch(() => {});
+      };
+      reader.readAsDataURL(blob);
+      return true;
+    },
+    [workspaceId]
+  );
+  const stageClipboardBlobRef = useRef(stageClipboardBlob);
+  stageClipboardBlobRef.current = stageClipboardBlob;
 
-    const ro = new ResizeObserver(() => {
-      scheduleDebouncedResizeFit();
-    });
-
-    if (containerRef.current) {
-      ro.observe(containerRef.current);
-    }
-
-    const handleWindowResize = () => {
-      scheduleDebouncedResizeFit();
-    };
-    window.addEventListener('resize', handleWindowResize);
-
-    const unbindDividerDrag = onTerminalDividerDragEnd(() => {
-      if (containerResizeDebounceRef.current !== null) {
-        window.clearTimeout(containerResizeDebounceRef.current);
-        containerResizeDebounceRef.current = null;
-      }
-      scheduleStableFitRef.current();
-    });
-
-    return () => {
-      unbindDividerDrag();
-      if (containerResizeDebounceRef.current !== null) {
-        window.clearTimeout(containerResizeDebounceRef.current);
-        containerResizeDebounceRef.current = null;
-      }
-      cancelSpawnReconcileRef.current?.();
-      cancelSpawnReconcileRef.current = null;
-      cancelDriftStabilizedFitRef.current?.();
-      cancelDriftStabilizedFitRef.current = null;
-      if (driftCheckFrameRef.current !== null) {
-        window.cancelAnimationFrame(driftCheckFrameRef.current);
-        driftCheckFrameRef.current = null;
-      }
-      if (syncHoldTimerRef.current !== null) {
-        window.clearTimeout(syncHoldTimerRef.current);
-        syncHoldTimerRef.current = null;
-      }
-      const pendingFrame = syncHoldRef.current.flush();
-      if (pendingFrame && pendingFrame.length > 0 && termRef.current) {
-        try {
-          termRef.current.write(pendingFrame);
-        } catch {
-          /* The pane is going away. Drop the frame rather than throw. */
-        }
-      }
-      startGenRef.current += 1;
-      fitWatchRef.current += 1;
-      ptyOpenRef.current = false;
-      isMountedRef.current = false;
-      window.removeEventListener('resize', handleWindowResize);
-      ro.disconnect();
-      stopPolling();
-      onDataDisposableRef.current?.dispose();
-      onDataDisposableRef.current = null;
-      const id = sessionIdRef.current;
-      if (id) {
-        activeMountedSessions.delete(id);
-      }
-      const live = id ? liveTerms.get(id) : undefined;
-      const el = termRef.current?.element;
-      if (live && el && termRef.current === live.term) {
-        terminalParking().appendChild(el);
-      }
-      termRef.current = null;
-      fitAddonRef.current = null;
-      syncVisibleBitmapRenderers();
-      syncParkedPollers();
-    };
-    // The session stays alive across splits and mode switches. This effect
-    // rebinds the existing screen; it must not follow callback identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propSessionId]);
-
-  useEffect(() => {
-    const id = propSessionId || sessionIdRef.current;
-    if (id) {
-      activeMountedSessions.add(id);
-      stopParkedPolling(id);
-    }
-    return () => {
-      if (id) {
-        activeMountedSessions.delete(id);
-      }
-      syncParkedPollers();
-    };
-  }, [propSessionId]);
-
+  // Drag and drop from operating system via Tauri
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -2058,45 +181,201 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
   }, [workspaceId]);
 
-  // Instant wake-up when app is foregrounded or focused again
+  // Terminal actions bus (clear, restart, interrupt, font adjustments)
   useEffect(() => {
-    const refreshVisible = () => {
-      isWindowFocusedRef.current = true;
-      if (sessionIdRef.current) {
-        triggerImmediatePollRef.current();
+    if (chrome !== 'pane') return;
+    const onCommand = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string; command?: string }>).detail;
+      if (!detail) return;
+      const addressed = detail.sessionId ? (restartedSessions.get(detail.sessionId) ?? detail.sessionId) : null;
+      const isTargeted =
+        detail.sessionId &&
+        (detail.sessionId === sessionIdRef.current ||
+          addressed === sessionIdRef.current ||
+          detail.sessionId === propSessionId);
+      const isGlobalAgentRefresh =
+        !detail.sessionId && (detail.command === 'restart-agent' || detail.command === 'refresh-all');
+
+      if (!isTargeted && !isGlobalAgentRefresh) return;
+
+      if (detail.command === 'restart-agent') {
+        const currentId = sessionIdRef.current;
+        if (currentId) {
+          setStatus('connecting');
+          setExitCode(null);
+          const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
+          void invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>('attach_terminal', {
+            sessionId: currentId,
+            owner,
+            engine,
+            workspaceId,
+            paneId: paneIdRef.current,
+            columns: 80,
+            rows: 24,
+          })
+            .then(() => {
+              setStatus('running');
+            })
+            .catch(() => {
+              void startSession(engine);
+            });
+        }
+        return;
       }
-      if (termRef.current && termRef.current.rows > 0) {
-        try {
-          repairWebglCanvasForDevicePixelRatio(termRef.current);
-          recoverWebglTextureAtlasIfIdle(
-            termRef.current,
-            () => writeActiveRef.current > 0 || syncHoldRef.current.pending,
-          );
-          termRef.current.refresh(0, termRef.current.rows - 1);
-        } catch {}
+      if (detail.command === 'clear') {
+        handleClear();
+        xtermHandleRef.current?.clear();
       }
-    };
-    const handleFocus = () => {
-      refreshVisible();
-    };
-    const handleBlur = () => {
-      isWindowFocusedRef.current = false;
-    };
-    const handleVisibility = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        refreshVisible();
+      if (detail.command === 'refresh' || detail.command === 'redraw') {
+        xtermHandleRef.current?.fit();
+        return;
+      }
+      if (detail.command === 'restart') {
+        void startSession(engine, { restart: true });
+      }
+      if (detail.command === 'interrupt') {
+        interruptSession();
+      }
+      if (detail.command === 'terminate') {
+        void terminateSession();
+      }
+      if (detail.command === 'font-larger' || detail.command === 'font-smaller') {
+        const currentSize = appearance.fontSize;
+        const next = Math.min(22, Math.max(10, currentSize + (detail.command === 'font-larger' ? 1 : -1)));
+        setTerminalAppearancePrefs({ fontSize: next });
       }
     };
 
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('blur', handleBlur);
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      window.removeEventListener('focus', handleFocus);
-      window.removeEventListener('blur', handleBlur);
-      document.removeEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('kite:terminal-command', onCommand);
+    return () => window.removeEventListener('kite:terminal-command', onCommand);
+  }, [appearance.fontSize, chrome, engine, handleClear, interruptSession, propSessionId, sessionIdRef, setExitCode, setStatus, startSession, terminateSession, workspaceId]);
+
+  // Appearance change broadcasts
+  useEffect(() => {
+    const onAppearanceChanged = (e: Event) => {
+      const prefs = (e as CustomEvent<TerminalAppearancePrefs>).detail ?? getTerminalAppearancePrefs();
+      setAppearance(prefs);
     };
+
+    window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
+    return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
   }, []);
+
+  // In-terminal prompt delivery (thrown prompts)
+  useEffect(() => {
+    let cancelled = false;
+
+    const handleStagedPrompt = async (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          sessionId?: string;
+          paneId?: string;
+          prompt: string;
+        }>
+      ).detail;
+      if (!detail?.prompt) return;
+
+      const currentSid = sessionIdRef.current || propSessionId;
+      const currentPid = paneIdRef.current;
+      const matchesSession =
+        detail.sessionId &&
+        (detail.sessionId === currentSid ||
+          detail.sessionId === propSessionId ||
+          restartedSessions.get(detail.sessionId) === currentSid);
+      const matchesPane = detail.paneId && detail.paneId === currentPid;
+
+      if (!matchesSession && !matchesPane) return;
+
+      triggerImpactPulse();
+      setIsReceivingPrompt(true);
+
+      const sid = sessionIdRef.current || propSessionId;
+      if (!sid) {
+        setIsReceivingPrompt(false);
+        return;
+      }
+
+      await waitForTerminalReady(sid, { timeoutMs: 12000 });
+      if (cancelled) return;
+
+      const text = detail.prompt;
+      const chunkSize = Math.max(3, Math.ceil(text.length / 24));
+      for (let i = 0; i < text.length; i += chunkSize) {
+        if (cancelled) return;
+        const chunk = text.slice(i, i + chunkSize);
+        await invokeCommand('write_terminal', {
+          sessionId: sid,
+          input: chunk,
+          owner: 'user',
+        }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      if (cancelled) return;
+
+      await new Promise((r) => setTimeout(r, 120));
+      await invokeCommand('write_terminal', {
+        sessionId: sid,
+        input: '\r\n',
+        owner: 'user',
+      }).catch(() => {});
+
+      markTerminalPromptInjected(sid);
+
+      setTimeout(() => {
+        if (!cancelled) {
+          setIsReceivingPrompt(false);
+          xtermHandleRef.current?.focus();
+        }
+      }, 500);
+    };
+
+    window.addEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:terminal-staged-prompt', handleStagedPrompt);
+    };
+  }, [paneIdRef, propSessionId, sessionIdRef, triggerImpactPulse]);
+
+  // Prompt landed wave
+  useEffect(() => {
+    const handlePromptLanded = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string; targetPaneId?: string }>).detail;
+      if (!detail) return;
+
+      const currentSid = sessionIdRef.current || propSessionId;
+      const currentPid = paneIdRef.current;
+      const matchesSession =
+        detail.sessionId &&
+        (detail.sessionId === currentSid ||
+          detail.sessionId === propSessionId ||
+          restartedSessions.get(detail.sessionId) === currentSid);
+      const matchesPane = detail.targetPaneId && detail.targetPaneId === currentPid;
+
+      if (!matchesSession && !matchesPane) return;
+      triggerImpactPulse();
+    };
+
+    window.addEventListener('kite:prompt-landed', handlePromptLanded);
+    return () => window.removeEventListener('kite:prompt-landed', handlePromptLanded);
+  }, [paneIdRef, propSessionId, sessionIdRef, triggerImpactPulse]);
+
+  const handleTitleChange = useCallback(
+    (nextTitle: string) => {
+      if (nextTitle) setOscTitle(nextTitle);
+    },
+    [setOscTitle]
+  );
+
+  const handleProcessExit = useCallback(
+    (code: number | null) => {
+      const sid = sessionIdRef.current || propSessionId;
+      if (sid) markTerminalExited(sid);
+      setExitCode(code ?? 0);
+      setStatus('exited');
+    },
+    [propSessionId, sessionIdRef, setExitCode, setStatus]
+  );
 
   return (
     <div
@@ -2106,8 +385,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }`}
       data-session-id={sessionId || propSessionId || undefined}
       data-pane-id={paneIdRef.current}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        height: '100%',
+        backgroundColor: '#0a0a0a',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
       onDragOver={(event) => {
-        if (Array.from(event.dataTransfer.types).includes('application/x-kite-files-entry')) {
+        if (event.dataTransfer.types.includes('application/x-kite-files-entry')) {
           event.preventDefault();
           event.dataTransfer.dropEffect = 'copy';
         }
@@ -2142,146 +430,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }}
     >
       {chrome === 'pane' ? null : (
-      <header className="terminal-toolbar">
-        <div className="terminal-toolbar__left">
-          <div className="terminal-toolbar__icon">
-            <TerminalIcon size={14} />
-          </div>
-          <span className="terminal-toolbar__title">{customTitle || oscTitle || 'ConPTY Terminal'}</span>
-          <span className="terminal-session-badge" title={sessionId || 'Idle session'}>
-            {sessionId ? `[${sessionId}]` : '[Idle]'}
-          </span>
-          <button
-            type="button"
-            className="terminal-session-badge"
-            data-renderer={appearance.renderer}
-            onClick={() => togglePrimaryTerminalRenderer()}
-            title={`Motor activo: ${getTerminalRendererBadgeLabel(appearance.renderer)} — Clic para alternar GhostGrid 2D ⇄ DOM Clásico`}
-            style={{
-              cursor: 'pointer',
-              borderRadius: 'var(--vl-radius-xs)',
-              background:
-                appearance.renderer === 'canvas'
-                  ? 'rgba(92, 143, 255, 0.14)'
-                  : 'rgba(255, 255, 255, 0.06)',
-              color:
-                appearance.renderer === 'canvas'
-                  ? '#8ab0ff'
-                  : 'rgba(255, 255, 255, 0.65)',
-              border:
-                appearance.renderer === 'canvas'
-                  ? '1px solid rgba(92, 143, 255, 0.28)'
-                  : '1px solid rgba(255, 255, 255, 0.1)',
-            }}
-          >
-            {getTerminalRendererBadgeLabel(appearance.renderer)}
-          </button>
-          <span className={`terminal-status-pill terminal-status-pill--${status}`}>
-            <span className="terminal-status-dot" />
-            <span>
-              {status === 'running'
-                ? 'Active'
-                : status === 'connecting'
-                ? 'Connecting'
-                : status === 'exited'
-                ? `Exited (${exitCode ?? 0})`
-                : status === 'terminated'
-                ? 'Terminated'
-                : 'Idle'}
-            </span>
-          </span>
-          {workspaceId && (
-            <span className="terminal-workspace-tag" title={`Workspace: ${workspaceId}`}>
-              <FolderIcon size={11} />
-              <span>{workspaceId}</span>
-            </span>
-          )}
-        </div>
-
-        <div className="terminal-toolbar__right">
-          <select
-            value={engine}
-            onChange={(e) => setEngine(e.target.value)}
-            disabled={status === 'running' || status === 'connecting'}
-            className="terminal-engine-select"
-            title="Select Terminal Shell Engine"
-          >
-            <option value="powershell">PowerShell</option>
-            <option value="gentle-shell">Gentle Shell</option>
-            <option value="antigravity">Antigravity (agy)</option>
-            <option value="claude-code">Claude Code</option>
-            <option value="codex">Codex</option>
-            <option value="gemini">Gemini CLI</option>
-          </select>
-
-          <button
-            onClick={handleClear}
-            className="terminal-btn terminal-btn--ghost"
-            title="Clear Terminal Output"
-            type="button"
-          >
-            <TrashIcon size={13} />
-            <span>Clear</span>
-          </button>
-
-          {status === 'running' ? (
-            <>
-              <button
-                onClick={() => startSession(engine, { restart: true })}
-                className="terminal-btn terminal-btn--secondary"
-                title="Restart Terminal Session"
-                type="button"
-              >
-                <RotateCwIcon size={13} />
-                <span>Restart</span>
-              </button>
-              <button
-                onClick={terminateSession}
-                className="terminal-btn terminal-btn--danger"
-                title="Terminate Terminal Session"
-                type="button"
-              >
-                <SquareIcon size={13} />
-                <span>Terminate</span>
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => startSession(engine, { restart: true })}
-              disabled={status === 'connecting'}
-              className="terminal-btn terminal-btn--primary"
-              title="Launch Terminal Session"
-              type="button"
-            >
-              {status === 'connecting' ? (
-                <>
-                  <SpinnerIcon size={13} />
-                  <span>Starting...</span>
-                </>
-              ) : (
-                <>
-                  <PlayIcon size={13} />
-                  <span>Launch</span>
-                </>
-              )}
-            </button>
-          )}
-
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="terminal-btn terminal-btn--ghost terminal-btn--icon-only"
-              title="Close Terminal Pane"
-              type="button"
-            >
-              <CloseIcon size={11} />
-            </button>
-          )}
-        </div>
-      </header>
+        <TerminalToolbar
+          customTitle={customTitle}
+          oscTitle={oscTitle}
+          sessionId={sessionId}
+          appearance={appearance}
+          status={status}
+          exitCode={exitCode}
+          workspaceId={workspaceId}
+          engine={engine}
+          setEngine={setEngine}
+          onClear={() => {
+            handleClear();
+            xtermHandleRef.current?.clear();
+          }}
+          onRestart={() => startSession(engine, { restart: true })}
+          onTerminate={terminateSession}
+          onLaunch={() => startSession(engine, { restart: true })}
+          onClose={onClose}
+        />
       )}
 
-      {/* Terminal Canvas Host */}
+      {/* Terminal Host Surface */}
       <div
         className={[
           'terminal-canvas-area',
@@ -2290,31 +460,29 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         ]
           .filter(Boolean)
           .join(' ')}
-        onClick={() => {
-          termRef.current?.focus();
-        }}
       >
-        {appearance.renderer === 'canvas' && (sessionId || propSessionId) ? (
-          <TerminalCanvasSurface
-            sessionId={sessionId || propSessionId!}
-            workspaceId={workspaceId}
-            className="terminal-surface-host"
-            onTitleChange={(nextTitle) => {
-              if (nextTitle) {
-                setOscTitle(nextTitle);
-              }
-            }}
-            onProcessExit={(code) => {
-              const sid = sessionIdRef.current || propSessionId;
-              if (sid) {
-                markTerminalExited(sid);
-              }
-              setExitCode(code ?? 0);
-              setStatus('exited');
-            }}
-          />
+        {appearance.renderer === 'canvas' ? (
+          (sessionId || propSessionId) ? (
+            <TerminalCanvasSurface
+              sessionId={sessionId || propSessionId!}
+              workspaceId={workspaceId}
+              className="terminal-surface-host"
+              onTitleChange={handleTitleChange}
+              onProcessExit={handleProcessExit}
+            />
+          ) : null
         ) : (
-          <div ref={containerRef} className="terminal-surface-host" />
+          (sessionId || propSessionId) ? (
+            <XtermDomSurface
+              ref={xtermHandleRef}
+              sessionId={sessionId || propSessionId!}
+              workspaceId={workspaceId}
+              engine={engine}
+              className="terminal-surface-host"
+              onProcessExit={handleProcessExit}
+              onStageClipboardBlob={stageClipboardBlob}
+            />
+          ) : null
         )}
 
         {status === 'connecting' && (

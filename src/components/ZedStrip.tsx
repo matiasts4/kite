@@ -8,6 +8,7 @@ import { resolveZedOrbState } from '../lib/operator/hooks/useOperatorTurnLogic';
 import { isBrowserTestLane } from '../lib/browserTestLane';
 import { useOperatorVoice } from '../lib/operator/hooks/useOperatorVoice';
 import { releaseOperatorCapture } from '../lib/operator/voice/zedVoice';
+import { isTerminalTarget } from '../lib/shortcuts/useGlobalShortcuts';
 import './zedFloat.css';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -330,7 +331,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
 
       // Escape: Close/Hide assistant, unless the terminal owns the key (copy mode, etc.).
       if (e.key === 'Escape') {
-        if (e.target instanceof Element && e.target.closest('.xterm, .terminal-surface__host')) {
+        if (isTerminalTarget(e.target)) {
           return;
         }
         e.preventDefault();

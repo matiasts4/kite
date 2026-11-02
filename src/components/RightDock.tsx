@@ -15,41 +15,38 @@ import { MOTION_EXIT_MS } from '../motion/contract';
 import { surfaceMotion } from '../motion/standard/surfaces';
 import type { Workspace } from '../types';
 import {
-  LayoutGridGlyph,
-  GlobeGlyph,
-  FolderGlyph,
-  GitDiffGlyph,
-  ListTodoGlyph,
-  MessageSquareQuoteGlyph,
   CloseGlyph,
   PlusGlyph,
   Maximize2Glyph,
   Minimize2Glyph,
-  SparklesGlyph,
-  TimerGlyph,
-  NotebookPenGlyph,
-  FlameGlyph,
 } from './dockIcons';
+import {
+  type SidePanelAppId,
+  type RightDockTabKind,
+  type DockTabItem,
+  type TabResolvedDef,
+  loadInitialTabs,
+  persistTabs,
+  loadInitialWidth,
+  persistWidth,
+  resolveTabDef,
+  STANDARD_MENU_TABS,
+  APP_MENU_TABS,
+} from './dock/dockConfig';
+import {
+  type TabBox,
+  TAB_GAP,
+  calculateSlot,
+  calculateTabShifts,
+  clampDragOffset,
+  calculateSlotLeft,
+  getKeyboardNextIndex,
+  usePointerDrag,
+} from './dock/dockTabPhysics';
+import { DockNewTabMenu } from './dock/DockNewTabMenu';
 
-export type SidePanelAppId = 'focusTimer' | 'scratchpad' | 'bombSprint' | 'kiteVerse';
-
-export type RightDockTabKind =
-  | 'dashboard'
-  | 'browser'
-  | 'files'
-  | 'diffs'
-  | 'tasks'
-  | 'prompts'
-  | 'app';
-
+export type { SidePanelAppId, RightDockTabKind, DockTabItem };
 export type RightDockTab = RightDockTabKind;
-
-export interface DockTabItem {
-  id: string;
-  kind: RightDockTabKind;
-  appId?: SidePanelAppId | null;
-  url?: string | null;
-}
 
 export interface RightDockProps {
   visible: boolean;
@@ -60,331 +57,6 @@ export interface RightDockProps {
   onSelectWorkspace?: (id: string) => void;
   onStartAgent?: () => void;
 }
-
-/* ==========================================================================
-   Constants & Storage
-   ========================================================================== */
-
-const STORAGE_KEY_TABS = 'kite-code.side-panel.tabs.v1';
-const STORAGE_KEY_BROWSER = 'kite-code.app-browser.v1';
-
-const DEFAULT_TABS: DockTabItem[] = [
-  { id: 'dashboard', kind: 'dashboard' },
-];
-
-interface StoredTabsPayload {
-  schemaVersion: number;
-  tabs: Array<{
-    id: string;
-    kind: RightDockTabKind;
-    appId?: SidePanelAppId | null;
-    url?: string | null;
-  }>;
-  selectedId?: string;
-}
-
-function loadInitialTabs(): { tabs: DockTabItem[]; activeTabId: string } {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_TABS);
-    if (raw) {
-      const parsed: StoredTabsPayload = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.tabs) && parsed.tabs.length > 0) {
-        const validTabs: DockTabItem[] = [];
-        const seenIds = new Set<string>();
-
-        for (const item of parsed.tabs) {
-          if (!item || typeof item.id !== 'string' || seenIds.has(item.id)) continue;
-          if (['dashboard', 'browser', 'files', 'diffs', 'tasks', 'prompts', 'app'].includes(item.kind)) {
-            seenIds.add(item.id);
-            validTabs.push({
-              id: item.id,
-              kind: item.kind,
-              appId: item.appId || null,
-              url: item.url || null,
-            });
-          }
-        }
-
-        // Pinned anchor: dashboard must be present
-        if (!validTabs.some((t) => t.kind === 'dashboard')) {
-          validTabs.unshift({ id: 'dashboard', kind: 'dashboard' });
-        }
-
-        const activeId =
-          parsed.selectedId && validTabs.some((t) => t.id === parsed.selectedId)
-            ? parsed.selectedId
-            : validTabs[0].id;
-
-        return { tabs: validTabs, activeTabId: activeId };
-      }
-    }
-  } catch {}
-
-  return { tabs: DEFAULT_TABS, activeTabId: 'dashboard' };
-}
-
-function loadInitialWidth(): number {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_BROWSER);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed?.width === 'number' && Number.isFinite(parsed.width)) {
-        return Math.round(Math.max(320, Math.min(parsed.width, window.innerWidth * 0.72)));
-      }
-    }
-  } catch {}
-  return 440;
-}
-
-function persistWidth(width: number) {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_BROWSER);
-    const parsed = raw ? JSON.parse(raw) : {};
-    localStorage.setItem(STORAGE_KEY_BROWSER, JSON.stringify({ ...parsed, width }));
-  } catch {}
-}
-
-/* ==========================================================================
-   Tab reordering and midpoint slot algorithms
-   ========================================================================== */
-
-interface TabBox {
-  left: number;
-  width: number;
-}
-
-const TAB_GAP = 2;
-const RUBBER_COEFF = 0.6;
-
-function rubberBand(offset: number, max: number, factor = 0.55): number {
-  return max <= 0 ? 0 : (offset * max * factor) / (max + factor * Math.abs(offset));
-}
-
-/** Midpoint slot tracking: Ye(boxes, from, midX) */
-function calculateSlot(boxes: TabBox[], from: number, midX: number): number {
-  let slot = 0;
-  boxes.forEach((box, i) => {
-    if (i !== from && midX > box.left + box.width / 2) slot += 1;
-  });
-  return slot;
-}
-
-/** Offset shifts for non-carried tabs: Xe(boxes, from, slot, gap) */
-function calculateTabShifts(boxes: TabBox[], from: number, slot: number, gap: number): number[] {
-  const carried = boxes[from];
-  if (!carried) return boxes.map(() => 0);
-  const stride = carried.width + gap;
-  return boxes.map((_, i) => {
-    if (i === from) return 0;
-    if (slot > from && i > from && i <= slot) return -stride;
-    if (slot < from && i >= slot && i < from) return stride;
-    return 0;
-  });
-}
-
-/** Clamped / rubberbanded drag offset: $e(boxes, from, dx) */
-function clampDragOffset(boxes: TabBox[], from: number, dx: number): number {
-  const current = boxes[from];
-  const first = boxes[0];
-  const last = boxes[boxes.length - 1];
-  if (!Number.isFinite(dx)) return 0;
-  if (!current || !first || !last) return dx;
-
-  const minOffset = first.left - current.left;
-  const maxOffset = last.left + last.width - (current.left + current.width);
-  const slack = current.width * RUBBER_COEFF;
-
-  if (dx < minOffset) return minOffset + rubberBand(dx - minOffset, slack);
-  if (dx > maxOffset) return maxOffset + rubberBand(dx - maxOffset, slack);
-  return dx;
-}
-
-/** Target slot left position: et(boxes, from, slot) */
-function calculateSlotLeft(boxes: TabBox[], from: number, slot: number): number {
-  const r = boxes[from];
-  const target = boxes[slot];
-  if (!r || !target) return r?.left ?? 0;
-  return slot > from ? target.left + target.width - r.width : target.left;
-}
-
-/** Keyboard index navigation: rt(key, index, total) */
-function getKeyboardNextIndex(key: string, index: number, total: number): number | null {
-  if (total === 0) return null;
-  switch (key) {
-    case 'ArrowLeft': return (index - 1 + total) % total;
-    case 'ArrowRight': return (index + 1) % total;
-    case 'Home': return 0;
-    case 'End': return total - 1;
-    default: return null;
-  }
-}
-
-/* ==========================================================================
-   Pointer Drag Hook (from usePointerDrag)
-   ========================================================================== */
-
-function setPointerDraggingState(dragging: boolean) {
-  const doc = globalThis.document?.documentElement;
-  if (!doc) return;
-  if (dragging) {
-    doc.dataset.pointerDragging = 'true';
-    globalThis.getSelection?.()?.removeAllRanges();
-  } else {
-    delete doc.dataset.pointerDragging;
-  }
-}
-
-interface PointerDragOptions {
-  enabled?: boolean;
-  threshold?: number;
-  ignoreSelector?: string;
-  onStart: (pos: { clientX: number; clientY: number }) => void;
-  onMove?: (pos: { clientX: number; clientY: number }) => void;
-  onEnd: (pos: { clientX: number; clientY: number }) => void;
-  onCancel?: () => void;
-}
-
-function usePointerDrag(options: PointerDragOptions) {
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
-
-  const activePointerRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    started: boolean;
-  } | null>(null);
-
-  const cleanupRef = useRef<(() => void) | null>(null);
-
-  const cleanup = useCallback(() => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
-    if (activePointerRef.current?.started) setPointerDraggingState(false);
-    activePointerRef.current = null;
-  }, []);
-
-  useEffect(() => {
-    if (options.enabled) return;
-    const current = activePointerRef.current;
-    cleanup();
-    if (current?.started) optionsRef.current.onCancel?.();
-  }, [cleanup, options.enabled]);
-
-  useEffect(() => () => {
-    const current = activePointerRef.current;
-    cleanup();
-    if (current?.started) optionsRef.current.onCancel?.();
-  }, [cleanup]);
-
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    const opts = optionsRef.current;
-    if (!opts.enabled || e.button !== 0 || !e.isPrimary || activePointerRef.current !== null) return;
-    const target = e.target;
-    if (opts.ignoreSelector && target instanceof Element && target.closest(opts.ignoreSelector) !== null) return;
-
-    const state = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, started: false };
-    activePointerRef.current = state;
-    const threshold = opts.threshold ?? 6;
-    const getPos = (ev: PointerEvent) => ({ clientX: ev.clientX, clientY: ev.clientY });
-
-    const handlePointerMove = (ev: PointerEvent) => {
-      if (ev.pointerId !== state.pointerId) return;
-      if (!state.started) {
-        if (Math.hypot(ev.clientX - state.startX, ev.clientY - state.startY) < threshold) return;
-        state.started = true;
-        setPointerDraggingState(true);
-        optionsRef.current.onStart(getPos(ev));
-      }
-      optionsRef.current.onMove?.(getPos(ev));
-    };
-
-    const handlePointerUp = (ev: PointerEvent) => {
-      if (ev.pointerId !== state.pointerId) return;
-      const started = state.started;
-      cleanup();
-      if (started) optionsRef.current.onEnd(getPos(ev));
-    };
-
-    const handleCancel = () => {
-      const started = state.started;
-      cleanup();
-      if (started) optionsRef.current.onCancel?.();
-    };
-
-    const handlePointerCancel = (ev: PointerEvent) => {
-      if (ev.pointerId === state.pointerId) handleCancel();
-    };
-
-    const handleKeyDown = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') handleCancel();
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerCancel);
-    window.addEventListener('blur', handleCancel);
-    window.addEventListener('keydown', handleKeyDown);
-
-    cleanupRef.current = () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerCancel);
-      window.removeEventListener('blur', handleCancel);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [cleanup]);
-
-  return { onPointerDown };
-}
-
-/* ==========================================================================
-   Tab Configurations & Resolution
-   ========================================================================== */
-
-interface TabResolvedDef {
-  label: string;
-  tooltip: string;
-  closable: boolean;
-  renderIcon: () => React.ReactElement;
-}
-
-const TAB_CONFIGS: Record<string, TabResolvedDef> = {
-  dashboard: { label: 'Dashboard', tooltip: 'Dashboard', closable: false, renderIcon: () => <LayoutGridGlyph /> },
-  browser: { label: 'Browser', tooltip: 'Browser', closable: true, renderIcon: () => <GlobeGlyph /> },
-  files: { label: 'Files', tooltip: 'Files', closable: true, renderIcon: () => <FolderGlyph /> },
-  diffs: { label: 'Diffs', tooltip: 'Diffs & Changes', closable: true, renderIcon: () => <GitDiffGlyph /> },
-  tasks: { label: 'Tasks', tooltip: 'Tasks', closable: true, renderIcon: () => <ListTodoGlyph /> },
-  prompts: { label: 'Prompts', tooltip: 'Prompts', closable: true, renderIcon: () => <MessageSquareQuoteGlyph /> },
-  'app:focusTimer': { label: 'Focus timer', tooltip: 'Focus timer', closable: true, renderIcon: () => <TimerGlyph /> },
-  'app:scratchpad': { label: 'Scratchpad', tooltip: 'Scratchpad', closable: true, renderIcon: () => <NotebookPenGlyph /> },
-  'app:bombSprint': { label: 'Bomb Sprint', tooltip: 'Bomb Sprint', closable: true, renderIcon: () => <FlameGlyph /> },
-  'app:kiteVerse': { label: 'KiteVerse', tooltip: 'KiteVerse', closable: true, renderIcon: () => <SparklesGlyph /> },
-};
-
-function resolveTabDef(tab: DockTabItem): TabResolvedDef {
-  const key = tab.kind === 'app' ? `app:${tab.appId}` : tab.kind;
-  return TAB_CONFIGS[key] || { label: 'App', tooltip: 'App', closable: true, renderIcon: () => <SparklesGlyph /> };
-}
-
-const STANDARD_MENU_TABS = [
-  { kind: 'browser' as const, label: 'Browser', icon: <GlobeGlyph /> },
-  { kind: 'files' as const, label: 'Files', icon: <FolderGlyph />, shortcut: 'Ctrl+Alt+F' },
-  { kind: 'diffs' as const, label: 'Diffs', icon: <GitDiffGlyph />, shortcut: 'Ctrl+Alt+D' },
-  { kind: 'tasks' as const, label: 'Tasks', icon: <ListTodoGlyph /> },
-  { kind: 'prompts' as const, label: 'Prompts', icon: <MessageSquareQuoteGlyph /> },
-];
-
-const APP_MENU_TABS: Array<{ appId: SidePanelAppId; label: string; icon: React.ReactElement }> = [
-  { appId: 'focusTimer', label: 'Focus timer', icon: <TimerGlyph /> },
-  { appId: 'scratchpad', label: 'Scratchpad', icon: <NotebookPenGlyph /> },
-  { appId: 'bombSprint', label: 'Bomb Sprint', icon: <FlameGlyph /> },
-  { appId: 'kiteVerse', label: 'KiteVerse', icon: <SparklesGlyph /> },
-];
-
-/* ==========================================================================
-   Main RightDock Component
-   ========================================================================== */
 
 export const RightDock: React.FC<RightDockProps> = ({
   visible,
@@ -567,14 +239,7 @@ export const RightDock: React.FC<RightDockProps> = ({
 
   // Persistence for tabs & active tab
   useEffect(() => {
-    try {
-      const payload: StoredTabsPayload = {
-        schemaVersion: 4,
-        tabs: tabs.map((t) => ({ id: t.id, kind: t.kind, appId: t.appId ?? null, url: t.url ?? null })),
-        selectedId: activeTabId,
-      };
-      localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(payload));
-    } catch {}
+    persistTabs(tabs, activeTabId);
   }, [tabs, activeTabId]);
 
   // Tab Drag & Drop state
@@ -770,14 +435,12 @@ export const RightDock: React.FC<RightDockProps> = ({
     tab: DockTabItem,
     tabDef: TabResolvedDef
   ) => {
-    // Delete closes closable tab
     if (e.key === 'Delete' && tabDef.closable && !e.altKey) {
       e.preventDefault();
       handleCloseTab(tab.id);
       return;
     }
 
-    // ArrowLeft / ArrowRight / Home / End navigation
     if (!e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       const targetIdx = getKeyboardNextIndex(e.key, index, tabs.length);
       if (targetIdx === null) return;
@@ -787,7 +450,6 @@ export const RightDock: React.FC<RightDockProps> = ({
       return;
     }
 
-    // Alt+Shift+ArrowLeft / ArrowRight reordering
     if (!canReorder || !e.altKey || !e.shiftKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) {
       return;
     }
@@ -1011,87 +673,14 @@ export const RightDock: React.FC<RightDockProps> = ({
                   <PlusGlyph />
                 </button>
 
-                {isNewTabMenuOpen && (
-                  <>
-                    <div
-                      style={{ position: 'fixed', inset: 0, zIndex: 59 }}
-                      onClick={() => setIsNewTabMenuOpen(false)}
-                    />
-                    <div
-                      role="menu"
-                      aria-label="New tab"
-                      className="ui-menu side-panel-add-menu scroll-quiet"
-                      onMouseLeave={() => setHighlightedMenuId(null)}
-                      style={{
-                        position: 'absolute',
-                        top: 'calc(var(--pane-header-height, 36px) + 2px)',
-                        right: 0,
-                        zIndex: 60,
-                      }}
-                    >
-                      <div className="ui-menu__header" role="presentation">
-                        <span className="ui-menu__title">New tab</span>
-                      </div>
-                      <div aria-hidden="true" className="ui-menu__rule" />
-
-                      {STANDARD_MENU_TABS.map((item) => {
-                        const id = `std-${item.kind}`;
-                        const isHighlighted = highlightedMenuId === id;
-                        return (
-                          <div
-                            key={item.kind}
-                            role="menuitem"
-                            tabIndex={-1}
-                            className="ui-menu__row"
-                            data-highlighted={isHighlighted ? 'true' : undefined}
-                            onMouseEnter={() => setHighlightedMenuId(id)}
-                            onClick={() => handleOpenStandardTab(item.kind)}
-                          >
-                            <span aria-hidden="true" className="ui-menu__icon">
-                              {item.icon}
-                            </span>
-                            <span className="ui-menu__label">
-                              <span className="ui-menu__row-title">{item.label}</span>
-                            </span>
-                            {item.shortcut && (
-                              <span aria-hidden="true" className="ui-menu__shortcut">
-                                {item.shortcut}
-                              </span>
-                            )}
-                          </div>
-                        );
-                      })}
-
-                      <div aria-hidden="true" className="ui-menu__rule" />
-                      <div className="ui-menu__heading" role="presentation">
-                        Apps
-                      </div>
-
-                      {APP_MENU_TABS.map((item) => {
-                        const id = `app-${item.appId}`;
-                        const isHighlighted = highlightedMenuId === id;
-                        return (
-                          <div
-                            key={item.appId}
-                            role="menuitem"
-                            tabIndex={-1}
-                            className="ui-menu__row"
-                            data-highlighted={isHighlighted ? 'true' : undefined}
-                            onMouseEnter={() => setHighlightedMenuId(id)}
-                            onClick={() => handleOpenAppTab(item.appId)}
-                          >
-                            <span aria-hidden="true" className="ui-menu__icon">
-                              {item.icon}
-                            </span>
-                            <span className="ui-menu__label">
-                              <span className="ui-menu__row-title">{item.label}</span>
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
+                <DockNewTabMenu
+                  isOpen={isNewTabMenuOpen}
+                  onClose={() => setIsNewTabMenuOpen(false)}
+                  highlightedMenuId={highlightedMenuId}
+                  setHighlightedMenuId={setHighlightedMenuId}
+                  onOpenStandardTab={handleOpenStandardTab}
+                  onOpenAppTab={handleOpenAppTab}
+                />
               </div>
 
               {/* Fullscreen Action */}

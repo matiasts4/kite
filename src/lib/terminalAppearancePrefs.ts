@@ -1,4 +1,4 @@
-export type TerminalRendererMode = 'canvas' | 'dom' | 'webgl';
+export type TerminalRendererMode = 'canvas' | 'dom';
 
 export type TerminalFontFamilyId =
   | 'cascadia'
@@ -99,8 +99,6 @@ export function sanitizeTerminalAppearancePrefs(
   const renderer: TerminalRendererMode =
     obj.renderer === 'canvas'
       ? 'canvas'
-      : obj.renderer === 'webgl'
-      ? 'webgl'
       : obj.renderer === 'dom'
       ? 'dom'
       : base.renderer;
@@ -209,8 +207,6 @@ export function getTerminalRendererLabel(mode: TerminalRendererMode): string {
       return 'GhostGrid · 2D';
     case 'dom':
       return 'DOM · Clásico';
-    case 'webgl':
-      return 'WebGL · GPU';
     default:
       return 'GhostGrid · 2D';
   }
@@ -222,8 +218,6 @@ export function getTerminalRendererBadgeLabel(mode: TerminalRendererMode): strin
       return 'GhostGrid 2D';
     case 'dom':
       return 'DOM Clásico';
-    case 'webgl':
-      return 'WebGL GPU';
     default:
       return 'GhostGrid 2D';
   }

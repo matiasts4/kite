@@ -30,8 +30,13 @@ function isInputElement(target: EventTarget | null): boolean {
 }
 
 /** xterm owns bare Escape (for example to leave copy mode). Do not treat the host as an app overlay. */
-function isTerminalTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest('.xterm, .terminal-surface__host') !== null;
+export function isTerminalTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      '.xterm, .terminal-surface-host, .terminal-surface__host, .terminal-canvas-surface-container, .terminal-canvas-surface__input, .terminal-canvas-area'
+    ) !== null
+  );
 }
 
 export function useGlobalShortcuts(options: UseGlobalShortcutsOptions = {}) {

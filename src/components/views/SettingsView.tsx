@@ -831,7 +831,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <div className="ui-card__row settings-row">
                       <div className="settings-row__copy">
                         <h3 className="settings-row__title">Motor de renderizado</h3>
-                        <p>GhostGrid 2D usa emulación VT nativa en Rust con sprites procedurales de cero artefactos y soporte completo de protocolos TUI. DOM Clásico usa ClearType. WebGL acelera en GPU.</p>
+                        <p>GhostGrid 2D (recomendado) usa emulación VT nativa en Rust con sprites procedurales de cero artefactos y soporte completo de protocolos TUI. DOM Clásico usa ClearType en el motor web tradicional.</p>
                       </div>
                       <div className="settings-row__control">
                         <fieldset aria-label="Motor de renderizado" className="ui-segmented">
@@ -856,17 +856,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                               <SegmentedIndicator group="settings-terminal-renderer" />
                             )}
                             <span>DOM · Clásico</span>
-                          </button>
-                          <button
-                            aria-pressed={terminalAppearance.renderer === 'webgl'}
-                            className="ui-segmented__item"
-                            onClick={() => handleUpdateTerminalAppearance({ renderer: 'webgl' })}
-                            type="button"
-                          >
-                            {terminalAppearance.renderer === 'webgl' && (
-                              <SegmentedIndicator group="settings-terminal-renderer" />
-                            )}
-                            <span>WebGL · GPU</span>
                           </button>
                         </fieldset>
                       </div>

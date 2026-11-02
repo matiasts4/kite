@@ -7,6 +7,7 @@ import {
   TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
   type TerminalWebLinksTarget,
 } from '../../../lib/terminalLinkNav';
+import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 
 import { CURRENT_APP_VERSION } from '../../../hooks/useAppUpdater';
 
@@ -98,6 +99,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   onClick={() => onToggleMode('light')}
                   type="button"
                 >
+                  {mode === 'light' && <SegmentedIndicator group="settings-general-mode" />}
                   <span aria-hidden="true" className="ui-segmented__icon">
                     <SunIcon size={12} strokeWidth={2} />
                   </span>
@@ -109,6 +111,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   onClick={() => onToggleMode('dark')}
                   type="button"
                 >
+                  {mode === 'dark' && <SegmentedIndicator group="settings-general-mode" />}
                   <span aria-hidden="true" className="ui-segmented__icon">
                     <MoonIcon size={12} strokeWidth={2} />
                   </span>
@@ -165,6 +168,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   onClick={() => handleWebLinksTargetChange('internal')}
                   type="button"
                 >
+                  {webLinksTarget === 'internal' && (
+                    <SegmentedIndicator group="settings-general-links-target" />
+                  )}
                   <span>Integrado</span>
                 </button>
                 <button
@@ -173,6 +179,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   onClick={() => handleWebLinksTargetChange('external')}
                   type="button"
                 >
+                  {webLinksTarget === 'external' && (
+                    <SegmentedIndicator group="settings-general-links-target" />
+                  )}
                   <span>Externo</span>
                 </button>
               </fieldset>

@@ -16,6 +16,7 @@ export interface AgentProfile {
   createdAtUnixMs: number;
   pinned: boolean;
   order: number;
+  disabledPluginIds?: string[];
 }
 
 export interface BootstrapResponse {
@@ -121,6 +122,9 @@ export interface ChatThread {
   workspaceId: string | null;
   pinned: boolean;
   quotaHandoffOffer?: QuotaHandoffOffer | null;
+  sessionState?: string;
+  isWarm?: boolean;
+  isSettled?: boolean;
   createdAtUnixMs: number;
   updatedAtUnixMs: number;
 }
@@ -147,10 +151,30 @@ export interface ChatItem {
   durationSeconds?: number | null;
 }
 
+export interface NotificationRecord {
+  id: string;
+  runId?: string;
+  target?: {
+    source: 'agentChat' | 'codeThread' | 'codeTerminal' | 'task' | string;
+    id: string;
+  };
+  profileId?: string | null;
+  routineId?: string | null;
+  kind?: {
+    kind: 'settled' | 'needsInput' | string;
+    outcome?: 'completed' | 'failed' | 'cancelled' | string;
+    requestKind?: 'toolApproval' | 'question' | 'unknown' | string;
+  };
+  resolution?: 'answered' | 'attended' | 'runSettled' | 'abandoned' | string | null;
+  createdAtUnixMs: number;
+  isRead: boolean;
+  isWaitingForInput?: boolean;
+}
+
 export interface NotificationsSnapshot {
   schemaVersion: number;
   revision: number;
-  records: any[];
+  records: NotificationRecord[];
   unreadCount: number;
   openInputRequestCount: number;
   authorization: string;

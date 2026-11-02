@@ -7,8 +7,10 @@ import {
   CheckIcon,
   CloseIcon,
   SearchIcon,
+  ChevronRightIcon,
 } from './ChatIcons';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
+import { BrandLogo } from '../../ui/BrandLogo';
 
 export interface ChatRailProps {
   threads: ExtendedChatThread[];
@@ -33,6 +35,13 @@ export function formatThreadTrailing(thread: ExtendedChatThread, now = Date.now(
   if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m`;
   if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h`;
   return `${Math.floor(elapsed / 86_400_000)}d`;
+}
+
+export function isThreadSettled(thread: { isSettled?: boolean; isWarm?: boolean; sessionState?: string; status?: string }): boolean {
+  if (thread.isSettled !== undefined) return thread.isSettled;
+  const isWarm = Boolean(thread.isWarm || thread.sessionState === 'warm');
+  const isBusy = thread.status === 'running' || thread.status === 'waiting' || thread.status === 'error';
+  return !isWarm && !isBusy;
 }
 
 export const ChatRail: React.FC<ChatRailProps> = ({
@@ -70,6 +79,24 @@ export const ChatRail: React.FC<ChatRailProps> = ({
     () => filteredThreads.filter((t) => !t.pinned),
     [filteredThreads]
   );
+
+  const activeRecentThreads = useMemo(
+    () => recentThreads.filter((t) => !isThreadSettled(t)),
+    [recentThreads]
+  );
+  const settledThreads = useMemo(
+    () => recentThreads.filter((t) => isThreadSettled(t)),
+    [recentThreads]
+  );
+
+  const [settledOpen, setSettledOpen] = useState<boolean | null>(null);
+  const isSelectedInSettled = selectedThreadId
+    ? settledThreads.some((t) => t.id === selectedThreadId)
+    : false;
+  const isSettledExpanded =
+    settledOpen !== null
+      ? settledOpen
+      : activeRecentThreads.length === 0 || isSelectedInSettled;
 
   const startRename = (thread: ExtendedChatThread, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -128,7 +155,9 @@ export const ChatRail: React.FC<ChatRailProps> = ({
         ? 'chat-thread-row__dot chat-thread-row__dot--waiting'
         : thread.status === 'error'
         ? 'chat-thread-row__dot chat-thread-row__dot--failed'
-        : 'chat-thread-row__dot';
+        : (thread.isWarm || thread.sessionState === 'warm')
+        ? 'chat-thread-row__dot chat-thread-row__dot--warm'
+        : 'chat-thread-row__dot chat-thread-row__dot--settled';
 
     const trailingClass =
       thread.status === 'running'
@@ -139,10 +168,12 @@ export const ChatRail: React.FC<ChatRailProps> = ({
         ? 'chat-thread-row__trailing chat-thread-row__trailing--failed'
         : 'chat-thread-row__trailing';
 
+    const settled = isThreadSettled(thread);
+
     return (
       <div
         key={thread.id}
-        className={`chat-thread-row ${isSelected ? 'chat-thread-row--selected' : ''}`}
+        className={`chat-thread-row ${isSelected ? 'chat-thread-row--selected' : ''}${settled ? ' chat-thread-row--settled' : ''}`}
         data-thread-id={thread.id}
       >
         <button
@@ -154,6 +185,7 @@ export const ChatRail: React.FC<ChatRailProps> = ({
           title={`${thread.title} (${thread.provider})`}
         >
           <i aria-hidden="true" className={dotClass} />
+          <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title || 'Untitled'}</span>
           <span aria-hidden="true" className={trailingClass}>
             {trailingLabel}
@@ -243,13 +275,52 @@ export const ChatRail: React.FC<ChatRailProps> = ({
               </section>
             )}
 
-            {/* Recent / Other Section */}
-            {recentThreads.length > 0 && (
+            {/* Active Recent Section */}
+            {activeRecentThreads.length > 0 && (
               <section className="chat-rail__band" aria-label="Recent threads">
                 {pinnedThreads.length > 0 && <h3 className="chat-rail__band-title">Recent threads</h3>}
                 <section className="chat-thread-list" aria-label="Recent threads">
-                  {recentThreads.map(renderThreadRow)}
+                  {activeRecentThreads.map(renderThreadRow)}
                 </section>
+              </section>
+            )}
+
+            {/* Settled Section */}
+            {settledThreads.length > 0 && (
+              <section className="chat-rail__band chat-rail__band--settled" aria-label="Settled threads">
+                <button
+                  type="button"
+                  className="chat-rail__settled-toggle"
+                  onClick={() => setSettledOpen(!isSettledExpanded)}
+                  aria-expanded={isSettledExpanded}
+                >
+                  <ChevronRightIcon
+                    size={10}
+                    style={{
+                      transform: isSettledExpanded ? 'rotate(90deg)' : 'none',
+                      transition: 'transform 120ms ease',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span className="chat-rail__band-title" style={{ margin: 0, textTransform: 'none' }}>Settled</span>
+                  <span
+                    style={{
+                      marginLeft: 'auto',
+                      fontSize: 'var(--text-badge)',
+                      color: 'var(--text-faint)',
+                      padding: '0 4px',
+                      borderRadius: 'var(--radius-chip)',
+                      background: 'var(--chip-fill)',
+                    }}
+                  >
+                    {settledThreads.length}
+                  </span>
+                </button>
+                {isSettledExpanded && (
+                  <section className="chat-thread-list" aria-label="Settled threads">
+                    {settledThreads.map(renderThreadRow)}
+                  </section>
+                )}
               </section>
             )}
 

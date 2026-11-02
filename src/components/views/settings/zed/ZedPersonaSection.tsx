@@ -3,6 +3,7 @@ import {
   ZedPersonaConfig,
   OperatorConfig,
 } from '../../../../lib/operator/operatorConfig';
+import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
 
 export const VOICE_OPTIONS = [
   { id: 'Ara', label: 'Ara — Clara, ágil (recomendada)' },
@@ -188,17 +189,21 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
                   { id: 'warm', label: 'Warm' },
                   { id: 'chill', label: 'Chill' },
                 ] as const
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  aria-pressed={persona.tone === t.id}
-                  className="ui-segmented__item"
-                  onClick={() => onPersonaChange('tone', t.id)}
-                >
-                  <span>{t.label}</span>
-                </button>
-              ))}
+              ).map((t) => {
+                const isSelected = persona.tone === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className="ui-segmented__item"
+                    onClick={() => onPersonaChange('tone', t.id)}
+                  >
+                    {isSelected && <SegmentedIndicator group="settings-zed-tone" />}
+                    <span>{t.label}</span>
+                  </button>
+                );
+              })}
             </fieldset>
           </div>
         </div>
@@ -216,17 +221,21 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
                   { id: 'normal', label: 'Normal' },
                   { id: 'detailed', label: 'Detailed' },
                 ] as const
-              ).map((b) => (
-                <button
-                  key={b.id}
-                  type="button"
-                  aria-pressed={persona.brevity === b.id}
-                  className="ui-segmented__item"
-                  onClick={() => onPersonaChange('brevity', b.id)}
-                >
-                  <span>{b.label}</span>
-                </button>
-              ))}
+              ).map((b) => {
+                const isSelected = persona.brevity === b.id;
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className="ui-segmented__item"
+                    onClick={() => onPersonaChange('brevity', b.id)}
+                  >
+                    {isSelected && <SegmentedIndicator group="settings-zed-brevity" />}
+                    <span>{b.label}</span>
+                  </button>
+                );
+              })}
             </fieldset>
           </div>
         </div>

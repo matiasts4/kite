@@ -12,7 +12,9 @@ import {
   getEngineVendor,
   supportsAgentChat,
 } from './engineMetadata';
-import { PROVIDER_CATALOG, engineToChatProvider } from '../chat/types';
+import { AUTOMATIC_MODEL_ID, engineToChatProvider, type ModelOption } from '../chat/types';
+import { usePluginConnections } from '../plugins/usePluginConnections';
+import { OFFICIAL_PLUGINS } from '../plugins/catalog';
 
 // SVG Icons (Zero Lucide & Zero emojis)
 const CheckIcon: React.FC<{ size?: number; className?: string }> = ({ size = 12, className = '' }) => (
@@ -341,25 +343,79 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
 
   const isChatCapableEngine = supportsAgentChat(settingsDraft.engine);
   const currentChatProvider = engineToChatProvider(settingsDraft.engine);
-  const currentCatalog = PROVIDER_CATALOG[currentChatProvider] || PROVIDER_CATALOG.antigravity;
+  const [liveModels, setLiveModels] = useState<ModelOption[]>([]);
+  const [modelsNote, setModelsNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLiveModels([]);
+    setModelsNote(null);
+    invokeCommand<{ models?: ModelOption[] }>('list_chat_provider_models', {
+      provider: currentChatProvider,
+      forceRefresh: false,
+    })
+      .then((res) => {
+        if (!mounted) return;
+        const models = Array.isArray(res?.models) ? res.models : [];
+        setLiveModels(models.filter((model) => model.id && model.id !== AUTOMATIC_MODEL_ID));
+        setModelsNote(
+          models.length > 0 ? null : 'This program has not listed its models yet.'
+        );
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setLiveModels([]);
+        setModelsNote('This program has not listed its models yet.');
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [currentChatProvider]);
+
   const modelRows = [
     {
-      id: 'automatic',
+      id: AUTOMATIC_MODEL_ID,
       title: 'Automatic',
-      detail: `${currentCatalog.models[0]?.name || currentCatalog.defaultModel} · provider default`,
+      detail: 'The connected program chooses.',
     },
-    ...currentCatalog.models.map((m) => ({
-      id: m.id,
-      title: m.name,
-      detail: m.description || currentCatalog.label,
+    ...liveModels.map((model) => ({
+      id: model.id,
+      title: model.name,
+      detail: model.description || 'Listed by the connected program',
     })),
   ];
+  const selectedLiveModel = liveModels.find((model) => model.id === settingsDraft.defaultModel);
+
+  const { connections: pluginConnections } = usePluginConnections();
+
+  const combinedMcpServers = React.useMemo(() => {
+    const pluginMap = new Map(OFFICIAL_PLUGINS.map((p) => [p.id, p]));
+    const pluginServers = pluginConnections
+      .filter((c) => c.state === 'connected')
+      .map((c) => {
+        const meta = pluginMap.get(c.id);
+        return {
+          id: c.id,
+          name: meta?.name || c.id,
+          provider: 'kite',
+          providerLabel: 'Kite Plugin',
+          description: c.account ? `${meta?.summary ?? 'Plugin'} (${c.account})` : meta?.summary ?? 'Connected plugin',
+          builtin: false,
+          toolCount: meta?.permissions?.length ?? 0,
+          tools: meta?.permissions ?? [],
+        };
+      });
+
+    const existingIds = new Set(allMcpServers.map((s) => s.id));
+    const uniquePluginServers = pluginServers.filter((s) => !existingIds.has(s.id));
+    return [...allMcpServers, ...uniquePluginServers];
+  }, [allMcpServers, pluginConnections]);
 
   const disabledPlugins: string[] = Array.isArray(settingsDraft.disabledPluginIds)
     ? settingsDraft.disabledPluginIds
     : [];
 
-  const visibleMcpServers = allMcpServers.filter((srv) => {
+  const visibleMcpServers = combinedMcpServers.filter((srv) => {
     if (mcpScope === 'all') return true;
     return srv.provider === settingsDraft.engine || srv.provider === currentChatProvider || srv.provider === 'kite';
   });
@@ -515,7 +571,7 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
           <section className="agent-setting-group">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
               <h2 className="agent-setting-label" style={{ margin: 0 }}>Integrations & MCP Servers</h2>
-              {allMcpServers.length > 0 && (
+              {combinedMcpServers.length > 0 && (
                 <div style={{ display: 'inline-flex', gap: '4px', background: 'var(--chip-fill)', padding: '2px', borderRadius: '6px', border: '1px solid var(--block-stroke)' }}>
                   <button
                     type="button"
@@ -523,7 +579,7 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
                     style={{ fontSize: '11px', padding: '2px 8px', height: '22px' }}
                     onClick={() => setMcpScope('provider')}
                   >
-                    {getEngineDisplayName(settingsDraft.engine)} ({allMcpServers.filter((s) => s.provider === settingsDraft.engine || s.provider === currentChatProvider || s.provider === 'kite').length})
+                    {getEngineDisplayName(settingsDraft.engine)} ({combinedMcpServers.filter((s) => s.provider === settingsDraft.engine || s.provider === currentChatProvider || s.provider === 'kite').length})
                   </button>
                   <button
                     type="button"
@@ -531,7 +587,7 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
                     style={{ fontSize: '11px', padding: '2px 8px', height: '22px' }}
                     onClick={() => setMcpScope('all')}
                   >
-                    All Providers ({allMcpServers.length})
+                    All Providers ({combinedMcpServers.length})
                   </button>
                 </div>
               )}
@@ -717,22 +773,26 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
                       <SelectMenu
                         variant="field"
                         label="Model"
-                        value={settingsDraft.defaultModel || 'automatic'}
+                        value={settingsDraft.defaultModel || AUTOMATIC_MODEL_ID}
                         triggerLabel={
-                          modelRows.find((r) => r.id === settingsDraft.defaultModel)?.title ||
+                          modelRows.find((r) => r.id === (settingsDraft.defaultModel || AUTOMATIC_MODEL_ID))?.title ||
                           settingsDraft.defaultModel ||
                           'Automatic'
                         }
                         disabled={readOnly || saving}
                         rows={modelRows}
                         onSelect={(id) => {
-                          setSettingsDraft((prev: any) => ({ ...prev, defaultModel: id === 'automatic' ? null : id }));
+                          setSettingsDraft((prev: any) => ({
+                            ...prev,
+                            defaultModel: id === AUTOMATIC_MODEL_ID ? null : id,
+                          }));
                           setSettingsDirty(true);
                         }}
                       />
+                      {modelsNote ? <small>{modelsNote}</small> : null}
                     </span>
                   </div>
-                  {(currentCatalog.supportsEffort && settingsDraft.defaultModel !== 'haiku' && settingsDraft.defaultModel !== 'gpt-oss-120b') ? (
+                  {selectedLiveModel?.supportsEffort ? (
                     <div className="agent-settings__row">
                       <span className="agent-settings__row-copy">
                         <strong>Reasoning effort</strong>

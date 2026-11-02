@@ -18,6 +18,7 @@ import { WhatsNewModal } from './components/views/modals/WhatsNewModal';
 import { ArchivedChatsModal } from './components/views/modals/ArchivedChatsModal';
 import { SshWorkspaceModal } from './components/views/modals/SshWorkspaceModal';
 import { NotificationsView } from './components/views/NotificationsView';
+import { useNotifications } from './lib/notifications/useNotifications';
 import { ResumeHost } from './components/modals/ResumeHost';
 import { PromptProjectileOverlay } from './components/code/PromptProjectileOverlay';
 import type { Workspace, AgentProfile, BootstrapResponse } from './types';
@@ -45,8 +46,9 @@ import { isBrowserTestLane } from './lib/browserTestLane';
 import { loadOperatorConfig, saveOperatorConfig } from './lib/operator/operatorConfig';
 import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
 import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
-import { usePresence } from './motion/usePresence';
 import { AppIntro } from './motion/AppIntro';
+import { AnimatePresence, motion } from 'motion/react';
+import { surfaceMotion } from './motion/standard/surfaces';
 
 export type ShellRoute =
   | { kind: 'agent' }
@@ -57,13 +59,21 @@ export type ShellRoute =
 export const App: React.FC = () => {
   const [workMode, setWorkMode] = useState<WorkMode>(() => {
     try {
+      // Default to 'code' on app launch; ignore previously persisted 'chat' (Thread) mode
       const saved = localStorage.getItem('bmone.workMode');
-      if (saved === 'code' || saved === 'agent' || saved === 'chat') {
-        return saved as WorkMode;
+      if (saved === 'code') {
+        return 'code';
       }
     } catch {}
     return 'code';
   });
+
+  const [hasOpenedChat, setHasOpenedChat] = useState<boolean>(() => workMode === 'chat');
+  useEffect(() => {
+    if (workMode === 'chat') {
+      setHasOpenedChat(true);
+    }
+  }, [workMode]);
 
   useEffect(() => {
     try {
@@ -200,9 +210,8 @@ export const App: React.FC = () => {
   const [agentEditorOpen, setAgentEditorOpen] = useState<boolean>(false);
   const [agentViewMode, setAgentViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters'>('chats');
   const [_route, _setRoute] = useState<ShellRoute>({ kind: 'agent' });
-  const [unreadCount, setUnreadCount] = useState<number>(0);
+  const { snapshot: notifSnapshot, unreadCount } = useNotifications();
   const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
-  const notificationsPresence = usePresence(isNotificationsOpen);
   const [notificationsAnchor, setNotificationsAnchor] = useState<DOMRect | null>(null);
   const [workspaceSessions, setWorkspaceSessions] = useState<Record<string, WorkspaceSessionTab[]>>({});
   const [requestedCodeTabId, setRequestedCodeTabId] = useState<string | null>(null);
@@ -252,10 +261,11 @@ export const App: React.FC = () => {
       return true;
     }
   });
+  const [bootstrapDone, setBootstrapDone] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const introStartRef = useRef(Date.now());
   const [introDismissed, setIntroDismissed] = useState(() => isBrowserTestLane());
-  const bootReady = !loading || error != null;
+  const bootReady = (bootstrapDone && !loading) || error != null;
 
   useEffect(() => {
     if (isBrowserTestLane()) return;
@@ -350,6 +360,7 @@ export const App: React.FC = () => {
   const loadBootstrap = useCallback(async () => {
     if (!isTauriEnvironment()) {
       setLoading(false);
+      setBootstrapDone(true);
       return;
     }
 
@@ -369,8 +380,8 @@ export const App: React.FC = () => {
           ['agent', 'code', 'chat'].includes(data.preferences.workMode)
         ) {
           const hasSavedMode = Boolean(localStorage.getItem('bmone.workMode'));
-          if (!hasSavedMode) {
-            setWorkMode(data.preferences.workMode as WorkMode);
+          if (!hasSavedMode && data.preferences.workMode === 'code') {
+            setWorkMode('code');
           }
         }
         if (typeof data.preferences.sidebarVisible === 'boolean') {
@@ -410,6 +421,7 @@ export const App: React.FC = () => {
       // Reveal UI immediately with 0 latency
       setLoading(false);
       bootstrappedRef.current = true;
+      setBootstrapDone(true);
       setError(null);
 
       // Load identity, credits and threads asynchronously in background
@@ -441,6 +453,7 @@ export const App: React.FC = () => {
       console.error('Failed to bootstrap Studio:', err);
       setError(err?.message || 'Failed to connect to Kite backend.');
       setLoading(false);
+      setBootstrapDone(true);
     }
   }, [applyTheme, loadThreads]);
 
@@ -1139,13 +1152,15 @@ export const App: React.FC = () => {
                   />
                 </div>
                 <div className={`mode-layer${workMode === 'chat' && !settingsOpen && !routinesOpen ? ' mode-layer--visible' : ''}`}>
-                  <ChatView
-                    workspaceId={selectedWorkspaceId}
-                    threadId={selectedThreadId}
-                    agents={agents}
-                    workspaces={workspaces}
-                    onThreadsChanged={loadThreads}
-                  />
+                  {hasOpenedChat && (
+                    <ChatView
+                      workspaceId={selectedWorkspaceId}
+                      threadId={selectedThreadId}
+                      agents={agents}
+                      workspaces={workspaces}
+                      onThreadsChanged={loadThreads}
+                    />
+                  )}
                 </div>
                 {routinesOpen && (
                   <div className="mode-layer mode-layer--visible">
@@ -1241,10 +1256,12 @@ export const App: React.FC = () => {
         />
 
         {/* Notifications Popover. Render only while open */}
-        {notificationsPresence.mounted && (
-          <div
-            className="notification-popover-overlay"
-            onClick={() => {
+        <AnimatePresence>
+          {isNotificationsOpen && (
+            <motion.div
+              className="notification-popover-overlay"
+              {...surfaceMotion('scrim')}
+              onClick={() => {
               setIsNotificationsOpen(false);
               setNotificationsAnchor(null);
             }}
@@ -1274,8 +1291,9 @@ export const App: React.FC = () => {
               }
 
               return (
-                <div
-                  className={`notification-popover-anchor ${notificationsPresence.phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
+                <motion.div
+                  {...surfaceMotion('popover')}
+                  className="notification-popover-anchor"
                   style={{
                     top,
                     right,
@@ -1284,14 +1302,25 @@ export const App: React.FC = () => {
                   onClick={(e) => e.stopPropagation()}
                 >
                   <NotificationsView
+                    externalSnapshot={notifSnapshot}
                     onClose={() => {
                       setIsNotificationsOpen(false);
                       setNotificationsAnchor(null);
                     }}
-                    onUnreadCountChange={setUnreadCount}
                     onNavigateAgent={(id) => {
                       setSelectedAgentId(id);
                       setWorkMode('agent');
+                      setIsNotificationsOpen(false);
+                      setNotificationsAnchor(null);
+                    }}
+                    onNavigateThread={(threadId, agentId) => {
+                      if (agentId) {
+                        setSelectedAgentId(agentId);
+                        setWorkMode('agent');
+                      } else {
+                        setWorkMode('code');
+                      }
+                      setSelectedThreadId(threadId);
                       setIsNotificationsOpen(false);
                       setNotificationsAnchor(null);
                     }}
@@ -1309,11 +1338,12 @@ export const App: React.FC = () => {
                       } catch (_) {}
                     }}
                   />
-                </div>
+                </motion.div>
               );
             })()}
-          </div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Floating Zed Voice & Operations Orb */}
         <ZedStripHost

@@ -1255,6 +1255,9 @@ app.post("/api/tauri/invoke", async (req, res) => {
               workspaceId: t.workspaceId,
               provider: t.provider,
               status: t.status,
+              sessionState: t.sessionState || (t.status === "running" ? "running" : (t.isWarm ? "warm" : "sleeping")),
+              isWarm: Boolean(t.isWarm),
+              isSettled: t.isSettled !== undefined ? t.isSettled : (!t.isWarm && t.status !== "running"),
               updatedAtUnixMs: t.updatedAtUnixMs,
               pinned: t.pinned,
             }));
@@ -1328,6 +1331,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
         const runId = randomUUID();
         agentChatRuns.set(runId, {
           threadId,
+          finished: true,
           nextSequence: 2,
           events: [
             { sequence: 1, kind: "upsert", item: assistantItem },
@@ -1353,6 +1357,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
         const runId = randomUUID();
         agentChatRuns.set(runId, {
           threadId,
+          finished: true,
           nextSequence: 2,
           events: [
             { sequence: 1, kind: "upsert", item: assistantItem },
@@ -1368,7 +1373,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
         const afterSequence = Number(reqData.afterSequence || 0);
         const run = agentChatRuns.get(runId);
         if (!run) {
-          return res.json({ schemaVersion: 1, runId, nextSequence: afterSequence, events: [] });
+          return res.json({ schemaVersion: 1, runId, nextSequence: afterSequence, events: [], finished: true });
         }
         const events = run.events.filter((ev) => ev.sequence > afterSequence);
         return res.json({
@@ -1376,6 +1381,7 @@ app.post("/api/tauri/invoke", async (req, res) => {
           runId,
           nextSequence: run.nextSequence,
           events,
+          finished: Boolean(run.finished ?? true),
         });
       }
 

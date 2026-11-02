@@ -70,7 +70,11 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
 
     const handleVisibility = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible' && mountedRef.current) {
-        pollMetrics(false);
+        window.setTimeout(() => {
+          if (mountedRef.current && document.visibilityState === 'visible') {
+            pollMetrics(false);
+          }
+        }, 2000);
       }
     };
     if (typeof document !== 'undefined') {
@@ -141,10 +145,10 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
           display: 'inline-flex',
           alignItems: 'center',
           gap: '6px',
-          padding: '0 8px',
+          padding: '0 10px',
           height: '24px',
           width: 'auto',
-          borderRadius: 'var(--radius-chip, 6px)',
+          borderRadius: '9999px',
           border: isOpen
             ? `1px solid ${pressureTheme.stroke}`
             : '1px solid var(--block-stroke)',
@@ -171,7 +175,11 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
           strokeLinecap="round"
           strokeLinejoin="round"
           aria-hidden="true"
-          style={{ flexShrink: 0, opacity: 0.92 }}
+          style={{
+            flexShrink: 0,
+            opacity: 0.92,
+            animation: isRefreshing ? 'spin 1s linear infinite' : 'none',
+          }}
         >
           <rect x="4" y="4" width="16" height="16" rx="2" />
           <rect x="9" y="9" width="6" height="6" />

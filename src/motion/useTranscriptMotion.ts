@@ -1,6 +1,14 @@
 import { useLayoutEffect, useRef, type MutableRefObject, type RefObject } from 'react';
 import { followLiveEdge } from './contract';
 
+/**
+ * Tracks which transcript rows appeared after their thread mounted.
+ *
+ * The returned predicate answers "is this row new and should animate in?".
+ * Rows already present when the thread mounted stay at rest; rows that arrive
+ * later report `true` once and keep reporting `true` while they stay mounted,
+ * so a re-render never restarts their entrance.
+ */
 export function useTranscriptMotion(threadId: string | null, itemIds: string[]) {
   const seededThreadRef = useRef<string | null>(null);
   const seededIdsRef = useRef<Set<string>>(new Set());
@@ -12,12 +20,12 @@ export function useTranscriptMotion(threadId: string | null, itemIds: string[]) 
     enterIdsRef.current = new Set();
   }
 
-  return (id: string) => {
+  return (id: string): boolean => {
     if (seededIdsRef.current.has(id) || enterIdsRef.current.has(id)) {
-      return enterIdsRef.current.has(id) ? 'motion-row-in' : '';
+      return enterIdsRef.current.has(id);
     }
     enterIdsRef.current.add(id);
-    return 'motion-row-in';
+    return true;
   };
 }
 

@@ -491,14 +491,14 @@
 
 /* Tickets New Button */
 .tickets-new {
-  height: 26px;
-  padding: 0 10px;
-  border-radius: var(--radius-chip, 6px);
+  height: var(--vl-control-md, 32px);
+  padding: 0 12px;
+  border-radius: var(--control-radius, 8px);
   background: var(--accent, #1f6feb);
   border: 0;
   color: #ffffff;
-  font-size: var(--text-caption, 12px);
-  font-weight: 600;
+  font-size: var(--text-row, 12px);
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 6px;

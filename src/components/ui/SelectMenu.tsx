@@ -8,9 +8,11 @@ import React, {
   useId,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import { BrandLogo } from '../views/agents/engineMetadata';
-import { usePresence } from '../../motion/usePresence';
-import { motionSurfaceClass } from '../../motion/surface';
+import { surfaceMotion, surfaceOrigin } from '../../motion/standard/surfaces';
+import { springs } from '../../motion/standard/tokens';
+import './selectMenuMotion.css';
 
 export interface SelectMenuRow {
   id: string;
@@ -174,7 +176,6 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 }) => {
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
-  const menuPresence = usePresence(isOpen);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [coords, setCoords] = useState<{
     left: number;
@@ -188,6 +189,8 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const openRef = useRef(isOpen);
+  openRef.current = isOpen;
   const menuId = useId();
 
   const maxRowsHeight = rows.length > 7 ? DEFAULT_MAX_HEIGHT : Infinity;
@@ -208,12 +211,23 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     }
   }, []);
 
-  useEffect(() => {
-    if (!menuPresence.mounted) {
-      setCoords(null);
-      setPanelEl(null);
-    }
-  }, [menuPresence.mounted]);
+  const handleExitComplete = useCallback(() => {
+    // Keep the last geometry while the exit plays, then release it.
+    setCoords(null);
+    setPanelEl(null);
+  }, []);
+
+  const attachPanel = useCallback((node: HTMLDivElement | null) => {
+    panelRef.current = node;
+    setPanelEl(node);
+  }, []);
+
+  // A leaving panel keeps the element it last rendered, so its inline style is
+  // stale: switch pointer events off when the exit actually starts.
+  const handlePanelAnimationStart = useCallback(() => {
+    const node = panelRef.current;
+    if (node) node.style.pointerEvents = openRef.current ? '' : 'none';
+  }, []);
 
   const openMenu = useCallback(() => {
     if (disabled) return;
@@ -408,7 +422,6 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   const portalHost = triggerRef.current ? getAnchoredGeometry(triggerRef.current).portalHost : document.body;
 
   const effectiveMaxRowsHeight = coords ? Math.min(maxRowsHeight, coords.room) : maxRowsHeight;
-  const panelMotion = motionSurfaceClass(menuPresence.phase, 'popover');
 
   return (
     <>
@@ -451,145 +464,169 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
         )}
       </button>
 
-      {menuPresence.mounted && coords &&
+      {coords &&
         createPortal(
-          <div
-            id={menuId}
-            ref={(node) => {
-              panelRef.current = node;
-              setPanelEl(node);
-            }}
-            data-select-menu="true"
-            role={searchable ? 'dialog' : 'listbox'}
-            aria-label={panelTitle ?? label}
-            tabIndex={-1}
-            onKeyDown={handlePanelKeyDown}
-            className={`select-menu select-menu--from-${coords.origin}${
-              searchable ? ' select-menu--searchable' : ''
-            }${panelMotion ? ` ${panelMotion}` : ''}`}
-            style={{
-              position: 'fixed',
-              left: `${coords.left}px`,
-              top: `${coords.top}px`,
-              width: `${coords.width}px`,
-              maxHeight: `${coords.room}px`,
-              '--select-menu-rows-max': `${effectiveMaxRowsHeight}px`,
-            } as React.CSSProperties}
-          >
-            {panelTitle ? (
-              <>
-                <div className="select-menu__header">
-                  <span className="select-menu__header-text">
-                    <span className="select-menu__header-title">{panelTitle}</span>
-                    {panelDetail ? (
-                      <span className="select-menu__header-detail">{panelDetail}</span>
-                    ) : null}
-                  </span>
-                  {panelEngine ? (
-                    <span className="select-menu__header-mark">
-                      <BrandLogo engine={panelEngine} size={15} />
-                    </span>
-                  ) : panelIcon ? (
-                    <span aria-hidden="true" className="select-menu__header-mark">
-                      {panelIcon}
-                    </span>
-                  ) : null}
-                </div>
-                <span aria-hidden="true" className="select-menu__rule" />
-              </>
-            ) : null}
-
-            {searchable ? (
-              <input
-                ref={searchInputRef}
-                type="text"
-                role="combobox"
-                aria-autocomplete="list"
-                aria-expanded="true"
-                aria-label={searchLabel}
-                placeholder={searchPlaceholder}
-                value={query}
-                onChange={(e) => {
-                  const val = e.currentTarget.value;
-                  setQuery(val);
-                  const firstMatch = rows.find(
-                    (row) => !row.disabled && rowMatchesQuery(row, val)
-                  );
-                  setHighlightedId(firstMatch ? firstMatch.id : null);
-                }}
-                className="select-menu__search"
-              />
-            ) : null}
-
-            {filteredRows.length === 0 ? (
-              <div className="select-menu__empty" role="status">
-                {emptyLabel}
-              </div>
-            ) : null}
-
-            <div className="select-menu__rows" role="listbox">
-              {filteredRows.map((row) => {
-                const isSelected = row.id === value;
-                const isHighlighted = row.id === highlightedId;
-                const hasMark = row.engine !== undefined || row.icon !== undefined;
-
-                return (
-                  <React.Fragment key={row.id}>
-                    {row.sectionTitle ? (
-                      <div className="select-menu__section">{row.sectionTitle}</div>
-                    ) : null}
-                    {row.ruleBefore ? (
-                      <span aria-hidden="true" className="select-menu__rule" />
-                    ) : null}
-                    <div
-                      id={`${menuId}-${row.id}`}
-                      role="option"
-                      aria-selected={isSelected}
-                      aria-disabled={row.disabled || undefined}
-                      data-highlighted={isHighlighted ? 'true' : undefined}
-                      tabIndex={-1}
-                      onClick={() => handlePick(row)}
-                      onPointerMove={() => {
-                        if (!row.disabled) setHighlightedId(row.id);
-                      }}
-                      className={`select-menu__row${hasMark ? ' select-menu__row--marked' : ''}`}
-                    >
-                      {row.engine !== undefined ? (
-                        <span className="select-menu__row-mark">
-                          <BrandLogo engine={row.engine} size={16} />
-                        </span>
-                      ) : row.icon !== undefined ? (
-                        <span aria-hidden="true" className="select-menu__row-mark">
-                          {row.icon}
-                        </span>
-                      ) : null}
-
-                      <span className="select-menu__row-text">
-                        <span className="select-menu__row-title">{row.title}</span>
-                        {row.detail ? (
-                          <span className="select-menu__row-detail">{row.detail}</span>
+          <AnimatePresence onExitComplete={handleExitComplete}>
+            {isOpen ? (
+              <motion.div
+                key="select-menu"
+                {...surfaceMotion('popover')}
+                transition={springs.pop}
+                id={menuId}
+                ref={attachPanel}
+                data-select-menu="true"
+                role={searchable ? 'dialog' : 'listbox'}
+                aria-label={panelTitle ?? label}
+                tabIndex={-1}
+                onKeyDown={handlePanelKeyDown}
+                onAnimationStart={handlePanelAnimationStart}
+                className={`select-menu select-menu--from-${coords.origin} select-menu--motion${
+                  searchable ? ' select-menu--searchable' : ''
+                }`}
+                style={{
+                  position: 'fixed',
+                  left: `${coords.left}px`,
+                  top: `${coords.top}px`,
+                  width: `${coords.width}px`,
+                  maxHeight: `${coords.room}px`,
+                  transformOrigin: surfaceOrigin(coords.origin),
+                  '--select-menu-rows-max': `${effectiveMaxRowsHeight}px`,
+                } as React.CSSProperties}
+              >
+                {panelTitle ? (
+                  <>
+                    <div className="select-menu__header">
+                      <span className="select-menu__header-text">
+                        <span className="select-menu__header-title">{panelTitle}</span>
+                        {panelDetail ? (
+                          <span className="select-menu__header-detail">{panelDetail}</span>
                         ) : null}
                       </span>
-
-                      {row.badge ? (
-                        <span className="select-menu__row-badge">{row.badge}</span>
+                      {panelEngine ? (
+                        <span className="select-menu__header-mark">
+                          <BrandLogo engine={panelEngine} size={15} />
+                        </span>
+                      ) : panelIcon ? (
+                        <span aria-hidden="true" className="select-menu__header-mark">
+                          {panelIcon}
+                        </span>
                       ) : null}
-
-                      <span className="select-menu__row-check">
-                        {isSelected ? (
-                          <CircleCheckIcon
-                            size={14}
-                            strokeWidth={2.5}
-                            className="select-menu__check-disc"
-                          />
-                        ) : null}
-                      </span>
                     </div>
-                  </React.Fragment>
-                );
-              })}
-            </div>
-          </div>,
+                    <span aria-hidden="true" className="select-menu__rule" />
+                  </>
+                ) : null}
+
+                {searchable ? (
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded="true"
+                    aria-label={searchLabel}
+                    placeholder={searchPlaceholder}
+                    value={query}
+                    onChange={(e) => {
+                      const val = e.currentTarget.value;
+                      setQuery(val);
+                      const firstMatch = rows.find(
+                        (row) => !row.disabled && rowMatchesQuery(row, val)
+                      );
+                      setHighlightedId(firstMatch ? firstMatch.id : null);
+                    }}
+                    className="select-menu__search"
+                  />
+                ) : null}
+
+                {filteredRows.length === 0 ? (
+                  <div className="select-menu__empty" role="status">
+                    {emptyLabel}
+                  </div>
+                ) : null}
+
+                <div className="select-menu__rows" role="listbox">
+                  {filteredRows.map((row) => {
+                    const isSelected = row.id === value;
+                    const isHighlighted = row.id === highlightedId;
+                    const hasMark = row.engine !== undefined || row.icon !== undefined;
+
+                    return (
+                      <React.Fragment key={row.id}>
+                        {row.sectionTitle ? (
+                          <div className="select-menu__section">{row.sectionTitle}</div>
+                        ) : null}
+                        {row.ruleBefore ? (
+                          <span aria-hidden="true" className="select-menu__rule" />
+                        ) : null}
+                        <div
+                          id={`${menuId}-${row.id}`}
+                          role="option"
+                          aria-selected={isSelected}
+                          aria-disabled={row.disabled || undefined}
+                          data-highlighted={isHighlighted ? 'true' : undefined}
+                          tabIndex={-1}
+                          onClick={() => handlePick(row)}
+                          onPointerMove={() => {
+                            if (!row.disabled) setHighlightedId(row.id);
+                          }}
+                          className={`select-menu__row${hasMark ? ' select-menu__row--marked' : ''}`}
+                        >
+                          {isHighlighted ? (
+                            <motion.span
+                              layoutId={`${menuId}-highlight`}
+                              className="select-menu__row-highlight"
+                              data-selected={isSelected ? 'true' : undefined}
+                              transition={springs.highlight}
+                              initial={false}
+                              aria-hidden="true"
+                            />
+                          ) : null}
+
+                          {row.engine !== undefined ? (
+                            <span className="select-menu__row-mark">
+                              <BrandLogo engine={row.engine} size={16} />
+                            </span>
+                          ) : row.icon !== undefined ? (
+                            <span aria-hidden="true" className="select-menu__row-mark">
+                              {row.icon}
+                            </span>
+                          ) : null}
+
+                          <span className="select-menu__row-text">
+                            <span className="select-menu__row-title">{row.title}</span>
+                            {row.detail ? (
+                              <span className="select-menu__row-detail">{row.detail}</span>
+                            ) : null}
+                          </span>
+
+                          {row.badge ? (
+                            <span className="select-menu__row-badge">{row.badge}</span>
+                          ) : null}
+
+                          <span className="select-menu__row-check">
+                            {isSelected ? (
+                              <motion.span
+                                layoutId={`${menuId}-check`}
+                                className="select-menu__check-surface"
+                                transition={springs.highlight}
+                                initial={false}
+                              >
+                                <CircleCheckIcon
+                                  size={14}
+                                  strokeWidth={2.5}
+                                  className="select-menu__check-disc"
+                                />
+                              </motion.span>
+                            ) : null}
+                          </span>
+                        </div>
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>,
           portalHost
         )}
     </>

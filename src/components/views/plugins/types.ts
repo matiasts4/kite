@@ -1,3 +1,6 @@
+import type { PluginId } from './pluginIdentity';
+export type { PluginId };
+
 export type PluginCategory =
   | 'developer'
   | 'productivity'
@@ -14,7 +17,25 @@ export type PluginAuthState =
   | 'localMCP'
   | 'oauthIntuit';
 
+export type PluginConnectionState =
+  | 'preview'
+  | 'unavailable'
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'needsReauth'
+  | 'disconnectPending';
+
 export type PluginConnectionStatus = 'installed' | 'available' | 'disabled';
+
+export type PluginAction = 'connect' | 'cancel' | 'disconnect';
+
+export interface PluginConnection {
+  id: string;
+  state: PluginConnectionState;
+  account: string | null;
+  message: string | null;
+}
 
 export type PluginLogo =
   | { onDark: string; onLight: string }
@@ -44,6 +65,7 @@ export interface PluginConfig {
   readOnly?: boolean;
   account?: string;
   customPort?: number;
+  enabledProviders?: string[];
 }
 
 export interface ActivePlugin extends OfficialPlugin {

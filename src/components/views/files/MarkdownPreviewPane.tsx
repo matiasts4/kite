@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { tokenizeLine } from './syntax';
 import { CopyIcon, CheckIcon } from '../chat/ChatIcons';
 import { ListTreeIcon } from './FileIcons';
+import { MermaidDiagram } from '../../ui/MermaidDiagram';
 
 export interface MarkdownPreviewPaneProps {
   text: string;
@@ -436,6 +437,9 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
             }
 
             if (block.type === 'code') {
+              if (block.lang && block.lang.toLowerCase() === 'mermaid') {
+                return <MermaidDiagram key={idx} code={block.code} />;
+              }
               const lines = block.code.split('\n');
               return (
                 <div

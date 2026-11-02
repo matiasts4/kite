@@ -15,8 +15,9 @@ import {
   QUOTA_PREFS_CHANGED_EVENT,
 } from '../../lib/quota/quotaManager';
 import { diagnoseProvider } from '../../lib/quota/providerState';
-import { saveOpenCodeCookie, clearOpenCodeCookie } from '../../lib/ipc';
+import { saveOpenCodeApiKey, clearOpenCodeApiKey } from '../../lib/ipc';
 import { AccountSwitcherModal } from './AccountSwitcherModal';
+import { UsersIcon, ChevronUpIcon, ChevronDownIcon } from '../views/settings/icons';
 import { usePresence } from '../../motion/usePresence';
 import { motionSurfaceClass } from '../../motion/surface';
 
@@ -99,14 +100,6 @@ export const PROVIDER_CONFIGS_ES: Record<string, ProviderMetaConfig> = {
     details:
       'Lee las credenciales OAuth en `~/.kimi-code/credentials/kimi-code.json` y refresca el token automáticamente. Si el token de actualización expira o la sesión caduca, ejecuta `kimi login` en la terminal.',
   },
-  [PROVIDERS.GEMINI]: {
-    title: 'Google Gemini CLI',
-    desc: 'Cuotas y contexto para Google Gemini 2.5 Pro y Flash.',
-    source: '~/.gemini/ o variable GEMINI_API_KEY',
-    connectionType: 'local_config',
-    details:
-      'Detecta la instalación de Gemini CLI en `~/.gemini/` o la presencia de la variable de entorno `GEMINI_API_KEY`.',
-  },
   [PROVIDERS.COPILOT]: {
     title: 'GitHub Copilot CLI',
     desc: 'Límites de peticiones y cuota de GitHub Copilot.',
@@ -133,12 +126,13 @@ export const PROVIDER_CONFIGS_ES: Record<string, ProviderMetaConfig> = {
       'Requiere definir la variable de entorno `DEEPSEEK_API_KEY` en tu sistema operativo con una clave de API válida de DeepSeek. Kite consulta el saldo directamente a api.deepseek.com.',
   },
   [PROVIDERS.OPENCODE]: {
-    title: 'OpenCode Go Console',
-    desc: 'Cuotas de crédito de 5 horas y 7 días de tu consola OpenCode Go.',
-    source: '~/.kite/opencode-go-quota.json',
+    title: 'OpenCode Go',
+    desc: 'Ventanas de cuota de 5 horas, semanal y mensual de tu suscripción OpenCode Go.',
+    source: 'OpenCode CLI (opencode.db / auth.json), OPENCODE_API_KEY o API key guardada en Kite',
+    loginCmd: 'opencode auth login opencode-go',
     connectionType: 'opencode_form',
     details:
-      'Pega la cabecera Cookie de sesión de consola desde las DevTools del navegador en opencode.ai (Application → Cookies). Debe incluir __Host-console_session.',
+      'Kite detecta automáticamente la sesión de OpenCode. Si no la encuentra, ejecutá `opencode auth login opencode-go` o guardá una API key de OpenCode Go. La cookie y el workspace legacy ya no se usan: la API oficial de cuotas requiere una API key.',
   },
 };
 
@@ -156,8 +150,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
   const [verifyFeedback, setVerifyFeedback] = useState<string | null>(null);
 
   // OpenCode Go form state
-  const [openCodeCookie, setOpenCodeCookie] = useState<string>('');
-  const [openCodeWorkspaceId, setOpenCodeWorkspaceId] = useState<string>('');
+  const [openCodeApiKey, setOpenCodeApiKey] = useState<string>('');
   const [openCodeStatus, setOpenCodeStatus] = useState<string | null>(null);
 
   // Multi-Account Switcher modal state
@@ -180,8 +173,8 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
   }, []);
 
   const enabledSet = useMemo(() => {
-    return new Set(prefs.enabledProviders || prefs.providerOrder);
-  }, [prefs.enabledProviders, prefs.providerOrder]);
+    return new Set(prefs.enabledProviders ?? []);
+  }, [prefs.enabledProviders]);
 
   const filteredProviders = useMemo(() => {
     if (!searchFilter.trim()) return ALL_SUPPORTED_PROVIDERS;
@@ -208,7 +201,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
 
   const handleToggleProvider = (providerId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const currentEnabled = new Set(prefs.enabledProviders || prefs.providerOrder);
+    const currentEnabled = new Set(prefs.enabledProviders ?? []);
     if (currentEnabled.has(providerId)) {
       currentEnabled.delete(providerId);
     } else {
@@ -294,16 +287,16 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
   };
 
   const handleSaveOpenCode = async () => {
-    if (!openCodeCookie.trim()) return;
+    if (!openCodeApiKey.trim()) return;
     setOpenCodeStatus('Guardando...');
     try {
-      const ok = await saveOpenCodeCookie(openCodeCookie.trim(), openCodeWorkspaceId.trim() || undefined);
+      const ok = await saveOpenCodeApiKey(openCodeApiKey.trim());
       if (ok) {
-        setOpenCodeStatus('Cookie guardada correctamente');
-        setOpenCodeCookie('');
+        setOpenCodeStatus('API key guardada correctamente');
+        setOpenCodeApiKey('');
         await subscriptionQuotaManager.fetchAll(true);
       } else {
-        setOpenCodeStatus('Error al guardar la cookie');
+        setOpenCodeStatus('Error al guardar la API key');
       }
     } catch (err: any) {
       setOpenCodeStatus(`Error: ${err?.message || 'Fallo al guardar'}`);
@@ -314,10 +307,9 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
   const handleClearOpenCode = async () => {
     setOpenCodeStatus('Limpiando...');
     try {
-      await clearOpenCodeCookie();
-      setOpenCodeStatus('Credenciales eliminadas');
-      setOpenCodeCookie('');
-      setOpenCodeWorkspaceId('');
+      await clearOpenCodeApiKey();
+      setOpenCodeStatus('Clave de Kite eliminada; la detección de OpenCode sigue activa');
+      setOpenCodeApiKey('');
       await subscriptionQuotaManager.fetchAll(true);
     } catch (err: any) {
       setOpenCodeStatus(`Error: ${err?.message || 'Fallo al limpiar'}`);
@@ -900,10 +892,12 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                                   padding: '1px 3px',
                                   color: '#a1a1aa',
                                   cursor: 'pointer',
-                                  fontSize: '10px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
                                 }}
                               >
-                                ▲
+                                <ChevronUpIcon size={12} strokeWidth={2.5} />
                               </button>
                             )}
                             {index < prefs.providerOrder.length - 1 && (
@@ -917,10 +911,12 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                                   padding: '1px 3px',
                                   color: '#a1a1aa',
                                   cursor: 'pointer',
-                                  fontSize: '10px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
                                 }}
                               >
-                                ▼
+                                <ChevronDownIcon size={12} strokeWidth={2.5} />
                               </button>
                             )}
                           </div>
@@ -1196,7 +1192,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                 </div>
 
                 {/* Multi-Account Switcher Vault Card */}
-                {['antigravity', 'gemini', 'claude', 'codex'].includes(selectedTab) && (
+                {['antigravity', 'claude', 'codex', 'opencode', 'grok'].includes(selectedTab) && (
                   <div
                     style={{
                       backgroundColor: 'rgba(59, 130, 246, 0.08)',
@@ -1219,12 +1215,11 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
-                          fontSize: '18px',
                           flexShrink: 0,
                           color: '#60a5fa',
                         }}
                       >
-                        👥
+                        <UsersIcon size={18} />
                       </div>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: '13px', fontWeight: 600, color: '#f4f4f5', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1357,15 +1352,56 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                         border: '1px solid rgba(255, 255, 255, 0.08)',
                       }}
                     >
+                      <div
+                        style={{
+                          fontSize: '10px',
+                          lineHeight: 1.6,
+                          color: '#a1a1aa',
+                          padding: '8px',
+                          borderRadius: '6px',
+                          backgroundColor: 'rgba(255, 255, 255, 0.03)',
+                          border: '1px solid rgba(255, 255, 255, 0.06)',
+                        }}
+                      >
+                        <div>
+                          <strong style={{ color: '#e4e4e7' }}>Detección:</strong>{' '}
+                          {String(
+                            currentSelectedQuota?.metadata?.authSource ||
+                              'sin credenciales detectadas'
+                          )}
+                        </div>
+                        <div>
+                          <strong style={{ color: '#e4e4e7' }}>Endpoint:</strong>{' '}
+                          {String(currentSelectedQuota?.metadata?.endpoint || '—')}
+                        </div>
+                        <div>
+                          <strong style={{ color: '#e4e4e7' }}>Último estado:</strong>{' '}
+                          {currentSelectedQuota?.metadata?.httpStatus
+                            ? `HTTP ${currentSelectedQuota.metadata.httpStatus}`
+                            : 'sin respuesta'}{' '}
+                          ·{' '}
+                          {currentSelectedQuota?.error ||
+                            (currentSelectedQuota
+                              ? `${Math.round(currentSelectedQuota.primaryRemainingPercent)}% restante`
+                              : '—')}
+                        </div>
+                        {currentSelectedQuota?.metadata?.legacyNote && (
+                          <div style={{ color: '#fbbf24', marginTop: '2px' }}>
+                            {String(currentSelectedQuota.metadata.legacyNote)}
+                          </div>
+                        )}
+                      </div>
+
                       <div>
                         <label style={{ fontSize: '11px', fontWeight: 500, color: '#a1a1aa' }}>
-                          Cookie de consola (__Host-console_session)
+                          API key de OpenCode Go
                         </label>
                         <input
                           type="password"
-                          placeholder="Pega la cabecera Cookie de opencode.ai"
-                          value={openCodeCookie}
-                          onChange={(e) => setOpenCodeCookie(e.target.value)}
+                          placeholder="sk-... (opcional si OpenCode ya está logueado)"
+                          autoComplete="off"
+                          value={openCodeApiKey}
+                          onChange={(e) => setOpenCodeApiKey(e.target.value)}
                           style={{
                             width: '100%',
                             boxSizing: 'border-box',
@@ -1381,27 +1417,10 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                         />
                       </div>
 
-                      <div>
-                        <label style={{ fontSize: '11px', fontWeight: 500, color: '#a1a1aa' }}>
-                          Workspace ID (opcional)
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="wrk_... (se autodetecta si queda vacío)"
-                          value={openCodeWorkspaceId}
-                          onChange={(e) => setOpenCodeWorkspaceId(e.target.value)}
-                          style={{
-                            width: '100%',
-                            boxSizing: 'border-box',
-                            marginTop: '4px',
-                            padding: '6px 10px',
-                            backgroundColor: '#0a0a0c',
-                            border: '1px solid rgba(255, 255, 255, 0.12)',
-                            borderRadius: '6px',
-                            color: '#fafafa',
-                            fontSize: '11px',
-                          }}
-                        />
+                      <div style={{ fontSize: '10px', color: '#71717a', lineHeight: 1.5 }}>
+                        Kite detecta la sesión de OpenCode automáticamente. Guardá una API key solo
+                        si querés forzar otra cuenta. La API oficial es{' '}
+                        <code>opencode.ai/zen/go/v1/usage</code>.
                       </div>
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
@@ -1419,7 +1438,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                             cursor: 'pointer',
                           }}
                         >
-                          Guardar cookie
+                          Guardar API key
                         </button>
                         <button
                           type="button"
@@ -1434,7 +1453,7 @@ export const QuotaSettingsModal: React.FC<QuotaSettingsModalProps> = ({
                             cursor: 'pointer',
                           }}
                         >
-                          Limpiar
+                          Quitar clave de Kite
                         </button>
                         {openCodeStatus && (
                           <span style={{ fontSize: '11px', color: '#34d399' }}>{openCodeStatus}</span>

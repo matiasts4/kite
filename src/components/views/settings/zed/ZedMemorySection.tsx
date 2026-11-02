@@ -4,6 +4,7 @@ import {
   ZedPersonaConfig,
 } from '../../../../lib/operator/operatorConfig';
 import { invokeCommand } from '../../../../lib/ipc';
+import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
 
 export interface ZedMemorySectionProps {
   persona: ZedPersonaConfig;
@@ -79,17 +80,21 @@ export const ZedMemorySection: React.FC<ZedMemorySectionProps> = ({
                   { id: 'transcript', label: 'Save transcript' },
                   { id: 'nothing', label: 'Nothing' },
                 ] as const
-              ).map((mode) => (
-                <button
-                  key={mode.id}
-                  type="button"
-                  aria-pressed={persona.afterCallMode === mode.id}
-                  className="ui-segmented__item"
-                  onClick={() => onPersonaChange('afterCallMode', mode.id)}
-                >
-                  <span>{mode.label}</span>
-                </button>
-              ))}
+              ).map((mode) => {
+                const isSelected = persona.afterCallMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className="ui-segmented__item"
+                    onClick={() => onPersonaChange('afterCallMode', mode.id)}
+                  >
+                    {isSelected && <SegmentedIndicator group="settings-zed-memory" />}
+                    <span>{mode.label}</span>
+                  </button>
+                );
+              })}
             </fieldset>
           </div>
         </div>

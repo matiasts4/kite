@@ -27,13 +27,14 @@ import {
   loadZedMemoryNotes,
   saveZedMemoryNotes,
   loadModelCatalog,
-  fetchOpenCodeModels,
+  fetchOpenCodeGoModels,
   VERCEL_MODEL_CATALOG,
   fetchVercelModels,
   CLOUDFLARE_MODEL_CATALOG,
   fetchCloudflareModels,
 } from '../../../lib/operator/operatorConfig';
 import { probeProviderLatency } from '../../../lib/operator/operatorProviders';
+import { invokeCommand, isTauriEnvironment } from '../../../lib/ipc';
 
 import { ZedHeroCard } from './zed/ZedHeroCard';
 import { ZedProvidersSection } from './zed/ZedProvidersSection';
@@ -49,6 +50,10 @@ export const ZedTab: React.FC = () => {
   const [newNoteText, setNewNoteText] = useState('');
   const [testingProvider, setTestingProvider] = useState<OperatorProviderId | null>(null);
   const [testMessage, setTestMessage] = useState<string | null>(null);
+  const [openCodeGoCredential, setOpenCodeGoCredential] = useState<{
+    available: boolean;
+    source: string | null;
+  } | null>(null);
   const [showApiKeys, setShowApiKeys] = useState<Record<string, boolean>>({});
   const [savedToast, setSavedToast] = useState(false);
   const [modelsList, setModelsList] = useState(
@@ -162,6 +167,18 @@ export const ZedTab: React.FC = () => {
     setMemoryNotes(loadZedMemoryNotes());
 
     let isMounted = true;
+
+    if (isTauriEnvironment()) {
+      invokeCommand<{ available: boolean; source: string | null }>(
+        'opencode_go_credential_status'
+      )
+        .then((status) => {
+          if (isMounted) setOpenCodeGoCredential(status);
+        })
+        .catch(() => {
+          if (isMounted) setOpenCodeGoCredential({ available: false, source: null });
+        });
+    }
     listAudioInputDevices().then((devices) => {
       if (isMounted) {
         setMicDevices(devices);
@@ -436,12 +453,12 @@ export const ZedTab: React.FC = () => {
     setSyncingModels(true);
     setTestMessage(null);
     try {
-      const fetched = await fetchOpenCodeModels(config.opencodeApiKey, config.opencodeBaseUrl);
+      const fetched = await fetchOpenCodeGoModels(config.opencodeApiKey);
       setModelsList(fetched.models);
       setOpenCodeSavedAt(fetched.savedAt);
       setTestMessage(
         fetched.fresh
-          ? `Lista actualizada: ${fetched.models.length} modelos de OpenCode. Queda guardada hasta que vuelvas a actualizar.`
+          ? `Lista actualizada: ${fetched.models.length} modelos de OpenCode Go. Queda guardada hasta que vuelvas a actualizar.`
           : fetched.detail
       );
     } catch (err: any) {
@@ -546,6 +563,7 @@ export const ZedTab: React.FC = () => {
         }
         testingProvider={testingProvider}
         onRunProbe={handleRunProbe}
+        openCodeGoCredential={openCodeGoCredential}
         effectiveOpenCodeModels={effectiveOpenCodeModels}
         syncingModels={syncingModels}
         openCodeSavedAt={openCodeSavedAt}

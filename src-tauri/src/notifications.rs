@@ -302,4 +302,44 @@ mod tests {
         let all_read = notifications_mark_all_read(None);
         assert_eq!(all_read["unreadCount"], 0);
     }
+
+    #[test]
+    fn test_settle_turn_and_approval_notifications() {
+        crate::chat::runtime::settle_turn_notification(
+            "run-test-1",
+            "thread-test-1",
+            Some("agent-1"),
+            true,
+            false,
+        );
+        let snap = make_notifications_snapshot();
+        let records = snap["records"].as_array().unwrap();
+        let found = records.iter().find(|r| r["runId"] == "run-test-1").expect("found settled notification");
+        assert_eq!(found["kind"]["kind"], "settled");
+        assert_eq!(found["kind"]["outcome"], "completed");
+        assert_eq!(found["target"]["source"], "agentChat");
+        assert_eq!(found["isWaitingForInput"], false);
+
+        // Simulate an approval needsInput notice
+        {
+            let mut items = notifications().lock().unwrap();
+            items.insert(0, json!({
+                "id": "approval-req-99",
+                "runId": "run-test-2",
+                "target": { "source": "codeThread", "id": "thread-test-2" },
+                "profileId": Value::Null,
+                "routineId": Value::Null,
+                "kind": { "kind": "needsInput", "requestKind": "toolApproval" },
+                "resolution": Value::Null,
+                "createdAtUnixMs": 1000,
+                "isRead": false,
+                "isWaitingForInput": true
+            }));
+        }
+        let snap2 = make_notifications_snapshot();
+        assert!(snap2["openInputRequestCount"].as_i64().unwrap_or(0) >= 1);
+        let records2 = snap2["records"].as_array().unwrap();
+        let approval = records2.iter().find(|r| r["id"] == "approval-req-99").unwrap();
+        assert_eq!(approval["isWaitingForInput"], true);
+    }
 }

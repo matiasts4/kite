@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useRef, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { motion } from 'motion/react';
+import { springs, scale } from '../motion/standard/tokens';
 import { windowControls } from '../lib/ipc';
 import { SubscriptionQuotaBadge } from './quota/SubscriptionQuotaBadge';
 import { SystemResourceBadge } from './telemetry/SystemResourceBadge';
 import { readQuotaPreferences, QUOTA_PREFS_CHANGED_EVENT } from '../lib/quota/quotaManager';
+import './zedFloat.css';
 
 export type TitleBarMode = 'agent' | 'code' | 'chat';
 
@@ -91,6 +94,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   // Sync window maximized state across native Tauri and browser fallback
   useEffect(() => {
     let mounted = true;
+    let timer: any = null;
     const checkMax = async () => {
       try {
         const val = await windowControls.isMaximized();
@@ -99,72 +103,22 @@ export const TitleBar: React.FC<TitleBarProps> = ({
     };
     checkMax();
 
-    let unlisten: (() => void) | undefined;
-    const setupTauriListener = async () => {
-      try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        const win = getCurrentWindow();
-        unlisten = await win.onResized(async () => {
-          if (mounted) {
-            const max = await win.isMaximized();
-            setIsMax(max);
-          }
-        });
-      } catch (_) {}
+    const debouncedCheck = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(checkMax, 120);
     };
-    setupTauriListener();
 
-    window.addEventListener('resize', checkMax);
+    window.addEventListener('resize', debouncedCheck);
     return () => {
       mounted = false;
-      window.removeEventListener('resize', checkMax);
-      if (unlisten) unlisten();
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('resize', debouncedCheck);
     };
   }, []);
-
-  // Update sliding thumb in mode toggle track via --thumb-x and --thumb-w
-  const updateThumb = useCallback(() => {
-    const el = trackRef.current;
-    if (!el) return;
-    const active = el.querySelector('.mode-toggle__item--active') as HTMLElement | null;
-    if (!active) return;
-    const parentRect = el.getBoundingClientRect();
-    const activeRect = active.getBoundingClientRect();
-    if (activeRect.width === 0 || parentRect.height === 0 || el.offsetHeight === 0) return;
-    const scale = parentRect.height / el.offsetHeight || 1;
-    el.style.setProperty('--thumb-x', `${(activeRect.left - parentRect.left) / scale - el.clientLeft}px`);
-    el.style.setProperty('--thumb-w', `${activeRect.width / scale}px`);
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!settingsOpen) {
-      updateThumb();
-    }
-  }, [activeMode, settingsOpen, updateThumb]);
 
   useEffect(() => {
-    const el = trackRef.current;
-    if (settingsOpen || !el) return;
-    let active = true;
-    const onResize = () => {
-      if (active) updateThumb();
-    };
-    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(onResize) : null;
-    observer?.observe(el);
-    for (const btn of el.querySelectorAll('button')) {
-      observer?.observe(btn);
-    }
-    document.fonts?.ready?.then(onResize);
-    const raf = window.requestAnimationFrame(() => {
-      if (active) setThumbReady(true);
-    });
-    return () => {
-      active = false;
-      observer?.disconnect();
-      window.cancelAnimationFrame(raf);
-      setThumbReady(false);
-    };
-  }, [settingsOpen, updateThumb]);
+    setThumbReady(true);
+  }, []);
 
   const handleToggleMaximize = async () => {
     try {
@@ -220,9 +174,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
     >
       {/* Brand & Leading Area */}
       <div
-        className={`titlebar__leading${
-          sidebarVisible || settingsOpen ? ' titlebar__leading--band' : ''
-        }`}
+        className="titlebar__leading"
         data-tauri-drag-region
       >
         <div className="brand-lockup" data-tauri-drag-region>
@@ -270,11 +222,11 @@ export const TitleBar: React.FC<TitleBarProps> = ({
         )}
       </div>
 
-      {/* Mode Toggle (Agent | Code | Thread) */}
+      {/* Mode Toggle (Agent | Code | Thread) — Stadium Pill & Animated UI standard */}
       {!settingsOpen && (
         <fieldset
           aria-label="Work mode"
-          className="mode-toggle"
+          className="mode-toggle mode-toggle--stadium"
           data-mode={activeMode}
           data-thumb-ready={thumbReady ? '' : undefined}
           ref={trackRef}
@@ -283,17 +235,30 @@ export const TitleBar: React.FC<TitleBarProps> = ({
             const { label, title: modeTitle } = MODE_DESCRIPTIONS[m];
             const isActive = activeMode === m;
             return (
-              <button
+              <motion.button
                 key={m}
                 type="button"
                 aria-pressed={isActive}
+                whileTap={{ scale: scale.press }}
                 className={`mode-toggle__item${isActive ? ' mode-toggle__item--active' : ''}`}
                 data-label={label}
                 onClick={() => onModeChange?.(m)}
                 title={modeTitle}
               >
-                {label}
-              </button>
+                {isActive && (
+                  <motion.div
+                    layoutId="titlebar-mode-toggle-indicator"
+                    className="mode-toggle__stadium-indicator"
+                    transition={springs.selection}
+                    initial={false}
+                    aria-hidden="true"
+                    data-mode={m}
+                  >
+                    <div className="mode-toggle__stadium-backdrop" />
+                  </motion.div>
+                )}
+                <span className="mode-toggle__label-text">{label}</span>
+              </motion.button>
             );
           })}
         </fieldset>

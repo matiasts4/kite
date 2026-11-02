@@ -11,8 +11,6 @@ export type ZedOrbState =
   | 'error'
   | 'muted';
 
-
-
 export interface ZedOrbProps {
   state?: ZedOrbState | string;
   size?: number;
@@ -24,8 +22,6 @@ export interface ZedOrbProps {
   ariaLabel?: string;
   badge?: React.ReactNode;
 }
-
-
 
 function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v));
@@ -79,7 +75,7 @@ export const ZedOrb: React.FC<ZedOrbProps> = ({
   getLevelRef.current = getLevel;
 
   useEffect(() => {
-    // For small orbs (e.g. TitleBar 16px), bypass WebGL completely to save GPU and WebGL contexts
+    // For small orbs (e.g. TitleBar 16px), bypass WebGL completely to save GPU resources
     if (size < 32) {
       setHasWebGL(false);
       if (rendererRef.current) {
@@ -113,6 +109,7 @@ export const ZedOrb: React.FC<ZedOrbProps> = ({
 
     let rafId = 0;
     let isDisposed = false;
+    let isRunning = false;
     let lastRenderTime = 0;
     const startTime = performance.now();
 
@@ -128,16 +125,16 @@ export const ZedOrb: React.FC<ZedOrbProps> = ({
     const tick = (now: number) => {
       if (isDisposed) return;
 
-      // Pause rendering loop if window or tab is hidden/minimized
+      // When window is minimized or tab is hidden, stop loop completely (0 CPU / 0 GPU)
       if (typeof document !== 'undefined' && document.hidden) {
-        rafId = window.requestAnimationFrame(tick);
+        isRunning = false;
         return;
       }
 
       const curState = stateRef.current;
       const isIdle = curState === 'idle' || curState === 'muted' || curState === 'connected';
 
-      // Throttle rendering when idle to save CPU/GPU cycles (target ~30fps when idle, 60fps when active)
+      // Throttle rendering when idle (30fps) vs active speech (60fps)
       const minInterval = isIdle ? 33 : 16;
       if (now - lastRenderTime < minInterval) {
         rafId = window.requestAnimationFrame(tick);
@@ -187,10 +184,10 @@ export const ZedOrb: React.FC<ZedOrbProps> = ({
         const shiftYVal = curTilt.y * 5;
 
         if (
-          Math.abs(nextLevel - lastWrittenStyles.level) > 0.008 ||
-          Math.abs(nextPeak - lastWrittenStyles.peak) > 0.015 ||
-          Math.abs(tiltXVal - lastWrittenStyles.tiltX) > 0.08 ||
-          Math.abs(tiltYVal - lastWrittenStyles.tiltY) > 0.08
+          Math.abs(nextLevel - lastWrittenStyles.level) > 0.015 ||
+          Math.abs(nextPeak - lastWrittenStyles.peak) > 0.02 ||
+          Math.abs(tiltXVal - lastWrittenStyles.tiltX) > 0.15 ||
+          Math.abs(tiltYVal - lastWrittenStyles.tiltY) > 0.15
         ) {
           el.style.setProperty('--orb-level', nextLevel.toFixed(3));
           el.style.setProperty('--orb-peak', nextPeak.toFixed(3));
@@ -232,14 +229,35 @@ export const ZedOrb: React.FC<ZedOrbProps> = ({
         });
       }
 
-      // Continuous fluid animation: never freeze completely, maintain gentle ambient drift
       rafId = window.requestAnimationFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
+    const startLoop = () => {
+      if (isRunning || isDisposed) return;
+      isRunning = true;
+      lastRenderTime = performance.now();
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        startLoop();
+      }
+    };
+
+    startLoop();
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
     return () => {
       isDisposed = true;
+      isRunning = false;
       window.cancelAnimationFrame(rafId);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
     };
   }, [size]);
 
@@ -267,7 +285,7 @@ export const ZedOrb: React.FC<ZedOrbProps> = ({
 
   return (
     <Tag
-      ref={rootRef as React.Ref< never >}
+      ref={rootRef as React.Ref<never>}
       type={interactive ? 'button' : undefined}
       className={[
         'zed-orb',

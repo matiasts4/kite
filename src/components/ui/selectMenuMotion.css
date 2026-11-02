@@ -1,0 +1,51 @@
+/*
+ * SelectMenu standard motion (Kite motion standard).
+ *
+ * The panel enters and leaves with Motion (`surfaceMotion('popover')`), so the
+ * legacy `select-menu-appear` keyframes are disabled for this component only.
+ * The highlighted row background becomes a gliding layer instead of an opaque
+ * per-row fill, and the selected check glides between rows on its own layout
+ * animation.
+ */
+
+.select-menu.select-menu--motion {
+  animation: none;
+}
+
+.select-menu--motion .select-menu__row {
+  position: relative;
+}
+
+/* Row content paints above the gliding highlight layer. */
+.select-menu--motion .select-menu__row > :not(.select-menu__row-highlight) {
+  position: relative;
+  z-index: 1;
+}
+
+/* The gliding layer is the only highlighted background. */
+.select-menu--motion .select-menu__row[data-highlighted='true'],
+.select-menu--motion .select-menu__row[data-highlighted='true'][aria-selected='true'] {
+  background: none;
+}
+
+.select-menu__row-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--radius-row);
+  background: var(--hover-fill);
+  pointer-events: none;
+  transition: background-color var(--duration-ink, 160ms) var(--ease-ink, ease);
+}
+
+.select-menu__row-highlight[data-selected='true'] {
+  background: var(--selected-fill);
+}
+
+/* A layout animation needs a box; the icon sits alone in its slot. */
+.select-menu__check-surface {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}

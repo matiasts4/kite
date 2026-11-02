@@ -1,9 +1,13 @@
-import { getSubscriptionQuotas } from '../ipc';
+import { getSubscriptionQuotas, listConnections, type ConnectionSummary } from '../ipc';
 import {
   type ProviderQuotaStatus,
   type QuotaPreferences,
   DEFAULT_QUOTA_PREFERENCES,
   PROVIDERS,
+  QUOTA_SETUP_VERSION,
+  normalizeProviderIds,
+  normalizeProviderOrder,
+  resolveEnabledProviderIds,
 } from './types';
 
 const PREFS_STORAGE_KEY = 'kite_quota_preferences';
@@ -32,7 +36,25 @@ export function readQuotaPreferences(): QuotaPreferences {
     const raw = localStorage.getItem(PREFS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { ...DEFAULT_QUOTA_PREFERENCES, ...parsed };
+      const setupVersion =
+        parsed && Number.isFinite(parsed.setupVersion)
+          ? Number(parsed.setupVersion)
+          : 1; // legacy installs never stored a setupVersion
+      const providerOrder = normalizeProviderOrder(parsed?.providerOrder);
+      const enabledProviders = Array.isArray(parsed?.enabledProviders)
+        ? normalizeProviderIds(parsed.enabledProviders)
+        : // Legacy prefs without the field meant "everything enabled"; the
+          // one-time setup migration resets the monitored list to empty.
+          setupVersion < QUOTA_SETUP_VERSION
+          ? providerOrder
+          : [];
+      return {
+        ...DEFAULT_QUOTA_PREFERENCES,
+        ...parsed,
+        setupVersion,
+        providerOrder,
+        enabledProviders,
+      };
     }
   } catch (_) {}
   return DEFAULT_QUOTA_PREFERENCES;
@@ -40,12 +62,23 @@ export function readQuotaPreferences(): QuotaPreferences {
 
 export function saveQuotaPreferences(prefs: Partial<QuotaPreferences>): QuotaPreferences {
   const current = readQuotaPreferences();
-  const next = { ...current, ...prefs };
+  const next: QuotaPreferences = {
+    ...current,
+    ...prefs,
+    providerOrder: normalizeProviderOrder(prefs.providerOrder ?? current.providerOrder),
+    enabledProviders: normalizeProviderIds(
+      prefs.enabledProviders ?? current.enabledProviders
+    ),
+  };
   try {
     localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify(next));
     window.dispatchEvent(new CustomEvent(QUOTA_PREFS_CHANGED_EVENT, { detail: next }));
   } catch (_) {}
   return next;
+}
+
+export function needsQuotaSetupMigration(): boolean {
+  return (readQuotaPreferences().setupVersion ?? 1) < QUOTA_SETUP_VERSION;
 }
 
 export function detectProviderFromSession(text: string | null | undefined): string | null {
@@ -94,21 +127,20 @@ export function resolveDisplayProvider(
   prefs: QuotaPreferences,
   detected: string | null,
   quotas: Record<string, ProviderQuotaStatus>
-): string {
-  const enabledSet = new Set(prefs.enabledProviders || prefs.providerOrder);
-  const candidateOrder = prefs.providerOrder.filter((id) => enabledSet.has(id));
+): string | null {
+  const candidateOrder = resolveEnabledProviderIds(prefs);
 
   if (candidateOrder.length === 0) {
-    return PROVIDERS.ANTIGRAVITY;
+    return null;
   }
 
   // 1. If user pinned a specific provider and it is enabled, stick to it
-  if (prefs.pinnedProvider && enabledSet.has(prefs.pinnedProvider)) {
+  if (prefs.pinnedProvider && candidateOrder.includes(prefs.pinnedProvider)) {
     return prefs.pinnedProvider;
   }
 
   // 2. If auto-detect is enabled and the session provider is enabled and has actual valid data
-  if (prefs.autoDetectActive && detected && enabledSet.has(detected)) {
+  if (prefs.autoDetectActive && detected && candidateOrder.includes(detected)) {
     const detectedQuota = quotas[detected];
     if (detectedQuota && detectedQuota.isAvailable && (!detectedQuota.error || (detectedQuota.windows && detectedQuota.windows.length > 0))) {
       return detected;
@@ -128,7 +160,43 @@ export function resolveDisplayProvider(
     if (quotas[id]) return id;
   }
 
-  return candidateOrder[0] || PROVIDERS.ANTIGRAVITY;
+  return candidateOrder[0] || null;
+}
+
+/** Endpoint ids that prove a quota read: the usage route, the Console status
+ * route, and the local RPC quota route. None of them proves a chat endpoint. */
+const QUOTA_ENDPOINT_SUFFIXES = ['/usage', '/api/go/status'];
+const QUOTA_ENDPOINT_PREFIXES = ['rpc:'];
+
+export function isVerifiedQuotaEndpoint(endpointId: string): boolean {
+  const id = endpointId.trim();
+  return (
+    QUOTA_ENDPOINT_SUFFIXES.some((suffix) => id.endsWith(suffix)) ||
+    QUOTA_ENDPOINT_PREFIXES.some((prefix) => id.startsWith(prefix))
+  );
+}
+
+/**
+ * Projects the shared connection registry onto the quota surface. A connection
+ * is listed only when one of its own quota endpoints is verified; its driver id
+ * alone never qualifies it.
+ */
+export function quotaConnections(connections: ConnectionSummary[]): ConnectionSummary[] {
+  return connections.filter((connection) =>
+    connection.endpoints.some(
+      (endpoint) => endpoint.ok && isVerifiedQuotaEndpoint(endpoint.endpointId)
+    )
+  );
+}
+
+export async function listQuotaConnections(): Promise<ConnectionSummary[]> {
+  try {
+    return quotaConnections(await listConnections());
+  } catch {
+    // A browser build, or a test double without the registry reader, shows no
+    // rows instead of claiming a connection.
+    return [];
+  }
 }
 
 class SubscriptionQuotaManager {
@@ -147,6 +215,8 @@ class SubscriptionQuotaManager {
     for (const [k, v] of Object.entries(saved)) {
       this.cache.set(k, v);
     }
+    // Upgrade legacy "everything enabled" prefs before the first render.
+    this.migrateLegacySetup();
     this.setupTauriListener();
   }
 
@@ -218,7 +288,11 @@ class SubscriptionQuotaManager {
       this.timer = setInterval(tick, this.pollIntervalMs);
 
       if (typeof window !== 'undefined') {
-        window.addEventListener('focus', tick);
+        let focusTimer: any = null;
+        window.addEventListener('focus', () => {
+          if (focusTimer) clearTimeout(focusTimer);
+          focusTimer = setTimeout(tick, 2500);
+        });
       }
     }
   }
@@ -235,16 +309,34 @@ class SubscriptionQuotaManager {
     this.isPolling = false;
   }
 
+  /**
+   * One-time upgrade from the legacy "all providers enabled" default.
+   * Monitoring starts empty so the user explicitly adds what they use; keys,
+   * CLI sessions and account vaults live elsewhere and are never touched.
+   */
+  private migrateLegacySetup(): QuotaPreferences {
+    const legacy = readQuotaPreferences();
+    if ((legacy.setupVersion ?? 1) >= QUOTA_SETUP_VERSION) return legacy;
+    return saveQuotaPreferences({
+      enabledProviders: [],
+      pinnedProvider: null,
+      setupVersion: QUOTA_SETUP_VERSION,
+    });
+  }
+
   async fetchAll(force: boolean = false, providersOverride?: string[]): Promise<Record<string, ProviderQuotaStatus>> {
     if (this.isFetching) return this.getAllQuotas();
     this.isFetching = true;
     try {
-      const prefs = readQuotaPreferences();
-      const providers =
-        providersOverride ||
-        (prefs.enabledProviders && prefs.enabledProviders.length > 0
-          ? prefs.enabledProviders
-          : prefs.providerOrder);
+      let prefs = readQuotaPreferences();
+      if (needsQuotaSetupMigration()) {
+        prefs = this.migrateLegacySetup();
+      }
+      const providers = providersOverride ?? resolveEnabledProviderIds(prefs);
+      // Nothing added: do not poll every backend provider behind the user's back.
+      if (providers.length === 0) {
+        return this.getAllQuotas();
+      }
       const data = await getSubscriptionQuotas(force, providers);
       if (data && typeof data === 'object') {
         for (const [key, val] of Object.entries(data)) {

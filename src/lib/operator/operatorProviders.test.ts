@@ -8,13 +8,47 @@ import {
   getProviderLatencyStats,
   DEFAULT_OPERATOR_CONFIG,
 } from './operatorConfig';
-import { queryOperatorLLM, benchmarkAllProviders } from './operatorProviders';
-import { invokeCommand } from '../ipc';
+import {
+  queryOperatorLLM,
+  benchmarkAllProviders,
+  isVerifiedChatEndpoint,
+  zedChatConnections,
+  zedChatProviderIdsForConnections,
+} from './operatorProviders';
+import { isVerifiedQuotaEndpoint, quotaConnections } from '../quota/quotaManager';
+import { invokeCommand, type ConnectionSummary } from '../ipc';
 
 vi.mock('../ipc', () => ({
   isTauriEnvironment: vi.fn(() => false),
   invokeCommand: vi.fn(),
+  listConnections: vi.fn(async () => []),
 }));
+
+const OPENCODE_GO_USAGE_ENDPOINT = 'https://opencode.ai/zen/go/v1/usage';
+const OPENCODE_GO_CHAT_ENDPOINT =
+  'https://opencode.ai/inference/go/openai/v1/chat/completions';
+
+function connection(
+  driverKind: string,
+  endpoints: ConnectionSummary['endpoints'],
+  overrides: Partial<ConnectionSummary> = {},
+): ConnectionSummary {
+  return {
+    connectionId: `${driverKind}:api_key:email=|org=|account=`,
+    driverKind,
+    displayName: driverKind,
+    authMethod: 'api_key',
+    accountIdentity: {},
+    credentialRef: 'vault',
+    billingMode: null,
+    endpoints,
+    status: 'verified',
+    lastCheckedMs: null,
+    expiresMs: null,
+    lastHttpStatus: null,
+    ...overrides,
+  };
+}
 
 describe('Operator Providers & Latency Benchmarks', () => {
   beforeEach(() => {
@@ -154,11 +188,12 @@ describe('Operator Providers & Latency Benchmarks', () => {
       expect(res.text).toBe('Hola, soy el asistente Zed de Kite.');
       expect(res.model).toBe('deepseek-v4.1-flash');
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://opencode.ai/inference/v1/chat/completions',
+        'https://opencode.ai/inference/go/openai/v1/chat/completions',
         expect.objectContaining({
           method: 'POST',
           headers: expect.objectContaining({
             Authorization: 'Bearer sk-test-key-1234',
+            'x-opencode-session': expect.stringMatching(/^ses_kite_/),
           }),
         })
       );
@@ -430,6 +465,81 @@ describe('Operator Providers & Latency Benchmarks', () => {
       expect(results['cloudflare'].success).toBe(true);
       expect(results['antigravity'].success).toBe(true);
       expect(results['grok'].success).toBe(true);
+    });
+  });
+
+  describe('shared connection registry projection', () => {
+    it('lists a quota-only connection in quotas and omits it from the Zed chat list', () => {
+      const quotaOnly = connection('opencode', [
+        { endpointId: OPENCODE_GO_USAGE_ENDPOINT, ok: true },
+      ]);
+      const consoleStatus = connection(
+        'opencode',
+        [{ endpointId: 'https://opencode.ai/console/api/go/status', ok: true }],
+        {
+          authMethod: 'console_oauth',
+          connectionId: 'opencode:console_oauth:email=|org=org-42|account=',
+        },
+      );
+
+      expect(quotaConnections([quotaOnly, consoleStatus])).toEqual([quotaOnly, consoleStatus]);
+      expect(zedChatConnections([quotaOnly, consoleStatus])).toEqual([]);
+      expect(zedChatProviderIdsForConnections([quotaOnly, consoleStatus])).toEqual([]);
+    });
+
+    it('lists a connection with a verified chat endpoint in the Zed chat list', () => {
+      const chat = connection('opencode', [
+        { endpointId: OPENCODE_GO_CHAT_ENDPOINT, ok: true },
+      ]);
+
+      expect(zedChatConnections([chat])).toEqual([chat]);
+      expect(zedChatProviderIdsForConnections([chat])).toEqual(['opencode']);
+      expect(quotaConnections([chat])).toEqual([]);
+    });
+
+    it('ignores an endpoint that is present but not verified', () => {
+      const unverified = connection('opencode', [
+        { endpointId: OPENCODE_GO_CHAT_ENDPOINT, ok: false },
+        { endpointId: OPENCODE_GO_USAGE_ENDPOINT, ok: false },
+      ]);
+
+      expect(zedChatConnections([unverified])).toEqual([]);
+      expect(quotaConnections([unverified])).toEqual([]);
+    });
+
+    it('never derives a capability from the driver id alone', () => {
+      const quotaOnly = connection('antigravity', [
+        { endpointId: 'cli:agy -p /usage', ok: true },
+      ]);
+      const cliChat = connection('antigravity', [{ endpointId: 'cli:agy -p', ok: true }], {
+        authMethod: 'cli_session',
+        connectionId: 'antigravity:cli_session:email=|org=|account=',
+      });
+      const acpChat = connection(
+        'antigravity',
+        [{ endpointId: 'acp:session/new', ok: true }],
+        { authMethod: 'acp', connectionId: 'antigravity:acp:email=|org=|account=' },
+      );
+
+      expect(zedChatProviderIdsForConnections([quotaOnly])).toEqual([]);
+      expect(zedChatProviderIdsForConnections([cliChat])).toEqual(['antigravity']);
+      // The Zed operator has no ACP spawn yet, so a verified ACP session does
+      // not add a provider row.
+      expect(zedChatProviderIdsForConnections([acpChat])).toEqual([]);
+      expect(quotaConnections([quotaOnly])).toEqual([quotaOnly]);
+      expect(quotaConnections([acpChat])).toEqual([]);
+      expect(isVerifiedChatEndpoint('cli:agy -p /usage')).toBe(false);
+      expect(isVerifiedChatEndpoint('acp:session/new')).toBe(false);
+      expect(isVerifiedQuotaEndpoint('cli:agy -p /usage')).toBe(true);
+    });
+
+    it('drops drivers the Zed operator cannot call', () => {
+      const claudeChat = connection('claude', [
+        { endpointId: 'https://api.anthropic.com/v1/messages', ok: true },
+      ]);
+
+      expect(zedChatConnections([claudeChat])).toEqual([]);
+      expect(zedChatProviderIdsForConnections([claudeChat])).toEqual([]);
     });
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchOpenCodeModels,
+  fetchOpenCodeGoModels,
   fetchVercelModels,
   fetchCloudflareModels,
   loadModelCatalog,
@@ -42,7 +43,7 @@ describe('Zed model catalog cache', () => {
 
   it('ignores a corrupt catalog and keeps the other provider', () => {
     saveModelCatalog('vercel', [sample]);
-    localStorage.setItem('kite.operator.modelCatalog.opencode.v1', '{');
+    localStorage.setItem('kite.operator.modelCatalog.opencode.v2', '{');
 
     expect(loadModelCatalog('opencode')).toBeNull();
     expect(loadModelCatalog('vercel')?.models[0].id).toBe('deepseek-custom');
@@ -75,6 +76,35 @@ describe('Zed model catalog cache', () => {
     expect(kept.fresh).toBe(false);
     expect(kept.models.map((model) => model.id)).toContain('alpha-model');
     expect(kept.detail).toContain('última lista');
+  });
+
+  it('keeps only Chat Completions models from the OpenCode Go catalog', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: 'deepseek-v4.1-flash' },
+          { id: 'kimi-k3' },
+          { id: 'gpt-6-luna' },
+          { id: 'claude-haiku-5-5' },
+          { id: 'gemini-4-argon-contributor' },
+        ],
+      }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const result = await fetchOpenCodeGoModels('test-key');
+    const ids = result.models.map((model) => model.id);
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://opencode.ai/zen/go/v1/models',
+      expect.objectContaining({ method: 'GET' })
+    );
+    expect(ids).toContain('deepseek-v4.1-flash');
+    expect(ids).toContain('kimi-k3');
+    expect(ids).not.toContain('gpt-6-luna');
+    expect(ids).not.toContain('claude-haiku-5-5');
+    expect(ids).not.toContain('gemini-4-argon-contributor');
   });
 
   it('keeps the saved Vercel list when the gateway cannot be reached', async () => {

@@ -13,7 +13,10 @@ export interface ChatThreadSummary {
   status?: 'idle' | 'running' | 'waiting' | 'error';
   unread?: boolean;
   hasContent?: boolean;
-  provider?: 'claude' | 'codex' | 'cursor' | 'grok' | 'opencode';
+  provider?: 'claude' | 'codex' | 'cursor' | 'grok' | 'opencode' | 'antigravity' | 'gemini' | string;
+  sessionState?: string;
+  isWarm?: boolean;
+  isSettled?: boolean;
 }
 
 export interface WorkspaceSessionTab {

@@ -36,7 +36,7 @@ export const ChatHome: React.FC<ChatHomeProps> = ({
   const handleSend = () => {
     const text = prompt.trim();
     if (!text) return;
-    onStartThread(text, provider, mode, providerMeta.defaultModel);
+    onStartThread(text, provider, mode);
   };
 
   return (

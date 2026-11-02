@@ -1,0 +1,678 @@
+/* Visual language — production layer.
+   Proposal: docs/visual-language.md. Loaded after the base bundle.
+   Scoped to body.kite-app so the dev-only ?animate lab keeps its own values. */
+
+:root {
+  --control-radius: 8px;
+  --card-radius: 12px;
+  --dialog-radius: 14px;
+  --chip-radius: 6px;
+  --pill-radius: 9999px;
+}
+
+body.kite-app {
+  --vl-radius-xs: 4px;
+  --vl-radius-sm: 6px;
+  --vl-radius-md: 8px;
+  --vl-radius-lg: 12px;
+  --vl-radius-xl: 14px;
+
+  /* Semantic scale aliases */
+  --control-radius: var(--vl-radius-md);
+  --card-radius: var(--vl-radius-lg);
+  --dialog-radius: var(--vl-radius-xl);
+  --chip-radius: var(--vl-radius-sm);
+  --pill-radius: 9999px;
+
+  /* Legacy variable reconciliation: harmonizes existing views automatically */
+  --radius-panel: var(--dialog-radius);
+  --radius-card: var(--card-radius);
+  --radius-composer: var(--card-radius);
+  --radius-row: var(--control-radius);
+  --radius-tile: var(--control-radius);
+  --radius-chip: var(--chip-radius);
+  --radius-pill: var(--pill-radius);
+
+  --vl-control-sm: 26px;
+  --vl-control-md: 32px;
+  --vl-control-lg: 38px;
+
+  --vl-stroke: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  --vl-stroke-strong: color-mix(in srgb, var(--text-primary) 22%, transparent);
+  --vl-focus: var(--accent);
+
+  --vl-surface-canvas: var(--background);
+  --vl-surface-raised: var(--raised-fill);
+  --vl-surface-overlay: var(--menu-plate);
+
+  --vl-inset: inset 0 1px 0 color-mix(in srgb, var(--text-primary) 6%, transparent);
+  --vl-inset-field: inset 0 1px 2px rgba(0, 0, 0, 0.38);
+  --vl-shadow-card: 0 14px 28px -18px rgba(0, 0, 0, 0.8);
+  --vl-shadow-overlay: 0 18px 40px -24px rgba(0, 0, 0, 0.8);
+
+  --vl-primary-top: #1a2029;
+  --vl-primary-bottom: #0b0f14;
+  --vl-primary-top-hover: #222a34;
+  --vl-primary-bottom-hover: #11161d;
+  --vl-primary-border: color-mix(in srgb, #ffffff 20%, transparent);
+  --vl-primary-border-hover: color-mix(in srgb, #ffffff 32%, transparent);
+  --vl-primary-ink: #f0f6fc;
+}
+
+html[data-theme='light'] body.kite-app {
+  --vl-inset: inset 0 1px 0 #ffffff;
+  --vl-inset-field: inset 0 1px 2px rgba(0, 0, 0, 0.08);
+  --vl-shadow-card: 0 14px 28px -18px rgba(0, 0, 0, 0.18);
+  --vl-shadow-overlay: 0 18px 40px -24px rgba(0, 0, 0, 0.2);
+  --vl-primary-top: #1f252e;
+  --vl-primary-bottom: #0b0f14;
+  --vl-primary-ink: #f7fafc;
+}
+
+/* Selection --------------------------------------------------------------- */
+
+body.kite-app input[type='checkbox'],
+body.kite-app input[type='radio'] {
+  appearance: none;
+  -webkit-appearance: none;
+  inline-size: 16px;
+  block-size: 16px;
+  flex: none;
+  margin: 0;
+  border: 1px solid var(--vl-stroke-strong);
+  background-color: var(--vl-surface-canvas);
+  box-shadow: var(--vl-inset-field);
+  cursor: pointer;
+  transition:
+    background-color 150ms var(--ease-ink, ease),
+    border-color 150ms var(--ease-ink, ease),
+    box-shadow 150ms var(--ease-ink, ease);
+}
+
+body.kite-app input[type='checkbox'] {
+  border-radius: var(--vl-radius-xs);
+}
+
+body.kite-app input[type='radio'] {
+  border-radius: 50%;
+}
+
+body.kite-app input[type='checkbox']:hover:not(:disabled),
+body.kite-app input[type='radio']:hover:not(:disabled) {
+  border-color: var(--vl-stroke-strong);
+}
+
+body.kite-app input[type='checkbox']:focus-visible,
+body.kite-app input[type='radio']:focus-visible {
+  outline: 2px solid var(--vl-focus);
+  outline-offset: 2px;
+}
+
+body.kite-app input[type='checkbox']:checked,
+body.kite-app input[type='checkbox']:indeterminate {
+  border-color: var(--accent);
+  background-color: var(--accent-fill);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.2 6.2 4.8 8.7 9.8 3.4' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 10px 10px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 30%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+body.kite-app input[type='checkbox']:indeterminate {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.4 6h7.2' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+body.kite-app input[type='radio']:checked {
+  border-color: var(--accent);
+  background-color: var(--accent-fill);
+  background-image: radial-gradient(circle, var(--accent-on-fill) 0 3.5px, transparent 4px);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 30%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+body.kite-app input[type='checkbox'][aria-invalid='true'],
+body.kite-app input[type='radio'][aria-invalid='true'] {
+  border-color: var(--status-failed);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--status-failed) 16%, transparent),
+    var(--vl-inset-field);
+}
+
+body.kite-app input[type='checkbox']:disabled,
+body.kite-app input[type='radio']:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+body.kite-app .ui-switch {
+  width: 40px;
+  height: 22px;
+  border: 1px solid var(--vl-stroke-strong);
+  background: var(--vl-surface-canvas);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+body.kite-app .ui-switch:hover:not(:disabled) {
+  border-color: var(--vl-stroke-strong);
+  background: color-mix(in srgb, var(--vl-surface-canvas) 88%, var(--text-primary) 12%);
+}
+
+body.kite-app .ui-switch[aria-checked='true'] {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: linear-gradient(180deg, var(--accent-fill-hover), var(--accent-fill));
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.25),
+    0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+body.kite-app .ui-switch__knob {
+  top: 1px;
+  left: 1px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #ffffff, #d5dde8);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 #ffffff;
+  transform-origin: left center;
+}
+
+body.kite-app .ui-switch[aria-checked='true'] .ui-switch__knob {
+  transform: translateX(18px);
+  transform-origin: right center;
+}
+
+body.kite-app .ui-switch:active:not(:disabled) .ui-switch__knob {
+  scale: 1.08 0.94;
+}
+
+body.kite-app .ui-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+html[data-theme='light'] body.kite-app .ui-switch {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+html[data-theme='light'] body.kite-app .ui-switch__knob {
+  background: linear-gradient(180deg, #ffffff, #f1f1f1);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 #ffffff;
+}
+
+/* Fields ------------------------------------------------------------------ */
+
+body.kite-app .ui-field:not(.ui-field--large):not(.ui-field--area) {
+  height: var(--vl-control-md);
+  border-radius: var(--vl-radius-md);
+}
+
+body.kite-app .ui-field {
+  border-color: var(--vl-stroke);
+  background: var(--vl-surface-canvas);
+  box-shadow: var(--vl-inset-field);
+}
+
+body.kite-app .ui-field--large,
+body.kite-app .ui-field--area {
+  border-radius: var(--vl-radius-md);
+}
+
+body.kite-app .ui-field:hover:not(:disabled) {
+  border-color: var(--vl-stroke-strong);
+}
+
+body.kite-app .ui-field:focus,
+body.kite-app .ui-field:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: var(--vl-inset-field);
+}
+
+body.kite-app .ui-field[aria-invalid='true'],
+body.kite-app .ui-field[aria-invalid='true']:hover:not(:disabled),
+body.kite-app .ui-field[aria-invalid='true']:focus {
+  border-color: var(--status-failed);
+  outline-color: var(--status-failed);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--status-failed) 16%, transparent),
+    var(--vl-inset-field);
+}
+
+/* Buttons ----------------------------------------------------------------- */
+
+body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button) {
+  border-radius: var(--vl-radius-md);
+  transition:
+    background-color var(--duration-ink, 150ms) var(--ease-ink, ease),
+    border-color var(--duration-ink, 150ms) var(--ease-ink, ease),
+    box-shadow var(--duration-ink, 150ms) var(--ease-ink, ease),
+    color var(--duration-ink, 150ms) var(--ease-ink, ease),
+    opacity var(--duration-ink, 150ms) var(--ease-ink, ease),
+    transform var(--duration-press, 120ms) var(--ease-snappy, ease);
+}
+
+body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button):hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button):active:not(:disabled) {
+  transform: scale(var(--press-scale, 0.97));
+}
+
+body.kite-app .primary-button {
+  border-color: var(--vl-primary-border);
+  background: linear-gradient(180deg, var(--vl-primary-top), var(--vl-primary-bottom) 72%);
+  color: var(--vl-primary-ink);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 14%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+body.kite-app .primary-button:hover:not(:disabled) {
+  border-color: var(--vl-primary-border-hover);
+  background: linear-gradient(180deg, var(--vl-primary-top-hover), var(--vl-primary-bottom-hover) 72%);
+}
+
+body.kite-app .primary-button:active:not(:disabled) {
+  background: linear-gradient(180deg, var(--vl-primary-bottom), var(--vl-primary-top) 140%);
+}
+
+body.kite-app .primary-button:disabled:not([aria-busy='true']) {
+  border-color: var(--vl-primary-border);
+  background: linear-gradient(180deg, var(--vl-primary-top), var(--vl-primary-bottom) 72%);
+  color: var(--vl-primary-ink);
+  box-shadow: none;
+}
+
+body.kite-app .primary-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 14%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+body.kite-app .secondary-button {
+  border-color: var(--vl-stroke-strong);
+  background: var(--vl-surface-raised);
+  color: var(--text-primary);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 6%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+body.kite-app .secondary-button:hover:not(:disabled) {
+  border-color: var(--vl-stroke-strong);
+  background: var(--raised-fill-hover);
+  color: var(--text-primary);
+}
+
+body.kite-app .ghost-button {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+
+body.kite-app .ghost-button:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--text-primary);
+}
+
+body.kite-app .danger-button {
+  border-color: color-mix(in srgb, var(--status-failed) 45%, transparent);
+  background: color-mix(in srgb, var(--status-failed) 10%, transparent);
+  color: var(--danger-ink);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 4%, transparent);
+}
+
+body.kite-app .danger-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--status-failed) 65%, transparent);
+  background: color-mix(in srgb, var(--status-failed) 16%, transparent);
+}
+
+body.kite-app .danger-button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--status-failed) 22%, transparent);
+}
+
+body.kite-app :is(.secondary-button, .ghost-button, .danger-button):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Cards and surfaces ------------------------------------------------------ */
+
+body.kite-app .ui-card {
+  border-radius: var(--vl-radius-lg);
+  border-color: var(--vl-stroke);
+  background: var(--vl-surface-raised);
+  box-shadow: var(--vl-inset);
+}
+
+html[data-theme='light'] body.kite-app .ui-card {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+body.kite-app .plugin-card {
+  border-radius: var(--vl-radius-lg);
+  border-color: var(--vl-stroke);
+  background: var(--vl-surface-raised);
+  box-shadow: var(--vl-inset);
+}
+
+body.kite-app .plugin-card:hover {
+  border-color: var(--vl-stroke-strong);
+  box-shadow: var(--vl-inset), var(--vl-shadow-card);
+}
+
+body.kite-app .ui-popover {
+  border-radius: var(--vl-radius-xl);
+  background: var(--vl-surface-overlay);
+  box-shadow: var(--vl-inset), var(--vl-shadow-overlay);
+}
+
+/* Reduced motion ---------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button):hover:not(:disabled),
+  body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button):active:not(:disabled) {
+    transform: none;
+  }
+}
+
+html[data-motion='reduce'] body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button):hover:not(:disabled),
+html[data-motion='reduce'] body.kite-app :is(.primary-button, .secondary-button, .ghost-button, .danger-button):active:not(:disabled) {
+  transform: none;
+}
+
+/* Stadium Pill & Animated UI standard ------------------------------------ */
+
+:root {
+  --radius-stadium: 9999px;
+}
+
+/* TitleBar Stadium Pill Mode Switcher — Complete Override of Legacy bundle.css */
+.mode-toggle--stadium:before,
+body.kite-app .mode-toggle--stadium:before {
+  display: none !important;
+  content: none !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  width: 0 !important;
+  height: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.mode-toggle--stadium,
+body.kite-app .mode-toggle--stadium {
+  position: relative !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  border-radius: 9999px !important;
+  background: #090a0d !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  padding: 3px !important;
+  box-shadow: inset 0 1.5px 4px rgba(0, 0, 0, 0.85) !important;
+  gap: 2px !important;
+  margin: 0 !important;
+  align-self: center !important;
+  box-sizing: border-box !important;
+  isolation: isolate;
+}
+
+.mode-toggle--stadium .mode-toggle__item,
+body.kite-app .mode-toggle--stadium .mode-toggle__item {
+  position: relative !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 26px !important;
+  min-height: 26px !important;
+  max-height: 26px !important;
+  line-height: 26px !important;
+  border-radius: 9999px !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  padding: 0 16px !important;
+  min-width: 68px !important;
+  font-size: 12.5px !important;
+  font-weight: 550 !important;
+  letter-spacing: -0.01em !important;
+  color: #838891 !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  transition: color 140ms ease !important;
+  z-index: 1 !important;
+  box-sizing: border-box !important;
+  margin: 0 !important;
+  text-align: center !important;
+  box-shadow: none !important;
+}
+
+.mode-toggle--stadium .mode-toggle__item:after,
+body.kite-app .mode-toggle--stadium .mode-toggle__item:after {
+  display: none !important;
+  content: none !important;
+}
+
+.mode-toggle--stadium .mode-toggle__item:hover,
+body.kite-app .mode-toggle--stadium .mode-toggle__item:hover {
+  color: #e4e7eb !important;
+  background: transparent !important;
+}
+
+.mode-toggle--stadium .mode-toggle__item--active,
+body.kite-app .mode-toggle--stadium .mode-toggle__item--active {
+  color: #ffffff !important;
+  background: transparent !important;
+  font-weight: 550 !important;
+}
+
+.mode-toggle--stadium .mode-toggle__label-text,
+body.kite-app .mode-toggle--stadium .mode-toggle__label-text {
+  position: relative !important;
+  z-index: 2 !important;
+  line-height: 1 !important;
+}
+
+.mode-toggle--stadium .mode-toggle__stadium-indicator,
+body.kite-app .mode-toggle--stadium .mode-toggle__stadium-indicator {
+  position: absolute !important;
+  inset: 0 !important;
+  border-radius: 9999px !important;
+  z-index: 1 !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
+  transition: box-shadow 220ms ease !important;
+}
+
+.mode-toggle--stadium .mode-toggle__stadium-indicator [data-beam],
+body.kite-app .mode-toggle--stadium .mode-toggle__stadium-indicator [data-beam] {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 9999px !important;
+  display: flex !important;
+}
+
+.mode-toggle--stadium .mode-toggle__stadium-backdrop,
+body.kite-app .mode-toggle--stadium .mode-toggle__stadium-backdrop {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 26px !important;
+  border-radius: 9999px !important;
+  background: #26282d !important;
+  border: 1px solid rgba(255, 255, 255, 0.13) !important;
+  box-shadow:
+    0 1.5px 4px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Subtle chromatic ambient illumination matching BorderBeam colors */
+.mode-toggle--stadium[data-mode='agent'] .mode-toggle__stadium-indicator,
+body.kite-app .mode-toggle--stadium[data-mode='agent'] .mode-toggle__stadium-indicator {
+  box-shadow: 0 0 14px -3px rgba(56, 189, 248, 0.35) !important;
+}
+
+.mode-toggle--stadium[data-mode='code'] .mode-toggle__stadium-indicator,
+body.kite-app .mode-toggle--stadium[data-mode='code'] .mode-toggle__stadium-indicator {
+  box-shadow: 0 0 14px -3px rgba(45, 212, 191, 0.35) !important;
+}
+
+.mode-toggle--stadium[data-mode='chat'] .mode-toggle__stadium-indicator,
+body.kite-app .mode-toggle--stadium[data-mode='chat'] .mode-toggle__stadium-indicator {
+  box-shadow: 0 0 14px -3px rgba(244, 63, 94, 0.35) !important;
+}
+
+/* Global Stadium Buttons */
+body.kite-app .stadium-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 18px;
+  border-radius: 9999px;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+body.kite-app .stadium-btn--primary {
+  background: #1a1f29;
+  border: 1px solid #28303e;
+  color: #f8fafc;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28);
+}
+
+body.kite-app .stadium-btn--primary:hover:not(:disabled) {
+  background: #222936;
+  border-color: #333d4e;
+  color: #ffffff;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.38);
+}
+
+body.kite-app .stadium-btn--secondary {
+  background: #141720;
+  border: 1px solid #202530;
+  color: #cbd5e1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+body.kite-app .stadium-btn--secondary:hover:not(:disabled) {
+  background: #1b202a;
+  border-color: #2a3242;
+  color: #f1f5f9;
+}
+
+body.kite-app .stadium-btn--stone {
+  background: #13171f;
+  border: 1px solid #222834;
+  color: #e2e8f0;
+  padding: 8px 20px;
+  box-shadow: 0 8px 16px -6px rgba(0, 0, 0, 0.5);
+}
+
+body.kite-app .stadium-btn--stone:hover:not(:disabled) {
+  background: #191f2a;
+  border-color: #2d3546;
+  color: #ffffff;
+  box-shadow: 0 12px 22px -6px rgba(0, 0, 0, 0.65);
+}
+
+body.kite-app .stadium-circle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #181d26;
+  border: 1px solid #28303e;
+  color: #e2e8f0;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+body.kite-app .stadium-circle-btn:hover:not(:disabled) {
+  background: #222834;
+  border-color: #343e50;
+  color: #ffffff;
+}
+
+/* Chat Composer Send Button Stadium Styling */
+body.kite-app .chat-composer__send {
+  border-radius: 9999px;
+  background: #1a1f29;
+  border: 1px solid #28303e;
+  color: #f8fafc;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28);
+  transition: all 140ms ease;
+}
+
+body.kite-app .chat-composer__send:not(:disabled):hover {
+  background: #222936;
+  border-color: #343e50;
+  color: #ffffff;
+}
+
+/* Lateral Panels & View Controls Standardization -------------------------- */
+
+body.kite-app .tickets-search {
+  height: var(--vl-control-md, 32px);
+  border-radius: var(--control-radius, 8px);
+  padding: 0 var(--space-2);
+  background: var(--vl-surface-canvas);
+  border: 1px solid var(--vl-stroke);
+  box-shadow: var(--vl-inset-field);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+}
+
+body.kite-app .tickets-search input {
+  height: 100%;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+body.kite-app .tickets-search:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+body.kite-app .tickets-header {
+  min-height: 44px;
+  align-items: center;
+}
+
+body.kite-app .tickets-header__trailing {
+  align-items: center;
+}
+
+body.kite-app .tickets-header__trailing .chrome-button {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--control-radius, 8px);
+}
+

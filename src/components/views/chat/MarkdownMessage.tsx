@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CheckIcon, CopyIcon } from './ChatIcons';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
+import { MermaidDiagram } from '../../ui/MermaidDiagram';
 
 function isFilePathCandidate(text: string): boolean {
   let trimmed = text.trim();
@@ -138,8 +139,12 @@ export const MarkdownMessage: React.FC<{ text: string; workspaceId?: string | nu
           code: ({ className, children }) => {
             const raw = String(children ?? '');
             const match = /language-([\w-]+)/.exec(className || '');
+            const lang = (match?.[1] ?? '').toLowerCase();
             const isBlock = Boolean(match) || raw.includes('\n');
             if (isBlock) {
+              if (lang === 'mermaid') {
+                return <MermaidDiagram code={raw.replace(/\n$/, '')} />;
+              }
               return <CodeBlock lang={match?.[1] ?? ''} code={raw.replace(/\n$/, '')} />;
             }
             const isPath = isFilePathCandidate(raw);

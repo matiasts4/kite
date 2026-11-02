@@ -10,7 +10,9 @@ import { SidePanelAppsView } from './views/SidePanelAppsView';
 import { AgentDashboardView } from './views/apps/AgentDashboardView';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { getActiveAgentTerminals } from '../lib/terminalRegistry';
-import { usePresence } from '../motion/usePresence';
+import { AnimatePresence, motion } from 'motion/react';
+import { MOTION_EXIT_MS } from '../motion/contract';
+import { surfaceMotion } from '../motion/standard/surfaces';
 import type { Workspace } from '../types';
 import {
   LayoutGridGlyph,
@@ -68,8 +70,6 @@ const STORAGE_KEY_BROWSER = 'kite-code.app-browser.v1';
 
 const DEFAULT_TABS: DockTabItem[] = [
   { id: 'dashboard', kind: 'dashboard' },
-  { id: 'tasks', kind: 'tasks' },
-  { id: 'prompts', kind: 'prompts' },
 ];
 
 interface StoredTabsPayload {
@@ -105,17 +105,9 @@ function loadInitialTabs(): { tabs: DockTabItem[]; activeTabId: string } {
           }
         }
 
-        // Pinned tabs: dashboard, tasks, prompts must be present
+        // Pinned anchor: dashboard must be present
         if (!validTabs.some((t) => t.kind === 'dashboard')) {
           validTabs.unshift({ id: 'dashboard', kind: 'dashboard' });
-        }
-        if (!validTabs.some((t) => t.kind === 'tasks')) {
-          const dashIdx = validTabs.findIndex((t) => t.kind === 'dashboard');
-          validTabs.splice(dashIdx + 1, 0, { id: 'tasks', kind: 'tasks' });
-        }
-        if (!validTabs.some((t) => t.kind === 'prompts')) {
-          const tasksIdx = validTabs.findIndex((t) => t.kind === 'tasks');
-          validTabs.splice(tasksIdx + 1, 0, { id: 'prompts', kind: 'prompts' });
         }
 
         const activeId =
@@ -128,7 +120,7 @@ function loadInitialTabs(): { tabs: DockTabItem[]; activeTabId: string } {
     }
   } catch {}
 
-  return { tabs: DEFAULT_TABS, activeTabId: 'tasks' };
+  return { tabs: DEFAULT_TABS, activeTabId: 'dashboard' };
 }
 
 function loadInitialWidth(): number {
@@ -362,8 +354,8 @@ const TAB_CONFIGS: Record<string, TabResolvedDef> = {
   browser: { label: 'Browser', tooltip: 'Browser', closable: true, renderIcon: () => <GlobeGlyph /> },
   files: { label: 'Files', tooltip: 'Files', closable: true, renderIcon: () => <FolderGlyph /> },
   diffs: { label: 'Diffs', tooltip: 'Diffs & Changes', closable: true, renderIcon: () => <GitDiffGlyph /> },
-  tasks: { label: 'Tasks', tooltip: 'Tasks', closable: false, renderIcon: () => <ListTodoGlyph /> },
-  prompts: { label: 'Prompts', tooltip: 'Prompts', closable: false, renderIcon: () => <MessageSquareQuoteGlyph /> },
+  tasks: { label: 'Tasks', tooltip: 'Tasks', closable: true, renderIcon: () => <ListTodoGlyph /> },
+  prompts: { label: 'Prompts', tooltip: 'Prompts', closable: true, renderIcon: () => <MessageSquareQuoteGlyph /> },
   'app:focusTimer': { label: 'Focus timer', tooltip: 'Focus timer', closable: true, renderIcon: () => <TimerGlyph /> },
   'app:scratchpad': { label: 'Scratchpad', tooltip: 'Scratchpad', closable: true, renderIcon: () => <NotebookPenGlyph /> },
   'app:bombSprint': { label: 'Bomb Sprint', tooltip: 'Bomb Sprint', closable: true, renderIcon: () => <FlameGlyph /> },
@@ -417,7 +409,7 @@ export const RightDock: React.FC<RightDockProps> = ({
 
   const effectiveWorkspaceId = useMemo(() => {
     if (workspaceId) return workspaceId;
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null;
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
     if (saved && workspaces?.some((w) => w.id === saved)) return saved;
     return workspaces?.[0]?.id ?? null;
   }, [workspaceId, workspaces]);
@@ -832,15 +824,17 @@ export const RightDock: React.FC<RightDockProps> = ({
     window.addEventListener('pointercancel', onUp);
   };
 
-  const dockPresence = usePresence(visible);
-  if (!dockPresence.mounted) return null;
-  const panelMotion = dockPresence.phase === 'out' ? ' motion-panel-out' : ' motion-panel-in';
+  const [dockMounted, setDockMounted] = useState(visible);
+
+  useEffect(() => {
+    if (visible) setDockMounted(true);
+  }, [visible]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
   return (
     <>
-      {dragging && (
+      {dragging && dockMounted && (
         <div
           aria-hidden="true"
           style={{
@@ -853,305 +847,311 @@ export const RightDock: React.FC<RightDockProps> = ({
           }}
         />
       )}
-      {isFullScreen && (
+      {isFullScreen && dockMounted && (
         <div
           aria-hidden="true"
           className="app-browser-sidebar__spacer"
           style={{ '--app-browser-width': `${panelWidth}px`, width: panelWidth, minWidth: panelWidth, flex: 'none' } as React.CSSProperties}
         />
       )}
-      <aside
-        ref={asideRef}
-        className={`app-browser-sidebar ${isFullScreen ? 'app-browser-sidebar--fullscreen' : ''}${dragging ? ' app-browser-sidebar--resizing' : ''}${panelMotion}`}
-        data-testid="app-browser-sidebar"
-        style={isFullScreen ? undefined : ({ '--app-browser-width': `${panelWidth}px`, width: panelWidth, minWidth: panelWidth, flex: 'none' } as React.CSSProperties)}
-      >
-        {!isFullScreen && (
-          <hr
-            className="app-browser-sidebar__grip"
-            aria-label="Resize side panel"
-            aria-orientation="vertical"
-            aria-valuemin={320}
-            aria-valuemax={Math.round(window.innerWidth * 0.72)}
-            aria-valuenow={panelWidth}
-            data-dragging={dragging ? 'true' : undefined}
-            onPointerDown={onGripDown}
-            tabIndex={0}
-          />
-        )}
-
-      {/* Side Panel Header with Tab Navigation */}
-      <div
-        className={`side-panel-header${activeDrag !== null ? ' side-panel-header--dragging' : ''}`}
-        data-tooltip-placement="above"
-      >
-        <span aria-live="polite" className="sr-only">
-          {announcement || activeTab?.kind}
-        </span>
-
-        {/* Tab list */}
-        <div
-          aria-label="Sidebar tabs"
-          className="side-panel-header__tabs"
-          ref={tabsContainerRef}
-          role="tablist"
-        >
-          {activeDrag !== null && (
-            <span
-              aria-hidden="true"
-              className="side-panel-tab-slot"
-              style={{
-                left: `${calculateSlotLeft(activeDrag.boxes, activeDrag.from, activeDrag.slot) - activeDrag.originX}px`,
-                width: `${activeDrag.boxes[activeDrag.from]?.width ?? 0}px`,
-              }}
-            />
-          )}
-
-          {tabs.map((tab, index) => {
-            const def = resolveTabDef(tab);
-            const isSelected = tab.id === activeTab?.id;
-            const isCarried = activeDrag?.id === tab.id;
-            const isSettling = settling?.id === tab.id;
-
-            const shifts = activeDrag === null ? null : calculateTabShifts(activeDrag.boxes, activeDrag.from, activeDrag.slot, TAB_GAP);
-            const translateX = isCarried
-              ? clampDragOffset(activeDrag?.boxes ?? [], activeDrag?.from ?? 0, activeDrag?.dx ?? 0)
-              : isSettling && settling?.phase === 'from'
-              ? settling.offset
-              : shifts?.[index] ?? 0;
-
-            const shortcuts = [
-              canReorder && index > 0 ? 'Alt+Shift+ArrowLeft' : null,
-              canReorder && index < tabs.length - 1 ? 'Alt+Shift+ArrowRight' : null,
-              def.closable ? 'Delete' : null,
-            ].filter(Boolean);
-
-            return (
-              <div
-                key={tab.id}
-                className={`side-panel-tab${isSelected ? ' side-panel-tab--selected' : ''}${isCarried ? ' side-panel-tab--carried' : ''}${isSettling ? ` side-panel-tab--settling-${settling?.phase}` : ''}`}
-                data-kind={tab.kind}
-                onPointerDown={(e) => {
-                  pointerDownTargetRef.current = { id: tab.id, x: e.clientX };
-                  dragHook.onPointerDown(e);
-                }}
-                ref={(el) => {
-                  if (el === null) tabElementsRef.current.delete(tab.id);
-                  else tabElementsRef.current.set(tab.id, el);
-                }}
-                style={translateX === 0 ? undefined : { transform: `translateX(${translateX}px)` }}
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={isSelected}
-                  aria-keyshortcuts={shortcuts.length > 0 ? shortcuts.join(' ') : undefined}
-                  tabIndex={isSelected ? 0 : -1}
-                  className="side-panel-tab__select"
-                  onClick={() => {
-                    if (didDragRef.current) return;
-                    setActiveTabId(tab.id);
-                  }}
-                  onKeyDown={(e) => handleTabKeyDown(e, index, tab, def)}
-                  ref={(el) => {
-                    if (el === null) tabButtonRefs.current.delete(tab.id);
-                    else tabButtonRefs.current.set(tab.id, el);
-                  }}
-                  title={canReorder ? `${def.tooltip} · drag to reorder` : def.tooltip}
-                >
-                  {def.renderIcon()}
-                  <span className="side-panel-tab__label">{def.label}</span>
-                  {tab.kind === 'dashboard' && activeAgentsCount > 0 && (
-                    <span className="side-panel-tab__count">{activeAgentsCount}</span>
-                  )}
-                </button>
-
-                {def.closable && activeDrag === null && (
-                  <button
-                    type="button"
-                    className="side-panel-tab__close"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleCloseTab(tab.id);
-                    }}
-                    tabIndex={-1}
-                    title="Close tab"
-                    aria-label={`Close ${def.label}`}
-                  >
-                    <CloseGlyph />
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* New Tab Action with Dropdown Menu */}
-        <div style={{ position: 'relative' }}>
-          <button
-            type="button"
-            aria-expanded={isNewTabMenuOpen}
-            aria-haspopup="menu"
-            aria-label="New tab"
-            className={`side-panel-header__action${isNewTabMenuOpen ? ' side-panel-header__action--on' : ''}`}
-            onClick={() => setIsNewTabMenuOpen((v) => !v)}
-            title="New tab"
+      <AnimatePresence onExitComplete={() => setDockMounted(false)}>
+        {visible && (
+          <motion.aside
+            key="right-dock"
+            ref={asideRef}
+            {...surfaceMotion('panel', { exitMs: MOTION_EXIT_MS })}
+            className={`app-browser-sidebar ${isFullScreen ? 'app-browser-sidebar--fullscreen' : ''}${dragging ? ' app-browser-sidebar--resizing' : ''}`}
+            data-testid="app-browser-sidebar"
+            style={isFullScreen ? undefined : ({ '--app-browser-width': `${panelWidth}px`, width: panelWidth, minWidth: panelWidth, flex: 'none' } as React.CSSProperties)}
           >
-            <PlusGlyph />
-          </button>
-
-          {isNewTabMenuOpen && (
-            <>
-              <div
-                style={{ position: 'fixed', inset: 0, zIndex: 59 }}
-                onClick={() => setIsNewTabMenuOpen(false)}
+            {!isFullScreen && (
+              <hr
+                className="app-browser-sidebar__grip"
+                aria-label="Resize side panel"
+                aria-orientation="vertical"
+                aria-valuemin={320}
+                aria-valuemax={Math.round(window.innerWidth * 0.72)}
+                aria-valuenow={panelWidth}
+                data-dragging={dragging ? 'true' : undefined}
+                onPointerDown={onGripDown}
+                tabIndex={0}
               />
-              <div
-                role="menu"
-                aria-label="New tab"
-                className="ui-menu side-panel-add-menu scroll-quiet"
-                onMouseLeave={() => setHighlightedMenuId(null)}
-                style={{
-                  position: 'absolute',
-                  top: 'calc(var(--pane-header-height, 36px) + 2px)',
-                  right: 0,
-                  zIndex: 60,
-                }}
-              >
-                <div className="ui-menu__header" role="presentation">
-                  <span className="ui-menu__title">New tab</span>
-                </div>
-                <div aria-hidden="true" className="ui-menu__rule" />
+            )}
 
-                {STANDARD_MENU_TABS.map((item) => {
-                  const id = `std-${item.kind}`;
-                  const isHighlighted = highlightedMenuId === id;
+            {/* Side Panel Header with Tab Navigation */}
+            <div
+              className={`side-panel-header${activeDrag !== null ? ' side-panel-header--dragging' : ''}`}
+              data-tooltip-placement="above"
+            >
+              <span aria-live="polite" className="sr-only">
+                {announcement || activeTab?.kind}
+              </span>
+
+              {/* Tab list */}
+              <div
+                aria-label="Sidebar tabs"
+                className="side-panel-header__tabs"
+                ref={tabsContainerRef}
+                role="tablist"
+              >
+                {activeDrag !== null && (
+                  <span
+                    aria-hidden="true"
+                    className="side-panel-tab-slot"
+                    style={{
+                      left: `${calculateSlotLeft(activeDrag.boxes, activeDrag.from, activeDrag.slot) - activeDrag.originX}px`,
+                      width: `${activeDrag.boxes[activeDrag.from]?.width ?? 0}px`,
+                    }}
+                  />
+                )}
+
+                {tabs.map((tab, index) => {
+                  const def = resolveTabDef(tab);
+                  const isSelected = tab.id === activeTab?.id;
+                  const isCarried = activeDrag?.id === tab.id;
+                  const isSettling = settling?.id === tab.id;
+
+                  const shifts = activeDrag === null ? null : calculateTabShifts(activeDrag.boxes, activeDrag.from, activeDrag.slot, TAB_GAP);
+                  const translateX = isCarried
+                    ? clampDragOffset(activeDrag?.boxes ?? [], activeDrag?.from ?? 0, activeDrag?.dx ?? 0)
+                    : isSettling && settling?.phase === 'from'
+                    ? settling.offset
+                    : shifts?.[index] ?? 0;
+
+                  const shortcuts = [
+                    canReorder && index > 0 ? 'Alt+Shift+ArrowLeft' : null,
+                    canReorder && index < tabs.length - 1 ? 'Alt+Shift+ArrowRight' : null,
+                    def.closable ? 'Delete' : null,
+                  ].filter(Boolean);
+
                   return (
                     <div
-                      key={item.kind}
-                      role="menuitem"
-                      tabIndex={-1}
-                      className="ui-menu__row"
-                      data-highlighted={isHighlighted ? 'true' : undefined}
-                      onMouseEnter={() => setHighlightedMenuId(id)}
-                      onClick={() => handleOpenStandardTab(item.kind)}
+                      key={tab.id}
+                      className={`side-panel-tab${isSelected ? ' side-panel-tab--selected' : ''}${isCarried ? ' side-panel-tab--carried' : ''}${isSettling ? ` side-panel-tab--settling-${settling?.phase}` : ''}`}
+                      data-kind={tab.kind}
+                      onPointerDown={(e) => {
+                        pointerDownTargetRef.current = { id: tab.id, x: e.clientX };
+                        dragHook.onPointerDown(e);
+                      }}
+                      ref={(el) => {
+                        if (el === null) tabElementsRef.current.delete(tab.id);
+                        else tabElementsRef.current.set(tab.id, el);
+                      }}
+                      style={translateX === 0 ? undefined : { transform: `translateX(${translateX}px)` }}
                     >
-                      <span aria-hidden="true" className="ui-menu__icon">
-                        {item.icon}
-                      </span>
-                      <span className="ui-menu__label">
-                        <span className="ui-menu__row-title">{item.label}</span>
-                      </span>
-                      {item.shortcut && (
-                        <span aria-hidden="true" className="ui-menu__shortcut">
-                          {item.shortcut}
-                        </span>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={isSelected}
+                        aria-keyshortcuts={shortcuts.length > 0 ? shortcuts.join(' ') : undefined}
+                        tabIndex={isSelected ? 0 : -1}
+                        className="side-panel-tab__select"
+                        onClick={() => {
+                          if (didDragRef.current) return;
+                          setActiveTabId(tab.id);
+                        }}
+                        onKeyDown={(e) => handleTabKeyDown(e, index, tab, def)}
+                        ref={(el) => {
+                          if (el === null) tabButtonRefs.current.delete(tab.id);
+                          else tabButtonRefs.current.set(tab.id, el);
+                        }}
+                        title={canReorder ? `${def.tooltip} · drag to reorder` : def.tooltip}
+                      >
+                        {def.renderIcon()}
+                        <span className="side-panel-tab__label">{def.label}</span>
+                        {tab.kind === 'dashboard' && activeAgentsCount > 0 && (
+                          <span className="side-panel-tab__count">{activeAgentsCount}</span>
+                        )}
+                      </button>
+
+                      {def.closable && activeDrag === null && (
+                        <button
+                          type="button"
+                          className="side-panel-tab__close"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCloseTab(tab.id);
+                          }}
+                          tabIndex={-1}
+                          title="Close tab"
+                          aria-label={`Close ${def.label}`}
+                        >
+                          <CloseGlyph />
+                        </button>
                       )}
                     </div>
                   );
                 })}
+              </div>
 
-                <div aria-hidden="true" className="ui-menu__rule" />
-                <div className="ui-menu__heading" role="presentation">
-                  Apps
-                </div>
+              {/* New Tab Action with Dropdown Menu */}
+              <div style={{ position: 'relative' }}>
+                <button
+                  type="button"
+                  aria-expanded={isNewTabMenuOpen}
+                  aria-haspopup="menu"
+                  aria-label="New tab"
+                  className={`side-panel-header__action${isNewTabMenuOpen ? ' side-panel-header__action--on' : ''}`}
+                  onClick={() => setIsNewTabMenuOpen((v) => !v)}
+                  title="New tab"
+                >
+                  <PlusGlyph />
+                </button>
 
-                {APP_MENU_TABS.map((item) => {
-                  const id = `app-${item.appId}`;
-                  const isHighlighted = highlightedMenuId === id;
-                  return (
+                {isNewTabMenuOpen && (
+                  <>
                     <div
-                      key={item.appId}
-                      role="menuitem"
-                      tabIndex={-1}
-                      className="ui-menu__row"
-                      data-highlighted={isHighlighted ? 'true' : undefined}
-                      onMouseEnter={() => setHighlightedMenuId(id)}
-                      onClick={() => handleOpenAppTab(item.appId)}
+                      style={{ position: 'fixed', inset: 0, zIndex: 59 }}
+                      onClick={() => setIsNewTabMenuOpen(false)}
+                    />
+                    <div
+                      role="menu"
+                      aria-label="New tab"
+                      className="ui-menu side-panel-add-menu scroll-quiet"
+                      onMouseLeave={() => setHighlightedMenuId(null)}
+                      style={{
+                        position: 'absolute',
+                        top: 'calc(var(--pane-header-height, 36px) + 2px)',
+                        right: 0,
+                        zIndex: 60,
+                      }}
                     >
-                      <span aria-hidden="true" className="ui-menu__icon">
-                        {item.icon}
-                      </span>
-                      <span className="ui-menu__label">
-                        <span className="ui-menu__row-title">{item.label}</span>
-                      </span>
+                      <div className="ui-menu__header" role="presentation">
+                        <span className="ui-menu__title">New tab</span>
+                      </div>
+                      <div aria-hidden="true" className="ui-menu__rule" />
+
+                      {STANDARD_MENU_TABS.map((item) => {
+                        const id = `std-${item.kind}`;
+                        const isHighlighted = highlightedMenuId === id;
+                        return (
+                          <div
+                            key={item.kind}
+                            role="menuitem"
+                            tabIndex={-1}
+                            className="ui-menu__row"
+                            data-highlighted={isHighlighted ? 'true' : undefined}
+                            onMouseEnter={() => setHighlightedMenuId(id)}
+                            onClick={() => handleOpenStandardTab(item.kind)}
+                          >
+                            <span aria-hidden="true" className="ui-menu__icon">
+                              {item.icon}
+                            </span>
+                            <span className="ui-menu__label">
+                              <span className="ui-menu__row-title">{item.label}</span>
+                            </span>
+                            {item.shortcut && (
+                              <span aria-hidden="true" className="ui-menu__shortcut">
+                                {item.shortcut}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      <div aria-hidden="true" className="ui-menu__rule" />
+                      <div className="ui-menu__heading" role="presentation">
+                        Apps
+                      </div>
+
+                      {APP_MENU_TABS.map((item) => {
+                        const id = `app-${item.appId}`;
+                        const isHighlighted = highlightedMenuId === id;
+                        return (
+                          <div
+                            key={item.appId}
+                            role="menuitem"
+                            tabIndex={-1}
+                            className="ui-menu__row"
+                            data-highlighted={isHighlighted ? 'true' : undefined}
+                            onMouseEnter={() => setHighlightedMenuId(id)}
+                            onClick={() => handleOpenAppTab(item.appId)}
+                          >
+                            <span aria-hidden="true" className="ui-menu__icon">
+                              {item.icon}
+                            </span>
+                            <span className="ui-menu__label">
+                              <span className="ui-menu__row-title">{item.label}</span>
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
+                  </>
+                )}
               </div>
-            </>
-          )}
-        </div>
 
-        {/* Fullscreen Action */}
-        <button
-          type="button"
-          aria-label={isFullScreen ? 'Exit full screen' : 'Full screen'}
-          aria-pressed={isFullScreen}
-          className={`side-panel-header__action${isFullScreen ? ' side-panel-header__action--on' : ''}`}
-          onClick={() => setIsFullScreen((v) => !v)}
-          title={isFullScreen ? 'Exit full screen' : 'Full screen'}
-        >
-          {isFullScreen ? <Minimize2Glyph /> : <Maximize2Glyph />}
-        </button>
-      </div>
+              {/* Fullscreen Action */}
+              <button
+                type="button"
+                aria-label={isFullScreen ? 'Exit full screen' : 'Full screen'}
+                aria-pressed={isFullScreen}
+                className={`side-panel-header__action${isFullScreen ? ' side-panel-header__action--on' : ''}`}
+                onClick={() => setIsFullScreen((v) => !v)}
+                title={isFullScreen ? 'Exit full screen' : 'Full screen'}
+              >
+                {isFullScreen ? <Minimize2Glyph /> : <Maximize2Glyph />}
+              </button>
+            </div>
 
-      {/* Side Panel Content Page */}
-      <div className="app-browser-sidebar__page">
-        {activeTab && (
-          <ErrorBoundary name={`RightDockView:${activeTab.kind}`}>
-            {activeTab.kind === 'dashboard' && <AgentDashboardView onStartAgent={onStartAgent} />}
-            {activeTab.kind === 'browser' && (
-              <BrowserView workspaceId={effectiveWorkspaceId} isOccluded={isOccluded || dragging} />
-            )}
-            {activeTab.kind === 'files' && (
-              <FilesView
-                workspaceId={effectiveWorkspaceId}
-                workspaces={workspaces}
-                onSelectWorkspace={onSelectWorkspace}
-              />
-            )}
-            {activeTab.kind === 'diffs' && (
-              <DiffsView
-                workspaceId={effectiveWorkspaceId}
-                workspaces={workspaces}
-                onSelectWorkspace={onSelectWorkspace}
-                onOpenFileInEditor={(filePath) => {
-                  setTabs((prev) => {
-                    if (!prev.some((t) => t.id === 'files')) {
-                      return [...prev, { id: 'files', kind: 'files' }];
-                    }
-                    return prev;
-                  });
-                  setActiveTabId('files');
-                  window.dispatchEvent(
-                    new CustomEvent('kite:open-right-dock-file', {
-                      detail: { filePath, workspaceId: effectiveWorkspaceId },
-                    })
-                  );
-                }}
-              />
-            )}
-            {activeTab.kind === 'tasks' && (
-              <div className="app-browser-sidebar__tasks">
-                <TicketsView workspaces={workspaces} selectedWorkspaceId={effectiveWorkspaceId} />
-              </div>
-            )}
-            {activeTab.kind === 'prompts' && (
-              <div className="app-browser-sidebar__prompts">
-                <PromptsView />
-              </div>
-            )}
-            {activeTab.kind === 'app' && (
-              <SidePanelAppsView
-                app={activeTab.appId ?? undefined}
-                title={activeTab.appId ? resolveTabDef(activeTab).label : undefined}
-              />
-            )}
-          </ErrorBoundary>
+            {/* Side Panel Content Page */}
+            <div className="app-browser-sidebar__page">
+              {activeTab && (
+                <ErrorBoundary name={`RightDockView:${activeTab.kind}`}>
+                  {activeTab.kind === 'dashboard' && <AgentDashboardView onStartAgent={onStartAgent} />}
+                  {activeTab.kind === 'browser' && (
+                    <BrowserView workspaceId={effectiveWorkspaceId} isOccluded={isOccluded || dragging} />
+                  )}
+                  {activeTab.kind === 'files' && (
+                    <FilesView
+                      workspaceId={effectiveWorkspaceId}
+                      workspaces={workspaces}
+                      onSelectWorkspace={onSelectWorkspace}
+                    />
+                  )}
+                  {activeTab.kind === 'diffs' && (
+                    <DiffsView
+                      workspaceId={effectiveWorkspaceId}
+                      workspaces={workspaces}
+                      onSelectWorkspace={onSelectWorkspace}
+                      onOpenFileInEditor={(filePath) => {
+                        setTabs((prev) => {
+                          if (!prev.some((t) => t.id === 'files')) {
+                            return [...prev, { id: 'files', kind: 'files' }];
+                          }
+                          return prev;
+                        });
+                        setActiveTabId('files');
+                        window.dispatchEvent(
+                          new CustomEvent('kite:open-right-dock-file', {
+                            detail: { filePath, workspaceId: effectiveWorkspaceId },
+                          })
+                        );
+                      }}
+                    />
+                  )}
+                  {activeTab.kind === 'tasks' && (
+                    <div className="app-browser-sidebar__tasks">
+                      <TicketsView workspaces={workspaces} selectedWorkspaceId={effectiveWorkspaceId} />
+                    </div>
+                  )}
+                  {activeTab.kind === 'prompts' && (
+                    <div className="app-browser-sidebar__prompts">
+                      <PromptsView />
+                    </div>
+                  )}
+                  {activeTab.kind === 'app' && (
+                    <SidePanelAppsView
+                      app={activeTab.appId ?? undefined}
+                      title={activeTab.appId ? resolveTabDef(activeTab).label : undefined}
+                    />
+                  )}
+                </ErrorBoundary>
+              )}
+            </div>
+          </motion.aside>
         )}
-      </div>
-    </aside>
-  </>
+      </AnimatePresence>
+    </>
   );
 };

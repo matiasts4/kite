@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { ActivePlugin, PluginLogo } from './types';
+import type { ActivePlugin, OfficialPlugin, PluginAction, PluginConnection, PluginConnectionState, PluginLogo } from './types';
 import {
   PuzzleIcon,
   BugIcon,
@@ -7,10 +7,36 @@ import {
 } from './pluginIcons';
 
 export interface PluginCardProps {
-  plugin: ActivePlugin;
-  onToggleStatus: (plugin: ActivePlugin) => void;
-  onOpenDetails: (plugin: ActivePlugin) => void;
-  onConnectAction: (plugin: ActivePlugin) => void;
+  plugin: OfficialPlugin | ActivePlugin;
+  connection?: PluginConnection | null;
+  onAction?: (id: string, action: PluginAction) => void;
+  onToggleStatus?: (plugin: any) => void;
+  onOpenDetails?: (plugin: any) => void;
+  onConnectAction?: (plugin: any) => void;
+}
+
+export function resolveCardCopy(
+  plugin: { name: string; summary: string },
+  connection?: PluginConnection | null
+): { text: string; tone?: 'failed' } {
+  if (connection?.message) {
+    return { text: connection.message, tone: 'failed' };
+  }
+  const state = connection?.state;
+  if (state === 'connected') {
+    return { text: connection?.account || 'Connected' };
+  }
+  if (state === 'needsReauth') {
+    const who = connection?.account || plugin.name;
+    return { text: `${who} — reconnect to keep using it.` };
+  }
+  if (state === 'connecting') {
+    return { text: 'Finish in your browser or local app, then return here.' };
+  }
+  if (state === 'unavailable') {
+    return { text: 'Account setup is not available in this build.' };
+  }
+  return { text: plugin.summary };
 }
 
 export const BrandLogo: React.FC<{
@@ -111,19 +137,115 @@ export const BrandLogo: React.FC<{
 
 export const PluginCard: React.FC<PluginCardProps> = ({
   plugin,
-  onToggleStatus: _onToggleStatus,
+  connection,
+  onAction,
+  onToggleStatus,
   onOpenDetails,
   onConnectAction,
 }) => {
-  const isInstalled = plugin.status === 'installed';
-  const isUnavailable = plugin.initialState === 'unavailable';
-  const isPreview = plugin.initialState === 'preview';
+  const effectiveState: PluginConnectionState =
+    connection?.state ??
+    ((plugin as any).status === 'installed'
+      ? 'connected'
+      : (plugin.initialState as PluginConnectionState) ?? 'disconnected');
 
-  const summaryText = isInstalled
-    ? 'Connected'
-    : isUnavailable
-    ? 'Account setup is not available in this build.'
-    : plugin.summary;
+  const effectiveConnection: PluginConnection = connection ?? {
+    id: plugin.id,
+    state: effectiveState,
+    account: (plugin as any).config?.account ?? null,
+    message: null,
+  };
+
+  const copy = resolveCardCopy(plugin, effectiveConnection);
+
+  const handleAction = (act: PluginAction, e: React.MouseEvent) => {
+    e.stopPropagation();
+    onAction?.(plugin.id, act);
+    onConnectAction?.(plugin);
+    onToggleStatus?.(plugin);
+  };
+
+  const renderActionButton = () => {
+    if (effectiveState === 'preview' || effectiveState === 'unavailable') {
+      return (
+        <span className="plugin-connect plugin-connect--chip">
+          {effectiveState === 'preview' ? 'Preview' : 'Unavailable'}
+        </span>
+      );
+    }
+
+    if (effectiveState === 'connecting') {
+      return (
+        <button
+          aria-label={`Cancel ${plugin.name}`}
+          className="plugin-connect plugin-connect--quiet"
+          onClick={(e) => handleAction('cancel', e)}
+          type="button"
+        >
+          <span aria-hidden="true" className="button-spinner" />
+          Cancel
+        </button>
+      );
+    }
+
+    if (effectiveState === 'connected') {
+      return (
+        <button
+          aria-label={`Disconnect ${plugin.name}`}
+          className="plugin-connect plugin-connect--linked"
+          onClick={(e) => handleAction('disconnect', e)}
+          title="Disconnect"
+          type="button"
+        >
+          <span aria-hidden="true" className="plugin-connect__swap">
+            <span className="plugin-connect__rest">
+              <i className="plugin-connect__dot" />
+              Connected
+            </span>
+            <span className="plugin-connect__hover">Disconnect</span>
+          </span>
+        </button>
+      );
+    }
+
+    if (effectiveState === 'needsReauth') {
+      return (
+        <button
+          aria-label={`Reconnect ${plugin.name}`}
+          className="plugin-connect"
+          onClick={(e) => handleAction('connect', e)}
+          type="button"
+        >
+          Reconnect
+        </button>
+      );
+    }
+
+    if (effectiveState === 'disconnectPending') {
+      return (
+        <button
+          aria-label={`Disconnect ${plugin.name}`}
+          className="plugin-connect"
+          onClick={(e) => handleAction('disconnect', e)}
+          type="button"
+        >
+          Disconnect
+        </button>
+      );
+    }
+
+    // Default: disconnected
+    return (
+      <button
+        aria-label={`Connect ${plugin.name}`}
+        className="plugin-connect"
+        onClick={(e) => handleAction('connect', e)}
+        type="button"
+      >
+        Connect
+      </button>
+    );
+  };
 
   return (
     <article
@@ -131,7 +253,7 @@ export const PluginCard: React.FC<PluginCardProps> = ({
       className="plugin-card"
       data-plugin={plugin.id}
       style={{ cursor: 'pointer' }}
-      onClick={() => onOpenDetails(plugin)}
+      onClick={() => onOpenDetails?.(plugin)}
     >
       {/* Tile with official logo */}
       <span
@@ -149,48 +271,13 @@ export const PluginCard: React.FC<PluginCardProps> = ({
       {/* Plugin Copy */}
       <span className="plugin-card__copy">
         <strong>{plugin.name}</strong>
-        <small aria-live="polite" title={summaryText} data-tone={isUnavailable ? 'failed' : undefined}>
-          {summaryText}
+        <small aria-live="polite" title={copy.text} data-tone={copy.tone}>
+          {copy.text}
         </small>
       </span>
 
-      {/* Connect Action chip/button */}
-      {isPreview || isUnavailable ? (
-        <span className="plugin-connect plugin-connect--chip">
-          {isPreview ? 'Preview' : 'Unavailable'}
-        </span>
-      ) : isInstalled ? (
-        <button
-          aria-label={`Disconnect ${plugin.name}`}
-          className="plugin-connect plugin-connect--linked"
-          onClick={(e) => {
-            e.stopPropagation();
-            onConnectAction(plugin);
-          }}
-          title="Disconnect"
-          type="button"
-        >
-          <span aria-hidden="true" className="plugin-connect__swap">
-            <span className="plugin-connect__rest">
-              <i className="plugin-connect__dot" />
-              Connected
-            </span>
-            <span className="plugin-connect__hover">Disconnect</span>
-          </span>
-        </button>
-      ) : (
-        <button
-          aria-label={`Connect ${plugin.name}`}
-          className="plugin-connect"
-          onClick={(e) => {
-            e.stopPropagation();
-            onConnectAction(plugin);
-          }}
-          type="button"
-        >
-          Connect
-        </button>
-      )}
+      {/* Action button state */}
+      {renderActionButton()}
     </article>
   );
 };

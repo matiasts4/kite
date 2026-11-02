@@ -45,6 +45,9 @@ export default defineConfig(({ mode }) => ({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // Motion adds transform/collect work to many suites; 5s is tight on a
+    // loaded local machine, so allow slow UI interaction tests to finish.
+    testTimeout: 15000,
     exclude: ['**/node_modules/**', '**/dist/**', '**/scratch/**', '**/scripts/**'],
   },
 }));

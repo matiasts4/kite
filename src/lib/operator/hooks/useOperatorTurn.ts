@@ -21,6 +21,7 @@ import {
   enqueueTurn,
   takeQueuedTurn,
   withTurnTimeout,
+  withPriorTurnHistory,
   OperatorTurnTimeoutError,
   OPERATOR_TURN_TIMEOUT_MESSAGE,
   type QueuedTurn,
@@ -136,10 +137,12 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
       setStageLabel(getStageLabelEs('planning'));
 
       try {
+        const historyOptions = withPriorTurnHistory(input, opts, getTurnTraces());
         const result = await withTurnTimeout(
           runOperatorTurn(input, {
             workspaceId: defaultWorkspaceIdRef.current,
             ...opts,
+            ...historyOptions,
           })
         );
 

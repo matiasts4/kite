@@ -12,18 +12,22 @@ import {
   ChatProvider,
   ChatMode,
   ChatAttachment,
-  ModelOption,
   ApprovalRequest,
-  PROVIDER_CATALOG,
-  MODE_LABELS,
+  AUTOMATIC_MODEL_ID,
   formatTokens,
   formatBytes,
 } from './types';
 import type { ChatItem } from '../../../types';
+import { isControlDeclared, isProviderDeclared, undeclaredReason } from '../../../lib/session/declaration';
+import type { DriverDeclaration } from '../../../lib/session/types';
 import { SelectMenu } from '../../ui/SelectMenu';
 import { EffortPicker } from './EffortPicker';
 import { ChatApprovalCard } from './ChatApprovalCard';
-import { invokeCommand } from '../../../lib/ipc';
+import { invokeCommand, listConnections } from '../../../lib/ipc';
+import {
+  verifiedSpawnConnections,
+  type ConnectionCandidate,
+} from './connectionBinding';
 
 export interface ChatComposerProps {
   threadId: string;
@@ -34,14 +38,20 @@ export interface ChatComposerProps {
   threadProvider: ChatProvider;
   threadModel: string | null;
   threadEffort?: string | null;
+  threadAgent?: string | null;
+  threadConnectionId?: string | null;
   threadItems?: ChatItem[];
+  declaration: DriverDeclaration;
   running: boolean;
   prompt: string;
   attachments: ChatAttachment[];
   totalTokens: number;
-  dynamicModels: ModelOption[];
+  /** Accepted for existing callers; the model menu no longer renders a refresh action. */
   isRefreshingModels?: boolean;
+  /** Accepted for existing callers; the model menu no longer renders a refresh action. */
   onRefreshModels?: (provider: ChatProvider) => void;
+  /** Loads a provider's live models on demand. Deduplicated per mounted chat session. */
+  ensureDynamicModels?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
   pendingApproval?: ApprovalRequest | null;
   onChangePrompt: (val: string) => void;
@@ -52,7 +62,8 @@ export interface ChatComposerProps {
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }) => void;
+  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null }) => void;
+  onSelectConnection?: (connectionId: string) => void;
   onApprovalDecision?: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
     requestId: string
@@ -98,6 +109,11 @@ function isPlainKey(e: React.KeyboardEvent): boolean {
   return !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
 }
 
+/** Makes the reason for an undeclared control available beyond its tooltip. */
+const ControlReason: React.FC<{ reason: string }> = ({ reason }) => (
+  <span className="sr-only">{reason}</span>
+);
+
 export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadId,
   agentName,
@@ -107,14 +123,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadProvider,
   threadModel,
   threadEffort,
+  threadAgent,
+  threadConnectionId,
   threadItems = [],
+  declaration,
   running,
   prompt,
   attachments,
   totalTokens,
-  dynamicModels,
-  isRefreshingModels = false,
-  onRefreshModels,
+  ensureDynamicModels,
   pendingApproval,
   onChangePrompt,
   onSend,
@@ -124,10 +141,30 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onStagePaths,
   onRemoveAttachment,
   onUpdateConfig,
+  onSelectConnection,
   onApprovalDecision,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
+
+  const [connectionCandidates, setConnectionCandidates] = useState<ConnectionCandidate[]>([]);
+
+  // A connection appears here only when it verified this provider's local spawn
+  // endpoint. With none or one the send binding is resolved without asking.
+  useEffect(() => {
+    let active = true;
+    void listConnections().then((connections) => {
+      if (active) setConnectionCandidates(verifiedSpawnConnections(threadProvider, connections));
+    });
+    return () => {
+      active = false;
+    };
+  }, [threadProvider]);
+
+  // The model menu is populated in the background; the composer never waits on it.
+  useEffect(() => {
+    ensureDynamicModels?.(threadProvider);
+  }, [ensureDynamicModels, threadProvider]);
 
   // Drag & drop drop-hint state ('attach' | 'mention' | 'prompt' | null)
   const [dropKind, setDropKind] = useState<'attach' | 'mention' | 'prompt' | null>(null);
@@ -383,19 +420,46 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     return false;
   };
 
-  const providerMeta = (PROVIDER_CATALOG as Record<string, any>)[threadProvider] || PROVIDER_CATALOG.claude;
-  const models: ModelOption[] = providerMeta.isDynamic && dynamicModels.length > 0 ? dynamicModels : providerMeta.models;
-  const currentModelOption = models.find((m) => m.id === threadModel);
-  const currentModelName = currentModelOption?.name || threadModel || providerMeta.defaultModel;
-  const supportsEffort = Boolean(providerMeta.supportsEffort || currentModelOption?.supportsEffort);
+  const providers = declaration.providers;
+  const providerDeclared = isProviderDeclared(declaration, threadProvider);
+  const providerRow = providers.find((row) => row.id === threadProvider) ?? null;
+  const providerReason = providerDeclared ? null : undeclaredReason(declaration, 'provider');
 
-  const modelTriggerLabel =
-    agentName && (!threadModel || threadModel === providerMeta.defaultModel)
+  const models = declaration.models;
+  const liveModels = models.filter((model) => model.id !== AUTOMATIC_MODEL_ID);
+  const modelsDeclared = models.length > 0;
+  const modelReason =
+    liveModels.length > 0 ? null : undeclaredReason(declaration, 'model');
+  const currentModelOption = models.find((model) => model.id === threadModel);
+  const currentModelName =
+    !threadModel || threadModel === AUTOMATIC_MODEL_ID
       ? 'Automatic'
-      : currentModelName.replace(/^Claude /u, '');
+      : currentModelOption?.label || threadModel;
+  const modelTriggerLabel = currentModelName.replace(/^Claude /u, '');
+
+  const effortChoices = declaration.effort ?? [];
+  const effortDeclared = isControlDeclared(declaration.effort);
+  const effortReason = effortDeclared ? null : undeclaredReason(declaration, 'effort');
+  const effortValue = threadEffort || declaration.defaultEffort || null;
+
+  const permissions = declaration.permission ?? [];
+  const permissionDeclared = isControlDeclared(declaration.permission);
+  const permissionReason = permissionDeclared ? null : undeclaredReason(declaration, 'permission');
+  const permissionLabel =
+    permissions.find((permission) => permission.id === threadMode)?.label || threadMode;
+
+  const workModes = declaration.workMode ?? [];
+  const workModeDeclared = isControlDeclared(declaration.workMode);
+  const workModeReason = workModeDeclared ? null : undeclaredReason(declaration, 'workMode');
+  const selectedWorkMode =
+    workModes.find((mode) => (threadAgent ? mode.id === threadAgent : false)) ??
+    workModes.find((mode) => mode.plan === Boolean(threadPlan)) ??
+    null;
 
   const canSend = Boolean(prompt.trim() || attachments.length > 0);
-  const executionMode = threadPlan ? 'plan' : threadMode;
+  const selectedConnection = connectionCandidates.find(
+    (candidate) => candidate.connectionId === threadConnectionId
+  );
 
   const composerPlaceholder = agentName
     ? running
@@ -560,40 +624,70 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               onSelect={(kind) => onPickAttachments(kind as 'files' | 'folder')}
             />
 
-            {/* Mode: wrapped in span.chat-composer__mode to avoid 28px child rule */}
-            {!agentName && (
-              <span
-                className="chat-composer__mode"
-                data-execution={executionMode}
-              >
-                <SelectMenu
-                  variant="toolbar"
-                  label="Mode"
-                  triggerIcon={<CompassIcon size={12} />}
-                  triggerLabel={threadPlan ? 'Plan' : MODE_LABELS[threadMode]?.title || 'Mode'}
-                  disabled={running}
-                  value={executionMode}
-                  panelTitle="Execution Mode"
-                  rows={[
-                    { id: 'plan', title: 'Plan', detail: 'Reads and plans, changes nothing' },
-                    ...providerMeta.modes.map((m: ChatMode) => {
-                      const meta = MODE_LABELS[m];
-                      return {
-                        id: m,
-                        title: meta?.title || m,
-                        detail: meta?.detail,
-                      };
-                    }),
-                  ]}
-                  onSelect={(m) => {
-                    if (m === 'plan') {
-                      onUpdateConfig({ plan: true });
-                    } else {
-                      onUpdateConfig({ plan: false, mode: m as ChatMode });
-                    }
-                  }}
-                />
-              </span>
+            {/* Work mode: wrapped in span.chat-composer__mode to avoid 28px child rule */}
+            <span
+              className="chat-composer__mode"
+              data-execution={threadPlan ? 'plan' : selectedWorkMode?.id ?? 'build'}
+            >
+              <SelectMenu
+                variant="toolbar"
+                label="Work mode"
+                help={workModeReason ?? 'How this session approaches the task'}
+                triggerIcon={<CompassIcon size={12} />}
+                triggerLabel={selectedWorkMode?.label ?? (threadPlan ? 'Plan' : 'Work mode')}
+                disabled={running || !workModeDeclared}
+                value={selectedWorkMode?.id ?? ''}
+                panelTitle="Work mode"
+                rows={workModes.map((mode) => ({
+                  id: mode.id,
+                  title: mode.label,
+                  detail: mode.detail,
+                }))}
+                onSelect={(modeId) => {
+                  const mode = workModes.find((candidate) => candidate.id === modeId);
+                  if (mode) onUpdateConfig({ plan: mode.plan, agent: mode.id });
+                }}
+              />
+            </span>
+            {workModeReason && <ControlReason reason={workModeReason} />}
+
+            {/* Permission is the driver's own "how much without asking" switch. */}
+            <span className="chat-composer__mode" data-execution={threadMode}>
+              <SelectMenu
+                variant="toolbar"
+                label="Permission"
+                help={permissionReason ?? 'How much this session may do without asking'}
+                triggerLabel={permissionLabel}
+                disabled={running || !permissionDeclared}
+                value={threadMode}
+                panelTitle="Permission mode"
+                rows={permissions.map((permission) => ({
+                  id: permission.id,
+                  title: permission.label,
+                  detail: permission.detail,
+                }))}
+                onSelect={(mode) => onUpdateConfig({ mode: mode as ChatMode })}
+              />
+            </span>
+            {permissionReason && <ControlReason reason={permissionReason} />}
+
+            {connectionCandidates.length > 1 && onSelectConnection && (
+              <SelectMenu
+                variant="toolbar"
+                label="Connection"
+                help="Account connection used for this send"
+                triggerLabel={selectedConnection?.displayName ?? 'Choose connection'}
+                disabled={running}
+                value={threadConnectionId ?? ''}
+                panelTitle="Account connection"
+                panelDetail="Each account is verified for its own endpoints."
+                rows={connectionCandidates.map((candidate) => ({
+                  id: candidate.connectionId,
+                  title: candidate.displayName,
+                  detail: candidate.supportedEndpoint,
+                }))}
+                onSelect={onSelectConnection}
+              />
             )}
           </div>
 
@@ -612,73 +706,54 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             <SelectMenu
               variant="toolbar"
               label="Provider"
-              help={`Provider · ${providerMeta.label}`}
-              triggerEngine={providerMeta.engineId || threadProvider}
-              disabled={running}
+              help={providerReason ?? `Provider · ${providerRow?.label ?? declaration.driver}`}
+              triggerEngine={providerRow?.engine ?? declaration.driver}
+              disabled={running || !providerDeclared}
               value={threadProvider}
               panelTitle="AI Provider"
-              rows={(Object.keys(PROVIDER_CATALOG) as ChatProvider[]).map((pKey) => {
-                const pMeta = (PROVIDER_CATALOG as Record<string, any>)[pKey];
-                return {
-                  id: pKey,
-                  title: pMeta.label,
-                  detail: pMeta.vendor,
-                  engine: pMeta.engineId || pKey,
-                };
-              })}
-              onSelect={(p) => onUpdateConfig({ provider: p as ChatProvider })}
+              rows={providers.map((provider) => ({
+                id: provider.id,
+                title: provider.label,
+                detail: provider.detail,
+                engine: provider.engine ?? provider.id,
+              }))}
+              onSelect={(provider) => onUpdateConfig({ provider: provider as ChatProvider })}
             />
 
             {/* Child 2: Model selector with label */}
             <SelectMenu
               variant="toolbar"
               label="Model"
-              help="Model"
+              help={modelReason ?? 'Model'}
               searchable
               triggerLabel={modelTriggerLabel}
-              triggerBadge={isRefreshingModels ? 'Syncing…' : undefined}
-              disabled={running}
-              value={threadModel || providerMeta.defaultModel}
-              panelTitle={`${providerMeta.label} Models`}
-              panelDetail={isRefreshingModels ? 'Querying live provider CLI…' : undefined}
-              panelEngine={providerMeta.engineId || threadProvider}
-              rows={[
-                ...models.map((m) => ({
-                  id: m.id,
-                  title: m.name,
-                  detail: m.description,
-                })),
-                ...(onRefreshModels
-                  ? [
-                      {
-                        id: '__refresh_models__',
-                        title: isRefreshingModels ? 'Checking live models…' : 'Refresh available models…',
-                        detail: 'Query provider CLI directly for newly released models',
-                        ruleBefore: true,
-                        disabled: isRefreshingModels,
-                      },
-                    ]
-                  : []),
-              ]}
-              onSelect={(m) => {
-                if (m === '__refresh_models__') {
-                  onRefreshModels?.(threadProvider);
-                  return;
-                }
-                onUpdateConfig({ model: m });
+              disabled={running || !modelsDeclared}
+              value={threadModel || AUTOMATIC_MODEL_ID}
+              panelTitle={`${providerRow?.label ?? declaration.driver} Models`}
+              panelEngine={providerRow?.engine ?? declaration.driver}
+              rows={models.map((model) => ({
+                id: model.id,
+                title: model.label,
+                detail: model.detail,
+              }))}
+              onSelect={(model) => {
+                onUpdateConfig({ model: model === AUTOMATIC_MODEL_ID ? null : model });
               }}
             />
 
-            {/* Child 3: EffortPicker (if supported by provider / model) */}
-            {supportsEffort && (
-              <EffortPicker
-                value={threadEffort || 'medium'}
-                disabled={running}
-                placement="top"
-                onSelect={(val) => onUpdateConfig({ effort: val })}
-              />
-            )}
+            {/* Child 3: EffortPicker (declared levels only) */}
+            <EffortPicker
+              choices={effortChoices}
+              value={effortValue}
+              disabled={running || !effortDeclared}
+              help={effortReason ?? undefined}
+              placement="top"
+              onSelect={(val) => onUpdateConfig({ effort: val })}
+            />
           </div>
+          {providerReason && <ControlReason reason={providerReason} />}
+          {modelReason && <ControlReason reason={modelReason} />}
+          {effortReason && <ControlReason reason={effortReason} />}
 
           {/* Dictation Control Button */}
           <span className="dictation-control">
@@ -702,7 +777,24 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               }
               aria-label={dictationState === 'recording' ? 'Finish dictation' : 'Dictate message'}
             >
-              {dictationState === 'recording' ? <StopIcon size={10} /> : <MicIcon size={12} />}
+              {dictationState === 'recording' ? (
+                <StopIcon size={10} />
+              ) : dictationState === 'transcribing' ? (
+                <svg
+                  className="animate-spin"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  aria-hidden="true"
+                >
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                </svg>
+              ) : (
+                <MicIcon size={12} />
+              )}
             </button>
             <span aria-live="polite" className="sr-only" role="status">
               {dictationState === 'recording' ? 'Listening. Press again to transcribe.' : 'Dictate message'}
@@ -740,6 +832,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           )}
         </div>
       </div>
-    </div>
+  </div>
   );
 };

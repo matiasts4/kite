@@ -1,6 +1,7 @@
 import React from 'react';
 import { SunIcon, MoonIcon, CheckIcon } from './icons';
 import { ThemeItem, DARK_THEMES, LIGHT_THEMES } from './types';
+import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 
 interface CustomizationsTabProps {
   mode: 'dark' | 'light';
@@ -91,6 +92,9 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
                   onClick={() => onToggleMode('light')}
                   type="button"
                 >
+                  {mode === 'light' && (
+                    <SegmentedIndicator group="settings-customizations-mode" />
+                  )}
                   <span aria-hidden="true" className="ui-segmented__icon">
                     <SunIcon size={12} strokeWidth={2} />
                   </span>
@@ -102,6 +106,9 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
                   onClick={() => onToggleMode('dark')}
                   type="button"
                 >
+                  {mode === 'dark' && (
+                    <SegmentedIndicator group="settings-customizations-mode" />
+                  )}
                   <span aria-hidden="true" className="ui-segmented__icon">
                     <MoonIcon size={12} strokeWidth={2} />
                   </span>

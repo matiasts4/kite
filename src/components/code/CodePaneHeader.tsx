@@ -2,6 +2,7 @@ import React, { useRef } from 'react';
 import type { AgentEngineDescriptor, PaneOccupant } from './types';
 import {
   SquareTerminalIcon,
+  GripDotsIcon,
   MoreHorizontalIcon,
   MaximizeIcon,
   MinimizeIcon,
@@ -43,6 +44,7 @@ export interface CodePaneHeaderProps {
   onPointerDownHeader: (e: React.PointerEvent) => void;
   onTerminalCommand: (cmd: 'font-larger' | 'font-smaller' | 'clear' | 'interrupt' | 'restart') => void;
   onResumePrevious?: () => void;
+  onDragGripPointerDown?: (e: React.PointerEvent) => void;
 }
 
 export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
@@ -77,6 +79,7 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
   onPointerDownHeader,
   onTerminalCommand,
   onResumePrevious,
+  onDragGripPointerDown,
 }) => {
   const isRenaming = renamingLeafId === nodeId;
   const actionsBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -84,8 +87,16 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
   return (
     <header
       className="code-pane-header"
-      data-draggable="true"
-      onPointerDown={onPointerDownHeader}
+      data-draggable={canSwap && !isFullscreen ? "true" : undefined}
+      onPointerDown={(e) => {
+        onPointerDownHeader(e);
+        if (canSwap && !isFullscreen) {
+          const target = e.target as HTMLElement;
+          if (!target.closest("button") && !target.closest("input") && !target.closest("form")) {
+            onDragGripPointerDown?.(e);
+          }
+        }
+      }}
     >
       {isRenaming ? (
         <form
@@ -156,6 +167,23 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
             <span className="sr-only">{displayName.replace(/\s*\([^)]*\)\s*$/, '').trim() || displayName}</span>
           </span>
         </>
+      )}
+
+      {canSwap && !isFullscreen && (
+        <div
+          role="button"
+          tabIndex={-1}
+          aria-label="Drag to reorder pane"
+          title="Drag to reorder pane"
+          className="code-pane-grip"
+          data-testid="pane-drag-grip"
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            onDragGripPointerDown?.(e);
+          }}
+        >
+          <GripDotsIcon size={13} />
+        </div>
       )}
 
       <div className="code-pane-actions">

@@ -13,10 +13,14 @@ import {
   updateSplitRatios,
   equalizeSplits,
   swapAdjacent,
+  swapLeaves,
+  moveLeafToEdge,
+  type PaneDropEdge,
   findLeaf,
   getAllLeaves,
   copySplitRatiosIfSameChildren,
 } from './treeUtils';
+import type { WorkspaceSessionTab, WorkspaceSessionPaneInfo } from '../sidebar/types';
 import type {
   PaneNode,
   PaneLeaf,
@@ -41,7 +45,7 @@ export interface UseWorkspaceLayoutStateParams {
   containerRef: React.RefObject<HTMLDivElement | null>;
   onSessionsChange?: (
     workspaceId: string,
-    sessions: Array<{ id: string; title: string; paneCount: number; isActive: boolean }>
+    sessions: WorkspaceSessionTab[]
   ) => void;
   requestedTabId?: string | null;
   onTabRequestedHandled?: () => void;
@@ -157,12 +161,37 @@ export function useWorkspaceLayoutState({
       null;
     onSessionsChange(
       selectedWorkspace.id,
-      layout.tabs.map((tab) => ({
-        id: tab.id,
-        title: tab.title,
-        paneCount: countLeaves(tab.root),
-        isActive: tab.id === resolvedActiveId,
-      }))
+      layout.tabs.map((tab) => {
+        const leaves = getAllLeaves(tab.root);
+        const panes: WorkspaceSessionPaneInfo[] = leaves.map((leaf) => {
+          if (leaf.occupant.kind === 'terminal') {
+            const occ = leaf.occupant;
+            const wireEngine = occ.engine || occ.runtime?.engine || 'terminal';
+            const label = occ.runtime?.agentName || occ.label || occ.runtime?.displayName || 'Terminal';
+            return {
+              id: leaf.id,
+              kind: 'terminal',
+              label,
+              engine: wireEngine,
+              agentName: occ.runtime?.agentName,
+              isFocused: tab.focusedLeafId === leaf.id,
+            };
+          }
+          return {
+            id: leaf.id,
+            kind: 'thread',
+            label: leaf.occupant.title || 'Chat',
+            isFocused: tab.focusedLeafId === leaf.id,
+          };
+        });
+        return {
+          id: tab.id,
+          title: tab.title,
+          paneCount: leaves.length,
+          isActive: tab.id === resolvedActiveId,
+          panes,
+        };
+      })
     );
   }, [layout, selectedWorkspace?.id, onSessionsChange]);
 
@@ -268,6 +297,30 @@ export function useWorkspaceLayoutState({
     const tab = activeLayoutTab();
     if (!tab) return;
     updateActiveRoot(swapAdjacent(tab.root, leafId, direction), tab.id);
+  }, [activeLayoutTab, updateActiveRoot]);
+
+  const handleSwapLeaves = useCallback((sourceLeafId: string, targetLeafId: string) => {
+    const tab = activeLayoutTab();
+    if (!tab) return;
+    const nextRoot = swapLeaves(tab.root, sourceLeafId, targetLeafId);
+    if (nextRoot !== tab.root) {
+      updateActiveRoot(nextRoot, tab.id);
+      setFocusedLeafId(sourceLeafId);
+    }
+  }, [activeLayoutTab, updateActiveRoot]);
+
+  const handleMoveLeaf = useCallback((
+    sourceLeafId: string,
+    targetLeafId: string,
+    edge: PaneDropEdge
+  ) => {
+    const tab = activeLayoutTab();
+    if (!tab) return;
+    const nextRoot = moveLeafToEdge(tab.root, sourceLeafId, targetLeafId, edge);
+    if (nextRoot !== tab.root) {
+      updateActiveRoot(nextRoot, tab.id);
+      setFocusedLeafId(sourceLeafId);
+    }
   }, [activeLayoutTab, updateActiveRoot]);
 
   const handleExtractLeafToTab = useCallback((leafId: string) => {
@@ -719,6 +772,8 @@ export function useWorkspaceLayoutState({
     handleFocusLeaf,
     handleEqualize,
     handleSwap,
+    handleSwapLeaves,
+    handleMoveLeaf,
     handleExtractLeafToTab,
     handleRenameLeaf,
     handleCloseLeaf,

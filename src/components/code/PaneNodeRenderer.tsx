@@ -48,6 +48,7 @@ export interface PaneNodeRendererProps {
   onSetTerminalStatus: (sessionId: string, status: TerminalStatus) => void;
   onResumePrevious?: (leafId: string, engine: string, title?: string) => void;
   onRegisterTerminalSlot?: (leafId: string, el: HTMLDivElement | null) => void;
+  onDragGripPointerDown?: (leafId: string, e: React.PointerEvent) => void;
 }
 
 export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
@@ -85,6 +86,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
   onSetTerminalStatus,
   onResumePrevious,
   onRegisterTerminalSlot,
+  onDragGripPointerDown,
 }) => {
   const registerSlotRef = React.useRef(onRegisterTerminalSlot);
   registerSlotRef.current = onRegisterTerminalSlot;
@@ -161,6 +163,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
           onNewTab={onLaunchTerminal}
           onNewSession={onNewSession}
           onPointerDownHeader={() => onFocusLeaf(node.id)}
+          onDragGripPointerDown={onDragGripPointerDown ? (e) => onDragGripPointerDown(node.id, e) : undefined}
           onTerminalCommand={(cmd) => {
             if (occupant.kind === 'terminal') {
               window.dispatchEvent(
@@ -285,6 +288,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
               onSetTerminalStatus={onSetTerminalStatus}
               onResumePrevious={onResumePrevious}
               onRegisterTerminalSlot={onRegisterTerminalSlot}
+              onDragGripPointerDown={onDragGripPointerDown}
             />
           </div>
           {idx < node.children.length - 1 && (

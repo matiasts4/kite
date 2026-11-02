@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import type { Workspace, AgentProfile } from '../../types';
+import type { WorkspaceSessionTab } from '../sidebar/types';
 import { invokeCommand, copyWorkspacePath } from '../../lib/ipc';
 import { TerminalView } from '../views/TerminalView';
 import { NewSessionPane } from './NewSessionPane';
@@ -11,7 +12,8 @@ import { CodePaneNewMenu } from './CodePaneMenu';
 import { PaneNodeRenderer, type TerminalStatus } from './PaneNodeRenderer';
 import { AgentPaneResumeModal } from '../modals/AgentPaneResumeModal';
 import { FolderIcon, PlusIcon } from './codeIcons';
-import { getAllLeaves } from './treeUtils';
+import { getAllLeaves, findLeaf, type PaneDropEdge } from './treeUtils';
+import { PaneDragOverlay } from './PaneDragOverlay';
 import type {
   PaneNode,
   PaneLeaf,
@@ -39,7 +41,7 @@ export interface CodeWorkspaceProps {
   availability?: Record<string, boolean>;
   onSessionsChange?: (
     workspaceId: string,
-    sessions: Array<{ id: string; title: string; paneCount: number; isActive: boolean }>
+    sessions: WorkspaceSessionTab[]
   ) => void;
   requestedTabId?: string | null;
   onTabRequestedHandled?: () => void;
@@ -83,6 +85,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   const [paneMenuOpenLeafId, setPaneMenuOpenLeafId] = useState<string | null>(null);
   const [paneMenuKind, setPaneMenuKind] = useState<'actions' | 'new' | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+
   const [isAddingWs, setIsAddingWs] = useState(false);
   const [spotlightLeafId, setSpotlightLeafId] = useState<string | null>(null);
   const [terminalStatus, setTerminalStatus] = useState<
@@ -108,6 +111,8 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     handleFocusLeaf,
     handleEqualize,
     handleSwap,
+    handleSwapLeaves,
+    handleMoveLeaf,
     handleExtractLeafToTab,
     handleRenameLeaf,
     handleCloseLeaf,
@@ -127,6 +132,45 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     requestedTabId,
     onTabRequestedHandled,
   });
+
+  const [activeDrag, setActiveDrag] = useState<{
+    sourceLeafId: string;
+    sourceTitle?: string;
+    startX: number;
+    startY: number;
+  } | null>(null);
+
+  const handlePaneDragStart = useCallback((leafId: string, e: React.PointerEvent) => {
+    if (!activeTab || layout.fullscreenLeafId) return;
+    const allLeaves = getAllLeaves(activeTab.root);
+    if (allLeaves.length < 2) return;
+    const leaf = findLeaf(activeTab.root, leafId);
+    const title = leaf
+      ? leaf.occupant.kind === "terminal"
+        ? leaf.occupant.label || leaf.occupant.runtime?.workTitle || leaf.occupant.runtime?.displayName || "Terminal"
+        : leaf.occupant.title || "Thread"
+      : "Terminal";
+    setActiveDrag({
+      sourceLeafId: leafId,
+      sourceTitle: title,
+      startX: e.clientX,
+      startY: e.clientY,
+    });
+  }, [activeTab, layout.fullscreenLeafId]);
+
+  const handleDrop = useCallback((
+    sourceLeafId: string,
+    targetLeafId: string,
+    edge: PaneDropEdge | null
+  ) => {
+    setActiveDrag(null);
+    if (edge === null) {
+      handleSwapLeaves(sourceLeafId, targetLeafId);
+    } else {
+      handleMoveLeaf(sourceLeafId, targetLeafId, edge);
+    }
+  }, [handleSwapLeaves, handleMoveLeaf]);
+
 
   useWorkspaceEventListeners({
     selectedWorkspace,
@@ -355,6 +399,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           setResumeModalPane({ paneId: leafId, engine, title });
         }}
         onRegisterTerminalSlot={handleRegisterTerminalSlot}
+        onDragGripPointerDown={handlePaneDragStart}
       />
     );
   };
@@ -497,6 +542,16 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           occ.sessionId,
         );
       })}
+      {activeDrag && (
+        <PaneDragOverlay
+          sourceLeafId={activeDrag.sourceLeafId}
+          sourceTitle={activeDrag.sourceTitle}
+          initialPointerX={activeDrag.startX}
+          initialPointerY={activeDrag.startY}
+          onDrop={handleDrop}
+          onCancel={() => setActiveDrag(null)}
+        />
+      )}
       {renderNotices()}
       {resumeModalPane && (
         <AgentPaneResumeModal

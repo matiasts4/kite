@@ -97,7 +97,47 @@ pub fn get_persisted_terminal_session(session_id: &str) -> Option<PersistedTermi
     read_persisted_terminal_sessions_unlocked().remove(session_id)
 }
 
+pub fn provider_id_if_unclaimed(id: Option<&str>, claimed: &HashSet<String>) -> Option<String> {
+    let trimmed = id.map(str::trim).filter(|value| !value.is_empty())?;
+    if claimed.contains(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// A strong discovery replaces the stored id. No discovery keeps the stored unclaimed id.
+pub fn pick_bound_provider_id(
+    existing: Option<&str>,
+    discovered: Option<&str>,
+    claimed: &HashSet<String>,
+) -> Option<String> {
+    if let Some(id) = provider_id_if_unclaimed(discovered, claimed) {
+        return Some(id);
+    }
+    provider_id_if_unclaimed(existing, claimed)
+}
+
+/// Restore resumes only the id saved for this terminal. A missing or claimed id starts fresh.
+pub fn choose_restore_provider_id(
+    saved: Option<&str>,
+    claimed: &HashSet<String>,
+) -> Option<String> {
+    provider_id_if_unclaimed(saved, claimed)
+}
+
 pub fn upsert_persisted_terminal_session(record: PersistedTerminalSession) {
+    upsert_persisted_terminal_session_inner(record, false);
+}
+
+pub fn upsert_persisted_terminal_session_clearing_provider(record: PersistedTerminalSession) {
+    upsert_persisted_terminal_session_inner(record, true);
+}
+
+fn upsert_persisted_terminal_session_inner(
+    record: PersistedTerminalSession,
+    clear_provider_session_id: bool,
+) {
     let _guard = persisted_sessions_file_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -117,9 +157,13 @@ pub fn upsert_persisted_terminal_session(record: PersistedTerminalSession) {
             } else {
                 record.active_engine
             },
-            provider_session_id: record
-                .provider_session_id
-                .or_else(|| prev.provider_session_id.clone()),
+            provider_session_id: if clear_provider_session_id {
+                record.provider_session_id
+            } else {
+                record
+                    .provider_session_id
+                    .or_else(|| prev.provider_session_id.clone())
+            },
             cwd: if record.cwd.is_empty() {
                 prev.cwd.clone()
             } else {
@@ -352,28 +396,24 @@ pub fn resolve_provider_session_id_with_context(
             last_user_input,
         ),
         "codex" => {
-            if let Some(existing) = valid_existing {
-                return Some(existing.to_string());
-            }
-            resolve_codex_session_id(
+            let discovered = resolve_codex_session_id(
                 cwd,
                 terminal_session_id,
                 spawned_at_unix_ms,
                 claimed_ids,
                 last_user_input,
-            )
+            );
+            pick_bound_provider_id(valid_existing, discovered.as_deref(), claimed_ids)
         }
         "open-code" => {
-            if let Some(existing) = valid_existing {
-                return Some(existing.to_string());
-            }
-            resolve_opencode_session_id(
+            let discovered = resolve_opencode_session_id(
                 cwd,
                 terminal_session_id,
                 spawned_at_unix_ms,
                 claimed_ids,
                 last_user_input,
-            )
+            );
+            pick_bound_provider_id(valid_existing, discovered.as_deref(), claimed_ids)
         }
         "claude-code" => resolve_claude_session_id(
             cwd,
@@ -420,9 +460,8 @@ fn resolve_antigravity_session_id(
         }
     }
 
-    // 2. If an unclaimed existing_provider_id was provided, keep it as long as it is not actively
-    // locked by a DIFFERENT live process tree.
-    if let Some(existing) = existing_provider_id {
+    let keep_existing = |existing: Option<&str>| -> Option<String> {
+        let existing = existing?;
         let locked_by_foreign_process = if let Some(holder_pids) = locked_conversations.get(existing)
         {
             !holder_pids.is_empty()
@@ -431,15 +470,19 @@ fn resolve_antigravity_session_id(
         } else {
             false
         };
-        if !locked_by_foreign_process {
-            return Some(existing.to_string());
+        if locked_by_foreign_process {
+            None
+        } else {
+            Some(existing.to_string())
         }
-    }
+    };
 
-    let home = user_home_dir()?;
+    let Some(home) = user_home_dir() else {
+        return keep_existing(existing_provider_id);
+    };
     let agy_dir = home.join(".gemini").join("antigravity-cli");
     if !agy_dir.is_dir() {
-        return None;
+        return keep_existing(existing_provider_id);
     }
 
     let is_locked_by_other = |conv_id: &str| -> bool {
@@ -459,7 +502,6 @@ fn resolve_antigravity_session_id(
     // Gather candidate conversations matching `cwd` from conversation_summaries.db and history.jsonl
     let mut workspace_candidates: HashSet<String> = HashSet::new();
     let mut summary_meta: HashMap<String, (String, String)> = HashMap::new();
-    let mut most_recent_ws_candidate: Option<String> = None;
 
     let db_path = agy_dir.join("conversation_summaries.db");
     if db_path.is_file() {
@@ -503,9 +545,6 @@ fn resolve_antigravity_session_id(
                                 uris_raw.to_ascii_lowercase().contains(&target_uri)
                             });
                         if uri_matched {
-                            if most_recent_ws_candidate.is_none() {
-                                most_recent_ws_candidate = Some(conv_id.clone());
-                            }
                             if root_pid.is_some() && locked_conversations.contains_key(&conv_id) {
                                 return Some(conv_id);
                             }
@@ -754,19 +793,13 @@ fn resolve_antigravity_session_id(
         }
     }
 
-    // Fallback: if scrollback scoring was inconclusive, resume the most recent
-    // conversation matching this workspace from conversation_summaries.db
-    if let Some(recent_id) = most_recent_ws_candidate {
-        return Some(recent_id);
-    }
-
-    None
+    keep_existing(existing_provider_id)
 }
 
 fn resolve_codex_session_id(
     cwd: &str,
     terminal_session_id: &str,
-    spawned_at_unix_ms: i64,
+    _spawned_at_unix_ms: i64,
     claimed_ids: &HashSet<String>,
     last_user_input: Option<&str>,
 ) -> Option<String> {
@@ -790,7 +823,6 @@ fn resolve_codex_session_id(
         .map(|s| normalize_terminal_text(s.as_bytes()))
         .unwrap_or_default();
 
-    let min_sec = (spawned_at_unix_ms / 1000).saturating_sub(30);
     if let Ok(mut stmt) = conn.prepare(
         "SELECT id, cwd, updated_at, title, first_user_message
          FROM threads
@@ -809,7 +841,7 @@ fn resolve_codex_session_id(
         }) {
             let mut candidates = Vec::new();
             for row in rows.flatten() {
-                let (id, row_cwd, updated_at, title, first_msg) = row;
+                let (id, row_cwd, _updated_at, title, first_msg) = row;
                 if id.is_empty() || claimed_ids.contains(&id) || !paths_match(&row_cwd, cwd) {
                     continue;
                 }
@@ -834,29 +866,12 @@ fn resolve_codex_session_id(
                         }
                     }
                 }
-                let updated_sec = if updated_at > 1_000_000_000_000 {
-                    updated_at / 1000
-                } else {
-                    updated_at
-                };
-                candidates.push((id, updated_sec, score));
+                candidates.push((id, score));
             }
 
-            if let Some((best_id, _, best_score)) =
-                candidates.iter().max_by_key(|(_, _, score)| *score)
-            {
+            if let Some((best_id, best_score)) = candidates.iter().max_by_key(|(_, score)| *score) {
                 if *best_score >= 40 {
                     return Some(best_id.clone());
-                }
-            }
-
-            if spawned_at_unix_ms > 0 {
-                let recent: Vec<&(String, i64, u32)> = candidates
-                    .iter()
-                    .filter(|(_, sec, _)| *sec == 0 || *sec >= min_sec)
-                    .collect();
-                if recent.len() == 1 {
-                    return Some(recent[0].0.clone());
                 }
             }
         }
@@ -867,7 +882,7 @@ fn resolve_codex_session_id(
 fn resolve_opencode_session_id(
     cwd: &str,
     terminal_session_id: &str,
-    spawned_at_unix_ms: i64,
+    _spawned_at_unix_ms: i64,
     claimed_ids: &HashSet<String>,
     last_user_input: Option<&str>,
 ) -> Option<String> {
@@ -894,7 +909,6 @@ fn resolve_opencode_session_id(
         .map(|s| normalize_terminal_text(s.as_bytes()))
         .unwrap_or_default();
 
-    let min_ms = spawned_at_unix_ms.saturating_sub(30_000);
     for table in ["session_v2", "session"] {
         let query = format!(
             "SELECT id, directory, time_updated, title FROM {} WHERE parent_id IS NULL ORDER BY time_updated DESC LIMIT 50",
@@ -911,7 +925,7 @@ fn resolve_opencode_session_id(
             }) {
                 let mut candidates = Vec::new();
                 for row in rows.flatten() {
-                    let (id, dir, time_updated, title) = row;
+                    let (id, dir, _time_updated, title) = row;
                     if id.is_empty() || claimed_ids.contains(&id) || !paths_match(&dir, cwd) {
                         continue;
                     }
@@ -934,29 +948,13 @@ fn resolve_opencode_session_id(
                             score += 60;
                         }
                     }
-                    let ts_ms = if time_updated > 0 && time_updated < 1_000_000_000_000 {
-                        time_updated * 1000
-                    } else {
-                        time_updated
-                    };
-                    candidates.push((id, ts_ms, score));
+                    candidates.push((id, score));
                 }
 
-                if let Some((best_id, _, best_score)) =
-                    candidates.iter().max_by_key(|(_, _, score)| *score)
+                if let Some((best_id, best_score)) = candidates.iter().max_by_key(|(_, score)| *score)
                 {
                     if *best_score >= 40 {
                         return Some(best_id.clone());
-                    }
-                }
-
-                if spawned_at_unix_ms > 0 {
-                    let recent: Vec<&(String, i64, u32)> = candidates
-                        .iter()
-                        .filter(|(_, ts, _)| *ts == 0 || *ts >= min_ms)
-                        .collect();
-                    if recent.len() == 1 {
-                        return Some(recent[0].0.clone());
                     }
                 }
             }
@@ -1023,18 +1021,8 @@ fn resolve_claude_session_id(
     claimed_ids: &HashSet<String>,
     last_user_input: Option<&str>,
 ) -> Option<String> {
-    if let Some(existing) = existing_provider_id {
-        if claude_session_file_exists(cwd, existing) {
-            return Some(existing.to_string());
-        }
-    }
-    if uuid::Uuid::parse_str(terminal_session_id).is_ok()
-        && !claimed_ids.contains(terminal_session_id)
-        && claude_session_file_exists(cwd, terminal_session_id)
-    {
-        return Some(terminal_session_id.to_string());
-    }
-    let home = user_home_dir()?;
+    let home = user_home_dir();
+    if let Some(home) = home {
     let projects_dir = home.join(".claude").join("projects");
     let slug = claude_project_slug(cwd);
     let mut candidate_dirs = Vec::new();
@@ -1117,8 +1105,17 @@ fn resolve_claude_session_id(
             return Some(best_id.clone());
         }
     }
-    if spawned_at_unix_ms > 0 && scored.len() == 1 {
-        return Some(scored[0].2.clone());
+    }
+    if uuid::Uuid::parse_str(terminal_session_id).is_ok()
+        && !claimed_ids.contains(terminal_session_id)
+        && claude_session_file_exists(cwd, terminal_session_id)
+    {
+        return Some(terminal_session_id.to_string());
+    }
+    if let Some(existing) = existing_provider_id {
+        if claude_session_file_exists(cwd, existing) {
+            return Some(existing.to_string());
+        }
     }
     None
 }
@@ -1127,70 +1124,44 @@ fn resolve_gemini_session_id(
     _cwd: &str,
     terminal_session_id: &str,
     existing_provider_id: Option<&str>,
-    spawned_at_unix_ms: i64,
+    _spawned_at_unix_ms: i64,
     claimed_ids: &HashSet<String>,
 ) -> Option<String> {
-    if let Some(existing) = existing_provider_id {
-        if std::path::Path::new(existing).is_file() {
-            return Some(existing.to_string());
-        }
-    }
-    let home = user_home_dir()?;
-    let tmp_dir = home.join(".gemini").join("tmp");
-    if !tmp_dir.is_dir() {
-        return existing_provider_id.map(|s| s.to_string());
-    }
-    let min_ms = spawned_at_unix_ms.saturating_sub(30_000) as u128;
-    let mut candidates: Vec<(u128, String)> = Vec::new();
-
-    if let Ok(buckets) = std::fs::read_dir(&tmp_dir) {
-        for bucket in buckets.flatten() {
-            let chats_dir = bucket.path().join("chats");
-            if !chats_dir.is_dir() {
-                continue;
-            }
-            let Ok(files) = std::fs::read_dir(&chats_dir) else {
-                continue;
-            };
-            for file in files.flatten() {
-                let path = file.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                    continue;
-                }
-                let Ok(meta) = file.metadata() else {
-                    continue;
-                };
-                let mod_ms = meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                if mod_ms < min_ms {
-                    continue;
-                }
-                let path_str = path.to_string_lossy().to_string();
-                if claimed_ids.contains(&path_str) {
-                    continue;
-                }
-                if let Ok(raw) = std::fs::read_to_string(&path) {
-                    if let Some(existing) = existing_provider_id {
-                        if raw.contains(existing) {
-                            return Some(path_str);
+    if let Some(home) = user_home_dir() {
+        let tmp_dir = home.join(".gemini").join("tmp");
+        if tmp_dir.is_dir() {
+            if let Ok(buckets) = std::fs::read_dir(&tmp_dir) {
+                for bucket in buckets.flatten() {
+                    let chats_dir = bucket.path().join("chats");
+                    if !chats_dir.is_dir() {
+                        continue;
+                    }
+                    let Ok(files) = std::fs::read_dir(&chats_dir) else {
+                        continue;
+                    };
+                    for file in files.flatten() {
+                        let path = file.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let path_str = path.to_string_lossy().to_string();
+                        if claimed_ids.contains(&path_str) {
+                            continue;
+                        }
+                        if let Ok(raw) = std::fs::read_to_string(&path) {
+                            if raw.contains(terminal_session_id) {
+                                return Some(path_str);
+                            }
                         }
                     }
-                    if raw.contains(terminal_session_id) {
-                        return Some(path_str);
-                    }
                 }
-                candidates.push((mod_ms, path_str));
             }
         }
     }
-    if spawned_at_unix_ms > 0 && candidates.len() == 1 {
-        return Some(candidates[0].1.clone());
-    }
-    existing_provider_id.map(|s| s.to_string())
+    existing_provider_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !claimed_ids.contains(*id))
+        .map(|id| id.to_string())
 }
 
 pub fn map_executable_name_to_agent_engine(exe_name: &str) -> Option<String> {
@@ -1550,5 +1521,74 @@ mod tests {
             &empty_claimed,
         );
         assert_eq!(res_ok.as_deref(), Some("existing-uuid-1234"));
+    }
+
+    #[test]
+    fn restore_uses_only_the_saved_unclaimed_provider_id() {
+        let mut claimed = HashSet::new();
+        claimed.insert("taken".to_string());
+        assert_eq!(
+            choose_restore_provider_id(Some("mine"), &HashSet::new()).as_deref(),
+            Some("mine")
+        );
+        assert_eq!(choose_restore_provider_id(Some("taken"), &claimed), None);
+        assert_eq!(choose_restore_provider_id(Some("  "), &HashSet::new()), None);
+        assert_eq!(choose_restore_provider_id(None, &HashSet::new()), None);
+    }
+
+    #[test]
+    fn strong_discovery_replaces_stored_provider_id() {
+        let claimed = HashSet::new();
+        assert_eq!(
+            pick_bound_provider_id(Some("old"), Some("new"), &claimed).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            pick_bound_provider_id(Some("old"), None, &claimed).as_deref(),
+            Some("old")
+        );
+        let mut taken = HashSet::new();
+        taken.insert("new".to_string());
+        assert_eq!(
+            pick_bound_provider_id(Some("old"), Some("new"), &taken).as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
+    fn upsert_keeps_provider_id_until_an_explicit_clear() {
+        let session_id = format!("test-upsert-clear-{}", uuid::Uuid::new_v4());
+        let base = PersistedTerminalSession {
+            session_id: session_id.clone(),
+            workspace_id: Some("ws".to_string()),
+            pane_id: Some("pane".to_string()),
+            base_engine: "codex".to_string(),
+            active_engine: "codex".to_string(),
+            provider_session_id: Some("prov-a".to_string()),
+            cwd: "E:/kite".to_string(),
+            had_user_activity: true,
+            last_user_input: None,
+            spawned_at_unix_ms: 1,
+            saved_at_unix_ms: 1,
+        };
+        upsert_persisted_terminal_session(base.clone());
+        let mut partial = base.clone();
+        partial.provider_session_id = None;
+        partial.saved_at_unix_ms = 2;
+        upsert_persisted_terminal_session(partial);
+        let kept = read_persisted_terminal_sessions()
+            .get(&session_id)
+            .and_then(|row| row.provider_session_id.clone());
+        assert_eq!(kept.as_deref(), Some("prov-a"));
+
+        let mut cleared = base;
+        cleared.provider_session_id = None;
+        cleared.saved_at_unix_ms = 3;
+        upsert_persisted_terminal_session_clearing_provider(cleared);
+        let after = read_persisted_terminal_sessions()
+            .get(&session_id)
+            .and_then(|row| row.provider_session_id.clone());
+        assert_eq!(after, None);
+        remove_persisted_terminal_session(&session_id);
     }
 }

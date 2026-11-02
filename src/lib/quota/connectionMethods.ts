@@ -5,6 +5,7 @@ import {
   getProviderCredentials,
   type CredentialStatusItem,
 } from '../ipc';
+import { saveOperatorConfig } from '../operator/operatorConfig';
 import { PROVIDERS } from './types';
 
 export interface ProviderConnectionMethodMeta {
@@ -29,7 +30,7 @@ export const PROVIDER_CONNECTION_METHODS: Record<string, ProviderConnectionMetho
     providerId: PROVIDERS.ANTIGRAVITY,
     name: 'Antigravity',
     vendor: 'Google',
-    cliCommand: 'agy auth login',
+    cliCommand: 'agy',
     cliInstallCommand: 'irm https://antigravity.google/cli/install.ps1 | iex',
     cliDocUrl: 'https://antigravity.google/docs/cli',
     apiKeyProviderKey: 'gemini',
@@ -224,6 +225,13 @@ export async function saveVaultApiKey(providerId: string, apiKey: string): Promi
   const meta = getProviderConnectionMeta(providerId);
   const targetKey = meta?.apiKeyProviderKey ?? providerId;
   const res = await saveProviderCredential(targetKey, apiKey.trim());
+  if (res.success && typeof window !== 'undefined') {
+    if (targetKey === 'grok') {
+      saveOperatorConfig({ grokApiKey: apiKey.trim() });
+    } else if (targetKey === 'opencode') {
+      saveOperatorConfig({ opencodeApiKey: apiKey.trim() });
+    }
+  }
   return res.success;
 }
 
@@ -231,6 +239,13 @@ export async function removeVaultApiKey(providerId: string): Promise<boolean> {
   const meta = getProviderConnectionMeta(providerId);
   const targetKey = meta?.apiKeyProviderKey ?? providerId;
   const res = await deleteProviderCredential(targetKey);
+  if (res.success && typeof window !== 'undefined') {
+    if (targetKey === 'grok') {
+      saveOperatorConfig({ grokApiKey: '' });
+    } else if (targetKey === 'opencode') {
+      saveOperatorConfig({ opencodeApiKey: '' });
+    }
+  }
   return res.success;
 }
 

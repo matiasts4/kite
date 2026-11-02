@@ -21,7 +21,7 @@ describe('terminalAppearancePrefs', () => {
   it('returns default preferences when localStorage is empty', () => {
     const prefs = getTerminalAppearancePrefs();
     expect(prefs).toEqual(DEFAULT_TERMINAL_APPEARANCE_PREFS);
-    expect(prefs.renderer).toBe('dom');
+    expect(prefs.renderer).toBe('canvas');
     expect(prefs.fontFamilyId).toBe('cascadia');
     expect(prefs.fontSize).toBe(13);
     expect(prefs.lineHeight).toBe(1.16);
@@ -61,7 +61,7 @@ describe('terminalAppearancePrefs', () => {
       cursorBlink: 'yes',
     });
 
-    expect(sanitized.renderer).toBe('dom');
+    expect(sanitized.renderer).toBe('canvas');
     expect(sanitized.fontFamilyId).toBe('cascadia');
     expect(sanitized.fontSize).toBe(22);
     expect(sanitized.lineHeight).toBe(1.0);

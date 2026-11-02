@@ -189,3 +189,33 @@ export function updateSplitRatios(
     ),
   };
 }
+
+/** Copy divider ratios from `resized` onto `current` only where child ids are unchanged and in the same order. */
+export function copySplitRatiosIfSameChildren(current: PaneNode, resized: PaneNode): PaneNode {
+  if (current.type !== 'split' || resized.type !== 'split') {
+    return current;
+  }
+
+  const resizedChild = (id: string) =>
+    resized.children.find((child) => child.id === id);
+
+  const nextChildren = current.children.map((child) => {
+    const match = resizedChild(child.id);
+    return match ? copySplitRatiosIfSameChildren(child, match) : child;
+  });
+
+  const sameOrder =
+    current.id === resized.id &&
+    current.children.length === resized.children.length &&
+    current.children.every((child, index) => child.id === resized.children[index]?.id);
+
+  if (!sameOrder) {
+    return { ...current, children: nextChildren };
+  }
+
+  return {
+    ...current,
+    ratios: [...resized.ratios],
+    children: nextChildren,
+  };
+}

@@ -300,3 +300,25 @@
 .inspector-code{resize:none;width:100%;color:var(--text-primary);background:0 0;border:0;border-radius:0}
 .inspector-resize{border:0;margin:0}
 .inspector-tablist{flex:1;gap:4px;min-width:0;display:flex;overflow-x:auto}
+
+/* --- Zero-Unmount Fullscreen & Dragging --- */
+.workspace-pane-canvas[data-fullscreen] .pane-tree,
+.workspace-pane-canvas[data-fullscreen] .pane-tree__child {
+  position: static !important;
+  overflow: visible !important;
+}
+.workspace-pane-canvas[data-fullscreen] .pane-divider {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+.workspace-pane-canvas[data-fullscreen] .code-pane-panel--hidden-by-fullscreen {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+.code-pane-panel--fullscreen {
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: 30 !important;
+  width: 100% !important;
+  height: 100% !important;
+}

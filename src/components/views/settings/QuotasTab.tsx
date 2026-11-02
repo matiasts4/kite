@@ -41,6 +41,7 @@ import {
   getProviderConnectionMeta,
 } from '../../../lib/quota/connectionMethods';
 import { SETTINGS_PROVIDER_STORAGE_KEY } from '../../../lib/settingsNav';
+import { useAgentUpdates } from '../../../lib/agentUpdates';
 import { StarIcon, ChevronDownIcon, ChevronUpIcon } from './icons';
 
 const DISPLAY_MODES: { id: QuotaPreferences['displayMode']; label: string }[] = [
@@ -91,6 +92,7 @@ const Switch: React.FC<{ checked: boolean; label: string; onChange: () => void }
 
 export const QuotasTab: React.FC = () => {
   const [prefs, setPrefs] = useState<QuotaPreferences>(() => readQuotaPreferences());
+  const { summary: updatesSummary } = useAgentUpdates();
   const [quotas, setQuotas] = useState<Record<string, ProviderQuotaStatus>>({});
   const [cliAccounts, setCliAccounts] = useState<DetectedCliAccount[]>([]);
   const [activeTerminals, setActiveTerminals] = useState<ActiveAgentTerminal[]>(() => {
@@ -414,6 +416,16 @@ export const QuotasTab: React.FC = () => {
                           style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center' }}
                         >
                           <StarIcon size={12} filled />
+                        </span>
+                      ) : null}
+                      {updatesSummary?.advisories[id]?.state === 'outdated' ? (
+                        <span
+                          className="qt-chip"
+                          data-tone="warn"
+                          title={`Versión v${updatesSummary.advisories[id].latestVersion} disponible`}
+                          style={{ padding: '0 4px', fontSize: '9px', height: '15px' }}
+                        >
+                          ⬆ Update
                         </span>
                       ) : null}
                       {pct !== null ? (

@@ -43,6 +43,7 @@ fn quota_cache_path() -> PathBuf {
 fn load_persisted_cache() -> HashMap<String, (Instant, ProviderQuotaStatus)> {
     let p = quota_cache_path();
     let mut map = HashMap::new();
+    let now = now_ms();
     if let Ok(data) = std::fs::read(&p) {
         if let Ok(saved) = serde_json::from_slice::<HashMap<String, ProviderQuotaStatus>>(&data) {
             for (k, v) in saved {
@@ -55,7 +56,14 @@ fn load_persisted_cache() -> HashMap<String, (Instant, ProviderQuotaStatus)> {
                 {
                     continue;
                 }
-                map.insert(k, (Instant::now(), v));
+                let ttl_ms = (cache_ttl_secs(&k) * 1000) as i64;
+                let age_ms = now.saturating_sub(v.last_updated_ms);
+                if age_ms >= 0 && age_ms < ttl_ms {
+                    let instant = Instant::now()
+                        .checked_sub(Duration::from_millis(age_ms as u64))
+                        .unwrap_or_else(Instant::now);
+                    map.insert(k, (instant, v));
+                }
             }
         }
     }
@@ -81,7 +89,11 @@ pub fn get_cached_provider_status(provider: &str) -> Option<ProviderQuotaStatus>
         });
     }
     let cache = cache_guard.as_ref()?;
-    cache.entries.get(provider).map(|(_, s)| s.clone())
+    let (cached_instant, s) = cache.entries.get(provider)?;
+    if cached_instant.elapsed() > Duration::from_secs(cache_ttl_secs(provider)) {
+        return None;
+    }
+    Some(s.clone())
 }
 
 pub fn invalidate_provider_cache(provider: &str) {

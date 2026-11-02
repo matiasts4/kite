@@ -5,7 +5,7 @@
 //  2. Native Web Speech API fallback with smart speech-cleaning filters, persona voice modulation,
 //     and natural neural voice prioritization.
 import { sanitizeReply } from './planner/sanitize';
-import { loadOperatorConfig } from './operatorConfig';
+import { loadOperatorConfig, syncNativeCredentialsWithVault } from './operatorConfig';
 
 export interface TTSOptions {
   lang?: string; // Default: 'es-ES' or 'en-US'
@@ -89,8 +89,8 @@ export function cleanTextForSpeech(text: string): string {
   cleaned = cleaned.replace(/^[-*+]\s+/gm, '');
   cleaned = cleaned.replace(/^\d+\.\s+/gm, '');
 
-  // Strip common noisy symbols and emojis
-  cleaned = cleaned.replace(/[📋🚀⚠️✅❌🔥✨🔍🛠️📦💻💬🤖⚡🔴🟢🔵]/g, '');
+  // Strip common noisy symbols, emojis and quotation guillemets
+  cleaned = cleaned.replace(/[📋🚀⚠️✅❌🔥✨🔍🛠️📦💻💬🤖⚡🔴🟢🔵«»]/g, '');
 
   // Replace tech symbols with natural speech pauses
   cleaned = cleaned.replace(/&&|\|\|/g, ' y ');
@@ -307,7 +307,7 @@ class TTSNarrator {
     const myGen = this.generation;
 
     // Sanitize to prevent prompt echo, code fences or noise from reaching TTS
-    const sanitized = sanitizeReply(text, '');
+    const sanitized = sanitizeReply(text, '', 2000);
     const textToSpeak = cleanTextForSpeech(sanitized);
     if (!textToSpeak) return;
 
@@ -316,8 +316,14 @@ class TTSNarrator {
       config = loadOperatorConfig();
     } catch {}
 
-    const engine = options.engine || config?.ttsEngine || 'browser';
-    const apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+    let engine = options.engine || config?.ttsEngine || 'browser';
+    let apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+    if (engine === 'elevenlabs' && !apiKey) {
+      try {
+        config = await syncNativeCredentialsWithVault();
+        apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+      } catch {}
+    }
 
     if (engine === 'elevenlabs' && apiKey.length > 0) {
       try {
@@ -539,7 +545,8 @@ class TTSNarrator {
         resolve();
       };
 
-      const maxMs = Math.max(3000, Math.ceil((textToSpeak.length / 7) * 1000) + 3000);
+      // Generous safety ceiling (at least 15s or 250 words/min equivalent with breathing room)
+      const maxMs = Math.max(15000, Math.ceil((textToSpeak.length / 4) * 1000) + 10000);
       this.safetyTimer = setTimeout(() => {
         if (!finished) {
           options.onEnd?.();
@@ -549,6 +556,14 @@ class TTSNarrator {
 
       utterance.onstart = () => {
         this.speaking = true;
+        // Refresh timer on actual speech start
+        if (this.safetyTimer) clearTimeout(this.safetyTimer);
+        this.safetyTimer = setTimeout(() => {
+          if (!finished) {
+            options.onEnd?.();
+            finish();
+          }
+        }, maxMs);
         options.onStart?.();
       };
 

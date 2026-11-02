@@ -560,7 +560,14 @@ export function loadOperatorConfig(): OperatorProviderConfig {
     const raw =
       localStorage.getItem(CONFIG_STORAGE_KEY) ??
       localStorage.getItem(LEGACY_CONFIG_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_OPERATOR_CONFIG, persona: { ...DEFAULT_ZED_PERSONA } };
+    const legacyGrokTrans = localStorage.getItem('kite_grok_transcription_api_key') || '';
+    if (!raw) {
+      return {
+        ...DEFAULT_OPERATOR_CONFIG,
+        grokTranscriptionApiKey: legacyGrokTrans || DEFAULT_OPERATOR_CONFIG.grokTranscriptionApiKey,
+        persona: { ...DEFAULT_ZED_PERSONA },
+      };
+    }
     const parsed = JSON.parse(raw) as Partial<OperatorProviderConfig>;
     // Migrate any stored pay-as-you-go inference base to the OpenCode Go
     // gateway. Without this, a Go API key receives HTTP 402 from /inference/v1.
@@ -595,6 +602,11 @@ export function loadOperatorConfig(): OperatorProviderConfig {
         : DEFAULT_OPERATOR_CONFIG.cloudflareApiToken;
     const cfModel = parsed.cloudflareModel || DEFAULT_OPERATOR_CONFIG.cloudflareModel;
 
+    const grokTransKey =
+      typeof parsed.grokTranscriptionApiKey === 'string' && parsed.grokTranscriptionApiKey.trim().length > 0
+        ? parsed.grokTranscriptionApiKey
+        : legacyGrokTrans || DEFAULT_OPERATOR_CONFIG.grokTranscriptionApiKey;
+
     const activeProvider = parsed.activeProvider || DEFAULT_OPERATOR_CONFIG.activeProvider;
 
     return {
@@ -614,6 +626,7 @@ export function loadOperatorConfig(): OperatorProviderConfig {
       cloudflareGatewaySlug: typeof parsed.cloudflareGatewaySlug === 'string' ? parsed.cloudflareGatewaySlug : DEFAULT_OPERATOR_CONFIG.cloudflareGatewaySlug,
       cloudflareBaseUrl: parsed.cloudflareBaseUrl || DEFAULT_OPERATOR_CONFIG.cloudflareBaseUrl,
       cloudflareModel: cfModel,
+      grokTranscriptionApiKey: grokTransKey,
       persona: {
         ...DEFAULT_ZED_PERSONA,
         ...(parsed.persona ?? {}),
@@ -644,20 +657,64 @@ export function saveOperatorConfig(
   try {
     localStorage.setItem(SEED_VERSION_KEY, '1');
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(merged));
+    if (partialOrFull.grokTranscriptionApiKey !== undefined) {
+      localStorage.setItem(
+        'kite_grok_transcription_api_key',
+        (merged.grokTranscriptionApiKey ?? '').trim()
+      );
+    }
 
     // Synchronize keys with native SQLite vault if running inside Tauri
     if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__)) {
-      const saveCred = (provider: string, key?: string) => {
-        if (key !== undefined) {
-          void invokeCommand('save_provider_credential', { provider, key }).catch(() => undefined);
+      const saveCred = (provider: string, nextKey?: string, prevKey?: string) => {
+        if (nextKey === undefined) return;
+        const trimmedNext = nextKey.trim();
+        const trimmedPrev = (prevKey ?? '').trim();
+        // Only write to SQLite vault when saving a non-empty key, or when the user
+        // explicitly cleared a key that was previously non-empty in current config.
+        // Never wipe SQLite vault when saving an unrelated setting while local config is empty.
+        if (trimmedNext.length > 0 || (trimmedPrev.length > 0 && trimmedNext.length === 0)) {
+          void invokeCommand('save_provider_credential', { provider, key: trimmedNext }).catch(() => undefined);
         }
       };
-      saveCred('opencode', partialOrFull.opencodeApiKey);
-      saveCred('grok', partialOrFull.grokApiKey);
-      saveCred('grok_transcription', partialOrFull.grokTranscriptionApiKey);
-      saveCred('vercel', partialOrFull.vercelApiKey);
-      saveCred('cloudflare', partialOrFull.cloudflareApiToken);
-      saveCred('cloudflare_account_id', partialOrFull.cloudflareAccountId);
+      saveCred('opencode', partialOrFull.opencodeApiKey, current.opencodeApiKey);
+      saveCred('grok', partialOrFull.grokApiKey, current.grokApiKey);
+      saveCred('grok_transcription', partialOrFull.grokTranscriptionApiKey, current.grokTranscriptionApiKey);
+      saveCred('vercel', partialOrFull.vercelApiKey, current.vercelApiKey);
+      saveCred('cloudflare', partialOrFull.cloudflareApiToken, current.cloudflareApiToken);
+      saveCred('cloudflare_account_id', partialOrFull.cloudflareAccountId, current.cloudflareAccountId);
+      saveCred('elevenlabs', partialOrFull.elevenlabsApiKey, current.elevenlabsApiKey);
+
+      const settingsSnapshot = {
+        activeProvider: merged.activeProvider,
+        opencodeBaseUrl: merged.opencodeBaseUrl,
+        opencodeModel: merged.opencodeModel,
+        vercelBaseUrl: merged.vercelBaseUrl,
+        vercelModel: merged.vercelModel,
+        cloudflareGatewaySlug: merged.cloudflareGatewaySlug,
+        cloudflareBaseUrl: merged.cloudflareBaseUrl,
+        cloudflareModel: merged.cloudflareModel,
+        antigravityModel: merged.antigravityModel,
+        antigravityCommand: merged.antigravityCommand,
+        grokBaseUrl: merged.grokBaseUrl,
+        grokModel: merged.grokModel,
+        grokUseCliSubscription: merged.grokUseCliSubscription,
+        grokTranscriptionBaseUrl: merged.grokTranscriptionBaseUrl,
+        grokTranscriptionModel: merged.grokTranscriptionModel,
+        ttsEnabled: merged.ttsEnabled,
+        ttsLanguage: merged.ttsLanguage,
+        ttsRate: merged.ttsRate,
+        ttsEngine: merged.ttsEngine,
+        elevenlabsModel: merged.elevenlabsModel,
+        elevenlabsVoiceId: merged.elevenlabsVoiceId,
+        elevenlabsStability: merged.elevenlabsStability,
+        elevenlabsSimilarity: merged.elevenlabsSimilarity,
+        persona: merged.persona,
+      };
+      void invokeCommand('save_provider_credential', {
+        provider: 'operator_settings_json',
+        key: JSON.stringify(settingsSnapshot),
+      }).catch(() => undefined);
     }
 
     if (typeof window !== 'undefined') {
@@ -696,13 +753,19 @@ export function getOrCreateOpenCodeSessionId(
 }
 
 /**
- * One-time synchronization of legacy localStorage API keys to the native SQLite vault.
+ * Bidirectional synchronization between localStorage and the native SQLite vault.
+ * 1. Pushes any non-empty localStorage keys into the native SQLite vault.
+ * 2. Restores any missing keys (and settings snapshot) from the SQLite vault back into localStorage
+ *    so app updates, WebView profile resets, or build switches never lose credentials.
  */
-export async function syncNativeCredentialsWithVault(): Promise<void> {
+export async function syncNativeCredentialsWithVault(): Promise<OperatorProviderConfig> {
   const isTauri = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
-  if (!isTauri) return;
+  if (!isTauri) return loadOperatorConfig();
 
   try {
+    const hadStoredConfig = Boolean(
+      localStorage.getItem(CONFIG_STORAGE_KEY) || localStorage.getItem(LEGACY_CONFIG_STORAGE_KEY)
+    );
     const cfg = loadOperatorConfig();
     const records: Record<string, string> = {};
     if (cfg.opencodeApiKey) records['opencode'] = cfg.opencodeApiKey;
@@ -711,6 +774,7 @@ export async function syncNativeCredentialsWithVault(): Promise<void> {
     if (cfg.vercelApiKey) records['vercel'] = cfg.vercelApiKey;
     if (cfg.cloudflareApiToken) records['cloudflare'] = cfg.cloudflareApiToken;
     if (cfg.cloudflareAccountId) records['cloudflare_account_id'] = cfg.cloudflareAccountId;
+    if (cfg.elevenlabsApiKey) records['elevenlabs'] = cfg.elevenlabsApiKey;
 
     const extraGrokTrans = localStorage.getItem('kite_grok_transcription_api_key');
     if (extraGrokTrans && !records['grok_transcription']) {
@@ -720,9 +784,81 @@ export async function syncNativeCredentialsWithVault(): Promise<void> {
     if (Object.keys(records).length > 0) {
       await invokeCommand('migrate_localstorage_credentials', { records }).catch(() => undefined);
     }
+
+    // Reverse hydration: restore missing keys and settings from the native SQLite vault
+    const hydratedPatch: Partial<OperatorProviderConfig> = {};
+
+    if (!hadStoredConfig) {
+      const snapRes = await invokeCommand<{ success?: boolean; key?: string | null }>(
+        'get_active_provider_key',
+        { provider: 'operator_settings_json' }
+      ).catch(() => null);
+      if (snapRes?.key && typeof snapRes.key === 'string') {
+        try {
+          const parsedSnap = JSON.parse(snapRes.key) as Partial<OperatorProviderConfig>;
+          if (parsedSnap && typeof parsedSnap === 'object') {
+            Object.assign(hydratedPatch, parsedSnap);
+          }
+        } catch {
+          // ignore invalid json
+        }
+      }
+    }
+
+    const vaultFieldMap: Array<{ provider: string; field: keyof OperatorProviderConfig }> = [
+      { provider: 'opencode', field: 'opencodeApiKey' },
+      { provider: 'grok', field: 'grokApiKey' },
+      { provider: 'grok_transcription', field: 'grokTranscriptionApiKey' },
+      { provider: 'vercel', field: 'vercelApiKey' },
+      { provider: 'cloudflare', field: 'cloudflareApiToken' },
+      { provider: 'cloudflare_account_id', field: 'cloudflareAccountId' },
+      { provider: 'elevenlabs', field: 'elevenlabsApiKey' },
+    ];
+
+    for (const { provider, field } of vaultFieldMap) {
+      const currentVal = (cfg[field] as string | undefined)?.trim() || '';
+      if (!currentVal) {
+        const res = await invokeCommand<{ success?: boolean; key?: string | null }>(
+          'get_active_provider_key',
+          { provider }
+        ).catch(() => null);
+        const vaultKey = typeof res?.key === 'string' ? res.key.trim() : '';
+        if (vaultKey.length > 0) {
+          (hydratedPatch as any)[field] = vaultKey;
+          if (provider === 'grok_transcription') {
+            try {
+              localStorage.setItem('kite_grok_transcription_api_key', vaultKey);
+            } catch {}
+          }
+          if (provider === 'elevenlabs' && !hadStoredConfig && !hydratedPatch.ttsEngine) {
+            hydratedPatch.ttsEngine = 'elevenlabs';
+          }
+        }
+      }
+    }
+
+    if (Object.keys(hydratedPatch).length > 0) {
+      const latest = loadOperatorConfig();
+      const merged: OperatorProviderConfig = {
+        ...latest,
+        ...hydratedPatch,
+        persona: {
+          ...latest.persona,
+          ...(hydratedPatch.persona ?? {}),
+        },
+      };
+      localStorage.setItem(SEED_VERSION_KEY, '1');
+      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(merged));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('kite:operator-config-updated', { detail: merged }));
+        window.dispatchEvent(new CustomEvent('kite:operator-config-changed', { detail: merged }));
+      }
+      return merged;
+    }
   } catch {
     // ignore migration errors
   }
+  return loadOperatorConfig();
 }
 
 // Automatically trigger migration when running in Tauri

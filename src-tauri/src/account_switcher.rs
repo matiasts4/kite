@@ -98,11 +98,47 @@ fn profile_storage_dir(provider: &str, account_id: &str) -> PathBuf {
     profile_storage_dir_in(&profiles_root(), provider, account_id)
 }
 
+fn reconcile_agy_profile_integrity(root: &Path, profiles: &mut Vec<SavedAccountProfile>) -> bool {
+    let mut modified = false;
+    for p in profiles.iter_mut() {
+        if canon_provider(&p.provider) == "agy" {
+            let prof_dir = root.join("agy").join(&p.id);
+            let cred_path = prof_dir.join("gemini_antigravity_cred.json");
+            if cred_path.exists() {
+                if let Ok(raw) = fs::read_to_string(&cred_path) {
+                    if let Some(identity) = crate::quota::parse_antigravity_credential_blob(&raw) {
+                        let cred_email = identity.email.trim();
+                        if !cred_email.is_empty() {
+                            let curr_email = p.email.as_deref().unwrap_or("").trim();
+                            if !curr_email.eq_ignore_ascii_case(cred_email) {
+                                if p.label.trim().is_empty() || p.label.trim().eq_ignore_ascii_case(curr_email) {
+                                    p.label = cred_email.to_string();
+                                }
+                                p.email = Some(cred_email.to_string());
+                                modified = true;
+                            }
+                        }
+                    }
+                }
+            }
+            // Clean up legacy contaminated files
+            for legacy in &["oauth_creds.json", "google_accounts.json", "cli_settings.json", "settings.json", "storage.json"] {
+                let leg_path = prof_dir.join(legacy);
+                if leg_path.exists() {
+                    let _ = fs::remove_file(leg_path);
+                }
+            }
+        }
+    }
+    modified
+}
+
 fn load_registry_from(root: &Path) -> AccountProfilesRegistry {
     let file = registry_file_in(root);
     if file.exists() {
         if let Ok(data) = fs::read(&file) {
             if let Ok(mut reg) = serde_json::from_slice::<AccountProfilesRegistry>(&data) {
+                let repaired = reconcile_agy_profile_integrity(root, &mut reg.profiles);
                 // Deduplicate profiles by provider + email (case-insensitive) or by id
                 let mut deduplicated: Vec<SavedAccountProfile> = Vec::new();
                 for p in reg.profiles {
@@ -115,8 +151,10 @@ fn load_registry_from(root: &Path) -> AccountProfilesRegistry {
                             }
                     });
                     if let Some(pos) = existing_pos {
-                        // Keep the active one or the most recently used one
-                        if p.is_active || (!deduplicated[pos].is_active && p.last_used_unix_ms > deduplicated[pos].last_used_unix_ms) {
+                        let cur = &deduplicated[pos];
+                        let cur_has_cred = root.join(&canon_prov).join(&cur.id).join("gemini_antigravity_cred.json").exists();
+                        let new_has_cred = root.join(&canon_prov).join(&p.id).join("gemini_antigravity_cred.json").exists();
+                        if (!cur_has_cred && new_has_cred) || p.is_active || (!cur.is_active && p.last_used_unix_ms > cur.last_used_unix_ms) {
                             deduplicated[pos] = p;
                         }
                     } else {
@@ -124,6 +162,9 @@ fn load_registry_from(root: &Path) -> AccountProfilesRegistry {
                     }
                 }
                 reg.profiles = deduplicated;
+                if repaired {
+                    let _ = save_registry_to(root, &reg);
+                }
                 return reg;
             }
         }
@@ -338,9 +379,166 @@ struct FileMapping {
     rel_dest: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveIdentityProbe {
+    pub provider: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub source: String,
+}
+
+pub fn probe_live_provider_identity(provider: &str) -> Option<LiveIdentityProbe> {
+    let canon = canon_provider(provider);
+    match canon.as_str() {
+        "agy" => {
+            if let Some((email, name)) = crate::quota::read_antigravity_credential() {
+                return Some(LiveIdentityProbe {
+                    provider: "agy".into(),
+                    email,
+                    name,
+                    source: "gemini:antigravity".into(),
+                });
+            }
+            if let Some((email, name)) = crate::quota::read_antigravity_ide_identity() {
+                return Some(LiveIdentityProbe {
+                    provider: "agy".into(),
+                    email,
+                    name,
+                    source: "state.vscdb".into(),
+                });
+            }
+            None
+        }
+        "gemini" => {
+            let home = user_home_dir();
+            let creds_file = home.join(".gemini").join("oauth_creds.json");
+            if creds_file.exists() {
+                if let Ok(bytes) = fs::read(&creds_file) {
+                    if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(id_tok) = val.get("id_token").and_then(|v| v.as_str()) {
+                            if let Some(payload) = decode_jwt_payload(id_tok) {
+                                let email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
+                                let name = payload.get("name").and_then(|v| v.as_str()).map(String::from);
+                                if let Some(e) = email {
+                                    return Some(LiveIdentityProbe {
+                                        provider: "gemini".into(),
+                                        email: e,
+                                        name,
+                                        source: "oauth_creds.json".into(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let accounts_file = home.join(".gemini").join("google_accounts.json");
+            if accounts_file.exists() {
+                if let Ok(bytes) = fs::read(&accounts_file) {
+                    if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(active) = val.get("active").and_then(|v| v.as_str()) {
+                            if !active.trim().is_empty() {
+                                return Some(LiveIdentityProbe {
+                                    provider: "gemini".into(),
+                                    email: active.trim().to_string(),
+                                    name: None,
+                                    source: "google_accounts.json".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "codex" => {
+            let home = user_home_dir();
+            let auth_file = home.join(".codex").join("auth.json");
+            if auth_file.exists() {
+                if let Ok(bytes) = fs::read(&auth_file) {
+                    if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(id_tok) = val.get("id_token").and_then(|v| v.as_str()) {
+                            if let Some(payload) = decode_jwt_payload(id_tok) {
+                                if let Some(e) = payload.get("email").and_then(|v| v.as_str()).map(String::from) {
+                                    let name = payload.get("name").and_then(|v| v.as_str()).map(String::from);
+                                    return Some(LiveIdentityProbe {
+                                        provider: "codex".into(),
+                                        email: e,
+                                        name,
+                                        source: "auth.json".into(),
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(tokens) = val.get("tokens").and_then(|v| v.as_object()) {
+                            if let Some(id_tok) = tokens.get("id_token").and_then(|v| v.as_str()) {
+                                if let Some(payload) = decode_jwt_payload(id_tok) {
+                                    if let Some(e) = payload.get("email").and_then(|v| v.as_str()).map(String::from) {
+                                        let name = payload.get("name").and_then(|v| v.as_str()).map(String::from);
+                                        return Some(LiveIdentityProbe {
+                                            provider: "codex".into(),
+                                            email: e,
+                                            name,
+                                            source: "tokens.id_token".into(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "claude" => {
+            let home = user_home_dir();
+            let claude_json = home.join(".claude.json");
+            if claude_json.exists() {
+                if let Ok(bytes) = fs::read(&claude_json) {
+                    if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(email) = val.pointer("/oauthAccount/emailAddress").and_then(|v| v.as_str()) {
+                            if !email.trim().is_empty() {
+                                return Some(LiveIdentityProbe {
+                                    provider: "claude".into(),
+                                    email: email.trim().to_string(),
+                                    name: None,
+                                    source: "claude.json".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "grok" => {
+            let home = user_home_dir();
+            let auth_file = home.join(".grok").join("auth.json");
+            if auth_file.exists() {
+                if let Ok(bytes) = fs::read(&auth_file) {
+                    if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(email) = val.get("email").and_then(|v| v.as_str()) {
+                            if !email.trim().is_empty() {
+                                return Some(LiveIdentityProbe {
+                                    provider: "grok".into(),
+                                    email: email.trim().to_string(),
+                                    name: None,
+                                    source: "auth.json".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
     let home = user_home_dir();
-    let appdata = appdata_dir();
     match canon_provider(provider).as_str() {
         "agy" => vec![
             FileMapping {
@@ -350,26 +548,6 @@ fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
             FileMapping {
                 source: home.join(".gemini").join("antigravity-cli").join("jetski_state.pbtxt"),
                 rel_dest: "jetski_state.pbtxt",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("antigravity-cli").join("settings.json"),
-                rel_dest: "cli_settings.json",
-            },
-            FileMapping {
-                source: appdata.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"),
-                rel_dest: "state.vscdb",
-            },
-            FileMapping {
-                source: appdata.join("Antigravity").join("User").join("globalStorage").join("storage.json"),
-                rel_dest: "storage.json",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("google_accounts.json"),
-                rel_dest: "google_accounts.json",
-            },
-            FileMapping {
-                source: home.join(".gemini").join("oauth_creds.json"),
-                rel_dest: "oauth_creds.json",
             },
         ],
         "claude" => vec![
@@ -611,8 +789,18 @@ fn apply_profile_to_active(provider: &str, account_id: &str) -> Result<(), Strin
     let provider = canon_provider(provider);
     let src_dir = profile_storage_dir(&provider, account_id);
     let mappings = get_provider_file_mappings(&provider);
+    let is_agy = provider == "agy";
+    let cred_file = src_dir.join("gemini_antigravity_cred.json");
 
-    if !mappings.iter().any(|m| src_dir.join(m.rel_dest).exists()) {
+    if is_agy {
+        if !cred_file.exists() {
+            return Err("El perfil seleccionado no contiene credenciales válidas de Antigravity (gemini_antigravity_cred.json). Vuelve a iniciar sesión con esa cuenta y guárdala.".to_string());
+        }
+        let raw = fs::read_to_string(&cred_file).map_err(|e| format!("No se pudo leer gemini_antigravity_cred.json: {e}"))?;
+        if crate::quota::parse_antigravity_credential_blob(&raw).is_none() {
+            return Err("El archivo de credenciales de Antigravity está dañado o no contiene una identidad válida.".to_string());
+        }
+    } else if !mappings.iter().any(|m| src_dir.join(m.rel_dest).exists()) {
         return Err("El perfil guardado no contiene archivos de sesión.".to_string());
     }
 
@@ -621,6 +809,16 @@ fn apply_profile_to_active(provider: &str, account_id: &str) -> Result<(), Strin
         .join("_backups")
         .join(&provider)
         .join(now_ms().to_string());
+    let _ = fs::create_dir_all(&backup_dir);
+
+    let mut live_agy_backup: Option<String> = None;
+    if is_agy {
+        if let Some(raw) = crate::quota::read_antigravity_raw_credential() {
+            let _ = fs::write(backup_dir.join("gemini_antigravity_cred.json"), &raw);
+            live_agy_backup = Some(raw);
+        }
+    }
+
     let mut existed: Vec<bool> = Vec::with_capacity(mappings.len());
     for m in &mappings {
         let present = m.source.exists();
@@ -687,17 +885,40 @@ fn apply_profile_to_active(provider: &str, account_id: &str) -> Result<(), Strin
         return Err(format!("Cambio revertido, falló {err}"));
     }
 
-    prune_backups(&provider);
+    // 5. Apply and verify credential for agy
+    if is_agy {
+        if let Ok(raw) = fs::read_to_string(&cred_file) {
+            let expected_identity = crate::quota::parse_antigravity_credential_blob(&raw);
+            let written = crate::quota::write_antigravity_credential(&raw);
+            let verified = if written {
+                if let Some(expected) = expected_identity {
+                    crate::quota::read_antigravity_credential()
+                        .map(|(e, _)| e.eq_ignore_ascii_case(&expected.email))
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
 
-    if provider == "agy" {
-        let cred_file = src_dir.join("gemini_antigravity_cred.json");
-        if cred_file.exists() {
-            if let Ok(raw) = fs::read_to_string(&cred_file) {
-                crate::quota::write_antigravity_credential(&raw);
+            if !verified {
+                if let Some(prev) = live_agy_backup {
+                    crate::quota::write_antigravity_credential(&prev);
+                }
+                for (i, m) in mappings.iter().enumerate() {
+                    if existed[i] {
+                        let _ = copy_atomic(&backup_dir.join(m.rel_dest), &m.source);
+                    } else {
+                        let _ = fs::remove_file(&m.source);
+                    }
+                }
+                return Err("No se pudo escribir o verificar la credencial de Antigravity en el Administrador de credenciales de Windows.".to_string());
             }
         }
     }
 
+    prune_backups(&provider);
     Ok(())
 }
 
@@ -757,20 +978,7 @@ fn fetch_live_quota(provider: &str) -> Option<LiveQuota> {
     }
 }
 
-/// agy and gemini share one Google identity file: after switching either, mark the
-/// sibling provider's profile for the same email as the active one.
-fn sync_google_siblings(reg: &mut AccountProfilesRegistry, provider: &str, activated: &SavedAccountProfile) {
-    let sibling = match canon_provider(provider).as_str() {
-        "agy" => "gemini",
-        "gemini" => "agy",
-        _ => return,
-    };
-    for p in &mut reg.profiles {
-        if p.provider == sibling {
-            p.is_active = activated.email.is_some() && p.email == activated.email;
-        }
-    }
-}
+
 
 // ---------------------------------------------------------------------------
 // Public Tauri Commands
@@ -786,9 +994,26 @@ pub fn list_saved_accounts(request: Option<Value>) -> Value {
 
     let canon_prov = provider.as_deref().map(canon_provider);
     let probe_target = canon_prov.clone().unwrap_or_else(|| "agy".to_string());
+    let quota_key = if probe_target == "agy" { "antigravity" } else { &probe_target };
 
-    // Phase 1: probe live quota (reads real OS credentials / token).
-    let live_q = get_cached_live_quota(&probe_target).or_else(|| fetch_live_quota(&probe_target));
+    // Direct synchronous live OS identity probe
+    let live_ident = probe_live_provider_identity(&probe_target);
+
+    // Check cached quota; if email mismatches live_ident, invalidate cache immediately!
+    let mut live_q = get_cached_live_quota(&probe_target);
+    if let Some(ref ident) = live_ident {
+        if let Some(ref q) = live_q {
+            if let Some(ref cached_email) = q.email {
+                if !cached_email.eq_ignore_ascii_case(&ident.email) {
+                    crate::quota::invalidate_provider_cache(quota_key);
+                    live_q = None;
+                }
+            }
+        }
+    }
+    if live_q.is_none() {
+        live_q = fetch_live_quota(&probe_target);
+    }
 
     // Phase 2: reconcile live identity with registry (short lock).
     let _guard = REGISTRY_LOCK.lock().unwrap();
@@ -796,64 +1021,55 @@ pub fn list_saved_accounts(request: Option<Value>) -> Value {
     let mut changed = false;
     let mut unregistered_live_session: Option<Value> = None;
 
-    if let Some(ref q) = live_q {
-        if let Some(ref live_email) = q.email {
-            let matching_idx = reg.profiles.iter().position(|p| {
-                same_provider(&p.provider, &probe_target)
-                    && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(live_email))
-            });
+    let authoritative_email = live_ident.as_ref().map(|i| i.email.clone())
+        .or_else(|| live_q.as_ref().and_then(|q| q.email.clone()));
 
-            if let Some(idx) = matching_idx {
-                for (i, p) in reg.profiles.iter_mut().enumerate() {
-                    if same_provider(&p.provider, &probe_target) {
-                        let should_be_active = i == idx;
-                        if p.is_active != should_be_active {
-                            p.is_active = should_be_active;
-                            changed = true;
-                        }
-                        if should_be_active {
+    if let Some(ref live_email) = authoritative_email {
+        let matching_idx = reg.profiles.iter().position(|p| {
+            same_provider(&p.provider, &probe_target)
+                && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(live_email))
+        });
+
+        if let Some(idx) = matching_idx {
+            for (i, p) in reg.profiles.iter_mut().enumerate() {
+                if same_provider(&p.provider, &probe_target) {
+                    let should_be_active = i == idx;
+                    if p.is_active != should_be_active {
+                        p.is_active = should_be_active;
+                        changed = true;
+                    }
+                    if should_be_active {
+                        if let Some(ref q) = live_q {
                             p.primary_remaining_percent = Some(q.percent);
                             p.primary_reset_at = q.reset_at.clone();
                             p.time_until_reset_ms = q.until_ms;
                             if q.plan.is_some() {
                                 p.plan_name = q.plan.clone();
                             }
-                            p.last_used_unix_ms = now_ms();
-                            changed = true;
                         }
-                    }
-                }
-            } else {
-                // The live account does not match any profile in the vault.
-                // Avoid false active badges and expose unregistered session to frontend.
-                for p in &mut reg.profiles {
-                    if same_provider(&p.provider, &probe_target) && p.is_active {
-                        p.is_active = false;
+                        p.last_used_unix_ms = now_ms();
                         changed = true;
                     }
                 }
-                unregistered_live_session = Some(json!({
-                    "provider": probe_target,
-                    "email": live_email,
-                    "planName": q.plan,
-                    "primaryRemainingPercent": q.percent,
-                    "primaryResetAt": q.reset_at,
-                    "timeUntilResetMs": q.until_ms,
-                }));
             }
         } else {
-            // Live email not detected, but update active profile quota if available
+            // The live account does not match any profile in the vault.
             for p in &mut reg.profiles {
                 if same_provider(&p.provider, &probe_target) && p.is_active {
-                    p.primary_remaining_percent = Some(q.percent);
-                    p.primary_reset_at = q.reset_at.clone();
-                    p.time_until_reset_ms = q.until_ms;
-                    if q.plan.is_some() {
-                        p.plan_name = q.plan.clone();
-                    }
+                    p.is_active = false;
                     changed = true;
                 }
             }
+            unregistered_live_session = Some(json!({
+                "provider": probe_target,
+                "email": live_email,
+                "name": live_ident.as_ref().and_then(|i| i.name.clone()),
+                "source": live_ident.as_ref().map(|i| i.source.clone()),
+                "planName": live_q.as_ref().and_then(|q| q.plan.clone()),
+                "primaryRemainingPercent": live_q.as_ref().map(|q| q.percent),
+                "primaryResetAt": live_q.as_ref().and_then(|q| q.reset_at.clone()),
+                "timeUntilResetMs": live_q.as_ref().and_then(|q| q.until_ms),
+            }));
         }
     }
 
@@ -875,23 +1091,47 @@ pub fn list_saved_accounts(request: Option<Value>) -> Value {
 
 pub fn save_current_account_profile_direct(provider: String, label: String) -> Value {
     let provider = canon_provider(&provider);
-    if get_provider_file_mappings(&provider).is_empty() {
+    if get_provider_file_mappings(&provider).is_empty() && provider != "agy" {
         return json!({ "success": false, "error": format!("Proveedor no soportado: {provider}") });
     }
 
-    // Probe quota before taking the lock (slow, spawns `agy`).
-    let live = get_cached_live_quota(&provider).or_else(|| fetch_live_quota(&provider));
+    let live_ident = probe_live_provider_identity(&provider);
+    if provider == "agy" && live_ident.is_none() {
+        return json!({
+            "success": false,
+            "error": "No se detectó una sesión activa de Antigravity en el sistema (gemini:antigravity). Inicia sesión primero."
+        });
+    }
+
+    let quota_key = if provider == "agy" { "antigravity" } else { &provider };
+    let mut live_q = get_cached_live_quota(&provider);
+    if let Some(ref ident) = live_ident {
+        if let Some(ref q) = live_q {
+            if let Some(ref cached_email) = q.email {
+                if !cached_email.eq_ignore_ascii_case(&ident.email) {
+                    crate::quota::invalidate_provider_cache(quota_key);
+                    live_q = None;
+                }
+            }
+        }
+    }
+    if live_q.is_none() {
+        live_q = fetch_live_quota(&provider);
+    }
+
+    let email = live_ident.as_ref().map(|i| i.email.clone())
+        .or_else(|| live_q.as_ref().and_then(|q| q.email.clone()));
+
+    let (plan_name, primary_remaining_percent, primary_reset_at, time_until_reset_ms) = match live_q {
+        Some(q) => (q.plan, Some(q.percent), q.reset_at, q.until_ms),
+        None => (None, None, None, None),
+    };
 
     let _guard = REGISTRY_LOCK.lock().unwrap();
     let mut reg = load_registry();
     let now = now_ms();
 
-    let (email, plan_name, primary_remaining_percent, primary_reset_at, time_until_reset_ms) = match live {
-        Some(q) => (q.email, q.plan, Some(q.percent), q.reset_at, q.until_ms),
-        None => (None, None, None, None, None),
-    };
-
-    // Upsert: check if a profile with the same provider and email already exists
+    // Match strictly by email against reg.profiles
     let existing_idx = if let Some(ref em) = email {
         reg.profiles.iter().position(|p| {
             same_provider(&p.provider, &provider)
@@ -963,7 +1203,6 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
         new_prof
     };
 
-    sync_google_siblings(&mut reg, &provider, &profile);
     save_registry(&reg);
 
     log_trace(&format!(
@@ -1024,17 +1263,41 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         return json!({ "success": false, "code": "PROVIDER_BUSY", "error": msg });
     }
 
-    // 1. Persist the latest state of the currently active profile before leaving it.
-    if let Some(active_prof) = reg
-        .profiles
-        .iter()
-        .find(|p| same_provider(&p.provider, &provider) && p.is_active)
-    {
-        if active_prof.id != account_id && !snapshot_active_to_profile(&provider, &active_prof.id) {
-            log_trace(&format!(
-                "account_switcher: could not refresh snapshot of active profile {}",
-                active_prof.id
-            ));
+    // 1. Persist latest state of active profile before leaving it, with live identity verification
+    let live_ident = probe_live_provider_identity(&provider);
+    if let Some(ref ident) = live_ident {
+        let matching_live_idx = reg.profiles.iter().position(|p| {
+            same_provider(&p.provider, &provider)
+                && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(&ident.email))
+        });
+
+        if let Some(l_idx) = matching_live_idx {
+            let live_prof_id = reg.profiles[l_idx].id.clone();
+            if live_prof_id != account_id {
+                snapshot_active_to_profile(&provider, &live_prof_id);
+            }
+        } else {
+            // Live session is unregistered: back up into _backups without overwriting any vault profile!
+            let safe_email = ident.email.replace(|c: char| !c.is_alphanumeric() && c != '@' && c != '.', "_");
+            let backup_dir = profiles_root()
+                .join("_backups")
+                .join(&provider)
+                .join(format!("unregistered_{}_{}", safe_email, now_ms()));
+            let _ = fs::create_dir_all(&backup_dir);
+            for m in get_provider_file_mappings(&provider) {
+                if m.source.exists() {
+                    let _ = copy_atomic(&m.source, &backup_dir.join(m.rel_dest));
+                }
+            }
+            if provider == "agy" {
+                if let Some(raw) = crate::quota::read_antigravity_raw_credential() {
+                    let _ = fs::write(backup_dir.join("gemini_antigravity_cred.json"), raw);
+                }
+            }
+        }
+    } else if let Some(active_prof) = reg.profiles.iter().find(|p| same_provider(&p.provider, &provider) && p.is_active) {
+        if active_prof.id != account_id {
+            snapshot_active_to_profile(&provider, &active_prof.id);
         }
     }
 
@@ -1062,7 +1325,7 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     }
 
     let activated_profile = reg.profiles[idx].clone();
-    sync_google_siblings(&mut reg, &provider, &activated_profile);
+    // sibling sync decoupled
     save_registry(&reg);
 
     // Invalidate quota cache for this provider so stale in-memory cached identity does not shadow the newly switched account
@@ -1253,32 +1516,15 @@ pub fn list_detected_cli_accounts() -> Value {
     {
         let bin = crate::acp::resolve_antigravity_acp_binary()
             .map(|p| p.to_string_lossy().to_string());
-        let creds_file = home.join(".gemini").join("oauth_creds.json");
-        let accounts_file = home.join(".gemini").join("google_accounts.json");
-        let mut email: Option<String> = None;
-        let mut name: Option<String> = None;
+        let (email, name, source) = if let Some((e, n)) = crate::quota::read_antigravity_credential() {
+            (Some(e), n, "Windows Credential Manager (gemini:antigravity)")
+        } else if let Some((e, n)) = crate::quota::read_antigravity_ide_identity() {
+            (Some(e), n, "Antigravity IDE (state.vscdb)")
+        } else {
+            (None, None, "")
+        };
 
-        if creds_file.exists() {
-            if let Ok(bytes) = fs::read(&creds_file) {
-                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
-                    if let Some(id_tok) = val.get("id_token").and_then(|v| v.as_str()) {
-                        if let Some(payload) = decode_jwt_payload(id_tok) {
-                            email = payload.get("email").and_then(|v| v.as_str()).map(String::from);
-                            name = payload.get("name").and_then(|v| v.as_str()).map(String::from);
-                        }
-                    }
-                }
-            }
-        }
-        if email.is_none() && accounts_file.exists() {
-            if let Ok(bytes) = fs::read(&accounts_file) {
-                if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
-                    email = val.get("active").and_then(|v| v.as_str()).map(String::from);
-                }
-            }
-        }
-
-        let auth_state = if email.is_some() || creds_file.exists() {
+        let auth_state = if email.is_some() {
             "authenticated"
         } else if bin.is_some() {
             "unauthenticated"
@@ -1290,12 +1536,12 @@ pub fn list_detected_cli_accounts() -> Value {
             provider: "antigravity".into(),
             display_name: "Antigravity".into(),
             auth_state: auth_state.into(),
-            account_label: email.clone().or(name).or_else(|| Some("Google Account".into())),
+            account_label: email.clone().or(name).or_else(|| Some("Antigravity Account".into())),
             email,
             plan_name: Some("Google Cloud AI / Gemini".into()),
             binary_path: bin,
-            config_path: Some(creds_file.to_string_lossy().to_string()),
-            details: Some("Sesión OAuth detectada en ~/.gemini/oauth_creds.json".into()),
+            config_path: if source.is_empty() { None } else { Some(source.into()) },
+            details: if source.is_empty() { None } else { Some(format!("Sesión detectada en {source}")) },
         });
     }
 
@@ -1572,6 +1818,67 @@ pub fn list_detected_cli_accounts() -> Value {
     })
 }
 
+pub fn prepare_new_account_login_direct(provider: String) -> Value {
+    let provider = canon_provider(&provider);
+    if provider == "agy" {
+        let live_ident = probe_live_provider_identity("agy");
+        let previous_email = live_ident.as_ref().map(|i| i.email.clone());
+
+        // 1. If active identity exists, snapshot/save it to vault first
+        if let Some(ref em) = previous_email {
+            let _ = save_current_account_profile_direct("agy".into(), em.clone());
+        }
+
+        // 2. Quiesce Kite terminals for agy
+        crate::terminal::quiesce_provider_terminals("agy");
+
+        // 3. Terminate running agy CLI processes so credentials are unlocked
+        terminate_provider_cli_processes("agy");
+
+        // 4. Clear generic credential from Windows Credential Manager
+        let deleted = crate::quota::delete_antigravity_credential();
+
+        // 5. Mark all agy profiles in profiles.json as is_active = false
+        {
+            let _guard = REGISTRY_LOCK.lock().unwrap();
+            let mut reg = load_registry();
+            for p in &mut reg.profiles {
+                if same_provider(&p.provider, "agy") {
+                    p.is_active = false;
+                }
+            }
+            let _ = save_registry(&reg);
+        }
+
+        // 6. Invalidate antigravity quota cache
+        crate::quota::invalidate_provider_cache("antigravity");
+
+        json!({
+            "success": true,
+            "previousEmailSaved": previous_email,
+            "loginCommand": "agy",
+            "keyringDeleted": deleted
+        })
+    } else {
+        json!({
+            "success": false,
+            "error": format!("Preparación de nuevo login no soportada para proveedor: {provider}")
+        })
+    }
+}
+
+#[tauri::command]
+pub fn prepare_new_account_login(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity")
+        .to_string();
+    prepare_new_account_login_direct(provider)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,4 +1968,60 @@ mod tests {
         });
         assert_eq!(existing, Some(0));
     }
+
+    #[test]
+    fn test_get_provider_file_mappings_agy_is_clean() {
+        let mappings = get_provider_file_mappings("agy");
+        assert_eq!(mappings.len(), 2);
+        let dests: Vec<&str> = mappings.iter().map(|m| m.rel_dest).collect();
+        assert!(dests.contains(&"antigravity_state.pbtxt"));
+        assert!(dests.contains(&"jetski_state.pbtxt"));
+        assert!(!dests.contains(&"cli_settings.json"));
+        assert!(!dests.contains(&"state.vscdb"));
+        assert!(!dests.contains(&"storage.json"));
+        assert!(!dests.contains(&"google_accounts.json"));
+        assert!(!dests.contains(&"oauth_creds.json"));
+    }
+
+    #[test]
+    fn test_reconcile_agy_profile_integrity_repairs_drift() {
+        let dir = std::env::temp_dir().join(format!("kite-reconcile-test-{}", Uuid::new_v4()));
+        let agy_prof_dir = dir.join("agy").join("prof-1");
+        fs::create_dir_all(&agy_prof_dir).unwrap();
+
+        let cred_json = r#"{
+            "token": {
+                "access_token": "ya29.test",
+                "refresh_token": "1//test"
+            },
+            "id_token_email": "reconciled@example.com"
+        }"#;
+        fs::write(agy_prof_dir.join("gemini_antigravity_cred.json"), cred_json).unwrap();
+        fs::write(agy_prof_dir.join("oauth_creds.json"), "contaminated").unwrap();
+
+        let mut reg = AccountProfilesRegistry::default();
+        reg.profiles.push(SavedAccountProfile {
+            id: "prof-1".to_string(),
+            provider: "agy".to_string(),
+            label: "Old Label".to_string(),
+            email: Some("stale@example.com".to_string()),
+            plan_name: None,
+            is_active: true,
+            last_used_unix_ms: 100,
+            primary_remaining_percent: None,
+            primary_reset_at: None,
+            time_until_reset_ms: None,
+        });
+
+        save_registry_to(&dir, &reg).unwrap();
+
+        let loaded = load_registry_from(&dir);
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].email.as_deref(), Some("reconciled@example.com"));
+        // Legacy contaminated file should be removed
+        assert!(!agy_prof_dir.join("oauth_creds.json").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
+

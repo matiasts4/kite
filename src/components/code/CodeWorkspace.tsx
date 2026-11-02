@@ -1,13 +1,17 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import type { Workspace, AgentProfile } from '../../types';
 import { invokeCommand } from '../../lib/ipc';
-import { releaseTerminal } from '../views/TerminalView';
+import { releaseTerminal, TerminalView } from '../views/TerminalView';
+import { setTerminalDividerDragging } from '../../lib/terminalViewport';
+import { waitForSpawnGeometry } from '../../lib/terminalHostSize';
+import { getTerminalAppearancePrefs } from '../../lib/terminalAppearancePrefs';
 import { NewSessionPane } from './NewSessionPane';
 import { CodeHome } from './CodeHome';
 import { WorkspaceEmptyLauncher } from './WorkspaceEmptyLauncher';
 import { CODE_LAUNCH_ENGINES } from './engineCatalog';
 import { CodePaneNewMenu } from './CodePaneMenu';
-import { PaneNodeRenderer } from './PaneNodeRenderer';
+import { PaneNodeRenderer, type TerminalStatus } from './PaneNodeRenderer';
 import { AgentPaneResumeModal } from '../modals/AgentPaneResumeModal';
 import {
   FolderIcon,
@@ -24,6 +28,7 @@ import {
   swapAdjacent,
   findLeaf,
   getAllLeaves,
+  copySplitRatiosIfSameChildren,
 } from './treeUtils';
 import type {
   PaneNode,
@@ -134,6 +139,25 @@ function sanitizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayout {
   };
 }
 
+function estimateTargetPaneGrid(
+  container: HTMLElement | null,
+  leafCount: number = 1,
+  axis: PaneAxis = 'vertical',
+): { columns: number; rows: number } {
+  const prefs = getTerminalAppearancePrefs();
+  const cellWidth = Math.max(6, prefs.fontSize * 0.6);
+  const cellHeight = Math.max(12, Math.round(prefs.fontSize * prefs.lineHeight));
+  const rect = container?.getBoundingClientRect();
+  const rawWidth = rect && rect.width >= 200 ? rect.width : 960;
+  const rawHeight = rect && rect.height >= 140 ? rect.height : 640;
+  const count = Math.max(1, leafCount);
+  const paneWidth = axis === 'vertical' ? (rawWidth - (count - 1) * 8) / count : rawWidth;
+  const paneHeight = (axis === 'horizontal' ? (rawHeight - (count - 1) * 8) / count : rawHeight) - 36;
+  const columns = Math.max(20, Math.floor((paneWidth - 21) / cellWidth));
+  const rows = Math.max(8, Math.floor((paneHeight - 16) / cellHeight));
+  return { columns, rows };
+}
+
 function seatEngine(engine: string): string {
   return engine === 'powershell' || engine === 'terminal' ? 'terminal' : engine;
 }
@@ -142,6 +166,7 @@ async function requestWorkspaceTerminals(
   workspaceId: string,
   seats: Array<{ engine: string; label?: string; agentName?: string }>,
   task = '',
+  dims?: { columns: number; rows: number },
 ): Promise<LaunchedTerminalSlot[] | null> {
   void invokeCommand('list_terminal_profiles').catch(() => undefined);
   try {
@@ -154,8 +179,8 @@ async function requestWorkspaceTerminals(
         ...(seat.agentName?.trim() ? { agentName: seat.agentName.trim().slice(0, 32) } : {}),
       })),
       task,
-      columns: 80,
-      rows: 24,
+      columns: dims?.columns ?? 80,
+      rows: dims?.rows ?? 24,
       confirmedByBuilder: true,
     });
     return launched?.slots?.length ? launched.slots : null;
@@ -262,6 +287,35 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   const canvasRef = useRef<HTMLDivElement>(null);
   const headerNewBtnRef = useRef<HTMLButtonElement | null>(null);
   const workspaceCwdRef = useRef<string | null>(null);
+  const terminalSlotsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const getOrCreateTerminalSlotHost = useCallback((leafId: string): HTMLDivElement => {
+    let host = terminalSlotsRef.current.get(leafId);
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'terminal-portal-slot-host';
+      host.style.width = '100%';
+      host.style.height = '100%';
+      host.style.display = 'flex';
+      host.style.flexDirection = 'column';
+      host.style.flex = '1 1 auto';
+      host.style.minWidth = '0';
+      host.style.minHeight = '0';
+      terminalSlotsRef.current.set(leafId, host);
+    }
+    return host;
+  }, []);
+
+  const handleRegisterTerminalSlot = useCallback(
+    (leafId: string, bodyEl: HTMLDivElement | null) => {
+      if (!bodyEl) return;
+      const host = getOrCreateTerminalSlotHost(leafId);
+      if (host.parentElement !== bodyEl) {
+        bodyEl.appendChild(host);
+      }
+    },
+    [getOrCreateTerminalSlotHost]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -298,6 +352,37 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   }, []);
 
   const activeTab = layout.tabs.find((t) => t.id === layout.activeTabId) || layout.tabs[0] || null;
+
+  const allTerminalLeaves = useMemo(() => {
+    const list: Array<{ leaf: PaneLeaf; tabId: string; isActiveTab: boolean }> = [];
+    const resolvedActiveId =
+      layout.tabs.find((t) => t.id === layout.activeTabId)?.id ||
+      layout.tabs[0]?.id ||
+      null;
+    for (const tab of layout.tabs) {
+      const leaves = getAllLeaves(tab.root);
+      for (const leaf of leaves) {
+        if (leaf.occupant.kind === 'terminal') {
+          list.push({
+            leaf,
+            tabId: tab.id,
+            isActiveTab: tab.id === resolvedActiveId,
+          });
+        }
+      }
+    }
+    return list;
+  }, [layout.tabs, layout.activeTabId]);
+
+  useEffect(() => {
+    const activeIds = new Set(allTerminalLeaves.map((item) => item.leaf.id));
+    for (const [leafId, hostEl] of terminalSlotsRef.current.entries()) {
+      if (!activeIds.has(leafId)) {
+        hostEl.remove();
+        terminalSlotsRef.current.delete(leafId);
+      }
+    }
+  }, [allTerminalLeaves]);
 
   // Load layout from Tauri when selected workspace changes
   const loadLayout = useCallback(async (wsId: string) => {
@@ -350,13 +435,15 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   // Persist layout helper
   const persistLayout = useCallback(
     async (nextLayout: WorkspaceLayout) => {
-      latestLayoutRef.current = nextLayout;
-      setLayout(nextLayout);
+      const revision = (latestLayoutRef.current.revision ?? 0) + 1;
+      const stamped: WorkspaceLayout = { ...nextLayout, revision };
+      latestLayoutRef.current = stamped;
+      setLayout(stamped);
       if (!selectedWorkspace?.id) return;
       try {
         await invokeCommand('save_workspace_layout', {
           workspaceId: selectedWorkspace.id,
-          layout: nextLayout,
+          layout: stamped,
         });
         setPersistenceWarning(null);
         setFailedSaveAttempts(0);
@@ -414,17 +501,20 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     (leafId: string) => {
       if (focusedLeafId === leafId && activeTab?.focusedLeafId === leafId) return;
       setFocusedLeafId(leafId);
-      if (activeTab && activeTab.focusedLeafId !== leafId) {
-        const updatedTabs = layout.tabs.map((t) =>
-          t.id === activeTab.id ? { ...t, focusedLeafId: leafId } : t
+      const current = latestLayoutRef.current;
+      const tab =
+        current.tabs.find((item) => item.id === current.activeTabId) || current.tabs[0];
+      if (tab && tab.focusedLeafId !== leafId) {
+        const updatedTabs = current.tabs.map((item) =>
+          item.id === tab.id ? { ...item, focusedLeafId: leafId } : item
         );
         void persistLayout({
-          ...layout,
+          ...current,
           tabs: updatedTabs,
         });
       }
     },
-    [activeTab, focusedLeafId, layout, persistLayout]
+    [activeTab, focusedLeafId, persistLayout]
   );
 
   // Close context menu on click outside
@@ -506,7 +596,8 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     const workspace = selectedWorkspace;
     if (!workspace) return;
     void (async () => {
-      const slots = await requestWorkspaceTerminals(workspace.id, [{ engine: 'powershell', label: 'Terminal' }]);
+      const dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
+      const slots = await requestWorkspaceTerminals(workspace.id, [{ engine: 'powershell', label: 'Terminal' }], '', dims);
       if (latestLayoutRef.current.workspaceId !== workspace.id) return;
       const slot = slots?.[0];
       const newLeaf = createLeaf(
@@ -549,9 +640,10 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     const workspace = selectedWorkspace;
     if (!workspace) return;
     void (async () => {
+      const dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
       const activeNames = collectActiveAgentNames(latestLayoutRef.current.tabs);
       const chosenName = getNextAgentName(activeNames);
-      const slots = await requestWorkspaceTerminals(workspace.id, [{ engine: engineId, agentName: chosenName }]);
+      const slots = await requestWorkspaceTerminals(workspace.id, [{ engine: engineId, agentName: chosenName }], '', dims);
       if (latestLayoutRef.current.workspaceId !== workspace.id) return;
       const slot = slots?.[0];
       const agentCodename = slot?.agentName || chosenName;
@@ -616,6 +708,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           return { eng, name: agentName, isTerm, agentName };
         }
       });
+      const dims = estimateTargetPaneGrid(canvasRef.current, planned.length, 'vertical');
       const slots = await requestWorkspaceTerminals(
         workspace.id,
         planned.map((seat) => ({
@@ -623,6 +716,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           ...(seat.isTerm ? { label: seat.name } : { agentName: seat.agentName }),
         })),
         task,
+        dims,
       );
       if (latestLayoutRef.current.workspaceId !== workspace.id) return;
       const existingSessionIds = new Set(
@@ -717,25 +811,29 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       const seats = isShell
         ? [{ engine: wireEngine, label }]
         : [{ engine: wireEngine, agentName }];
-      const slots = await requestWorkspaceTerminals(workspace.id, seats);
+      const dims = estimateTargetPaneGrid(canvasRef.current, 2, axis);
+      const slots = await requestWorkspaceTerminals(workspace.id, seats, '', dims);
       const current = latestLayoutRef.current;
       const currentTab = current.tabs.find((item) => item.id === tab.id);
       if (!currentTab || current.workspaceId !== workspace.id) return;
       const slot = slots?.[0];
       const finalName = slot?.agentName || agentName || label;
-      const newLeaf = createLeaf({
-        kind: 'terminal',
-        sessionId: slot?.sessionId || globalThis.crypto.randomUUID(),
-        label: finalName,
-        engine: wireEngine,
-        runtime: {
+      const newLeaf = createLeaf(
+        {
+          kind: 'terminal',
+          sessionId: slot?.sessionId || globalThis.crypto.randomUUID(),
+          label: finalName,
           engine: wireEngine,
-          displayName: finalName,
-          workTitle: finalName,
-          agentName: isShell ? undefined : finalName,
-          paneId: slot?.paneId,
+          runtime: {
+            engine: wireEngine,
+            displayName: finalName,
+            workTitle: finalName,
+            agentName: isShell ? undefined : finalName,
+            paneId: slot?.paneId,
+          },
         },
-      });
+        slot?.paneId,
+      );
 
       const updatedRoot = splitLeaf(currentTab.root, targetLeafId, newLeaf, axis);
       const updatedTabs = current.tabs.map((t) =>
@@ -750,25 +848,34 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     })();
   };
 
-  const updateActiveRoot = (nextRoot: PaneNode) => {
-    if (!activeTab) return;
+  const updateActiveRoot = (nextRoot: PaneNode, tabId: string) => {
+    const current = latestLayoutRef.current;
     void persistLayout({
-      ...layout,
-      tabs: layout.tabs.map((tab) => (tab.id === activeTab.id ? { ...tab, root: nextRoot } : tab)),
+      ...current,
+      tabs: current.tabs.map((tab) => (tab.id === tabId ? { ...tab, root: nextRoot } : tab)),
     });
   };
 
+  const activeLayoutTab = () => {
+    const current = latestLayoutRef.current;
+    return current.tabs.find((tab) => tab.id === current.activeTabId) || current.tabs[0] || null;
+  };
+
   const handleEqualize = () => {
-    if (!activeTab) return;
-    updateActiveRoot(equalizeSplits(activeTab.root));
+    const tab = activeLayoutTab();
+    if (!tab) return;
+    updateActiveRoot(equalizeSplits(tab.root), tab.id);
   };
 
   const handleSwap = (leafId: string, direction: -1 | 1) => {
-    if (!activeTab) return;
-    updateActiveRoot(swapAdjacent(activeTab.root, leafId, direction));
+    const tab = activeLayoutTab();
+    if (!tab) return;
+    updateActiveRoot(swapAdjacent(tab.root, leafId, direction), tab.id);
   };
 
   const handleExtractLeafToTab = (leafId: string) => {
+    const current = latestLayoutRef.current;
+    const activeTab = current.tabs.find((tab) => tab.id === current.activeTabId) || current.tabs[0];
     if (!activeTab) return;
     const leaf = findLeaf(activeTab.root, leafId);
     if (!leaf) return;
@@ -796,7 +903,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       focusedLeafId: leaf.id,
     };
 
-    const updatedTabs = layout.tabs.map((t) =>
+    const updatedTabs = current.tabs.map((t) =>
       t.id === activeTab.id
         ? { ...t, root: updatedRoot, focusedLeafId: nextFocusedInCurrent }
         : t
@@ -804,7 +911,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
     setFocusedLeafId(leaf.id);
     void persistLayout({
-      ...layout,
+      ...current,
       tabs: [...updatedTabs, newTab],
       activeTabId: newTab.id,
       fullscreenLeafId: null,
@@ -812,7 +919,8 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   };
 
   const handleRenameLeaf = (leafId: string, name: string) => {
-    if (!activeTab) return;
+    const tab = activeLayoutTab();
+    if (!tab) return;
     const nextName = name.trim();
     const walk = (node: PaneNode): PaneNode => {
       if (node.type === 'split') return { ...node, children: node.children.map(walk) };
@@ -825,7 +933,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         },
       };
     };
-    updateActiveRoot(walk(activeTab.root));
+    updateActiveRoot(walk(tab.root), tab.id);
   };
 
   const handleCloseLeaf = (targetLeafId: string) => {
@@ -1001,6 +1109,11 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
       const finalTitle = detail.title || (agentName ? `${agentName} (${wireEngine})` : `Terminal (${wireEngine})`);
       const leafLabel = agentName || cleanAgentTitle(finalTitle);
+      let dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
+      if (!isShell && dims.columns < 50) {
+        await waitForSpawnGeometry(canvasRef.current, dims.columns);
+        dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
+      }
 
       try {
         await invokeCommand('start_terminal', {
@@ -1008,8 +1121,8 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           engine: wireEngine,
           workspaceId: selectedWorkspace?.id || null,
           paneId,
-          columns: 80,
-          rows: 24,
+          columns: dims.columns,
+          rows: dims.rows,
           confirmedByBuilder: true,
           agentName: agentName || undefined,
           displayName: leafLabel,
@@ -1206,9 +1319,10 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   }, [selectedWorkspace, persistLayout, onSelectWorkspace]);
 
   const handleToggleFullscreen = (leafId: string) => {
-    const nextFs = layout.fullscreenLeafId === leafId ? null : leafId;
+    const current = latestLayoutRef.current;
+    const nextFs = current.fullscreenLeafId === leafId ? null : leafId;
     void persistLayout({
-      ...layout,
+      ...current,
       fullscreenLeafId: nextFs,
     });
   };
@@ -1328,34 +1442,55 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     axis: PaneAxis
   ) => {
     e.preventDefault();
+    setTerminalDividerDragging(true);
     const isVertical = axis === 'vertical';
     const startPos = isVertical ? e.clientX : e.clientY;
     const parentElem = (e.currentTarget.parentElement as HTMLElement) || containerRef.current;
     const totalSize = isVertical ? parentElem.clientWidth : parentElem.clientHeight;
 
-    const handlePointerMove = (ev: PointerEvent) => {
-      const currentPos = isVertical ? ev.clientX : ev.clientY;
-      const deltaPixels = currentPos - startPos;
-      const deltaRatio = deltaPixels / (totalSize || 1);
+    const tabId = activeTab?.id;
+    const baselineTab = latestLayoutRef.current.tabs.find((tab) => tab.id === tabId);
+    const baselineRoot = baselineTab?.root;
+    if (!tabId || !baselineRoot) return;
 
-      if (!activeTab) return;
-      const nextRoot = updateSplitRatios(activeTab.root, splitId, dividerIndex, deltaRatio);
+    let rafId: number | null = null;
+    let pendingDeltaRatio: number | null = null;
+
+    const commitRatio = () => {
+      rafId = null;
+      if (pendingDeltaRatio === null) return;
+      const resizedRoot = updateSplitRatios(baselineRoot, splitId, dividerIndex, pendingDeltaRatio);
+      const current = latestLayoutRef.current;
+      const currentTab = current.tabs.find((tab) => tab.id === tabId);
+      if (!currentTab) return;
+      const nextRoot = copySplitRatiosIfSameChildren(currentTab.root, resizedRoot);
       const nextLayout: WorkspaceLayout = {
-        ...latestLayoutRef.current,
-        tabs: latestLayoutRef.current.tabs.map((t) => (t.id === activeTab.id ? { ...t, root: nextRoot } : t)),
+        ...current,
+        tabs: current.tabs.map((tab) => (tab.id === tabId ? { ...tab, root: nextRoot } : tab)),
       };
       latestLayoutRef.current = nextLayout;
       setLayout(nextLayout);
     };
 
+    const handlePointerMove = (ev: PointerEvent) => {
+      const currentPos = isVertical ? ev.clientX : ev.clientY;
+      const deltaPixels = currentPos - startPos;
+      pendingDeltaRatio = deltaPixels / (totalSize || 1);
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(commitRatio);
+      }
+    };
+
     const handlePointerUp = () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        commitRatio();
+      }
+      setTerminalDividerDragging(false);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
-      if (selectedWorkspace?.id && latestLayoutRef.current) {
-        void invokeCommand('save_workspace_layout', {
-          workspaceId: selectedWorkspace.id,
-          layout: latestLayoutRef.current,
-        });
+      if (selectedWorkspace?.id) {
+        void persistLayout(latestLayoutRef.current);
       }
     };
 
@@ -1419,16 +1554,9 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   );
 
   const renderPaneNode = (node: PaneNode): React.ReactNode => {
-    let targetNode = node;
-    if (layout.fullscreenLeafId) {
-      const fsLeaf = findLeaf(node, layout.fullscreenLeafId);
-      if (fsLeaf) {
-        targetNode = fsLeaf;
-      }
-    }
     return (
       <PaneNodeRenderer
-        node={targetNode}
+        node={node}
         fullscreenLeafId={layout.fullscreenLeafId}
         focusedLeafId={focusedLeafId}
         spotlightLeafId={spotlightLeafId}
@@ -1471,6 +1599,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         onResumePrevious={(leafId, engine, title) => {
           setResumeModalPane({ paneId: leafId, engine, title });
         }}
+        onRegisterTerminalSlot={handleRegisterTerminalSlot}
       />
     );
   };
@@ -1602,6 +1731,34 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           >
             <div className="workspace-tab-layer__tree">{renderPaneNode(tab.root)}</div>
           </div>
+        );
+      })}
+      {allTerminalLeaves.map(({ leaf: l }) => {
+        const occ = l.occupant as PaneOccupantTerminal;
+        const slotEl = getOrCreateTerminalSlotHost(l.id);
+        return createPortal(
+          <TerminalView
+            key={occ.sessionId}
+            chrome="pane"
+            workspaceId={selectedWorkspace.id}
+            paneId={l.id}
+            sessionId={occ.sessionId}
+            initialEngine={occ.engine || occ.runtime?.engine}
+            title={occ.label}
+            onStatusChange={(status) => {
+              const mapped: TerminalStatus =
+                status === 'running' || status === 'connecting'
+                  ? 'working'
+                  : status === 'exited'
+                  ? 'done'
+                  : status === 'terminated'
+                  ? 'failed'
+                  : 'idle';
+              setTerminalStatus((prev) => (prev[occ.sessionId] === mapped ? prev : { ...prev, [occ.sessionId]: mapped }));
+            }}
+          />,
+          slotEl,
+          occ.sessionId,
         );
       })}
       {renderNotices()}

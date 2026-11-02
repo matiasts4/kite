@@ -398,7 +398,16 @@ class AppOperatorController {
         norm === 'vacía' ||
         norm === 'vacia'
       ) {
-        return terminals.filter((t) => t.state === 'idle' || t.state === 'exited').map((t) => t.sessionId);
+        const strictMatches = terminals.filter((t) => t.state === 'idle' || t.state === 'exited').map((t) => t.sessionId);
+        if (strictMatches.length > 0) return strictMatches;
+        // Fallback: shells waiting at prompt (state waitingForYou or done without active running agents)
+        const idleShells = terminals.filter(
+          (t) =>
+            (t.engine === 'powershell' || t.engine === 'terminal' || !t.who || t.who === 'powershell') &&
+            (t.state === 'waitingForYou' || t.state === 'idle' || t.state === 'done')
+        ).map((t) => t.sessionId);
+        if (idleShells.length > 0) return idleShells;
+        return terminals.filter((t) => t.state === 'waitingForYou' || t.state === 'done').map((t) => t.sessionId);
       }
       if (
         norm === 'active' ||

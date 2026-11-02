@@ -175,4 +175,18 @@ describe('terminalSyncOutput', () => {
     expect(coreRefresh).toHaveBeenCalledWith(0, 23, true);
     vi.restoreAllMocks();
   });
+
+  it('coalesces split ConPTY cursor-restore chunks after ?2026l when holdForCursorRestore is enabled', () => {
+    const hold = createSyncOutputHold({ holdForCursorRestore: true });
+    expect(hold.push('\x1b[?2026h\x1b[?25l\x1b[1;1Hbox-frame\x1b[?2026l')).toEqual([]);
+    expect(hold.pending).toBe(true);
+    expect(hold.awaitingCursorRestore).toBe(true);
+
+    const out = hold.push('\x1b[20;5H\x1b[?25h');
+    expect(out.map((u) => new TextDecoder().decode(u))).toEqual([
+      '\x1b[?2026h\x1b[?25l\x1b[1;1Hbox-frame\x1b[?2026l\x1b[20;5H\x1b[?25h',
+    ]);
+    expect(hold.pending).toBe(false);
+    expect(hold.awaitingCursorRestore).toBe(false);
+  });
 });

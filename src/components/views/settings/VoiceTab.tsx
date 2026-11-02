@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { DictationAvailability, DictationInputDevice, DictationSettings } from './types';
-import { saveOperatorConfig } from '../../../lib/operator/operatorConfig';
+import {
+  loadOperatorConfig,
+  saveOperatorConfig,
+  syncNativeCredentialsWithVault,
+  type OperatorConfig,
+} from '../../../lib/operator/operatorConfig';
 import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 import { toast } from '../../../lib/toast';
 import { MicCalibrationCard } from './voice/MicCalibrationCard';
@@ -28,15 +33,27 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
   onChooseWhisperModel,
   onRequestMicrophone,
 }) => {
+  const [operatorCfg, setOperatorCfg] = useState<OperatorConfig>(() => loadOperatorConfig());
   const [grokKeyInput, setGrokKeyInput] = useState<string>(() => {
     try {
-      return localStorage.getItem('kite_grok_transcription_api_key') || '';
+      const cfg = loadOperatorConfig();
+      return (
+        cfg.grokTranscriptionApiKey ||
+        localStorage.getItem('kite_grok_transcription_api_key') ||
+        cfg.grokApiKey ||
+        ''
+      );
     } catch {
       return '';
     }
   });
   const [showKey, setShowKey] = useState(false);
   const [savedBadge, setSavedBadge] = useState(false);
+  const [elevenKeyInput, setElevenKeyInput] = useState<string>(
+    () => loadOperatorConfig().elevenlabsApiKey || ''
+  );
+  const [showElevenKey, setShowElevenKey] = useState(false);
+  const [savedElevenBadge, setSavedElevenBadge] = useState(false);
   const [autoExecute, setAutoExecute] = useState<boolean>(() => {
     try {
       return localStorage.getItem('kite_zed_auto_execute') !== 'false';
@@ -52,16 +69,69 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
     }
   });
 
+  useEffect(() => {
+    let mounted = true;
+    void syncNativeCredentialsWithVault().then((synced) => {
+      if (!mounted) return;
+      setOperatorCfg(synced);
+      const nextGrok =
+        synced.grokTranscriptionApiKey ||
+        localStorage.getItem('kite_grok_transcription_api_key') ||
+        synced.grokApiKey ||
+        '';
+      setGrokKeyInput((prev) => (prev.trim() ? prev : nextGrok));
+      setElevenKeyInput((prev) => (prev.trim() ? prev : synced.elevenlabsApiKey || ''));
+    });
+
+    const handleConfigUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<OperatorConfig>).detail ?? loadOperatorConfig();
+      setOperatorCfg(detail);
+      if (detail.grokTranscriptionApiKey) {
+        setGrokKeyInput(detail.grokTranscriptionApiKey);
+      }
+      if (detail.elevenlabsApiKey !== undefined) {
+        setElevenKeyInput(detail.elevenlabsApiKey);
+      }
+    };
+    window.addEventListener('kite:operator-config-updated', handleConfigUpdated);
+    return () => {
+      mounted = false;
+      window.removeEventListener('kite:operator-config-updated', handleConfigUpdated);
+    };
+  }, []);
+
   const handleSaveGrokKey = () => {
     const trimmed = grokKeyInput.trim();
     try {
       localStorage.setItem('kite_grok_transcription_api_key', trimmed);
-      saveOperatorConfig({ grokTranscriptionApiKey: trimmed });
+      const updated = saveOperatorConfig({ grokTranscriptionApiKey: trimmed });
+      setOperatorCfg(updated);
       setSavedBadge(true);
-      toast.success('Clave API guardada', 'Configuración de dictado y transcripción actualizada.');
+      toast.success('Clave API guardada', 'Configuración de dictado y transcripción actualizada en bóveda SQLite.');
       setTimeout(() => setSavedBadge(false), 2000);
     } catch {
       toast.error('Error al guardar', 'No se pudo guardar la clave API en almacenamiento local.');
+    }
+  };
+
+  const handleToggleTtsEngine = (engine: 'browser' | 'elevenlabs') => {
+    const updated = saveOperatorConfig({ ttsEngine: engine });
+    setOperatorCfg(updated);
+  };
+
+  const handleSaveElevenKey = () => {
+    const trimmed = elevenKeyInput.trim();
+    try {
+      const updated = saveOperatorConfig({
+        elevenlabsApiKey: trimmed,
+        ttsEngine: trimmed ? 'elevenlabs' : operatorCfg.ttsEngine,
+      });
+      setOperatorCfg(updated);
+      setSavedElevenBadge(true);
+      toast.success('Clave de ElevenLabs guardada', 'Síntesis de voz (Texto a Voz) guardada en bóveda SQLite.');
+      setTimeout(() => setSavedElevenBadge(false), 2000);
+    } catch {
+      toast.error('Error al guardar', 'No se pudo guardar la clave de ElevenLabs.');
     }
   };
 
@@ -291,6 +361,20 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                   {savedBadge ? 'Guardado ✓' : 'Guardar'}
                 </button>
               </div>
+              {grokKeyInput.trim() ? (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    color: 'var(--text-success, #4ade80)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    marginTop: '4px',
+                  }}
+                >
+                  Protegida en Bóveda Local SQLite (Voz a Texto · STT)
+                </span>
+              ) : null}
             </div>
           </div>
 
@@ -343,6 +427,93 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
               >
                 <span aria-hidden="true" className="ui-switch__knob" />
               </button>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Motor de Síntesis de Voz (Texto a Voz · TTS)</h3>
+              <p>
+                Elige entre la voz local del sistema o el streaming neuronal de ElevenLabs (v4 Turbo).
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <fieldset aria-label="Motor de Síntesis de Voz" className="ui-segmented">
+                <button
+                  type="button"
+                  aria-pressed={operatorCfg.ttsEngine !== 'elevenlabs'}
+                  className="ui-segmented__item"
+                  onClick={() => handleToggleTtsEngine('browser')}
+                >
+                  {operatorCfg.ttsEngine !== 'elevenlabs' && (
+                    <SegmentedIndicator group="voice-tab-tts-engine" />
+                  )}
+                  <span>Nativo (Sistema)</span>
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={operatorCfg.ttsEngine === 'elevenlabs'}
+                  className="ui-segmented__item"
+                  onClick={() => handleToggleTtsEngine('elevenlabs')}
+                >
+                  {operatorCfg.ttsEngine === 'elevenlabs' && (
+                    <SegmentedIndicator group="voice-tab-tts-engine" />
+                  )}
+                  <span>ElevenLabs Neural</span>
+                </button>
+              </fieldset>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row settings-row--stacked">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">ElevenLabs API Key (Texto a Voz · TTS)</h3>
+              <p>
+                Clave de API de ElevenLabs para que el asistente hable con voz neuronal de baja latencia (~100ms).
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <div className="settings-credential">
+                <input
+                  type={showElevenKey ? 'text' : 'password'}
+                  className="ui-field"
+                  placeholder="xi_..."
+                  value={elevenKeyInput}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label="ElevenLabs API Key (Texto a Voz)"
+                  onChange={(e) => setElevenKeyInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="settings-control ui-button"
+                  onClick={() => setShowElevenKey(!showElevenKey)}
+                  title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
+                >
+                  {showElevenKey ? 'Ocultar' : 'Ver'}
+                </button>
+                <button
+                  type="button"
+                  className="settings-control ui-button ui-button--primary"
+                  onClick={handleSaveElevenKey}
+                >
+                  {savedElevenBadge ? 'Guardado ✓' : 'Guardar'}
+                </button>
+              </div>
+              {elevenKeyInput.trim() ? (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    color: 'var(--text-success, #4ade80)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    marginTop: '4px',
+                  }}
+                >
+                  Protegida en Bóveda Local SQLite (Texto a Voz · TTS)
+                </span>
+              ) : null}
             </div>
           </div>
         </div>

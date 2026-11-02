@@ -12,6 +12,7 @@ import {
   hasMinimallyRenderableFitGeometry,
   reconcilePtySizeAfterSpawn,
   repairWebglCanvasForDevicePixelRatio,
+  resizeConptyViewport,
   resolveBlockElementGradient,
   safeFitTerminal,
   scheduleStabilizedFit,
@@ -59,6 +60,13 @@ describe('terminalViewport', () => {
     const joinedComponent = provider.charProperties(0x1f4bb, zwjProps);
     expect(extractUnicodeWidth(joinedComponent)).toBe(2);
     expect(joinedComponent & 1).toBe(1);
+
+    const warningSign = provider.charProperties(0x26a0, 0);
+    expect(extractUnicodeWidth(warningSign)).toBe(1);
+    const vs16Props = provider.charProperties(0xfe0f, warningSign);
+    expect(extractUnicodeKind(vs16Props)).toBe(0xfe0f);
+    expect(extractUnicodeWidth(vs16Props)).toBe(2);
+    expect(vs16Props & 1).toBe(1);
   });
 
   it('maps runs of identical Unicode block elements to exact CSS linear-gradients', () => {
@@ -177,7 +185,7 @@ describe('terminalViewport', () => {
     expect(refresh).toHaveBeenCalledWith(0, 23);
   });
 
-  it('computes stable cell dimensions with 5px scrollbar width without clearing render service', () => {
+  it('computes stable cell dimensions with 5px scrollbar width and clears render service on resize', () => {
     const parent = document.createElement('div');
     parent.style.width = '805px';
     parent.style.height = '480px';
@@ -218,8 +226,8 @@ describe('terminalViewport', () => {
     expect(proposed).toEqual({ cols: 100, rows: 30 });
 
     addon.fit();
+    expect(clearRenderService).toHaveBeenCalledTimes(1);
     expect(resize).toHaveBeenCalledWith(100, 30);
-    expect(clearRenderService).not.toHaveBeenCalled();
   });
 
   it('waits for two consecutive matching proposed grids in scheduleStabilizedFit', () => {
@@ -248,5 +256,65 @@ describe('terminalViewport', () => {
     expect(onSettled).not.toHaveBeenCalled();
     callbacks.shift()!(32);
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the top viewport line anchored across normal-buffer ConPTY resize reflow', () => {
+    const preLines = [
+      { isWrapped: false },
+      { isWrapped: true },
+      { isWrapped: false }, // ybase = 2 (logical line #2 is at top of viewport)
+      { isWrapped: false },
+      { isWrapped: false },
+    ];
+    const postLines = [
+      { isWrapped: false },
+      { isWrapped: false }, // logical line #2 is now at index 1 after wider reflow rejoined line 0+1
+      { isWrapped: false },
+      { isWrapped: false },
+    ];
+    const normalBuffer = {
+      ybase: 2,
+      ydisp: 2,
+      lines: {
+        get length() {
+          return normalBuffer === currentBuffer ? preLines.length : postLines.length;
+        },
+        get(index: number) {
+          return (normalBuffer === currentBuffer ? preLines : postLines)[index];
+        },
+      },
+    };
+    let currentBuffer = normalBuffer;
+    const term = {
+      cols: 80,
+      rows: 3,
+      buffer: { active: { type: 'normal' } },
+      _core: {
+        _bufferService: {
+          buffers: {
+            get normal() {
+              return currentBuffer;
+            },
+          },
+        },
+      },
+      resize: vi.fn((cols: number, rows: number) => {
+        term.cols = cols;
+        term.rows = rows;
+        currentBuffer = {
+          ybase: 2,
+          ydisp: 2,
+          lines: {
+            length: postLines.length,
+            get: (index: number) => postLines[index],
+          },
+        };
+      }),
+    } as any;
+
+    resizeConptyViewport(term, 120, 3);
+    expect(term.resize).toHaveBeenCalledWith(120, 3);
+    expect(currentBuffer.ybase).toBe(1);
+    expect(currentBuffer.ydisp).toBe(1);
   });
 });

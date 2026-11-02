@@ -452,6 +452,20 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         return { kind: 'CLOSE_TERMINALS', count, target: cleanedRemainder || 'all' };
       }
 
+      // Check numeric terminals first (single or compound: e.g. "terminal 2", "terminal uno que está vacía")
+      const rawIndices = extractTerminalIndices(rawTarget);
+      if (rawIndices.length > 1) {
+        return {
+          kind: 'CLOSE_TERMINALS',
+          count: rawIndices.length,
+          target: rawIndices.join(', '),
+          targets: rawIndices.map(String),
+        };
+      }
+      if (rawIndices.length === 1 && !detectEngineFromText(rawTarget)) {
+        return { kind: 'CLOSE_TERMINALS', target: String(rawIndices[0]) };
+      }
+
       if (
         targetLower.includes('terminada') ||
         targetLower.includes('finished') ||
@@ -484,20 +498,6 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         targetLower.includes('last')
       ) {
         return { kind: 'CLOSE_TERMINALS', target: 'last' };
-      }
-
-      // Check numeric terminals (single or compound: e.g. "terminal 2", "terminal uno y dos", "terminales 1 y 2", "la 1 y la 2")
-      const rawIndices = extractTerminalIndices(rawTarget);
-      if (rawIndices.length > 1) {
-        return {
-          kind: 'CLOSE_TERMINALS',
-          count: rawIndices.length,
-          target: rawIndices.join(', '),
-          targets: rawIndices.map(String),
-        };
-      }
-      if (rawIndices.length === 1 && !detectEngineFromText(rawTarget)) {
-        return { kind: 'CLOSE_TERMINALS', target: String(rawIndices[0]) };
       }
 
       // Check engine directly from rawTarget (e.g. "terminal de antigravity", "antigravity", "grok")
@@ -1074,6 +1074,28 @@ export function planTurnHeuristic(input: string): OperatorPlan {
       actions: [],
       reply: 'Entendido. No abriré ni cerraré ninguna terminal.',
     };
+  }
+
+  // S4/Compound: support compound multi-intent commands like "Abre terminal de antigravity y cierra la vacía"
+  const compoundMatch = text.match(
+    /^(.+?)\s+(?:y|luego|despu[eé]s|adem[aá]s)\s+((?:cierra|abre|inicia|crea|lanza|inyecta|resume|narr[aá]|divide|iguala|enfoca)\b.+)$/i
+  );
+  if (compoundMatch) {
+    const part1 = compoundMatch[1].trim();
+    const part2 = compoundMatch[2].trim();
+    // Do not split commands where 'y' introduces a shell command prompt (e.g. "abre terminal y ejecuta npm test")
+    const isShellCommandCarrier = /^(?:ejecuta|corre|pon|haz)\s+/i.test(part2);
+    if (!isShellCommandCarrier) {
+      const plan1 = planTurnHeuristic(part1);
+      const plan2 = planTurnHeuristic(part2);
+      if (plan1.actions.length > 0 && plan2.actions.length > 0) {
+        return {
+          strategy: 'heuristic',
+          actions: [...plan1.actions, ...plan2.actions],
+          reply: `${plan1.reply} ${plan2.reply}`.trim(),
+        };
+      }
+    }
   }
 
   // S9: workspace switching, optionally followed by actions requested in the same sentence.

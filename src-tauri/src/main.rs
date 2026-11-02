@@ -18,6 +18,7 @@ pub mod window;
 pub mod session;
 pub mod session_resolver;
 pub mod terminal;
+pub mod vt_engine;
 pub mod agents;
 pub mod agent_mind;
 pub mod workspaces;
@@ -47,11 +48,13 @@ pub mod agent_inbox;
 pub mod credentials;
 pub mod connections;
 pub mod plugins;
+pub mod agent_maintenance;
 
 use logger::log_trace;
 use tauri::Manager;
 
 use acp::*;
+use agent_maintenance::*;
 use odd_tasks::*;
 use operator_runtime::*;
 use audio_ducking::*;
@@ -124,6 +127,23 @@ fn main() {
     // the auto-updater check (Go compares `os.Getenv("AGY_CLI_DISABLE_AUTO_UPDATE") == "true"`),
     // eliminating `--bg-updater` and `agy.exe --version` invocations.
     std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+
+    #[cfg(target_os = "windows")]
+    {
+        // Ensure background windows and non-focused tabs in WebView2 are never
+        // timer-throttled, occluded-suspended, or backgrounded. This keeps long-running
+        // agent terminals (Grok, Claude, OpenCode) streaming in real time without lag.
+        let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        let flags = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
+        if !existing.contains("--disable-background-timer-throttling") {
+            let combined = if existing.is_empty() {
+                flags.to_string()
+            } else {
+                format!("{} {}", existing, flags)
+            };
+            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", combined);
+        }
+    }
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && (args[1] == "mcp" || args[1] == "mcp-tasks" || args[1] == "kite-tasks") {
@@ -412,6 +432,10 @@ fn main() {
             read_files_preview,
             read_files_text,
             read_terminal_output,
+            poll_terminal_snapshot,
+            scroll_terminal_viewport,
+            dump_terminal_diagnostics,
+            clear_terminal_vt,
             read_workspace_changes,
             read_workspace_file_diff,
             reconnect_ssh_workspace,
@@ -515,6 +539,7 @@ fn main() {
             list_detected_cli_accounts,
             save_current_account_profile,
             switch_account_profile,
+            prepare_new_account_login,
             delete_account_profile,
             get_active_account_profile,
             recommend_continuation_targets,
@@ -542,6 +567,10 @@ fn main() {
             plugins::plugin_connection_action,
             plugins::get_plugin_config,
             plugins::save_plugin_config,
+            get_agent_updates_summary,
+            start_agent_tool_job,
+            get_active_agent_tool_jobs,
+            cancel_agent_tool_job,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {

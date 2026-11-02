@@ -1,4 +1,4 @@
-export type TerminalRendererMode = 'dom' | 'webgl';
+export type TerminalRendererMode = 'canvas' | 'dom' | 'webgl';
 
 export type TerminalFontFamilyId =
   | 'cascadia'
@@ -19,10 +19,11 @@ export interface TerminalAppearancePrefs {
 }
 
 export const TERMINAL_APPEARANCE_STORAGE_KEY = 'kite.terminalAppearancePrefs';
+export const TERMINAL_APPEARANCE_MIGRATION_KEY = 'kite.terminalAppearancePrefs.v4';
 export const TERMINAL_APPEARANCE_CHANGED_EVENT = 'kite:terminal-appearance-changed';
 
 export const DEFAULT_TERMINAL_APPEARANCE_PREFS: TerminalAppearancePrefs = {
-  renderer: 'dom',
+  renderer: 'canvas',
   fontFamilyId: 'cascadia',
   fontSize: 13,
   lineHeight: 1.16,
@@ -96,7 +97,13 @@ export function sanitizeTerminalAppearancePrefs(
   const obj = input as Partial<Record<keyof TerminalAppearancePrefs, unknown>>;
 
   const renderer: TerminalRendererMode =
-    obj.renderer === 'webgl' ? 'webgl' : obj.renderer === 'dom' ? 'dom' : base.renderer;
+    obj.renderer === 'canvas'
+      ? 'canvas'
+      : obj.renderer === 'webgl'
+      ? 'webgl'
+      : obj.renderer === 'dom'
+      ? 'dom'
+      : base.renderer;
 
   const fontFamilyId: TerminalFontFamilyId =
     typeof obj.fontFamilyId === 'string' && obj.fontFamilyId in TERMINAL_FONT_MAP
@@ -135,7 +142,15 @@ export function getTerminalAppearancePrefs(): TerminalAppearancePrefs {
     if (typeof localStorage !== 'undefined') {
       const raw = localStorage.getItem(TERMINAL_APPEARANCE_STORAGE_KEY);
       if (raw) {
-        return sanitizeTerminalAppearancePrefs(JSON.parse(raw));
+        const parsed = JSON.parse(raw);
+        const migrated = localStorage.getItem(TERMINAL_APPEARANCE_MIGRATION_KEY) === '1';
+        const prefs = sanitizeTerminalAppearancePrefs(parsed);
+        if (!migrated) {
+          prefs.renderer = 'canvas';
+          localStorage.setItem(TERMINAL_APPEARANCE_STORAGE_KEY, JSON.stringify(prefs));
+          localStorage.setItem(TERMINAL_APPEARANCE_MIGRATION_KEY, '1');
+        }
+        return prefs;
       }
     }
   } catch {}
@@ -151,6 +166,7 @@ export function setTerminalAppearancePrefs(
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(TERMINAL_APPEARANCE_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(TERMINAL_APPEARANCE_MIGRATION_KEY, '1');
     }
   } catch {}
 
@@ -172,6 +188,7 @@ export function resetTerminalAppearancePrefs(): TerminalAppearancePrefs {
         TERMINAL_APPEARANCE_STORAGE_KEY,
         JSON.stringify(DEFAULT_TERMINAL_APPEARANCE_PREFS)
       );
+      localStorage.setItem(TERMINAL_APPEARANCE_MIGRATION_KEY, '1');
     }
   } catch {}
 
@@ -185,3 +202,36 @@ export function resetTerminalAppearancePrefs(): TerminalAppearancePrefs {
 
   return { ...DEFAULT_TERMINAL_APPEARANCE_PREFS };
 }
+
+export function getTerminalRendererLabel(mode: TerminalRendererMode): string {
+  switch (mode) {
+    case 'canvas':
+      return 'GhostGrid · 2D';
+    case 'dom':
+      return 'DOM · Clásico';
+    case 'webgl':
+      return 'WebGL · GPU';
+    default:
+      return 'GhostGrid · 2D';
+  }
+}
+
+export function getTerminalRendererBadgeLabel(mode: TerminalRendererMode): string {
+  switch (mode) {
+    case 'canvas':
+      return 'GhostGrid 2D';
+    case 'dom':
+      return 'DOM Clásico';
+    case 'webgl':
+      return 'WebGL GPU';
+    default:
+      return 'GhostGrid 2D';
+  }
+}
+
+export function togglePrimaryTerminalRenderer(): TerminalAppearancePrefs {
+  const current = getTerminalAppearancePrefs();
+  const nextRenderer: TerminalRendererMode = current.renderer === 'canvas' ? 'dom' : 'canvas';
+  return setTerminalAppearancePrefs({ renderer: nextRenderer });
+}
+

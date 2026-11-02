@@ -26,6 +26,7 @@ Thumbs.db
 .idea/
 .cargo/
 src-tauri/.cargo/
+.cursorrules
 
 # Environment & Secrets
 .env

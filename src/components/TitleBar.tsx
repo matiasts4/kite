@@ -4,6 +4,7 @@ import { springs, scale } from '../motion/standard/tokens';
 import { windowControls } from '../lib/ipc';
 import { SubscriptionQuotaBadge } from './quota/SubscriptionQuotaBadge';
 import { SystemResourceBadge } from './telemetry/SystemResourceBadge';
+import { AgentUpdatesBadge } from './updates/AgentUpdatesBadge';
 import { readQuotaPreferences, QUOTA_PREFS_CHANGED_EVENT } from '../lib/quota/quotaManager';
 import './zedFloat.css';
 
@@ -291,6 +292,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
           data-usage-meter-slot=""
           style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}
         >
+          <AgentUpdatesBadge />
           <SystemResourceBadge />
 
           {quotaEnabled ? (

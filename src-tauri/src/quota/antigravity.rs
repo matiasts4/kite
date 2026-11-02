@@ -8,6 +8,7 @@ use crate::quota::utils::{
     b64url_decode, chrono_parse_rfc3339, format_unix_to_rfc3339, now_ms, silent_command,
     user_home_dir,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -263,30 +264,98 @@ pub fn read_antigravity_raw_credential() -> Option<String> {
     None
 }
 
-pub fn read_antigravity_credential() -> Option<(String, Option<String>)> {
-    let raw = read_antigravity_raw_credential()?;
-    if let Ok(val) = serde_json::from_str::<Value>(&raw) {
-        let id_token_str = val.get("id_token")
-            .or_else(|| val.pointer("/token/id_token"))
-            .and_then(|v| v.as_str());
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityCredentialIdentity {
+    pub email: String,
+    pub name: Option<String>,
+    pub auth_method: Option<String>,
+    pub has_refresh_token: bool,
+    pub expiry: Option<String>,
+    pub source: String,
+}
 
-        if let Some(id_token) = id_token_str {
-            let parts: Vec<&str> = id_token.split('.').collect();
-            if parts.len() >= 2 {
-                if let Some(payload_bytes) = b64url_decode(parts[1]) {
-                    if let Ok(jwt_json) = serde_json::from_slice::<Value>(&payload_bytes) {
-                        if let Some(email) = jwt_json.get("email").and_then(|v| v.as_str()).map(|s| s.trim().to_string()) {
-                            if !email.is_empty() {
-                                let name = jwt_json.get("name").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
-                                return Some((email, name));
-                            }
+pub fn parse_antigravity_credential_blob(raw: &str) -> Option<AntigravityCredentialIdentity> {
+    let val: Value = serde_json::from_str(raw).ok()?;
+
+    let mut email: Option<String> = None;
+    let mut name: Option<String> = None;
+
+    // 1. Try decoding id_token JWT if present
+    let id_token_str = val
+        .get("id_token")
+        .or_else(|| val.pointer("/token/id_token"))
+        .and_then(|v| v.as_str());
+
+    if let Some(id_token) = id_token_str {
+        let parts: Vec<&str> = id_token.split('.').collect();
+        if parts.len() >= 2 {
+            if let Some(payload_bytes) = b64url_decode(parts[1]) {
+                if let Ok(jwt_json) = serde_json::from_slice::<Value>(&payload_bytes) {
+                    if let Some(e) = jwt_json
+                        .get("email")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                    {
+                        if !e.is_empty() {
+                            email = Some(e);
+                            name = jwt_json
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string());
                         }
                     }
                 }
             }
         }
     }
-    None
+
+    // 2. If id_token had no email or wasn't present, check id_token_email or top-level email
+    if email.is_none() {
+        email = val
+            .get("id_token_email")
+            .or_else(|| val.pointer("/token/id_token_email"))
+            .or_else(|| val.get("email"))
+            .or_else(|| val.pointer("/token/email"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+
+    let email = email?;
+
+    let auth_method = val
+        .get("auth_method")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+
+    let has_refresh_token = val
+        .pointer("/token/refresh_token")
+        .or_else(|| val.get("refresh_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    let expiry = val
+        .pointer("/token/expiry")
+        .or_else(|| val.get("expiry"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+
+    Some(AntigravityCredentialIdentity {
+        email,
+        name,
+        auth_method,
+        has_refresh_token,
+        expiry,
+        source: "gemini:antigravity".to_string(),
+    })
+}
+
+pub fn read_antigravity_credential() -> Option<(String, Option<String>)> {
+    let raw = read_antigravity_raw_credential()?;
+    let identity = parse_antigravity_credential_blob(&raw)?;
+    Some((identity.email, identity.name))
 }
 
 #[cfg(windows)]
@@ -339,7 +408,30 @@ pub fn write_antigravity_credential(_blob_json: &str) -> bool {
     false
 }
 
-fn read_antigravity_ide_identity() -> Option<(String, Option<String>)> {
+#[cfg(windows)]
+pub fn delete_antigravity_credential() -> bool {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn CredDeleteW(target_name: *const u16, cred_type: u32, flags: u32) -> i32;
+    }
+
+    let target_utf16: Vec<u16> = "gemini:antigravity".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if CredDeleteW(target_utf16.as_ptr(), 1 /* CRED_TYPE_GENERIC */, 0) != 0 {
+            true
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error();
+            err == Some(1168)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn delete_antigravity_credential() -> bool {
+    true
+}
+
+pub fn read_antigravity_ide_identity() -> Option<(String, Option<String>)> {
     let home = user_home_dir();
     let appdata = std::env::var("APPDATA")
         .map(PathBuf::from)
@@ -379,8 +471,8 @@ fn read_antigravity_ide_identity() -> Option<(String, Option<String>)> {
     None
 }
 
-pub(crate) fn enrich_google_identity(status: &mut ProviderQuotaStatus) {
-    // 1. Try Windows Credential Manager gemini:antigravity first (real active Antigravity session)
+pub fn enrich_antigravity_identity(status: &mut ProviderQuotaStatus) {
+    // 1. Try Windows Credential Manager gemini:antigravity first (authoritative active CLI session)
     if let Some((email, name)) = read_antigravity_credential() {
         status.metadata.insert("email".to_string(), json!(email));
         if let Some(n) = name {
@@ -389,55 +481,16 @@ pub(crate) fn enrich_google_identity(status: &mut ProviderQuotaStatus) {
         status.metadata.insert("accountSource".to_string(), json!("gemini:antigravity"));
     }
 
-    // 2. If no email yet, try oauth_creds.json
-    if !status.metadata.contains_key("email") {
-        let home = user_home_dir();
-        let creds_file = home.join(".gemini").join("oauth_creds.json");
-        if let Ok(data) = std::fs::read(&creds_file) {
-            if let Ok(val) = serde_json::from_slice::<Value>(&data) {
-                if let Some(id_token) = val.get("id_token").and_then(|v| v.as_str()) {
-                    let parts: Vec<&str> = id_token.split('.').collect();
-                    if parts.len() >= 2 {
-                        if let Some(payload_bytes) = b64url_decode(parts[1]) {
-                            if let Ok(jwt_json) = serde_json::from_slice::<Value>(&payload_bytes) {
-                                if let Some(email) = jwt_json.get("email").and_then(|v| v.as_str()) {
-                                    status.metadata.insert("email".to_string(), json!(email));
-                                    status.metadata.insert("accountSource".to_string(), json!("oauth_creds.json"));
-                                }
-                                if !status.metadata.contains_key("userName") {
-                                    if let Some(name) = jwt_json.get("name").and_then(|v| v.as_str()) {
-                                        status.metadata.insert("userName".to_string(), json!(name));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    // 2. Check Antigravity IDE state.vscdb
+    if let Some((ide_email, ide_name)) = read_antigravity_ide_identity() {
+        if let Some(cli_email) = status.metadata.get("email").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            if !cli_email.eq_ignore_ascii_case(&ide_email) {
+                status.metadata.insert("ideEmail".to_string(), json!(ide_email));
+                status.metadata.insert("splitBrainWarning".to_string(), json!(true));
             }
-        }
-    }
-
-    // 3. Fallback to google_accounts.json
-    if !status.metadata.contains_key("email") {
-        let home = user_home_dir();
-        let accounts_file = home.join(".gemini").join("google_accounts.json");
-        if let Ok(data) = std::fs::read(&accounts_file) {
-            if let Ok(val) = serde_json::from_slice::<Value>(&data) {
-                if let Some(active_email) = val.get("active").and_then(|v| v.as_str()) {
-                    if !active_email.trim().is_empty() {
-                        status.metadata.insert("email".to_string(), json!(active_email.trim()));
-                        status.metadata.insert("accountSource".to_string(), json!("google_accounts.json"));
-                    }
-                }
-            }
-        }
-    }
-
-    // 4. Fallback to Antigravity IDE state.vscdb
-    if !status.metadata.contains_key("email") {
-        if let Some((email, name)) = read_antigravity_ide_identity() {
-            status.metadata.insert("email".to_string(), json!(email));
-            if let Some(n) = name {
+        } else {
+            status.metadata.insert("email".to_string(), json!(ide_email));
+            if let Some(n) = ide_name {
                 status.metadata.insert("userName".to_string(), json!(n));
             }
             status.metadata.insert("accountSource".to_string(), json!("Antigravity IDE"));
@@ -448,6 +501,10 @@ pub(crate) fn enrich_google_identity(status: &mut ProviderQuotaStatus) {
     if !status.metadata.contains_key("planType") {
         status.metadata.insert("planType".to_string(), json!("Google AI Pro"));
     }
+}
+
+pub(crate) fn enrich_google_identity(status: &mut ProviderQuotaStatus) {
+    enrich_antigravity_identity(status);
 }
 
 pub fn fetch_antigravity_quota() -> ProviderQuotaStatus {
@@ -1310,6 +1367,49 @@ mod tests {
             .find(|record| record.auth_method == "acp")
             .expect("acp connection");
         assert!(acp.endpoints.iter().all(|endpoint| !endpoint.ok));
+    }
+
+    #[test]
+    fn parse_antigravity_credential_blob_extracts_id_token_email() {
+        let raw = r#"{
+            "token": {
+                "access_token": "ya29.test-access-token",
+                "token_type": "Bearer",
+                "refresh_token": "1//test-refresh-token",
+                "expiry": "2026-10-30T19:13:14.8340187-03:00",
+                "expires_in": 3599
+            },
+            "auth_method": "consumer",
+            "id_token_email": "active-user@example.com"
+        }"#;
+
+        let parsed = parse_antigravity_credential_blob(raw).expect("should parse credential");
+        assert_eq!(parsed.email, "active-user@example.com");
+        assert_eq!(parsed.name, None);
+        assert_eq!(parsed.auth_method.as_deref(), Some("consumer"));
+        assert!(parsed.has_refresh_token);
+        assert_eq!(parsed.source, "gemini:antigravity");
+    }
+
+    #[test]
+    fn parse_antigravity_credential_blob_extracts_jwt_claims() {
+        // Base64Url for {"email":"jwt-user@example.com","name":"Test User"}
+        let jwt = "header.eyJlbWFpbCI6Imp3dC11c2VyQGV4YW1wbGUuY29tIiwibmFtZSI6IlRlc3QgVXNlciJ9.signature";
+        let raw = format!(
+            r#"{{
+                "token": {{
+                    "access_token": "ya29.test",
+                    "refresh_token": "1//refresh"
+                }},
+                "id_token": "{jwt}",
+                "auth_method": "consumer"
+            }}"#
+        );
+
+        let parsed = parse_antigravity_credential_blob(&raw).expect("should parse credential with jwt");
+        assert_eq!(parsed.email, "jwt-user@example.com");
+        assert_eq!(parsed.name.as_deref(), Some("Test User"));
+        assert!(parsed.has_refresh_token);
     }
 }
 

@@ -505,6 +505,21 @@ fn resolve_credential(home: &Path) -> (Option<Credential>, Vec<String>) {
         }
     }
 
+    if let Some((vault_key, source)) = crate::credentials::resolve_provider_credential("opencode") {
+        let key = vault_key.trim();
+        if !key.is_empty() {
+            let label = match source {
+                crate::credentials::CredentialSource::Vault => "Bóveda Local SQLite (Kite)".to_string(),
+                crate::credentials::CredentialSource::Env => "Variable de Entorno (OPENCODE_API_KEY)".to_string(),
+                _ => "Kite Vault".to_string(),
+            };
+            return (
+                Some(api_key_credential(key.to_string(), label)),
+                notes,
+            );
+        }
+    }
+
     if let Ok(key) = std::env::var("OPENCODE_API_KEY") {
         let key = key.trim();
         if !key.is_empty() {

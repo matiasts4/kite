@@ -3,6 +3,12 @@ import { createPortal } from 'react-dom';
 import type { AgentEngineDescriptor, PaneOccupant } from './types';
 import { SquareTerminalIcon, SplitHorizontalIcon, PlusIcon } from './codeIcons';
 import { BrandLogo } from '../views/agents/engineMetadata';
+import {
+  getTerminalAppearancePrefs,
+  getTerminalRendererBadgeLabel,
+  togglePrimaryTerminalRenderer,
+} from '../../lib/terminalAppearancePrefs';
+import { invokeCommand } from '../../lib/ipc';
 
 export interface CodePaneActionsMenuProps {
   displayName: string;
@@ -182,6 +188,20 @@ export const CodePaneActionsMenu: React.FC<CodePaneActionsMenuProps> = ({
             className="ui-menu__row"
             onClick={() => {
               onCloseMenu();
+              togglePrimaryTerminalRenderer();
+            }}
+          >
+            <span className="ui-menu__label">
+              <span className="ui-menu__row-title">
+                Switch Renderer ({getTerminalRendererBadgeLabel(getTerminalAppearancePrefs().renderer)})
+              </span>
+            </span>
+          </div>
+          <div
+            role="menuitem"
+            className="ui-menu__row"
+            onClick={() => {
+              onCloseMenu();
               onRename();
             }}
           >
@@ -225,6 +245,28 @@ export const CodePaneActionsMenu: React.FC<CodePaneActionsMenuProps> = ({
           >
             <span className="ui-menu__label">
               <span className="ui-menu__row-title">Restart</span>
+            </span>
+          </div>
+          <div
+            role="menuitem"
+            className="ui-menu__row"
+            onClick={() => {
+              onCloseMenu();
+              if (occupant.kind !== 'terminal' || !occupant.sessionId) return;
+              void invokeCommand<string>('dump_terminal_diagnostics', {
+                sessionId: occupant.sessionId,
+              })
+                .then((path) => {
+                  if (typeof path === 'string' && path && navigator.clipboard?.writeText) {
+                    return navigator.clipboard.writeText(path);
+                  }
+                  return undefined;
+                })
+                .catch(() => {});
+            }}
+          >
+            <span className="ui-menu__label">
+              <span className="ui-menu__row-title">Export Diagnostics</span>
             </span>
           </div>
           {(() => {

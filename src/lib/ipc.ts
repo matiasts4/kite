@@ -947,6 +947,8 @@ export interface ListSavedAccountsResult {
   unregisteredLiveSession?: {
     provider: string;
     email: string;
+    name?: string | null;
+    source?: string | null;
     planName?: string | null;
     primaryRemainingPercent?: number | null;
     primaryResetAt?: string | null;
@@ -1043,6 +1045,17 @@ export async function getActiveAccountProfile(
   } catch (err) {
     console.warn('[IPC] getActiveAccountProfile failed:', err);
     return { found: false };
+  }
+}
+
+export async function prepareNewAccountLogin(
+  provider: string
+): Promise<{ success: boolean; previousEmailSaved?: string; loginCommand?: string; keyringDeleted?: boolean; error?: string }> {
+  try {
+    return await invokeCommand('prepare_new_account_login', { provider });
+  } catch (err: any) {
+    console.error('[IPC] prepareNewAccountLogin failed:', err);
+    return { success: false, error: err?.message || String(err) };
   }
 }
 

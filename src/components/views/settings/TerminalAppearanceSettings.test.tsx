@@ -24,9 +24,9 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(screen.getByText('Altura de línea')).toBeInTheDocument();
     expect(screen.getByText('Estilo del cursor')).toBeInTheDocument();
 
-    // Default renderer is DOM · Clásico
-    const domBtn = screen.getByRole('button', { name: /DOM · Clásico/i });
-    expect(domBtn).toHaveAttribute('aria-pressed', 'true');
+    // Default renderer is GhostGrid · 2D
+    const canvasBtn = screen.getByRole('button', { name: /GhostGrid · 2D/i });
+    expect(canvasBtn).toHaveAttribute('aria-pressed', 'true');
 
     // Default font size is 13 px
     expect(screen.getByText('13 px')).toBeInTheDocument();
@@ -40,9 +40,15 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(cursorBar).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('switches renderer mode between DOM and WebGL', async () => {
+  it('switches renderer mode between Canvas, DOM and WebGL', async () => {
     const user = userEvent.setup();
     render(<SettingsView />);
+
+    const domBtn = screen.getByRole('button', { name: /DOM · Clásico/i });
+    await user.click(domBtn);
+
+    expect(domBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(getTerminalAppearancePrefs().renderer).toBe('dom');
 
     const webglBtn = screen.getByRole('button', { name: /WebGL · GPU/i });
     await user.click(webglBtn);
@@ -50,11 +56,11 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(webglBtn).toHaveAttribute('aria-pressed', 'true');
     expect(getTerminalAppearancePrefs().renderer).toBe('webgl');
 
-    const domBtn = screen.getByRole('button', { name: /DOM · Clásico/i });
-    await user.click(domBtn);
+    const canvasBtn = screen.getByRole('button', { name: /GhostGrid · 2D/i });
+    await user.click(canvasBtn);
 
-    expect(domBtn).toHaveAttribute('aria-pressed', 'true');
-    expect(getTerminalAppearancePrefs().renderer).toBe('dom');
+    expect(canvasBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(getTerminalAppearancePrefs().renderer).toBe('canvas');
   });
 
   it('adjusts font size with stepper buttons and resets to default', async () => {

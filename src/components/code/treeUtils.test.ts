@@ -9,6 +9,7 @@ import {
   equalizeSplits,
   updateSplitRatios,
   swapAdjacent,
+  copySplitRatiosIfSameChildren,
 } from './treeUtils';
 import type { PaneSplit } from './types';
 
@@ -133,5 +134,28 @@ describe('treeUtils - Code Workspace Split Tree Operations', () => {
     expect(root3.axis).toBe('vertical');
     expect(root3.children).toHaveLength(3);
     expect(root3.ratios).toEqual([1 / 3, 1 / 3, 1 / 3]);
+  });
+
+  it('copies divider ratios when the child order is unchanged', () => {
+    const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'left');
+    const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'right');
+    const current = createSplit('vertical', [l1, l2], [0.5, 0.5], 'split');
+    const resized = createSplit('vertical', [l1, l2], [0.7, 0.3], 'split');
+
+    const merged = copySplitRatiosIfSameChildren(current, resized) as PaneSplit;
+    expect(merged.children.map((child) => child.id)).toEqual(['left', 'right']);
+    expect(merged.ratios[0]).toBeCloseTo(0.7, 2);
+    expect(merged.ratios[1]).toBeCloseTo(0.3, 2);
+  });
+
+  it('keeps a swapped child order when copying ratios from an older tree', () => {
+    const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'left');
+    const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'right');
+    const swapped = createSplit('vertical', [l2, l1], [0.4, 0.6], 'split');
+    const older = createSplit('vertical', [l1, l2], [0.8, 0.2], 'split');
+
+    const merged = copySplitRatiosIfSameChildren(swapped, older) as PaneSplit;
+    expect(merged.children.map((child) => child.id)).toEqual(['right', 'left']);
+    expect(merged.ratios).toEqual([0.4, 0.6]);
   });
 });

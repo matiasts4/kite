@@ -10,6 +10,7 @@ import {
   ZedMemoryNote,
   loadOperatorConfig,
   saveOperatorConfig,
+  syncNativeCredentialsWithVault,
   loadLatencyRecords,
   saveLatencyRecords,
   computeLatencySummaries,
@@ -132,6 +133,17 @@ export const ZedTab: React.FC = () => {
 
     let isMounted = true;
 
+    void syncNativeCredentialsWithVault()
+      .then((synced) => {
+        if (isMounted) setConfig(synced);
+      })
+      .catch(() => {});
+
+    const handleConfigUpdated = () => {
+      if (isMounted) setConfig(loadOperatorConfig());
+    };
+    window.addEventListener('kite:operator-config-updated', handleConfigUpdated);
+
     if (isTauriEnvironment()) {
       invokeCommand<{ available: boolean; source: string | null }>(
         'opencode_go_credential_status'
@@ -163,6 +175,7 @@ export const ZedTab: React.FC = () => {
 
     return () => {
       isMounted = false;
+      window.removeEventListener('kite:operator-config-updated', handleConfigUpdated);
       if (ttsNarrator && typeof ttsNarrator.stop === 'function') {
         ttsNarrator.stop();
       }
@@ -205,15 +218,15 @@ export const ZedTab: React.FC = () => {
     }
   };
 
-  const persistConfig = (next: OperatorConfig) => {
-    setConfig(next);
-    saveOperatorConfig(next);
+  const persistConfig = (next: Partial<OperatorConfig>) => {
+    const saved = saveOperatorConfig(next);
+    setConfig(saved);
     setSavedToast(true);
     window.setTimeout(() => setSavedToast(false), 1800);
   };
 
   const handleFieldChange = <K extends keyof OperatorConfig>(key: K, value: OperatorConfig[K]) => {
-    persistConfig({ ...config, [key]: value });
+    persistConfig({ [key]: value });
   };
 
   const handlePersonaChange = <K extends keyof ZedPersonaConfig>(
@@ -221,7 +234,6 @@ export const ZedTab: React.FC = () => {
     value: ZedPersonaConfig[K]
   ) => {
     persistConfig({
-      ...config,
       persona: {
         ...persona,
         [key]: value,
@@ -384,7 +396,7 @@ export const ZedTab: React.FC = () => {
       />
 
       {/* Section 3: Audio Input & Mic Controls */}
-      <ZedAudioSection />
+      <ZedAudioSection config={config} onFieldChange={handleFieldChange} />
 
       {/* Section 4: Identity & Personality */}
       <ZedPersonaSection

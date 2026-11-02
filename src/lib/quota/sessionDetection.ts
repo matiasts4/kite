@@ -32,8 +32,8 @@ export function matchEngineToProvider(engine: string, providerId: string): boole
   if (norm === prov) return true;
   if (prov === 'claude' && (norm === 'claude-code' || norm === 'claude')) return true;
   if (prov === 'opencode' && (norm === 'open-code' || norm === 'opencode')) return true;
-  if (prov === 'gemini' && (norm === 'gemini' || norm === 'antigravity')) return true;
-  if (prov === 'antigravity' && (norm === 'antigravity' || norm === 'gemini')) return true;
+  if (prov === 'gemini' && norm === 'gemini') return true;
+  if (prov === 'antigravity' && (norm === 'antigravity' || norm === 'agy')) return true;
   if (prov === 'cursor' && (norm === 'cursor' || norm === 'cursor-agent')) return true;
   return false;
 }
@@ -45,30 +45,36 @@ export function resolveProviderDetectedSession(
   quota?: ProviderQuotaStatus,
   credentials: CredentialStatusItem[] = []
 ): ProviderDetectedSession {
+  // Find matching CLI account strictly for this provider (no cross-contamination)
+  const cli = cliAccounts.find((a) => a.provider === providerId);
+
   // 1. Terminal Agent: Active live process running in terminal pane
   const activeTerm = terminals.find(
     (t) => matchEngineToProvider(t.engine, providerId) && t.state !== 'exited'
   );
   if (activeTerm) {
+    const fallbackEmail =
+      cli?.email || (quota?.metadata?.email ? String(quota.metadata.email) : undefined);
+    const fallbackPlan =
+      cli?.planName || (quota?.metadata?.planType ? String(quota.metadata.planType) : undefined);
+    const fallbackAccountLabel =
+      cli?.accountLabel || (quota?.metadata?.userName ? String(quota.metadata.userName) : undefined);
+
     return {
       providerId,
       hasSession: true,
       sessionType: 'terminal_agent',
       statusLabel: '● Agente en terminal',
       statusTone: 'ok',
+      email: fallbackEmail,
+      accountLabel: fallbackAccountLabel,
+      planName: fallbackPlan,
       terminalTitle: activeTerm.who || activeTerm.title,
       details: `Terminal activa: ${activeTerm.title}`,
     };
   }
 
-  // 2. Local CLI Account (tokens/oauth files in ~/.gemini, ~/.codex, ~/.grok, etc.)
-  const cli = cliAccounts.find(
-    (a) =>
-      a.provider === providerId ||
-      (providerId === 'gemini' && a.provider === 'antigravity') ||
-      (providerId === 'antigravity' && a.provider === 'gemini')
-  );
-
+  // 2. Local CLI Account (tokens/oauth files in OS credential manager or local configs)
   if (cli && cli.authState === 'authenticated') {
     return {
       providerId,

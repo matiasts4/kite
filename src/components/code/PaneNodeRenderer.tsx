@@ -3,7 +3,7 @@ import type { Workspace, AgentProfile } from '../../types';
 import { TerminalView } from '../views/TerminalView';
 import { ChatView } from '../views/ChatView';
 import { CodePaneHeader } from './CodePaneHeader';
-import { getAllLeaves, findLeaf } from './treeUtils';
+import { getAllLeaves } from './treeUtils';
 import type {
   PaneNode,
   WorkspaceTab,
@@ -47,6 +47,7 @@ export interface PaneNodeRendererProps {
   onDividerPointerDown: (e: React.PointerEvent, splitId: string, dividerIndex: number, axis: PaneAxis) => void;
   onSetTerminalStatus: (sessionId: string, status: TerminalStatus) => void;
   onResumePrevious?: (leafId: string, engine: string, title?: string) => void;
+  onRegisterTerminalSlot?: (leafId: string, el: HTMLDivElement | null) => void;
 }
 
 export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
@@ -83,58 +84,20 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
   onDividerPointerDown,
   onSetTerminalStatus,
   onResumePrevious,
+  onRegisterTerminalSlot,
 }) => {
-  if (fullscreenLeafId) {
-    if (node.type === 'leaf') {
-      if (node.id !== fullscreenLeafId) return null;
-    } else if (node.type === 'split') {
-      const fsLeaf = findLeaf(node, fullscreenLeafId);
-      if (fsLeaf) {
-        return (
-          <PaneNodeRenderer
-            node={fsLeaf}
-            fullscreenLeafId={fullscreenLeafId}
-            focusedLeafId={focusedLeafId}
-            spotlightLeafId={spotlightLeafId}
-            paneMenuOpenLeafId={paneMenuOpenLeafId}
-            paneMenuKind={paneMenuKind}
-            renamingLeafId={renamingLeafId}
-            renameValue={renameValue}
-            terminalStatus={terminalStatus}
-            availableEngines={availableEngines}
-            selectedWorkspace={selectedWorkspace}
-            activeTab={activeTab}
-            agents={agents}
-            selectedAgentId={selectedAgentId}
-            onFocusLeaf={onFocusLeaf}
-            onOpenMenu={onOpenMenu}
-            onCloseMenu={onCloseMenu}
-            onToggleFullscreen={onToggleFullscreen}
-            onClosePane={onClosePane}
-            onSplit={onSplit}
-            onSwap={onSwap}
-            onExtractToTab={onExtractToTab}
-            onEqualize={onEqualize}
-            onStartRename={onStartRename}
-            onChangeRename={onChangeRename}
-            onCommitRename={onCommitRename}
-            onCancelRename={onCancelRename}
-            onLaunchTerminal={onLaunchTerminal}
-            onLaunchAgent={onLaunchAgent}
-            onNewSession={onNewSession}
-            onDividerPointerDown={onDividerPointerDown}
-            onSetTerminalStatus={onSetTerminalStatus}
-            onResumePrevious={onResumePrevious}
-          />
-        );
-      }
-      return null;
-    }
-  }
+  const registerSlotRef = React.useRef(onRegisterTerminalSlot);
+  registerSlotRef.current = onRegisterTerminalSlot;
+  const slotLeafId = node.type === 'leaf' ? node.id : '';
+  const terminalSlotRef = React.useCallback((el: HTMLDivElement | null) => {
+    if (!slotLeafId) return;
+    registerSlotRef.current?.(slotLeafId, el);
+  }, [slotLeafId]);
 
   if (node.type === 'leaf') {
     const isFocused = focusedLeafId === node.id;
     const isFullscreen = fullscreenLeafId === node.id;
+    const isHiddenByFullscreen = Boolean(fullscreenLeafId && fullscreenLeafId !== node.id);
     const occupant = node.occupant;
     const isSpotlighted =
       spotlightLeafId === node.id ||
@@ -156,7 +119,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
       <section
         key={node.id}
         aria-label={`${displayName} pane`}
-        className={`code-pane-panel${isFocused ? ' code-pane-panel--focused' : ''}${isSpotlighted ? ' code-pane-panel--beacon-a' : ''}${occupant.kind === 'terminal' ? ' motion-terminal-in' : ''}`}
+        className={`code-pane-panel${isFocused ? ' code-pane-panel--focused' : ''}${isSpotlighted ? ' code-pane-panel--beacon-a' : ''}${occupant.kind === 'terminal' ? ' motion-terminal-in' : ''}${isFullscreen ? ' code-pane-panel--fullscreen' : ''}${isHiddenByFullscreen ? ' code-pane-panel--hidden-by-fullscreen' : ''}`}
         onClick={() => onFocusLeaf(node.id)}
         data-leaf-id={node.id}
         data-pane-id={node.id}
@@ -222,28 +185,35 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
         <div
           className="code-pane-body"
           data-terminal-slot={occupant.kind === 'terminal' ? occupant.sessionId : undefined}
+          ref={
+            occupant.kind === 'terminal' && onRegisterTerminalSlot
+              ? terminalSlotRef
+              : undefined
+          }
         >
           {occupant.kind === 'terminal' ? (
-            <TerminalView
-              key={occupant.sessionId}
-              chrome="pane"
-              workspaceId={selectedWorkspace.id}
-              paneId={node.id}
-              sessionId={occupant.sessionId}
-              initialEngine={occupant.engine || occupant.runtime?.engine}
-              title={occupant.label}
-              onStatusChange={(status) => {
-                const mapped: TerminalStatus =
-                  status === 'running' || status === 'connecting'
-                    ? 'working'
-                    : status === 'exited'
-                    ? 'done'
-                    : status === 'terminated'
-                    ? 'failed'
-                    : 'idle';
-                onSetTerminalStatus(occupant.sessionId, mapped);
-              }}
-            />
+            onRegisterTerminalSlot ? null : (
+              <TerminalView
+                key={occupant.sessionId}
+                chrome="pane"
+                workspaceId={selectedWorkspace.id}
+                paneId={node.id}
+                sessionId={occupant.sessionId}
+                initialEngine={occupant.engine || occupant.runtime?.engine}
+                title={occupant.label}
+                onStatusChange={(status) => {
+                  const mapped: TerminalStatus =
+                    status === 'running' || status === 'connecting'
+                      ? 'working'
+                      : status === 'exited'
+                      ? 'done'
+                      : status === 'terminated'
+                      ? 'failed'
+                      : 'idle';
+                  onSetTerminalStatus(occupant.sessionId, mapped);
+                }}
+              />
+            )
           ) : (
             <ChatView
               workspaceId={selectedWorkspace.id}
@@ -313,6 +283,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
               onDividerPointerDown={onDividerPointerDown}
               onSetTerminalStatus={onSetTerminalStatus}
               onResumePrevious={onResumePrevious}
+              onRegisterTerminalSlot={onRegisterTerminalSlot}
             />
           </div>
           {idx < node.children.length - 1 && (

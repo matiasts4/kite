@@ -10,7 +10,7 @@
  *  5. Real-time Web Audio API frequency analysis for reactive spherical orb pulses.
  */
 
-import { loadOperatorConfig } from '../operatorConfig';
+import { loadOperatorConfig, syncNativeCredentialsWithVault } from '../operatorConfig';
 import { isTauriEnvironment, proxyOperatorHttp } from '../../ipc';
 import { startAudioDucking, stopAudioDucking } from './audioDucking';
 
@@ -744,6 +744,12 @@ async function transcribeOperatorAudioBlob(audioBlob: Blob): Promise<string> {
     if (!grokKey && typeof localStorage !== 'undefined') {
       grokKey = localStorage.getItem('kite_grok_transcription_api_key') || '';
     }
+    if (!grokKey && (!cfAccount.trim() || !cfToken.trim()) && isTauriEnvironment()) {
+      const synced = await syncNativeCredentialsWithVault();
+      grokKey = synced.grokTranscriptionApiKey || synced.grokApiKey || '';
+      cfAccount = synced.cloudflareAccountId || cfAccount;
+      cfToken = synced.cloudflareApiToken || cfToken;
+    }
   } catch {}
 
   const hasGrok = Boolean(grokKey && grokKey.trim().length > 0);
@@ -1309,6 +1315,9 @@ export async function startTranscriptionTestSession(
         };
       }
 
+      if (isTauriEnvironment()) {
+        await syncNativeCredentialsWithVault().catch(() => undefined);
+      }
       const engineStatus = getVoiceEngineStatus();
       const t0 = Date.now();
 

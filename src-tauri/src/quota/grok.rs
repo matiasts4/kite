@@ -111,6 +111,14 @@ pub fn fetch_grok_quota() -> ProviderQuotaStatus {
     };
 
     if !auth_file.exists() {
+        if let Some(_key) = crate::credentials::resolve_provider_key("grok") {
+            status.is_available = true;
+            status.is_auth = true;
+            status.metadata.insert("source".to_string(), json!("Bóveda Local SQLite"));
+            status.metadata.insert("tier".to_string(), json!("xAI API Key"));
+            status.metadata.insert("note".to_string(), json!("API Key xAI configurada en Kite para inferencia y transcripción."));
+            return status;
+        }
         status.error = Some("No se encontraron credenciales de Grok en ~/.grok/auth.json".to_string());
         return status;
     }

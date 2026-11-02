@@ -7,6 +7,7 @@ import {
 } from '../../../../lib/operator/operatorConfig';
 import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
 import { SelectMenu, type SelectMenuRow } from '../../../ui/SelectMenu';
+import { toast } from '../../../../lib/toast';
 
 export const VOICE_OPTIONS = [
   { id: 'Ara', label: 'Ara — Clara, ágil (recomendada)' },
@@ -59,6 +60,7 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
   openingPreview,
 }) => {
   const [showElevenKey, setShowElevenKey] = useState(false);
+  const [savedElevenKey, setSavedElevenKey] = useState(false);
   const isEleven = config.ttsEngine === 'elevenlabs';
   const isCuratedVoice = ELEVENLABS_CURATED_VOICES.some((v) => v.id === config.elevenlabsVoiceId);
   const [customVoiceActive, setCustomVoiceActive] = useState(!isCuratedVoice && Boolean(config.elevenlabsVoiceId));
@@ -145,8 +147,13 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
           <>
             <div className="ui-card__row settings-row settings-row--stacked">
               <div className="settings-row__copy">
-                <h3 className="settings-row__title">Clave de API ElevenLabs</h3>
-                <p>Requerida para streaming de audio de alta fidelidad (~100ms de latencia).</p>
+                <h3 className="settings-row__title">Clave de API ElevenLabs (Texto a Voz · TTS)</h3>
+                <p>Requerida para streaming de audio de alta fidelidad (~100ms de latencia). Se sincroniza con la Bóveda Local SQLite.</p>
+                {config.elevenlabsApiKey?.trim() ? (
+                  <p style={{ marginTop: 4, color: 'var(--text-success, #4ade80)' }}>
+                    Protegida en Bóveda Local SQLite
+                  </p>
+                ) : null}
               </div>
               <div className="settings-row__control">
                 <div className="settings-credential">
@@ -167,6 +174,18 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
                     title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
                   >
                     {showElevenKey ? 'Ocultar' : 'Ver'}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-control ui-button ui-button--primary"
+                    onClick={() => {
+                      onFieldChange('elevenlabsApiKey', (config.elevenlabsApiKey || '').trim());
+                      setSavedElevenKey(true);
+                      window.setTimeout(() => setSavedElevenKey(false), 1800);
+                      toast.success('API Key de ElevenLabs guardada en Bóveda SQLite');
+                    }}
+                  >
+                    {savedElevenKey ? 'Guardado ✓' : 'Guardar'}
                   </button>
                 </div>
               </div>

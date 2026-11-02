@@ -475,4 +475,19 @@ describe('T4 / S9 — workspace switching', () => {
     expect(goTo.actions[0].type).toBe('switch_workspace');
     expect((goTo.actions[0] as any).workspaceQuery).toBe('atlantis');
   });
+it('prioritizes specific terminal number over state adjectives like vacía', () => {
+    const plan = planTurnHeuristic('Cierra la terminal uno que está vacía');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('close_terminals');
+    expect((plan.actions[0] as any).target).toBe('1');
+  });
+
+  it('splits compound open and close commands into both actions', () => {
+    const plan = planTurnHeuristic('Abre una nueva terminal de antigravity y cierra la terminal vacía que hay ahora mismo');
+    expect(plan.actions).toHaveLength(2);
+    expect(plan.actions[0].type).toBe('open_terminals');
+    expect((plan.actions[0] as any).engine).toBe('antigravity');
+    expect(plan.actions[1].type).toBe('close_terminals');
+    expect((plan.actions[1] as any).target).toBe('idle');
+  });
 });

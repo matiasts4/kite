@@ -15,10 +15,40 @@ export const PTY_VIEWPORT_DEFAULT_ROWS = 24;
 export const PTY_VIEWPORT_MAX_COLS = 1000;
 export const PTY_VIEWPORT_MAX_ROWS = 500;
 
+let activeDividerDragCount = 0;
+const dividerDragEndCallbacks = new Set<() => void>();
+
+export function setTerminalDividerDragging(dragging: boolean): void {
+  if (dragging) {
+    activeDividerDragCount += 1;
+  } else {
+    activeDividerDragCount = Math.max(0, activeDividerDragCount - 1);
+    if (activeDividerDragCount === 0) {
+      for (const cb of Array.from(dividerDragEndCallbacks)) {
+        try {
+          cb();
+        } catch {}
+      }
+    }
+  }
+}
+
+export function isTerminalDividerDragging(): boolean {
+  return activeDividerDragCount > 0;
+}
+
+export function onTerminalDividerDragEnd(cb: () => void): () => void {
+  dividerDragEndCallbacks.add(cb);
+  return () => {
+    dividerDragEndCallbacks.delete(cb);
+  };
+}
+
 export const CONPTY_REFACTORED_BUILD_NUMBER = 21376;
 export const DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER = 22631;
 
 const ZERO_WIDTH_JOINER = 0x200d;
+const VARIATION_SELECTOR_16 = 0xfe0f;
 const BASE_UNICODE_VERSION = '11';
 const ZWJ_UNICODE_VERSION = '11-zwj';
 
@@ -112,6 +142,12 @@ export class ZwjAwareUnicode11Provider implements IUnicodeVersionProvider {
     if (codepoint === ZERO_WIDTH_JOINER && precedingWidth > 0) {
       return createUnicodePropertyValue(ZERO_WIDTH_JOINER, precedingWidth, true);
     }
+    if (codepoint === VARIATION_SELECTOR_16 && precedingWidth > 0) {
+      // ConPTY and Mode 2027 TUIs widen narrow symbols (e.g. U+26A0 ⚠) to 2 cells
+      // when followed by U+FE0F (Emoji Presentation Selector). Returning width 2
+      // with shouldJoin=true causes xterm.js to upgrade the preceding cell to width 2.
+      return createUnicodePropertyValue(VARIATION_SELECTOR_16, 2, true);
+    }
     if (
       precedingKind === ZERO_WIDTH_JOINER &&
       precedingWidth > 0 &&
@@ -161,6 +197,7 @@ export function activateTerminalUnicodeProvider(
 const BLOCK_FG_VAR = '--kite-block-fg';
 const BLOCK_FILL_ATTR = 'data-kite-block-fill';
 const BLOCK_INLINE_FG_ATTR = 'data-kite-block-inline-fg';
+const BLOCK_CLASS_ATTR = 'data-kite-block-class';
 
 function buildBlockGradient(
   direction: 'bottom' | 'right',
@@ -198,6 +235,7 @@ function clearBlockSpanStyle(span: HTMLElement): void {
   const isTransparent = span.style.color === 'transparent';
   span.removeAttribute(BLOCK_FILL_ATTR);
   span.removeAttribute(BLOCK_INLINE_FG_ATTR);
+  span.removeAttribute(BLOCK_CLASS_ATTR);
   span.style.removeProperty('background-image');
   span.style.removeProperty('background-size');
   span.style.removeProperty('background-repeat');
@@ -215,19 +253,26 @@ function applyBlockSpanStyle(span: HTMLElement): void {
     clearBlockSpanStyle(span);
     return;
   }
+  const currentClass = span.className || '';
   const inlineColor = span.style.color;
   const alreadyApplied = span.hasAttribute(BLOCK_FILL_ATTR) && inlineColor === 'transparent';
-  if (alreadyApplied && span.getAttribute(BLOCK_FILL_ATTR) === text) {
+  if (
+    alreadyApplied &&
+    span.getAttribute(BLOCK_FILL_ATTR) === text &&
+    span.getAttribute(BLOCK_CLASS_ATTR) === currentClass
+  ) {
     return;
   }
-  const effectiveColor = alreadyApplied
-    ? span.style.getPropertyValue(BLOCK_FG_VAR)
-    : inlineColor || (typeof getComputedStyle === 'function' ? getComputedStyle(span).color : '');
-  if (!effectiveColor) return;
-  if (!alreadyApplied) {
-    span.setAttribute(BLOCK_INLINE_FG_ATTR, inlineColor);
+  if (alreadyApplied) {
+    clearBlockSpanStyle(span);
   }
+  const freshInlineColor = span.style.color;
+  const effectiveColor =
+    freshInlineColor || (typeof getComputedStyle === 'function' ? getComputedStyle(span).color : '');
+  if (!effectiveColor || effectiveColor === 'transparent') return;
+  span.setAttribute(BLOCK_INLINE_FG_ATTR, freshInlineColor);
   span.setAttribute(BLOCK_FILL_ATTR, text);
+  span.setAttribute(BLOCK_CLASS_ATTR, currentClass);
   span.style.setProperty(BLOCK_FG_VAR, effectiveColor);
   span.style.color = 'transparent';
   span.style.backgroundImage = gradient;
@@ -250,12 +295,27 @@ export function attachDomBlockFillCleanup(term: Terminal): () => void {
   if (!element || typeof MutationObserver === 'undefined') {
     return () => {};
   }
-  const rowsRoot = element.querySelector('.xterm-rows');
-  if (rowsRoot) {
+  const scanAllRows = () => {
+    const rowsRoot = element.querySelector('.xterm-rows');
+    if (!rowsRoot) return;
     for (const child of Array.from(rowsRoot.children)) {
       scanRowElementForBlockSpans(child);
     }
-  }
+  };
+  scanAllRows();
+  const renderDisposable =
+    typeof term.onRender === 'function'
+      ? term.onRender((range) => {
+          const rowsRoot = element.querySelector('.xterm-rows');
+          if (!rowsRoot) return;
+          const children = rowsRoot.children;
+          const start = Math.max(0, range?.start ?? 0);
+          const end = Math.min(children.length - 1, range?.end ?? children.length - 1);
+          for (let i = start; i <= end; i += 1) {
+            scanRowElementForBlockSpans(children[i]);
+          }
+        })
+      : null;
   const observer = new MutationObserver((records) => {
     const dirtyRows = new Set<HTMLElement>();
     for (const record of records) {
@@ -290,8 +350,17 @@ export function attachDomBlockFillCleanup(term: Terminal): () => void {
       }
     }
   });
-  observer.observe(element, { childList: true, characterData: true, subtree: true });
-  return () => observer.disconnect();
+  observer.observe(element, {
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['class'],
+    subtree: true,
+  });
+  return () => {
+    observer.disconnect();
+    renderDisposable?.dispose?.();
+  };
 }
 
 export function repairWebglCanvasForDevicePixelRatio(
@@ -377,6 +446,131 @@ export function getStableCellDimensions(
   return null;
 }
 
+interface InternalNormalBuffer {
+  ybase: number;
+  ydisp: number;
+  lines: {
+    length: number;
+    get(index: number): { isWrapped?: boolean } | undefined;
+  };
+}
+
+function getInternalNormalBuffer(term: Terminal): InternalNormalBuffer | null {
+  const normal = (
+    term as unknown as {
+      _core?: {
+        _bufferService?: {
+          buffers?: {
+            normal?: InternalNormalBuffer;
+          };
+        };
+      };
+    }
+  )._core?._bufferService?.buffers?.normal;
+  if (
+    !normal ||
+    typeof normal.ybase !== 'number' ||
+    typeof normal.ydisp !== 'number' ||
+    !normal.lines ||
+    typeof normal.lines.length !== 'number' ||
+    typeof normal.lines.get !== 'function'
+  ) {
+    return null;
+  }
+  return normal;
+}
+
+function clearTerminalRenderService(term: Terminal): void {
+  try {
+    const core = (
+      term as unknown as {
+        _core?: {
+          _renderService?: {
+            clear?: () => void;
+          };
+        };
+      }
+    )._core;
+    core?._renderService?.clear?.();
+  } catch {
+    // Ignore if internal render service is unavailable in mocks.
+  }
+}
+
+/**
+ * Resizes an xterm instance while keeping the top viewport line anchored in the
+ * normal buffer, matching Windows ConPTY's top-anchored viewport repaint behavior
+ * so wrapped lines are not duplicated or overwritten on resize.
+ */
+export function resizeConptyViewport(term: Terminal, cols: number, rows: number): void {
+  if (term.cols === cols && term.rows === rows) {
+    return;
+  }
+  clearTerminalRenderService(term);
+  if (term.buffer?.active?.type !== 'normal') {
+    term.resize(cols, rows);
+    return;
+  }
+  const before = getInternalNormalBuffer(term);
+  if (!before) {
+    term.resize(cols, rows);
+    return;
+  }
+
+  let anchorRow = -1;
+  for (let row = 0; row < term.rows; row += 1) {
+    const line = before.lines.get(before.ybase + row);
+    if (!line) break;
+    if (!line.isWrapped) {
+      anchorRow = row;
+      break;
+    }
+  }
+  if (anchorRow === -1) {
+    term.resize(cols, rows);
+    return;
+  }
+
+  let logicalAnchor = 0;
+  for (let i = 0; i <= before.ybase + anchorRow; i += 1) {
+    if (!before.lines.get(i)?.isWrapped) {
+      logicalAnchor += 1;
+    }
+  }
+
+  const wasAtBottom = before.ydisp === before.ybase;
+  term.resize(cols, rows);
+
+  const after = getInternalNormalBuffer(term);
+  if (!after || after.ybase === 0) {
+    return;
+  }
+
+  let logical = 0;
+  let index = -1;
+  for (let i = 0; i < after.lines.length; i += 1) {
+    if (!after.lines.get(i)?.isWrapped) {
+      logical += 1;
+      if (logical === logicalAnchor) {
+        index = i;
+        break;
+      }
+    }
+  }
+  if (index === -1) {
+    return;
+  }
+
+  const shift = index - after.ybase - anchorRow;
+  if (shift === 0) {
+    return;
+  }
+  const maxYbase = Math.max(0, after.lines.length - rows);
+  const nextYbase = Math.max(0, Math.min(maxYbase, after.ybase + shift));
+  after.ybase = nextYbase;
+  after.ydisp = wasAtBottom ? nextYbase : Math.min(after.ydisp, nextYbase);
+}
+
 export class StableCellFitAddon extends FitAddon {
   private stableTerminal: Terminal | null = null;
 
@@ -392,7 +586,7 @@ export class StableCellFitAddon extends FitAddon {
       return;
     }
     if (term.cols !== dims.cols || term.rows !== dims.rows) {
-      term.resize(dims.cols, dims.rows);
+      resizeConptyViewport(term, dims.cols, dims.rows);
     }
   }
 

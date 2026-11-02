@@ -4,8 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { AddProviderModal } from './AddProviderModal';
 import { AccountSwitcherModal } from './AccountSwitcherModal';
 
-vi.mock('../../lib/ipc', () => ({
-  listSavedAccounts: vi.fn().mockResolvedValue([
+vi.mock('../../lib/ipc', () => {
+  const sampleProfiles = [
     {
       id: 'acc-1',
       provider: 'antigravity',
@@ -22,20 +22,33 @@ vi.mock('../../lib/ipc', () => ({
       isActive: false,
       primaryRemainingPercent: 40,
     },
-  ]),
-  switchAccountProfile: vi.fn().mockResolvedValue({
-    success: true,
-    profile: { id: 'acc-2', label: 'Google Work', isActive: true },
-  }),
-  saveCurrentAccountProfile: vi.fn().mockResolvedValue({
-    success: true,
-    profile: { id: 'acc-3', label: 'Google New', isActive: true },
-  }),
-  deleteAccountProfile: vi.fn().mockResolvedValue({ success: true }),
-  getProviderCredentials: vi.fn().mockResolvedValue({ success: true, credentials: [] }),
-  saveProviderCredential: vi.fn().mockResolvedValue({ success: true }),
-  deleteProviderCredential: vi.fn().mockResolvedValue({ success: true }),
-}));
+  ];
+
+  return {
+    listSavedAccounts: vi.fn().mockResolvedValue(sampleProfiles),
+    listSavedAccountsFull: vi.fn().mockResolvedValue({
+      profiles: sampleProfiles,
+      unregisteredLiveSession: null,
+    }),
+    prepareNewAccountLogin: vi.fn().mockResolvedValue({
+      success: true,
+      previousEmailSaved: 'personal@gmail.com',
+      loginCommand: 'agy',
+    }),
+    switchAccountProfile: vi.fn().mockResolvedValue({
+      success: true,
+      profile: { id: 'acc-2', label: 'Google Work', isActive: true },
+    }),
+    saveCurrentAccountProfile: vi.fn().mockResolvedValue({
+      success: true,
+      profile: { id: 'acc-3', label: 'Google New', isActive: true },
+    }),
+    deleteAccountProfile: vi.fn().mockResolvedValue({ success: true }),
+    getProviderCredentials: vi.fn().mockResolvedValue({ success: true, credentials: [] }),
+    saveProviderCredential: vi.fn().mockResolvedValue({ success: true }),
+    deleteProviderCredential: vi.fn().mockResolvedValue({ success: true }),
+  };
+});
 
 describe('AddProviderModal & AccountSwitcherModal (Unified Modals)', () => {
   it('renders AddProviderModal with search filter and multi-selection', async () => {
@@ -175,5 +188,43 @@ describe('AddProviderModal & AccountSwitcherModal (Unified Modals)', () => {
     expect(handleSwitched).toHaveBeenCalledWith(
       expect.objectContaining({ label: 'Google Work' })
     );
+  });
+
+  it('renders unregisteredLiveSession banner and connects new account in AccountSwitcherModal', async () => {
+    const { listSavedAccountsFull, prepareNewAccountLogin } = await import('../../lib/ipc');
+    vi.mocked(listSavedAccountsFull).mockResolvedValueOnce({
+      profiles: [
+        {
+          id: 'acc-1', provider: 'antigravity', label: 'Google Personal', email: 'personal@gmail.com', isActive: false, planName: 'Pro', lastUsedUnixMs: 0, primaryRemainingPercent: 80, primaryResetAt: null, timeUntilResetMs: null,
+        },
+      ],
+      unregisteredLiveSession: {
+        provider: 'antigravity',
+        email: 'unregistered-live@gmail.com',
+      },
+    });
+
+    const user = userEvent.setup();
+    const handleClose = vi.fn();
+
+    render(
+      <AccountSwitcherModal
+        provider="antigravity"
+        providerLabel="Antigravity"
+        isOpen={true}
+        onClose={handleClose}
+      />
+    );
+
+    // Unregistered live session banner is visible
+    expect(await screen.findByText('Sesión activa no guardada:')).toBeInTheDocument();
+    expect(screen.getByText('unregistered-live@gmail.com')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Guardar en bóveda/i })).toBeInTheDocument();
+
+    // Connect new account button is present
+    const connectBtn = screen.getByRole('button', { name: /Conectar nueva cuenta/i });
+    expect(connectBtn).toBeInTheDocument();
+    await user.click(connectBtn);
+    expect(prepareNewAccountLogin).toHaveBeenCalledWith('antigravity');
   });
 });

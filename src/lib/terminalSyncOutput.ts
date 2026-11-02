@@ -1,10 +1,12 @@
 import type { Terminal } from '@xterm/xterm';
 
 /**
- * Maximum time (1 animation frame) to hold an incomplete DEC 2026 synchronized
- * frame before flushing it to xterm.
+ * Maximum time to hold an incomplete DEC 2026 synchronized frame before
+ * flushing it as a safety fallback. Must exceed the IPC polling interval
+ * (35-40ms) so multi-chunk TUI frames from OpenCode/Grok are never torn mid-frame.
  */
-export const SYNC_OUTPUT_MAX_HOLD_MS = 16;
+export const SYNC_OUTPUT_MAX_HOLD_MS = 250;
+export const SYNC_OUTPUT_CURSOR_RESTORE_HOLD_MS = 32;
 export const SYNC_OUTPUT_MAX_BUFFER_BYTES = 262_144;
 
 export const ALT_SCREEN_ENTER_SEQUENCE = '\x1b[?1049h';
@@ -17,6 +19,8 @@ const SYNC_END_STR = '\x1b[?2026l';
 
 const START = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x32, 0x36, 0x68]);
 const END = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x32, 0x36, 0x6c]);
+const CURSOR_HIDE_BYTES = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c]);
+const CURSOR_SHOW_BYTES = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68]);
 
 const encoder = new TextEncoder();
 
@@ -69,20 +73,51 @@ function suffixPrefixLength(data: Uint8Array, marker: Uint8Array): number {
   return 0;
 }
 
+function lastIndexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
+  if (needle.length === 0 || haystack.length < needle.length) return -1;
+  for (let i = haystack.length - needle.length; i >= 0; i -= 1) {
+    let matches = true;
+    for (let j = 0; j < needle.length; j += 1) {
+      if (haystack[i + j] !== needle[j]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return i;
+  }
+  return -1;
+}
+
+export function frameNeedsCursorRestore(frameBytes: Uint8Array): boolean {
+  const lastHide = lastIndexOfBytes(frameBytes, CURSOR_HIDE_BYTES);
+  if (lastHide === -1) return false;
+  const lastShow = lastIndexOfBytes(frameBytes, CURSOR_SHOW_BYTES);
+  return lastShow < lastHide;
+}
+
 export interface SyncOutputHold {
   readonly holding: boolean;
+  readonly awaitingCursorRestore: boolean;
   readonly pending: boolean;
   push(chunk: Uint8Array | string): Uint8Array[];
   flush(): Uint8Array | null;
 }
 
-export function createSyncOutputHold(): SyncOutputHold {
+export function createSyncOutputHold(options?: {
+  holdForCursorRestore?: boolean;
+}): SyncOutputHold {
+  const holdForCursorRestore = options?.holdForCursorRestore ?? false;
   let holding = false;
+  let awaitingCursorRestore = false;
+  let awaitingFrameEndOffset = 0;
   let buffer: Uint8Array = new Uint8Array(0);
 
   return {
     get holding() {
       return holding;
+    },
+    get awaitingCursorRestore() {
+      return awaitingCursorRestore;
     },
     get pending() {
       return buffer.length > 0;
@@ -92,6 +127,26 @@ export function createSyncOutputHold(): SyncOutputHold {
       if (incoming.length === 0 && buffer.length === 0) return [];
       buffer = concat(buffer, incoming);
       const ready: Uint8Array[] = [];
+
+      if (awaitingCursorRestore) {
+        awaitingCursorRestore = false;
+        const tail = buffer.subarray(awaitingFrameEndOffset);
+        const showRel = indexOf(tail, CURSOR_SHOW_BYTES);
+        const nextStartRel = indexOf(tail, START);
+        if (
+          showRel !== -1 &&
+          (nextStartRel === -1 || showRel < nextStartRel)
+        ) {
+          const coalescedCut =
+            awaitingFrameEndOffset + showRel + CURSOR_SHOW_BYTES.length;
+          ready.push(copyBytes(buffer, 0, coalescedCut));
+          buffer = copyBytes(buffer, coalescedCut);
+        } else {
+          ready.push(copyBytes(buffer, 0, awaitingFrameEndOffset));
+          buffer = copyBytes(buffer, awaitingFrameEndOffset);
+        }
+        awaitingFrameEndOffset = 0;
+      }
 
       while (true) {
         if (!holding) {
@@ -121,7 +176,29 @@ export function createSyncOutputHold(): SyncOutputHold {
           }
           break;
         }
-        const cut = end + END.length;
+        let cut = end + END.length;
+        const frameSlice = buffer.subarray(0, cut);
+        if (frameNeedsCursorRestore(frameSlice)) {
+          const tail = buffer.subarray(cut);
+          if (tail.length > 0) {
+            const showRel = indexOf(tail, CURSOR_SHOW_BYTES);
+            const nextStartRel = indexOf(tail, START);
+            if (
+              showRel !== -1 &&
+              (nextStartRel === -1 || showRel < nextStartRel)
+            ) {
+              cut += showRel + CURSOR_SHOW_BYTES.length;
+            }
+          } else if (
+            holdForCursorRestore &&
+            buffer.length < SYNC_OUTPUT_MAX_BUFFER_BYTES
+          ) {
+            holding = false;
+            awaitingCursorRestore = true;
+            awaitingFrameEndOffset = cut;
+            break;
+          }
+        }
         ready.push(copyBytes(buffer, 0, cut));
         buffer = copyBytes(buffer, cut);
         holding = false;
@@ -131,6 +208,8 @@ export function createSyncOutputHold(): SyncOutputHold {
     },
     flush(): Uint8Array | null {
       holding = false;
+      awaitingCursorRestore = false;
+      awaitingFrameEndOffset = 0;
       if (buffer.length === 0) return null;
       const out = buffer;
       buffer = new Uint8Array(0);
@@ -533,6 +612,55 @@ function executeViewportRefresh(
 }
 
 const pendingAtlasClears = new WeakSet<Terminal>();
+const idleAtlasTimers = new WeakMap<Terminal, number>();
+
+export const IDLE_ATLAS_RECOVERY_DELAY_MS = 160;
+
+function cancelIdleAtlasTimer(term: Terminal): void {
+  const timer = idleAtlasTimers.get(term);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    idleAtlasTimers.delete(term);
+  }
+}
+
+/**
+ * Clears the WebGL glyph texture atlas and repaints visible rows only when
+ * no active output writes are in flight, preventing mid-stream glyph quad drops.
+ */
+export function recoverWebglTextureAtlasIfIdle(
+  term: Terminal,
+  isBusy?: () => boolean,
+): boolean {
+  if (typeof term.rows !== 'number' || term.rows < 1) return false;
+  if (isBusy?.() === true) return false;
+  try {
+    term.clearTextureAtlas?.();
+    executeViewportRefresh(term, false);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function scheduleIdleAtlasRecovery(
+  term: Terminal,
+  shouldDeferAtlasClear?: () => boolean,
+): void {
+  cancelIdleAtlasTimer(term);
+  const timer = window.setTimeout(() => {
+    idleAtlasTimers.delete(term);
+    if (shouldDeferAtlasClear?.() === true) {
+      scheduleIdleAtlasRecovery(term, shouldDeferAtlasClear);
+      return;
+    }
+    if (pendingAtlasClears.has(term)) {
+      pendingAtlasClears.delete(term);
+      recoverWebglTextureAtlasIfIdle(term);
+    }
+  }, IDLE_ATLAS_RECOVERY_DELAY_MS);
+  idleAtlasTimers.set(term, timer);
+}
 
 function cancelFollowupViewportRefresh(term: Terminal): void {
   const existing = followupRefreshHandles.get(term);
@@ -548,13 +676,19 @@ function cancelFollowupViewportRefresh(term: Terminal): void {
 function flushFollowupRefresh(
   term: Terminal,
   shouldRefreshSynchronously?: () => boolean,
+  shouldDeferAtlasClear?: () => boolean,
 ): void {
   followupRefreshHandles.delete(term);
   if (pendingAtlasClears.has(term)) {
-    pendingAtlasClears.delete(term);
-    try {
-      term.clearTextureAtlas?.();
-    } catch {}
+    if (shouldDeferAtlasClear?.() === true) {
+      scheduleIdleAtlasRecovery(term, shouldDeferAtlasClear);
+    } else {
+      pendingAtlasClears.delete(term);
+      cancelIdleAtlasTimer(term);
+      try {
+        term.clearTextureAtlas?.();
+      } catch {}
+    }
   }
   executeViewportRefresh(term, shouldRefreshSynchronously?.() ?? true);
 }
@@ -563,6 +697,7 @@ function scheduleFollowupViewportRefresh(
   term: Terminal,
   shouldRefreshSynchronously?: () => boolean,
   clearTextureAtlas = false,
+  shouldDeferAtlasClear?: () => boolean,
 ): void {
   if (clearTextureAtlas) {
     pendingAtlasClears.add(term);
@@ -570,19 +705,20 @@ function scheduleFollowupViewportRefresh(
   cancelFollowupViewportRefresh(term);
   if (typeof requestAnimationFrame === 'function') {
     const id = requestAnimationFrame(() => {
-      flushFollowupRefresh(term, shouldRefreshSynchronously);
+      flushFollowupRefresh(term, shouldRefreshSynchronously, shouldDeferAtlasClear);
     });
     followupRefreshHandles.set(term, { kind: 'raf', id });
     return;
   }
   const id = window.setTimeout(() => {
-    flushFollowupRefresh(term, shouldRefreshSynchronously);
+    flushFollowupRefresh(term, shouldRefreshSynchronously, shouldDeferAtlasClear);
   }, 16);
   followupRefreshHandles.set(term, { kind: 'timeout', id });
 }
 
 export function disposeTerminalRefreshTracking(term: Terminal): void {
   cancelFollowupViewportRefresh(term);
+  cancelIdleAtlasTimer(term);
   pendingAtlasClears.delete(term);
   const tracker = refreshTrackers.get(term);
   if (tracker) {
@@ -601,6 +737,7 @@ export function writeTerminalOutputWithRefresh(
     followupViewportRefresh?: boolean;
     clearTextureAtlasOnFollowup?: boolean;
     shouldRefreshViewportSynchronously?: () => boolean;
+    shouldDeferAtlasClear?: () => boolean;
     onParsed?: () => void;
   } = {},
 ): boolean {
@@ -623,6 +760,7 @@ export function writeTerminalOutputWithRefresh(
           term,
           options.shouldRefreshViewportSynchronously,
           Boolean(options.clearTextureAtlasOnFollowup),
+          options.shouldDeferAtlasClear,
         );
       }
     }

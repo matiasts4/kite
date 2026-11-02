@@ -68,4 +68,20 @@ describe('terminalRegistry — Prompt readiness & startup decontamination', () =
 
     markTerminalExited('test-sess-2');
   });
+
+  it('does not falsely classify normal shell terminals running npm or git as codex', () => {
+    // A regular terminal running npm run dev or touching files mentioning codex
+    recordTerminalOutput('shell-term-npm', '> kite-code@0.1.41 dev\n> vite\n\n  VITE v6.0.7  ready in 324 ms\n  ➜  Local:   http://localhost:1420/\n  ➜  Network: use --host to expose\n', {
+      engine: 'powershell',
+    });
+    // Even if output mentions file path containing codex or codecs
+    recordTerminalOutput('shell-term-npm', 'transforming (42) src/quota/codex.rs\ncompiling video codecs module\n', {
+      engine: 'powershell',
+    });
+
+    // An actual OpenAI Codex CLI banner MUST be required to classify as codex
+    recordTerminalOutput('real-codex-cli', '  >_ OpenAI Codex (v0.164.0)\n     loading\n\n› Ask Codex to do anything\n', {
+      engine: 'powershell',
+    });
+  });
 });

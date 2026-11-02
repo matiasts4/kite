@@ -409,6 +409,10 @@ impl ConnectionRegistry {
         Ok(records)
     }
 
+    pub fn remove_secret(&mut self, connection_id: &str) -> Result<(), String> {
+        self.set_secret(connection_id, "")
+    }
+
     pub fn set_secret(&mut self, connection_id: &str, secret: &str) -> Result<(), String> {
         let trimmed = secret.trim();
         if trimmed.is_empty() {

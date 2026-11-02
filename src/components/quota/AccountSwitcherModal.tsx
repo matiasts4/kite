@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import type { SavedAccountProfile } from '../../types';
 import {
-  listSavedAccounts,
+  listSavedAccountsFull,
+  prepareNewAccountLogin,
   saveCurrentAccountProfile,
   switchAccountProfile,
   deleteAccountProfile,
@@ -34,6 +35,11 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
   const [newLabel, setNewLabel] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [unregisteredLiveSession, setUnregisteredLiveSession] = useState<{
+    email: string;
+    planName?: string | null;
+  } | null>(null);
+  const [isConnectingNew, setIsConnectingNew] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -44,8 +50,16 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     setLoading(true);
     setErrorMsg(null);
     try {
-      const data = await listSavedAccounts(provider);
-      setProfiles(data);
+      const data = await listSavedAccountsFull(provider);
+      setProfiles(data.profiles || []);
+      setUnregisteredLiveSession(
+        data.unregisteredLiveSession
+          ? {
+              email: data.unregisteredLiveSession.email,
+              planName: data.unregisteredLiveSession.planName,
+            }
+          : null
+      );
     } catch {
       setErrorMsg('Error al cargar las cuentas guardadas');
     } finally {
@@ -100,13 +114,13 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     }
   };
 
-  const handleSaveCurrent = async () => {
+  const handleSaveCurrent = async (overrideLabel?: string) => {
     if (isSaving) return;
     setIsSaving(true);
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
-      const label = newLabel.trim() || `Cuenta ${profiles.length + 1}`;
+      const label = overrideLabel || newLabel.trim() || `Cuenta ${profiles.length + 1}`;
       const res = await saveCurrentAccountProfile(provider, label);
       if (res.success && res.profile) {
         setSuccessMsg(`Sesión actual guardada como «${res.profile.label}».`);
@@ -120,6 +134,48 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       setErrorMsg(err?.message || 'Error al guardar la sesión actual');
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleConnectNewAccount = async () => {
+    if (isConnectingNew) return;
+    setIsConnectingNew(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = await prepareNewAccountLogin(provider);
+      if (res.success) {
+        setSuccessMsg(
+          res.previousEmailSaved
+            ? `Sesión anterior (${res.previousEmailSaved}) guardada en la bóveda. Iniciando nueva autenticación...`
+            : 'Listo para conectar nueva cuenta. Abre tu terminal e inicia sesión.'
+        );
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-command', {
+            detail: { command: 'launch-cli', provider },
+          })
+        );
+        let attempts = 0;
+        const interval = setInterval(async () => {
+          attempts++;
+          const check = await listSavedAccountsFull(provider);
+          if (check.unregisteredLiveSession || check.profiles.some((p) => p.isActive)) {
+            clearInterval(interval);
+            setIsConnectingNew(false);
+            await fetchProfiles();
+            setSuccessMsg('¡Nueva cuenta detectada y disponible en la bóveda!');
+          } else if (attempts >= 24) {
+            clearInterval(interval);
+            setIsConnectingNew(false);
+          }
+        }, 2500);
+      } else {
+        setErrorMsg(res.error || 'No se pudo preparar la conexión de una nueva cuenta.');
+        setIsConnectingNew(false);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Error al conectar nueva cuenta');
+      setIsConnectingNew(false);
     }
   };
 
@@ -200,6 +256,39 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
           {successMsg ? (
             <div className="qt-banner" data-tone="ok">
               {successMsg}
+            </div>
+          ) : null}
+
+          {/* Unregistered live session banner */}
+          {unregisteredLiveSession ? (
+            <div
+              className="qt-banner"
+              data-tone="warn"
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '10px 12px',
+                borderRadius: 'var(--card-radius)',
+              }}
+            >
+              <div>
+                <strong style={{ fontSize: '12px' }}>Sesión activa no guardada:</strong>{' '}
+                <code style={{ fontSize: '12px' }}>{unregisteredLiveSession.email}</code>
+                <div style={{ fontSize: '11px', opacity: 0.85, marginTop: '2px' }}>
+                  Esta cuenta está en uso en tu sistema pero aún no está registrada en la bóveda.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="qt-button qt-button--primary"
+                style={{ height: '28px', whiteSpace: 'nowrap' }}
+                disabled={isSaving}
+                onClick={() => handleSaveCurrent(unregisteredLiveSession.email)}
+              >
+                Guardar en bóveda
+              </button>
             </div>
           ) : null}
 
@@ -333,24 +422,36 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
                   type="button"
                   className="qt-button qt-button--primary"
                   disabled={isSaving}
-                  onClick={handleSaveCurrent}
+                  onClick={() => handleSaveCurrent()}
                 >
                   {isSaving ? 'Guardando…' : 'Guardar sesión actual'}
                 </button>
               </div>
             </div>
           ) : (
-            <button
-              type="button"
-              className="qt-save-trigger"
-              onClick={() => setShowAddForm(true)}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              <span>Guardar sesión actual como nueva cuenta en la bóveda</span>
-            </button>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="qt-button"
+                style={{ height: '32px', whiteSpace: 'nowrap' }}
+                disabled={isConnectingNew}
+                onClick={handleConnectNewAccount}
+              >
+                {isConnectingNew ? 'Preparando...' : '+ Conectar nueva cuenta'}
+              </button>
+              <button
+                type="button"
+                className="qt-save-trigger"
+                style={{ flex: 1, margin: 0 }}
+                onClick={() => setShowAddForm(true)}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                <span>Guardar sesión actual</span>
+              </button>
+            </div>
           )}
         </div>
 

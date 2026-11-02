@@ -14,7 +14,7 @@ import { diagnoseProvider } from '../../lib/quota/providerState';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { saveQuotaPreferences } from '../../lib/quota/quotaManager';
 import { openSettingsTab } from '../../lib/settingsNav';
-import { listSavedAccounts, switchAccountProfile } from '../../lib/ipc';
+import { listSavedAccountsFull, switchAccountProfile } from '../../lib/ipc';
 import type { SavedAccountProfile } from '../../types';
 import { MOTION_EXIT_MS } from '../../motion/contract';
 import { surfaceMotion } from '../../motion/standard/surfaces';
@@ -48,6 +48,10 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   const accountsDropdownRef = useRef<HTMLDivElement>(null);
   const [isAccountsExpanded, setIsAccountsExpanded] = useState(false);
   const [savedAccounts, setSavedAccounts] = useState<SavedAccountProfile[]>([]);
+  const [unregisteredLiveSession, setUnregisteredLiveSession] = useState<{
+    email: string;
+    planName?: string | null;
+  } | null>(null);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [switchingAccountId, setSwitchingAccountId] = useState<string | null>(null);
   const [switchFeedback, setSwitchFeedback] = useState<string | null>(null);
@@ -66,8 +70,16 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     setLoadingAccounts(true);
     setSwitchFeedback(null);
     try {
-      const list = await listSavedAccounts(prov);
-      setSavedAccounts(list);
+      const res = await listSavedAccountsFull(prov);
+      setSavedAccounts(res.profiles || []);
+      setUnregisteredLiveSession(
+        res.unregisteredLiveSession
+          ? {
+              email: res.unregisteredLiveSession.email,
+              planName: res.unregisteredLiveSession.planName,
+            }
+          : null
+      );
     } catch {
       setSavedAccounts([]);
     } finally {
@@ -759,7 +771,13 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
-                    title={currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
+                    title={(() => {
+                      const emailDisplay =
+                        savedAccounts.find((a) => a.isActive)?.email ??
+                        unregisteredLiveSession?.email ??
+                        (currentQuota.metadata?.email ? String(currentQuota.metadata.email) : null);
+                      return emailDisplay || 'Sesión nativa activa';
+                    })()}
                   >
                     {currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
                   </span>
@@ -829,6 +847,43 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
                     overflowY: 'auto',
                   }}
                 >
+                  {unregisteredLiveSession && (
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        padding: '6px 8px',
+                        borderRadius: 'var(--vl-radius-xs, 4px)',
+                        backgroundColor: 'rgba(234, 179, 8, 0.15)',
+                        border: '1px solid rgba(234, 179, 8, 0.3)',
+                        color: 'var(--text-primary)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '4px',
+                        marginBottom: '4px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontWeight: 600 }}>Sesión no guardada:</span>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSettings(selectedProvider)}
+                          style={{
+                            background: 'var(--accent)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 'var(--vl-radius-xs, 4px)',
+                            padding: '2px 6px',
+                            fontSize: '10px',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Guardar
+                        </button>
+                      </div>
+                      <code style={{ fontSize: '10px' }}>{unregisteredLiveSession.email}</code>
+                    </div>
+                  )}
+
                   {switchFeedback && (
                     <div
                       style={{

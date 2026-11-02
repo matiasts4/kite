@@ -3,7 +3,61 @@
    Classes: SettingsSidebar, settings-row, ui-segmented, ui-switch, etc. */
 
 /* Container Layout */
-.settings-view {
+/* Settings Modal Backdrop & Portal */
+.settings-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: var(--scrim, rgba(0, 0, 0, 0.65));
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4, 16px);
+  animation: settingsModalFadeIn 150ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes settingsModalFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Modal Window Container (desktop standard dialog layout) */
+.settings-modal-window.settings-view {
+  width: min(1140px, calc(100vw - 48px));
+  height: min(800px, calc(100vh - 56px));
+  max-width: 1180px;
+  max-height: 88vh;
+  border-radius: var(--dialog-radius, 14px);
+  background: var(--pane, #141416);
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  position: relative;
+  color: var(--text-primary, #fafafa);
+  animation: settingsModalScaleIn 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes settingsModalScaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Fallback/Embedded Container Layout */
+.settings-view:not(.settings-modal-window) {
   display: flex;
   flex-direction: row;
   width: 100%;
@@ -21,12 +75,17 @@
   min-width: 200px;
   max-width: 240px;
   background: var(--sidebar-fill, #171717);
+  border: none;
   border-right: 1px solid var(--separator, #262626);
+  border-radius: 0 !important;
+  box-shadow: none !important;
   display: flex;
   flex-direction: column;
   height: 100%;
   flex-shrink: 0;
   user-select: none;
+  position: relative;
+  inset: auto;
 }
 
 .sidebar--settings .sidebar__primary {
@@ -165,6 +224,7 @@
 }
 
 /* Main Application Settings Content Pane */
+.application-settings-pane,
 .pane.application-settings-pane {
   flex: 1;
   min-width: 0;
@@ -173,6 +233,9 @@
   flex-direction: column;
   background: var(--pane, #0a0a0a);
   position: relative;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
 }
 
 .application-settings-pane > .application-settings {
@@ -185,16 +248,17 @@
 }
 
 .application-settings__column {
-  width: min(var(--settings-column, 640px), 100%);
-  gap: var(--space-7, 28px);
-  padding: var(--space-7, 28px) var(--space-6, 24px) 40px;
+  width: min(var(--settings-column, 760px), 100%);
+  gap: var(--space-6, 24px);
+  padding: var(--space-6, 24px) var(--space-6, 24px) 36px;
   flex-direction: column;
   margin-inline: auto;
   display: flex;
 }
 
 .application-settings__column--wide {
-  width: min(var(--settings-column-wide, 880px), 100%);
+  width: 100%;
+  max-width: 100%;
 }
 
 .application-settings__heading {
@@ -238,6 +302,58 @@
   font-size: var(--text-row, 13px);
   line-height: var(--leading-row, 18px);
   margin: 0;
+}
+
+.settings-modal-close {
+  margin-left: auto;
+  height: var(--control-row, 28px);
+  padding: 0 var(--space-2, 8px);
+  gap: 6px;
+  border-radius: var(--control-radius, 8px);
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  color: var(--text-secondary, #a3a3a3);
+  font-size: var(--text-caption, 12px);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  align-items: center;
+  display: inline-flex;
+  transition: all var(--duration-ink, 150ms) var(--ease-ink, ease);
+  flex-shrink: 0;
+}
+
+.settings-modal-close:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.12));
+  color: var(--text-primary, #fafafa);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.settings-modal-close__kbd {
+  font-size: 10px;
+  line-height: 1;
+  font-family: inherit;
+  padding: 2px 5px;
+  border-radius: var(--vl-radius-xs, 4px);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-tertiary, #737373);
+  font-weight: 500;
+}
+
+.settings-rail__footer {
+  margin-top: auto;
+  padding: var(--space-3, 12px) var(--space-2, 8px);
+  border-top: 1px solid var(--separator, #262626);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.settings-rail__version {
+  font-size: var(--text-caption, 11px);
+  color: var(--text-tertiary, #737373);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Settings Group & Cards */

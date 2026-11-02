@@ -50,6 +50,10 @@ pub fn fetch_codex_quota() -> ProviderQuotaStatus {
         }
     }
 
+    if access_token.is_none() {
+        access_token = crate::credentials::resolve_provider_key("codex");
+    }
+
     let token = match access_token {
         Some(t) => t,
         None => {

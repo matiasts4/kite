@@ -174,6 +174,28 @@ mod win_metrics {
         name: String,
     }
 
+
+    #[derive(Clone)]
+    struct TerminalOrigin {
+        session_id: String,
+        workspace_id: Option<String>,
+        engine: String,
+        is_agent: bool,
+    }
+
+    fn is_build_tool(name: &str) -> bool {
+        let n = name.to_lowercase();
+        n.contains("rustc")
+            || n.contains("cargo")
+            || n.contains("esbuild")
+            || n.contains("tsc")
+            || n.contains("webpack")
+            || n.contains("vite")
+            || n.contains("vitest")
+            || n.contains("jest")
+            || n.contains("link.exe")
+    }
+
     fn infer_process_label(name: &str) -> &'static str {
         let lower = name.to_lowercase();
         if lower.contains("node") {
@@ -322,6 +344,84 @@ mod win_metrics {
 
         // 2. Process Tree Memory & CPU ticks
         let tree = collect_process_tree(root_pid);
+
+        // Query active terminals in Kite to map root PIDs to session/workspace context
+        let mut terminal_roots: HashMap<u32, TerminalOrigin> = HashMap::new();
+        let mut terminal_titles: HashMap<String, String> = HashMap::new();
+        if let Ok(terms) = crate::terminal::get_terminals().lock() {
+            for (sid, inst) in terms.iter() {
+                let ws_id = inst.workspace_id.lock().ok().and_then(|w| w.clone());
+                let detected = inst.detected_agent_engine.lock().ok().and_then(|d| d.clone());
+                let engine = detected.clone().unwrap_or_else(|| inst.engine.clone());
+                let lower_eng = engine.to_lowercase();
+                let is_agent = detected.is_some()
+                    || (!["powershell", "cmd", "bash", "zsh", "sh", "terminal"].contains(&lower_eng.as_str())
+                        && !lower_eng.is_empty());
+
+                let title = if is_agent {
+                    format!("Agente {}", engine)
+                } else {
+                    format!("Terminal ({})", engine)
+                };
+                terminal_titles.insert(sid.clone(), title);
+
+                if let Ok(child) = inst.child.lock() {
+                    if let Some(cpid) = child.process_id() {
+                        terminal_roots.insert(cpid, TerminalOrigin {
+                            session_id: sid.clone(),
+                            workspace_id: ws_id,
+                            engine,
+                            is_agent,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Build parent map for quick ancestor traversal
+        let mut parent_map: HashMap<u32, u32> = HashMap::with_capacity(tree.len());
+        for node in &tree {
+            parent_map.insert(node.pid, node.parent_pid);
+        }
+
+        struct WsAccum {
+            memory_bytes: u64,
+            private_bytes: u64,
+            process_count: usize,
+            sessions: HashSet<String>,
+        }
+
+        struct TermAccum {
+            title: String,
+            engine: String,
+            workspace_id: Option<String>,
+            is_agent: bool,
+            root_pid: u32,
+            memory_bytes: u64,
+            private_bytes: u64,
+            process_count: usize,
+        }
+
+        let mut ws_map: HashMap<String, WsAccum> = HashMap::new();
+        let mut term_map: HashMap<String, TermAccum> = HashMap::new();
+
+        for (cpid, origin) in &terminal_roots {
+            let title = terminal_titles
+                .get(&origin.session_id)
+                .cloned()
+                .unwrap_or_else(|| format!("Terminal {}", origin.engine));
+            term_map.entry(origin.session_id.clone()).or_insert_with(|| TermAccum {
+                title,
+                engine: origin.engine.clone(),
+                workspace_id: origin.workspace_id.clone(),
+                is_agent: origin.is_agent,
+                root_pid: *cpid,
+                memory_bytes: 0,
+                private_bytes: 0,
+                process_count: 0,
+            });
+        }
+
         let mut core_bytes = 0u64;
         let mut core_private_bytes = 0u64;
         let mut core_count = 0usize;
@@ -338,22 +438,91 @@ mod win_metrics {
             let (mem, priv_mem, cpu_ticks) = query_process_mem_and_cpu(node.pid);
             current_proc_times.insert(node.pid, cpu_ticks);
 
-            let (category, label) = if node.pid == root_pid || node.name.contains("kite") {
+            let (matched_terminal, is_orphan) = if node.pid == root_pid
+                || node.name.contains("kite")
+                || node.name.contains("webview")
+                || node.name.contains("msedge")
+            {
+                (None, false)
+            } else {
+                let mut curr = node.pid;
+                let mut matched = None;
+                let mut depth = 0;
+                while curr != 0 && curr != root_pid && depth < 24 {
+                    if let Some(origin) = terminal_roots.get(&curr) {
+                        matched = Some(origin.clone());
+                        break;
+                    }
+                    curr = parent_map.get(&curr).copied().unwrap_or(0);
+                    depth += 1;
+                }
+                let orphan = matched.is_none()
+                    && node.parent_pid != root_pid
+                    && !parent_map.contains_key(&node.parent_pid);
+                (matched, orphan)
+            };
+
+            let is_bld = is_build_tool(&node.name);
+
+            let (category, role, label) = if node.pid == root_pid || node.name.contains("kite") {
                 core_bytes = core_bytes.saturating_add(mem);
                 core_private_bytes = core_private_bytes.saturating_add(priv_mem);
                 core_count += 1;
-                ("core", infer_process_label(&node.name))
+                ("core", "core", infer_process_label(&node.name))
             } else if node.name.contains("webview") || node.name.contains("msedge") {
                 webview_bytes = webview_bytes.saturating_add(mem);
                 webview_private_bytes = webview_private_bytes.saturating_add(priv_mem);
                 webview_count += 1;
-                ("webview", infer_process_label(&node.name))
+                ("webview", "webview", infer_process_label(&node.name))
             } else {
                 terminals_bytes = terminals_bytes.saturating_add(mem);
                 terminals_private_bytes = terminals_private_bytes.saturating_add(priv_mem);
                 terminals_count += 1;
-                ("terminals", infer_process_label(&node.name))
+                let r = if is_bld {
+                    "build"
+                } else if matched_terminal.as_ref().map(|t| t.is_agent).unwrap_or(false) {
+                    "agent"
+                } else {
+                    "terminal"
+                };
+                ("terminals", r, infer_process_label(&node.name))
             };
+
+            let session_id = matched_terminal.as_ref().map(|t| t.session_id.clone());
+            let workspace_id = matched_terminal.as_ref().and_then(|t| t.workspace_id.clone());
+            let engine = matched_terminal.as_ref().map(|t| t.engine.clone());
+            let is_agent = matched_terminal.as_ref().map(|t| t.is_agent).unwrap_or(false);
+
+            if let Some(ref sid) = session_id {
+                let entry = term_map.entry(sid.clone()).or_insert_with(|| TermAccum {
+                    title: terminal_titles.get(sid).cloned().unwrap_or_else(|| "Terminal".to_string()),
+                    engine: engine.clone().unwrap_or_else(|| "terminal".to_string()),
+                    workspace_id: workspace_id.clone(),
+                    is_agent,
+                    root_pid: node.pid,
+                    memory_bytes: 0,
+                    private_bytes: 0,
+                    process_count: 0,
+                });
+                entry.memory_bytes = entry.memory_bytes.saturating_add(mem);
+                entry.private_bytes = entry.private_bytes.saturating_add(priv_mem);
+                entry.process_count += 1;
+            }
+
+            if let Some(ref ws) = workspace_id {
+                let entry = ws_map.entry(ws.clone()).or_insert_with(|| WsAccum {
+                    memory_bytes: 0,
+                    private_bytes: 0,
+                    process_count: 0,
+                    sessions: HashSet::new(),
+                });
+                entry.memory_bytes = entry.memory_bytes.saturating_add(mem);
+                entry.private_bytes = entry.private_bytes.saturating_add(priv_mem);
+                entry.process_count += 1;
+                if let Some(ref sid) = session_id {
+                    entry.sessions.insert(sid.clone());
+                }
+            }
 
             detailed_processes.push(json!({
                 "pid": node.pid,
@@ -361,12 +530,59 @@ mod win_metrics {
                 "name": node.name,
                 "label": label,
                 "category": category,
+                "role": role,
                 "memoryBytes": mem,
                 "privateBytes": priv_mem,
+                "sessionId": session_id,
+                "workspaceId": workspace_id,
+                "engine": engine,
+                "isAgent": is_agent,
+                "isOrphan": is_orphan,
             }));
         }
 
         detailed_processes.sort_by(|a, b| {
+            let b_bytes = b["memoryBytes"].as_u64().unwrap_or(0);
+            let a_bytes = a["memoryBytes"].as_u64().unwrap_or(0);
+            b_bytes.cmp(&a_bytes)
+        });
+
+        let mut workspaces_list: Vec<Value> = ws_map
+            .into_iter()
+            .map(|(ws_id, accum)| {
+                json!({
+                    "workspaceId": ws_id,
+                    "displayName": ws_id,
+                    "memoryBytes": accum.memory_bytes,
+                    "privateBytes": accum.private_bytes,
+                    "processCount": accum.process_count,
+                    "terminalCount": accum.sessions.len(),
+                })
+            })
+            .collect();
+        workspaces_list.sort_by(|a, b| {
+            let b_bytes = b["memoryBytes"].as_u64().unwrap_or(0);
+            let a_bytes = a["memoryBytes"].as_u64().unwrap_or(0);
+            b_bytes.cmp(&a_bytes)
+        });
+
+        let mut terminals_list: Vec<Value> = term_map
+            .into_iter()
+            .map(|(sid, accum)| {
+                json!({
+                    "sessionId": sid,
+                    "title": accum.title,
+                    "engine": accum.engine,
+                    "workspaceId": accum.workspace_id,
+                    "isAgent": accum.is_agent,
+                    "rootPid": accum.root_pid,
+                    "memoryBytes": accum.memory_bytes,
+                    "privateBytes": accum.private_bytes,
+                    "processCount": accum.process_count,
+                })
+            })
+            .collect();
+        terminals_list.sort_by(|a, b| {
             let b_bytes = b["memoryBytes"].as_u64().unwrap_or(0);
             let a_bytes = a["memoryBytes"].as_u64().unwrap_or(0);
             b_bytes.cmp(&a_bytes)
@@ -580,7 +796,9 @@ mod win_metrics {
                         "processCount": terminals_count
                     }
                 ],
-                "processes": detailed_processes
+                "processes": detailed_processes,
+                "workspaces": workspaces_list,
+                "terminals": terminals_list
             }
         })
     }
@@ -678,6 +896,7 @@ mod fallback_metrics {
                         "name": "kite-code",
                         "label": "Núcleo Kite Code (Tauri Host)",
                         "category": "core",
+                        "role": "core",
                         "memoryBytes": 64 * 1024 * 1024,
                         "privateBytes": 42 * 1024 * 1024
                     },
@@ -687,10 +906,13 @@ mod fallback_metrics {
                         "name": "webview-render",
                         "label": "Motor UI (WebView / GPU)",
                         "category": "webview",
+                        "role": "webview",
                         "memoryBytes": 276 * 1024 * 1024,
                         "privateBytes": 148 * 1024 * 1024
                     }
-                ]
+                ],
+                "workspaces": [],
+                "terminals": []
             }
         })
     }

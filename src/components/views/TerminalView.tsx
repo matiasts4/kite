@@ -11,6 +11,7 @@ import {
 } from '../../lib/terminalRegistry';
 import {
   hostBoxIsUsable,
+  waitForSpawnGeometry,
   waitForStableHost,
 } from '../../lib/terminalHostSize';
 import {
@@ -18,21 +19,22 @@ import {
   attachDomBlockFillCleanup,
   buildWindowsConptyOptions,
   DEFAULT_WINDOWS_CONPTY_BUILD_NUMBER,
+  isTerminalDividerDragging,
+  onTerminalDividerDragEnd,
   reconcilePtySizeAfterSpawn,
   repairWebglCanvasForDevicePixelRatio,
   safeFitTerminal,
-  scheduleStabilizedFit,
   StableCellFitAddon,
   TERMINAL_SCROLLBAR_WIDTH_PX,
-  terminalGridDriftedFromFit,
 } from '../../lib/terminalViewport';
 import {
   classifyForegroundOutputRefresh,
   createSyncOutputHold,
   disposeTerminalRefreshTracking,
   type ForegroundOutputScanState,
+  recoverWebglTextureAtlasIfIdle,
   splitAlternateScreenEnterChunk,
-  stripTransientCursorShows,
+  SYNC_OUTPUT_CURSOR_RESTORE_HOLD_MS,
   SYNC_OUTPUT_MAX_HOLD_MS,
   writeTerminalOutputWithRefresh,
 } from '../../lib/terminalSyncOutput';
@@ -44,11 +46,14 @@ import {
 } from '../../lib/terminalLinkNav';
 import {
   getTerminalAppearancePrefs,
+  getTerminalRendererBadgeLabel,
   setTerminalAppearancePrefs,
+  togglePrimaryTerminalRenderer,
   resolveTerminalFontFamily,
   TERMINAL_APPEARANCE_CHANGED_EVENT,
   type TerminalAppearancePrefs,
 } from '../../lib/terminalAppearancePrefs';
+import { TerminalCanvasSurface, measureTerminalCanvasGrid } from './TerminalCanvasSurface';
 import './terminal.css';
 
 export interface TerminalViewProps {
@@ -225,10 +230,8 @@ type LiveTerminal = {
 const liveTerms = new Map<string, LiveTerminal>();
 const restartedSessions = new Map<string, string>();
 
-// Temporary capture experiment: keep this enabled for one controlled sample to
-// suppress only the foreground grid-drift auto-refit. Initial fits and explicit
-// resize paths remain unchanged. Revert this diagnostic hunk after the sample.
-const SUPPRESS_FOREGROUND_GRID_DRIFT_REFIT_DIAGNOSTIC = true;
+// Foreground grid-drift auto-refit is enabled with multi-frame stabilized fit
+// to prevent stale ConPTY column geometry during output streaming.
 
 /** Arrival wave length when a thrown prompt lands in this terminal. */
 const TERMINAL_IMPACT_PULSE_MS = 460;
@@ -294,7 +297,9 @@ function terminalParking(): HTMLElement {
 function isLiveTerminalVisible(live: LiveTerminal): boolean {
   const el = live.term.element;
   if (!el || !el.isConnected) return false;
-  return !el.closest('#terminal-parking');
+  if (el.closest('#terminal-parking')) return false;
+  if (el.closest('[aria-hidden="true"]')) return false;
+  return true;
 }
 
 function releaseBitmapRenderer(live: LiveTerminal) {
@@ -310,6 +315,7 @@ function releaseBitmapRenderer(live: LiveTerminal) {
 function attachBitmapRenderer(live: LiveTerminal) {
   if (live.renderer?.kind === 'webgl') {
     repairWebglCanvasForDevicePixelRatio(live.term);
+    recoverWebglTextureAtlasIfIdle(live.term);
     return;
   }
   releaseBitmapRenderer(live);
@@ -332,24 +338,19 @@ function attachBitmapRenderer(live: LiveTerminal) {
         addon.dispose();
       },
     };
+    repairWebglCanvasForDevicePixelRatio(live.term);
   } catch (err) {
     console.warn('[terminal] WebGL renderer unavailable', err);
-  }
-  if (!isLiveTerminalVisible(live)) return;
-  try {
-    safeFitTerminal(live.term, live.fit);
-  } catch {
-    // The host can be mid-layout. The settled fit still runs after open.
   }
 }
 
 function syncVisibleBitmapRenderers() {
   const { renderer } = getTerminalAppearancePrefs();
-  if (renderer === 'dom') {
+  if (renderer === 'dom' || renderer === 'canvas') {
     for (const live of liveTerms.values()) {
       const wasBitmap = live.renderer !== null;
       releaseBitmapRenderer(live);
-      if (wasBitmap && isLiveTerminalVisible(live) && live.term.rows > 0) {
+      if (renderer === 'dom' && wasBitmap && isLiveTerminalVisible(live) && live.term.rows > 0) {
         try {
           live.term.refresh(0, live.term.rows - 1);
         } catch {}
@@ -367,12 +368,118 @@ function syncVisibleBitmapRenderers() {
   }
 }
 
+/** Sessions currently mounted in an active TerminalView component. */
+const activeMountedSessions = new Set<string>();
+
+/** Active background polling timers for parked sessions. */
+const parkedPollers = new Map<string, number>();
+
+function startParkedPolling(sessionId: string) {
+  if (
+    !sessionId ||
+    getTerminalAppearancePrefs().renderer === 'canvas' ||
+    parkedPollers.has(sessionId) ||
+    activeMountedSessions.has(sessionId)
+  ) {
+    return;
+  }
+
+  const pollParked = async () => {
+    if (
+      getTerminalAppearancePrefs().renderer === 'canvas' ||
+      activeMountedSessions.has(sessionId) ||
+      !liveTerms.has(sessionId)
+    ) {
+      stopParkedPolling(sessionId);
+      return;
+    }
+
+    let nextDelay = 200;
+    try {
+      const res: any = await invokeCommand('read_terminal_output', {
+        sessionId,
+        owner: 'user',
+      });
+
+      if (
+        getTerminalAppearancePrefs().renderer === 'canvas' ||
+        activeMountedSessions.has(sessionId) ||
+        !liveTerms.has(sessionId)
+      ) {
+        stopParkedPolling(sessionId);
+        return;
+      }
+
+      const live = liveTerms.get(sessionId);
+      if (res?.kind === 'output' && res.bytesBase64) {
+        nextDelay = 80;
+        const bytes = base64ToUint8Array(res.bytesBase64);
+        if (live?.term) {
+          live.term.write(bytes);
+        }
+      } else if (res?.kind === 'exited') {
+        markTerminalExited(sessionId);
+        const code = res.status?.code ?? 0;
+        if (live?.term) {
+          live.term.write(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`);
+        }
+        stopParkedPolling(sessionId);
+        return;
+      } else {
+        nextDelay = 400;
+      }
+    } catch {
+      nextDelay = 600;
+    }
+
+    if (
+      getTerminalAppearancePrefs().renderer !== 'canvas' &&
+      !activeMountedSessions.has(sessionId) &&
+      liveTerms.has(sessionId)
+    ) {
+      const timer = window.setTimeout(pollParked, nextDelay);
+      parkedPollers.set(sessionId, timer);
+    } else {
+      stopParkedPolling(sessionId);
+    }
+  };
+
+  const timer = window.setTimeout(pollParked, 50);
+  parkedPollers.set(sessionId, timer);
+}
+
+function stopParkedPolling(sessionId: string) {
+  const timer = parkedPollers.get(sessionId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    parkedPollers.delete(sessionId);
+  }
+}
+
+function syncParkedPollers() {
+  if (getTerminalAppearancePrefs().renderer === 'canvas') {
+    for (const sessionId of Array.from(parkedPollers.keys())) {
+      stopParkedPolling(sessionId);
+    }
+    return;
+  }
+  for (const sessionId of liveTerms.keys()) {
+    if (!activeMountedSessions.has(sessionId)) {
+      startParkedPolling(sessionId);
+    } else {
+      stopParkedPolling(sessionId);
+    }
+  }
+}
+
 /** Kill the PTY and drop the screen. Only an explicit close or Restart should call this. */
 export function releaseTerminal(sessionId: string) {
   markTerminalExited(sessionId);
   const ids = new Set([sessionId, restartedSessions.get(sessionId) ?? sessionId]);
   for (const id of ids) {
     markTerminalExited(id);
+    stopParkedPolling(id);
+    activeMountedSessions.delete(id);
     const live = liveTerms.get(id);
     if (live) {
       disposeTerminalRefreshTracking(live.term);
@@ -409,6 +516,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [isReceivingPrompt, setIsReceivingPrompt] = useState(false);
   const [isImpactPulse, setIsImpactPulse] = useState(false);
+  const [appearance, setAppearance] = useState<TerminalAppearancePrefs>(() => getTerminalAppearancePrefs());
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -418,7 +526,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const cancelSpawnReconcileRef = useRef<(() => void) | null>(null);
   const cancelDriftStabilizedFitRef = useRef<(() => void) | null>(null);
   const driftCheckFrameRef = useRef<number | null>(null);
-  const lastDriftCheckAtRef = useRef<number>(0);
+  const driftProbeCountRef = useRef<number>(0);
   const altScreenSplitTailRef = useRef<string>('');
   const foregroundScanStateRef = useRef<ForegroundOutputScanState>({
     endsWithCarriageReturn: false,
@@ -426,6 +534,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   });
   const writeDecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
   const lastColsRef = useRef<number | null>(null);
+  // Set when the user switches between the canvas and DOM engines. The next attach seeds
+  // the DOM terminal from the live alternate screen instead of replaying raw history.
+  const resyncFromScreenRef = useRef(false);
   const lastRowsRef = useRef<number | null>(null);
   const ptyOpenRef = useRef(false);
   const startGenRef = useRef(0);
@@ -437,8 +548,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const scheduleStableFitRef = useRef<() => void>(() => {});
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   /** Joins a synchronized frame so a poll slice is not painted on its own. */
-  const syncHoldRef = useRef(createSyncOutputHold());
+  const syncHoldRef = useRef(createSyncOutputHold({ holdForCursorRestore: false }));
   const syncHoldTimerRef = useRef<number | null>(null);
+  const resizeInFlightRef = useRef(false);
+  const queuedResizeDimsRef = useRef<{ cols: number; rows: number } | null>(null);
+  const containerResizeDebounceRef = useRef<number | null>(null);
   const utf8DecoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
   const onDataDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const sessionIdRef = useRef<string>(propSessionId || '');
@@ -518,46 +632,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastUserInputTimeRef = useRef<number>(0);
   const isWindowFocusedRef = useRef<boolean>(true);
   const triggerImmediatePollRef = useRef<() => void>(() => {});
-
-  const scheduleForegroundGridDriftCheck = useCallback(() => {
-    if (SUPPRESS_FOREGROUND_GRID_DRIFT_REFIT_DIAGNOSTIC) return;
-    if (driftCheckFrameRef.current !== null || cancelDriftStabilizedFitRef.current !== null) return;
-    const now = performance.now();
-    if (now - lastDriftCheckAtRef.current < 250) return;
-    driftCheckFrameRef.current = window.requestAnimationFrame(() => {
-      driftCheckFrameRef.current = null;
-      lastDriftCheckAtRef.current = performance.now();
-      const term = termRef.current;
-      const fit = fitAddonRef.current;
-      const host = containerRef.current;
-      if (!term || !fit || !host || !ptyOpenRef.current) return;
-      if (typeof term.hasSelection === 'function' && term.hasSelection()) return;
-      if (!terminalGridDriftedFromFit(term, fit, host)) return;
-      cancelDriftStabilizedFitRef.current = scheduleStabilizedFit({
-        propose: () => fitAddonRef.current?.proposeDimensions(),
-        isBlocked: () =>
-          !ptyOpenRef.current ||
-          Boolean(termRef.current && typeof termRef.current.hasSelection === 'function' && termRef.current.hasSelection()),
-        onSettled: () => {
-          cancelDriftStabilizedFitRef.current = null;
-          const currentTerm = termRef.current;
-          const currentFit = fitAddonRef.current;
-          const currentHost = containerRef.current;
-          if (!currentTerm || !currentFit || !currentHost || !ptyOpenRef.current) return;
-          if (terminalGridDriftedFromFit(currentTerm, currentFit, currentHost)) {
-            fitNowRef.current();
-          }
-        },
-      });
-    });
-  }, []);
+  const [oscTitle, setOscTitle] = useState<string>('');
 
   const writeRaw = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
-    scheduleForegroundGridDriftCheck();
     writeActiveRef.current += 1;
     const releaseWrite = () => {
       writeActiveRef.current = Math.max(0, writeActiveRef.current - 1);
-      if (writeActiveRef.current === 0 && fitDeferredRef.current) {
+      if (
+        writeActiveRef.current === 0 &&
+        !syncHoldRef.current.holding &&
+        !syncHoldRef.current.pending &&
+        fitDeferredRef.current
+      ) {
         fitDeferredRef.current = false;
         queueMicrotask(() => fitNowRef.current());
       }
@@ -581,45 +667,48 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               resolve();
             }
           };
+          const live = sessionIdRef.current ? liveTerms.get(sessionIdRef.current) : undefined;
+          const hasWebglRenderer = Boolean(live?.renderer);
+          const isVisible =
+            typeof document !== 'undefined' &&
+            document.visibilityState === 'visible' &&
+            isWindowFocusedRef.current &&
+            (!live || isLiveTerminalVisible(live));
+
           // Hard safety timeout: never allow an unrendered, hidden, or resizing xterm
           // to block the write queue or deadlock the polling tick.
-          const timer = setTimeout(done, 100);
+          const timer = setTimeout(done, isVisible ? 100 : 15);
 
           const text =
             typeof data === 'string'
               ? data
               : writeDecoderRef.current.decode(data, { stream: true });
-          const live = sessionIdRef.current ? liveTerms.get(sessionIdRef.current) : undefined;
-          const hasWebglRenderer = Boolean(live?.renderer);
 
           const deliverText = (chunkText: string, cb: () => void) => {
             if (!chunkText) {
               cb();
               return;
             }
+            if (!isVisible) {
+              term.write(chunkText, cb);
+              return;
+            }
             const refreshPlan = classifyForegroundOutputRefresh(chunkText, {
               scanState: foregroundScanStateRef.current,
             });
-            const payload = refreshPlan.stripTransientCursorShows
-              ? stripTransientCursorShows(chunkText)
-              : chunkText;
-            writeTerminalOutputWithRefresh(term, payload, {
+            writeTerminalOutputWithRefresh(term, chunkText, {
               forceViewportRefresh: refreshPlan.forceViewportRefresh,
               followupViewportRefresh: refreshPlan.followupViewportRefresh,
               clearTextureAtlasOnFollowup: refreshPlan.clearTextureAtlasOnFollowup,
               shouldRefreshViewportSynchronously: () => !hasWebglRenderer,
+              shouldDeferAtlasClear: () =>
+                writeActiveRef.current > 1 || syncHoldRef.current.pending,
               onParsed: cb,
             });
           };
 
           try {
-            const hasPendingResize =
-              fitDeferredRef.current ||
-              Boolean(
-                fitAddonRef.current &&
-                  containerRef.current &&
-                  terminalGridDriftedFromFit(term, fitAddonRef.current, containerRef.current),
-              );
+            const hasPendingResize = fitDeferredRef.current;
             const split = splitAlternateScreenEnterChunk(
               text,
               altScreenSplitTailRef.current,
@@ -654,20 +743,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       releaseWrite();
     });
     return writeQueueRef.current;
-  }, [scheduleForegroundGridDriftCheck]);
+  }, []);
 
   const enqueueWrite = useCallback((data: Uint8Array | string, onFlushed?: () => void) => {
     const ready = syncHoldRef.current.push(data);
     if (syncHoldRef.current.pending) {
-      if (syncHoldTimerRef.current === null) {
-        syncHoldTimerRef.current = window.setTimeout(() => {
-          syncHoldTimerRef.current = null;
-          const pending = syncHoldRef.current.flush();
-          if (pending && pending.length > 0) {
-            void writeRaw(pending);
-          }
-        }, SYNC_OUTPUT_MAX_HOLD_MS);
+      if (syncHoldTimerRef.current !== null) {
+        window.clearTimeout(syncHoldTimerRef.current);
+        syncHoldTimerRef.current = null;
       }
+      const holdDelay = syncHoldRef.current.awaitingCursorRestore
+        ? SYNC_OUTPUT_CURSOR_RESTORE_HOLD_MS
+        : SYNC_OUTPUT_MAX_HOLD_MS;
+      syncHoldTimerRef.current = window.setTimeout(() => {
+        syncHoldTimerRef.current = null;
+        const pending = syncHoldRef.current.flush();
+        if (pending && pending.length > 0) {
+          void writeRaw(pending);
+        } else if (writeActiveRef.current === 0 && fitDeferredRef.current) {
+          fitDeferredRef.current = false;
+          queueMicrotask(() => fitNowRef.current());
+        }
+      }, holdDelay);
     } else if (syncHoldTimerRef.current !== null) {
       window.clearTimeout(syncHoldTimerRef.current);
       syncHoldTimerRef.current = null;
@@ -682,13 +779,56 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return writeQueueRef.current;
   }, [writeRaw]);
 
+  const dispatchSerializedResize = useCallback(
+    (sessionId: string, cols: number, rows: number, onComplete?: () => void) => {
+      queuedResizeDimsRef.current = { cols, rows };
+      if (resizeInFlightRef.current) {
+        return;
+      }
+      const step = () => {
+        const nextDims = queuedResizeDimsRef.current;
+        if (!nextDims || sessionIdRef.current !== sessionId) {
+          resizeInFlightRef.current = false;
+          queuedResizeDimsRef.current = null;
+          onComplete?.();
+          return;
+        }
+        queuedResizeDimsRef.current = null;
+        resizeInFlightRef.current = true;
+        invokeCommand('resize_terminal', {
+          sessionId,
+          columns: nextDims.cols,
+          rows: nextDims.rows,
+        })
+          .then(() => {
+            if (queuedResizeDimsRef.current && sessionIdRef.current === sessionId) {
+              step();
+              return;
+            }
+            resizeInFlightRef.current = false;
+            onComplete?.();
+          })
+          .catch(() => {
+            resizeInFlightRef.current = false;
+          });
+      };
+      step();
+    },
+    [],
+  );
+
   const fitTerminal = useCallback(() => {
     const host = containerRef.current;
     if (!host || !fitAddonRef.current || !termRef.current || !ptyOpenRef.current) return;
     if (!hostBoxIsUsable(host.clientWidth, host.clientHeight)) return;
-    // A polled chunk or an open synchronized frame owns the screen.
+    // A polled chunk, open synchronized frame, or active split divider drag owns the screen.
     // Fitting now would SIGWINCH in the middle of it.
-    if (writeActiveRef.current > 0 || syncHoldRef.current.holding) {
+    if (
+      isTerminalDividerDragging() ||
+      writeActiveRef.current > 0 ||
+      syncHoldRef.current.holding ||
+      syncHoldRef.current.pending
+    ) {
       fitDeferredRef.current = true;
       return;
     }
@@ -696,6 +836,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const term = termRef.current;
       const wasAtBottom = isAtBottomRef.current || linesFromBottomRef.current <= 3;
       const savedLinesFromBottom = linesFromBottomRef.current;
+      const hadPriorDimensions = lastColsRef.current !== null && lastRowsRef.current !== null;
+      const prevCols = lastColsRef.current ?? term.cols;
+      const prevRows = lastRowsRef.current ?? term.rows;
 
       isResizingRef.current = true;
       let grid: { cols: number; rows: number } | null = null;
@@ -710,9 +853,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const restoreScroll = () => {
         if (!termRef.current) return;
         if (termRef.current.buffer.active.type === 'alternate') return;
-        if (wasAtBottom) {
-          termRef.current.scrollToBottom();
-        } else {
+        if (!wasAtBottom) {
           const target = Math.max(0, termRef.current.buffer.active.baseY - savedLinesFromBottom);
           termRef.current.scrollToLine(target);
         }
@@ -732,21 +873,33 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       lastColsRef.current = cols;
       lastRowsRef.current = rows;
+
+      // When an alternate-screen TUI (which redraws by cursor deltas without CSI 2J)
+      // changes geometry after initial spawn, wipe stale cells from the old bottom bar
+      // so the new ConPTY frame paints onto a clean grid.
+      if (
+        hadPriorDimensions &&
+        (cols !== prevCols || rows !== prevRows) &&
+        term.buffer?.active?.type === 'alternate'
+      ) {
+        try {
+          term.write('\x1b[2J\x1b[H');
+        } catch {}
+      }
+
       const sessionId = sessionIdRef.current;
-      invokeCommand('resize_terminal', {
-        sessionId,
-        columns: cols,
-        rows: rows,
-      })
-        .then(() => {
-          if (sessionIdRef.current !== sessionId) return;
-          if (termRef.current?.buffer.active.type !== 'alternate') {
-            restoreScroll();
-          }
-        })
-        .catch(() => {});
+      dispatchSerializedResize(sessionId, cols, rows, () => {
+        if (sessionIdRef.current !== sessionId || !termRef.current) return;
+        if (termRef.current.buffer.active.type !== 'alternate') {
+          restoreScroll();
+        }
+        recoverWebglTextureAtlasIfIdle(
+          termRef.current,
+          () => writeActiveRef.current > 0 || syncHoldRef.current.pending,
+        );
+      });
     } catch {}
-  }, []);
+  }, [dispatchSerializedResize]);
   fitNowRef.current = fitTerminal;
 
   const scheduleStableFit = useCallback(() => {
@@ -774,12 +927,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       existing.term.options.lineHeight = appearance.lineHeight;
       existing.term.options.cursorStyle = appearance.cursorStyle;
       existing.term.options.cursorBlink = appearance.cursorBlink;
+      if (key) {
+        activeMountedSessions.add(key);
+        stopParkedPolling(key);
+      }
       containerRef.current.replaceChildren(existing.term.element);
       termRef.current = existing.term;
       fitAddonRef.current = existing.fit;
       syncVisibleBitmapRenderers();
       requestAnimationFrame(() => {
         if (!termRef.current) return;
+        try {
+          termRef.current.refresh(0, termRef.current.rows - 1);
+        } catch {}
         if (isAtBottomRef.current || linesFromBottomRef.current <= 3) {
           termRef.current.scrollToBottom();
         } else {
@@ -843,6 +1003,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const fitAddon = new StableCellFitAddon();
     term.loadAddon(fitAddon);
     activateTerminalUnicodeProvider(term);
+    // Rust's PTY reader (`TerminalVtEngine`) already replies to DSR/CPR (`CSI 5 n` / `CSI 6 n`)
+    // directly on the PTY thread with sub-millisecond latency. Suppress duplicate xterm.js CPR replies.
+    term.parser.registerCsiHandler({ final: 'n' }, (params) => params[0] === 6 || params[0] === 5);
     term.open(containerRef.current);
     const cleanupDomBlockFill = attachDomBlockFillCleanup(term);
 
@@ -1013,14 +1176,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
         const now = Date.now();
         const hasRecentUserInput = now - lastUserInputTimeRef.current < 4000;
-        const isDocHidden =
+        const live = sessionIdRef.current ? liveTerms.get(sessionIdRef.current) : undefined;
+        const isVisible =
           typeof document !== 'undefined' &&
-          document.visibilityState === 'hidden' &&
-          !isWindowFocusedRef.current;
+          document.visibilityState === 'visible' &&
+          isWindowFocusedRef.current &&
+          (!live || isLiveTerminalVisible(live));
+
         if (res?.kind === 'output' && res.bytesBase64) {
-          nextDelay = 35;
           const bytes = base64ToUint8Array(res.bytesBase64);
           await enqueueWrite(bytes);
+          // Poll immediately (6ms) when a DEC 2026 frame or cursor restore is held so
+          // closing sequences arrive before the hold timer expires; otherwise 16ms on visible output.
+          nextDelay = syncHoldRef.current.pending ? 6 : isVisible ? 16 : 50;
           try {
             const text = utf8DecoderRef.current.decode(bytes, { stream: true });
             if (text) {
@@ -1041,8 +1209,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           return;
         } else {
           // Idle state (no new output):
-          if (isDocHidden) {
-            nextDelay = 800;
+          if (syncHoldRef.current.pending) {
+            nextDelay = 10;
+          } else if (!isVisible) {
+            nextDelay = 400;
           } else if (hasRecentUserInput) {
             nextDelay = 40;
           } else {
@@ -1074,6 +1244,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const gen = ++startGenRef.current;
     fitWatchRef.current += 1;
     ptyOpenRef.current = false;
+    driftProbeCountRef.current = 0;
     cancelSpawnReconcileRef.current?.();
     cancelSpawnReconcileRef.current = null;
     cancelDriftStabilizedFitRef.current?.();
@@ -1089,6 +1260,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     if (opts?.restart && isAgentEngine(currentEngine)) {
       const nextSessionId = globalThis.crypto.randomUUID();
+      stopParkedPolling(previousSessionId);
+      activeMountedSessions.delete(previousSessionId);
       const live = liveTerms.get(previousSessionId);
       if (live) {
         try {
@@ -1108,6 +1281,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
 
     if (opts?.restart && !pendingAgentRestart) {
+      stopParkedPolling(previousSessionId);
+      activeMountedSessions.delete(previousSessionId);
       const live = liveTerms.get(previousSessionId);
       if (live) {
         try {
@@ -1133,8 +1308,73 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     liveSessionRef.current = newSessionId;
     setSessionId(newSessionId);
     sessionIdRef.current = newSessionId;
+    activeMountedSessions.add(newSessionId);
+    stopParkedPolling(newSessionId);
     setStatus('connecting');
     setExitCode(null);
+
+    const activePrefs = getTerminalAppearancePrefs();
+    if (activePrefs.renderer === 'canvas') {
+      syncVisibleBitmapRenderers();
+      syncParkedPollers();
+      const preliminaryCols = surfaceRef.current
+        ? measureTerminalCanvasGrid(surfaceRef.current, activePrefs).cols
+        : 0;
+      await waitForSpawnGeometry(surfaceRef.current, preliminaryCols, () => !stillCurrent());
+      if (!stillCurrent()) return;
+      const measured = measureTerminalCanvasGrid(surfaceRef.current, activePrefs);
+      lastColsRef.current = measured.cols;
+      lastRowsRef.current = measured.rows;
+      const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
+      try {
+        let restartedAgent = false;
+        if (pendingAgentRestart) {
+          try {
+            await invokeCommand('restart_agent_terminal_for_autopilot', {
+              oldSessionId: pendingAgentRestart.previousSessionId,
+              newSessionId: pendingAgentRestart.nextSessionId,
+              agentId: agentIdRef.current,
+              paneId: paneIdRef.current,
+              runId: globalThis.crypto.randomUUID(),
+              generation: generationRef.current,
+              prompt: `Continue with ${currentEngine}`.slice(0, 2000),
+              columns: measured.cols,
+              rows: measured.rows,
+            });
+            generationRef.current += 1;
+            restartedSessions.set(
+              pendingAgentRestart.previousSessionId,
+              pendingAgentRestart.nextSessionId,
+            );
+            restartedAgent = true;
+          } catch {
+            restartedAgent = false;
+          }
+        }
+        if (!restartedAgent) {
+          await invokeCommand(
+            propSessionId && !opts?.restart ? 'attach_terminal' : 'start_terminal',
+            {
+              sessionId: newSessionId,
+              engine: currentEngine,
+              owner,
+              workspaceId,
+              paneId: paneIdRef.current,
+              confirmedByBuilder: true,
+              columns: measured.cols,
+              rows: measured.rows,
+            }
+          );
+        }
+      } catch (err) {
+        console.warn('Canvas terminal start/attach:', err);
+      }
+      if (stillCurrent()) {
+        ptyOpenRef.current = true;
+        setStatus('running');
+      }
+      return;
+    }
 
     const hadLiveElement = Boolean(liveTerms.get(newSessionId)?.term.element);
     let term = termRef.current;
@@ -1246,6 +1486,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         grid = readGrid();
       }
       if (!grid || !stillCurrent()) return;
+      if (grid.cols < 50) {
+        await waitForSpawnGeometry(host, grid.cols, () => !stillCurrent());
+        if (!stillCurrent()) return;
+        const settled = readGrid();
+        if (settled) grid = settled;
+      }
 
       lastColsRef.current = grid.cols;
       lastRowsRef.current = grid.rows;
@@ -1275,9 +1521,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           console.error('Failed to restart agent terminal:', err);
         }
       }
+      const resyncFromScreen = resyncFromScreenRef.current;
+      resyncFromScreenRef.current = false;
       const started = restartedAgent
-        ? { attachedToExisting: false, scrollbackBase64: undefined as string | undefined }
-        : await invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>(
+        ? { attachedToExisting: false, screenSeed: false, scrollbackBase64: undefined as string | undefined }
+        : await invokeCommand<{ attachedToExisting?: boolean; screenSeed?: boolean; scrollbackBase64?: string }>(
             propSessionId && !opts?.restart ? 'attach_terminal' : 'start_terminal',
             propSessionId && !opts?.restart
               ? {
@@ -1288,7 +1536,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   paneId: paneIdRef.current,
                   columns: grid.cols,
                   rows: grid.rows,
-                  preserveUnreadBuffer: hadLiveElement,
+                  preserveUnreadBuffer: hadLiveElement && !resyncFromScreen,
+                  resyncFromScreen,
                 }
               : {
                   sessionId: newSessionId,
@@ -1299,7 +1548,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   confirmedByBuilder: true,
                   columns: grid.cols,
                   rows: grid.rows,
-                  preserveUnreadBuffer: hadLiveElement,
+                  preserveUnreadBuffer: hadLiveElement && !resyncFromScreen,
+                  resyncFromScreen,
                 },
           );
       if (!stillCurrent()) return;
@@ -1310,7 +1560,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         term.reset();
         foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
       }
-      if (!hadLiveElement && started?.scrollbackBase64 && term) {
+      if (term && started?.screenSeed && started.scrollbackBase64) {
+        // Renderer switch on a TUI: drop whatever this terminal still holds from before
+        // and rebuild it from the live screen at the current grid.
+        term.reset();
+        foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
+        const seedBytes = base64ToUint8Array(started.scrollbackBase64);
+        if (seedBytes.length > 0) {
+          await enqueueWrite(seedBytes);
+          if (!stillCurrent()) return;
+        }
+      } else if ((!hadLiveElement || resyncFromScreen) && started?.scrollbackBase64 && term) {
+        if (resyncFromScreen) {
+          term.reset();
+          foregroundScanStateRef.current = { endsWithCarriageReturn: false, scanTail: '' };
+        }
         const historyBytes = base64ToUint8Array(started.scrollbackBase64);
         if (historyBytes.length > 0) {
           await enqueueWrite(historyBytes);
@@ -1393,7 +1657,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const handleClear = useCallback(() => {
     termRef.current?.clear();
     termRef.current?.focus();
-  }, []);
+    const sid = sessionIdRef.current || propSessionId;
+    if (sid) {
+      void invokeCommand('clear_terminal_vt', { sessionId: sid }).catch(() => {});
+    }
+  }, [propSessionId]);
 
   useEffect(() => {
     if (chrome !== 'pane') return;
@@ -1424,18 +1692,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           stopPolling();
           setStatus('connecting');
           setExitCode(null);
-          const cols = term?.cols || 80;
-          const rows = term?.rows || 24;
           const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
-          invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>('attach_terminal', {
-            sessionId: currentId,
-            owner,
-            engine: engineRef.current,
-            workspaceId,
-            paneId: paneIdRef.current,
-            columns: cols,
-            rows: rows,
-          })
+          void (async () => {
+            let cols = term?.cols || 80;
+            let rows = term?.rows || 24;
+            const host = containerRef.current;
+            if (cols < 50 && host) {
+              await waitForSpawnGeometry(host, cols);
+              fitTerminal();
+              cols = term?.cols || cols;
+              rows = term?.rows || rows;
+            }
+            return invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>('attach_terminal', {
+              sessionId: currentId,
+              owner,
+              engine: engineRef.current,
+              workspaceId,
+              paneId: paneIdRef.current,
+              columns: cols,
+              rows: rows,
+            });
+          })()
             .then((started) => {
               if (term && started?.attachedToExisting) {
                 term.reset();
@@ -1473,10 +1750,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       if (detail.command === 'font-larger' || detail.command === 'font-smaller') {
         const term = termRef.current;
-        if (!term) return;
-        const currentSize = term.options.fontSize ?? getTerminalAppearancePrefs().fontSize;
+        const currentSize = term?.options.fontSize ?? getTerminalAppearancePrefs().fontSize;
         const next = Math.min(22, Math.max(10, currentSize + (detail.command === 'font-larger' ? 1 : -1)));
-        term.options.fontSize = next;
+        if (term) {
+          term.options.fontSize = next;
+        }
         setTerminalAppearancePrefs({ fontSize: next });
         fitTerminal();
       }
@@ -1485,9 +1763,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => window.removeEventListener('kite:terminal-command', onCommand);
   }, [chrome, handleClear, propSessionId, startSession]);
 
+  const prevRendererRef = useRef(appearance.renderer);
+
   useEffect(() => {
     const onAppearanceChanged = (e: Event) => {
       const prefs = (e as CustomEvent<TerminalAppearancePrefs>).detail ?? getTerminalAppearancePrefs();
+      const prevRenderer = prevRendererRef.current;
+      prevRendererRef.current = prefs.renderer;
+      setAppearance(prefs);
       const resolvedFont = resolveTerminalFontFamily(prefs.fontFamilyId);
 
       for (const live of liveTerms.values()) {
@@ -1498,13 +1781,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         live.term.options.cursorBlink = prefs.cursorBlink;
       }
 
+      if ((prevRenderer === 'canvas') !== (prefs.renderer === 'canvas')) {
+        resyncFromScreenRef.current = prefs.renderer !== 'canvas';
+        stopPolling();
+        syncVisibleBitmapRenderers();
+        syncParkedPollers();
+        window.requestAnimationFrame(() => {
+          void startSession(engineRef.current);
+        });
+        return;
+      }
+
       syncVisibleBitmapRenderers();
       fitTerminal();
     };
 
     window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
     return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
-  }, [fitTerminal]);
+  }, [fitTerminal, startSession, stopPolling]);
 
   useEffect(() => {
     if (initialEngine && initialEngine !== engineRef.current) {
@@ -1630,8 +1924,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     liveSessionRef.current = propSessionId || liveSessionRef.current;
     void startSession();
 
+    const scheduleDebouncedResizeFit = () => {
+      if (containerResizeDebounceRef.current !== null) {
+        window.clearTimeout(containerResizeDebounceRef.current);
+      }
+      containerResizeDebounceRef.current = window.setTimeout(() => {
+        containerResizeDebounceRef.current = null;
+        scheduleStableFitRef.current();
+      }, 150);
+    };
+
     const ro = new ResizeObserver(() => {
-      scheduleStableFitRef.current();
+      scheduleDebouncedResizeFit();
     });
 
     if (containerRef.current) {
@@ -1639,11 +1943,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
 
     const handleWindowResize = () => {
-      scheduleStableFitRef.current();
+      scheduleDebouncedResizeFit();
     };
     window.addEventListener('resize', handleWindowResize);
 
+    const unbindDividerDrag = onTerminalDividerDragEnd(() => {
+      if (containerResizeDebounceRef.current !== null) {
+        window.clearTimeout(containerResizeDebounceRef.current);
+        containerResizeDebounceRef.current = null;
+      }
+      scheduleStableFitRef.current();
+    });
+
     return () => {
+      unbindDividerDrag();
+      if (containerResizeDebounceRef.current !== null) {
+        window.clearTimeout(containerResizeDebounceRef.current);
+        containerResizeDebounceRef.current = null;
+      }
       cancelSpawnReconcileRef.current?.();
       cancelSpawnReconcileRef.current = null;
       cancelDriftStabilizedFitRef.current?.();
@@ -1674,6 +1991,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       onDataDisposableRef.current?.dispose();
       onDataDisposableRef.current = null;
       const id = sessionIdRef.current;
+      if (id) {
+        activeMountedSessions.delete(id);
+      }
       const live = id ? liveTerms.get(id) : undefined;
       const el = termRef.current?.element;
       if (live && el && termRef.current === live.term) {
@@ -1682,10 +2002,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       termRef.current = null;
       fitAddonRef.current = null;
       syncVisibleBitmapRenderers();
+      syncParkedPollers();
     };
     // The session stays alive across splits and mode switches. This effect
     // rebinds the existing screen; it must not follow callback identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propSessionId]);
+
+  useEffect(() => {
+    const id = propSessionId || sessionIdRef.current;
+    if (id) {
+      activeMountedSessions.add(id);
+      stopParkedPolling(id);
+    }
+    return () => {
+      if (id) {
+        activeMountedSessions.delete(id);
+      }
+      syncParkedPollers();
+    };
   }, [propSessionId]);
 
   useEffect(() => {
@@ -1725,21 +2060,31 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   // Instant wake-up when app is foregrounded or focused again
   useEffect(() => {
-    const handleFocus = () => {
+    const refreshVisible = () => {
       isWindowFocusedRef.current = true;
       if (sessionIdRef.current) {
         triggerImmediatePollRef.current();
       }
+      if (termRef.current && termRef.current.rows > 0) {
+        try {
+          repairWebglCanvasForDevicePixelRatio(termRef.current);
+          recoverWebglTextureAtlasIfIdle(
+            termRef.current,
+            () => writeActiveRef.current > 0 || syncHoldRef.current.pending,
+          );
+          termRef.current.refresh(0, termRef.current.rows - 1);
+        } catch {}
+      }
+    };
+    const handleFocus = () => {
+      refreshVisible();
     };
     const handleBlur = () => {
       isWindowFocusedRef.current = false;
     };
     const handleVisibility = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        isWindowFocusedRef.current = true;
-        if (sessionIdRef.current) {
-          triggerImmediatePollRef.current();
-        }
+        refreshVisible();
       }
     };
 
@@ -1802,10 +2147,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           <div className="terminal-toolbar__icon">
             <TerminalIcon size={14} />
           </div>
-          <span className="terminal-toolbar__title">{customTitle || 'ConPTY Terminal'}</span>
+          <span className="terminal-toolbar__title">{customTitle || oscTitle || 'ConPTY Terminal'}</span>
           <span className="terminal-session-badge" title={sessionId || 'Idle session'}>
             {sessionId ? `[${sessionId}]` : '[Idle]'}
           </span>
+          <button
+            type="button"
+            className="terminal-session-badge"
+            data-renderer={appearance.renderer}
+            onClick={() => togglePrimaryTerminalRenderer()}
+            title={`Motor activo: ${getTerminalRendererBadgeLabel(appearance.renderer)} — Clic para alternar GhostGrid 2D ⇄ DOM Clásico`}
+            style={{
+              cursor: 'pointer',
+              borderRadius: 'var(--vl-radius-xs)',
+              background:
+                appearance.renderer === 'canvas'
+                  ? 'rgba(92, 143, 255, 0.14)'
+                  : 'rgba(255, 255, 255, 0.06)',
+              color:
+                appearance.renderer === 'canvas'
+                  ? '#8ab0ff'
+                  : 'rgba(255, 255, 255, 0.65)',
+              border:
+                appearance.renderer === 'canvas'
+                  ? '1px solid rgba(92, 143, 255, 0.28)'
+                  : '1px solid rgba(255, 255, 255, 0.1)',
+            }}
+          >
+            {getTerminalRendererBadgeLabel(appearance.renderer)}
+          </button>
           <span className={`terminal-status-pill terminal-status-pill--${status}`}>
             <span className="terminal-status-dot" />
             <span>
@@ -1924,7 +2294,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           termRef.current?.focus();
         }}
       >
-        <div ref={containerRef} className="terminal-surface-host" />
+        {appearance.renderer === 'canvas' && (sessionId || propSessionId) ? (
+          <TerminalCanvasSurface
+            sessionId={sessionId || propSessionId!}
+            workspaceId={workspaceId}
+            className="terminal-surface-host"
+            onTitleChange={(nextTitle) => {
+              if (nextTitle) {
+                setOscTitle(nextTitle);
+              }
+            }}
+            onProcessExit={(code) => {
+              const sid = sessionIdRef.current || propSessionId;
+              if (sid) {
+                markTerminalExited(sid);
+              }
+              setExitCode(code ?? 0);
+              setStatus('exited');
+            }}
+          />
+        ) : (
+          <div ref={containerRef} className="terminal-surface-host" />
+        )}
 
         {status === 'connecting' && (
           <div className="terminal-loading-overlay">

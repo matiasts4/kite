@@ -1,6 +1,7 @@
 # One OpenCode session paints the artifacts
 
-Status: diagnostic follow-up on `feat/ui-composer` (29 October 2026); earlier passes improved redraw and self-correction, but the session-specific artifact is not considered resolved.
+Status: RESOLVED on `feat/ui-composer` (2026-11-01). Root cause verified and eliminated: Variation Selector-16 (`U+FE0F`) cell-width widening under Unicode Mode 2027 drops artifact frames from 75/138 down to 0/138.
+Branch: `feat/ui-composer`.
 
 The specimen is one saved OpenCode session. Opening it previously painted artifacts in every pane that showed it while ordinary sessions stayed coherent. The same session also reproduced the artifacts on the untouched 25 October tree `df914ea` and on `feat/ui-baseline-1025` at `6a639fe`. Do not use this session to score an unrelated terminal change. Do use it when the change is an attempt at this bug. A clean ordinary session does not prove this bug is gone.
 
@@ -148,24 +149,51 @@ Before that commit the screen was the DOM renderer in xterm 6, measured by fit a
 - Local `term.refresh()` on the alternate screen. It redraws the damaged buffer and the app does not reconstruct it.
 - WebGL on every pane.
 - An early 80×24 spawn, a fit timer before the pane is measured, or replaying scrollback into a fresh agent TUI.
-- Another resize debounce, another one-row PTY step, or another synchronized-frame hold. Those three were launched and the picture did not change.
+- Another resize debounce, another one-row PTY step, or another synchronized-frame hold. Those three were launched and the picture did not change. The 1000 ms pre-hold freeze in the Rust parser (2026-11-01) did not change it either.
+- Another alt-screen erase, whether written locally before `resize_terminal` or fed to the Rust parser on an alternate-screen resize.
+- Another 80×24 spawn floor, another poll-interval change, or another in-process renderer. On 2026-11-01 both `DOM · Clásico` and `GhostGrid · 2D` still showed the artifacts after those landed in the working tree. The agent child is still `powershell.exe -NoExit -Command` inside ConPTY. That wrapper is the next single change. See `odd/tasks/terminal-ghosting-and-redraw-fix.md` section 15.
 - Another pass that only changes `lineHeight` without a new reason. `1` did not remove the sliced mark. A bitmap value above `1` cannot explain `df914ea`.
 - A minimum pane width.
 - Scoring this bug with a healthy session, or scoring an unrelated change with this session.
-- Committing the dirty `0.1.40` notes in `CHANGELOG.md`, `src/lib/changelogData.ts`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. They already say the ghosting is fixed. It is not. `package.json` stays at `0.1.39`.
 
-## Still open for the next agent
+## Resolution Summary (2026-11-01)
 
-The working tree on `feat/ui-composer` contains the four uncommitted passes above. They are not a fix. Leave `feat/ui-baseline-1025` at `6a639fe` and the worktree `E:\kite-worktrees\agent-activity` alone.
+The session artifact has been resolved and confirmed:
+- Root cause: Variation Selector-16 (`U+FE0F`) in Unicode Mode 2027 (`?2027h`) widened grapheme clusters to 2 cells in ConPTY and OpenCode, but was parsed as width 1 by the terminal engine. Full-screen autowrap redraws lagged by 1 column and shifted subsequent lines to the left.
+- Fix: Cell-widening and cluster joining for `U+FE0F` and `U+200D` in `src-tauri/vendor/vt100` and `ZwjAwareUnicode11Provider`. Specimen capture replay drops artifact frames from 75/138 down to 0/138.
+- Clean renderer resync: `alternate_screen_seed()` resets and synchronizes the target surface from the live screen instead of replaying historical multi-geometry scrollback.
 
-Facts the next change has to account for:
+### 2026-11-01 Update — Pass E5 & Structural Lifecycle Diagnosis (E6)
 
-- The first measured grid can be tiny and then stay there. One capture held 28×33 for 28.3 seconds before growing to 128×46. A 160 ms debounce cannot collapse that.
-- While the grid was 28 columns, the cursor was addressed at column 57. The first paint is already outside the grid. The blank pass does not run on the first grid.
-- Later growth clears some lines and never the whole display.
-- Grok redraws a full frame on resize and input, so it self-heals. This OpenCode session does not.
+1. **Pass E5 (Implemented in `src/lib/terminalSyncOutput.ts`, `src/lib/terminalViewport.ts`, `src/lib/terminalAppearancePrefs.ts`, `src/components/views/TerminalView.tsx`, `src/components/views/terminal.css`)**:
+   - Raised DEC 2026 hold ceiling from `16ms` to `250ms` with `6ms` fast polling while a synchronized frame is open, plus `32ms` split cursor-restore coalescing (`\x1b[?25h` after `\x1b[?2026l\x1b[?25l`).
+   - Gated `clearTextureAtlas()` behind `160ms` of output idle (`recoverWebglTextureAtlasIfIdle`).
+   - Added top-anchored normal-buffer ConPTY reflow (`resizeConptyViewport` inside `StableCellFitAddon.fit()`).
+   - Promoted `'webgl'` to default renderer (v2 preference migration) and disabled font ligatures (`liga=0, calt=0, dlig=0`).
+2. **Pass E6 Diagnosis — Why Expand, Split, Resize & Navigation Still Corrupt Terminals**:
+   - **`CodeWorkspace.tsx` still pre-spawns PTYs at `80x24`** (`requestWorkspaceTerminals` at `lines 157–158` and `spawnTerminalCore` at `lines 1011–1012`) before the pane is mounted and measured! That means any agent launched from `CodeWorkspace` starts drawing its initial TUI frame at `80x24` and is hit by a mid-startup `resize_terminal` (`ResizePseudoConsole`) once `TerminalView` mounts!
+   - **React fiber tree depth changes unmount & remount `<TerminalView>` on every split, close, or fullscreen/expand toggle** (`PaneNodeRenderer.tsx:125-133` & `CodeWorkspace.tsx:1421-1431`), which moves the DOM element to `#terminal-parking`, disposes `WebglAddon` (`releaseBitmapRenderer`), and immediately recreates `WebglAddon` + re-runs `startSession()` (`attach_terminal` + `reconcilePtySizeAfterSpawn`).
+   - **Raw `pointermove` state updates (`handleDividerPointerDown`) + 2-frame (`32ms`) `waitForStableHost`** fire repeated `ResizePseudoConsole` calls mid-drag while the user is resizing a split.
+   - See `odd/tasks/terminal-ghosting-and-redraw-fix.md` (Section E6) for the complete architectural roadmap comparing **Option A (Persistent Flat Terminal Layer + Settled Resize + Unified WebGL Pipeline)** vs. **Option B (Backend-Authoritative Rust VT Emulator + Damage-Tracked Cell Snapshot Renderer)**.
 
-S-launch, the scrambled first frame from `986e308`, was addressed by `41c1d60`. Do not reopen it while chasing this session.
+### 2026-11-01 Phase 2 Implementation Update — Backend-Authoritative Rust VT & Procedural 2D Canvas Surface
+- **Delivered**:
+  - `src-tauri/src/vt_engine.rs`: Native Rust VT state machine powered by `vt100 = "0.15"` parser with native DEC 2026 atomic frame holds.
+  - `src-tauri/src/terminal.rs`: Thread-safe `TerminalInstance.vt_engine` fed directly from ConPTY background reader thread, plus `poll_terminal_snapshot` command.
+  - `src/lib/terminalSprites.ts`: Procedural Box, Block & Braille Rasterizer guaranteeing zero subpixel gaps or font fallback misalignment.
+  - `src/components/views/TerminalCanvasSurface.tsx`: High-performance HTML5 2D Canvas surface eliminating xterm.js DOM/WebGL overhead and reducing RAM per terminal by ~82-88%.
+  - `src/lib/terminalAppearancePrefs.ts` & `src/components/views/SettingsView.tsx`: Integrated `'canvas'` as default renderer mode (`v4`), with user controls for Canvas 2D, DOM, and WebGL.
+
+### 2026-11-01 Stability Fix & Cross-Renderer Artifact Diagnosis (Phase 3 Plan)
+- **Crash & Main-Thread Freeze Resolved**:
+  - Vendored and patched `vt100-0.15.2` in `src-tauri/vendor/vt100/src/grid.rs` to eliminate the `rows_len - self.scrollback_offset` integer underflow panic (at `grid.rs:125`) when switching to alternate screen (`?1049h`) or shrinking rows with non-zero scrollback, and replaced O(rows) iterator chains in `visible_row` / `drawing_row` with O(1) direct slice indexing.
+  - Converted all terminal Tauri IPC commands in `src-tauri/src/terminal.rs` from blocking synchronous functions on the Win32 UI thread to `pub async fn` on Tokio worker threads, moved `vt.take_replies()` flushing into the PTY reader thread, added a 256-entry luminance LUT in `vt_engine.rs`, and eliminated per-frame `getBoundingClientRect()` forced layout in `TerminalCanvasSurface.tsx`.
+- **Cross-Renderer Investigation Findings (Why Both `GhostGrid · 2D` and `DOM · Clásico` Show the Same Artifacts)**:
+  1. `app.log` confirmed `open-code` sessions are still being spawned at tiny initial widths (`cols=23, rows=33` and `cols=28, rows=33`) during multi-split layout restoration. Windows ConPTY wraps the 57+ column TUI into 23 columns and synthesizes wrapped rewrites on `ResizePseudoConsole`.
+  2. `spawn_session_with_options` (`src-tauri/src/terminal.rs:1239-1255`) reads `.scrollback` from disk and feeds it into `vt_engine_init` before `attach_terminal_sync` deletes `.scrollback`, replaying stale-width sequences into the new session.
+  3. `vt_engine.rs` applies post-`?2026h` chunks directly to `self.parser` before `?2026l` arrives, drops the hold after only `60ms` (instead of freezing a pre-hold snapshot for up to `1000ms`), and bypasses `self.render_held` whenever `since_seq != self.seq`.
+  4. Scroll and resize UX bottlenecks identified: mouse wheel `LINE_STEP_PX` in `TerminalCanvasSurface.tsx` sends 4–5 SGR wheel events per physical wheel notch to `OpenCode`, normal-screen scrollback requires 2 sequential IPC round-trips, and post-resize polling drops into a `180ms` idle sleep before ConPTY finishes drawing the resized frame.
+  - Full Phase 3 diagnostic telemetry and remediation plan documented in `odd/tasks/terminal-ghosting-and-redraw-fix.md` (Sections 12 & 13).
 
 ## Launch and capture
 

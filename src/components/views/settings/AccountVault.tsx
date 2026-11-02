@@ -4,6 +4,7 @@ import {
   deleteAccountProfile,
   listSavedAccountsFull,
   saveCurrentAccountProfile,
+  prepareNewAccountLogin,
   switchAccountProfile,
 } from '../../../lib/ipc';
 import { BrandLogo } from '../../ui/BrandLogo';
@@ -45,6 +46,7 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [saving, setSaving] = useState(false);
+  const [isConnectingNew, setIsConnectingNew] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -129,6 +131,49 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleConnectNewAccount = async () => {
+    if (isConnectingNew) return;
+    setIsConnectingNew(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await prepareNewAccountLogin(provider);
+      if (res.success) {
+        setNotice(
+          res.previousEmailSaved
+            ? `Sesión anterior (${res.previousEmailSaved}) guardada en la bóveda. Iniciando nueva autenticación...`
+            : 'Listo para conectar nueva cuenta. Abre tu terminal e inicia sesión.'
+        );
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-command', {
+            detail: { command: 'launch-cli', provider },
+          })
+        );
+        let attempts = 0;
+        const interval = setInterval(async () => {
+          attempts++;
+          const check = await listSavedAccountsFull(provider);
+          if (check.unregisteredLiveSession || check.profiles.some((p) => p.isActive)) {
+            clearInterval(interval);
+            setIsConnectingNew(false);
+            await refresh();
+            setNotice('¡Nueva cuenta detectada y guardada en la bóveda!');
+            onChanged?.();
+          } else if (attempts >= 24) {
+            clearInterval(interval);
+            setIsConnectingNew(false);
+          }
+        }, 2500);
+      } else {
+        setError(res.error || 'No se pudo preparar la conexión de una nueva cuenta.');
+        setIsConnectingNew(false);
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Error al conectar nueva cuenta');
+      setIsConnectingNew(false);
     }
   };
 
@@ -270,19 +315,37 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
           <h4>Guardar la sesión actual de {providerLabel}</h4>
           <p>Captura las credenciales de la cuenta activa en tu equipo y las guarda en la bóveda local.</p>
         </div>
-        <input
-          className="qt-input"
-          type="text"
-          placeholder="Nombre de la cuenta (ej. Google Pro Personal)"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void handleSave();
-          }}
-        />
-        <button type="button" className="qt-button qt-button--primary" disabled={saving} onClick={() => void handleSave()}>
-          {saving ? 'Guardando…' : 'Guardar sesión'}
-        </button>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', width: '100%' }}>
+          <input
+            className="qt-input"
+            type="text"
+            style={{ flex: 1 }}
+            placeholder="Nombre de la cuenta (ej. Google Pro Personal)"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void handleSave();
+            }}
+          />
+          <button
+            type="button"
+            className="qt-button qt-button--primary"
+            style={{ height: '32px', whiteSpace: 'nowrap' }}
+            disabled={saving}
+            onClick={() => void handleSave()}
+          >
+            {saving ? 'Guardando…' : 'Guardar sesión'}
+          </button>
+          <button
+            type="button"
+            className="qt-button"
+            style={{ height: '32px', whiteSpace: 'nowrap' }}
+            disabled={isConnectingNew}
+            onClick={() => void handleConnectNewAccount()}
+          >
+            {isConnectingNew ? 'Preparando…' : '+ Conectar nueva cuenta'}
+          </button>
+        </div>
       </div>
 
       {provider === 'antigravity' ? (

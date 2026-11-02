@@ -1,14 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { openSettingsTab } from '../../../lib/settingsNav';
 import {
-  listGoogleAccounts,
-  setActiveGoogleAccount,
   listDetectedCliAccounts,
   type DetectedCliAccount,
 } from '../../../lib/ipc';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { AccountSwitcherModal } from '../../quota/AccountSwitcherModal';
-import { SelectMenu } from '../../ui/SelectMenu';
 import { MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
 import { CheckIcon, XIcon } from './icons';
 import { PrivacyPolicyCard } from './PrivacyPolicyCard';
@@ -35,17 +32,12 @@ export const AccountTab: React.FC<AccountTabProps> = ({
   accountName = 'Kite User',
   accountEmail = 'local@kite.dev',
 }) => {
-  const [googleActive, setGoogleActive] = useState<string | null>(null);
-  const [googleAccounts, setGoogleAccounts] = useState<string[]>([]);
-  const [isSwitchingGoogle, setIsSwitchingGoogle] = useState(false);
-  const [googleNotice, setGoogleNotice] = useState<string | null>(null);
   const [detectedAccounts, setDetectedAccounts] = useState<DetectedCliAccount[]>([]);
   const [loadingDetected, setLoadingDetected] = useState(false);
   const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
   const avatarLetter = (accountName || 'K').trim().charAt(0).toUpperCase();
 
   useEffect(() => {
-    void loadGoogleState();
     void loadDetectedAccounts();
   }, []);
 
@@ -58,38 +50,6 @@ export const AccountTab: React.FC<AccountTabProps> = ({
       console.warn('Error loading detected CLI accounts:', err);
     } finally {
       setLoadingDetected(false);
-    }
-  };
-
-  const loadGoogleState = async () => {
-    try {
-      const data = await listGoogleAccounts();
-      if (data) {
-        setGoogleActive(data.active);
-        setGoogleAccounts(data.accounts || []);
-      }
-    } catch {
-      // Ignora si no hay cuentas disponibles
-    }
-  };
-
-  const handleSelectGoogleAccount = async (email: string) => {
-    if (email === googleActive || isSwitchingGoogle) return;
-    setIsSwitchingGoogle(true);
-    setGoogleNotice(null);
-    try {
-      const res = await setActiveGoogleAccount(email);
-      if (res.success) {
-        setGoogleActive(res.active);
-        setGoogleAccounts(res.accounts || []);
-        setGoogleNotice(`Cuenta de Antigravity cambiada a ${res.active}`);
-        void loadDetectedAccounts();
-        setTimeout(() => setGoogleNotice(null), 3500);
-      }
-    } catch (err: any) {
-      setGoogleNotice(err?.message || 'Error al cambiar cuenta de Google');
-    } finally {
-      setIsSwitchingGoogle(false);
     }
   };
 
@@ -146,11 +106,7 @@ export const AccountTab: React.FC<AccountTabProps> = ({
           </button>
         </div>
 
-        {googleNotice && (
-          <div style={{ marginBottom: '10px', padding: '6px 12px', borderRadius: '6px', background: 'rgba(96, 165, 250, 0.1)', color: 'var(--accent-primary, #60a5fa)', fontSize: '12px' }}>
-            {googleNotice}
-          </div>
-        )}
+
 
         <div className="ui-card" style={{ display: 'flex', flexDirection: 'column' }}>
           {detectedAccounts.length === 0 && !loadingDetected && (
@@ -226,24 +182,7 @@ export const AccountTab: React.FC<AccountTabProps> = ({
                 </div>
 
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
-                  {acc.provider === 'antigravity' && googleAccounts.length > 1 && (
-                    <SelectMenu
-                      label="Cuenta de Google"
-                      variant="field"
-                      className="settings-select"
-                      value={googleActive || googleAccounts[0]}
-                      disabled={isSwitchingGoogle}
-                      rows={googleAccounts.map((email) => ({
-                        id: email,
-                        title: email,
-                        detail: email === googleActive ? 'Activa' : undefined,
-                      }))}
-                      triggerLabel={googleActive || googleAccounts[0]}
-                      onSelect={(email) => {
-                        void handleSelectGoogleAccount(email);
-                      }}
-                    />
-                  )}
+
 
                   {MULTI_ACCOUNT_PROVIDERS.some((p) => p.id === acc.provider) && (
                     <button

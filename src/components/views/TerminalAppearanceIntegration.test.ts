@@ -15,7 +15,7 @@ describe('Terminal Appearance Configuration & Contract', () => {
 
   it('provides default options matching classic Kite terminal appearance', () => {
     const prefs = getTerminalAppearancePrefs();
-    expect(prefs.renderer).toBe('dom');
+    expect(prefs.renderer).toBe('canvas');
     expect(prefs.lineHeight).toBe(1.16);
     expect(prefs.fontSize).toBe(13);
     expect(prefs.fontFamilyId).toBe('cascadia');

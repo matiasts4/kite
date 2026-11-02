@@ -1,9 +1,52 @@
-use crate::quota::antigravity::enrich_google_identity;
 use crate::quota::types::ProviderQuotaStatus;
-use crate::quota::utils::{now_ms, user_home_dir};
-use serde_json::json;
+use crate::quota::utils::{b64url_decode, now_ms, user_home_dir};
+use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+
+pub(crate) fn enrich_gemini_cli_identity(status: &mut ProviderQuotaStatus) {
+    let home = user_home_dir();
+    let creds_file = home.join(".gemini").join("oauth_creds.json");
+    if let Ok(data) = std::fs::read(&creds_file) {
+        if let Ok(val) = serde_json::from_slice::<Value>(&data) {
+            if let Some(id_token) = val.get("id_token").and_then(|v| v.as_str()) {
+                let parts: Vec<&str> = id_token.split('.').collect();
+                if parts.len() >= 2 {
+                    if let Some(payload_bytes) = b64url_decode(parts[1]) {
+                        if let Ok(jwt_json) = serde_json::from_slice::<Value>(&payload_bytes) {
+                            if let Some(email) = jwt_json.get("email").and_then(|v| v.as_str()) {
+                                status.metadata.insert("email".to_string(), json!(email));
+                                status.metadata.insert("accountSource".to_string(), json!("oauth_creds.json"));
+                            }
+                            if !status.metadata.contains_key("userName") {
+                                if let Some(name) = jwt_json.get("name").and_then(|v| v.as_str()) {
+                                    status.metadata.insert("userName".to_string(), json!(name));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !status.metadata.contains_key("email") {
+        let accounts_file = home.join(".gemini").join("google_accounts.json");
+        if let Ok(data) = std::fs::read(&accounts_file) {
+            if let Ok(val) = serde_json::from_slice::<Value>(&data) {
+                if let Some(active_email) = val.get("active").and_then(|v| v.as_str()) {
+                    if !active_email.trim().is_empty() {
+                        status.metadata.insert("email".to_string(), json!(active_email.trim()));
+                        status.metadata.insert("accountSource".to_string(), json!("google_accounts.json"));
+                    }
+                }
+            }
+        }
+    }
+
+    if !status.metadata.contains_key("planType") {
+        status.metadata.insert("planType".to_string(), json!("Google Gemini"));
+    }
+}
 
 pub fn fetch_gemini_quota() -> ProviderQuotaStatus {
     let home = user_home_dir();
@@ -27,8 +70,7 @@ pub fn fetch_gemini_quota() -> ProviderQuotaStatus {
     if is_avail {
         status.metadata.insert("source".to_string(), json!("~/.gemini/"));
         status.metadata.insert("note".to_string(), json!("Detectado localmente"));
-        enrich_google_identity(&mut status);
+        enrich_gemini_cli_identity(&mut status);
     }
     status
 }
-

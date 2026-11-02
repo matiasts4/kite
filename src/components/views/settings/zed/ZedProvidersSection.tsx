@@ -275,6 +275,15 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                     </div>
                   </div>
                 </div>
+                {config.vercelApiKey ? (
+                  <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                    Protegida en Bóveda Local SQLite
+                  </span>
+                ) : (
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted, #94a3b8)', marginTop: '4px', display: 'block' }}>
+                    Clave de API de Vercel AI Gateway (vck_...).
+                  </span>
+                )}
               </div>
 
               <div>
@@ -364,6 +373,11 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                   placeholder="Tu Account ID de Cloudflare"
                   style={{ width: '100%' }}
                 />
+                {config.cloudflareAccountId ? (
+                  <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                    Guardado en Bóveda Local SQLite
+                  </span>
+                ) : null}
               </div>
 
               <div>
@@ -394,6 +408,15 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                     </div>
                   </div>
                 </div>
+                {config.cloudflareApiToken ? (
+                  <span style={{ fontSize: '11px', color: 'var(--text-success, #4ade80)', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                    Protegida en Bóveda Local SQLite
+                  </span>
+                ) : (
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted, #94a3b8)', marginTop: '4px', display: 'block' }}>
+                    Token de API de Cloudflare con permisos de Workers AI.
+                  </span>
+                )}
               </div>
             </div>
 

@@ -153,7 +153,16 @@ function detectEngineFromText(text: string, fallbackEngine?: string): { engine: 
   if (lower.includes('claude code') || lower.includes('claude-code')) {
     return { engine: 'claude-code', who: 'Anthropic Claude', title: 'Claude Code' };
   }
-  if (lower.includes('codex') || lower.includes('openai codex')) {
+  // Only match codex on explicit CLI brand markers, never on loose text, file paths, or package names
+  if (
+    lower.includes('openai codex') ||
+    lower.includes('codex-cli') ||
+    lower.includes('ask codex to') ||
+    lower.includes('>_ openai codex') ||
+    lower.includes('codex (v0.') ||
+    lower.includes('codex (v1.') ||
+    /\b(?:openai\s+codex|codex-cli)\b/i.test(lower)
+  ) {
     return { engine: 'codex', who: 'OpenAI Codex', title: 'Codex' };
   }
   if (lower.includes('gemini-cli') || lower.includes('google gemini')) {
@@ -730,13 +739,22 @@ export function isTerminalReadyForInput(sessionId: string): boolean {
     return false;
   }
 
-  // If already recognized as waiting for user input or idle
+  // If already recognized as waiting for user input
   if (tracker?.state === 'waitingForYou' || term?.state === 'waitingForYou') {
     return true;
   }
 
   // If rolling buffer contains an active prompt symbol
   if (tracker?.rollingBuffer && isWaitingForUserInput(tracker.rollingBuffer)) {
+    return true;
+  }
+
+  // If terminal has settled into quiet idle (not actively booting or producing output)
+  if (
+    tracker &&
+    (tracker.state === 'idle' || tracker.state === 'done') &&
+    Date.now() - tracker.lastOutputAt >= SETTLE_DELAY_MS
+  ) {
     return true;
   }
 
@@ -787,7 +805,7 @@ export function waitForTerminalReady(
       if (settled) return;
       const detail = (e as CustomEvent<{ sessionId?: string; state?: string }>).detail;
       if (!detail || detail.sessionId !== sessionId) return;
-      if (detail.state === 'waitingForYou' || isTerminalReadyForInput(sessionId)) {
+      if (detail.state === 'waitingForYou' || detail.state === 'idle' || isTerminalReadyForInput(sessionId)) {
         cleanup();
         resolve(true);
       } else if (detail.state === 'exited') {

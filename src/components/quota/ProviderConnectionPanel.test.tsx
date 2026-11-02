@@ -8,6 +8,7 @@ vi.mock('../../lib/ipc', () => ({
   saveProviderCredential: vi.fn().mockResolvedValue({ success: true, preview: 'sk-...1234' }),
   deleteProviderCredential: vi.fn().mockResolvedValue({ success: true }),
   getProviderCredentials: vi.fn().mockResolvedValue({ success: true, credentials: [] }),
+  isTauriEnvironment: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock('../../lib/terminalLinkNav', () => ({

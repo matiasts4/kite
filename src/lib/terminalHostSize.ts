@@ -44,6 +44,50 @@ export function classifyHostBox(
  * The cap resolves with the latest usable box so a pane that never repeats
  * a sample still opens, instead of falling back to 80×24.
  */
+const SPAWN_SETTLE_MIN_COLS = 50;
+const SPAWN_SETTLE_MIN_WIDTH_PX = 360;
+const SPAWN_SETTLE_MAX_FRAMES = 4;
+const SPAWN_SETTLE_CAP_MS = 60;
+
+/**
+ * Short settle before an agent pane is born.
+ * Waits until the host is wider than 360px or the width repeats for two frames.
+ * Caps at four animation frames or about 60ms so a stuck layout still launches.
+ */
+export function waitForSpawnGeometry(
+  el: HTMLElement | null,
+  firstCols: number,
+  isCancelled?: () => boolean,
+): Promise<void> {
+  if (!el || isCancelled?.()) return Promise.resolve();
+  const needsSettle = firstCols < SPAWN_SETTLE_MIN_COLS || el.clientWidth <= SPAWN_SETTLE_MIN_WIDTH_PX;
+  if (!needsSettle) return Promise.resolve();
+  const started = performance.now();
+  let previous = el.clientWidth;
+  let matched = false;
+  const step = (frame: number): Promise<void> => {
+    if (frame >= SPAWN_SETTLE_MAX_FRAMES || isCancelled?.()) return Promise.resolve();
+    if (performance.now() - started >= SPAWN_SETTLE_CAP_MS && frame > 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    }).then(() => {
+      if (isCancelled?.()) return;
+      const width = el.clientWidth;
+      if (width > SPAWN_SETTLE_MIN_WIDTH_PX) return;
+      if (width > 0 && width === previous) {
+        if (matched) return;
+        matched = true;
+      } else {
+        matched = false;
+      }
+      previous = width;
+      if (performance.now() - started >= SPAWN_SETTLE_CAP_MS) return;
+      return step(frame + 1);
+    });
+  };
+  return step(0);
+}
+
 export function waitForStableHost(
   el: HTMLElement,
   isCancelled: () => boolean,

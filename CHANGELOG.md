@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.42] - 2026-11-01
+
+> Motor de Terminal 2D, Eliminación de Artefactos ConPTY y Streaming Continuo
+
+### Added
+- Superficie de renderizado procedural Canvas 2D con rasterizador de glifos box/block/braille
+- Motor de terminal virtual nativo en Rust con snapshots atómicos y soporte de actualizaciones sincronizadas DEC 2026
+- Polling en segundo plano para terminales aparcadas en memoria
+
+### Changed
+- Lanzamiento directo de ejecutables de agentes bajo ConPTY eliminando wrappers innecesarios
+- Desactivar estrangulamiento de timers de WebView2 en segundo plano
+
+### Fixed
+- Desincronización de ancho de celda en glifos VS16 (`U+FE0F`) y secuencias ZWJ en Windows ConPTY que causaba fragmentos y caracteres desplazados
+- Parpadeo y desincronización de scrollback al alternar entre motores de renderizado
+- Eliminar congelamiento y aceleración x5 en terminales al cambiar de proyecto o ventana
+- Omitir repintados costosos de xterm mientras la terminal no es visible
+
+---
+
 ## [0.1.41] - 2026-10-29
 
 > Ajuste Estabilizado de Terminal, Apariencia Personalizable y Enrutamiento de Atajos

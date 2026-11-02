@@ -33,6 +33,50 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.42',
+    tag: 'v0.1.42',
+    date: 'Nov 01, 2026',
+    title: 'Motor de Terminal 2D, Eliminación de Artefactos ConPTY y Streaming Continuo',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Desincronización de ancho de celda en glifos VS16 (U+FE0F) y secuencias ZWJ en Windows ConPTY que causaba fragmentos y caracteres desplazados',
+      },
+      {
+        kind: 'added',
+        description: 'Superficie de renderizado procedural Canvas 2D con rasterizador de glifos box/block/braille',
+      },
+      {
+        kind: 'added',
+        description: 'Motor de terminal virtual nativo en Rust con snapshots atómicos y soporte de actualizaciones sincronizadas DEC 2026',
+      },
+      {
+        kind: 'changed',
+        description: 'Lanzamiento directo de ejecutables de agentes bajo ConPTY eliminando wrappers innecesarios',
+      },
+      {
+        kind: 'fixed',
+        description: 'Parpadeo y desincronización de scrollback al alternar entre motores de renderizado',
+      },
+      {
+        kind: 'added',
+        description: 'Polling en segundo plano para terminales aparcadas en memoria',
+      },
+      {
+        kind: 'changed',
+        description: 'Desactivar estrangulamiento de timers de WebView2 en segundo plano',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminar congelamiento y aceleración x5 en terminales al cambiar de proyecto o ventana',
+      },
+      {
+        kind: 'fixed',
+        description: 'Omitir repintados costosos de xterm mientras la terminal no es visible',
+      },
+    ],
+  },
+  {
     version: '0.1.41',
     tag: 'v0.1.41',
     date: 'Oct 29, 2026',

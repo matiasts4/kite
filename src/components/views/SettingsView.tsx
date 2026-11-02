@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { motion } from 'motion/react';
 import { springs } from '../../motion/standard/tokens';
 import {
@@ -126,6 +127,8 @@ const SETTINGS_TABS: SettingsTabConfig[] = [
 ];
 
 export interface SettingsViewProps {
+  isOpen?: boolean;
+  onClose?: () => void;
   onBack?: () => void;
   onOpenWhatsNew?: () => void;
   accountName?: string;
@@ -137,15 +140,19 @@ export interface SettingsViewProps {
   palette?: string;
   onToggleMode?: (newMode: 'dark' | 'light') => void;
   onSelectTheme?: (paletteId: string, themeMode?: 'dark' | 'light') => void;
+  embedded?: boolean;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
+  isOpen,
+  onClose,
   onBack,
   onOpenWhatsNew,
   mode: propMode,
   palette: propPalette,
   onToggleMode: propOnToggleMode,
   onSelectTheme: propOnSelectTheme,
+  embedded = false,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
   const [localMode, setLocalMode] = useState<'dark' | 'light'>('dark');
@@ -397,25 +404,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   }, []);
 
-  const handleBack = useCallback(() => {
-    if (activeTab !== 'general') {
-      handleSelectTab('general');
+  const handleClose = useCallback(() => {
+    if (onClose) {
+      onClose();
     } else if (onBack) {
       onBack();
     } else {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     }
-  }, [activeTab, handleSelectTab, onBack]);
+  }, [onClose, onBack]);
 
   useEffect(() => {
+    if (isOpen === false) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        handleBack();
+        e.stopPropagation();
+        handleClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
+  }, [handleClose, isOpen]);
+
+  const handleBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      handleClose();
+    }
+  }, [handleClose]);
 
   const handleSelectTheme = (paletteId: string, themeMode?: 'dark' | 'light') => {
     const nextMode = themeMode ?? currentMode;
@@ -609,10 +624,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const ActiveIcon = currentTab.icon;
 
-  return (
-    <div className="settings-view" data-palette={currentPalette} data-theme={currentMode}>
+  const dialogContent = (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-heading"
+      className={`settings-view${embedded ? '' : ' settings-modal-window'}`}
+      data-palette={currentPalette}
+      data-theme={currentMode}
+      onClick={(e) => e.stopPropagation()}
+    >
       {/* Settings Rail Sidebar */}
-      <aside className="SettingsSidebar sidebar sidebar--settings" data-testid="settings-sidebar">
+      <aside className="SettingsSidebar sidebar--settings" data-testid="settings-sidebar">
         <section aria-labelledby="settings-heading" className="sidebar__primary">
           <div className="sidebar__section-heading">
             <h1 className="settings-rail__title" id="settings-heading">
@@ -620,12 +643,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </h1>
             <button
               className="settings-rail__back"
-              onClick={handleBack}
-              title="Back (Esc)"
+              onClick={handleClose}
+              title="Close (Esc)"
               type="button"
+              aria-label="Close settings"
             >
               <ChevronLeftIcon aria-hidden="true" size={12} strokeWidth={2.2} />
-              Back
+              Close
             </button>
           </div>
 
@@ -663,11 +687,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               );
             })}
           </nav>
+
+          <footer className="settings-rail__footer">
+            <span className="settings-rail__version">Kite {appVersion ? `v${appVersion}` : ''}</span>
+          </footer>
         </section>
       </aside>
 
       {/* Main Settings Content Pane */}
-      <section className="pane application-settings-pane" data-settings-tab={activeTab}>
+      <section className="application-settings-pane" data-settings-tab={activeTab}>
         <div className="application-settings scroll-quiet">
           <div
             className={`application-settings__column${
@@ -688,6 +716,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <h2>{currentTab.label}</h2>
                 <p>{currentTab.blurb}</p>
               </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={handleClose}
+                aria-label="Cerrar modal de configuración"
+                title="Cerrar (Esc)"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+                <kbd className="settings-modal-close__kbd">Esc</kbd>
+              </button>
             </header>
 
             {activeTab === 'general' && (
@@ -780,10 +831,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <div className="ui-card__row settings-row">
                       <div className="settings-row__copy">
                         <h3 className="settings-row__title">Motor de renderizado</h3>
-                        <p>DOM usa el suavizado nativo ClearType del sistema (aspecto clásico). WebGL acelera el dibujado en GPU.</p>
+                        <p>GhostGrid 2D usa emulación VT nativa en Rust con sprites procedurales de cero artefactos y soporte completo de protocolos TUI. DOM Clásico usa ClearType. WebGL acelera en GPU.</p>
                       </div>
                       <div className="settings-row__control">
                         <fieldset aria-label="Motor de renderizado" className="ui-segmented">
+                          <button
+                            aria-pressed={terminalAppearance.renderer === 'canvas'}
+                            className="ui-segmented__item"
+                            onClick={() => handleUpdateTerminalAppearance({ renderer: 'canvas' })}
+                            type="button"
+                          >
+                            {terminalAppearance.renderer === 'canvas' && (
+                              <SegmentedIndicator group="settings-terminal-renderer" />
+                            )}
+                            <span>GhostGrid · 2D</span>
+                          </button>
                           <button
                             aria-pressed={terminalAppearance.renderer === 'dom'}
                             className="ui-segmented__item"
@@ -1167,4 +1229,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </section>
     </div>
   );
+
+  if (isOpen === false) {
+    return null;
+  }
+
+  if (embedded) {
+    return dialogContent;
+  }
+
+  const modalNode = (
+    <div
+      className="settings-modal-backdrop"
+      data-palette={currentPalette}
+      data-theme={currentMode}
+      data-testid="settings-modal-backdrop"
+      onClick={handleBackdropClick}
+    >
+      {dialogContent}
+    </div>
+  );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalNode, document.body);
+  }
+
+  return modalNode;
 };
+
+export const SettingsModal = SettingsView;

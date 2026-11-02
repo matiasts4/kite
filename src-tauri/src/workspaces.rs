@@ -376,7 +376,22 @@ fn write_stored_object(path: &Path, map: &Map<String, Value>) -> std::io::Result
         std::fs::create_dir_all(parent)?;
     }
     let body = serde_json::to_vec_pretty(map)?;
-    std::fs::write(path, body)
+    let tmp_path = path.with_extension(format!("json.{}.tmp", Uuid::new_v4().simple()));
+    std::fs::write(&tmp_path, &body)?;
+    if std::fs::rename(&tmp_path, path).is_err() {
+        std::fs::write(path, &body)?;
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    Ok(())
+}
+
+fn layout_revision(value: &Value) -> i64 {
+    value.get("revision").and_then(|v| v.as_i64()).unwrap_or(0)
+}
+
+fn incoming_layout_revision_accepted(stored: Option<&Value>, incoming: &Value) -> bool {
+    let stored_rev = stored.map(layout_revision).unwrap_or(0);
+    layout_revision(incoming) >= stored_rev
 }
 
 fn empty_layout(workspace_id: &str) -> Value {
@@ -642,6 +657,9 @@ pub fn save_workspace_layout(request: Value) -> Value {
     let StoredObject::Map(mut map) = read_stored_object(&path) else {
         return Value::Null;
     };
+    if !incoming_layout_revision_accepted(map.get(workspace_id), layout) {
+        return Value::Null;
+    }
     map.insert(workspace_id.to_string(), layout.clone());
     let _ = write_stored_object(&path, &map);
     sync_layout_agent_resume_locked(workspace_id, layout);
@@ -1048,6 +1066,41 @@ mod tests {
         }
         let _clear = Clear(dir.clone());
         test(&dir);
+    }
+
+    #[test]
+    fn older_layout_revision_does_not_replace_stored_layout() {
+        let stored = json!({"revision": 4});
+        assert!(incoming_layout_revision_accepted(None, &json!({"revision": 0})));
+        assert!(!incoming_layout_revision_accepted(Some(&stored), &json!({"revision": 3})));
+        assert!(incoming_layout_revision_accepted(Some(&stored), &json!({"revision": 4})));
+        assert!(incoming_layout_revision_accepted(Some(&stored), &json!({"revision": 5})));
+        assert!(!incoming_layout_revision_accepted(Some(&stored), &json!({})));
+
+        with_temp_config(|_dir| {
+            let workspace_id = "a1111111-1111-4111-8111-111111111199";
+            let newer = json!({
+                "schemaVersion": 2,
+                "workspaceId": workspace_id,
+                "revision": 2,
+                "tabs": [{"id": "new"}],
+                "activeTabId": null,
+                "fullscreenLeafId": null
+            });
+            save_workspace_layout(json!({ "layout": newer }));
+            let older = json!({
+                "schemaVersion": 2,
+                "workspaceId": workspace_id,
+                "revision": 1,
+                "tabs": [{"id": "old"}],
+                "activeTabId": null,
+                "fullscreenLeafId": null
+            });
+            save_workspace_layout(json!({ "layout": older }));
+            let loaded = load_workspace_layout(json!({ "workspaceId": workspace_id }));
+            assert_eq!(loaded["layout"]["revision"], 2);
+            assert_eq!(loaded["layout"]["tabs"][0]["id"], "new");
+        });
     }
 
     #[test]

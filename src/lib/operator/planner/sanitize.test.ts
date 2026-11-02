@@ -54,6 +54,13 @@ describe('Sanitize & Contract Tests', () => {
       expect(clean.length).toBeLessThanOrEqual(280);
       expect(clean.endsWith('...')).toBe(true);
     });
+
+    it('allows longer summaries when custom maxLength is specified', () => {
+      const mediumText = 'Esta es una respuesta detallada con varias líneas de resumen para el usuario. '.repeat(5);
+      const clean = sanitizeReply(mediumText, undefined, 800);
+      expect(clean.length).toBeGreaterThan(280);
+      expect(clean.length).toBeLessThanOrEqual(800);
+    });
   });
 
   describe('Contract Zod Schemas', () => {

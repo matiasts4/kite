@@ -300,6 +300,18 @@
   height: 100%;
   padding: 8px 12px;
   background-color: #0a0a0a;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0, "dlig" 0;
+}
+
+.terminal-surface-host .xterm .xterm-rows,
+.terminal-surface-host .xterm .xterm-char-measure-element {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0, "dlig" 0;
+}
+
+.terminal-surface-host .xterm .xterm-rows > div {
+  overflow: hidden;
 }
 
 .terminal-surface-host .xterm .xterm-viewport {

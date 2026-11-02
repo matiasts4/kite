@@ -9,10 +9,12 @@ import type { DetectedCliAccount } from '../ipc';
 import type { ActiveAgentTerminal } from '../terminalRegistry';
 
 describe('sessionDetection', () => {
-  it('correctly matches engine names to provider ids', () => {
+  it('correctly matches engine names to provider ids without gemini-antigravity conflation', () => {
     expect(matchEngineToProvider('antigravity', 'antigravity')).toBe(true);
     expect(matchEngineToProvider('agy', 'antigravity')).toBe(true);
-    expect(matchEngineToProvider('gemini', 'antigravity')).toBe(true);
+    expect(matchEngineToProvider('gemini', 'antigravity')).toBe(false);
+    expect(matchEngineToProvider('gemini', 'gemini')).toBe(true);
+    expect(matchEngineToProvider('agy', 'gemini')).toBe(false);
     expect(matchEngineToProvider('claude-code', 'claude')).toBe(true);
     expect(matchEngineToProvider('open-code', 'opencode')).toBe(true);
     expect(matchEngineToProvider('cursor-agent', 'cursor')).toBe(true);
@@ -20,25 +22,54 @@ describe('sessionDetection', () => {
     expect(matchEngineToProvider('powershell', 'codex')).toBe(false);
   });
 
-  it('detects active terminal agent with top priority', () => {
+  it('detects active terminal agent with top priority and enriches identity metadata', () => {
     const terminals: ActiveAgentTerminal[] = [
       {
         sessionId: 'term-1',
-        engine: 'claude-code',
-        title: 'Claude Code Agent',
-        who: 'Anthropic Claude',
+        engine: 'agy',
+        title: 'Antigravity CLI Agent',
+        who: 'Google Antigravity',
         state: 'working',
         latestLine: 'Processing request...',
         updatedAt: Date.now(),
       },
     ];
 
-    const session = resolveProviderDetectedSession('claude', [], terminals, undefined);
+    const cliAccounts: DetectedCliAccount[] = [
+      {
+        provider: 'antigravity',
+        displayName: 'Antigravity',
+        authState: 'authenticated',
+        email: 'active-user@example.com',
+        planName: 'Google AI Pro',
+      },
+    ];
+
+    const session = resolveProviderDetectedSession('antigravity', cliAccounts, terminals, undefined);
     expect(session.hasSession).toBe(true);
     expect(session.sessionType).toBe('terminal_agent');
     expect(session.statusLabel).toBe('● Agente en terminal');
     expect(session.statusTone).toBe('ok');
-    expect(session.terminalTitle).toBe('Anthropic Claude');
+    expect(session.terminalTitle).toBe('Google Antigravity');
+    expect(session.email).toBe('active-user@example.com');
+    expect(session.planName).toBe('Google AI Pro');
+  });
+
+  it('never inherits a gemini CLI account for antigravity', () => {
+    const cliAccounts: DetectedCliAccount[] = [
+      {
+        provider: 'gemini',
+        displayName: 'Gemini CLI',
+        authState: 'authenticated',
+        email: 'gemini-only@example.com',
+        planName: 'Google Gemini',
+      },
+    ];
+
+    const session = resolveProviderDetectedSession('antigravity', cliAccounts, [], undefined);
+    expect(session.hasSession).toBe(false);
+    expect(session.sessionType).toBe('none');
+    expect(session.email).toBeUndefined();
   });
 
   it('detects local CLI account when authenticated', () => {

@@ -866,20 +866,6 @@ export const App: React.FC = () => {
       );
     }
 
-    if (settingsOpen) {
-      return (
-        <SettingsView
-          onBack={() => setSettingsOpen(false)}
-          onOpenWhatsNew={() => setIsWhatsNewOpen(true)}
-          accountName={accountName}
-          accountEmail={accountEmail || 'developer@kite.local'}
-          accountTier={accountTier}
-          accountTierPaid={accountTierPaid}
-          creditsLabel={creditsLabel}
-        />
-      );
-    }
-
     switch (workMode) {
       case 'agent':
         return (
@@ -1015,7 +1001,7 @@ export const App: React.FC = () => {
           onToggleBrowser={() => setRightDockVisible((v) => !v)}
           operatorVisible={operatorOpen}
           onToggleOperator={toggleOperator}
-          settingsOpen={settingsOpen}
+          settingsOpen={false}
           unreadCount={unreadCount}
           activeEngine={workMode === 'agent' ? agents.find((a) => a.id === selectedAgentId)?.engine : threads.find((t) => t.id === selectedThreadId)?.provider}
           activeSessionTitle={workMode === 'agent' ? agents.find((a) => a.id === selectedAgentId)?.name : threads.find((t) => t.id === selectedThreadId)?.title}
@@ -1039,9 +1025,8 @@ export const App: React.FC = () => {
           }`}
         >
           {/* Authentic Left Rail Sidebar */}
-          {!settingsOpen && (
-            <Sidebar
-              hidden={!sidebarVisible}
+          <Sidebar
+            hidden={!sidebarVisible}
               onRailPresenceChange={setSidebarRailMounted}
               mode={workMode}
               workspaces={workspaces}
@@ -1206,7 +1191,6 @@ export const App: React.FC = () => {
               appearance={appearance}
               onToggleAppearance={handleToggleAppearance}
             />
-          )}
 
           {/* Center stage. Agent, Code, and Thread stay mounted so a terminal is hidden, not killed, when the mode changes. */}
           <main className="main-pane main-pane--stacked">
@@ -1214,7 +1198,7 @@ export const App: React.FC = () => {
             !(loading && workspaces.length === 0 && agents.length === 0) &&
             !(error && workspaces.length === 0 && agents.length === 0) ? (
               <>
-                <div className={`mode-layer${workMode === 'agent' && !settingsOpen && !routinesOpen ? ' mode-layer--visible' : ''}`}>
+                <div className={`mode-layer${workMode === 'agent' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
                   <AgentsView
                     agents={agents}
                     workspaceId={selectedWorkspaceId}
@@ -1250,7 +1234,7 @@ export const App: React.FC = () => {
                     }}
                   />
                 </div>
-                <div className={`mode-layer${workMode === 'code' && !settingsOpen && !routinesOpen ? ' mode-layer--visible' : ''}`}>
+                <div className={`mode-layer${workMode === 'code' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
                   <CodeWorkspace
                     workspaces={workspaces}
                     selectedWorkspaceId={selectedWorkspaceId}
@@ -1265,7 +1249,7 @@ export const App: React.FC = () => {
                     newSessionRequest={newSessionRequest}
                   />
                 </div>
-                <div className={`mode-layer${workMode === 'chat' && !settingsOpen && !routinesOpen ? ' mode-layer--visible' : ''}`}>
+                <div className={`mode-layer${workMode === 'chat' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
                   {hasOpenedChat && (
                     <ChatView
                       workspaceId={selectedWorkspaceId}
@@ -1289,23 +1273,6 @@ export const App: React.FC = () => {
                         }}
                       />
                     </div>
-                  </div>
-                )}
-                {settingsOpen && (
-                  <div className="mode-layer mode-layer--visible">
-                    <SettingsView
-                      onBack={() => setSettingsOpen(false)}
-                      onOpenWhatsNew={() => setIsWhatsNewOpen(true)}
-                      accountName={accountName}
-                      accountEmail={accountEmail || 'developer@kite.local'}
-                      accountTier={accountTier}
-                      accountTierPaid={accountTierPaid}
-                      creditsLabel={creditsLabel}
-                      mode={appearance}
-                      palette={palette}
-                      onToggleMode={handleToggleMode}
-                      onSelectTheme={handleSelectTheme}
-                    />
                   </div>
                 )}
               </>
@@ -1429,6 +1396,22 @@ export const App: React.FC = () => {
             setSelectedWorkspaceId(ws.id);
             setWorkMode('code');
           }}
+        />
+
+        <SettingsView
+          isOpen={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          onBack={() => setSettingsOpen(false)}
+          onOpenWhatsNew={() => setIsWhatsNewOpen(true)}
+          accountName={accountName}
+          accountEmail={accountEmail || 'developer@kite.local'}
+          accountTier={accountTier}
+          accountTierPaid={accountTierPaid}
+          creditsLabel={creditsLabel}
+          mode={appearance}
+          palette={palette}
+          onToggleMode={handleToggleMode}
+          onSelectTheme={handleSelectTheme}
         />
 
         {/* Notifications Popover. Render only while open */}

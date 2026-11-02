@@ -11,7 +11,12 @@ import { formatSummaryForSpeech, extractOutcomeFromBuffer } from './sessionConte
 import { appOperatorController } from './appOperatorController';
 import { runLedger } from './runLedger';
 import { planTurnLLM } from './planner/llm';
-import { saveOperatorConfig, DEFAULT_OPERATOR_CONFIG } from './operatorConfig';
+import {
+  saveOperatorConfig,
+  loadOperatorConfig,
+  syncNativeCredentialsWithVault,
+  DEFAULT_OPERATOR_CONFIG,
+} from './operatorConfig';
 import * as operatorProvidersModule from './operatorProviders';
 import * as terminalRegistry from '../terminalRegistry';
 
@@ -633,4 +638,97 @@ describe('runOperatorTurn — negation short-circuit & run ledger closure', () =
     expect(getTurnTrace('turn-quota-1')?.error).toMatch(/sin cuota/i);
   });
 });
+
+describe('OperatorConfig SQLite Vault Sync & Protection', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    (window as any).__TAURI_INTERNALS__ = {};
+  });
+
+  it('never wipes SQLite vault credentials when saving unrelated settings while localStorage keys are empty', async () => {
+    const { invokeCommand } = await import('../ipc');
+    saveOperatorConfig({
+      ...DEFAULT_OPERATOR_CONFIG,
+      ttsRate: 1.15,
+    });
+
+    const credentialCalls = vi
+      .mocked(invokeCommand)
+      .mock.calls.filter(
+        ([cmd, args]: any) =>
+          cmd === 'save_provider_credential' && args?.provider !== 'operator_settings_json'
+      );
+    expect(credentialCalls).toHaveLength(0);
+  });
+
+  it('saves non-empty STT (grok_transcription) and TTS (elevenlabs) keys to SQLite vault and only deletes when explicitly cleared', async () => {
+    const { invokeCommand } = await import('../ipc');
+
+    saveOperatorConfig({
+      grokTranscriptionApiKey: 'xai-stt-secret-key',
+      elevenlabsApiKey: 'xi_tts_secret_key',
+    });
+
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith('save_provider_credential', {
+      provider: 'grok_transcription',
+      key: 'xai-stt-secret-key',
+    });
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith('save_provider_credential', {
+      provider: 'elevenlabs',
+      key: 'xi_tts_secret_key',
+    });
+    expect(localStorage.getItem('kite_grok_transcription_api_key')).toBe('xai-stt-secret-key');
+
+    vi.clearAllMocks();
+
+    // Explicitly clearing elevenlabsApiKey should delete it from vault, while leaving grokTranscriptionApiKey untouched
+    saveOperatorConfig({
+      elevenlabsApiKey: '',
+    });
+
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith('save_provider_credential', {
+      provider: 'elevenlabs',
+      key: '',
+    });
+    expect(vi.mocked(invokeCommand)).not.toHaveBeenCalledWith(
+      'save_provider_credential',
+      expect.objectContaining({ provider: 'grok_transcription' })
+    );
+  });
+
+  it('hydrates localStorage from SQLite vault after an update or WebView storage reset', async () => {
+    const { invokeCommand } = await import('../ipc');
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'get_active_provider_key') {
+        const vault: Record<string, string> = {
+          grok: 'xai-main-key',
+          grok_transcription: 'xai-voice-stt-key',
+          elevenlabs: 'xi-eleven-tts-key',
+          cloudflare: 'cf-token-123',
+          cloudflare_account_id: 'cf-acc-456',
+          operator_settings_json: JSON.stringify({ ttsEngine: 'elevenlabs' }),
+        };
+        const key = vault[args?.provider] ?? null;
+        return { success: Boolean(key), key };
+      }
+      return {};
+    });
+
+    const synced = await syncNativeCredentialsWithVault();
+
+    expect(synced.grokApiKey).toBe('xai-main-key');
+    expect(synced.grokTranscriptionApiKey).toBe('xai-voice-stt-key');
+    expect(synced.elevenlabsApiKey).toBe('xi-eleven-tts-key');
+    expect(synced.cloudflareApiToken).toBe('cf-token-123');
+    expect(synced.cloudflareAccountId).toBe('cf-acc-456');
+    expect(synced.ttsEngine).toBe('elevenlabs');
+    expect(localStorage.getItem('kite_grok_transcription_api_key')).toBe('xai-voice-stt-key');
+
+    const reloaded = loadOperatorConfig();
+    expect(reloaded.grokTranscriptionApiKey).toBe('xai-voice-stt-key');
+    expect(reloaded.elevenlabsApiKey).toBe('xi-eleven-tts-key');
+  });
+});
+
 

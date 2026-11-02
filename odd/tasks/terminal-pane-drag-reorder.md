@@ -138,18 +138,12 @@ Add layout action handlers:
 
 ## 5. Task Breakdown
 
-- **T1 — Pure Tree Operations (`src/components/code/treeUtils.ts` & tests)**:
-  Implement `swapLeaves` and `moveLeafToEdge`. Add unit tests in `src/components/code/treeUtils.test.ts` verifying all 4 edge splits (`left`, `right`, `top`, `bottom`), deep nested tree reordering, single-child cleanup, and center swaps.
-- **T2 — Layout State Actions (`src/components/code/useWorkspaceLayoutState.ts`)**:
-  Wire `handleMoveLeaf` and `handleSwapLeaves` into layout state hook, ensuring state persistence and focus retention.
-- **T3 — Drag Handle Grip (`src/components/code/CodePaneHeader.tsx`)**:
-  Add the 6-dot grip handle in pane headers, styling with standard 4px micro radius, grab cursor, and 4px deadband pointer down handler.
-- **T4 — Global Drag Overlay & Drop Zones (`src/components/code/PaneDragOverlay.tsx`)**:
-  Implement full-window pointer capture layer with 25% edge margin calculation, 50% center swap detection, Escape key cancellation, and accent drop indicator preview.
-- **T5 — Non-Destructive Reparenting Integration (`src/components/code/CodeWorkspace.tsx`)**:
-  Integrate `PaneDragOverlay` into `CodeWorkspace`, linking drag events to slot host preservation so terminals never remount or reset during relocation.
-- **T6 — Test Coverage & Verification**:
-  Add unit tests for drag state calculations and drop zone geometry. Run `npx vitest run`, `npx tsc --noEmit`, and sanitizer audit.
+- **T1 — Pure Tree Operations (`src/components/code/treeUtils.ts` & tests)** — Status: completed — Implemented `swapLeaves`, `insertLeafAdjacent`, and `moveLeafToEdge`. 19 unit tests passing in `src/components/code/treeUtils.test.ts`.
+- **T2 — Layout State Actions (`src/components/code/useWorkspaceLayoutState.ts`)** — Status: completed — Added `handleSwapLeaves` and `handleMoveLeaf` with active root updates, layout persistence, and focus preservation.
+- **T3 — Drag Handle Grip (`src/components/code/CodePaneHeader.tsx`)** — Status: completed — Added 6-dot grip handle (`GripDotsIcon`), 4px micro radius token, hover reveal, grab cursor, and pointer down listener.
+- **T4 — Global Drag Overlay & Drop Zones (`src/components/code/PaneDragOverlay.tsx`)** — Status: completed — Implemented full-window capture overlay with 4px activation deadband, 25% edge margin calculation, 50% center swap, Escape key cancellation, and accent drop indicator preview. Tested in `PaneDragOverlay.test.tsx` and `paneDragUtils.test.ts`.
+- **T5 — Non-Destructive Reparenting Integration (`src/components/code/CodeWorkspace.tsx`)** — Status: completed — Integrated `PaneDragOverlay` with terminal slot host reparenting, ensuring terminals never unmount or restart PTYs during rearrangement.
+- **T6 — Test Coverage & Verification** — Status: completed — 41/41 vitest unit tests passing, `npx tsc --noEmit` exit 0, sanitizer audit clean.
 
 ---
 

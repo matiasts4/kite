@@ -256,6 +256,7 @@ export const AgentTerminalPane: React.FC<AgentTerminalPaneProps> = ({
           agentId={agentId}
           initialEngine={engine}
           title={agentName}
+          isFocused={true}
           onStatusChange={(status) => {
             if (status === 'connecting' || status === 'idle') setPhase('loading');
             else if (status === 'running') setPhase('running');

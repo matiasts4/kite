@@ -26,7 +26,6 @@ export interface UseTerminalMouseTrackingOptions {
   matrixRef: React.MutableRefObject<CellSnapshot[][]>;
   alternateScreenRef?: React.MutableRefObject<boolean>;
   applicationCursorRef?: React.MutableRefObject<boolean>;
-  mouseTrackingRef: React.MutableRefObject<boolean>;
   mouseModeRef: React.MutableRefObject<TerminalMouseMode>;
   sgrMouseRef: React.MutableRefObject<boolean>;
   sgrPixelsMouseRef: React.MutableRefObject<boolean>;
@@ -56,7 +55,6 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     cellHeightRef,
     spareYRef,
     matrixRef,
-    mouseTrackingRef,
     mouseModeRef,
     sgrMouseRef,
     sgrPixelsMouseRef,
@@ -293,7 +291,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     }
 
     // 2. App mouse tracking
-    const takesMouse = mouseTrackingRef.current && mouseModeRef.current !== 'none' && !e.shiftKey;
+    const takesMouse = mouseModeRef.current !== 'none' && !e.shiftKey;
     if (takesMouse && (e.button === 0 || e.button === 1 || e.button === 2)) {
       buttonsDownRef.current |= 1 << e.button;
       lastMouseReportRef.current = {
@@ -309,6 +307,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
     // 3. Otherwise, handle local selection (single = char, double = word, triple = line)
     if (e.button !== 0) return;
+    e.preventDefault();
 
     const clicks = e.detail || 1;
     const mode: 'char' | 'word' | 'line' =
@@ -421,7 +420,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
     // Forward mouse motion to PTY when mouseMode is 'drag' or 'any'
     const mode = mouseModeRef.current;
-    const takesMouse = mouseTrackingRef.current && mode !== 'none' && !e.shiftKey;
+    const takesMouse = mode !== 'none' && !e.shiftKey;
     if (takesMouse && !isSelectingRef.current) {
       const buttons = buttonsDownRef.current;
       if (mode === 'click') return;
@@ -451,7 +450,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     const wasDown = (buttonsDownRef.current & bit) !== 0;
     buttonsDownRef.current &= ~bit;
 
-    const takesMouse = mouseTrackingRef.current && mouseModeRef.current !== 'none' && !e.shiftKey;
+    const takesMouse = mouseModeRef.current !== 'none' && !e.shiftKey;
     if ((takesMouse || wasDown) && (e.button === 0 || e.button === 1 || e.button === 2)) {
       const pt = clientToGrid(e.clientX, e.clientY);
       lastMouseReportRef.current = {
@@ -535,7 +534,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       return steps;
     };
 
-    const takesMouse = mouseTrackingRef.current && mouseModeRef.current !== 'none' && !e.shiftKey;
+    const takesMouse = mouseModeRef.current !== 'none' && !e.shiftKey;
     const alt = alternateScreenRef.current;
     const cellH = Math.max(1, cellHeightRef.current || 16);
     const reportWheel = takesMouse || alt;
@@ -579,6 +578,18 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     const lines = discreteAxis(e.deltaY) ? (stepsY < 0 ? 3 : -3) : -stepsY;
     requestScrollLines(lines);
   };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onNativeWheel = (e: WheelEvent) => {
+      e.preventDefault();
+    };
+    canvas.addEventListener('wheel', onNativeWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', onNativeWheel);
+    };
+  }, [canvasRef]);
 
   return {
     handleMouseDown,

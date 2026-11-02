@@ -465,6 +465,12 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
       {allTerminalLeaves.map(({ leaf: l }) => {
         const occ = l.occupant as PaneOccupantTerminal;
         const slotEl = getOrCreateTerminalSlotHost(l.id);
+        const resolvedActiveId =
+          layout.tabs.find((t) => t.id === layout.activeTabId)?.id ||
+          layout.tabs[0]?.id ||
+          null;
+        const isTabActive = activeTab ? activeTab.id === resolvedActiveId : true;
+        const isLeafFocused = isTabActive && focusedLeafId === l.id;
         return createPortal(
           <TerminalView
             key={occ.sessionId}
@@ -474,6 +480,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
             sessionId={occ.sessionId}
             initialEngine={occ.engine || occ.runtime?.engine}
             title={occ.label}
+            isFocused={isLeafFocused}
             onStatusChange={(status) => {
               const mapped: TerminalStatus =
                 status === 'running' || status === 'connecting'

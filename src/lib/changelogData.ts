@@ -33,6 +33,34 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.44',
+    tag: 'v0.1.44',
+    date: 'Nov 2, 2026',
+    title: 'Estabilización de Terminal Canvas, Enfoque y Scroll en Agentes',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Restauración de captura de pulsaciones de teclado y auto-enfoque en terminal Canvas (GhostGrid 2D)',
+      },
+      {
+        kind: 'fixed',
+        description: 'Propagación y sincronización de isFocused en paneles de agentes y workspace (Antigravity, Cursor, etc.)',
+      },
+      {
+        kind: 'fixed',
+        description: 'Restauración de paquetes SGR para rueda de ratón y clics en aplicaciones TUI interactivas',
+      },
+      {
+        kind: 'fixed',
+        description: 'Prevención de desenfoque por defecto del navegador en mousedown sobre superficie de terminal',
+      },
+      {
+        kind: 'changed',
+        description: 'removed: Retirada de badges e indicadores "GhostGrid 2D" en las cabeceras de paneles y barras de herramientas',
+      },
+    ],
+  },
+  {
     version: '0.1.43',
     tag: 'v0.1.43',
     date: 'Nov 2, 2026',

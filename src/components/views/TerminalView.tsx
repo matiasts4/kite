@@ -39,6 +39,7 @@ export interface TerminalViewProps {
   /** `pane` hides the debug toolbar. Clear, restart, and interrupt come from the Code pane menu. */
   chrome?: 'toolbar' | 'pane';
   title?: string;
+  isFocused?: boolean;
   onClose?: () => void;
   onStatusChange?: (status: 'idle' | 'connecting' | 'running' | 'exited' | 'terminated') => void;
 }
@@ -52,6 +53,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   compact = false,
   chrome = 'toolbar',
   title: customTitle,
+  isFocused,
   onClose,
   onStatusChange,
 }) => {
@@ -466,6 +468,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             <TerminalCanvasSurface
               sessionId={sessionId || propSessionId!}
               workspaceId={workspaceId}
+              isFocused={isFocused}
               className="terminal-surface-host"
               onTitleChange={handleTitleChange}
               onProcessExit={handleProcessExit}

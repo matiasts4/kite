@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.44] - 2026-11-02
+
+> Estabilización de Terminal Canvas, Enfoque y Scroll en Agentes
+
+### Changed
+- removed: Retirada de badges e indicadores "GhostGrid 2D" en las cabeceras de paneles y barras de herramientas
+
+### Fixed
+- Restauración de captura de pulsaciones de teclado y auto-enfoque en terminal Canvas (GhostGrid 2D)
+- Propagación y sincronización de isFocused en paneles de agentes y workspace (Antigravity, Cursor, etc.)
+- Restauración de paquetes SGR para rueda de ratón y clics en aplicaciones TUI interactivas
+- Prevención de desenfoque por defecto del navegador en mousedown sobre superficie de terminal
+
+---
+
 ## [0.1.43] - 2026-11-02
 
 > Arquitectura Modular, Estabilización de Terminal y Monitor de Recursos

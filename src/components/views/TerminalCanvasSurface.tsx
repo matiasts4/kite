@@ -31,6 +31,7 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
   sessionId,
   workspaceId,
   isFocused,
+  className = '',
   onTitleChange,
   onProcessExit,
 }) => {
@@ -43,7 +44,7 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const isFocusedRef = useRef<boolean>(Boolean(isFocused));
-  isFocusedRef.current = Boolean(isFocused);
+  // Focus is owned by the hidden textarea focus/blur events; the prop only seeds it.
   const rafIdRef = useRef<number | null>(null);
 
   const cellWidthRef = useRef<number>(9);
@@ -245,9 +246,6 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     [applySnapshot, scheduleRender, sessionId]
   );
 
-  const mouseTrackingRef = useRef<boolean>(false);
-  mouseTrackingRef.current = mouseModeRef.current !== 'none';
-
   const setPointerCursor = useCallback((pointer: boolean) => {
     if (canvasRef.current) {
       canvasRef.current.style.cursor = pointer ? 'pointer' : 'text';
@@ -273,7 +271,6 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     matrixRef,
     alternateScreenRef,
     applicationCursorRef,
-    mouseTrackingRef,
     mouseModeRef,
     sgrMouseRef,
     sgrPixelsMouseRef,
@@ -463,6 +460,27 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChange);
   }, []);
 
+  // Sync isFocused prop to native input focus and internal tracking
+  useEffect(() => {
+    if (isFocused) {
+      inputRef.current?.focus();
+    }
+  }, [isFocused]);
+
+  useEffect(() => {
+    if (isFocused !== undefined) {
+      isFocusedRef.current = Boolean(isFocused);
+      scheduleRender();
+    }
+  }, [isFocused, scheduleRender]);
+
+  // Auto-focus on mount or session change
+  useEffect(() => {
+    if (sessionId) {
+      inputRef.current?.focus();
+    }
+  }, [sessionId]);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
     armFastPoll(1000);
@@ -544,16 +562,16 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     }
   };
 
-  const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.target === containerRef.current) {
-      inputRef.current?.focus();
-    }
+  // A click anywhere on the surface (including the canvas, whose default mousedown action moves focus
+  // to <body> when it is not preventDefault-ed) must hand focus back to the hidden input so typing keeps working.
+  const handleContainerClick = () => {
+    inputRef.current?.focus();
   };
 
   return (
     <div
       ref={containerRef}
-      className="terminal-canvas-surface-container"
+      className={`terminal-canvas-surface-container ${className}`}
       onClick={handleContainerClick}
       style={{
         position: 'relative',
@@ -566,7 +584,7 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     >
       <canvas
         ref={canvasRef}
-        className="terminal-canvas-surface terminal-canvas-area"
+        className="terminal-canvas-surface"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

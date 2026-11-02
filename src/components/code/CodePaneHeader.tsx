@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef } from 'react';
 import type { AgentEngineDescriptor, PaneOccupant } from './types';
 import {
   SquareTerminalIcon,
@@ -10,14 +10,6 @@ import {
 } from './codeIcons';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { CodePaneActionsMenu, CodePaneNewMenu } from './CodePaneMenu';
-import {
-  getTerminalAppearancePrefs,
-  getTerminalRendererBadgeLabel,
-  TERMINAL_APPEARANCE_CHANGED_EVENT,
-  togglePrimaryTerminalRenderer,
-  type TerminalAppearancePrefs,
-  type TerminalRendererMode,
-} from '../../lib/terminalAppearancePrefs';
 
 export interface CodePaneHeaderProps {
   nodeId: string;
@@ -89,19 +81,6 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
   const isRenaming = renamingLeafId === nodeId;
   const actionsBtnRef = useRef<HTMLButtonElement | null>(null);
   const newBtnRef = useRef<HTMLButtonElement | null>(null);
-  const [rendererMode, setRendererMode] = useState<TerminalRendererMode>(
-    () => getTerminalAppearancePrefs().renderer
-  );
-
-  useEffect(() => {
-    const onAppearanceChanged = (e: Event) => {
-      const detail = (e as CustomEvent<TerminalAppearancePrefs>).detail;
-      setRendererMode((detail ?? getTerminalAppearancePrefs()).renderer);
-    };
-    window.addEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
-    return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChanged);
-  }, []);
-
   return (
     <header
       className="code-pane-header"
@@ -175,56 +154,6 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
               );
             })()}
             <span className="sr-only">{displayName.replace(/\s*\([^)]*\)\s*$/, '').trim() || displayName}</span>
-          </span>
-          <span className="code-pane-meta">
-            {occupant.kind === 'terminal' && (
-              <span
-                role="button"
-                tabIndex={0}
-                className="terminal-renderer-badge"
-                data-renderer={rendererMode}
-                title={`Motor activo: ${getTerminalRendererBadgeLabel(rendererMode)} — Clic para alternar GhostGrid 2D ⇄ DOM Clásico`}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  togglePrimaryTerminalRenderer();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    togglePrimaryTerminalRenderer();
-                  }
-                }}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  padding: '1px 6px',
-                  fontSize: '10px',
-                  fontWeight: 500,
-                  letterSpacing: '0.02em',
-                  borderRadius: 'var(--vl-radius-xs)',
-                  background:
-                    rendererMode === 'canvas'
-                      ? 'rgba(92, 143, 255, 0.14)'
-                      : 'rgba(255, 255, 255, 0.06)',
-                  color:
-                    rendererMode === 'canvas'
-                      ? '#8ab0ff'
-                      : 'rgba(255, 255, 255, 0.52)',
-                  border:
-                    rendererMode === 'canvas'
-                      ? '1px solid rgba(92, 143, 255, 0.28)'
-                      : '1px solid rgba(255, 255, 255, 0.1)',
-                  cursor: 'pointer',
-                  userSelect: 'none',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {getTerminalRendererBadgeLabel(rendererMode)}
-              </span>
-            )}
           </span>
         </>
       )}

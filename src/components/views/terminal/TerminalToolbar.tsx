@@ -1,9 +1,5 @@
 import React from 'react';
-import {
-  type TerminalAppearancePrefs,
-  getTerminalRendererBadgeLabel,
-  togglePrimaryTerminalRenderer,
-} from '../../../lib/terminalAppearancePrefs';
+import { type TerminalAppearancePrefs } from '../../../lib/terminalAppearancePrefs';
 import {
   CloseIcon,
   FolderIcon,
@@ -19,7 +15,7 @@ export interface TerminalToolbarProps {
   customTitle?: string;
   oscTitle?: string;
   sessionId?: string;
-  appearance: TerminalAppearancePrefs;
+  appearance?: TerminalAppearancePrefs;
   status: 'idle' | 'connecting' | 'running' | 'exited' | 'terminated';
   exitCode: number | null;
   workspaceId?: string | null;
@@ -36,7 +32,6 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
   customTitle,
   oscTitle,
   sessionId,
-  appearance,
   status,
   exitCode,
   workspaceId,
@@ -58,31 +53,6 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
         <span className="terminal-session-badge" title={sessionId || 'Idle session'}>
           {sessionId ? `[${sessionId}]` : '[Idle]'}
         </span>
-        <button
-          type="button"
-          className="terminal-session-badge"
-          data-renderer={appearance.renderer}
-          onClick={() => togglePrimaryTerminalRenderer()}
-          title={`Motor activo: ${getTerminalRendererBadgeLabel(appearance.renderer)} — Clic para alternar GhostGrid 2D ⇄ DOM Clásico`}
-          style={{
-            cursor: 'pointer',
-            borderRadius: 'var(--vl-radius-xs)',
-            background:
-              appearance.renderer === 'canvas'
-                ? 'rgba(92, 143, 255, 0.14)'
-                : 'rgba(255, 255, 255, 0.06)',
-            color:
-              appearance.renderer === 'canvas'
-                ? '#8ab0ff'
-                : 'rgba(255, 255, 255, 0.65)',
-            border:
-              appearance.renderer === 'canvas'
-                ? '1px solid rgba(92, 143, 255, 0.28)'
-                : '1px solid rgba(255, 255, 255, 0.1)',
-          }}
-        >
-          {getTerminalRendererBadgeLabel(appearance.renderer)}
-        </button>
         <span className={`terminal-status-pill terminal-status-pill--${status}`}>
           <span className="terminal-status-dot" />
           <span>

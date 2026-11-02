@@ -201,6 +201,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
                 sessionId={occupant.sessionId}
                 initialEngine={occupant.engine || occupant.runtime?.engine}
                 title={occupant.label}
+                isFocused={isFocused}
                 onStatusChange={(status) => {
                   const mapped: TerminalStatus =
                     status === 'running' || status === 'connecting'

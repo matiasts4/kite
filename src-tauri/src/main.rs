@@ -37,6 +37,7 @@ pub mod misc;
 pub mod tickets;
 pub mod quota;
 pub mod updater;
+pub mod local_feed;
 pub mod account_switcher;
 pub mod handoff;
 pub mod system_metrics;
@@ -49,6 +50,10 @@ pub mod credentials;
 pub mod connections;
 pub mod plugins;
 pub mod agent_maintenance;
+pub mod dispatch;
+pub mod dispatch_wire;
+pub mod core_wire;
+pub mod core_daemon;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -83,6 +88,7 @@ use tickets::*;
 use updater::*;
 use window::*;
 use workspaces::*;
+use core_daemon::*;
 
 #[cfg(windows)]
 fn register_windows_shutdown_handler() {
@@ -97,6 +103,7 @@ fn register_windows_shutdown_handler() {
     unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 2 || ctrl_type == 5 || ctrl_type == 6 {
             crate::terminal::snapshot_and_shutdown_all_terminals("windows_ctrl_shutdown");
+            crate::dispatch_wire::shutdown();
             if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
                 manager.stop_all();
             }
@@ -146,9 +153,17 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && (args[1] == "daemon" || args[1] == "--daemon" || args[1] == "kite-core") {
+        crate::core_daemon::run_core_daemon_main();
+        return;
+    }
     if args.len() >= 2 && (args[1] == "mcp" || args[1] == "mcp-tasks" || args[1] == "kite-tasks") {
         crate::tickets::run_mcp_server(&args[1..]);
         return;
+    }
+    if args.len() >= 2 && args[1] == "dispatch" {
+        let code = crate::dispatch_wire::run_dispatch_cli(&args[2..]);
+        std::process::exit(code);
     }
 
     std::panic::set_hook(Box::new(|info| {
@@ -263,6 +278,11 @@ fn main() {
                 updater::spawn_startup_check(app.handle().clone());
             }
             crate::chat::persistent::start_idle_reaper();
+            // A detached core owns loopback dispatch; otherwise serve it here.
+            if !crate::core_daemon::ensure_core_daemon_started() {
+                crate::dispatch_wire::start_background();
+            }
+            crate::system_metrics::init_benchmark_from_env();
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
             for (label, w) in &windows {
@@ -276,11 +296,7 @@ fn main() {
                     event,
                     tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
                 ) {
-                    crate::terminal::snapshot_and_shutdown_all_terminals("main_window_close");
-                    crate::audio_ducking::restore_audio_immediate();
-                    if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
-                        manager.stop_all();
-                    }
+                    crate::core_daemon::on_client_window_close();
                 }
             }
         })
@@ -433,7 +449,9 @@ fn main() {
             read_files_text,
             read_terminal_output,
             poll_terminal_snapshot,
+            set_terminal_presentation,
             scroll_terminal_viewport,
+            find_terminal_text,
             dump_terminal_diagnostics,
             clear_terminal_vt,
             read_workspace_changes,
@@ -506,6 +524,9 @@ fn main() {
             terminal_host_set_keep_agents_running,
             terminal_host_clear_scrollback,
             terminate_terminal,
+            shutdown_core_daemon,
+            poll_terminal_snapshot_bin,
+            replenish_terminal_credit,
             ticket_call,
             ticket_snapshot,
             ticket_connect,
@@ -545,6 +566,10 @@ fn main() {
             recommend_continuation_targets,
             get_handoff_preview,
             get_system_metrics,
+            start_terminal_benchmark,
+            stop_terminal_benchmark,
+            get_terminal_benchmark_sample,
+            report_terminal_frontend_metrics,
             continue_turn_with_handoff,
             create_odd_task_file,
             list_odd_task_files,
@@ -571,6 +596,16 @@ fn main() {
             start_agent_tool_job,
             get_active_agent_tool_jobs,
             cancel_agent_tool_job,
+            dispatch_wire::dispatch_send,
+            dispatch_wire::dispatch_publish,
+            dispatch_wire::dispatch_osc,
+            dispatch_wire::dispatch_ls,
+            dispatch_wire::dispatch_run,
+            dispatch_wire::dispatch_wait,
+            dispatch_wire::dispatch_read,
+            dispatch_wire::dispatch_report,
+            dispatch_wire::dispatch_skill,
+            dispatch_wire::dispatch_pane_shown,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
@@ -592,19 +627,11 @@ fn main() {
         match event {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
-                crate::audio_ducking::restore_audio_immediate();
-                crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit_requested");
-                if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
-                    manager.stop_all();
-                }
+                crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::Exit => {
-                log_trace("App RunEvent::Exit, ensuring all terminals are snapshotted");
-                crate::audio_ducking::restore_audio_immediate();
-                crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit");
-                if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
-                    manager.stop_all();
-                }
+                log_trace("App RunEvent::Exit, detaching GUI from persistent core");
+                crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::MainEventsCleared => {
                 // Do NOT log MainEventsCleared. It triggers dozens of times per second,

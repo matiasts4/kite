@@ -1,7 +1,308 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketMemorySample {
+    pub process_count: usize,
+    pub working_set_bytes: u64,
+    pub private_bytes: u64,
+    pub cpu_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebviewSubBreakdown {
+    pub host_private_bytes: u64,
+    pub renderer_private_bytes: u64,
+    pub gpu_private_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketsSample {
+    pub platform: BucketMemorySample,
+    pub pty_host: BucketMemorySample,
+    pub workload: BucketMemorySample,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalDataPlaneCounters {
+    pub active_terminals: usize,
+    pub live_visible_terminals: usize,
+    pub pty_bytes_read_per_sec: u64,
+    pub vt_feed_calls_per_sec: u64,
+    pub vt_feed_duration_us_p95: f64,
+    pub activity_events_emitted_per_sec: u64,
+    pub snapshot_polls_per_sec: u64,
+    pub snapshot_payload_bytes_per_sec: u64,
+    pub dirty_rows_painted_per_sec: u64,
+    pub frame_paint_us_p50: f64,
+    pub frame_paint_us_p95: f64,
+    pub frame_paint_us_p99: f64,
+    pub input_to_paint_ms_p95: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalBenchSample {
+    pub timestamp_unix_ms: u64,
+    pub scenario_id: String,
+    pub terminal_count: usize,
+    pub elapsed_sec: u64,
+    pub buckets: BucketsSample,
+    pub webview_sub_breakdown: WebviewSubBreakdown,
+    pub data_plane: TerminalDataPlaneCounters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributionBucket {
+    Platform,
+    PtyHost,
+    Workload,
+}
+
+pub fn classify_process_bucket(name: &str) -> AttributionBucket {
+    let lower = name.to_lowercase();
+    if lower.contains("conhost") || lower.contains("openconsole") {
+        AttributionBucket::PtyHost
+    } else if lower.contains("kite") || lower.contains("webview") || lower.contains("msedge") {
+        AttributionBucket::Platform
+    } else {
+        AttributionBucket::Workload
+    }
+}
+
+/// Lineage-aware attribution: every process sampled for a benchmark belongs to
+/// the Kite host tree, so only a terminal-root ancestor moves it out of the
+/// platform bucket.
+pub fn classify_process_bucket_with_lineage(
+    name: &str,
+    has_terminal_ancestor: bool,
+) -> AttributionBucket {
+    let lower = name.to_lowercase();
+    if lower.contains("conhost") || lower.contains("openconsole") {
+        AttributionBucket::PtyHost
+    } else if has_terminal_ancestor {
+        AttributionBucket::Workload
+    } else {
+        AttributionBucket::Platform
+    }
+}
+
+pub fn compute_webview_breakdown(webview_procs: &[(u32, u32, u64)], root_pid: u32) -> WebviewSubBreakdown {
+    if webview_procs.is_empty() {
+        return WebviewSubBreakdown {
+            host_private_bytes: 0,
+            renderer_private_bytes: 0,
+            gpu_private_bytes: 0,
+        };
+    }
+    if webview_procs.len() == 1 {
+        return WebviewSubBreakdown {
+            host_private_bytes: webview_procs[0].2,
+            renderer_private_bytes: 0,
+            gpu_private_bytes: 0,
+        };
+    }
+    if webview_procs.len() == 2 {
+        let (p1, p2) = (&webview_procs[0], &webview_procs[1]);
+        if p1.2 >= p2.2 {
+            return WebviewSubBreakdown {
+                host_private_bytes: p2.2,
+                renderer_private_bytes: p1.2,
+                gpu_private_bytes: 0,
+            };
+        } else {
+            return WebviewSubBreakdown {
+                host_private_bytes: p1.2,
+                renderer_private_bytes: p2.2,
+                gpu_private_bytes: 0,
+            };
+        }
+    }
+
+    let host_idx = webview_procs
+        .iter()
+        .position(|p| p.1 == root_pid)
+        .unwrap_or(0);
+    let host_priv = webview_procs[host_idx].2;
+
+    let mut other_privs: Vec<u64> = webview_procs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != host_idx)
+        .map(|(_, p)| p.2)
+        .collect();
+    other_privs.sort_unstable_by(|a, b| b.cmp(a));
+
+    let renderer_priv = other_privs.first().copied().unwrap_or(0);
+    let gpu_priv = other_privs.get(1).copied().unwrap_or(0);
+    let remaining_util: u64 = other_privs.iter().skip(2).sum();
+
+    WebviewSubBreakdown {
+        host_private_bytes: host_priv.saturating_add(remaining_util),
+        renderer_private_bytes: renderer_priv,
+        gpu_private_bytes: gpu_priv,
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct FrontendMetricsState {
+    pub dirty_rows_painted_per_sec: u64,
+    pub frame_paint_us_p50: f64,
+    pub frame_paint_us_p95: f64,
+    pub frame_paint_us_p99: f64,
+    pub input_to_paint_ms_p95: f64,
+    pub last_reported_at: Option<Instant>,
+}
+
+fn frontend_metrics() -> &'static Mutex<FrontendMetricsState> {
+    static STATE: OnceLock<Mutex<FrontendMetricsState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(FrontendMetricsState::default()))
+}
+
+pub fn update_frontend_metrics(
+    dirty_rows: u64,
+    p50: f64,
+    p95: f64,
+    p99: f64,
+    input_p95: f64,
+) {
+    if let Ok(mut lock) = frontend_metrics().lock() {
+        lock.dirty_rows_painted_per_sec = dirty_rows;
+        lock.frame_paint_us_p50 = p50;
+        lock.frame_paint_us_p95 = p95;
+        lock.frame_paint_us_p99 = p99;
+        lock.input_to_paint_ms_p95 = input_p95;
+        lock.last_reported_at = Some(Instant::now());
+    }
+}
+
+/// How long a frontend report stays valid for the backend sample.
+const FRONTEND_METRICS_TTL: Duration = Duration::from_secs(3);
+
+/// Snapshot of the last frontend report, zeroed once it goes stale so a closed
+/// or benchmark-inactive UI cannot keep reporting old numbers forever.
+fn fresh_frontend_metrics() -> FrontendMetricsState {
+    let front = frontend_metrics().lock().map(|f| f.clone()).unwrap_or_default();
+    match front.last_reported_at {
+        Some(reported_at) if reported_at.elapsed() <= FRONTEND_METRICS_TTL => front,
+        _ => FrontendMetricsState::default(),
+    }
+}
+
+pub struct BenchmarkState {
+    pub active: bool,
+    /// Monotonic run id: a spawned writer thread must exit once it is superseded.
+    pub generation: u64,
+    pub scenario_id: String,
+    pub log_path: Option<String>,
+    pub started_at: Instant,
+    pub last_sample_instant: Instant,
+    pub sample_counter: u64,
+    pub last_pty_bytes: u64,
+    pub last_vt_calls: u64,
+    pub last_activity_events: u64,
+    pub last_snapshot_polls: u64,
+    pub last_snapshot_payload_bytes: u64,
+}
+
+pub fn benchmark_state() -> &'static Mutex<BenchmarkState> {
+    static STATE: OnceLock<Mutex<BenchmarkState>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        let now = Instant::now();
+        Mutex::new(BenchmarkState {
+            active: false,
+            generation: 0,
+            scenario_id: "E1-idle".to_string(),
+            log_path: None,
+            started_at: now,
+            last_sample_instant: now,
+            sample_counter: 0,
+            last_pty_bytes: 0,
+            last_vt_calls: 0,
+            last_activity_events: 0,
+            last_snapshot_polls: 0,
+            last_snapshot_payload_bytes: 0,
+        })
+    })
+}
+
+pub fn start_benchmark_internal(path: Option<String>, scenario_id: Option<String>) {
+    let my_generation = {
+        let mut bst = benchmark_state().lock().unwrap();
+        bst.active = true;
+        bst.generation = bst.generation.wrapping_add(1);
+        if let Some(s) = scenario_id {
+            bst.scenario_id = s;
+        }
+        bst.log_path = path.clone();
+        bst.started_at = Instant::now();
+        bst.last_sample_instant = Instant::now();
+        bst.sample_counter = 0;
+        bst.generation
+    };
+
+    // A new run owns fresh counters and a dedicated CPU delta timeline.
+    crate::terminal::bench_reset_counters();
+    crate::terminal::set_bench_active(true);
+    *bench_cpu_state().lock().unwrap_or_else(|e| e.into_inner()) = CpuSampleState::new();
+
+    let raw_plane = crate::terminal::get_terminal_data_plane_snapshot();
+    if let Ok(mut bst) = benchmark_state().lock() {
+        bst.last_pty_bytes = raw_plane.pty_bytes_read_total;
+        bst.last_vt_calls = raw_plane.vt_feed_calls_total;
+        bst.last_activity_events = raw_plane.activity_events_emitted_total;
+        bst.last_snapshot_polls = raw_plane.snapshot_polls_total;
+        bst.last_snapshot_payload_bytes = raw_plane.snapshot_payload_bytes_total;
+    }
+
+    if let Some(log_path) = path {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let still_current = benchmark_state()
+                    .lock()
+                    .map(|st| st.active && st.generation == my_generation)
+                    .unwrap_or(false);
+                if !still_current {
+                    break;
+                }
+                let sample = collect_benchmark_sample(None, None, None);
+                if let Ok(line) = serde_json::to_string(&sample) {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        let _ = writeln!(f, "{}", line);
+                    }
+                }
+            }
+        });
+    }
+}
+
+pub fn stop_benchmark_internal() {
+    if let Ok(mut bst) = benchmark_state().lock() {
+        bst.active = false;
+    }
+    crate::terminal::set_bench_active(false);
+}
+
+pub fn init_benchmark_from_env() {
+    if let Ok(path) = std::env::var("KITE_BENCH_LOG") {
+        if !path.trim().is_empty() {
+            start_benchmark_internal(Some(path), Some("E1-idle".to_string()));
+        }
+    }
+}
 
 struct CpuSampleState {
     started_at: Instant,
@@ -14,10 +315,9 @@ struct CpuSampleState {
     last_app_cpu_pct: f64,
 }
 
-fn cpu_state() -> &'static Mutex<CpuSampleState> {
-    static STATE: OnceLock<Mutex<CpuSampleState>> = OnceLock::new();
-    STATE.get_or_init(|| {
-        Mutex::new(CpuSampleState {
+impl CpuSampleState {
+    fn new() -> Self {
+        CpuSampleState {
             started_at: Instant::now(),
             last_sample_at: None,
             last_sys_idle: 0,
@@ -26,8 +326,20 @@ fn cpu_state() -> &'static Mutex<CpuSampleState> {
             last_proc_times: HashMap::new(),
             last_sys_cpu_pct: 4.0,
             last_app_cpu_pct: 0.8,
-        })
-    })
+        }
+    }
+}
+
+fn cpu_state() -> &'static Mutex<CpuSampleState> {
+    static STATE: OnceLock<Mutex<CpuSampleState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(CpuSampleState::new()))
+}
+
+/// Separate CPU delta timeline for the 1 Hz benchmark sampler so UI polling
+/// cannot shorten its elapsed window below the 250 ms threshold.
+fn bench_cpu_state() -> &'static Mutex<CpuSampleState> {
+    static STATE: OnceLock<Mutex<CpuSampleState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(CpuSampleState::new()))
 }
 
 fn now_ms() -> u64 {
@@ -318,6 +630,27 @@ mod win_metrics {
             .into_iter()
             .filter(|p| tree_pids.contains(&p.pid))
             .collect()
+    }
+
+    /// Walks the parent chain from `pid` up to the host root looking for a
+    /// registered terminal root. Depth is capped so a corrupt parent map cannot
+    /// spin forever.
+    pub(super) fn has_terminal_root_ancestor(
+        pid: u32,
+        root_pid: u32,
+        parent_map: &HashMap<u32, u32>,
+        terminal_roots: &HashSet<u32>,
+    ) -> bool {
+        let mut curr = pid;
+        let mut depth = 0;
+        while curr != 0 && curr != root_pid && depth < 64 {
+            if terminal_roots.contains(&curr) {
+                return true;
+            }
+            curr = parent_map.get(&curr).copied().unwrap_or(0);
+            depth += 1;
+        }
+        false
     }
 
     pub fn collect_snapshot() -> Value {
@@ -802,11 +1135,272 @@ mod win_metrics {
             }
         })
     }
+
+    pub fn collect_benchmark_sample(
+        scenario_id: Option<&str>,
+        elapsed_sec_override: Option<u64>,
+        terminal_count_override: Option<usize>,
+    ) -> TerminalBenchSample {
+        let root_pid = std::process::id();
+        let logical_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+
+        let tree = collect_process_tree(root_pid);
+        let terminal_roots = crate::terminal::get_terminal_root_pids();
+        let mut parent_map: HashMap<u32, u32> = HashMap::with_capacity(tree.len());
+        for node in &tree {
+            parent_map.insert(node.pid, node.parent_pid);
+        }
+
+        let mut platform_ws = 0u64;
+        let mut platform_priv = 0u64;
+        let mut platform_count = 0usize;
+
+        let mut pty_ws = 0u64;
+        let mut pty_priv = 0u64;
+        let mut pty_count = 0usize;
+
+        let mut workload_ws = 0u64;
+        let mut workload_priv = 0u64;
+        let mut workload_count = 0usize;
+
+        let mut webview_procs: Vec<(u32, u32, u64)> = Vec::new();
+        let mut current_proc_times: HashMap<u32, u64> = HashMap::new();
+        let mut node_buckets: HashMap<u32, AttributionBucket> = HashMap::with_capacity(tree.len());
+
+        for node in &tree {
+            let (mem, priv_mem, cpu_ticks) = query_process_mem_and_cpu(node.pid);
+            current_proc_times.insert(node.pid, cpu_ticks);
+
+            let bucket = classify_process_bucket_with_lineage(
+                &node.name,
+                has_terminal_root_ancestor(node.pid, root_pid, &parent_map, &terminal_roots),
+            );
+            node_buckets.insert(node.pid, bucket);
+            match bucket {
+                AttributionBucket::Platform => {
+                    platform_ws = platform_ws.saturating_add(mem);
+                    platform_priv = platform_priv.saturating_add(priv_mem);
+                    platform_count += 1;
+                    let lower = node.name.to_lowercase();
+                    if lower.contains("webview") || lower.contains("msedge") {
+                        webview_procs.push((node.pid, node.parent_pid, priv_mem));
+                    }
+                }
+                AttributionBucket::PtyHost => {
+                    pty_ws = pty_ws.saturating_add(mem);
+                    pty_priv = pty_priv.saturating_add(priv_mem);
+                    pty_count += 1;
+                }
+                AttributionBucket::Workload => {
+                    workload_ws = workload_ws.saturating_add(mem);
+                    workload_priv = workload_priv.saturating_add(priv_mem);
+                    workload_count += 1;
+                }
+            }
+        }
+
+        let webview_breakdown = compute_webview_breakdown(&webview_procs, root_pid);
+
+        // CPU delta computation across buckets
+        let (platform_cpu, pty_cpu, workload_cpu) = {
+            let mut st = bench_cpu_state().lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+
+            let mut plat_delta = 0u64;
+            let mut pty_delta = 0u64;
+            let mut work_delta = 0u64;
+
+            if let Some(prev_at) = st.last_sample_at {
+                let elapsed = now.duration_since(prev_at).as_secs_f64();
+                if elapsed >= 0.25 {
+                    let capacity_ticks = elapsed * 10_000_000.0 * (logical_cores.max(1) as f64);
+                    if capacity_ticks > 0.0 {
+                        for node in &tree {
+                            let curr = current_proc_times.get(&node.pid).copied().unwrap_or(0);
+                            let prev = st.last_proc_times.get(&node.pid).copied().unwrap_or(curr);
+                            let delta = curr.saturating_sub(prev);
+                            match node_buckets
+                                .get(&node.pid)
+                                .copied()
+                                .unwrap_or(AttributionBucket::Platform)
+                            {
+                                AttributionBucket::Platform => plat_delta = plat_delta.saturating_add(delta),
+                                AttributionBucket::PtyHost => pty_delta = pty_delta.saturating_add(delta),
+                                AttributionBucket::Workload => work_delta = work_delta.saturating_add(delta),
+                            }
+                        }
+                        let p_cpu = ((plat_delta as f64 / capacity_ticks) * 100.0).clamp(0.0, 100.0);
+                        let pt_cpu = ((pty_delta as f64 / capacity_ticks) * 100.0).clamp(0.0, 100.0);
+                        let w_cpu = ((work_delta as f64 / capacity_ticks) * 100.0).clamp(0.0, 100.0);
+
+                        st.last_proc_times = current_proc_times;
+                        st.last_sample_at = Some(now);
+
+                        (
+                            (p_cpu * 100.0).round() / 100.0,
+                            (pt_cpu * 100.0).round() / 100.0,
+                            (w_cpu * 100.0).round() / 100.0,
+                        )
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    }
+                } else {
+                    (0.0, 0.0, 0.0)
+                }
+            } else {
+                st.last_proc_times = current_proc_times;
+                st.last_sample_at = Some(now);
+                (0.0, 0.0, 0.0)
+            }
+        };
+
+        let raw_plane = crate::terminal::get_terminal_data_plane_snapshot();
+        let front = fresh_frontend_metrics();
+
+        let (scenario, elapsed_sec, pty_rate, vt_rate, act_rate, snap_poll_rate, snap_payload_rate) = {
+            let mut bst = benchmark_state().lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            let dt = now.duration_since(bst.last_sample_instant).as_secs_f64().max(0.001);
+            bst.last_sample_instant = now;
+            bst.sample_counter += 1;
+
+            let pty_diff = raw_plane.pty_bytes_read_total.saturating_sub(bst.last_pty_bytes);
+            let vt_diff = raw_plane.vt_feed_calls_total.saturating_sub(bst.last_vt_calls);
+            let act_diff = raw_plane.activity_events_emitted_total.saturating_sub(bst.last_activity_events);
+            let poll_diff = raw_plane.snapshot_polls_total.saturating_sub(bst.last_snapshot_polls);
+            let pay_diff = raw_plane.snapshot_payload_bytes_total.saturating_sub(bst.last_snapshot_payload_bytes);
+
+            bst.last_pty_bytes = raw_plane.pty_bytes_read_total;
+            bst.last_vt_calls = raw_plane.vt_feed_calls_total;
+            bst.last_activity_events = raw_plane.activity_events_emitted_total;
+            bst.last_snapshot_polls = raw_plane.snapshot_polls_total;
+            bst.last_snapshot_payload_bytes = raw_plane.snapshot_payload_bytes_total;
+
+            let elapsed = elapsed_sec_override.unwrap_or_else(|| now.duration_since(bst.started_at).as_secs());
+            let scen = scenario_id.map(|s| s.to_string()).unwrap_or_else(|| bst.scenario_id.clone());
+
+            (
+                scen,
+                elapsed,
+                (pty_diff as f64 / dt).round() as u64,
+                (vt_diff as f64 / dt).round() as u64,
+                (act_diff as f64 / dt).round() as u64,
+                (poll_diff as f64 / dt).round() as u64,
+                (pay_diff as f64 / dt).round() as u64,
+            )
+        };
+
+        let term_count = terminal_count_override.unwrap_or(raw_plane.active_terminals);
+
+        TerminalBenchSample {
+            timestamp_unix_ms: now_ms(),
+            scenario_id: scenario,
+            terminal_count: term_count,
+            elapsed_sec,
+            buckets: BucketsSample {
+                platform: BucketMemorySample {
+                    process_count: platform_count,
+                    working_set_bytes: platform_ws,
+                    private_bytes: platform_priv,
+                    cpu_percent: platform_cpu,
+                },
+                pty_host: BucketMemorySample {
+                    process_count: pty_count,
+                    working_set_bytes: pty_ws,
+                    private_bytes: pty_priv,
+                    cpu_percent: pty_cpu,
+                },
+                workload: BucketMemorySample {
+                    process_count: workload_count,
+                    working_set_bytes: workload_ws,
+                    private_bytes: workload_priv,
+                    cpu_percent: workload_cpu,
+                },
+            },
+            webview_sub_breakdown: webview_breakdown,
+            data_plane: TerminalDataPlaneCounters {
+                active_terminals: raw_plane.active_terminals,
+                live_visible_terminals: raw_plane.live_visible_terminals,
+                pty_bytes_read_per_sec: pty_rate,
+                vt_feed_calls_per_sec: vt_rate,
+                vt_feed_duration_us_p95: raw_plane.vt_feed_duration_us_p95,
+                activity_events_emitted_per_sec: act_rate,
+                snapshot_polls_per_sec: snap_poll_rate,
+                snapshot_payload_bytes_per_sec: snap_payload_rate,
+                dirty_rows_painted_per_sec: front.dirty_rows_painted_per_sec,
+                frame_paint_us_p50: front.frame_paint_us_p50,
+                frame_paint_us_p95: front.frame_paint_us_p95,
+                frame_paint_us_p99: front.frame_paint_us_p99,
+                input_to_paint_ms_p95: front.input_to_paint_ms_p95,
+            },
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod fallback_metrics {
     use super::*;
+
+    pub fn collect_benchmark_sample(
+        scenario_id: Option<&str>,
+        elapsed_sec_override: Option<u64>,
+        terminal_count_override: Option<usize>,
+    ) -> TerminalBenchSample {
+        let bst = benchmark_state().lock().unwrap();
+        let elapsed = elapsed_sec_override.unwrap_or(bst.sample_counter);
+        let scenario = scenario_id.unwrap_or(&bst.scenario_id).to_string();
+        let front = fresh_frontend_metrics();
+        let active = terminal_count_override.unwrap_or(2);
+
+        TerminalBenchSample {
+            timestamp_unix_ms: now_ms(),
+            scenario_id: scenario,
+            terminal_count: active,
+            elapsed_sec: elapsed,
+            buckets: BucketsSample {
+                platform: BucketMemorySample {
+                    process_count: 2,
+                    working_set_bytes: 340 * 1024 * 1024,
+                    private_bytes: 190 * 1024 * 1024,
+                    cpu_percent: 0.15,
+                },
+                pty_host: BucketMemorySample {
+                    process_count: active,
+                    working_set_bytes: (active as u64) * 16 * 1024 * 1024,
+                    private_bytes: (active as u64) * 8 * 1024 * 1024,
+                    cpu_percent: 0.02,
+                },
+                workload: BucketMemorySample {
+                    process_count: active,
+                    working_set_bytes: (active as u64) * 42 * 1024 * 1024,
+                    private_bytes: (active as u64) * 28 * 1024 * 1024,
+                    cpu_percent: 0.05,
+                },
+            },
+            webview_sub_breakdown: WebviewSubBreakdown {
+                host_private_bytes: 50 * 1024 * 1024,
+                renderer_private_bytes: 110 * 1024 * 1024,
+                gpu_private_bytes: 30 * 1024 * 1024,
+            },
+            data_plane: TerminalDataPlaneCounters {
+                active_terminals: active,
+                live_visible_terminals: active,
+                pty_bytes_read_per_sec: 0,
+                vt_feed_calls_per_sec: 0,
+                vt_feed_duration_us_p95: 0.0,
+                activity_events_emitted_per_sec: 0,
+                snapshot_polls_per_sec: 0,
+                snapshot_payload_bytes_per_sec: 0,
+                dirty_rows_painted_per_sec: front.dirty_rows_painted_per_sec,
+                frame_paint_us_p50: front.frame_paint_us_p50,
+                frame_paint_us_p95: front.frame_paint_us_p95,
+                frame_paint_us_p99: front.frame_paint_us_p99,
+                input_to_paint_ms_p95: front.input_to_paint_ms_p95,
+            },
+        }
+    }
 
     pub fn collect_snapshot() -> Value {
         let root_pid = std::process::id();
@@ -927,5 +1521,395 @@ pub fn get_system_metrics(_request: Option<Value>) -> Value {
     #[cfg(not(target_os = "windows"))]
     {
         fallback_metrics::collect_snapshot()
+    }
+}
+
+pub fn collect_benchmark_sample(
+    scenario_id: Option<&str>,
+    elapsed_sec_override: Option<u64>,
+    terminal_count_override: Option<usize>,
+) -> TerminalBenchSample {
+    #[cfg(target_os = "windows")]
+    {
+        win_metrics::collect_benchmark_sample(scenario_id, elapsed_sec_override, terminal_count_override)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        fallback_metrics::collect_benchmark_sample(scenario_id, elapsed_sec_override, terminal_count_override)
+    }
+}
+
+#[tauri::command]
+pub fn start_terminal_benchmark(request: Option<Value>) -> Value {
+    let req = request.as_ref();
+    let path = req.and_then(|r| r.get("path")).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let scenario_id = req.and_then(|r| r.get("scenarioId")).and_then(|v| v.as_str()).map(|s| s.to_string());
+    start_benchmark_internal(path.clone(), scenario_id.clone());
+    json!({
+        "ok": true,
+        "path": path,
+        "scenarioId": scenario_id.unwrap_or_else(|| "E1-idle".to_string()),
+    })
+}
+
+#[tauri::command]
+pub fn stop_terminal_benchmark() -> Value {
+    stop_benchmark_internal();
+    json!({ "ok": true })
+}
+
+#[tauri::command]
+pub fn get_terminal_benchmark_sample(request: Option<Value>) -> Value {
+    let req = request.as_ref();
+    let scenario = req.and_then(|r| r.get("scenarioId")).and_then(|v| v.as_str());
+    let elapsed = req.and_then(|r| r.get("elapsedSec")).and_then(|v| v.as_u64());
+    let terms = req.and_then(|r| r.get("terminalCount")).and_then(|v| v.as_u64()).map(|n| n as usize);
+    let sample = collect_benchmark_sample(scenario, elapsed, terms);
+    serde_json::to_value(&sample).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+pub fn report_terminal_frontend_metrics(request: Value) -> Value {
+    let req = request.get("metrics").unwrap_or(&request);
+    let dirty_rows = req.get("dirtyRowsPaintedPerSec").and_then(|v| v.as_u64()).unwrap_or(0);
+    let p50 = req.get("framePaintUsP50").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let p95 = req.get("framePaintUsP95").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let p99 = req.get("framePaintUsP99").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let input_p95 = req.get("inputToPaintMsP95").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    update_frontend_metrics(dirty_rows, p50, p95, p99, input_p95);
+    json!({ "ok": true })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bench_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::terminal::bench_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn test_classify_process_bucket_attribution() {
+        assert_eq!(classify_process_bucket("kite-code.exe"), AttributionBucket::Platform);
+        assert_eq!(classify_process_bucket("kite-core.exe"), AttributionBucket::Platform);
+        assert_eq!(classify_process_bucket("msedgewebview2.exe"), AttributionBucket::Platform);
+        assert_eq!(classify_process_bucket("conhost.exe"), AttributionBucket::PtyHost);
+        assert_eq!(classify_process_bucket("OpenConsole.exe"), AttributionBucket::PtyHost);
+        assert_eq!(classify_process_bucket("pwsh.exe"), AttributionBucket::Workload);
+        assert_eq!(classify_process_bucket("cmd.exe"), AttributionBucket::Workload);
+        assert_eq!(classify_process_bucket("node.exe"), AttributionBucket::Workload);
+        assert_eq!(classify_process_bucket("cargo.exe"), AttributionBucket::Workload);
+        assert_eq!(classify_process_bucket("rustc.exe"), AttributionBucket::Workload);
+    }
+
+    #[test]
+    fn test_webview_sub_breakdown() {
+        let procs = vec![
+            (100, 10, 45_000_000),
+            (101, 100, 150_000_000),
+            (102, 100, 35_000_000),
+        ];
+        let breakdown = compute_webview_breakdown(&procs, 10);
+        assert_eq!(breakdown.host_private_bytes, 45_000_000);
+        assert_eq!(breakdown.renderer_private_bytes, 150_000_000);
+        assert_eq!(breakdown.gpu_private_bytes, 35_000_000);
+    }
+
+    #[test]
+    fn test_terminal_bench_sample_schema_and_serialization() {
+        let sample = TerminalBenchSample {
+            timestamp_unix_ms: 1700000000000,
+            scenario_id: "E1-idle".to_string(),
+            terminal_count: 2,
+            elapsed_sec: 15,
+            buckets: BucketsSample {
+                platform: BucketMemorySample {
+                    process_count: 4,
+                    working_set_bytes: 450_000_000,
+                    private_bytes: 280_000_000,
+                    cpu_percent: 0.15,
+                },
+                pty_host: BucketMemorySample {
+                    process_count: 2,
+                    working_set_bytes: 32_000_000,
+                    private_bytes: 16_000_000,
+                    cpu_percent: 0.02,
+                },
+                workload: BucketMemorySample {
+                    process_count: 2,
+                    working_set_bytes: 85_000_000,
+                    private_bytes: 45_000_000,
+                    cpu_percent: 0.05,
+                },
+            },
+            webview_sub_breakdown: WebviewSubBreakdown {
+                host_private_bytes: 70_000_000,
+                renderer_private_bytes: 160_000_000,
+                gpu_private_bytes: 50_000_000,
+            },
+            data_plane: TerminalDataPlaneCounters {
+                active_terminals: 2,
+                live_visible_terminals: 2,
+                pty_bytes_read_per_sec: 0,
+                vt_feed_calls_per_sec: 0,
+                vt_feed_duration_us_p95: 0.0,
+                activity_events_emitted_per_sec: 0,
+                snapshot_polls_per_sec: 0,
+                snapshot_payload_bytes_per_sec: 0,
+                dirty_rows_painted_per_sec: 0,
+                frame_paint_us_p50: 0.0,
+                frame_paint_us_p95: 0.0,
+                frame_paint_us_p99: 0.0,
+                input_to_paint_ms_p95: 0.0,
+            },
+        };
+
+        let json_str = serde_json::to_string(&sample).expect("serialize sample");
+        let val: Value = serde_json::from_str(&json_str).expect("parse json");
+
+        assert_eq!(val["scenarioId"], "E1-idle");
+        assert_eq!(val["terminalCount"], 2);
+        assert_eq!(val["buckets"]["platform"]["workingSetBytes"], 450_000_000);
+        assert_eq!(val["buckets"]["ptyHost"]["workingSetBytes"], 32_000_000);
+        assert_eq!(val["buckets"]["workload"]["workingSetBytes"], 85_000_000);
+        assert_eq!(val["webviewSubBreakdown"]["rendererPrivateBytes"], 160_000_000);
+        assert_eq!(val["dataPlane"]["activeTerminals"], 2);
+    }
+
+    #[test]
+    fn test_classify_process_bucket_with_lineage() {
+        // Shells, agents and build tools inside a terminal tree are workload.
+        assert_eq!(
+            classify_process_bucket_with_lineage("pwsh.exe", true),
+            AttributionBucket::Workload
+        );
+        assert_eq!(
+            classify_process_bucket_with_lineage("node.exe", true),
+            AttributionBucket::Workload
+        );
+        assert_eq!(
+            classify_process_bucket_with_lineage("cargo.exe", true),
+            AttributionBucket::Workload
+        );
+        // Console hosts attached to a PTY session are the PTY host layer.
+        assert_eq!(
+            classify_process_bucket_with_lineage("conhost.exe", true),
+            AttributionBucket::PtyHost
+        );
+        assert_eq!(
+            classify_process_bucket_with_lineage("OpenConsole.exe", true),
+            AttributionBucket::PtyHost
+        );
+        // Kite and WebView2 processes outside any terminal lineage are platform.
+        assert_eq!(
+            classify_process_bucket_with_lineage("kite-code.exe", false),
+            AttributionBucket::Platform
+        );
+        assert_eq!(
+            classify_process_bucket_with_lineage("msedgewebview2.exe", false),
+            AttributionBucket::Platform
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_terminal_root_ancestor_walk() {
+        let mut parent_map: HashMap<u32, u32> = HashMap::new();
+        parent_map.insert(100, 2); // terminal root shell, child of the host
+        parent_map.insert(101, 100); // agent process inside that terminal
+        parent_map.insert(102, 101); // build tool spawned by the agent
+        parent_map.insert(103, 2); // WebView helper, child of the host only
+        let terminal_roots: HashSet<u32> = [100u32].into_iter().collect();
+
+        assert!(win_metrics::has_terminal_root_ancestor(
+            100,
+            2,
+            &parent_map,
+            &terminal_roots
+        ));
+        assert!(win_metrics::has_terminal_root_ancestor(
+            102,
+            2,
+            &parent_map,
+            &terminal_roots
+        ));
+        assert!(!win_metrics::has_terminal_root_ancestor(
+            103,
+            2,
+            &parent_map,
+            &terminal_roots
+        ));
+        assert!(!win_metrics::has_terminal_root_ancestor(
+            2,
+            2,
+            &parent_map,
+            &terminal_roots
+        ));
+    }
+
+    #[test]
+    fn test_bench_gate_controls_counters_and_snapshot_poll_flag() {
+        let _guard = bench_guard();
+
+        crate::terminal::set_bench_active(false);
+        crate::terminal::bench_reset_counters();
+        crate::terminal::bench_record_pty_bytes(1024);
+        crate::terminal::bench_record_vt_feed(200);
+        crate::terminal::bench_record_activity_event();
+        crate::terminal::bench_record_snapshot_poll(512);
+
+        let idle = crate::terminal::get_terminal_data_plane_snapshot();
+        assert_eq!(idle.pty_bytes_read_total, 0);
+        assert_eq!(idle.vt_feed_calls_total, 0);
+        assert_eq!(idle.activity_events_emitted_total, 0);
+        assert_eq!(idle.snapshot_polls_total, 0);
+        assert_eq!(idle.snapshot_payload_bytes_total, 0);
+
+        // An inactive poll still teaches the frontend that benchmarking is off.
+        let idle_poll = crate::terminal::poll_terminal_snapshot_sync(serde_json::json!({
+            "sessionId": "bench-missing-session",
+            "sinceSeq": 7
+        }));
+        assert_eq!(idle_poll["kind"], "unchanged");
+        assert_eq!(idle_poll["seq"], 7);
+        assert_eq!(idle_poll["benchmarkActive"], false);
+
+        crate::terminal::set_bench_active(true);
+        crate::terminal::bench_record_pty_bytes(1024);
+        crate::terminal::bench_record_vt_feed(200);
+        crate::terminal::bench_record_activity_event();
+        let active_poll = crate::terminal::poll_terminal_snapshot_sync(serde_json::json!({
+            "sessionId": "bench-missing-session",
+            "sinceSeq": 9
+        }));
+        assert_eq!(active_poll["benchmarkActive"], true);
+
+        let active = crate::terminal::get_terminal_data_plane_snapshot();
+        assert_eq!(active.pty_bytes_read_total, 1024);
+        assert_eq!(active.vt_feed_calls_total, 1);
+        assert_eq!(active.vt_feed_duration_us_p95, 200.0);
+        assert_eq!(active.activity_events_emitted_total, 1);
+        assert_eq!(active.snapshot_polls_total, 1);
+        assert_eq!(active.snapshot_payload_bytes_total, 64);
+
+        crate::terminal::bench_reset_counters();
+        let reset = crate::terminal::get_terminal_data_plane_snapshot();
+        assert_eq!(reset.pty_bytes_read_total, 0);
+        assert_eq!(reset.vt_feed_calls_total, 0);
+        assert_eq!(reset.vt_feed_duration_us_p95, 0.0);
+        assert_eq!(reset.activity_events_emitted_total, 0);
+        assert_eq!(reset.snapshot_polls_total, 0);
+        assert_eq!(reset.snapshot_payload_bytes_total, 0);
+
+        crate::terminal::set_bench_active(false);
+    }
+
+    #[test]
+    fn test_snapshot_payload_flag_is_attached_to_snapshot_kind() {
+        let snapshot = serde_json::json!({
+            "kind": "snapshot",
+            "seq": 12,
+            "snapshot": { "seq": 12 }
+        });
+        let flagged = crate::terminal::attach_benchmark_active(snapshot, true);
+        assert_eq!(flagged["kind"], "snapshot");
+        assert_eq!(flagged["seq"], 12);
+        assert_eq!(flagged["benchmarkActive"], true);
+    }
+
+    #[test]
+    fn test_benchmark_start_stop_lifecycle() {
+        let _guard = bench_guard();
+
+        start_benchmark_internal(None, Some("E2-spinners".to_string()));
+        {
+            let st = benchmark_state().lock().unwrap();
+            assert!(st.active);
+            assert_eq!(st.scenario_id, "E2-spinners");
+        }
+        assert!(crate::terminal::is_bench_active());
+        stop_benchmark_internal();
+        {
+            let st = benchmark_state().lock().unwrap();
+            assert!(!st.active);
+        }
+        assert!(!crate::terminal::is_bench_active());
+    }
+
+    #[test]
+    fn test_benchmark_start_resets_counters_and_cpu_state() {
+        let _guard = bench_guard();
+
+        crate::terminal::set_bench_active(true);
+        crate::terminal::bench_record_pty_bytes(4096);
+        crate::terminal::bench_record_activity_event();
+        assert!(crate::terminal::get_terminal_data_plane_snapshot().pty_bytes_read_total > 0);
+        crate::terminal::set_bench_active(false);
+        let _ = collect_benchmark_sample(Some("E1-idle"), Some(1), Some(1));
+        assert!(bench_cpu_state().lock().unwrap().last_sample_at.is_some());
+
+        start_benchmark_internal(None, Some("E3-agents".to_string()));
+        let first_generation = benchmark_state().lock().unwrap().generation;
+
+        let plane = crate::terminal::get_terminal_data_plane_snapshot();
+        assert_eq!(plane.pty_bytes_read_total, 0);
+        assert_eq!(plane.activity_events_emitted_total, 0);
+        assert!(bench_cpu_state().lock().unwrap().last_sample_at.is_none());
+
+        stop_benchmark_internal();
+        start_benchmark_internal(None, Some("E3-agents".to_string()));
+        let second_generation = benchmark_state().lock().unwrap().generation;
+        assert!(second_generation > first_generation);
+        stop_benchmark_internal();
+    }
+
+    #[test]
+    fn test_bench_cpu_state_is_not_primed_by_ui_snapshot() {
+        let _guard = bench_guard();
+
+        *cpu_state().lock().unwrap_or_else(|e| e.into_inner()) = CpuSampleState::new();
+        *bench_cpu_state().lock().unwrap_or_else(|e| e.into_inner()) = CpuSampleState::new();
+
+        let _ = get_system_metrics(None);
+        assert!(cpu_state().lock().unwrap().last_sample_at.is_some());
+        assert!(bench_cpu_state().lock().unwrap().last_sample_at.is_none());
+    }
+
+    #[test]
+    fn test_collect_benchmark_sample_structure() {
+        let _guard = bench_guard();
+
+        let sample = collect_benchmark_sample(Some("E1-idle"), Some(10), Some(2));
+        assert_eq!(sample.scenario_id, "E1-idle");
+        assert_eq!(sample.elapsed_sec, 10);
+        assert_eq!(sample.terminal_count, 2);
+        assert!(sample.buckets.platform.process_count >= 1);
+    }
+
+    #[test]
+    fn test_stale_frontend_metrics_are_reported_as_zero() {
+        let _guard = bench_guard();
+
+        update_frontend_metrics(123, 10.0, 20.0, 30.0, 4.0);
+        let fresh = collect_benchmark_sample(Some("E1-idle"), Some(1), Some(1));
+        assert_eq!(fresh.data_plane.dirty_rows_painted_per_sec, 123);
+        assert_eq!(fresh.data_plane.frame_paint_us_p50, 10.0);
+        assert_eq!(fresh.data_plane.frame_paint_us_p95, 20.0);
+        assert_eq!(fresh.data_plane.frame_paint_us_p99, 30.0);
+        assert_eq!(fresh.data_plane.input_to_paint_ms_p95, 4.0);
+
+        if let Ok(mut state) = frontend_metrics().lock() {
+            state.last_reported_at = Some(Instant::now() - Duration::from_secs(10));
+        }
+
+        let stale = collect_benchmark_sample(Some("E1-idle"), Some(1), Some(1));
+        assert_eq!(stale.data_plane.dirty_rows_painted_per_sec, 0);
+        assert_eq!(stale.data_plane.frame_paint_us_p50, 0.0);
+        assert_eq!(stale.data_plane.frame_paint_us_p95, 0.0);
+        assert_eq!(stale.data_plane.frame_paint_us_p99, 0.0);
+        assert_eq!(stale.data_plane.input_to_paint_ms_p95, 0.0);
     }
 }

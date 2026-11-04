@@ -43,6 +43,131 @@ pub fn to_base64(data: &[u8]) -> String {
 const MAX_SCROLLBACK_BYTES: usize = 256 * 1024;
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+// Benchmark data-plane telemetry atomic counters. Every recorder is gated on
+// BENCH_ACTIVE so an unset benchmark run pays only one relaxed load per event.
+static BENCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BENCH_PTY_BYTES_READ: AtomicU64 = AtomicU64::new(0);
+static BENCH_VT_FEED_CALLS: AtomicU64 = AtomicU64::new(0);
+static BENCH_VT_FEED_DURATION_US_SUM: AtomicU64 = AtomicU64::new(0);
+static BENCH_VT_FEED_DURATIONS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static BENCH_ACTIVITY_EVENTS_EMITTED: AtomicU64 = AtomicU64::new(0);
+static BENCH_SNAPSHOT_POLLS: AtomicU64 = AtomicU64::new(0);
+static BENCH_SNAPSHOT_PAYLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_bench_active(active: bool) {
+    BENCH_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+pub fn is_bench_active() -> bool {
+    BENCH_ACTIVE.load(Ordering::Relaxed)
+}
+
+pub fn bench_reset_counters() {
+    BENCH_PTY_BYTES_READ.store(0, Ordering::Relaxed);
+    BENCH_VT_FEED_CALLS.store(0, Ordering::Relaxed);
+    BENCH_VT_FEED_DURATION_US_SUM.store(0, Ordering::Relaxed);
+    BENCH_ACTIVITY_EVENTS_EMITTED.store(0, Ordering::Relaxed);
+    BENCH_SNAPSHOT_POLLS.store(0, Ordering::Relaxed);
+    BENCH_SNAPSHOT_PAYLOAD_BYTES.store(0, Ordering::Relaxed);
+    if let Ok(mut lock) = BENCH_VT_FEED_DURATIONS.lock() {
+        lock.clear();
+    }
+}
+
+pub fn bench_record_pty_bytes(bytes: u64) {
+    if !is_bench_active() {
+        return;
+    }
+    BENCH_PTY_BYTES_READ.fetch_add(bytes, Ordering::Relaxed);
+}
+
+pub fn bench_record_vt_feed(duration_us: u64) {
+    if !is_bench_active() {
+        return;
+    }
+    BENCH_VT_FEED_CALLS.fetch_add(1, Ordering::Relaxed);
+    BENCH_VT_FEED_DURATION_US_SUM.fetch_add(duration_us, Ordering::Relaxed);
+    if let Ok(mut lock) = BENCH_VT_FEED_DURATIONS.lock() {
+        if lock.len() >= 4096 {
+            lock.drain(0..2048);
+        }
+        lock.push(duration_us);
+    }
+}
+
+pub fn bench_record_activity_event() {
+    if !is_bench_active() {
+        return;
+    }
+    BENCH_ACTIVITY_EVENTS_EMITTED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn bench_record_snapshot_poll(payload_bytes: u64) {
+    if !is_bench_active() {
+        return;
+    }
+    BENCH_SNAPSHOT_POLLS.fetch_add(1, Ordering::Relaxed);
+    BENCH_SNAPSHOT_PAYLOAD_BYTES.fetch_add(payload_bytes, Ordering::Relaxed);
+}
+
+/// Serialized tests toggle the process-wide benchmark gate; they must not race
+/// each other across modules.
+#[cfg(test)]
+pub(crate) fn bench_test_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TerminalDataPlaneSnapshot {
+    pub active_terminals: usize,
+    pub live_visible_terminals: usize,
+    pub pty_bytes_read_total: u64,
+    pub vt_feed_calls_total: u64,
+    pub vt_feed_duration_us_p95: f64,
+    pub activity_events_emitted_total: u64,
+    pub snapshot_polls_total: u64,
+    pub snapshot_payload_bytes_total: u64,
+}
+
+pub fn get_terminal_data_plane_snapshot() -> TerminalDataPlaneSnapshot {
+    let (active_terminals, live_visible_terminals) = {
+        if let Ok(map) = get_terminals().lock() {
+            let active = map.len();
+            let live = map.values().filter(|inst| inst.presentation_live.load(Ordering::Relaxed)).count();
+            (active, live)
+        } else {
+            (0, 0)
+        }
+    };
+
+    let p95 = {
+        if let Ok(lock) = BENCH_VT_FEED_DURATIONS.lock() {
+            if lock.is_empty() {
+                0.0
+            } else {
+                let mut sorted = lock.clone();
+                sorted.sort_unstable();
+                let idx = ((sorted.len() * 95) / 100).min(sorted.len() - 1);
+                sorted[idx] as f64
+            }
+        } else {
+            0.0
+        }
+    };
+
+    TerminalDataPlaneSnapshot {
+        active_terminals,
+        live_visible_terminals,
+        pty_bytes_read_total: BENCH_PTY_BYTES_READ.load(Ordering::Relaxed),
+        vt_feed_calls_total: BENCH_VT_FEED_CALLS.load(Ordering::Relaxed),
+        vt_feed_duration_us_p95: p95,
+        activity_events_emitted_total: BENCH_ACTIVITY_EVENTS_EMITTED.load(Ordering::Relaxed),
+        snapshot_polls_total: BENCH_SNAPSHOT_POLLS.load(Ordering::Relaxed),
+        snapshot_payload_bytes_total: BENCH_SNAPSHOT_PAYLOAD_BYTES.load(Ordering::Relaxed),
+    }
+}
+
 fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -148,6 +273,7 @@ fn scan_terminal_ansi_markers(
     counts
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn count_terminal_ansi_markers(bytes: &[u8]) -> TerminalAnsiMarkerCounts {
     let mut pending = Vec::new();
     scan_terminal_ansi_markers(&mut pending, bytes)
@@ -308,6 +434,224 @@ fn capture_terminal_output(
     sequence
 }
 
+fn emit_terminal_activity(session_id: &str, seq: u64, exited: bool, exit_code: Option<i64>) {
+    bench_record_activity_event();
+    let Some(app) = crate::get_app_handle() else {
+        return;
+    };
+    use tauri::Emitter;
+    let _ = app.emit(
+        "terminal://activity",
+        serde_json::json!({
+            "sessionId": session_id,
+            "seq": seq,
+            "exited": exited,
+            "exitCode": exit_code,
+        }),
+    );
+}
+
+fn notify_terminal_exit(session_id: &str, inst: &TerminalInstance, code: i64) {
+    if inst.exit_notified.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    inst.lifecycle_stop.store(true, Ordering::Relaxed);
+    let seq = inst.vt_engine.lock().ok().map(|vt| vt.seq()).unwrap_or(0);
+    emit_terminal_activity(session_id, seq, true, Some(code));
+}
+
+fn try_child_exit(inst: &TerminalInstance) -> Option<i64> {
+    let mut child = inst.child.lock().ok()?;
+    match child.try_wait() {
+        Ok(Some(status)) => Some(status.exit_code() as i64),
+        _ => None,
+    }
+}
+
+fn maybe_bind_provider_session(session_id: &str, inst: &Arc<TerminalInstance>) {
+    let now = now_unix_ms();
+    let needs_bind = inst
+        .provider_session_id
+        .lock()
+        .ok()
+        .and_then(|p| p.clone())
+        .is_none();
+    let is_shell = is_generic_shell_engine(&inst.engine);
+    let shell_has_agent = is_shell
+        && inst
+            .detected_agent_engine
+            .lock()
+            .ok()
+            .and_then(|d| d.clone())
+            .is_some();
+    if !(needs_bind && (!is_shell || shell_has_agent)) {
+        return;
+    }
+    let attempts = inst.bind_attempts.load(Ordering::Relaxed);
+    if attempts >= 4 {
+        return;
+    }
+    let last_attempt = inst.last_bind_attempt_ms.load(Ordering::Relaxed) as i64;
+    let required_gap_ms = match attempts {
+        0 => 1_200,
+        1 => 3_500,
+        2 => 8_000,
+        _ => 18_000,
+    };
+    if now.saturating_sub(last_attempt) < required_gap_ms {
+        return;
+    }
+    inst.last_bind_attempt_ms
+        .store(now as u64, Ordering::Relaxed);
+    inst.bind_attempts.fetch_add(1, Ordering::Relaxed);
+    let sid = session_id.to_string();
+    let inst = Arc::clone(inst);
+    std::thread::spawn(move || {
+        let _ = try_bind_provider_session_id(&sid, &inst);
+    });
+}
+
+fn schedule_paint_activity(session_id: &str, inst: &Arc<TerminalInstance>, seq: u64) {
+    if !inst.presentation_live.load(Ordering::Relaxed) {
+        return;
+    }
+    let now = now_unix_ms() as u64;
+    let last = inst.last_paint_emit_ms.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 16 {
+        inst.last_paint_emit_ms.store(now, Ordering::Relaxed);
+        emit_terminal_activity(session_id, seq, false, None);
+        return;
+    }
+    if inst
+        .paint_flush_armed
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let wait = 16u64.saturating_sub(now.saturating_sub(last)).max(1);
+    let session_id = session_id.to_string();
+    let inst = Arc::clone(inst);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        inst.paint_flush_armed.store(false, Ordering::Relaxed);
+        if !inst.presentation_live.load(Ordering::Relaxed) {
+            return;
+        }
+        inst.last_paint_emit_ms
+            .store(now_unix_ms() as u64, Ordering::Relaxed);
+        let seq = inst.vt_engine.lock().ok().map(|vt| vt.seq()).unwrap_or(0);
+        emit_terminal_activity(&session_id, seq, false, None);
+    });
+}
+
+fn spawn_terminal_lifecycle(session_id: String, inst: Arc<TerminalInstance>) {
+    std::thread::spawn(move || {
+        while !inst.lifecycle_stop.load(Ordering::Relaxed) && !SHUTTING_DOWN.load(Ordering::Relaxed)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if inst.lifecycle_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            maybe_bind_provider_session(&session_id, &inst);
+            if let Some(code) = try_child_exit(&inst) {
+                notify_terminal_exit(&session_id, &inst, code);
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_pty_reader(
+    mut reader: impl Read + Send + 'static,
+    inst: Arc<TerminalInstance>,
+    session_id: String,
+) {
+    std::thread::spawn(move || {
+        let mut temp = [0u8; 32768];
+        let mut dirty = false;
+        let mut last_flush = std::time::Instant::now();
+        while let Ok(n) = reader.read(&mut temp) {
+            if n == 0 {
+                break;
+            }
+            bench_record_pty_bytes(n as u64);
+            let mut pending_replies = Vec::new();
+            let mut wants_paint = false;
+            let mut seq_after = 0u64;
+            if let Ok(mut vt) = inst.vt_engine.lock() {
+                let seq_before = vt.seq();
+                let t_feed_start = std::time::Instant::now();
+                vt.feed(&temp[..n]);
+                bench_record_vt_feed(t_feed_start.elapsed().as_micros() as u64);
+                wants_paint = vt.wants_paint() || vt.seq() != seq_before;
+                seq_after = vt.seq();
+                pending_replies = vt.take_replies();
+            }
+            if !pending_replies.is_empty() {
+                if let Ok(mut w) = inst.writer.try_lock() {
+                    let _ = w.write_all(&pending_replies);
+                    let _ = w.flush();
+                } else {
+                    let w_clone = Arc::clone(&inst.writer);
+                    let pending_replies = pending_replies.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(mut w) = w_clone.lock() {
+                            let _ = w.write_all(&pending_replies);
+                            let _ = w.flush();
+                        }
+                    });
+                }
+            }
+            if let Some(osc_dir) = extract_osc_cwd(&temp[..n]) {
+                if let Ok(mut cwd_guard) = inst.live_cwd.lock() {
+                    *cwd_guard = osc_dir;
+                }
+            }
+            let _ = capture_terminal_output(&session_id, &inst, &temp[..n], now_unix_ms());
+            if wants_paint {
+                schedule_paint_activity(&session_id, &inst, seq_after);
+            }
+            {
+                let mut b_guard = inst.buffer.lock().ok();
+                let mut s_guard = inst.scrollback.lock().ok();
+                if let Some(ref mut b) = b_guard {
+                    b.extend_from_slice(&temp[..n]);
+                    if b.len() > MAX_SCROLLBACK_BYTES {
+                        let excess = b.len() - MAX_SCROLLBACK_BYTES;
+                        b.drain(0..excess);
+                    }
+                }
+                if let Some(ref mut s) = s_guard {
+                    s.extend_from_slice(&temp[..n]);
+                    if s.len() > MAX_SCROLLBACK_BYTES {
+                        let excess = s.len() - MAX_SCROLLBACK_BYTES;
+                        s.drain(0..excess);
+                    }
+                    dirty = true;
+                }
+            }
+            if dirty && last_flush.elapsed() >= std::time::Duration::from_millis(2500) {
+                let snapshot_bytes = inst.scrollback.lock().ok().map(|s| s.clone());
+                if let Some(s) = snapshot_bytes {
+                    write_scrollback_file(&session_id, &s);
+                }
+                dirty = false;
+                last_flush = std::time::Instant::now();
+            }
+        }
+        if dirty {
+            let snapshot_bytes = inst.scrollback.lock().ok().map(|s| s.clone());
+            if let Some(s) = snapshot_bytes {
+                write_scrollback_file(&session_id, &s);
+            }
+        }
+        if let Some(code) = try_child_exit(&inst) {
+            notify_terminal_exit(&session_id, &inst, code);
+        }
+    });
+}
+
 pub fn terminal_scrollback_dir() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
     let folder = if cfg!(debug_assertions) {
@@ -363,6 +707,103 @@ pub fn read_scrollback_file(session_id: &str) -> Option<Vec<u8>> {
 pub fn write_scrollback_file(session_id: &str, bytes: &[u8]) {
     let path = scrollback_path_for_session(session_id);
     let _ = std::fs::write(path, bytes);
+}
+
+pub fn terminal_recent_text(session_id: &str) -> String {
+    if session_id.is_empty() {
+        return String::new();
+    }
+    let inst = {
+        let map = get_terminals().lock().unwrap();
+        map.get(session_id).cloned()
+    };
+    let bytes = if let Some(inst) = inst {
+        let screen = inst
+            .vt_engine
+            .lock()
+            .ok()
+            .map(|vt| vt.screen_text())
+            .unwrap_or_default();
+        if !screen.trim().is_empty() {
+            return screen;
+        }
+        // Same lock order as the reader: buffer, then scrollback. The grid lock is already dropped.
+        let pending = inst.buffer.lock().ok().map(|buf| buf.clone()).unwrap_or_default();
+        let scroll = inst
+            .scrollback
+            .lock()
+            .ok()
+            .map(|buf| buf.clone())
+            .unwrap_or_default();
+        if scroll.is_empty() { pending } else { scroll }
+    } else {
+        read_scrollback_file(session_id).unwrap_or_default()
+    };
+    let start = bytes.len().saturating_sub(64 * 1024);
+    plain_terminal_text(&bytes[start..])
+}
+
+fn plain_terminal_text(bytes: &[u8]) -> String {
+    let mut kept = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0x1b {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            match bytes[i] {
+                b'[' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        let c = bytes[i];
+                        i += 1;
+                        if (0x40..=0x7e).contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        if b == b'\r' || b == 0x08 || (b < 0x20 && b != b'\n' && b != b'\t') {
+            if b == 0x08 {
+                kept.pop();
+            }
+            i += 1;
+            continue;
+        }
+        kept.push(b);
+        i += 1;
+    }
+    String::from_utf8_lossy(&kept).replace('\u{0}', "")
+}
+
+#[cfg(test)]
+mod plain_terminal_text_tests {
+    use super::plain_terminal_text;
+
+    #[test]
+    fn dispatch_read_strips_color_and_keeps_lines() {
+        let raw = b"hello \x1b[31mred\x1b[0m\r\nnext";
+        assert_eq!(plain_terminal_text(raw), "hello red\nnext");
+    }
 }
 
 pub fn delete_scrollback_file(session_id: &str) {
@@ -426,6 +867,8 @@ pub struct TerminalInstance {
     pub workspace_id: Mutex<Option<String>>,
     pub pane_id: Mutex<Option<String>>,
     pub spawned_at_unix_ms: i64,
+    /// OS process id of the PTY root child, captured at spawn time.
+    pub root_pid: u32,
     pub had_user_activity: AtomicBool,
     pub input_line_buffer: Mutex<String>,
     pub last_user_input: Mutex<Option<String>>,
@@ -433,12 +876,34 @@ pub struct TerminalInstance {
     pub bind_attempts: std::sync::atomic::AtomicU32,
     pub cols: std::sync::atomic::AtomicU16,
     pub rows: std::sync::atomic::AtomicU16,
+    /// When false, paint wakes stop. The PTY and the VT engine keep running.
+    pub presentation_live: AtomicBool,
+    pub exit_notified: AtomicBool,
+    pub lifecycle_stop: AtomicBool,
+    pub last_paint_emit_ms: AtomicU64,
+    pub paint_flush_armed: AtomicBool,
 }
 
 pub fn get_terminals() -> &'static Mutex<HashMap<String, Arc<TerminalInstance>>> {
     static INSTANCE: std::sync::OnceLock<Mutex<HashMap<String, Arc<TerminalInstance>>>> =
         std::sync::OnceLock::new();
     INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Root shell PIDs of every open terminal session. Benchmark attribution uses
+/// these as lineage anchors for the workload and PTY-host buckets.
+pub fn get_terminal_root_pids() -> HashSet<u32> {
+    let mut roots = HashSet::new();
+    if let Ok(map) = get_terminals().lock() {
+        for inst in map.values() {
+            if let Ok(child) = inst.child.lock() {
+                if let Some(pid) = child.process_id() {
+                    roots.insert(pid);
+                }
+            }
+        }
+    }
+    roots
 }
 
 pub fn get_session_resolve_lock() -> &'static Mutex<()> {
@@ -820,7 +1285,7 @@ fn build_agent_command(
     program: &str,
     agent_args: &[String],
     cwd: &std::path::Path,
-) -> CommandBuilder {
+) -> (CommandBuilder, &'static str) {
     if let Some(exe) = resolve_direct_agent_executable(program) {
         log_trace(&format!(
             "agent_launch: direct ConPTY child exe={} args={}",
@@ -830,7 +1295,7 @@ fn build_agent_command(
         let mut c = CommandBuilder::new(exe.as_os_str());
         c.cwd(cwd);
         c.args(agent_args);
-        return c;
+        return (c, "direct");
     }
     log_trace(&format!(
         "WARN agent_launch: no native executable behind {program}; using PowerShell wrapper"
@@ -839,7 +1304,7 @@ fn build_agent_command(
     c.cwd(cwd);
     let launch = build_agent_launch_command(program, agent_args);
     c.args(["-NoLogo", "-NoExit", "-Command", &launch]);
-    c
+    (c, "powershell")
 }
 
 /// Builds the CLI arguments for launching or resuming an AI agent engine.
@@ -1199,6 +1664,7 @@ pub fn spawn_session_with_options(
     let mut initial_detected_agent: Option<String> = None;
 
     let mut agent_terminal = false;
+    let mut launcher = "powershell";
     let mut cmd = if let Some(ref hybrid_agent) = hybrid_agent_opt {
         // Hybrid shell resume: open PowerShell in the saved CWD and automatically invoke the agent's resume command
         let (agent_args, bound_id) = build_agent_cli_args_ext(
@@ -1215,7 +1681,9 @@ pub fn spawn_session_with_options(
 
         if let Some(program) = resolve_engine_program(hybrid_agent) {
             agent_terminal = true;
-            build_agent_command(&program, &agent_args, &target_dir)
+            let (built, kind) = build_agent_command(&program, &agent_args, &target_dir);
+            launcher = kind;
+            built
         } else {
             let mut c = CommandBuilder::new("powershell.exe");
             c.cwd(&target_dir);
@@ -1235,7 +1703,9 @@ pub fn spawn_session_with_options(
         );
         initial_provider_id = bound_id;
         initial_detected_agent = Some(canonical_agent_engine(engine));
-        build_agent_command(&program, &agent_args, &target_dir)
+        let (built, kind) = build_agent_command(&program, &agent_args, &target_dir);
+        launcher = kind;
+        built
     } else if is_generic_shell_engine(engine) {
         let mut c = CommandBuilder::new("powershell.exe");
         c.cwd(&target_dir);
@@ -1259,6 +1729,19 @@ pub fn spawn_session_with_options(
 
     cmd.env("KITE_ENV", "1");
     cmd.env("KITE_SESSION_ID", session_id);
+    cmd.env("KITE_DISPATCH", "1");
+    let dispatch_address = format!("session:{session_id}");
+    cmd.env("KITE_ADDRESS", &dispatch_address);
+    let skill = crate::dispatch::cli::install_dispatch_skill();
+    cmd.env("KITE_SKILL_FILE", skill.display().to_string());
+    let bin = crate::dispatch::cli::install_kite_shim();
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let path_value = if inherited.is_empty() {
+        bin.display().to_string()
+    } else {
+        format!("{};{inherited}", bin.display())
+    };
+    cmd.env("PATH", &path_value);
     cmd.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
     if agent_terminal {
         cmd.env("TERM", AGENT_TERMINAL_TERM);
@@ -1280,13 +1763,36 @@ pub fn spawn_session_with_options(
         }
     }
 
+    let trace_engine = initial_detected_agent
+        .clone()
+        .unwrap_or_else(|| engine.to_string());
+    let launch_text = options.initial_prompt.as_deref().unwrap_or("");
+    crate::dispatch::trace::record(&crate::dispatch::trace::handoff_event(
+        "launch",
+        launch_text,
+        crate::dispatch::trace::Fields {
+            op: "launch",
+            session: session_id,
+            engine: &trace_engine,
+            status: "",
+            pane: "",
+            writes: if options.initial_prompt.is_some() { 1 } else { 0 },
+            launcher,
+            manual: crate::dispatch::trace::manual_label(
+                options.system_prompt.is_some(),
+                launch_text,
+            ),
+        },
+    ));
+
     let child = pair
         .slave
         .spawn_command(cmd)
         .expect("failed to spawn command in pty");
     drop(pair.slave);
+    let root_pid = child.process_id().unwrap_or(0);
 
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .expect("failed to clone pty reader");
@@ -1295,10 +1801,8 @@ pub fn spawn_session_with_options(
             .take_writer()
             .expect("failed to take pty writer"),
     ));
-    let writer_reader = Arc::clone(&writer);
 
     let buffer = Arc::new(Mutex::new(Vec::new()));
-    let buf_reader = Arc::clone(&buffer);
 
     let initial_scrollback = if is_agent_cli {
         delete_scrollback_file(session_id);
@@ -1307,10 +1811,7 @@ pub fn spawn_session_with_options(
         read_scrollback_file(session_id).unwrap_or_default()
     };
     let scrollback = Arc::new(Mutex::new(initial_scrollback));
-    let scrollback_reader = Arc::clone(&scrollback);
     let live_cwd = Arc::new(Mutex::new(target_dir_str.clone()));
-    let live_cwd_reader = Arc::clone(&live_cwd);
-    let session_id_owned = session_id.to_string();
 
     let initial_cols = if cols == 0 { 80 } else { cols };
     let initial_rows = if rows == 0 { 24 } else { rows };
@@ -1324,75 +1825,6 @@ pub fn spawn_session_with_options(
         }
     }
     let vt_engine = Arc::new(Mutex::new(vt_engine_init));
-    let vt_engine_reader = Arc::clone(&vt_engine);
-
-    std::thread::spawn(move || {
-        let mut temp = [0u8; 32768];
-        let mut dirty = false;
-        let mut last_flush = std::time::Instant::now();
-        while let Ok(n) = reader.read(&mut temp) {
-            if n == 0 {
-                break;
-            }
-            let mut pending_replies = Vec::new();
-            if let Ok(mut vt) = vt_engine_reader.lock() {
-                vt.feed(&temp[..n]);
-                pending_replies = vt.take_replies();
-            }
-            if !pending_replies.is_empty() {
-                if let Ok(mut w) = writer_reader.try_lock() {
-                    let _ = w.write_all(&pending_replies);
-                    let _ = w.flush();
-                } else {
-                    let w_clone = Arc::clone(&writer_reader);
-                    std::thread::spawn(move || {
-                        if let Ok(mut w) = w_clone.lock() {
-                            let _ = w.write_all(&pending_replies);
-                            let _ = w.flush();
-                        }
-                    });
-                }
-            }
-            if let Some(osc_dir) = extract_osc_cwd(&temp[..n]) {
-                if let Ok(mut cwd_guard) = live_cwd_reader.lock() {
-                    *cwd_guard = osc_dir;
-                }
-            }
-            {
-                let mut b_guard = buf_reader.lock().ok();
-                let mut s_guard = scrollback_reader.lock().ok();
-                if let Some(ref mut b) = b_guard {
-                    b.extend_from_slice(&temp[..n]);
-                    if b.len() > MAX_SCROLLBACK_BYTES {
-                        let excess = b.len() - MAX_SCROLLBACK_BYTES;
-                        b.drain(0..excess);
-                    }
-                }
-                if let Some(ref mut s) = s_guard {
-                    s.extend_from_slice(&temp[..n]);
-                    if s.len() > MAX_SCROLLBACK_BYTES {
-                        let excess = s.len() - MAX_SCROLLBACK_BYTES;
-                        s.drain(0..excess);
-                    }
-                    dirty = true;
-                }
-            }
-            if dirty && last_flush.elapsed() >= std::time::Duration::from_millis(2500) {
-                let snapshot_bytes = scrollback_reader.lock().ok().map(|s| s.clone());
-                if let Some(s) = snapshot_bytes {
-                    write_scrollback_file(&session_id_owned, &s);
-                }
-                dirty = false;
-                last_flush = std::time::Instant::now();
-            }
-        }
-        if dirty {
-            let snapshot_bytes = scrollback_reader.lock().ok().map(|s| s.clone());
-            if let Some(s) = snapshot_bytes {
-                write_scrollback_file(&session_id_owned, &s);
-            }
-        }
-    });
 
     let spawned_at_ms = now_unix_ms();
     let had_initial_activity = match &options.mode {
@@ -1423,6 +1855,7 @@ pub fn spawn_session_with_options(
         workspace_id: Mutex::new(options.workspace_id.clone()),
         pane_id: Mutex::new(options.pane_id.clone()),
         spawned_at_unix_ms: spawned_at_ms,
+        root_pid,
         had_user_activity: AtomicBool::new(had_initial_activity),
         input_line_buffer: Mutex::new(String::new()),
         last_user_input: Mutex::new(None),
@@ -1430,8 +1863,14 @@ pub fn spawn_session_with_options(
         bind_attempts: std::sync::atomic::AtomicU32::new(0),
         cols: std::sync::atomic::AtomicU16::new(if cols == 0 { 80 } else { cols }),
         rows: std::sync::atomic::AtomicU16::new(if rows == 0 { 24 } else { rows }),
+        presentation_live: AtomicBool::new(true),
+        exit_notified: AtomicBool::new(false),
+        lifecycle_stop: AtomicBool::new(false),
+        last_paint_emit_ms: AtomicU64::new(0),
+        paint_flush_armed: AtomicBool::new(false),
     });
 
+    let mut start_reader = false;
     if let Ok(mut map) = get_terminals().lock() {
         if map.contains_key(session_id) {
             if let Ok(mut child) = instance.child.lock() {
@@ -1442,7 +1881,12 @@ pub fn spawn_session_with_options(
             }
         } else {
             map.insert(session_id.to_string(), Arc::clone(&instance));
+            start_reader = true;
         }
+    }
+    if start_reader {
+        spawn_pty_reader(reader, Arc::clone(&instance), session_id.to_string());
+        spawn_terminal_lifecycle(session_id.to_string(), Arc::clone(&instance));
     }
 
     // Record initial session metadata in terminal-sessions.json
@@ -1482,6 +1926,24 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+    if should_proxy_to_core_daemon(&session_id) {
+        let mut remote = req.clone();
+        remote["sessionId"] = serde_json::Value::String(session_id.clone());
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc("session.create", Some(remote)) {
+            return serde_json::json!({
+                "sessionId": res.get("sessionId").cloned().unwrap_or(serde_json::Value::String(session_id.clone())),
+                "attachedToExisting": false,
+                "scrollbackBase64": serde_json::Value::Null,
+                "host": { "backend": "conpty", "buildNumber": 22631 },
+                "restore": { "kind": "startedFresh", "reason": "coreDaemon" },
+                "rootPid": res.get("rootPid").cloned().unwrap_or(serde_json::Value::Null),
+                "spawnedAtUnixMs": res.get("spawnedAtUnixMs").cloned().unwrap_or(serde_json::Value::Null),
+                "channelId": res.get("channelId").cloned().unwrap_or(serde_json::Value::Null),
+            });
+        }
+        // The daemon did not answer: fall back to an in-process spawn.
+    }
+
     let cwd = workspace_cwd(req);
     let workspace_id = extract_workspace_id(req);
     let pane_id = extract_pane_id(req);
@@ -1492,7 +1954,11 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         .and_then(|e| e.as_str())
         .unwrap_or("powershell");
 
-    let cols = req.get("columns").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+    let cols = req
+        .get("columns")
+        .or_else(|| req.get("cols"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(80) as u16;
     let rows = req.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
     let preserve_unread_buffer = req
         .get("preserveUnreadBuffer")
@@ -1534,12 +2000,12 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
                 }
             }
             let sb = snapshot_scrollback_for_attach(&session_id, inst, preserve_unread_buffer);
-            Some(sb)
+            Some((sb, inst.root_pid, inst.spawned_at_unix_ms))
         } else {
             None
         }
     };
-    if let Some(sb) = existing_scrollback {
+    if let Some((sb, root_pid, spawned_at_unix_ms)) = existing_scrollback {
         capture_terminal_lifecycle(
             &session_id,
             true,
@@ -1552,7 +2018,9 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
             "attachedToExisting": true,
             "scrollbackBase64": sb.as_deref().map(to_base64),
             "host": { "backend": "conpty", "buildNumber": 22631 },
-            "restore": { "kind": "reattached" }
+            "restore": { "kind": "reattached" },
+            "rootPid": root_pid,
+            "spawnedAtUnixMs": spawned_at_unix_ms
         });
     }
 
@@ -1565,10 +2033,14 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         .get("autoApprove")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let system_prompt = req
+    let mut system_prompt = req
         .get("systemPrompt")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .filter(|text| !text.is_empty());
+    if system_prompt.is_none() && crate::dispatch::programs::accepts_system_prompt(engine) {
+        system_prompt = Some(crate::dispatch::cli::skill_text().to_string());
+    }
 
     spawn_session_with_options(
         &session_id,
@@ -1596,12 +2068,23 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         disk_scrollback_bytes.as_ref().map(Vec::len),
     );
 
+    let (root_pid, spawned_at_unix_ms) = get_terminals()
+        .lock()
+        .ok()
+        .and_then(|map| {
+            map.get(&session_id)
+                .map(|inst| (inst.root_pid, inst.spawned_at_unix_ms))
+        })
+        .unwrap_or((0, now_unix_ms()));
+
     serde_json::json!({
         "sessionId": session_id,
         "attachedToExisting": false,
         "scrollbackBase64": disk_scrollback,
         "host": { "backend": "conpty", "buildNumber": 22631 },
-        "restore": { "kind": "startedFresh", "reason": "noConversation" }
+        "restore": { "kind": "startedFresh", "reason": "noConversation" },
+        "rootPid": root_pid,
+        "spawnedAtUnixMs": spawned_at_unix_ms
     })
 }
 
@@ -1611,6 +2094,45 @@ pub async fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
 }
 
 pub fn attach_terminal_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    if should_proxy_to_core_daemon(&session_id) {
+        let mut remote = req.clone();
+        remote["sessionId"] = serde_json::Value::String(session_id.clone());
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc("session.attach_rpc", Some(remote))
+        {
+            let exited = res
+                .get("exited")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let attached_to_existing = res
+                .get("rootPid")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0;
+            return serde_json::json!({
+                "sessionId": session_id,
+                "attachedToExisting": attached_to_existing,
+                "scrollbackBase64": serde_json::Value::Null,
+                "screenSeed": false,
+                "channelId": res.get("channelId").cloned().unwrap_or(serde_json::Value::Null),
+                "rootPid": res.get("rootPid").cloned().unwrap_or(serde_json::Value::Null),
+                "exited": exited,
+                "host": { "backend": "conpty", "buildNumber": 22631 },
+                "restore": { "kind": if attached_to_existing { "reattached" } else { "restoredFromDisk" } },
+            });
+        }
+        // The daemon did not answer: fall back to a local attach/spawn.
+    }
+    attach_terminal_local_sync(request)
+}
+
+pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req
         .get("sessionId")
@@ -1893,19 +2415,6 @@ pub fn read_terminal_output_sync(request: serde_json::Value) -> serde_json::Valu
     };
 
     if let Some(inst) = instance {
-        if let Ok(mut vt) = inst.vt_engine.lock() {
-            vt.set_canvas_active(false);
-            let _ = vt.take_replies();
-        }
-        let _capture_order = if terminal_capture_dir().is_some() {
-            Some(
-                inst.output_capture_order
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            )
-        } else {
-            None
-        };
         let mut bytes = Vec::new();
         if let Ok(mut buf) = inst.buffer.lock() {
             if !buf.is_empty() {
@@ -1915,50 +2424,8 @@ pub fn read_terminal_output_sync(request: serde_json::Value) -> serde_json::Valu
 
         let now = now_unix_ms();
 
-        // Periodically check if an active terminal still needs its providerSessionId bound.
-        // Generic shells (PowerShell, cmd) never need binding unless a child agent was detected.
-        // AI agents attempt binding with progressive backoff and stop after 4 attempts.
-        let needs_bind = inst
-            .provider_session_id
-            .lock()
-            .ok()
-            .and_then(|p| p.clone())
-            .is_none();
-        let is_shell = is_generic_shell_engine(&inst.engine);
-        let shell_has_agent = is_shell
-            && inst
-                .detected_agent_engine
-                .lock()
-                .ok()
-                .and_then(|d| d.clone())
-                .is_some();
-        let should_attempt = needs_bind && (!is_shell || shell_has_agent);
-
-        if should_attempt {
-            let attempts = inst.bind_attempts.load(Ordering::Relaxed);
-            if attempts < 4 {
-                let last_attempt = inst.last_bind_attempt_ms.load(Ordering::Relaxed) as i64;
-                let required_gap_ms = match attempts {
-                    0 => 1_200,
-                    1 => 3_500,
-                    2 => 8_000,
-                    _ => 18_000,
-                };
-                if now.saturating_sub(last_attempt) >= required_gap_ms {
-                    inst.last_bind_attempt_ms
-                        .store(now as u64, Ordering::Relaxed);
-                    inst.bind_attempts.fetch_add(1, Ordering::Relaxed);
-                    let sid = session_id.to_string();
-                    let inst_clone = Arc::clone(&inst);
-                    std::thread::spawn(move || {
-                        let _ = try_bind_provider_session_id(&sid, &inst_clone);
-                    });
-                }
-            }
-        }
-
         if !bytes.is_empty() {
-            let seq = capture_terminal_output(&session_id, &inst, &bytes, now);
+            let seq = inst.sequence.load(Ordering::Relaxed);
             return serde_json::json!({
                 "kind": "output",
                 "sequence": seq,
@@ -2002,6 +2469,18 @@ pub async fn write_terminal(request: serde_json::Value) -> serde_json::Value {
 pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc("session.write", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    write_terminal_local_sync(request)
+}
+
+pub fn write_terminal_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let input = req.get("input").and_then(|v| v.as_str()).unwrap_or("");
 
     let instance = {
@@ -2009,6 +2488,7 @@ pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         map.get(session_id).cloned()
     };
 
+    let mut wrote_ok = false;
     if let Some(inst) = instance {
         let mut submitted_line = false;
         if !input.is_empty() {
@@ -2035,9 +2515,31 @@ pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {
                 }
             }
         }
-        if let Ok(mut writer) = inst.writer.lock() {
+        let wrote = if let Ok(mut writer) = inst.writer.lock() {
             let _ = writer.write_all(input.as_bytes());
             let _ = writer.flush();
+            true
+        } else {
+            false
+        };
+        wrote_ok = wrote;
+        if wrote
+            && (input.contains('\n') || input.contains('\r') || input.contains("\u{1b}[200~"))
+        {
+            crate::dispatch::trace::record(&crate::dispatch::trace::handoff_event(
+                "pty",
+                input,
+                crate::dispatch::trace::Fields {
+                    op: "pty-write",
+                    session: session_id,
+                    engine: &inst.engine,
+                    status: "",
+                    pane: "",
+                    writes: 1,
+                    launcher: "",
+                    manual: "none",
+                },
+            ));
         }
 
         if submitted_line {
@@ -2062,9 +2564,15 @@ pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {
                 });
             }
         }
+    } else {
+        return serde_json::json!({ "ok": false, "error": "Session not found" });
     }
 
-    serde_json::Value::Null
+    if wrote_ok {
+        serde_json::json!({ "ok": true })
+    } else {
+        serde_json::json!({ "ok": false, "error": "Terminal writer unavailable" })
+    }
 }
 
 #[tauri::command]
@@ -2073,6 +2581,19 @@ pub async fn resize_terminal(request: serde_json::Value) -> serde_json::Value {
 }
 
 pub fn resize_terminal_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.resize", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    resize_terminal_local_sync(request)
+}
+
+pub fn resize_terminal_local_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let cols = req.get("columns").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
@@ -2084,7 +2605,11 @@ pub fn resize_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         map.get(session_id).cloned()
     };
 
-    if let Some(inst) = instance {
+    let Some(inst) = instance else {
+        return serde_json::json!({ "ok": false, "error": "Session not found" });
+    };
+
+    {
         let prev_cols = inst.cols.swap(cols, Ordering::Relaxed);
         let prev_rows = inst.rows.swap(rows, Ordering::Relaxed);
         if force || prev_cols != cols || prev_rows != rows {
@@ -2118,7 +2643,48 @@ pub fn resize_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         }
     }
 
-    serde_json::Value::Null
+    serde_json::json!({ "ok": true, "columns": cols, "rows": rows })
+}
+
+/// Bytes GhostGrid has not yet handed to the agent registry.
+///
+/// The DOM surface drains this buffer through `read_terminal_output`. GhostGrid
+/// never calls that command, so the snapshot poll takes the same chunks and
+/// returns them as `observedBytesBase64`. The scrollback copy stays intact.
+fn take_terminal_output_buffer(inst: &TerminalInstance) -> Vec<u8> {
+    inst.buffer
+        .lock()
+        .ok()
+        .map(|mut buf| std::mem::take(&mut *buf))
+        .unwrap_or_default()
+}
+
+fn attach_observed_bytes(mut value: serde_json::Value, bytes: &[u8]) -> serde_json::Value {
+    if bytes.is_empty() {
+        return value;
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "observedBytesBase64".to_string(),
+            serde_json::Value::String(to_base64(bytes)),
+        );
+    }
+    value
+}
+
+/// Every snapshot poll response carries the benchmark gate state so the
+/// frontend collector can activate and deactivate itself without extra IPC.
+pub fn attach_benchmark_active(
+    mut value: serde_json::Value,
+    bench_active: bool,
+) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "benchmarkActive".to_string(),
+            serde_json::Value::Bool(bench_active),
+        );
+    }
+    value
 }
 
 #[tauri::command]
@@ -2129,6 +2695,19 @@ pub async fn poll_terminal_snapshot(request: serde_json::Value) -> serde_json::V
 pub fn poll_terminal_snapshot_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.poll_snapshot", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    poll_terminal_snapshot_local_sync(request)
+}
+
+pub fn poll_terminal_snapshot_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let since_seq = req.get("sinceSeq").and_then(|v| v.as_u64()).unwrap_or(0);
 
     let instance = {
@@ -2137,66 +2716,6 @@ pub fn poll_terminal_snapshot_sync(request: serde_json::Value) -> serde_json::Va
     };
 
     if let Some(inst) = instance {
-        let _capture_order = if terminal_capture_dir().is_some() {
-            Some(
-                inst.output_capture_order
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            )
-        } else {
-            None
-        };
-        let mut bytes = Vec::new();
-        if let Ok(mut buf) = inst.buffer.lock() {
-            if !buf.is_empty() {
-                bytes = std::mem::take(&mut *buf);
-            }
-        }
-        let now = now_unix_ms();
-        if !bytes.is_empty() {
-            let _ = capture_terminal_output(session_id, &inst, &bytes, now);
-        }
-
-        // Periodically check if an active terminal still needs its providerSessionId bound.
-        let needs_bind = inst
-            .provider_session_id
-            .lock()
-            .ok()
-            .and_then(|p| p.clone())
-            .is_none();
-        let is_shell = is_generic_shell_engine(&inst.engine);
-        let shell_has_agent = is_shell
-            && inst
-                .detected_agent_engine
-                .lock()
-                .ok()
-                .and_then(|d| d.clone())
-                .is_some();
-        let should_attempt = needs_bind && (!is_shell || shell_has_agent);
-
-        if should_attempt {
-            let attempts = inst.bind_attempts.load(Ordering::Relaxed);
-            if attempts < 4 {
-                let last_attempt = inst.last_bind_attempt_ms.load(Ordering::Relaxed) as i64;
-                let required_gap_ms = match attempts {
-                    0 => 1_200,
-                    1 => 3_500,
-                    2 => 8_000,
-                    _ => 18_000,
-                };
-                if now.saturating_sub(last_attempt) >= required_gap_ms {
-                    inst.last_bind_attempt_ms
-                        .store(now as u64, Ordering::Relaxed);
-                    inst.bind_attempts.fetch_add(1, Ordering::Relaxed);
-                    let sid = session_id.to_string();
-                    let inst_clone = Arc::clone(&inst);
-                    std::thread::spawn(move || {
-                        let _ = try_bind_provider_session_id(&sid, &inst_clone);
-                    });
-                }
-            }
-        }
-
         let (exited, exit_code) = if let Ok(mut child) = inst.child.lock() {
             if let Ok(Some(status)) = child.try_wait() {
                 (true, Some(status.exit_code() as i64))
@@ -2208,7 +2727,6 @@ pub fn poll_terminal_snapshot_sync(request: serde_json::Value) -> serde_json::Va
         };
 
         if let Ok(mut vt) = inst.vt_engine.lock() {
-            vt.set_canvas_active(true);
             let pending_replies = vt.take_replies();
             let res = vt.get_snapshot_diff(since_seq, exited, exit_code);
             let timeout_notes = vt.take_dec2026_timeouts();
@@ -2220,16 +2738,235 @@ pub fn poll_terminal_snapshot_sync(request: serde_json::Value) -> serde_json::Va
                     let _ = w.flush();
                 }
             }
-            return serde_json::to_value(&res).unwrap_or(serde_json::Value::Null);
+            let observed = take_terminal_output_buffer(&inst);
+            let snapshot_val = serde_json::to_value(&res).unwrap_or(serde_json::Value::Null);
+            let bench_active = is_bench_active();
+            let res_val = attach_benchmark_active(
+                attach_observed_bytes(snapshot_val, &observed),
+                bench_active,
+            );
+            // Measuring payload size is benchmark-only work: skip the second
+            // serialization entirely when no run is active.
+            let payload_bytes = if bench_active {
+                serde_json::to_string(&res_val)
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            bench_record_snapshot_poll(payload_bytes);
+            return res_val;
         }
     }
 
-    serde_json::json!({
-        "kind": "unchanged",
-        "seq": since_seq,
-        "exited": false,
-        "exitCode": serde_json::Value::Null
-    })
+    let bench_active = is_bench_active();
+    bench_record_snapshot_poll(if bench_active { 64 } else { 0 });
+    attach_benchmark_active(
+        serde_json::json!({
+            "kind": "unchanged",
+            "seq": since_seq,
+            "exited": false,
+            "exitCode": serde_json::Value::Null
+        }),
+        bench_active,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Binary snapshot polling (`SNAPSHOT_BIN`)
+// ---------------------------------------------------------------------------
+
+static LAST_BIN_POLLED_SEQ: std::sync::OnceLock<Mutex<HashMap<String, u64>>> =
+    std::sync::OnceLock::new();
+
+fn last_bin_polled_seq() -> &'static Mutex<HashMap<String, u64>> {
+    LAST_BIN_POLLED_SEQ.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_bin_polled_seq(session_id: &str, seq: u64) {
+    if let Ok(mut map) = last_bin_polled_seq().lock() {
+        map.insert(session_id.to_string(), seq);
+    }
+}
+
+fn bin_polled_seq(session_id: &str) -> u64 {
+    last_bin_polled_seq()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(session_id).copied())
+        .unwrap_or(0)
+}
+
+/// Returns the sequence number of output a binary client has not received yet.
+fn unpolled_bin_seq(session_id: &str) -> Option<u64> {
+    let instance = get_terminals()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(session_id).cloned())?;
+    let vt = instance.vt_engine.lock().ok()?;
+    let seq = vt.seq();
+    if vt.has_pending_output() || seq > bin_polled_seq(session_id) {
+        Some(seq)
+    } else {
+        None
+    }
+}
+
+/// True when the VT grid advanced past the last `SNAPSHOT_BIN` frame delivered.
+pub fn session_has_unpolled_output(session_id: &str) -> bool {
+    unpolled_bin_seq(session_id).is_some()
+}
+
+/// Emits `terminal://activity` after a `CREDIT` replenishment re-armed a paused
+/// binary channel, coalescing all dirty rows into exactly one wake-up (S2).
+pub fn notify_session_credit_restored(session_id: &str) {
+    if let Some(seq) = unpolled_bin_seq(session_id) {
+        emit_terminal_activity(session_id, seq, false, None);
+    }
+}
+
+/// Builds a `SNAPSHOT_BIN` frame payload for a session while applying every side
+/// effect of `poll_terminal_snapshot_sync`: PTY query replies, DEC 2026 timeout
+/// logging, observed output draining, and snapshot credit accounting.
+///
+/// Returns an empty payload when the session is gone, the grid is unchanged, or
+/// the session's credit balance is exhausted. The VT engine keeps parsing either
+/// way, so a paused channel resumes with one coalesced frame.
+pub fn poll_terminal_snapshot_bin_bytes(session_id: &str, since_seq: Option<u64>) -> Vec<u8> {
+    if should_proxy_to_core_daemon(session_id) {
+        let params = serde_json::json!({ "sessionId": session_id, "sinceSeq": since_seq });
+        match crate::core_daemon::send_core_daemon_rpc("session.poll_snapshot_bin", Some(params)) {
+            Ok(res) => {
+                return res
+                    .get("bytesBase64")
+                    .and_then(|v| v.as_str())
+                    .and_then(decode_base64)
+                    .unwrap_or_default();
+            }
+            Err(_) => return Vec::new(),
+        }
+    }
+    poll_terminal_snapshot_bin_local_bytes(session_id, since_seq)
+}
+
+/// In-process `SNAPSHOT_BIN` builder used by the daemon that owns the PTYs.
+pub fn poll_terminal_snapshot_bin_local_bytes(session_id: &str, since_seq: Option<u64>) -> Vec<u8> {
+    let instance = {
+        let Ok(map) = get_terminals().lock() else {
+            return Vec::new();
+        };
+        map.get(session_id).cloned()
+    };
+    let Some(inst) = instance else {
+        return Vec::new();
+    };
+
+    let (exited, exit_code) = if let Ok(mut child) = inst.child.lock() {
+        if let Ok(Some(status)) = child.try_wait() {
+            (true, Some(status.exit_code() as i64))
+        } else {
+            (false, None)
+        }
+    } else {
+        (false, None)
+    };
+
+    let has_credit = crate::core_daemon::has_session_snapshot_credit(session_id);
+    let mut pending_replies = Vec::new();
+    let mut timeout_notes = Vec::new();
+    let mut render_held = false;
+    let mut response = None;
+    if let Ok(mut vt) = inst.vt_engine.lock() {
+        pending_replies = vt.take_replies();
+        timeout_notes = vt.take_dec2026_timeouts();
+        render_held = vt.render_held();
+        if has_credit {
+            response = Some(vt.get_snapshot_diff(since_seq.unwrap_or(0), exited, exit_code));
+        }
+    }
+    log_dec2026_timeouts(session_id, timeout_notes);
+    if !pending_replies.is_empty() {
+        if let Ok(mut writer) = inst.writer.lock() {
+            let _ = writer.write_all(&pending_replies);
+            let _ = writer.flush();
+        }
+    }
+
+    let observed = take_terminal_output_buffer(&inst);
+    if !observed.is_empty() {
+        maybe_bind_provider_session(session_id, &inst);
+    }
+
+    let Some(crate::vt_engine::TerminalSnapshotPollResponse::Snapshot { snapshot, .. }) = response else {
+        return Vec::new();
+    };
+    if !crate::core_daemon::try_consume_session_snapshot_credit(session_id) {
+        return Vec::new();
+    }
+
+    let bench_active = is_bench_active();
+    let observed_bytes_base64 = if observed.is_empty() {
+        None
+    } else {
+        Some(to_base64(&observed))
+    };
+    let bytes = crate::vt_engine::serialize_render_snapshot_bin(
+        &snapshot,
+        exited,
+        exit_code,
+        render_held,
+        bench_active,
+        observed_bytes_base64,
+    );
+    record_bin_polled_seq(session_id, snapshot.seq);
+    bench_record_snapshot_poll(bytes.len() as u64);
+    bytes
+}
+
+#[tauri::command]
+pub async fn set_terminal_presentation(request: serde_json::Value) -> serde_json::Value {
+    set_terminal_presentation_sync(request)
+}
+pub fn set_terminal_presentation_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let live = req.get("live").and_then(|v| v.as_bool()).unwrap_or(false);
+    let instance = {
+        let map = get_terminals().lock().unwrap();
+        map.get(session_id).cloned()
+    };
+    if let Some(inst) = instance {
+        inst.presentation_live.store(live, Ordering::Relaxed);
+        if let Ok(mut vt) = inst.vt_engine.lock() {
+            vt.set_canvas_active(live);
+        }
+        if live {
+            let seq = inst.vt_engine.lock().ok().map(|vt| vt.seq()).unwrap_or(0);
+            emit_terminal_activity(session_id, seq, false, None);
+        }
+    }
+    serde_json::json!({ "ok": instance_exists(session_id), "live": live })
+}
+
+fn instance_exists(session_id: &str) -> bool {
+    get_terminals()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(session_id).cloned())
+        .is_some()
+}
+
+/// True when this process owns a live PTY registry entry for the session.
+pub fn has_local_terminal_instance(session_id: &str) -> bool {
+    instance_exists(session_id)
+}
+
+/// True when a detached `kite-core` owns the PTYs and this process must forward
+/// terminal operations over the control pipe instead of touching a local map.
+fn should_proxy_to_core_daemon(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && crate::core_daemon::is_external_daemon_owner()
+        && !has_local_terminal_instance(session_id)
 }
 
 fn log_dec2026_timeouts(session_id: &str, notes: Vec<crate::vt_engine::Dec2026TimeoutNotice>) {
@@ -2266,6 +3003,7 @@ pub fn scroll_terminal_viewport_sync(
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let delta_lines = req.get("deltaLines").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let absolute_offset = req.get("absoluteOffset").and_then(|v| v.as_u64());
     if session_id.is_empty() {
         return Err("Session not found".to_string());
     }
@@ -2279,7 +3017,11 @@ pub fn scroll_terminal_viewport_sync(
     };
     let mut vt = inst.vt_engine.lock().map_err(|e| e.to_string())?;
     let prev_seq = vt.seq();
-    vt.scroll_viewport(delta_lines);
+    if let Some(offset) = absolute_offset {
+        vt.jump_scrollback(offset as u32);
+    } else {
+        vt.scroll_viewport(delta_lines);
+    }
     let response = vt.get_snapshot_diff(prev_seq, false, None);
     let notes = vt.take_dec2026_timeouts();
     let snapshot = match response {
@@ -2296,6 +3038,31 @@ pub fn scroll_terminal_viewport_sync(
     drop(vt);
     log_dec2026_timeouts(session_id, notes);
     snapshot
+}
+
+#[tauri::command]
+pub async fn find_terminal_text(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    find_terminal_text_sync(request)
+}
+
+pub fn find_terminal_text_sync(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
+    if session_id.is_empty() {
+        return Err("Session not found".to_string());
+    }
+    let inst = {
+        let manager = get_terminals().lock().map_err(|e| e.to_string())?;
+        manager
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "Session not found".to_string())?
+    };
+    let mut vt = inst.vt_engine.lock().map_err(|e| e.to_string())?;
+    let hits = vt.find_text(query, limit);
+    Ok(serde_json::json!({ "hits": hits }))
 }
 
 #[tauri::command]
@@ -2413,35 +3180,35 @@ pub fn report_terminal_agent_detected(request: serde_json::Value) -> serde_json:
     serde_json::Value::Null
 }
 
-/// Synchronously flushes all terminal scrollbacks, captures live CWDs, child agent processes,
-/// and provider session IDs into `terminal-sessions.json`, and terminates ConPTY processes
-/// cleanly WITHOUT deleting `.scrollback` files.
-pub fn snapshot_and_shutdown_all_terminals(reason: &str) {
-    if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    log_trace(&format!(
-        "snapshot_and_shutdown_all_terminals invoked: reason={}",
-        reason
-    ));
-
+/// Flushes scrollback and persists `terminal-sessions.json` for every live
+/// terminal without terminating any child process and without latching
+/// `SHUTTING_DOWN`, so the background core survives a GUI window close (S4).
+pub fn flush_all_terminal_scrollbacks() {
     let active_instances: Vec<(String, Arc<TerminalInstance>)> = {
-        let Ok(mut map) = get_terminals().lock() else {
+        let Ok(map) = get_terminals().lock() else {
             return;
         };
-        map.drain().collect()
+        map.iter()
+            .map(|(session_id, inst)| (session_id.clone(), Arc::clone(inst)))
+            .collect()
     };
-
     if active_instances.is_empty() {
         return;
     }
+    flush_and_persist_active_terminals(&active_instances, now_unix_ms());
+}
 
+/// Shared scrollback flush + session metadata persistence for a snapshot of live
+/// instances. Returns the root PIDs the caller may terminate.
+fn flush_and_persist_active_terminals(
+    active_instances: &[(String, Arc<TerminalInstance>)],
+    now: i64,
+) -> Vec<u32> {
     let mut persisted_map = read_persisted_terminal_sessions();
     let mut claimed_provider_ids: HashSet<String> = HashSet::new();
-    let now = now_unix_ms();
     let mut pids_to_kill: Vec<u32> = Vec::new();
 
-    for (session_id, inst) in &active_instances {
+    for (session_id, inst) in active_instances.iter() {
         // 1. Flush any unread buffer into scrollback and write .scrollback to disk
         let _ = snapshot_scrollback_for_attach(session_id, inst, false);
 
@@ -2573,10 +3340,37 @@ pub fn snapshot_and_shutdown_all_terminals(reason: &str) {
         );
     }
 
-    // 3. Atomically persist terminal-sessions.json before killing child processes
+    // Atomically persist terminal-sessions.json before any caller kills children.
     write_persisted_terminal_sessions(&persisted_map);
+    pids_to_kill
+}
 
-    // 4. Terminate child process trees so no orphaned ConPTY/node/agent processes remain
+/// Synchronously flushes all terminal scrollbacks, captures live CWDs, child agent processes,
+/// and provider session IDs into `terminal-sessions.json`, and terminates ConPTY processes
+/// cleanly WITHOUT deleting `.scrollback` files.
+pub fn snapshot_and_shutdown_all_terminals(reason: &str) {
+    if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log_trace(&format!(
+        "snapshot_and_shutdown_all_terminals invoked: reason={}",
+        reason
+    ));
+
+    let active_instances: Vec<(String, Arc<TerminalInstance>)> = {
+        let Ok(mut map) = get_terminals().lock() else {
+            return;
+        };
+        map.drain().collect()
+    };
+
+    if active_instances.is_empty() {
+        return;
+    }
+
+    let pids_to_kill = flush_and_persist_active_terminals(&active_instances, now_unix_ms());
+
+    // Terminate child process trees so no orphaned ConPTY/node/agent processes remain
     #[cfg(windows)]
     if !pids_to_kill.is_empty() {
         let mut kill_args: Vec<String> = vec!["/F".into(), "/T".into()];
@@ -2607,6 +3401,19 @@ pub async fn terminate_terminal(request: serde_json::Value) -> serde_json::Value
 pub fn terminate_terminal_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.terminate", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    terminate_terminal_local_sync(request)
+}
+
+pub fn terminate_terminal_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let preserve_state = req
         .get("preserveState")
         .and_then(|v| v.as_bool())
@@ -2622,6 +3429,7 @@ pub fn terminate_terminal_sync(request: serde_json::Value) -> serde_json::Value 
     let existed = instance.is_some();
 
     if let Some(inst) = instance {
+        inst.lifecycle_stop.store(true, Ordering::Relaxed);
         if preserve_state {
             if let Ok(sb) = inst.scrollback.lock() {
                 if !sb.is_empty() {
@@ -2819,6 +3627,13 @@ fn extract_pane_id(req: &serde_json::Value) -> Option<String> {
 }
 
 fn workspace_cwd(req: &serde_json::Value) -> String {
+    if let Some(cwd) = req
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .filter(|path| std::path::Path::new(path).is_dir())
+    {
+        return cwd.to_string();
+    }
     let workspace_id = req
         .get("workspaceId")
         .and_then(|value| value.as_str())
@@ -2903,7 +3718,7 @@ fn remove_session(session_id: &str) -> Option<(String, String)> {
     Some(home)
 }
 
-fn decode_base64(input: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(input: &str) -> Option<Vec<u8>> {
     fn value(byte: u8) -> Option<u8> {
         match byte {
             b'A'..=b'Z' => Some(byte - b'A'),
@@ -3595,7 +4410,7 @@ mod tests {
             "sessionId": session_id,
             "input": "echo 'kite_test_lifecycle'\r\n"
         }));
-        assert!(write_res.is_null());
+        assert_eq!(write_res["ok"], true);
 
         // 4. Resize terminal
         let resize_res = resize_terminal_sync(serde_json::json!({
@@ -3603,7 +4418,7 @@ mod tests {
             "columns": 120,
             "rows": 40
         }));
-        assert!(resize_res.is_null());
+        assert_eq!(resize_res["ok"], true);
 
         // 5. Read output (PTY output is asynchronous, give it a few polling iterations)
         let mut got_output = false;
@@ -3730,20 +4545,22 @@ mod tests {
     fn test_terminal_missing_or_unknown_session_safety() {
         let fake_id = "non-existent-session-xyz";
 
-        // Writing to non-existent session returns null without panic
+        // Writing to non-existent session reports the missing target without panic
         let write_res = write_terminal_sync(serde_json::json!({
             "sessionId": fake_id,
             "input": "test"
         }));
-        assert!(write_res.is_null());
+        assert_eq!(write_res["ok"], false);
+        assert_eq!(write_res["error"], "Session not found");
 
-        // Resizing non-existent session returns null without panic
+        // Resizing non-existent session reports the missing target without panic
         let resize_res = resize_terminal_sync(serde_json::json!({
             "sessionId": fake_id,
             "columns": 80,
             "rows": 24
         }));
-        assert!(resize_res.is_null());
+        assert_eq!(resize_res["ok"], false);
+        assert_eq!(resize_res["error"], "Session not found");
 
         // Terminating a non-existent session reports that no live session was terminated
         let term_res = terminate_terminal_sync(serde_json::json!({
@@ -3959,5 +4776,24 @@ mod tests {
         // Clean up
         let _ = terminate_terminal_sync(serde_json::json!({ "sessionId": session_id }));
         let _ = delete_scrollback_file(&session_id);
+    }
+
+    #[test]
+    fn observed_bytes_attach_to_snapshot_poll_json() {
+        let value = serde_json::json!({
+            "kind": "unchanged",
+            "seq": 3,
+            "exited": false,
+            "exitCode": null
+        });
+        let empty = attach_observed_bytes(value.clone(), b"");
+        assert!(empty.get("observedBytesBase64").is_none());
+
+        let with = attach_observed_bytes(value, b"OpenCode v0.2.0\n");
+        let encoded = with
+            .get("observedBytesBase64")
+            .and_then(|v| v.as_str())
+            .expect("observed bytes");
+        assert_eq!(decode_base64(encoded).unwrap(), b"OpenCode v0.2.0\n");
     }
 }

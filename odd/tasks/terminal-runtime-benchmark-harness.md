@@ -132,9 +132,9 @@ export interface TerminalBenchSample {
 
 ## Tasks
 
-- [x] **T1** (`S1`, `S3` | route: inline/delegated): Add atomic data-plane counters (`ptyBytesRead`, `vtFeedDurationUs`, `snapshotPolls`, `snapshotPayloadBytes`) and `Bucket A/B/C` CPU/memory aggregation in `src-tauri/src/system_metrics.rs` and `src-tauri/src/terminal.rs`.
-- [x] **T2** (`S3` | route: inline/delegated): Add opt-in frontend frame-timing (`framePaintUs` p50/p95/p99 and `inputToPaintMs`) reporting in `src/components/views/terminal/canvas/useTerminalSnapshotPoller.ts` and `canvasGridRenderer.ts`.
-- [x] **T3** (`S2`, `S4` | route: inline/delegated): Create deterministic benchmark runner script `scripts/bench-terminals.mjs` covering scenarios `E1`–`E4` (1, 2, and 3 terminals/agents) with Markdown report output.
+- [x] **T1** (`S1`, `S3` | route: delegated | commit: `03893da`, `54b80a0`): Add atomic data-plane counters (`ptyBytesRead`, `vtFeedDurationUs`, `snapshotPolls`, `snapshotPayloadBytes`) and `Bucket A/B/C` CPU/memory aggregation in `src-tauri/src/system_metrics.rs` and `src-tauri/src/terminal.rs`.
+- [x] **T2** (`S3` | route: delegated | commit: `03893da`, `d6bd4c1`): Add opt-in frontend frame-timing (`framePaintUs` p50/p95/p99 and `inputToPaintMs`) reporting in `src/components/views/terminal/canvas/useTerminalSnapshotPoller.ts` and `canvasGridRenderer.ts`.
+- [x] **T3** (`S2`, `S4` | route: delegated | commit: `03893da`): Create deterministic benchmark runner script `scripts/bench-terminals.mjs` covering scenarios `E1`–`E4` (1, 2, and 3 terminals/agents) with Markdown report output.
 
 ## Verification
 

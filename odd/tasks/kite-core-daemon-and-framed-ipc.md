@@ -211,10 +211,10 @@ On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps th
 
 ## Tasks
 
-- [x] **T1** (`S1` | route: inline/delegated): Implement `BinaryCellRecord` and 32-byte `SNAPSHOT_BIN` serializer in `src-tauri/src/vt_engine.rs` + TypeScript `DataView` decoder in `src/components/views/terminal/canvas/binarySnapshotDecoder.ts` with parity unit tests against JSON `RenderSnapshot`.
-- [x] **T2** (`S2` | route: inline/delegated): Implement the 9-byte framed codec (`[u32 channel][u8 kind][u32 len]`) and per-channel `CREDIT` flow-control state machine in `src-tauri/src/core_wire.rs`.
-- [x] **T3** (`S3`, `S4` | route: inline/delegated): Extract PTY registry, `vt_engine`, and `session_resolver` runtime host into `src-tauri/src/core_daemon.rs` listening on `\\.\pipe\kite-core-v1-<username>`, and update `src-tauri/src/main.rs` so window close detaches instead of shutting down live terminals.
-- [x] **T4** (`S4`, `S5` | route: inline/delegated): Move `dispatch_wire.rs` and `agent_inbox.rs` ownership into `kite-core` and wire Tauri frontend `useTerminalSession.ts` / `useTerminalSnapshotPoller.ts` to `session.attach` + `CREDIT` replenishment.
+- [x] **T1** (`S1` | route: delegated | commit: `d6bd4c1`): Implement `BinaryCellRecord` and 32-byte `SNAPSHOT_BIN` serializer in `src-tauri/src/vt_engine.rs` + TypeScript `DataView` decoder in `src/components/views/terminal/canvas/binarySnapshotDecoder.ts` with parity unit tests against JSON `RenderSnapshot`.
+- [x] **T2** (`S2` | route: delegated | commit: `54b80a0`): Implement the 9-byte framed codec (`[u32 channel][u8 kind][u32 len]`) and per-channel `CREDIT` flow-control state machine in `src-tauri/src/core_wire.rs`.
+- [x] **T3** (`S3`, `S4` | route: delegated | commit: `54b80a0`): Extract PTY registry, `vt_engine`, and `session_resolver` runtime host into `src-tauri/src/core_daemon.rs` listening on `\\.\pipe\kite-core-v1-<username>`, and update `src-tauri/src/main.rs` so window close detaches instead of shutting down live terminals.
+- [x] **T4** (`S4`, `S5` | route: delegated | commit: `d6bd4c1`, `54b80a0`): Move `dispatch_wire.rs` and `agent_inbox.rs` ownership into `kite-core` and wire Tauri frontend `useTerminalSession.ts` / `useTerminalSnapshotPoller.ts` to `session.attach` + `CREDIT` replenishment.
 
 ## Verification
 

@@ -1368,7 +1368,12 @@ impl TerminalVtEngine {
             shape: self.cursor_shape.clone(),
         };
 
+        // A delta is against the last frame this engine published. If the
+        // client is still on an older seq, that delta would patch the wrong
+        // screen and leave one or two rows from the missed frame behind.
+        let missed_frame = since_seq != 0 && since_seq < self.seq;
         let force_full = since_seq == 0
+            || missed_frame
             || self.client_rows.len() != self.rows as usize
             || self.client_rows.first().map_or(0, |r| r.len()) != self.cols as usize;
 
@@ -1754,6 +1759,39 @@ mod tests {
         assert!(
             row0.starts_with("    \u{26a0}\u{fe0f} gentle-ai-verify returned"),
             "unexpected row0: {row0:?}"
+        );
+    }
+
+    #[test]
+    fn missed_sync_frame_poll_returns_the_whole_screen_not_the_tail_row() {
+        let mut engine = TerminalVtEngine::new(20, 4);
+        engine.feed(b"HELLO\r\n");
+        let first = match engine.get_snapshot_diff(0, false, None) {
+            TerminalSnapshotPollResponse::Snapshot { snapshot, .. } => snapshot,
+            TerminalSnapshotPollResponse::Unchanged { .. } => panic!("expected first snapshot"),
+        };
+
+        // The synced block publishes a frame inside the engine. The tail after
+        // the closer is a later dirty row. The client is still on first.seq.
+        engine.feed(b"\x1b[?2026h\x1b[1;1HWORLD\x1b[?2026l\x1b[2;1HTAIL");
+        let next = match engine.get_snapshot_diff(first.seq, false, None) {
+            TerminalSnapshotPollResponse::Snapshot { snapshot, .. } => snapshot,
+            TerminalSnapshotPollResponse::Unchanged { .. } => panic!("expected a snapshot"),
+        };
+
+        assert!(
+            next.full,
+            "a client that missed the synced frame must not receive a one-row delta"
+        );
+        assert!(
+            row_text(&next, 0).contains("WORLD"),
+            "row 0 was {}",
+            row_text(&next, 0)
+        );
+        assert!(
+            row_text(&next, 1).contains("TAIL"),
+            "row 1 was {}",
+            row_text(&next, 1)
         );
     }
 }

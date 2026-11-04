@@ -1117,3 +1117,16 @@ The terminal ghosting, stuck vertical bars (`┃┃`), and character collisions 
 - `npx vitest run`: 30/30 terminal unit and integration tests passing.
 - `cargo check --manifest-path src-tauri/Cargo.toml`: Clean build, 0 errors.
 - Specimen session capture verification: Artifact frames reduced from 75/138 down to 0/138.
+
+## 18. Scroll row tear (2026-11-03) — code landed, visual check pending
+
+While a pane advances or the wheel moves an OpenCode view, one or two rows stay behind, overlap, or duplicate, then correct themselves on a later frame.
+
+The engine can publish a synchronized frame into its own copy and then emit only the rows that changed after that. The canvas still holds the previous screen, so those rows land on the wrong frame. A snapshot that arrives late can paint the same way.
+
+This change does two things and nothing else:
+
+- If the client asks for a frame older than the one already published, the snapshot is the whole screen (`full`), not a delta.
+- The canvas ignores an older snapshot. A partial snapshot that skips a sequence asks for that whole screen instead of patching rows.
+
+Not in this change: line height, resize, hold timing, or the renderer. Automated: `missed_sync_frame_poll_returns_the_whole_screen_not_the_tail_row` and `classifySnapshotApply`. Visual check still open: scroll an OpenCode pane and confirm the stuck, overlapping, and duplicate rows are gone. Rollback: revert the `missed_frame` guard in `get_snapshot_diff` and `classifySnapshotApply`.

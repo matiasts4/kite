@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { invokeCommand } from '../../../../lib/ipc';
+import { classifySnapshotApply } from './snapshotApply';
 import { isTerminalDividerDragging } from '../../../../lib/terminalViewport';
 import {
   type CellSnapshot,
@@ -64,6 +65,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
   const hasNotifiedExitRef = options.hasNotifiedExitRef ?? internalHasNotifiedExitRef;
   const lastTitleRef = useRef<string>('');
   const immediatePollRef = useRef<(() => void) | null>(null);
+  const forceFullRef = useRef(false);
   const internalResizeInFlightRef = useRef<boolean>(false);
   const resizeInFlightRef = options.resizeInFlightRef ?? internalResizeInFlightRef;
 
@@ -78,6 +80,13 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
 
   const applySnapshot = useCallback(
     (snapshot: RenderSnapshot) => {
+      const plan = classifySnapshotApply(lastSeqRef.current, snapshot.seq, snapshot.full);
+      if (plan === 'ignore') return;
+      if (plan === 'resync') {
+        forceFullRef.current = true;
+        immediatePollRef.current?.();
+        return;
+      }
       lastSeqRef.current = snapshot.seq;
       cursorRef.current = snapshot.cursor;
       alternateScreenRef.current = Boolean(snapshot.alternateScreen);
@@ -178,9 +187,11 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
       inFlight = true;
 
       try {
+        const sinceSeq = forceFullRef.current ? 0 : lastSeqRef.current;
+        forceFullRef.current = false;
         const res = await invokeCommand<TerminalSnapshotPollResponse>('poll_terminal_snapshot', {
           sessionId,
-          sinceSeq: lastSeqRef.current,
+          sinceSeq,
         });
 
         inFlight = false;

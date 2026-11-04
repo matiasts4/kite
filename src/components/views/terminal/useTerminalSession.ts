@@ -153,19 +153,21 @@ export function useTerminalSession(options: UseTerminalSessionOptions) {
       }
 
       if (!restartedAgent) {
-        await invokeCommand(
-          propSessionId && !opts?.restart ? 'attach_terminal' : 'start_terminal',
-          {
-            sessionId: newSessionId,
-            engine: currentEngine,
-            owner,
-            workspaceId,
-            paneId: paneIdRef.current,
-            confirmedByBuilder: true,
-            columns: measured.cols,
-            rows: measured.rows,
-          }
-        );
+        const attachExisting = Boolean(propSessionId) && !opts?.restart;
+        await invokeCommand(attachExisting ? 'attach_terminal' : 'start_terminal', {
+          sessionId: newSessionId,
+          engine: currentEngine,
+          owner,
+          workspaceId,
+          paneId: paneIdRef.current,
+          confirmedByBuilder: true,
+          columns: measured.cols,
+          rows: measured.rows,
+          // Ask the daemon for the packed grid stream so the canvas paints
+          // `SNAPSHOT_BIN` frames and replenishes channel credit.
+          mode: 'snapshot_bin',
+          live: true,
+        });
       }
 
       if (isMountedRef.current && startGenRef.current === gen) {

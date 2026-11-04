@@ -1,5 +1,7 @@
 import { resolveTerminalFontFamily, type TerminalAppearancePrefs } from '../../../../lib/terminalAppearancePrefs';
 import { isProceduralSpriteChar, drawProceduralSprite } from '../../../../lib/terminalSprites';
+import { isTerminalBenchmarkActive, recordFramePaint } from './terminalBenchMetrics';
+import type { GridFindHit } from './terminalGridText';
 import {
   type CellSnapshot,
   type CursorSnapshot,
@@ -20,6 +22,8 @@ export interface CanvasRenderState {
   cursor: CursorSnapshot;
   selection: { start: SelectionPoint | null; end: SelectionPoint | null };
   hoveredLink: HoveredLinkSpan | null;
+  findHits?: GridFindHit[];
+  activeFind?: number;
   isFocused: boolean;
   scrollbackOffset: number;
   cellW: number;
@@ -27,6 +31,10 @@ export interface CanvasRenderState {
   baseline: number;
   gridRows: number;
   gridCols: number;
+  /** null paints every row. An array paints only those row indexes. */
+  dirtyRows?: number[] | null;
+  cursorBlinkOn?: boolean;
+  onPaintRow?: (row: number) => void;
 }
 
 export function renderCanvasGrid(state: CanvasRenderState): number {
@@ -37,6 +45,8 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     cursor,
     selection,
     hoveredLink,
+    findHits,
+    activeFind = -1,
     isFocused,
     scrollbackOffset,
     cellW,
@@ -44,10 +54,16 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     baseline,
     gridRows,
     gridCols,
+    dirtyRows,
+    cursorBlinkOn = true,
+    onPaintRow,
   } = state;
 
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) return 0;
+
+  const benchActive = isTerminalBenchmarkActive();
+  const benchStart = benchActive ? performance.now() : 0;
 
   const rect = canvas.getBoundingClientRect();
   if (rect.width < 4 || rect.height < 4) return 0;
@@ -58,19 +74,24 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   const targetPixelW = Math.max(1, Math.round(displayW * dpr));
   const targetPixelH = Math.max(1, Math.round(displayH * dpr));
 
-  if (canvas.width !== targetPixelW || canvas.height !== targetPixelH) {
+  const sizeChanged = canvas.width !== targetPixelW || canvas.height !== targetPixelH;
+  if (sizeChanged) {
     canvas.width = targetPixelW;
     canvas.height = targetPixelH;
   }
+  const partial = !sizeChanged && Array.isArray(dirtyRows);
+  const dirtySet = partial ? new Set(dirtyRows) : null;
+  const paintRow = (row: number) => !dirtySet || dirtySet.has(row);
 
   const snap = (v: number) => Math.round(v * dpr) / dpr;
 
   ctx.save();
   ctx.scale(dpr, dpr);
 
-  // Clear full viewport background
-  ctx.fillStyle = DEFAULT_BG_HEX;
-  ctx.fillRect(0, 0, displayW, displayH);
+  if (!partial) {
+    ctx.fillStyle = DEFAULT_BG_HEX;
+    ctx.fillRect(0, 0, displayW, displayH);
+  }
 
   const fontFamily = resolveTerminalFontFamily(prefs.fontFamilyId);
   const fontSize = prefs.fontSize;
@@ -103,9 +124,15 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
 
   // Pass 1: Batched cell backgrounds & selection highlights
   for (let r = 0; r < visibleRows; r++) {
+    if (!paintRow(r)) continue;
+    onPaintRow?.(r);
     const row = matrix[r];
     if (!row) continue;
     const y0 = snap(oy + r * cellH);
+    if (partial) {
+      ctx.fillStyle = DEFAULT_BG_HEX;
+      ctx.fillRect(0, y0, displayW, snap(oy + (r + 1) * cellH) - y0);
+    }
     const y1 = snap(oy + (r + 1) * cellH);
     const rh = y1 - y0;
     const maxCol = Math.min(row.length, visibleCols);
@@ -154,6 +181,17 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
         ctx.fillRect(sx0, y0, sx1 - sx0, rh);
       }
     }
+
+    if (findHits && findHits.length > 0) {
+      for (let i = 0; i < findHits.length; i += 1) {
+        const hit = findHits[i];
+        if (hit.row !== r || hit.endCol <= hit.startCol) continue;
+        const fx0 = snap(ox + hit.startCol * cellW);
+        const fx1 = snap(ox + Math.min(visibleCols, hit.endCol) * cellW);
+        ctx.fillStyle = i === activeFind ? 'rgba(250, 204, 21, 0.45)' : 'rgba(250, 204, 21, 0.22)';
+        ctx.fillRect(fx0, y0, Math.max(1, fx1 - fx0), rh);
+      }
+    }
   }
 
   // Pass 2: Procedural sprites, batched ASCII runs, Nerd Font icon fitting, non-ASCII glyphs & underlines
@@ -161,6 +199,7 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   let currentFill = '';
 
   for (let r = 0; r < visibleRows; r++) {
+    if (!paintRow(r)) continue;
     const row = matrix[r];
     if (!row) continue;
     const py = oy + r * cellH;
@@ -300,7 +339,12 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   }
 
   // Pass 2.5: Hovered Ctrl+Click link underline
-  if (hoveredLink && hoveredLink.row >= 0 && hoveredLink.row < visibleRows) {
+  if (
+    hoveredLink &&
+    hoveredLink.row >= 0 &&
+    hoveredLink.row < visibleRows &&
+    paintRow(hoveredLink.row)
+  ) {
     const ly = snap(oy + (hoveredLink.row + 1) * cellH - 2);
     const lx0 = snap(ox + hoveredLink.startCol * cellW);
     const lx1 = snap(ox + hoveredLink.endCol * cellW);
@@ -315,7 +359,9 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     cursor.row >= 0 &&
     cursor.row < visibleRows &&
     cursor.col >= 0 &&
-    cursor.col < visibleCols
+    cursor.col < visibleCols &&
+    cursorBlinkOn &&
+    paintRow(cursor.row)
   ) {
     const curCell = matrix[cursor.row]?.[cursor.col];
     const curSpan = curCell && curCell.width > 1 ? curCell.width : 1;
@@ -347,12 +393,12 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   }
 
   // Pass 4: Scrollback indicator pill when scrolled up
-  if (scrollbackOffset > 0) {
+  if (!partial && scrollbackOffset > 0) {
     const label = `↑ ${scrollbackOffset} lines`;
     ctx.font = `11px ${fontFamily}`;
     const badgeW = Math.ceil(ctx.measureText(label).width) + 14;
     const badgeH = 20;
-    const bx = displayW - badgeW - 10;
+    const bx = displayW - badgeW - 22;
     const by = 8;
     ctx.fillStyle = 'rgba(24, 24, 28, 0.88)';
     ctx.fillRect(bx, by, badgeW, badgeH);
@@ -364,5 +410,10 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   }
 
   ctx.restore();
+  if (benchActive) {
+    const durationUs = Math.round((performance.now() - benchStart) * 1000);
+    const rowsCount = Array.isArray(dirtyRows) ? dirtyRows.length : gridRows;
+    recordFramePaint(durationUs, rowsCount);
+  }
   return spareYOffset;
 }

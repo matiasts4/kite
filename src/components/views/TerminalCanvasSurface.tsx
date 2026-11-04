@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { forwardRef, useRef, useEffect, useState, useCallback, useImperativeHandle } from 'react';
 import { invokeCommand } from '../../lib/ipc';
 import {
   type TerminalAppearancePrefs,
@@ -11,6 +11,7 @@ import {
 } from '../../lib/terminalViewport';
 import {
   type SelectionPoint,
+  selectionRows,
   type HoveredLinkSpan,
   type TerminalMouseMode,
   type CellSnapshot,
@@ -18,26 +19,38 @@ import {
   type RenderSnapshot,
   measureTerminalCanvasGrid,
   type TerminalCanvasSurfaceProps,
+  type TerminalSurfaceHandle,
 } from './terminal/canvas/terminalCanvasTypes';
 import { renderCanvasGrid } from './terminal/canvas/canvasGridRenderer';
+import { collectFindHits, type GridFindHit } from './terminal/canvas/terminalGridText';
+import './terminal/canvas/terminalCanvasChrome.css';
 import { encodeVtKey, normalizePasteText } from './terminal/canvas/terminalInputKeyEncoder';
 import { useTerminalMouseTracking } from './terminal/canvas/useTerminalMouseTracking';
 import { useTerminalSnapshotPoller } from './terminal/canvas/useTerminalSnapshotPoller';
+import { recordTerminalUserInput } from './terminal/canvas/terminalBenchMetrics';
 
 export { measureTerminalCanvasGrid };
 export type { TerminalCanvasSurfaceProps };
 
-export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
+export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalCanvasSurfaceProps>(function TerminalCanvasSurface({
   sessionId,
   workspaceId,
+  engine,
   isFocused,
   className = '',
   onTitleChange,
   onProcessExit,
-}) => {
+  onStageClipboardBlob,
+}, ref) {
   const [prefs, setPrefs] = useState<TerminalAppearancePrefs>(() =>
     getTerminalAppearancePrefs()
   );
+  const [viewport, setViewport] = useState({ offset: 0, depth: 0, alt: false });
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findIndex, setFindIndex] = useState(0);
+  const [findCount, setFindCount] = useState(0);
+  const [liveText, setLiveText] = useState('');
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -65,6 +78,20 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
   const win32InputModeRef = useRef<boolean>(false);
   const kittyKeyboardFlagsRef = useRef<number>(0);
   const scrollbackOffsetRef = useRef<number>(0);
+  const rowWrappedRef = useRef<boolean[]>([]);
+  const findHitsRef = useRef<GridFindHit[]>([]);
+  const findIndexRef = useRef(0);
+  const findQueryRef = useRef('');
+  const findOpenRef = useRef(false);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const onStageClipboardBlobRef = useRef(onStageClipboardBlob);
+  onStageClipboardBlobRef.current = onStageClipboardBlob;
+  const scrollbarTrackRef = useRef<HTMLDivElement>(null);
+  const jumpInFlightRef = useRef(false);
+  const pendingJumpRef = useRef<number | null>(null);
+  const liveTimerRef = useRef<number | null>(null);
+  const pendingLiveRef = useRef('');
+  const viewportDepthRef = useRef(0);
   const buttonsDownRef = useRef<number>(0);
   const lastMouseReportRef = useRef<{ col: number; row: number; buttons: number } | null>(null);
   const lastSeqRef = useRef<number>(0);
@@ -113,6 +140,15 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     selectionStartRef.current = null;
     selectionEndRef.current = null;
     hoveredLinkRef.current = null;
+    rowWrappedRef.current = [];
+    findHitsRef.current = [];
+    findQueryRef.current = '';
+    findOpenRef.current = false;
+    setFindOpen(false);
+    setFindQuery('');
+    setFindIndex(0);
+    setFindCount(0);
+    setViewport({ offset: 0, depth: 0, alt: false });
   }, [sessionId]);
 
   // Unmount cleanup
@@ -126,6 +162,10 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
         window.clearTimeout(scrollFlushTimerRef.current);
         scrollFlushTimerRef.current = null;
       }
+      if (liveTimerRef.current !== null) {
+        window.clearTimeout(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -133,16 +173,22 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    const dirtyRows = paintRowsRef.current;
+    paintRowsRef.current = [];
     spareYRef.current = renderCanvasGrid({
       canvas,
       prefs,
       matrix: matrixRef.current,
       cursor: cursorRef.current,
+      dirtyRows,
+      cursorBlinkOn: cursorBlinkOnRef.current,
       selection: {
         start: selectionStartRef.current,
         end: selectionEndRef.current,
       },
       hoveredLink: hoveredLinkRef.current,
+      findHits: findHitsRef.current,
+      activeFind: findIndexRef.current,
       isFocused: isFocusedRef.current,
       scrollbackOffset: scrollbackOffsetRef.current,
       cellW: cellWidthRef.current,
@@ -153,7 +199,18 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     });
   }, [prefs]);
 
-  const scheduleRender = useCallback(() => {
+  const paintRowsRef = useRef<number[] | null>([]);
+  const cursorBlinkOnRef = useRef(true);
+  const surfaceLiveRef = useRef(true);
+
+  const scheduleRender = useCallback((rows?: number[]) => {
+    if (!rows) {
+      paintRowsRef.current = null;
+    } else if (paintRowsRef.current) {
+      for (const row of rows) {
+        if (!paintRowsRef.current.includes(row)) paintRowsRef.current.push(row);
+      }
+    }
     if (rafIdRef.current !== null) return;
     rafIdRef.current = window.requestAnimationFrame(() => {
       rafIdRef.current = null;
@@ -161,8 +218,43 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     });
   }, [renderCanvas]);
 
-  const { immediatePoll, armFastPoll, applySnapshot } = useTerminalSnapshotPoller({
+  const onViewportMetrics = useCallback((metrics: { offset: number; depth: number }) => {
+    viewportDepthRef.current = metrics.depth;
+    const alt = alternateScreenRef.current;
+    setViewport((prev) => {
+      if (prev.offset === metrics.offset && prev.depth === metrics.depth && prev.alt === alt) return prev;
+      return { offset: metrics.offset, depth: metrics.depth, alt };
+    });
+    if (findOpenRef.current && findQueryRef.current.trim()) {
+      findHitsRef.current = collectFindHits(
+        matrixRef.current,
+        rowWrappedRef.current,
+        findQueryRef.current,
+      );
+      const count = findHitsRef.current.length;
+      setFindCount((prev) => (prev === count ? prev : count));
+      setFindIndex((prev) => {
+        const next = count === 0 ? 0 : Math.min(prev, count - 1);
+        findIndexRef.current = next;
+        return next;
+      });
+    }
+  }, []);
+
+  const onScreenText = useCallback((text: string) => {
+    pendingLiveRef.current = text;
+    if (liveTimerRef.current !== null) return;
+    liveTimerRef.current = window.setTimeout(() => {
+      liveTimerRef.current = null;
+      const next = pendingLiveRef.current;
+      setLiveText((prev) => (prev === next ? prev : next));
+    }, 250);
+  }, []);
+
+  const { immediatePoll, armFastPoll, applySnapshot, setSurfaceLive } = useTerminalSnapshotPoller({
     sessionId,
+    workspaceId,
+    engine,
     matrixRef,
     cursorRef,
     alternateScreenRef,
@@ -175,6 +267,9 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     win32InputModeRef,
     kittyKeyboardFlagsRef,
     scrollbackOffsetRef,
+    rowWrappedRef,
+    onViewportMetrics,
+    onScreenText,
     appliedPtyColsRef,
     appliedPtyRowsRef,
     isFocusedRef,
@@ -185,6 +280,59 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     lastSeqRef,
     hasNotifiedExitRef,
   });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    let seenLayout = false;
+    let published: boolean | null = null;
+    const compute = () => {
+      if (!el || !el.isConnected) return true;
+      if (el.closest('[aria-hidden="true"]')) return false;
+      if (document.visibilityState === 'hidden') return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width >= 2 && rect.height >= 2) {
+        seenLayout = true;
+        return true;
+      }
+      return !seenLayout;
+    };
+    const publish = () => {
+      const live = compute();
+      if (published === live) return;
+      published = live;
+      surfaceLiveRef.current = live;
+      setSurfaceLive(live);
+      void invokeCommand('set_terminal_presentation', { sessionId, live }).catch(() => {});
+    };
+    publish();
+    document.addEventListener('visibilitychange', publish);
+    window.addEventListener('resize', publish);
+    const observer =
+      typeof IntersectionObserver !== 'undefined' && el
+        ? new IntersectionObserver(() => publish())
+        : null;
+    if (observer && el) observer.observe(el);
+    return () => {
+      document.removeEventListener('visibilitychange', publish);
+      window.removeEventListener('resize', publish);
+      observer?.disconnect();
+      surfaceLiveRef.current = false;
+      setSurfaceLive(false);
+      void invokeCommand('set_terminal_presentation', { sessionId, live: false }).catch(() => {});
+    };
+  }, [sessionId, setSurfaceLive]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const cursor = cursorRef.current;
+      if (!surfaceLiveRef.current) return;
+      if (!cursor.visible || cursor.blink === false) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      cursorBlinkOnRef.current = !cursorBlinkOnRef.current;
+      scheduleRender([cursor.row]);
+    }, 530);
+    return () => window.clearInterval(id);
+  }, [scheduleRender]);
 
   const sendInput = useCallback(
     (data: string, clearSelection = true) => {
@@ -197,9 +345,11 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
         immediatePoll();
       });
       if (clearSelection && (selectionStartRef.current || selectionEndRef.current)) {
+        const start = selectionStartRef.current;
+        const end = selectionEndRef.current;
         selectionStartRef.current = null;
         selectionEndRef.current = null;
-        scheduleRender();
+        scheduleRender(selectionRows(start, end));
       }
     },
     [armFastPoll, immediatePoll, scheduleRender, sessionId]
@@ -269,6 +419,7 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     cellHeightRef,
     spareYRef,
     matrixRef,
+    rowWrappedRef,
     alternateScreenRef,
     applicationCursorRef,
     mouseModeRef,
@@ -338,6 +489,125 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     },
     [armFastPoll, immediatePoll, prefs, scheduleRender, sessionId]
   );
+
+  const jumpToOffset = useCallback(
+    (offset: number) => {
+      const next = Math.max(0, Math.round(offset));
+      pendingJumpRef.current = next;
+      const flush = () => {
+        const target = pendingJumpRef.current;
+        if (target === null) {
+          jumpInFlightRef.current = false;
+          return;
+        }
+        pendingJumpRef.current = null;
+        jumpInFlightRef.current = true;
+        armFastPoll(250);
+        void invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
+          sessionId,
+          absoluteOffset: target,
+        })
+          .then((snapshot) => {
+            if (snapshot && typeof snapshot.seq === 'number') applySnapshot(snapshot);
+            scheduleRender();
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (pendingJumpRef.current !== null) flush();
+            else jumpInFlightRef.current = false;
+          });
+      };
+      if (!jumpInFlightRef.current) flush();
+    },
+    [applySnapshot, armFastPoll, scheduleRender, sessionId]
+  );
+
+  const applyFindQuery = useCallback(
+    (query: string) => {
+      findQueryRef.current = query;
+      setFindQuery(query);
+      if (!query.trim()) {
+        findHitsRef.current = [];
+        setFindCount(0);
+        setFindIndex(0);
+        scheduleRender();
+        return;
+      }
+      const local = collectFindHits(matrixRef.current, rowWrappedRef.current, query);
+      if (local.length > 0) {
+        findHitsRef.current = local;
+        setFindCount(local.length);
+        setFindIndex(0);
+        findIndexRef.current = 0;
+        scheduleRender();
+        return;
+      }
+      void invokeCommand<{ hits: Array<{ scrollbackOffset: number; row: number; col: number }> }>(
+        'find_terminal_text',
+        { sessionId, query, limit: 40 },
+      )
+        .then(async (res) => {
+          const hit = res?.hits?.[0];
+          if (!hit || findQueryRef.current !== query) {
+            if (findQueryRef.current === query) {
+              findHitsRef.current = [];
+              setFindCount(0);
+              scheduleRender();
+            }
+            return;
+          }
+          const snapshot = await invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
+            sessionId,
+            absoluteOffset: hit.scrollbackOffset,
+          });
+          if (findQueryRef.current !== query) return;
+          if (snapshot && typeof snapshot.seq === 'number') applySnapshot(snapshot);
+          const next = collectFindHits(matrixRef.current, rowWrappedRef.current, query);
+          findHitsRef.current = next;
+          setFindCount(next.length);
+          setFindIndex(0);
+          findIndexRef.current = 0;
+          scheduleRender();
+        })
+        .catch(() => {});
+    },
+    [applySnapshot, scheduleRender, sessionId]
+  );
+
+  const stepFind = useCallback(
+    (direction: 1 | -1) => {
+      const count = findHitsRef.current.length;
+      if (count === 0) return;
+      const next = (findIndexRef.current + direction + count) % count;
+      findIndexRef.current = next;
+      setFindIndex(next);
+      scheduleRender();
+    },
+    [scheduleRender]
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      clear: () => {
+        void invokeCommand('clear_terminal_vt', { sessionId }).finally(() => {
+          immediatePoll();
+          inputRef.current?.focus();
+        });
+      },
+      focus: () => {
+        inputRef.current?.focus();
+      },
+      fit: () => {
+        syncGridAndResizePty(true);
+      },
+    }),
+    [immediatePoll, sessionId, syncGridAndResizePty]
+  );
+
+  useEffect(() => {
+    if (findOpen) findInputRef.current?.focus();
+  }, [findOpen]);
 
   // Sync PTY whenever prefs or sessionId change
   useEffect(() => {
@@ -470,7 +740,7 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
   useEffect(() => {
     if (isFocused !== undefined) {
       isFocusedRef.current = Boolean(isFocused);
-      scheduleRender();
+      scheduleRender([cursorRef.current.row]);
     }
   }, [isFocused, scheduleRender]);
 
@@ -482,6 +752,7 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
   }, [sessionId]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    recordTerminalUserInput();
     if (e.nativeEvent.isComposing) return;
     armFastPoll(1000);
 
@@ -490,9 +761,11 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
       const key = e.key.toLowerCase();
       if (key === 'c') {
         if (e.shiftKey || copySelectionToClipboard()) {
+          const start = selectionStartRef.current;
+          const end = selectionEndRef.current;
           selectionStartRef.current = null;
           selectionEndRef.current = null;
-          scheduleRender();
+          scheduleRender(selectionRows(start, end));
           e.preventDefault();
           return;
         }
@@ -502,14 +775,39 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
           return;
         }
       }
+      if (key === 'f') {
+        e.preventDefault();
+        findOpenRef.current = true;
+        setFindOpen(true);
+        return;
+      }
       if (key === 'v') {
+        e.preventDefault();
         if (e.shiftKey && typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
-          e.preventDefault();
           void navigator.clipboard.readText().then((txt) => {
             if (txt) pasteTextToTerminal(txt);
           });
           return;
         }
+        void (async () => {
+          const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+          if (clipboard?.read) {
+            try {
+              const items = await clipboard.read();
+              for (const item of items) {
+                const imgType = item.types.find((type) => type.toLowerCase().startsWith('image/'));
+                if (!imgType) continue;
+                const blob = await item.getType(imgType);
+                if (onStageClipboardBlobRef.current?.(blob, imgType)) return;
+              }
+            } catch {
+              // Fall through to text. A path already on the clipboard still pastes.
+            }
+          }
+          const readText = clipboard?.readText?.bind(clipboard);
+          const text = readText ? await readText().catch(() => '') : '';
+          if (text) pasteTextToTerminal(text);
+        })();
         return;
       }
     }
@@ -562,6 +860,42 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
     }
   };
 
+  const onScrollbarPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (viewport.depth <= 0) return;
+    const track = scrollbarTrackRef.current;
+    if (!track) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = track.getBoundingClientRect();
+    const thumb = track.querySelector('.terminal-canvas-scrollbar__thumb') as HTMLElement | null;
+    const thumbH = thumb?.offsetHeight ?? 18;
+    const travel = Math.max(1, rect.height - thumbH);
+    const fromThumb = (event.target as HTMLElement).classList.contains('terminal-canvas-scrollbar__thumb');
+    const originY = event.clientY;
+    const originTop = fromThumb
+      ? Math.min(travel, Math.max(0, originY - rect.top - thumbH / 2))
+      : Math.min(travel, Math.max(0, originY - rect.top - thumbH / 2));
+    const offsetForTop = (top: number) => {
+      const ratio = Math.min(1, Math.max(0, top / travel));
+      return Math.round((1 - ratio) * viewportDepthRef.current);
+    };
+    jumpToOffset(offsetForTop(originTop));
+    const move = (ev: PointerEvent) => {
+      const top = Math.min(travel, Math.max(0, originTop + (ev.clientY - originY)));
+      jumpToOffset(offsetForTop(top));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  const rowsForThumb = Math.max(1, gridRowsRef.current);
+  const thumbRatio = viewport.depth > 0 ? rowsForThumb / (rowsForThumb + viewport.depth) : 1;
+  const showScrollbar = viewport.depth > 0 && !viewport.alt;
+
   // A click anywhere on the surface (including the canvas, whose default mousedown action moves focus
   // to <body> when it is not preventDefault-ed) must hand focus back to the hidden input so typing keeps working.
   const handleContainerClick = () => {
@@ -598,6 +932,80 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
           cursor: 'text',
         }}
       />
+      {showScrollbar ? (
+        <div
+          ref={scrollbarTrackRef}
+          className="terminal-canvas-scrollbar"
+          onPointerDown={onScrollbarPointerDown}
+        >
+          <div
+            className="terminal-canvas-scrollbar__thumb"
+            style={{
+              height: `${Math.max(8, Math.round(thumbRatio * 100))}%`,
+              top: `${viewport.depth <= 0 ? 0 : ((viewport.depth - viewport.offset) / viewport.depth) * (100 - Math.max(8, Math.round(thumbRatio * 100)))}%`,
+            }}
+          />
+        </div>
+      ) : null}
+      {findOpen ? (
+        <form
+          className="terminal-canvas-find"
+          onSubmit={(event) => {
+            event.preventDefault();
+            stepFind(1);
+          }}
+        >
+          <input
+            ref={findInputRef}
+            aria-label="Buscar en la terminal"
+            placeholder="Buscar"
+            value={findQuery}
+            onChange={(event) => applyFindQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                findOpenRef.current = false;
+                findHitsRef.current = [];
+                setFindOpen(false);
+                setFindCount(0);
+                scheduleRender();
+                inputRef.current?.focus();
+                return;
+              }
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                stepFind(event.shiftKey ? -1 : 1);
+              }
+            }}
+          />
+          <span className="terminal-canvas-find__count">
+            {findCount === 0 ? '0' : `${findIndex + 1}/${findCount}`}
+          </span>
+          <button type="button" aria-label="Anterior" onClick={() => stepFind(-1)}>
+            ↑
+          </button>
+          <button type="button" aria-label="Siguiente" onClick={() => stepFind(1)}>
+            ↓
+          </button>
+          <button
+            type="button"
+            aria-label="Cerrar búsqueda"
+            onClick={() => {
+              findOpenRef.current = false;
+              findHitsRef.current = [];
+              setFindOpen(false);
+              setFindCount(0);
+              scheduleRender();
+              inputRef.current?.focus();
+            }}
+          >
+            ×
+          </button>
+        </form>
+      ) : null}
+      <div className="terminal-canvas-live" aria-live="polite" aria-atomic="true">
+        {liveText}
+      </div>
       <textarea
         ref={inputRef}
         className="terminal-canvas-surface__input"
@@ -613,14 +1021,14 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
         onPaste={handlePaste}
         onFocus={() => {
           isFocusedRef.current = true;
-          scheduleRender();
+          scheduleRender([cursorRef.current.row]);
           if (focusReportingRef.current) {
             sendInput('\x1b[I', false);
           }
         }}
         onBlur={() => {
           isFocusedRef.current = false;
-          scheduleRender();
+          scheduleRender([cursorRef.current.row]);
           if (focusReportingRef.current) {
             sendInput('\x1b[O', false);
           }
@@ -644,4 +1052,6 @@ export const TerminalCanvasSurface: React.FC<TerminalCanvasSurfaceProps> = ({
       />
     </div>
   );
-};
+});
+
+TerminalCanvasSurface.displayName = 'TerminalCanvasSurface';

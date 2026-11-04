@@ -16,6 +16,7 @@ export interface CellSnapshot {
 export interface RowSnapshot {
   rowIdx: number;
   cells: CellSnapshot[];
+  wrapped?: boolean;
 }
 
 export interface CursorSnapshot {
@@ -27,6 +28,28 @@ export interface CursorSnapshot {
 }
 
 export type TerminalMouseMode = 'none' | 'click' | 'drag' | 'any';
+
+/** One dirty row of a packed `SNAPSHOT_BIN` payload, addressed by byte offset. */
+export interface PackedDirtyRowView {
+  index: number;
+  wrapped: boolean;
+  cellCount: number;
+  /** Byte offset of the first 16-byte BinaryCellRecord for this row inside buffer */
+  byteOffset: number;
+}
+
+/** One row of a reusable cell grid. `cells` is mutated in place on steady-state frames. */
+export interface GridRowState {
+  cells: CellSnapshot[];
+  wrapped: boolean;
+}
+
+/** Reusable cell grid shared between the packed decoder and the canvas renderer. */
+export interface GridState {
+  cols: number;
+  rowCount: number;
+  rows: GridRowState[];
+}
 
 export interface RenderSnapshot {
   seq: number;
@@ -43,31 +66,83 @@ export interface RenderSnapshot {
   win32InputMode?: boolean;
   kittyKeyboardFlags?: number;
   scrollbackOffset?: number;
+  scrollbackDepth?: number;
   cursor: CursorSnapshot;
   dirtyRows: RowSnapshot[];
   full: boolean;
   title?: string | null;
   clipboardWrite?: string | null;
+  /** Backend benchmark gate state carried by the `SNAPSHOT_BIN` metadata tail. */
+  benchmarkActive?: boolean;
+  /** Raw PTY output observed while the frame was produced (already decoded UTF-8 text). */
+  observedText?: string | null;
+  /** Raw PTY output observed while the frame was produced (base64-encoded bytes). */
+  observedBytesBase64?: string | null;
+  /** Underlying packed payload for renderers that paint straight from the buffer. */
+  packedBuffer?: ArrayBuffer;
+  /** Byte offset of the packed payload inside `packedBuffer`. */
+  packedByteOffset?: number;
+  /** Dirty rows of the packed payload, in frame order. */
+  packedDirtyRows?: PackedDirtyRowView[];
+  /** Byte offset of the overflow UTF-8 string table inside the payload view. */
+  overflowUtf8Offset?: number;
+  /** Byte length of the overflow UTF-8 string table. */
+  overflowUtf8Length?: number;
 }
 
 export type TerminalSnapshotPollResponse =
-  | { kind: 'unchanged'; seq: number; exited?: boolean; exitCode?: number | null }
-  | { kind: 'snapshot'; snapshot: RenderSnapshot; exited?: boolean; exitCode?: number | null };
+  | {
+      kind: 'unchanged';
+      seq: number;
+      exited?: boolean;
+      exitCode?: number | null;
+      /** Raw PTY bytes drained for the agent registry. Paint still uses the grid. */
+      observedBytesBase64?: string;
+    }
+  | {
+      kind: 'snapshot';
+      snapshot: RenderSnapshot;
+      exited?: boolean;
+      exitCode?: number | null;
+      observedBytesBase64?: string;
+    };
 
 export interface TerminalCanvasSurfaceProps {
   sessionId: string;
   workspaceId?: string | null;
+  engine?: string;
   className?: string;
   isFocused?: boolean;
   onFocus?: () => void;
   onBlur?: () => void;
   onTitleChange?: (title: string) => void;
   onProcessExit?: (exitCode: number | null) => void;
+  /** Stages image bytes. Returns false when the blob is not a supported image. */
+  onStageClipboardBlob?: (blob: Blob, mimeType: string, fileName?: string) => boolean;
+}
+
+export interface TerminalSurfaceHandle {
+  clear: () => void;
+  fit: () => void;
+  focus: () => void;
 }
 
 export interface SelectionPoint {
   col: number;
   row: number;
+}
+
+/** Inclusive row indexes covered by a selection. Empty when either end is missing. */
+export function selectionRows(
+  start: SelectionPoint | null,
+  end: SelectionPoint | null,
+): number[] {
+  if (!start || !end) return [];
+  const from = Math.min(start.row, end.row);
+  const to = Math.max(start.row, end.row);
+  const rows: number[] = [];
+  for (let row = from; row <= to; row += 1) rows.push(row);
+  return rows;
 }
 
 export interface HoveredLinkSpan {

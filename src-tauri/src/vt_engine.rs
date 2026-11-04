@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,9 @@ pub struct CellSnapshot {
 pub struct RowSnapshot {
     pub row_idx: u16,
     pub cells: Vec<CellSnapshot>,
+    /// True when the row continues onto the next visible row (soft wrap).
+    #[serde(default)]
+    pub wrapped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -35,6 +38,8 @@ pub struct CursorSnapshot {
     pub col: u16,
     pub row: u16,
     pub shape: String,
+    #[serde(default)]
+    pub blink: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -595,6 +600,7 @@ impl TerminalVtEngine {
             col: 0,
             row: 0,
             shape: "bar".to_string(),
+            blink: false,
         };
 
         Self {
@@ -640,6 +646,88 @@ impl TerminalVtEngine {
 
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// Current OSC 0/2 window title, if the child ever set one.
+    pub fn title(&self) -> Option<String> {
+        self.current_title.clone()
+    }
+
+    /// True while a synchronized-output block is being painted in memory only.
+    pub fn render_held(&self) -> bool {
+        self.render_held
+    }
+
+    /// True when parsed output has not been published in a snapshot yet.
+    pub fn has_pending_output(&self) -> bool {
+        self.dirty || self.render_held
+    }
+
+    /// True when the grid has unpainted changes and DEC 2026 sync output is not holding paint.
+    pub fn wants_paint(&self) -> bool {
+        self.dirty && !self.render_held
+    }
+
+    /// Plain text contents of the current visible screen.
+    pub fn screen_text(&self) -> String {
+        self.parser.screen().contents()
+    }
+
+    /// Jump the viewport directly to an absolute scrollback offset.
+    pub fn jump_scrollback(&mut self, offset: u32) {
+        if self.parser.screen().alternate_screen() {
+            return;
+        }
+        let current = self.parser.screen().scrollback();
+        self.parser.set_scrollback(offset as usize);
+        if self.parser.screen().scrollback() != current {
+            self.dirty = true;
+        }
+    }
+
+    /// Case-insensitive text search across visible screen rows.
+    pub fn find_text(&self, query: &str, limit: usize) -> Vec<serde_json::Value> {
+        let needle = query.trim();
+        if needle.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let needle_lower = needle.to_lowercase();
+        let screen = self.parser.screen();
+        let mut hits = Vec::new();
+        for r in 0..self.rows {
+            let mut row_str = String::with_capacity(self.cols as usize);
+            for c in 0..self.cols {
+                if let Some(cell) = screen.cell(r, c) {
+                    if !cell.is_wide_continuation() {
+                        let ch = cell.contents();
+                        if ch.is_empty() {
+                            row_str.push(' ');
+                        } else {
+                            row_str.push_str(&ch);
+                        }
+                    }
+                } else {
+                    row_str.push(' ');
+                }
+            }
+            let row_lower = row_str.to_lowercase();
+            let mut search_from = 0;
+            while let Some(pos) = row_lower[search_from..].find(&needle_lower) {
+                let byte_col = search_from + pos;
+                let char_col = row_lower[..byte_col].chars().count() as u16;
+                hits.push(serde_json::json!({
+                    "row": r,
+                    "col": char_col,
+                    "len": needle.chars().count(),
+                    "line": row_str.trim_end(),
+                }));
+                if hits.len() >= limit {
+                    return hits;
+                }
+                search_from = byte_col + needle_lower.len().max(1);
+            }
+        }
+        hits
     }
 
     pub fn alternate_screen(&self) -> bool {
@@ -1366,6 +1454,8 @@ impl TerminalVtEngine {
             col: cursor_col.min(self.cols.saturating_sub(1)),
             row: cursor_row.min(self.rows.saturating_sub(1)),
             shape: self.cursor_shape.clone(),
+            // Blink is a renderer preference, not a VT grid fact.
+            blink: false,
         };
 
         // A delta is against the last frame this engine published. If the
@@ -1472,6 +1562,7 @@ impl TerminalVtEngine {
                 dirty_rows.push(RowSnapshot {
                     row_idx: r,
                     cells: row_cells.clone(),
+                    wrapped: screen.row_wrapped(r),
                 });
             }
 
@@ -1505,6 +1596,7 @@ impl TerminalVtEngine {
             .map(|(idx, cells)| RowSnapshot {
                 row_idx: idx as u16,
                 cells: cells.clone(),
+                wrapped: screen.row_wrapped(idx as u16),
             })
             .collect();
         self.committed_snapshot = Some(RenderSnapshot {
@@ -1557,6 +1649,420 @@ impl TerminalVtEngine {
             exit_code,
         }
     }
+}
+
+pub const SNAPSHOT_BIN_HEADER_LEN: usize = 32;
+pub const MODE_FLAG_APPLICATION_CURSOR: u8 = 0x40;
+pub const MODE_FLAG_EXTENDED_META: u8 = 0x80;
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinaryCellRecord {
+    pub codepoint_or_span: u32,
+    pub fg_rgba: u32,
+    pub bg_rgba: u32,
+    pub width: u8,
+    pub attrs: u8,
+    pub extra: u16,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtendedSnapshotMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_write: Option<String>,
+    pub mouse_mode: String,
+    pub sgr_mouse: bool,
+    pub sgr_pixels_mouse: bool,
+    pub focus_reporting: bool,
+    pub win32_input_mode: bool,
+    pub kitty_keyboard_flags: u8,
+    pub scrollback_offset: u32,
+    #[serde(default)]
+    pub scrollback_depth: u32,
+    #[serde(default)]
+    pub benchmark_active: bool,
+    /// Base64 of the PTY bytes this poll drained, mirroring the JSON
+    /// `observedBytesBase64` field so both transports feed agent output capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_bytes_base64: Option<String>,
+}
+
+/// Reads the 64-bit monotonic sequence number from a `SNAPSHOT_BIN` payload header.
+pub fn snapshot_bin_seq(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let arr: [u8; 8] = bytes[0..8].try_into().ok()?;
+    Some(u64::from_le_bytes(arr))
+}
+
+/// Serializes a `RenderSnapshot` into the packed `SNAPSHOT_BIN` binary wire format:
+/// - 32-byte little-endian header (`cursor_flags` bit 1 = blink)
+/// - 4-byte dirty row descriptors (`[u16 row_idx][u16 cell_count]`, `cell_count`
+///   bit 15 = row soft-wrapped)
+/// - 16-byte `BinaryCellRecord` entries
+/// - trailing UTF-8 table (`overflow_utf8_len` bytes) for multi-codepoint graphemes
+/// - trailing UTF-8 JSON `ExtendedSnapshotMeta` tail (flagged by `mode_flags` bit 7 `0x80`),
+///   including `observedBytesBase64` when the poll drained PTY bytes
+pub fn serialize_render_snapshot_bin(
+    snapshot: &RenderSnapshot,
+    exited: bool,
+    exit_code: Option<i64>,
+    sync_output: bool,
+    benchmark_active: bool,
+    observed_bytes_base64: Option<String>,
+) -> Vec<u8> {
+    let dirty_row_count = snapshot.dirty_rows.len().min(u16::MAX as usize) as u16;
+    let total_cells: usize = snapshot
+        .dirty_rows
+        .iter()
+        .take(dirty_row_count as usize)
+        .map(|r| r.cells.len())
+        .sum();
+
+    let mut overflow_utf8: Vec<u8> = Vec::new();
+    let mut cell_bytes: Vec<u8> = Vec::with_capacity(total_cells * 16);
+
+    for row in snapshot.dirty_rows.iter().take(dirty_row_count as usize) {
+        for cell in &row.cells {
+            let mut attrs: u8 = 0;
+            if cell.bold {
+                attrs |= 0x01;
+            }
+            if cell.dim {
+                attrs |= 0x02;
+            }
+            if cell.italic {
+                attrs |= 0x04;
+            }
+            if cell.underline {
+                attrs |= 0x08;
+            }
+            if cell.inverse {
+                attrs |= 0x10;
+            }
+
+            let codepoint_or_span: u32 = if cell.ch.is_empty() {
+                0
+            } else {
+                let mut chars = cell.ch.chars();
+                let first = chars.next().unwrap_or('\0');
+                if chars.next().is_none() {
+                    first as u32
+                } else {
+                    let utf8 = cell.ch.as_bytes();
+                    let offset = overflow_utf8.len();
+                    let len = utf8.len().min(255);
+                    if offset <= 0x00ff_ffff {
+                        attrs |= 0x80;
+                        overflow_utf8.extend_from_slice(&utf8[..len]);
+                        ((offset as u32) & 0x00ff_ffff) | ((len as u32) << 24)
+                    } else {
+                        first as u32
+                    }
+                }
+            };
+
+            let fg_alpha: u8 = if cell.fg == DEFAULT_FG { 0x00 } else { 0xff };
+            let fg_rgba: u32 = ((cell.fg[0] as u32) << 24)
+                | ((cell.fg[1] as u32) << 16)
+                | ((cell.fg[2] as u32) << 8)
+                | (fg_alpha as u32);
+
+            let bg_alpha: u8 = if cell.has_bg { 0xff } else { 0x00 };
+            let bg_rgba: u32 = ((cell.bg[0] as u32) << 24)
+                | ((cell.bg[1] as u32) << 16)
+                | ((cell.bg[2] as u32) << 8)
+                | (bg_alpha as u32);
+
+            cell_bytes.extend_from_slice(&codepoint_or_span.to_le_bytes());
+            cell_bytes.extend_from_slice(&fg_rgba.to_le_bytes());
+            cell_bytes.extend_from_slice(&bg_rgba.to_le_bytes());
+            cell_bytes.push(cell.width);
+            cell_bytes.push(attrs);
+            cell_bytes.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
+
+    let shape_code: u8 = match snapshot.cursor.shape.as_str() {
+        "underline" => 1,
+        "bar" => 2,
+        _ => 0,
+    };
+    let mut cursor_flags: u8 = (shape_code & 0x07) << 2;
+    if snapshot.cursor.visible {
+        cursor_flags |= 0x01;
+    }
+    if snapshot.cursor.blink {
+        cursor_flags |= 0x02;
+    }
+
+    let meta = ExtendedSnapshotMeta {
+        title: snapshot.title.clone(),
+        clipboard_write: snapshot.clipboard_write.clone(),
+        mouse_mode: snapshot.mouse_mode.clone(),
+        sgr_mouse: snapshot.sgr_mouse,
+        sgr_pixels_mouse: snapshot.sgr_pixels_mouse,
+        focus_reporting: snapshot.focus_reporting,
+        win32_input_mode: snapshot.win32_input_mode,
+        kitty_keyboard_flags: snapshot.kitty_keyboard_flags,
+        scrollback_offset: snapshot.scrollback_offset,
+        scrollback_depth: 0,
+        benchmark_active,
+        observed_bytes_base64,
+    };
+    let meta_bytes = serde_json::to_vec(&meta).unwrap_or_default();
+
+    let mut mode_flags: u8 = 0;
+    if snapshot.full {
+        mode_flags |= 0x01;
+    }
+    if snapshot.alternate_screen {
+        mode_flags |= 0x02;
+    }
+    if snapshot.mouse_tracking {
+        mode_flags |= 0x04;
+    }
+    if snapshot.bracketed_paste {
+        mode_flags |= 0x08;
+    }
+    if sync_output {
+        mode_flags |= 0x10;
+    }
+    if exited {
+        mode_flags |= 0x20;
+    }
+    if snapshot.application_cursor {
+        mode_flags |= MODE_FLAG_APPLICATION_CURSOR;
+    }
+    if !meta_bytes.is_empty() {
+        mode_flags |= MODE_FLAG_EXTENDED_META;
+    }
+
+    let overflow_utf8_len = overflow_utf8.len() as u32;
+    let raw_exit_code: i32 = exit_code.unwrap_or(0) as i32;
+
+    let total_len = SNAPSHOT_BIN_HEADER_LEN
+        + (dirty_row_count as usize) * 4
+        + cell_bytes.len()
+        + overflow_utf8.len()
+        + meta_bytes.len();
+    let mut out = Vec::with_capacity(total_len);
+
+    // 32-byte header (Little-Endian)
+    out.extend_from_slice(&snapshot.seq.to_le_bytes());
+    out.extend_from_slice(&snapshot.cols.to_le_bytes());
+    out.extend_from_slice(&snapshot.rows.to_le_bytes());
+    out.extend_from_slice(&snapshot.cursor.col.to_le_bytes());
+    out.extend_from_slice(&snapshot.cursor.row.to_le_bytes());
+    out.push(cursor_flags);
+    out.push(mode_flags);
+    out.extend_from_slice(&dirty_row_count.to_le_bytes());
+    out.extend_from_slice(&(total_cells as u32).to_le_bytes());
+    out.extend_from_slice(&overflow_utf8_len.to_le_bytes());
+    out.extend_from_slice(&raw_exit_code.to_le_bytes());
+
+    // Dirty row index table
+    for row in snapshot.dirty_rows.iter().take(dirty_row_count as usize) {
+        let count = (row.cells.len().min(0x7fff)) as u16;
+        let count_with_flags = if row.wrapped { count | 0x8000 } else { count };
+        out.extend_from_slice(&row.row_idx.to_le_bytes());
+        out.extend_from_slice(&count_with_flags.to_le_bytes());
+    }
+
+    // Packed cells + overflow UTF-8 + extended metadata JSON tail
+    out.extend_from_slice(&cell_bytes);
+    out.extend_from_slice(&overflow_utf8);
+    out.extend_from_slice(&meta_bytes);
+    out
+}
+
+/// Decodes a `SNAPSHOT_BIN` payload back into `(RenderSnapshot, exited, exit_code, sync_output)`.
+pub fn decode_render_snapshot_bin(
+    bytes: &[u8],
+) -> Result<(RenderSnapshot, bool, Option<i64>, bool), String> {
+    if bytes.len() < SNAPSHOT_BIN_HEADER_LEN {
+        return Err(format!(
+            "Binary snapshot payload too small: {} < {}",
+            bytes.len(),
+            SNAPSHOT_BIN_HEADER_LEN
+        ));
+    }
+
+    let seq = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let cols = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
+    let rows = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
+    let cursor_col = u16::from_le_bytes(bytes[12..14].try_into().unwrap());
+    let cursor_row = u16::from_le_bytes(bytes[14..16].try_into().unwrap());
+    let cursor_flags = bytes[16];
+    let mode_flags = bytes[17];
+    let dirty_row_count = u16::from_le_bytes(bytes[18..20].try_into().unwrap()) as usize;
+    let total_cells = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    let overflow_utf8_len = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
+    let raw_exit_code = i32::from_le_bytes(bytes[28..32].try_into().unwrap());
+
+    let dirty_rows_end = SNAPSHOT_BIN_HEADER_LEN + dirty_row_count * 4;
+    let cells_end = dirty_rows_end + total_cells * 16;
+    let overflow_end = cells_end + overflow_utf8_len;
+
+    if bytes.len() < overflow_end {
+        return Err(format!(
+            "Binary snapshot truncated: expected at least {} bytes, got {}",
+            overflow_end,
+            bytes.len()
+        ));
+    }
+
+    let overflow_slice = &bytes[cells_end..overflow_end];
+    let mut dirty_rows = Vec::with_capacity(dirty_row_count);
+    let mut cell_offset = dirty_rows_end;
+
+    for r in 0..dirty_row_count {
+        let entry_offset = SNAPSHOT_BIN_HEADER_LEN + r * 4;
+        let row_idx = u16::from_le_bytes(bytes[entry_offset..entry_offset + 2].try_into().unwrap());
+        let raw_count =
+            u16::from_le_bytes(bytes[entry_offset + 2..entry_offset + 4].try_into().unwrap());
+        let count = (raw_count & 0x7fff) as usize;
+        let wrapped = (raw_count & 0x8000) != 0;
+        let mut cells = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            if cell_offset + 16 > cells_end {
+                return Err("Cell table overflow in binary snapshot".to_string());
+            }
+            let codepoint_or_span =
+                u32::from_le_bytes(bytes[cell_offset..cell_offset + 4].try_into().unwrap());
+            let fg_rgba =
+                u32::from_le_bytes(bytes[cell_offset + 4..cell_offset + 8].try_into().unwrap());
+            let bg_rgba =
+                u32::from_le_bytes(bytes[cell_offset + 8..cell_offset + 12].try_into().unwrap());
+            let width = bytes[cell_offset + 12];
+            let attrs = bytes[cell_offset + 13];
+            cell_offset += 16;
+
+            let ch = if (attrs & 0x80) != 0 {
+                let offset = (codepoint_or_span & 0x00ff_ffff) as usize;
+                let len = ((codepoint_or_span >> 24) & 0xff) as usize;
+                if offset + len <= overflow_slice.len() {
+                    String::from_utf8_lossy(&overflow_slice[offset..offset + len]).into_owned()
+                } else {
+                    " ".to_string()
+                }
+            } else if codepoint_or_span == 0 {
+                String::new()
+            } else {
+                char::from_u32(codepoint_or_span)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| " ".to_string())
+            };
+
+            let fg = if (fg_rgba & 0xff) == 0 {
+                DEFAULT_FG
+            } else {
+                [
+                    ((fg_rgba >> 24) & 0xff) as u8,
+                    ((fg_rgba >> 16) & 0xff) as u8,
+                    ((fg_rgba >> 8) & 0xff) as u8,
+                ]
+            };
+
+            let has_bg = (bg_rgba & 0xff) != 0;
+            let bg = if !has_bg {
+                DEFAULT_BG
+            } else {
+                [
+                    ((bg_rgba >> 24) & 0xff) as u8,
+                    ((bg_rgba >> 16) & 0xff) as u8,
+                    ((bg_rgba >> 8) & 0xff) as u8,
+                ]
+            };
+
+            cells.push(CellSnapshot {
+                ch,
+                width,
+                fg,
+                bg,
+                has_bg,
+                bold: (attrs & 0x01) != 0,
+                dim: (attrs & 0x02) != 0,
+                italic: (attrs & 0x04) != 0,
+                underline: (attrs & 0x08) != 0,
+                inverse: (attrs & 0x10) != 0,
+            });
+        }
+
+        dirty_rows.push(RowSnapshot { row_idx, cells, wrapped });
+    }
+
+    let cursor_visible = (cursor_flags & 0x01) != 0;
+    let cursor_blink = (cursor_flags & 0x02) != 0;
+    let cursor_shape = match (cursor_flags >> 2) & 0x07 {
+        1 => "underline".to_string(),
+        2 => "bar".to_string(),
+        _ => "block".to_string(),
+    };
+
+    let full = (mode_flags & 0x01) != 0;
+    let alternate_screen = (mode_flags & 0x02) != 0;
+    let mouse_tracking = (mode_flags & 0x04) != 0;
+    let bracketed_paste = (mode_flags & 0x08) != 0;
+    let sync_output = (mode_flags & 0x10) != 0;
+    let exited = (mode_flags & 0x20) != 0;
+    let application_cursor = (mode_flags & MODE_FLAG_APPLICATION_CURSOR) != 0;
+    let exit_code = if exited {
+        Some(raw_exit_code as i64)
+    } else {
+        None
+    };
+
+    let meta: Option<ExtendedSnapshotMeta> =
+        if (mode_flags & MODE_FLAG_EXTENDED_META) != 0 && bytes.len() > overflow_end {
+            serde_json::from_slice(&bytes[overflow_end..]).ok()
+        } else {
+            None
+        };
+
+    let snapshot = RenderSnapshot {
+        seq,
+        cols,
+        rows,
+        alternate_screen,
+        application_cursor,
+        bracketed_paste,
+        mouse_tracking,
+        mouse_mode: meta
+            .as_ref()
+            .map(|m| m.mouse_mode.clone())
+            .unwrap_or_else(|| {
+                if mouse_tracking {
+                    "click".to_string()
+                } else {
+                    "none".to_string()
+                }
+            }),
+        sgr_mouse: meta.as_ref().map(|m| m.sgr_mouse).unwrap_or(false),
+        sgr_pixels_mouse: meta.as_ref().map(|m| m.sgr_pixels_mouse).unwrap_or(false),
+        focus_reporting: meta.as_ref().map(|m| m.focus_reporting).unwrap_or(false),
+        win32_input_mode: meta.as_ref().map(|m| m.win32_input_mode).unwrap_or(false),
+        kitty_keyboard_flags: meta.as_ref().map(|m| m.kitty_keyboard_flags).unwrap_or(0),
+        scrollback_offset: meta.as_ref().map(|m| m.scrollback_offset).unwrap_or(0),
+        cursor: CursorSnapshot {
+            visible: cursor_visible,
+            col: cursor_col,
+            row: cursor_row,
+            shape: cursor_shape,
+            blink: cursor_blink,
+        },
+        dirty_rows,
+        full,
+        title: meta.as_ref().and_then(|m| m.title.clone()),
+        clipboard_write: meta.as_ref().and_then(|m| m.clipboard_write.clone()),
+    };
+
+    Ok((snapshot, exited, exit_code, sync_output))
 }
 
 #[cfg(test)]
@@ -1792,6 +2298,109 @@ mod tests {
             row_text(&next, 1).contains("TAIL"),
             "row 1 was {}",
             row_text(&next, 1)
+        );
+    }
+
+    #[test]
+    fn binary_snapshot_round_trips_full_metadata_and_graphemes_with_exact_parity() {
+        let mut engine = TerminalVtEngine::new(24, 4);
+        engine.feed(
+            "\x1b[?1h\x1b[?1002;1006;1004;2004h\x1b[?9001h\x1b[>3u\x1b]0;Agent Title\x07\x1b]52;c;SGVsbG8=\x07\x1b[1;31m🚀\u{26a0}\u{fe0f}Hi\x1b[0m"
+                .as_bytes(),
+        );
+        let snap = match engine.get_snapshot_diff(0, false, None) {
+            TerminalSnapshotPollResponse::Snapshot { snapshot, .. } => snapshot,
+            TerminalSnapshotPollResponse::Unchanged { .. } => panic!("expected snapshot"),
+        };
+
+        let bytes = serialize_render_snapshot_bin(&snap, true, Some(42), true, true, None);
+        assert_eq!(snapshot_bin_seq(&bytes), Some(snap.seq));
+
+        let (decoded, dec_exited, dec_exit_code, dec_sync) =
+            decode_render_snapshot_bin(&bytes).expect("decode should succeed");
+        assert!(dec_exited);
+        assert_eq!(dec_exit_code, Some(42));
+        assert!(dec_sync);
+        assert_eq!(decoded.seq, snap.seq);
+        assert_eq!(decoded.cols, snap.cols);
+        assert_eq!(decoded.rows, snap.rows);
+        assert_eq!(decoded.application_cursor, snap.application_cursor);
+        assert_eq!(decoded.bracketed_paste, snap.bracketed_paste);
+        assert_eq!(decoded.mouse_tracking, snap.mouse_tracking);
+        assert_eq!(decoded.mouse_mode, snap.mouse_mode);
+        assert_eq!(decoded.sgr_mouse, snap.sgr_mouse);
+        assert_eq!(decoded.focus_reporting, snap.focus_reporting);
+        assert_eq!(decoded.win32_input_mode, snap.win32_input_mode);
+        assert_eq!(decoded.kitty_keyboard_flags, snap.kitty_keyboard_flags);
+        assert_eq!(decoded.title, snap.title);
+        assert_eq!(decoded.clipboard_write, snap.clipboard_write);
+        assert_eq!(decoded.cursor, snap.cursor);
+        assert_eq!(decoded.dirty_rows, snap.dirty_rows);
+    }
+
+    #[test]
+    fn binary_snapshot_carries_row_wrap_cursor_blink_and_observed_bytes() {
+        let mut engine = TerminalVtEngine::new(16, 3);
+        engine.feed(b"WRAP-ROW\r\nSECOND\r\n");
+        let mut snap = match engine.get_snapshot_diff(0, false, None) {
+            TerminalSnapshotPollResponse::Snapshot { snapshot, .. } => snapshot,
+            TerminalSnapshotPollResponse::Unchanged { .. } => panic!("expected snapshot"),
+        };
+        assert!(
+            snap.dirty_rows.len() >= 2,
+            "the first poll must publish every row so wrap flags can be asserted"
+        );
+
+        snap.cursor.blink = true;
+        for (idx, row) in snap.dirty_rows.iter_mut().enumerate() {
+            row.wrapped = idx == 0;
+        }
+
+        let observed = crate::terminal::to_base64(b"agent rolling output\n");
+        let bytes =
+            serialize_render_snapshot_bin(&snap, false, None, false, false, Some(observed.clone()));
+
+        assert_eq!(
+            bytes[16] & 0x02,
+            0x02,
+            "cursor blink must map to bit 1 of cursor_flags"
+        );
+        let first_row_count = u16::from_le_bytes(bytes[34..36].try_into().unwrap());
+        let second_row_count = u16::from_le_bytes(bytes[38..40].try_into().unwrap());
+        assert_eq!(
+            first_row_count & 0x8000,
+            0x8000,
+            "a wrapped row must set bit 15 of its dirty-row cell_count"
+        );
+        assert_eq!(
+            second_row_count & 0x8000,
+            0x0000,
+            "a non-wrapped row must clear bit 15 of its dirty-row cell_count"
+        );
+
+        let tail = String::from_utf8_lossy(&bytes);
+        assert!(
+            tail.contains("\"observedBytesBase64\""),
+            "the extended metadata tail must carry the observed output bytes"
+        );
+        assert!(tail.contains(&observed));
+
+        let (decoded, exited, exit_code, sync_output) =
+            decode_render_snapshot_bin(&bytes).expect("decode should succeed");
+        assert!(!exited);
+        assert_eq!(exit_code, None);
+        assert!(!sync_output);
+        assert!(decoded.cursor.blink);
+        assert!(decoded.dirty_rows[0].wrapped);
+        assert!(!decoded.dirty_rows[1].wrapped);
+        assert_eq!(decoded.cursor, snap.cursor);
+        assert_eq!(decoded.dirty_rows, snap.dirty_rows);
+
+        let without_observed =
+            serialize_render_snapshot_bin(&snap, false, None, false, false, None);
+        assert!(
+            !String::from_utf8_lossy(&without_observed).contains("observedBytesBase64"),
+            "an empty observed buffer must not emit the key at all"
         );
     }
 }

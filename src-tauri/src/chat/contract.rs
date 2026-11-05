@@ -1149,11 +1149,16 @@ mod tests {
                 model_expected,
                 "{driver} model control"
             );
-            assert_eq!(
-                joined.contains("--effort"),
-                declared.accepts_effort,
-                "{driver} effort control"
-            );
+            let effort_sent = if driver == "opencode" {
+                args.args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--model" && pair[1].ends_with("#high"))
+            } else {
+                args.args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--effort" && pair[1] == "high")
+            };
+            assert_eq!(effort_sent, declared.accepts_effort, "{driver} effort control");
             assert_eq!(
                 joined.contains("provider-handle-9"),
                 endpoint.accepts_session,

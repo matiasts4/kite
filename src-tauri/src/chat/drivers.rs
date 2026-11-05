@@ -286,7 +286,7 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
                 unsupported(
                     "effort",
                     "claude",
-                    "no effort flag was observed and the catalog advertises levels only",
+                    "no effort flag was observed; the binary is absent on this machine (2026-11-05), so no flag was read",
                 ),
                 unsupported(
                     "sessionMode",
@@ -311,7 +311,7 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
             unsupported: vec![unsupported(
                 "effort",
                 "codex",
-                "the exec spawn passes no effort flag; levels are advertised only",
+                "no effort flag was observed; the binary is absent on this machine (2026-11-05), so no flag was read",
             )],
             version: Some(DriverVersion {
                 probe_args: vec!["--version"],
@@ -333,7 +333,11 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
             accepts_resume: true,
             unsupported: vec![
                 unsupported("model", "cursor", "no model flag was observed; the spawn passes only -p"),
-                unsupported("effort", "cursor", "no effort flag was observed"),
+                unsupported(
+                    "effort",
+                    "cursor",
+                    "no effort flag was observed; cursor-agent is absent on this machine (2026-11-05)",
+                ),
                 unsupported("permission", "cursor", "no permission flag was observed"),
                 unsupported("workMode", "cursor", "no plan, build, or ask switch was observed"),
             ],
@@ -355,7 +359,11 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
             accepts_resume: true,
             unsupported: vec![
                 unsupported("model", "gemini", "no model flag was observed on this machine"),
-                unsupported("effort", "gemini", "no effort flag was observed"),
+                unsupported(
+                    "effort",
+                    "gemini",
+                    "no effort flag was observed; the binary is absent on this machine (2026-11-05), so no flag was read",
+                ),
                 unsupported("permission", "gemini", "no permission flag was observed"),
                 unsupported("workMode", "gemini", "no plan, build, or ask switch was observed"),
             ],
@@ -364,13 +372,15 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
                 "gemini: 0.64.0 documents --resume and --session-id only, so no lasting channel was observed",
             ),
         },
-        // `grok` 1.0.62 exposes `--resume`, `--session-id`, and
-        // `--permission-mode` with six documented values.
+        // `grok` 1.0.70 (`grok --help`, 2026-11-05) documents `-m/--model` and
+        // `--reasoning-effort` (alias `--effort`). The one-shot spawn passes
+        // the alias. Per-model levels come from the CLI catalog. `--resume`
+        // and `--session-id` still do not make a lasting channel.
         "grok" => DriverDeclaration {
             driver: driver.to_string(),
             session_mode: Some(SessionMode::Resumable),
-            accepts_model: false,
-            accepts_effort: false,
+            accepts_model: true,
+            accepts_effort: true,
             accepts_permission: true,
             work_modes: work_modes(&[
                 "default",
@@ -381,27 +391,25 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
                 "plan",
             ]),
             accepts_resume: true,
-            unsupported: vec![
-                unsupported("model", "grok", "no model flag was observed on this machine"),
-                unsupported("effort", "grok", "no effort flag was observed"),
-            ],
+            unsupported: Vec::new(),
             version: None,
             wire: WireSupport::unsupported(
-                "grok: 1.0.62 documents --resume and --session-id only, so no lasting channel was observed",
+                "grok: 1.0.70 documents --resume and --session-id only, so no lasting channel was observed",
             ),
         },
-        // `opencode` 2.1.4 exposes `serve`, `--server`, `--session`, and `acp`,
-        // so the lasting channel exists; its run spawn passes no controls.
+        // `opencode` 2.2.5 `run --help` (2026-11-05) documents
+        // `--model provider/model#variant`. That variant is the effort level.
+        // `--thinking` only shows thinking blocks, so it is not an effort flag.
+        // The lasting wire minimum stays 2.1.4.
         "opencode" => DriverDeclaration {
             driver: driver.to_string(),
             session_mode: Some(SessionMode::Persistent),
             accepts_model: true,
-            accepts_effort: false,
+            accepts_effort: true,
             accepts_permission: false,
             work_modes: Vec::new(),
             accepts_resume: true,
             unsupported: vec![
-                unsupported("effort", "opencode", "no effort flag was observed"),
                 unsupported("permission", "opencode", "no permission flag was observed"),
                 unsupported("workMode", "opencode", "no plan, build, or ask switch was observed"),
             ],
@@ -446,9 +454,9 @@ mod tests {
         let expected: [(&str, Option<SessionMode>, bool, bool, bool, bool); 7] = [
             ("antigravity", Some(SessionMode::Persistent), true, true, true, true),
             ("codex", Some(SessionMode::Persistent), true, false, true, true),
-            ("opencode", Some(SessionMode::Persistent), true, false, false, true),
+            ("opencode", Some(SessionMode::Persistent), true, true, false, true),
             ("gemini", Some(SessionMode::Resumable), false, false, false, true),
-            ("grok", Some(SessionMode::Resumable), false, false, true, true),
+            ("grok", Some(SessionMode::Resumable), true, true, true, true),
             ("cursor", Some(SessionMode::Resumable), false, false, false, true),
             ("claude", None, true, false, true, true),
         ];

@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::chat::drivers::{declaration, DriverVersion};
 use crate::chat::persistent::{
-    unsupported_wire, AntigravitySession, OpenCodeServerSession, PersistentControls,
-    ANTIGRAVITY_DRIVER, OPENCODE_DRIVER,
+    opencode_model_arg, unsupported_wire, AntigravitySession, OpenCodeServerSession,
+    PersistentControls, ANTIGRAVITY_DRIVER, OPENCODE_DRIVER,
 };
 use crate::chat::recipe::{apply_recipe, snapshot_for_agent};
 use crate::chat::session::{
@@ -349,7 +349,7 @@ pub fn select_persistent_transport(
     };
     let transport: Box<dyn SessionTransport> = match kind {
         TransportKind::Antigravity => Box::new(AntigravitySession::new(controls)),
-        TransportKind::OpenCodeServer => Box::new(OpenCodeServerSession::new()),
+        TransportKind::OpenCodeServer => Box::new(OpenCodeServerSession::with_controls(controls)),
     };
     Ok(SelectedTransport {
         driver: declared.driver,
@@ -1067,10 +1067,12 @@ pub fn spawn_endpoint(provider: &str) -> Option<SpawnEndpoint> {
             accepts_model: false,
             accepts_session: false,
         },
+        // `grok --help` 1.0.70 documents `-m/--model`. The selected model is
+        // sent without a separate endpoint claim.
         "grok" => SpawnEndpoint {
             endpoint_id: "grok -p",
-            model_by_default: false,
-            accepts_model: false,
+            model_by_default: true,
+            accepts_model: true,
             accepts_session: false,
         },
         // `opencode run` accepts `--model` (documented by the CLI), but it does
@@ -1282,12 +1284,22 @@ pub fn spawn_args(
                 "acceptEdits" => "acceptEdits",
                 _ => "bypassPermissions",
             };
-            vec![
+            let mut args = vec![
                 "-p".into(),
                 "--permission-mode".into(),
                 permission.into(),
-                sent,
-            ]
+            ];
+            if let Some(model) = resolved.model {
+                args.push("--model".into());
+                args.push(model.into());
+            }
+            // `--effort` is the documented alias of `--reasoning-effort`.
+            if let Some(effort) = effort.map(str::trim).filter(|level| !level.is_empty()) {
+                args.push("--effort".into());
+                args.push(effort.into());
+            }
+            args.push(sent);
+            args
         }
         "cursor" => vec!["-p".into(), sent],
         "opencode" => {
@@ -1300,7 +1312,7 @@ pub fn spawn_args(
             }
             if let Some(model) = resolved.model {
                 args.push("--model".into());
-                args.push(model.into());
+                args.push(opencode_model_arg(model, effort));
             }
             args.push(sent);
             args
@@ -2318,7 +2330,7 @@ mod tests {
 
     #[test]
     fn spawns_without_a_supported_endpoint_omit_model_and_session() {
-        for provider in ["cursor", "grok", "gemini"] {
+        for provider in ["cursor", "gemini"] {
             let values = send(Some("go-model-1"), Some("session-1"), None, None, &[]);
             let spawn = spawn_args(provider, "fullAccess", &values, None, "hello")
                 .unwrap_or_else(|error| panic!("{provider} spawn args: {error}"));
@@ -2341,7 +2353,7 @@ mod tests {
 
     #[test]
     fn supported_endpoint_flag_fails_on_a_spawn_without_model_support() {
-        for provider in ["cursor", "grok", "gemini"] {
+        for provider in ["cursor", "gemini"] {
             let endpoint_id = spawn_endpoint(provider)
                 .unwrap_or_else(|| panic!("{provider} endpoint"))
                 .endpoint_id;
@@ -2415,6 +2427,66 @@ mod tests {
         assert_eq!(model_flags(&spawn.args), vec!["--model"]);
         assert!(spawn.args.iter().any(|arg| arg == "gemini-4-argon"));
         assert!(spawn.args.iter().any(|arg| arg == "--conversation"));
+    }
+
+    #[test]
+    fn grok_sends_the_selected_model_and_the_documented_effort_alias() {
+        let values = send(Some("grok-4.7"), Some("session-1"), None, None, &[]);
+        let spawn = spawn_args("grok", "acceptEdits", &values, Some("high"), "hello")
+            .expect("grok args");
+        assert_eq!(
+            spawn.args,
+            vec![
+                "-p",
+                "--permission-mode",
+                "acceptEdits",
+                "--model",
+                "grok-4.7",
+                "--effort",
+                "high",
+                "hello",
+            ]
+        );
+
+        let without_level = spawn_args("grok", "fullAccess", &values, None, "hello").expect("grok args");
+        assert!(without_level.args.windows(2).any(|pair| pair == ["--model", "grok-4.7"]));
+        assert!(!without_level.args.iter().any(|arg| arg == "--effort" || arg == "--reasoning-effort"));
+    }
+
+    #[test]
+    fn opencode_sends_effort_as_the_model_variant() {
+        let values = send(Some("xai/grok-4.7"), None, None, None, &[]);
+        let spawn = spawn_args("opencode", "fullAccess", &values, Some("ultra"), "hello")
+            .expect("opencode args");
+        assert!(spawn.args.windows(2).any(|pair| pair == ["--model", "xai/grok-4.7#ultra"]));
+        assert!(!spawn.args.iter().any(|arg| arg == "--effort" || arg == "--thinking"));
+
+        let replaced = send(Some("xai/grok-4.7#low"), None, None, None, &[]);
+        let spawn = spawn_args("opencode", "fullAccess", &replaced, Some("high"), "hello")
+            .expect("opencode args");
+        assert!(spawn.args.windows(2).any(|pair| pair == ["--model", "xai/grok-4.7#high"]));
+
+        let bare = spawn_args("opencode", "fullAccess", &values, None, "hello").expect("opencode args");
+        assert!(bare.args.windows(2).any(|pair| pair == ["--model", "xai/grok-4.7"]));
+    }
+
+    #[test]
+    fn drivers_without_an_observed_effort_flag_do_not_gain_one() {
+        for provider in ["claude", "codex", "cursor", "gemini"] {
+            let values = send(Some("contract-model"), None, None, None, &[]);
+            let spawn = spawn_args(provider, "fullAccess", &values, Some("ultra"), "hello")
+                .expect("args");
+            assert!(
+                !spawn.args.iter().any(|arg| {
+                    arg == "--effort"
+                        || arg == "--reasoning-effort"
+                        || arg.contains("#ultra")
+                        || arg == "--thinking"
+                }),
+                "{provider} invented an effort flag: {}",
+                spawn.args.join(" ")
+            );
+        }
     }
 
     #[test]

@@ -197,6 +197,8 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
             (stripped, Some("max"))
         } else if let Some(stripped) = raw_id.strip_suffix("-minimal") {
             (stripped, Some("minimal"))
+        } else if let Some(stripped) = raw_id.strip_suffix("-ultra") {
+            (stripped, Some("ultra"))
         } else {
             (raw_id, None)
         };
@@ -208,6 +210,7 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
             .replace(" (X-High)", "")
             .replace(" (Max)", "")
             .replace(" (Minimal)", "")
+            .replace(" (Ultra)", "")
             .replace(" (Adaptive)", "");
 
         let id_lower = base_id.to_lowercase();
@@ -265,8 +268,10 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
 
             sort_effort_levels(&mut entry.tiers);
 
-            let supports_effort = !entry.tiers.is_empty();
-            let default_effort: Option<String> = if entry.tiers.iter().any(|t| t == "medium") {
+            let supports_effort = entry.tiers.len() >= 2;
+            let default_effort: Option<String> = if !supports_effort {
+                None
+            } else if entry.tiers.iter().any(|t| t == "medium") {
                 Some("medium".to_string())
             } else {
                 entry.tiers.first().cloned()
@@ -315,14 +320,107 @@ pub fn fetch_grok_models_dynamic() -> Vec<Value> {
     if let Some(program) = resolve_bin("grok", &[]) {
         if let Ok(out) = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(10)) {
             if out.success() {
-                let models = parse_grok_models(&out.stdout_lossy());
+                let mut models = parse_grok_models(&out.stdout_lossy());
                 if !models.is_empty() {
+                    if let Some(menus) = read_grok_effort_menus() {
+                        apply_grok_effort_menus(&mut models, &menus);
+                    }
                     return models;
                 }
             }
         }
     }
     Vec::new()
+}
+
+/// Reads the Grok CLI catalog (`~/.grok/models_cache.json`) that records each
+/// model's `reasoning_efforts` menu. The text `grok models` list names ids
+/// only. A missing file leaves those rows without levels.
+fn read_grok_effort_menus() -> Option<HashMap<String, GrokEffortMenu>> {
+    let path = crate::quota::utils::user_home_dir()
+        .join(".grok")
+        .join("models_cache.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let menus = parse_grok_effort_menus(&raw);
+    if menus.is_empty() {
+        None
+    } else {
+        Some(menus)
+    }
+}
+
+pub struct GrokEffortMenu {
+    pub levels: Vec<String>,
+    pub default_effort: Option<String>,
+}
+
+/// Parses the CLI catalog. A model is included only when it advertises at
+/// least two reasoning levels. Fewer than two leaves the control disabled.
+pub fn parse_grok_effort_menus(raw: &str) -> HashMap<String, GrokEffortMenu> {
+    let mut menus = HashMap::new();
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return menus;
+    };
+    let Some(models) = value.get("models").and_then(|entry| entry.as_object()) else {
+        return menus;
+    };
+    for (id, entry) in models {
+        let info = entry.get("info").unwrap_or(entry);
+        if info
+            .get("supports_reasoning_effort")
+            .and_then(|flag| flag.as_bool())
+            != Some(true)
+        {
+            continue;
+        }
+        let mut levels: Vec<String> = info
+            .get("reasoning_efforts")
+            .and_then(|rows| rows.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+                    .map(str::trim)
+                    .filter(|level| !level.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        sort_effort_levels(&mut levels);
+        levels.dedup();
+        if levels.len() < 2 {
+            continue;
+        }
+        let default_effort = info
+            .get("reasoning_effort")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|level| levels.iter().any(|known| known == level))
+            .map(str::to_string);
+        menus.insert(
+            id.clone(),
+            GrokEffortMenu {
+                levels,
+                default_effort,
+            },
+        );
+    }
+    menus
+}
+
+pub fn apply_grok_effort_menus(models: &mut [Value], menus: &HashMap<String, GrokEffortMenu>) {
+    for model in models.iter_mut() {
+        let Some(id) = model.get("id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(menu) = menus.get(id) else {
+            continue;
+        };
+        model["supportsEffort"] = json!(true);
+        model["effortLevels"] = json!(menu.levels);
+        if let Some(default_effort) = &menu.default_effort {
+            model["defaultEffort"] = json!(default_effort);
+        }
+    }
 }
 
 /// Parses `grok models`: a bulleted list under an `Available models:` header.
@@ -341,20 +439,13 @@ pub fn parse_grok_models(raw: &str) -> Vec<Value> {
         if id.is_empty() || !model_id_ok(id) || !seen.insert(id.to_string()) {
             continue;
         }
-        let is_reasoning = id.to_lowercase().contains("reasoning");
-        let effort_levels = if is_reasoning {
-            Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
-        } else {
-            None
-        };
-        let default_effort = if is_reasoning { Some("medium") } else { None };
         models.push(model_row(
             id,
             id,
             "Listed by the Grok CLI",
-            is_reasoning,
-            effort_levels,
-            default_effort,
+            false,
+            None,
+            None,
         ));
     }
     models
@@ -416,6 +507,7 @@ pub fn sort_effort_levels(levels: &mut [String]) {
             "high" => 4,
             "xhigh" | "extra-high" | "extra_high" | "very-high" => 5,
             "max" | "maximum" => 6,
+            "ultra" => 7,
             _ => 10,
         }
     }
@@ -551,8 +643,10 @@ pub fn parse_opencode_models_inner(raw: &str, config: Option<&Value>) -> Vec<Val
         variants.dedup();
         sort_effort_levels(&mut variants);
 
-        let supports_effort = !variants.is_empty();
-        let default_effort: Option<String> = if let Some(rv) = root_variant {
+        let supports_effort = variants.len() >= 2;
+        let default_effort: Option<String> = if !supports_effort {
+            None
+        } else if let Some(rv) = root_variant {
             if is_root_configured || variants.iter().any(|v| v == rv) {
                 Some(rv.to_string())
             } else if variants.iter().any(|v| v == "medium") {
@@ -775,6 +869,7 @@ mod tests {
     fn sorts_effort_levels_in_canonical_progression() {
         let mut tiers = vec![
             "high".to_string(),
+            "ultra".to_string(),
             "max".to_string(),
             "minimal".to_string(),
             "low".to_string(),
@@ -784,7 +879,7 @@ mod tests {
         sort_effort_levels(&mut tiers);
         assert_eq!(
             tiers,
-            vec!["minimal", "low", "medium", "high", "xhigh", "max"]
+            vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
         );
     }
 
@@ -863,6 +958,108 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(opus_levels, vec!["low", "max"]);
+    }
+
+    #[test]
+    fn parses_agy_models_collapsing_an_ultra_suffix() {
+        let raw = "gemini-4-argon-ultra\tGemini 4 Argon (Ultra)\ngemini-4-argon-low\tGemini 4 Argon (Low)\ngemini-4-argon-max\tGemini 4 Argon (Max)\n";
+        let parsed = parse_agy_models(raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].get("id").and_then(|v| v.as_str()), Some("gemini-4-argon"));
+        assert_eq!(parsed[0].get("name").and_then(|v| v.as_str()), Some("Gemini 4 Argon"));
+        let levels: Vec<&str> = parsed[0]
+            .get("effortLevels")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(levels, vec!["low", "max", "ultra"]);
+    }
+
+    #[test]
+    fn a_single_agy_tier_does_not_advertise_effort() {
+        let parsed = parse_agy_models("plain-ultra\tPlain (Ultra)\n");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].get("supportsEffort").and_then(|v| v.as_bool()), Some(false));
+        assert!(parsed[0].get("effortLevels").is_none());
+    }
+
+    #[test]
+    fn grok_text_list_has_no_invented_effort_until_the_catalog_says_so() {
+        let raw = "Available models:\n  * grok-4.7 (default)\n  - grok-4.5\n";
+        let mut models = parse_grok_models(raw);
+        assert_eq!(models[0].get("supportsEffort").and_then(|v| v.as_bool()), Some(false));
+
+        let catalog = r#"{
+            "models": {
+                "grok-4.7": {
+                    "info": {
+                        "supports_reasoning_effort": true,
+                        "reasoning_effort": "high",
+                        "reasoning_efforts": [
+                            {"id": "xhigh"},
+                            {"id": "high"},
+                            {"id": "medium"},
+                            {"id": "low"}
+                        ]
+                    }
+                },
+                "grok-4.5": {
+                    "info": {
+                        "supports_reasoning_effort": true,
+                        "reasoning_effort": "low",
+                        "reasoning_efforts": [{"id": "minimal"}]
+                    }
+                }
+            }
+        }"#;
+        let menus = parse_grok_effort_menus(catalog);
+        apply_grok_effort_menus(&mut models, &menus);
+
+        assert_eq!(models[0].get("supportsEffort").and_then(|v| v.as_bool()), Some(true));
+        let levels: Vec<&str> = models[0]
+            .get("effortLevels")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(levels, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(models[0].get("defaultEffort").and_then(|v| v.as_str()), Some("high"));
+        assert_eq!(models[1].get("supportsEffort").and_then(|v| v.as_bool()), Some(false));
+        assert!(models[1].get("effortLevels").is_none());
+    }
+
+    #[test]
+    fn opencode_variants_include_ultra_and_a_single_variant_stays_off() {
+        let config = json!({
+            "provider": {
+                "xai": {
+                    "models": {
+                        "grok-ceiling": {
+                            "name": "Grok Ceiling",
+                            "variants": { "low": {}, "ultra": {}, "high": {} }
+                        },
+                        "solo": {
+                            "name": "Solo",
+                            "variants": { "ultra": {} }
+                        }
+                    }
+                }
+            }
+        });
+        let models = parse_opencode_models_inner("xai/grok-ceiling\nxai/solo\n", Some(&config));
+        let ceiling = &models[0];
+        let levels: Vec<&str> = ceiling
+            .get("effortLevels")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(levels, vec!["low", "high", "ultra"]);
+        assert_eq!(models[1].get("supportsEffort").and_then(|v| v.as_bool()), Some(false));
     }
 }
 

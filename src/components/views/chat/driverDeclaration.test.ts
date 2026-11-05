@@ -70,6 +70,26 @@ describe('resolveEffortChoicesForModel', () => {
     const resolvedClaude = resolveEffortChoicesForModel(claudeModel);
     expect(resolvedClaude!.choices.map((c) => c.id)).toEqual(['low', 'medium', 'high', 'max']);
   });
+
+  it('labels ultra and disables a model that advertises fewer than two levels', () => {
+    const ultra = resolveEffortChoicesForModel({
+      id: 'gemini-4-argon',
+      name: 'Gemini 4 Argon',
+      supportsEffort: true,
+      effortLevels: ['low', 'ultra'],
+    });
+    expect(ultra!.choices.map((choice) => choice.label)).toEqual(['Bajo', 'Ultra']);
+    expect(ultra!.choices[1]?.detail).toBe('Razonamiento ultra para el techo del modelo');
+
+    expect(
+      resolveEffortChoicesForModel({
+        id: 'solo',
+        name: 'Solo',
+        supportsEffort: true,
+        effortLevels: ['ultra'],
+      })
+    ).toBeNull();
+  });
 });
 
 describe('declarationFromCatalog with dynamic effort levels', () => {

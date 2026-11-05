@@ -620,14 +620,40 @@ pub fn opencode_server_url(port: u16) -> String {
 /// The prompt is in argv, not stdin, because the client documents no stdin
 /// frame.
 pub fn opencode_turn_args(port: u16, session_key: &str, prompt: &str) -> Vec<String> {
-    vec![
+    opencode_turn_args_with_model(port, session_key, prompt, None)
+}
+
+/// `opencode run --help` documents `--model provider/model#variant` on the same
+/// command that continues a server session. The variant is the effort level.
+pub fn opencode_model_arg(model: &str, effort: Option<&str>) -> String {
+    let Some(level) = effort.map(str::trim).filter(|level| !level.is_empty()) else {
+        return model.to_string();
+    };
+    match model.split_once('#') {
+        Some((base, _)) if !base.is_empty() => format!("{base}#{level}"),
+        _ => format!("{model}#{level}"),
+    }
+}
+
+pub fn opencode_turn_args_with_model(
+    port: u16,
+    session_key: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
         "run".to_string(),
         "--server".to_string(),
         opencode_server_url(port),
         "--session".to_string(),
         session_key.to_string(),
-        prompt.to_string(),
-    ]
+    ];
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args.push(prompt.to_string());
+    args
 }
 
 /// Picks a free loopback port for one thread's server by binding and releasing
@@ -692,6 +718,8 @@ pub struct OpenCodeServerSession {
     server_tail: Arc<Mutex<String>>,
     port: Option<u16>,
     session_key: Option<String>,
+    /// Model id for each turn, including `#level` when a level was chosen.
+    model_arg: Option<String>,
     turn: Option<HiddenChild>,
     turn_streams: Option<JoinHandle<()>>,
     turn_eof: Arc<AtomicBool>,
@@ -712,6 +740,16 @@ impl OpenCodeServerSession {
         Self::with_probe(program, Box::new(SystemDriverProbe))
     }
 
+    /// Keeps the chosen model on the server session. Each later turn passes it
+    /// as `--model`; the running server process is not rewritten.
+    pub fn with_controls(controls: PersistentControls) -> Self {
+        let mut session = Self::new();
+        session.model_arg = controls.model.as_deref().filter(|model| !model.trim().is_empty()).map(|model| {
+            opencode_model_arg(model.trim(), controls.effort.as_deref())
+        });
+        session
+    }
+
     pub fn with_probe(program: Option<PathBuf>, probe: Box<dyn DriverProbe>) -> Self {
         Self {
             program,
@@ -723,6 +761,7 @@ impl OpenCodeServerSession {
             server_tail: Arc::new(Mutex::new(String::new())),
             port: None,
             session_key: None,
+            model_arg: None,
             turn: None,
             turn_streams: None,
             turn_eof: Arc::new(AtomicBool::new(true)),
@@ -873,7 +912,7 @@ impl SessionTransport for OpenCodeServerSession {
 
         self.stop_turn();
 
-        let args = opencode_turn_args(port, &session_key, prompt);
+        let args = opencode_turn_args_with_model(port, &session_key, prompt, self.model_arg.as_deref());
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut child = spawn_streaming(&program, &args_refs, self.working_directory.as_deref())
             .map_err(|error| {
@@ -1349,6 +1388,28 @@ mod tests {
         assert!(!opencode_turn_args(45871, "thread-1:1", "hello")
             .iter()
             .any(|arg| arg == "--prompt"));
+    }
+
+    #[test]
+    fn an_opencode_turn_sends_the_chosen_level_as_the_model_variant() {
+        let model = opencode_model_arg("xai/grok-4.7", Some("ultra"));
+        assert_eq!(
+            opencode_turn_args_with_model(45871, "thread-1:1", "hello", Some(&model)),
+            vec![
+                "run".to_string(),
+                "--server".to_string(),
+                "http://127.0.0.1:45871".to_string(),
+                "--session".to_string(),
+                "thread-1:1".to_string(),
+                "--model".to_string(),
+                "xai/grok-4.7#ultra".to_string(),
+                "hello".to_string(),
+            ]
+        );
+        assert_eq!(
+            opencode_model_arg("xai/grok-4.7#low", Some("high")),
+            "xai/grok-4.7#high"
+        );
     }
 
     #[test]

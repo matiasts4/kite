@@ -48,6 +48,10 @@ export function resolveEffortChoicesForModel(
 
   // 1. If the model explicitly provides effortLevels, format and map them
   if (Array.isArray(model.effortLevels) && model.effortLevels.length > 0) {
+    if (model.effortLevels.length < 2) {
+      return null;
+    }
+
     const choices: DriverChoice[] = model.effortLevels.map((lvl) => {
       if (typeof lvl === 'string') {
         const key = lvl.toLowerCase();

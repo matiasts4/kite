@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { invokeCommand } from '../../../lib/ipc';
 import { markTerminalExited } from '../../../lib/terminalRegistry';
 import { getTerminalAppearancePrefs } from '../../../lib/terminalAppearancePrefs';
+import { waitForStableHost } from '../../../lib/terminalHostSize';
 import { measureTerminalCanvasGrid } from '../TerminalCanvasSurface';
 import {
   isAgentEngine,
@@ -120,6 +121,13 @@ export function useTerminalSession(options: UseTerminalSessionOptions) {
     const activePrefs = getTerminalAppearancePrefs();
     syncParkedPollers();
 
+    const attachExisting = Boolean(propSessionId) && !opts?.restart;
+    const host = surfaceRef.current;
+    if (attachExisting && host) {
+      await waitForStableHost(host, () => !isMountedRef.current || startGenRef.current !== gen);
+      if (!isMountedRef.current || startGenRef.current !== gen) return;
+    }
+
     const measured = surfaceRef.current
       ? measureTerminalCanvasGrid(surfaceRef.current, activePrefs)
       : { cols: 80, rows: 24 };
@@ -153,7 +161,6 @@ export function useTerminalSession(options: UseTerminalSessionOptions) {
       }
 
       if (!restartedAgent) {
-        const attachExisting = Boolean(propSessionId) && !opts?.restart;
         await invokeCommand(attachExisting ? 'attach_terminal' : 'start_terminal', {
           sessionId: newSessionId,
           engine: currentEngine,

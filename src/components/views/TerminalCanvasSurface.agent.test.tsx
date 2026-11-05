@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/react';
 import { TerminalCanvasSurface } from './TerminalCanvasSurface';
 import { invokeCommand } from '../../lib/ipc';
+import { getActiveAgentTerminals, markTerminalExited } from '../../lib/terminalRegistry';
 
 vi.mock('../../lib/ipc', () => ({
   invokeCommand: vi.fn(),
+  isTauriEnvironment: () => false,
 }));
 
 /** Snapshot shaped like what a mouse-tracking alt-screen TUI agent produces. */
@@ -74,8 +76,9 @@ describe('TerminalCanvasSurface with a mouse-tracking alt-screen agent', () => {
   it('reports wheel events as SGR mouse wheel when the TUI tracks the mouse', async () => {
     const { canvas } = await mountAndSettle();
     fireEvent.wheel(canvas, { deltaY: 100, deltaMode: 0, clientX: 20, clientY: 20 });
-    const out = writes().join('');
-    expect(out).toMatch(/\x1b\[<65;\d+;\d+M/);
+    await waitFor(() => {
+      expect(writes().join('')).toMatch(/\x1b\[<65;\d+;\d+M/);
+    });
   });
 
   it('reports clicks as SGR mouse press/release when the TUI tracks the mouse', async () => {
@@ -114,19 +117,51 @@ describe('TerminalCanvasSurface scroll routing', () => {
     mockSnapshot({ alternateScreen: false, mouseMode: 'none' });
     const { canvas } = await mount();
     fireEvent.wheel(canvas, { deltaY: -100, deltaMode: 0 });
-    expect(invokeCommand).toHaveBeenCalledWith(
-      'scroll_terminal_viewport',
-      expect.objectContaining({ sessionId: 'agent-2', deltaLines: expect.any(Number) })
-    );
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith(
+        'scroll_terminal_viewport',
+        expect.objectContaining({ sessionId: 'agent-2', deltaLines: expect.any(Number) })
+      );
+    });
   });
 
   it('translates wheel into arrow keys on the alternate screen without mouse tracking', async () => {
     mockSnapshot({ alternateScreen: true, mouseMode: 'none' });
     const { canvas } = await mount();
     fireEvent.wheel(canvas, { deltaY: 100, deltaMode: 0 });
-    expect(writes().join('')).toContain('\x1b[B');
+    await waitFor(() => {
+      expect(writes().join('')).toContain('\x1b[B');
+    });
   });
 });
+describe('TerminalCanvasSurface agent observation', () => {
+  it('records PTY text from the snapshot poll into the agent registry', async () => {
+    const sessionId = 'ghostgrid-observe-opencode';
+    (invokeCommand as any).mockImplementation((cmd: string) => {
+      if (cmd === 'poll_terminal_snapshot') {
+        return Promise.resolve({
+          kind: 'unchanged',
+          seq: 1,
+          exited: false,
+          observedBytesBase64: btoa('OpenCode v0.2.0\n'),
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<TerminalCanvasSurface sessionId={sessionId} engine="terminal" />);
+
+    try {
+      await waitFor(() => {
+        const found = getActiveAgentTerminals().find((term) => term.sessionId === sessionId);
+        expect(found?.engine).toBe('open-code');
+      });
+    } finally {
+      markTerminalExited(sessionId);
+    }
+  });
+});
+
 describe('TerminalCanvasSurface focus', () => {
   it('automatically focuses the hidden input on mount with a sessionId', () => {
     (invokeCommand as any).mockImplementation(() => Promise.resolve(null));

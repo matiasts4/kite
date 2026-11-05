@@ -21,12 +21,15 @@ export const GripDotsIcon: React.FC<IconProps> = ({
     className={className}
     style={style}
   >
-    <circle cx="9" cy="6" r="1.75" />
-    <circle cx="15" cy="6" r="1.75" />
-    <circle cx="9" cy="12" r="1.75" />
-    <circle cx="15" cy="12" r="1.75" />
-    <circle cx="9" cy="18" r="1.75" />
-    <circle cx="15" cy="18" r="1.75" />
+    <circle cx="6" cy="6" r="1.5" />
+    <circle cx="12" cy="6" r="1.5" />
+    <circle cx="18" cy="6" r="1.5" />
+    <circle cx="6" cy="12" r="1.5" />
+    <circle cx="12" cy="12" r="1.5" />
+    <circle cx="18" cy="12" r="1.5" />
+    <circle cx="6" cy="18" r="1.5" />
+    <circle cx="12" cy="18" r="1.5" />
+    <circle cx="18" cy="18" r="1.5" />
   </svg>
 );
 

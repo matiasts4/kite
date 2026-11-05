@@ -12,7 +12,7 @@ import {
   type TerminalAppearancePrefs,
 } from '../../lib/terminalAppearancePrefs';
 import { TerminalCanvasSurface } from './TerminalCanvasSurface';
-import { XtermDomSurface, type XtermDomSurfaceHandle } from './terminal/XtermDomSurface';
+import type { TerminalSurfaceHandle } from './terminal/canvas/terminalCanvasTypes';
 import { TerminalToolbar } from './terminal/TerminalToolbar';
 import { RotateCwIcon, SpinnerIcon } from './terminal/terminalIcons';
 import { clipboardImageFormat, extractClipboardImage } from '../../lib/clipboardImage';
@@ -58,7 +58,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onStatusChange,
 }) => {
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const xtermHandleRef = useRef<XtermDomSurfaceHandle>(null);
+  const surfaceHandleRef = useRef<TerminalSurfaceHandle>(null);
   const impactTimerRef = useRef<number | null>(null);
 
   const [isReceivingPrompt, setIsReceivingPrompt] = useState(false);
@@ -226,10 +226,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       if (detail.command === 'clear') {
         handleClear();
-        xtermHandleRef.current?.clear();
+        surfaceHandleRef.current?.clear();
       }
       if (detail.command === 'refresh' || detail.command === 'redraw') {
-        xtermHandleRef.current?.fit();
+        surfaceHandleRef.current?.fit();
         return;
       }
       if (detail.command === 'restart') {
@@ -327,7 +327,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setTimeout(() => {
         if (!cancelled) {
           setIsReceivingPrompt(false);
-          xtermHandleRef.current?.focus();
+          surfaceHandleRef.current?.focus();
         }
       }, 500);
     };
@@ -444,7 +444,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           setEngine={setEngine}
           onClear={() => {
             handleClear();
-            xtermHandleRef.current?.clear();
+            surfaceHandleRef.current?.clear();
           }}
           onRestart={() => startSession(engine, { restart: true })}
           onTerminate={terminateSession}
@@ -463,30 +463,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           .filter(Boolean)
           .join(' ')}
       >
-        {appearance.renderer === 'canvas' ? (
-          (sessionId || propSessionId) ? (
-            <TerminalCanvasSurface
-              sessionId={sessionId || propSessionId!}
-              workspaceId={workspaceId}
-              isFocused={isFocused}
-              className="terminal-surface-host"
-              onTitleChange={handleTitleChange}
-              onProcessExit={handleProcessExit}
-            />
-          ) : null
-        ) : (
-          (sessionId || propSessionId) ? (
-            <XtermDomSurface
-              ref={xtermHandleRef}
-              sessionId={sessionId || propSessionId!}
-              workspaceId={workspaceId}
-              engine={engine}
-              className="terminal-surface-host"
-              onProcessExit={handleProcessExit}
-              onStageClipboardBlob={stageClipboardBlob}
-            />
-          ) : null
-        )}
+        {(sessionId || propSessionId) ? (
+          <TerminalCanvasSurface
+            ref={surfaceHandleRef}
+            sessionId={sessionId || propSessionId!}
+            workspaceId={workspaceId}
+            engine={engine}
+            isFocused={isFocused}
+            className="terminal-surface-host"
+            onTitleChange={handleTitleChange}
+            onProcessExit={handleProcessExit}
+            onStageClipboardBlob={stageClipboardBlob}
+          />
+        ) : null}
 
         {status === 'connecting' && (
           <div className="terminal-loading-overlay">

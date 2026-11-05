@@ -3,7 +3,8 @@
 Este directorio contiene la arquitectura, análisis del estado del arte (incluyendo hallazgos de `gentle-shell` y ODD - Organic-Driven Development), y los dos planes de implementación ejecutables para **Kite Code**:
 
 - **[Registro de fallos de Zed](./zed-fallos.md)** — protocolo para anotar malos turnos del operador y cerrarlos con utterances o evidencia.
-- **[Handoff agente → terminal hija](./agent-handoff.md)** — buzón `.kite/inbox`, CLI `scripts/kite-agent.mjs` y entrega del cuerpo completo del archivo de tarea.
+- **[Handoff agente → terminal hija](./agent-handoff.md)** — buzón `.kite/inbox`, CLI `scripts/kite-agent.mjs` y entrega del cuerpo completo del archivo de tarea. El protocolo que lo reemplaza está en `odd/tasks/agent-dispatch.md`.
+- **[Dispatch](./agent-dispatch.pptx)** — recorrido del plan. La especificación es `odd/tasks/agent-dispatch.md`.
 - **[OpenCode Go en Zed](./opencode-go-integration.md)** — contrato HTTP verificado, resolución de credenciales, sesión y catálogo; ACP documentado como opción futura.
 
 ## 📑 Documentos de Planificación

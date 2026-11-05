@@ -198,11 +198,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
+          gridTemplateColumns: 'repeat(4, 1fr)',
           gap: '6px',
           backgroundColor: 'var(--block-fill)',
           border: '1px solid var(--block-stroke)',
-          borderRadius: '9px',
+          borderRadius: 'var(--control-radius, 8px)',
           padding: '8px 10px',
         }}
       >
@@ -223,6 +223,38 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
         </div>
         <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
           <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
+            Agentes AI
+          </div>
+          <div
+            style={{
+              fontSize: '13px',
+              fontWeight: 700,
+              fontVariantNumeric: 'tabular-nums',
+              color: 'var(--accent, #5c8fff)',
+              marginTop: '1px',
+            }}
+          >
+            {formatBytes(snapshot.memory.appAgentsBytes ?? snapshot.memory.appTerminalsBytes)}
+          </div>
+        </div>
+        <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
+          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
+            Servidores MCP
+          </div>
+          <div
+            style={{
+              fontSize: '13px',
+              fontWeight: 700,
+              fontVariantNumeric: 'tabular-nums',
+              color: '#c084fc',
+              marginTop: '1px',
+            }}
+          >
+            {snapshot.memory.appMcpsBytes ? formatBytes(snapshot.memory.appMcpsBytes) : '0 B'}
+          </div>
+        </div>
+        <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
+          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
             Fluidez UI
           </div>
           <div
@@ -235,21 +267,6 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             }}
           >
             {uiFps} FPS
-          </div>
-        </div>
-        <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
-          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-            Subprocesos
-          </div>
-          <div
-            style={{
-              fontSize: '13px',
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              marginTop: '1px',
-            }}
-          >
-            {snapshot.runtime.processCount} activos
           </div>
         </div>
       </div>

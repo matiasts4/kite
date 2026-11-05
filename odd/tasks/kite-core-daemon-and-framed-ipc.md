@@ -61,6 +61,17 @@ In `kite-core`, the **VT parser (`vt_engine.rs`) and scrollback ring live inside
   2. When a GUI window closes and reopens hours later, `kite-core` immediately transmits a single packed binary full-grid snapshot (`SNAPSHOT_BIN` with `full = true`) in `< 5 ms` without replaying megabytes of historical ANSI output through a fresh parser.
   3. For raw-byte consumers (such as the classic DOM fallback or a future Phase 2 native client that prefers raw PTY bytes), `kite-core` also supports raw `DATA` streaming on the same channel.
 
+### 2.1 System Actors, Responsibilities & State Ownership
+
+To guarantee deterministic performance and eliminate ad-hoc cross-process calls, the runtime is divided into **4 explicit actors** with strict boundaries:
+
+| Actor | Process / Module | Owned State | Primary Functions & Responsibilities |
+| :--- | :--- | :--- | :--- |
+| **1. `CoreDaemon` (`kite-core --daemon`)** | Detached background process (`src-tauri/src/core_daemon.rs`, `terminal.rs`, `vt_engine.rs`) | • `TERMINALS` map (`TerminalInstance`)<br>• ConPTY masters & child OS processes<br>• Per-session `TerminalVtEngine` & scrollback files<br>• `DAEMON_ACTIVITY_NOTIFY`<br>• `dispatch_wire` & `agent_inbox` | • Spawns and supervises all PTY child trees (`rootPid`).<br>• Runs one blocking `spawn_pty_reader` thread per PTY that feeds `vt_engine` and triggers `notify_daemon_activity()`.<br>• Accepts persistent Named Pipe connections (`handle_stream_client`) and pushes `SNAPSHOT_BIN`, `DATA`, `FACTS`, and `CLOSE` frames whenever `DAEMON_ACTIVITY_NOTIFY` fires and channel `CREDIT > 0`. |
+| **2. `CoreConnection` (Persistent Multiplexed Client)** | Desktop GUI Host (`src-tauri/src/core_daemon.rs`) | • Single open Named Pipe stream<br>• `writer: mpsc::Sender<Vec<u8>>` (`core-writer` thread)<br>• `routes: Arc<Mutex<ClientRoutes>>` (`core-reader` thread)<br>• `sessions: HashMap<String, ClientSessionSlot>` | • Opens **one** persistent pipe connection to `CoreDaemon` on startup (and auto-reconnects on EOF).<br>• Multiplexes Channel 0 JSON-RPC calls (`call_rpc`) with non-blocking 9-byte binary frames on Channels `1..N` (`send_channel_frame`).<br>• Receives pushed `SNAPSHOT_BIN`, `FACTS`, and `CLOSE` frames in `core-reader`, caches the latest binary frame in `ClientSessionSlot`, and immediately emits `terminal://activity` to the WebView. |
+| **3. `TerminalBridge` (Tauri Command Surface)** | Desktop GUI Host (`src-tauri/src/terminal.rs`) | • Stateless command router delegating to `CoreConnection` when `is_external_daemon_owner()` is `true` | • Translates Tauri frontend commands into `CoreConnection` operations:<br>  - Hot path (`write_terminal`, `resize_terminal`, `set_terminal_presentation`, `replenish_terminal_credit`) $\to$ enqueues 9-byte binary frames (`DATA`, `RESIZE`, `FOCUS`, `CREDIT`) onto `core-writer` without blocking or opening new pipes.<br>  - Frame consumption (`poll_terminal_snapshot_bin`) $\to$ takes the pushed raw `Vec<u8>` directly from `ClientSessionSlot` (zero Base64, zero JSON) or coalesces via Channel 0.<br>  - Viewport & inspection (`scroll_terminal_viewport`, `find_terminal_text`, `clear_terminal_vt`, `get_terminal_root_pids`) $\to$ routes over Channel 0 RPC on the persistent connection. |
+| **4. `CanvasPresenter` (Original Kite UI Surface)** | WebView2 Frontend (`src/components/views/terminal/canvas/*`) | • `packedGridRef` (in-place `RenderSnapshot` buffer)<br>• `outputClock` (`33 ms` / `30 Hz` coalescer + `<200 ms` typing bypass)<br>• Dirty-row Canvas2D context | • Listens to `terminal://activity` wakeups (0 timers in idle).<br>• Schedules frame consumption on the shared `33 ms` `outputClock` (or immediately on recent key input).<br>• Decodes `SNAPSHOT_BIN` `ArrayBuffer` in-place via `decodeBinarySnapshotIntoGrid`, paints only `dirtyRows`, and calls `replenish_terminal_credit` (`CREDIT`). |
+
 ---
 
 ## 3. Wire Protocol Specification (9-Byte Framed Multiplexing)
@@ -117,6 +128,75 @@ To prevent a fast PTY producer (e.g., `cargo build` or 3 streaming agents) from 
 3. While a channel's credit is exhausted (`available_credit == 0`), `kite-core` continues feeding the PTY output into its in-memory `vt_engine` at full speed, coalescing dirty rows without emitting wire frames on that channel.
 4. As soon as the client finishes painting a frame (`requestAnimationFrame` / Canvas2D flush), it sends a 9+4 byte `CREDIT` frame (`kind = 0x03`), immediately re-arming `kite-core` to emit the next coalesced 33 ms snapshot.
 
+### 3.4 Persistent Multiplexed Client Architecture (`CoreConnection` in Desktop Host)
+
+Instead of opening a new Named Pipe per RPC call, the desktop GUI process maintains a single persistent `CoreConnection` singleton (`src-tauri/src/core_daemon.rs`) modeled around two dedicated background threads and an in-memory routing table:
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                  Desktop GUI Host Process (`kite-code.exe`)                  │
+│                                                                              │
+│  ┌──────────────────────┐                       ┌─────────────────────────┐  │
+│  │   TerminalBridge     │                       │     CanvasPresenter     │  │
+│  │ (`src/terminal.rs`)  │                       │  (`TerminalCanvas*`)    │  │
+│  └──────┬────────┬──────┘                       └────────────▲────────────┘  │
+│         │        │                                           │               │
+│   9-byte│        │Channel 0                      `terminal://activity`       │
+│   frames│        │JSON-RPC                     + raw `SNAPSHOT_BIN` bytes    │
+│         ▼        ▼                                           │               │
+│  ┌───────────────────────────────────────────────────────────┴────────────┐  │
+│  │                       `CoreConnection` Singleton                       │  │
+│  │                                                                        │  │
+│  │  • `writer_tx: mpsc::Sender<Vec<u8>>` ──▶ [`core-writer` thread]       │  │
+│  │  • `routes: Arc<Mutex<ClientRoutes>>` ◀── [`core-reader` thread]       │  │
+│  │      ├─ `replies: HashMap<u64, mpsc::Sender<Result<Value, String>>>`   │  │
+│  │      ├─ `channels: HashMap<u32, String>` (channel_id ──▶ session_id)   │  │
+│  │      └─ `sessions: HashMap<String, ClientSessionSlot>`                 │  │
+│  │            ├─ `channel_id: u32`                                        │  │
+│  │            ├─ `latest_snapshot_bin: Option<Vec<u8>>`                   │  │
+│  │            ├─ `latest_seq: u64`                                        │  │
+│  │            ├─ `root_pid: u32`                                          │  │
+│  │            ├─ `exited: bool` / `exit_code: Option<i64>`                │  │
+│  │            └─ `facts: Value`                                           │  │
+│  └───────────────────────────────────┬────────────────────────────────────┘  │
+└──────────────────────────────────────┼───────────────────────────────────────┘
+                                       │ Single Persistent Named Pipe Stream
+                                       ▼
+                        `kite-core --daemon` (`CoreDaemon`)
+```
+
+1. **`core-writer` Thread**:
+   - Owns the write half of the Named Pipe stream.
+   - Drains `writer_tx: mpsc::Receiver<Vec<u8>>` and writes pre-encoded 9-byte frames to the pipe.
+   - Guarantees that UI threads calling `write_terminal`, `resize_terminal`, `set_terminal_presentation`, or `replenish_terminal_credit` enqueue their 9-byte frame in `< 5 µs` and never block on pipe I/O.
+2. **`core-reader` Thread**:
+   - Owns the read half of the Named Pipe stream and a `FrameStreamDecoder`.
+   - Routes incoming frames by `channel_id` and `kind`:
+     - **`channel_id == 0` (`FrameKind::Rpc`)**: Matches `id` in `routes.replies` and wakes the waiting `call_rpc` caller; if the frame is a server-pushed `dispatch.event` notification (`"dispatch-open-pane"` or `"dispatch-prompt-projectile"`), emits it directly onto the GUI `AppHandle` (`app.emit`).
+     - **`channel_id >= 1` (`FrameKind::SnapshotBin`)**: Stores the raw binary payload in `sessions[session_id].latest_snapshot_bin`, extracts `seq` from the 32-byte header (`snapshot_bin_seq`), and immediately invokes `emit_terminal_activity(session_id, seq, exited, exit_code)` in the GUI process so the WebView `CanvasPresenter` wakes up.
+     - **`channel_id >= 1` (`FrameKind::Facts`)**: Updates `sessions[session_id].facts` (`cwd`, `title`, `activeEngine`, `providerSessionId`).
+     - **`channel_id >= 1` (`FrameKind::Close`)**: Marks `exited = true`, stores `exit_code`, and emits `terminal://activity` with `exited: true`.
+3. **Automatic Reconnect & Session Re-Bind**:
+   - If the pipe closes unexpectedly, `core-reader` marks `routes.closed = true` and fails any in-flight RPCs cleanly. The next call to `CoreConnection::get()` transparently establishes a fresh connection to `kite-core`.
+
+### 3.5 End-to-End Actor Communication Sequences
+
+1. **Spawn / Attach (`start_terminal` / `attach_terminal`)**:
+   - `CanvasPresenter` $\to$ `TerminalBridge` $\to$ `CoreConnection.call_rpc("session.create" | "session.attach", ...)`.
+   - `CoreDaemon` spawns/attaches the PTY, binds `channel_id >= 1` on that persistent stream with initial `CREDIT = 2`, and immediately pushes the initial `SNAPSHOT_BIN` (`full = true`) frame on `channel_id`.
+   - `core-reader` registers `channel_id <-> session_id`, caches the initial `SNAPSHOT_BIN`, and emits `terminal://activity`.
+2. **User Keystroke (`write_terminal`)**:
+   - `CanvasPresenter` $\to$ `TerminalBridge::write_terminal` $\to$ looks up `channel_id` in `CoreConnection` $\to$ enqueues `Frame::new(channel_id, FrameKind::Data, input_bytes)` directly to `core-writer` (zero JSON-RPC).
+   - `CoreDaemon` writes bytes to PTY stdin, resets VT scrollback, and triggers `notify_daemon_activity()`.
+3. **PTY Output Burst & Push Rendering (`SNAPSHOT_BIN` + `CREDIT`)**:
+   - `spawn_pty_reader` in `CoreDaemon` feeds PTY bytes into `vt_engine` and calls `notify_daemon_activity()`.
+   - `CoreDaemon` stream loop wakes up, checks `tracker.available_credit() > 0`, encodes `SNAPSHOT_BIN` (consuming 1 credit), and writes `[channel_id][SNAPSHOT_BIN][len][payload]` to the pipe.
+   - `core-reader` in the GUI process receives the frame, stores `latest_snapshot_bin` in `ClientSessionSlot`, and emits `terminal://activity` to WebView2.
+   - `CanvasPresenter` wakes via `outputClock` (`33 ms` coalesced or immediate typing bypass), calls `poll_terminal_snapshot_bin` (which takes `latest_snapshot_bin` from `ClientSessionSlot` in O(1) memory move without touching the pipe or Base64), paints dirty rows, and calls `replenish_terminal_credit`, which enqueues a 9+4 byte `[channel_id][CREDIT][1]` frame onto `core-writer`.
+4. **Resize & Visibility (`resize_terminal` / `set_terminal_presentation`)**:
+   - `TerminalBridge::resize_terminal` enqueues `[channel_id][RESIZE][cols, rows, 0, 0]` onto `core-writer`.
+   - `TerminalBridge::set_terminal_presentation` enqueues `[channel_id][FOCUS][live, live]` onto `core-writer`.
+
 ---
 
 ## 4. Packed Binary Grid Snapshot Format (`SNAPSHOT_BIN`, `kind = 0x02`)
@@ -133,7 +213,7 @@ Replaces JSON serialization in `poll_terminal_snapshot_sync` (`src-tauri/src/ter
 | `12..14` | `u16` | `cursor_col` | 0-based cursor column. |
 | `14..16` | `u16` | `cursor_row` | 0-based cursor row. |
 | `16` | `u8` | `cursor_flags` | Bit 0: `visible`, Bit 1: `blink`, Bits 2..4: `shape` (`0=block, 1=underline, 2=bar`). |
-| `17` | `u8` | `mode_flags` | Bit 0: `full_frame`, Bit 1: `alt_screen`, Bit 2: `mouse_reporting`, Bit 3: `bracketed_paste`, Bit 4: `sync_output`, Bit 5: `exited`. |
+| `17` | `u8` | `mode_flags` | Bit 0: `full_frame`, Bit 1: `alt_screen`, Bit 2: `mouse_reporting`, Bit 3: `bracketed_paste`, Bit 4: `sync_output`, Bit 5: `exited`, Bit 6: `application_cursor` (`0x40`), Bit 7: `extended_meta` (`0x80`). |
 | `18..20` | `u16` | `dirty_row_count` | Number of dirty row descriptors following the header. |
 | `20..24` | `u32` | `total_cells` | Total `BinaryCellRecord` structs in the cell table. |
 | `24..28` | `u32` | `overflow_utf8_len` | Byte length of the trailing UTF-8 string table (for multi-codepoint grapheme clusters). |
@@ -143,7 +223,7 @@ Replaces JSON serialization in `poll_terminal_snapshot_sync` (`src-tauri/src/ter
 
 Each dirty row entry is 4 bytes:
 - `row_index: u16` (0-based visible row index)
-- `cell_count: u16` (number of cells for this row, normally `cols`)
+- `cell_count_and_flags: u16` (Bits `0..14`: number of cells for this row, normally `cols`; Bit `15` (`0x8000`): `wrapped` line-continuation flag)
 
 ### 4.3 Packed Cell Record (`16 bytes * total_cells`)
 
@@ -166,7 +246,13 @@ pub struct BinaryCellRecord {
 }
 ```
 
-On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps the `ArrayBuffer` in a `DataView` / `Uint32Array` and paints dirty rows directly into the 2D context without allocating per-cell JS objects.
+### 4.4 Trailing `overflow_utf8` & `ExtendedSnapshotMeta` Trailer
+
+Immediately following the `16 * total_cells` cell table:
+1. **`overflow_utf8` (`overflow_utf8_len` bytes)**: Contiguous UTF-8 bytes referenced by `(offset: u24, len: u8)` in multi-codepoint grapheme cells.
+2. **`ExtendedSnapshotMeta` (`[u32 len][UTF-8 JSON]`, present when `mode_flags` Bit 7 `0x80` is set)**: Carries non-cell terminal state (`title`, `clipboardWrite`, `mouseMode`, `sgrMouse`, `sgrPixelsMouse`, `focusReporting`, `win32InputMode`, `kittyKeyboardFlags`, `scrollbackOffset`, `scrollbackDepth`, `benchmarkActive`, `observedBytesBase64`, `observedText`).
+
+On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps the `ArrayBuffer` in a `DataView` / `Uint32Array` (`decodeBinarySnapshotIntoGrid`) and mutates `packedGridRef` in-place before painting dirty rows into the 2D context with zero per-cell object allocation in steady state.
 
 ---
 
@@ -176,10 +262,23 @@ On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps th
 | :--- | :--- | :--- | :--- |
 | `session.create` | `{ sessionId, workspaceId?, paneId?, engine, cwd, cols, rows, env? }` | `{ sessionId, channelId, rootPid, spawnedAtUnixMs }` | Spawns PTY in `kite-core`, initializes `vt_engine`, persists entry in `terminal-sessions.json`, and binds `channelId`. |
 | `session.attach` | `{ sessionId, mode: 'snapshot_bin' \| 'raw', cols, rows, live: boolean }` | `{ sessionId, channelId, rootPid, exited, exitCode, facts }` | Binds session to `channelId` for this client connection and immediately queues one `SNAPSHOT_BIN` (`full = true`) frame. |
-| `session.detach` | `{ sessionId }` | `{ detached: true }` | Unsubscribes client connection from `sessionId` **without** killing the PTY or clearing `vt_engine`. |
+| `session.detach` | `{ sessionId?, all?: boolean }` | `{ detached: true }` | Unsubscribes client connection from `sessionId` (or all channels when `all: true`) **without** killing the PTY or clearing `vt_engine`. |
 | `session.list` | `{ workspaceId? }` | `{ sessions: LiveSessionSummary[] }` | Lists all live and exited sessions currently managed by `kite-core`. |
-| `session.terminate` | `{ sessionId, owner }` | `{ terminated: true, exitCode }` | Explicitly kills the PTY process tree and removes the session from `kite-core`. |
-| `agent.dispatch` | `DispatchEnvelope` (existing `dispatch_wire.rs` schema) | `DispatchResult` | Routes autonomous agent actions (`open_terminals`, `send_prompt`, `close_terminals`, `await_idle`) directly inside `kite-core` even if no GUI window is open. |
+| `session.terminate` | `{ sessionId, owner }` | `{ terminated: boolean, exitCode }` | Explicitly kills the PTY process tree and removes the session from `kite-core` (idempotent if already absent). |
+| `session.scroll_viewport` | `{ sessionId, deltaLines, absoluteOffset? }` | `RenderSnapshot` | Scrolls the session's VT viewport in `kite-core` and returns the updated snapshot. |
+| `session.find_text` | `{ sessionId, query, limit }` | `{ hits: TextSearchHit[] }` | Searches scrollback and live screen inside `kite-core` and returns matching coordinates. |
+| `session.clear_vt` | `{ sessionId }` | `null` | Clears the VT grid and scrollback buffer for `sessionId` inside `kite-core`. |
+| `session.set_presentation` | `{ sessionId, live }` | `{ ok: true, live }` | Updates `presentation_live` and `vt.set_canvas_active(live)` inside `kite-core`. |
+| `session.report_agent_detected` | `{ sessionId, engine }` | `null` | Records detected child agent engine and binds provider session ID inside `kite-core`. |
+| `session.dump_diagnostics` | `{ sessionId }` | `{ path: string }` | Writes a diagnostic JSON report from `kite-core` and returns its file path. |
+| `session.recent_text` | `{ sessionId }` | `{ text: string }` | Returns recent plain terminal text for agent context / handoff consumers. |
+| `session.read_output` | `{ sessionId, sinceChunkId?, maxBytes? }` | `{ text, totalBytes, droppedBytes, lastChunkId }` | Reads buffered terminal output chunks from `kite-core`. |
+| `session.restart_autopilot` | `{ oldSessionId, newSessionId, workspaceId?, paneId?, provider, cwd, cols, rows, prompt? }` | `{ sessionId, rootPid }` | Terminates `oldSessionId` and spawns a fresh autopilot PTY session inside `kite-core`. |
+| `session.quiesce_provider` | `{ provider }` | `QuiescedTerminal[]` | Flushes scrollback and gracefully stops all `kite-core` terminals matching `provider` during account switch. |
+| `session.respawn_provider` | `{ provider, newAccountLabel, quiesced }` | `RespawnedTerminalResult[]` | Respawns previously quiesced terminals inside `kite-core` under the newly activated provider account. |
+| `agent.dispatch` | `DispatchEnvelope` (`dispatch_wire.rs` schema) | `DispatchResult` | Routes autonomous agent actions (`send`, `publish`, `osc`, `ls`, `run`, `wait`, `read`, `report`, `pane_shown`) inside `kite-core` even if no GUI window is open. |
+| `dispatch.event` *(Notification)* | `{ event: "dispatch-open-pane" \| "dispatch-prompt-projectile", data }` | *(One-way Core $\to$ Client)* | Pushed by `kite-core` on Channel 0 via `DAEMON_UI_EVENT_BROADCAST`; `core-reader` re-emits it on the GUI `AppHandle`. |
+| `core.status` | `null` | `{ protocol, coreVersion, corePid, activeSessions, dataPlane }` | Reports daemon health, active session count, and `TerminalDataPlaneSnapshot` counters for benchmark telemetry. |
 | `core.shutdown` | `{ force: boolean }` | `{ shuttingDown: true }` | Explicitly terminates all PTYs and stops `kite-core` (invoked only on explicit "Quit Kite & Stop Background Sessions" user action). |
 
 ---
@@ -196,6 +295,36 @@ On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps th
 
 ---
 
+## 7. Cross-ODD Model Audit: What Exists Today vs. Remaining Consolidation
+
+To avoid duplicating work across related specifications (`odd/tasks/runtime-idle-cost.md`, `odd/tasks/terminal-runtime-benchmark-harness.md`, `odd/tasks/native-gpu-surface-phase2-evaluation.md`, and `odd/tasks/native-deck-open-window-gate.md`), this section records the exact audit of what is already implemented in `HEAD` versus the remaining split-state gaps to assign next:
+
+### 7.1 Relationship Across Existing ODDs (De-Duplicated Map)
+
+| ODD Specification | Role in the Architecture | Current Status in `HEAD` |
+| :--- | :--- | :--- |
+| **`odd/tasks/runtime-idle-cost.md`** (Phases 1–5) | Frontend `33 ms` `outputClock.ts`, `terminal://activity` wakeup, hidden-pane suspension (`set_terminal_presentation`), dirty-row Canvas2D paint, and in-process `local_feed.rs`. | ✅ **100% Implemented.** Note: its historical §3 non-goal ("no background daemon") is superseded by this Phase 1 specification (`kite-core`). |
+| **`odd/tasks/terminal-runtime-benchmark-harness.md`** (Phase 0) | Three-bucket process attribution (`Bucket A/B/C`) in `src-tauri/src/system_metrics.rs` and `scripts/bench-terminals.mjs`. | ✅ **100% Implemented**, including cross-process `dataPlane` counter retrieval (`T8`) when PTYs run in `kite-core --daemon`. |
+| **`odd/tasks/kite-core-daemon-and-framed-ipc.md`** (Phase 1 — **This ODD**) | Persistent `kite-core --daemon`, 9-byte wire codec (`core_wire.rs`), `SNAPSHOT_BIN` (`vt_engine.rs`), persistent multiplexed `CoreConnection` (`core-writer` + `core-reader` + `ClientRoutes`), and unified dispatch/lifecycle bridge for the **original Kite application**. | ✅ **`T1`–`T8` Implemented (100% of Original App + Daemon Unification).** Only `T9` (shared wire crate extraction for the optional Phase 2 prototype) remains open. |
+| **`odd/tasks/native-gpu-surface-phase2-evaluation.md` & `native-deck-open-window-gate.md`** (Phase 2) | Standalone experimental native binary (`crates/kite-gpui`) connecting to `kite-core`. | ⚠️ **Separate prototype binary** (`crates/kite-gpui`). It is **not** the original Kite UI and currently duplicates `core_wire.rs` / `SNAPSHOT_BIN` parsing in `crates/kite-gpui/src/core_client.rs` and `snapshot_bin.rs` (`T9`). |
+
+### 7.2 Split-State Consolidation Audit (`T6`–`T9`)
+
+1. **Gap 1 (`T6` — Unified `dispatch_wire` State & Daemon-to-GUI UI Events) — ✅ Resolved**:
+   - **Previous Gap**: Tauri commands (`dispatch_send`, `dispatch_publish`, `dispatch_osc`, `dispatch_ls`, `dispatch_run`, `dispatch_wait`, `dispatch_read`, `dispatch_report`, `dispatch_pane_shown`) executed against a local GUI `Service<LivePort>` instance, while CLI agents dispatched into `kite-core --daemon` where `crate::get_app_handle()` was `None`.
+   - **Resolution (`T6`)**: All `dispatch_*` Tauri commands now proxy through `CoreConnection` (`agent.dispatch` on Channel 0) when `is_external_daemon_owner()` is `true`, and `DAEMON_UI_EVENT_BROADCAST` pushes `"dispatch-open-pane"` and `"dispatch-prompt-projectile"` notifications over Channel 0 (`dispatch.event`) so `core-reader` emits them on the GUI's `AppHandle`.
+2. **Gap 2 (`T7` — Autopilot Restart & Provider Account Switcher over `CoreConnection`) — ✅ Resolved**:
+   - **Previous Gap**: `restart_agent_terminal_for_autopilot`, `quiesce_provider_terminals`, and `respawn_provider_terminals` inspected only the GUI's local `get_terminals()` map.
+   - **Resolution (`T7`)**: Added Channel 0 RPCs `session.restart_autopilot`, `session.quiesce_provider`, and `session.respawn_provider` in `core_daemon.rs` and proxied those lifecycle functions in `terminal.rs` when `is_external_daemon_owner()` is `true`.
+3. **Gap 3 (`T8` — Live `FACTS` Consumption & Daemon Data-Plane Benchmark Counters) — ✅ Resolved**:
+   - **Previous Gap**: `collect_benchmark_sample` read local process atomics (`ptyBytesReadPerSec`, `vtFeedCallsPerSec`, `vtFeedDurationUsP95`) that were `0` in the GUI process when `kite-core --daemon` ran the PTY reader threads.
+   - **Resolution (`T8`)**: Exposed `get_client_session_facts(session_id)` from `CoreConnection` and included `TerminalDataPlaneSnapshot` (`dataPlane`) in `core.status` so `get_terminal_data_plane_snapshot()` and `collect_benchmark_sample` report real PTY/VT counters in daemon mode.
+4. **Gap 4 (`T9` — Shared Wire Codec Between `src-tauri` and `crates/kite-gpui`) — ⏳ Pending (Optional Prototype Cleanup)**:
+   - **Current State**: `crates/kite-gpui/src/core_client.rs` and `crates/kite-gpui/src/snapshot_bin.rs` duplicate the 9-byte frame codec (`Frame`, `FrameKind`, `FrameDecoder`) and `SNAPSHOT_BIN` header constants already defined in `src-tauri/src/core_wire.rs` and `src-tauri/src/vt_engine.rs`.
+   - **Planned Cleanup (`T9`)**: Extract or re-export the wire codec and `SNAPSHOT_BIN` types from a shared crate/module so only one definition of the 9-byte protocol exists in the repository.
+
+---
+
 ## Specs
 
 - **S1 — Binary Snapshot Encoding & Zero-Object Canvas Decoding (`Phase 1A`)**:
@@ -208,6 +337,12 @@ On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps th
   - `WHEN` the user closes the main Kite GUI window while terminals or autonomous agents are running `THEN` the GUI process MUST exit without killing the PTYs in `kite-core`, reducing platform memory to the headless daemon footprint (`< 40 MB` Private Bytes); `WHEN` the user reopens the GUI window `THEN` it MUST reattach to all live sessions in `kite-core` and render their current grids without restarting the underlying processes.
 - **S5 — Daemon-Owned Agent Dispatch & Loopback Continuity (`Phase 1B`)**:
   - `WHEN` an external agent script or `kite-agent.mjs` dispatches a command while the main GUI window is closed `THEN` `kite-core` MUST execute the dispatch against the live PTY sessions, record state updates in `agent_inbox`, and emit updated `FACTS` / `SNAPSHOT_BIN` frames when a GUI client next attaches.
+- **S6 — Persistent Multiplexed `CoreConnection` & Push-Driven Desktop Bridge (`Phase 1B+`)**:
+  - `WHEN` the desktop GUI connects to `kite-core --daemon` `THEN` it MUST maintain a single persistent `CoreConnection` with dedicated `core-writer` and `core-reader` threads (`Routes` table for Channel 0 RPC replies and Channels `1..N` session slots) rather than opening a pipe per operation; `WHEN` `kite-core` pushes a `SNAPSHOT_BIN` or `CLOSE` frame on `channel_id >= 1` `THEN` `core-reader` MUST cache the raw binary frame in `ClientSessionSlot` and emit `terminal://activity` to the WebView without Base64/JSON re-encoding; and `WHEN` the frontend invokes `write_terminal`, `resize_terminal`, `set_terminal_presentation`, `replenish_terminal_credit`, `scroll_terminal_viewport`, `find_terminal_text`, `clear_terminal_vt`, `report_terminal_agent_detected`, `dump_terminal_diagnostics`, or `get_terminal_root_pids` `THEN` `TerminalBridge` MUST route them through `CoreConnection` (using 9-byte channel frames on the hot path and Channel 0 RPCs for inspection).
+- **S7 — Single-Authority `dispatch_wire` & Daemon-to-GUI Event Forwarding (`Phase 1C`)**:
+  - `WHEN` `is_external_daemon_owner()` is `true` `THEN` all `dispatch_*` Tauri commands (`dispatch_send`, `dispatch_publish`, `dispatch_osc`, `dispatch_ls`, `dispatch_run`, `dispatch_wait`, `dispatch_read`, `dispatch_report`) MUST execute against the single `Service<LivePort>` owned by `kite-core --daemon` over `CoreConnection`, and any daemon-originated `"dispatch-open-pane"` or `"dispatch-prompt-projectile"` events MUST be forwarded over the persistent pipe and emitted on the GUI's `AppHandle`.
+- **S8 — Daemon-Backed Autopilot Restart, Provider Account Switch, & Telemetry Counters (`Phase 1C`)**:
+  - `WHEN` `restart_agent_terminal_for_autopilot`, `quiesce_provider_terminals`, `respawn_provider_terminals`, or `collect_benchmark_sample` runs while `is_external_daemon_owner()` is `true` `THEN` it MUST operate on the live sessions and data-plane counters inside `kite-core --daemon` via `CoreConnection` rather than the GUI's empty local `TERMINALS` map.
 
 ## Tasks
 
@@ -215,6 +350,11 @@ On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps th
 - [x] **T2** (`S2` | route: delegated | commit: `54b80a0`): Implement the 9-byte framed codec (`[u32 channel][u8 kind][u32 len]`) and per-channel `CREDIT` flow-control state machine in `src-tauri/src/core_wire.rs`.
 - [x] **T3** (`S3`, `S4` | route: delegated | commit: `54b80a0`): Extract PTY registry, `vt_engine`, and `session_resolver` runtime host into `src-tauri/src/core_daemon.rs` listening on `\\.\pipe\kite-core-v1-<username>`, and update `src-tauri/src/main.rs` so window close detaches instead of shutting down live terminals.
 - [x] **T4** (`S4`, `S5` | route: delegated | commit: `d6bd4c1`, `54b80a0`): Move `dispatch_wire.rs` and `agent_inbox.rs` ownership into `kite-core` and wire Tauri frontend `useTerminalSession.ts` / `useTerminalSnapshotPoller.ts` to `session.attach` + `CREDIT` replenishment.
+- [x] **T5** (`S6` | route: inline): Implement the persistent multiplexed `CoreConnection` (`core-writer`, `core-reader`, `ClientRoutes`, `ClientSessionSlot`) in `src-tauri/src/core_daemon.rs` and wire full hot-path 9-byte frame dispatch (`DATA`, `RESIZE`, `FOCUS`, `CREDIT`), push-cached `SNAPSHOT_BIN` retrieval + `terminal://activity` wakeup, and complete command parity (`scroll_viewport`, `find_text`, `clear_vt`, `set_presentation`, `report_agent_detected`, `dump_diagnostics`, `recent_text`, `get_terminal_root_pids`) in `src-tauri/src/terminal.rs`.
+- [x] **T6** (`S7` | route: delegated): Route all `dispatch_*` Tauri commands (`dispatch_send`, `dispatch_publish`, `dispatch_osc`, `dispatch_ls`, `dispatch_run`, `dispatch_wait`, `dispatch_read`, `dispatch_report`) in `src-tauri/src/dispatch_wire.rs` through `CoreConnection` when `is_external_daemon_owner()` is `true`, and forward daemon-originated `"dispatch-open-pane"` and `"dispatch-prompt-projectile"` notifications over `CoreConnection` (`core-reader` $\to$ `app.emit`).
+- [x] **T7** (`S8` | route: delegated): Proxy `restart_agent_terminal_for_autopilot`, `quiesce_provider_terminals`, and `respawn_provider_terminals` in `src-tauri/src/terminal.rs` to `kite-core --daemon` via Channel 0 RPCs (`session.restart_autopilot`, `session.quiesce_provider`, `session.respawn_provider`) when `is_external_daemon_owner()` is `true`.
+- [x] **T8** (`S8` | route: delegated): Expose `get_client_session_facts` from `CoreConnection` (`ClientSessionSlot.facts`) and include `TerminalDataPlaneCounters` in `core.status` so `collect_benchmark_sample` (`src-tauri/src/system_metrics.rs`) reports real PTY/VT counters when `kite-core --daemon` owns the PTYs.
+- [ ] **T9** (`S2` | route: delegated): Deduplicate the 9-byte frame codec and `SNAPSHOT_BIN` reader between `src-tauri/src/core_wire.rs` and `crates/kite-gpui/src/core_client.rs` / `snapshot_bin.rs`.
 
 ## Verification
 
@@ -245,3 +385,13 @@ On the frontend (`src/components/views/terminal/canvas/`), the renderer wraps th
   - **`S3` Live Handshake**: JSON-line handshake completed in **`4.96 ms`** (`< 500 ms` budget); full Channel 0 `core.status` RPC round-trip in **`7.42 ms`**. Added `KITE_CORE_PIPE` environment variable support in `get_core_pipe_name()` for isolated daemon testing.
   - **`S1`/`S3` Live Multi-Terminal Spawn**: Created 3 live `powershell.exe` PTY sessions (`eval-live-1`, `eval-live-2`, `eval-live-3`) over Channel 0; verified real OS `rootPid`s (`16164`, `8436`, `12328`) and distinct `channelId`s (`2, 3, 4`). Daemon memory increased from `22.99 MB WS / 9.77 MB Private` (0 terminals) to **`24.17 MB WS / 11.19 MB Private`** with 3 active terminals (~`473 KB` Private Bytes per terminal in `kite-core`).
   - **`S4` Live Window-Close Detach & Reattach**: Executed `session.detach { all: true }`; verified **3/3 (`100%`)** child `rootPid`s remained alive in Windows while headless at **`24.58 MB WS / 11.25 MB Private Bytes`** (`< 40 MB` Private Bytes target). Subsequent `session.attach` completed in **`0.65 ms`** (`< 10 ms` target).
+- **L6 (2026-11-04)**: Formalized the 4-actor architecture (`CoreDaemon`, `CoreConnection`, `TerminalBridge`, `CanvasPresenter`) and communication sequences in §2.1, §3.4, and §3.5, and implemented `S6` / `T5` across `src-tauri/src/core_daemon.rs` and `src-tauri/src/terminal.rs`:
+  1. **Persistent Multiplexed `CoreConnection` (`core-writer` + `core-reader`)**: Replaced per-call Named Pipe opening with a single persistent `tokio::io::split(NamedPipeClient)` connection (`CoreConnection::get()`), routing Channel 0 RPC replies via `ClientRoutes.replies` and pushed Channels `1..N` frames via `ClientRoutes.sessions` and `early_frames`.
+  2. **Non-Blocking 9-Byte Hot-Path Frames**: Wired `write_terminal_sync` (`FrameKind::Data`), `resize_terminal_sync` (`FrameKind::Resize`), `set_terminal_presentation_sync` (`FrameKind::Focus`), and `replenish_terminal_credit` (`FrameKind::Credit`) to enqueue 9-byte binary frames directly onto `core-writer` (`< 5 µs`, zero JSON-RPC).
+  3. **O(1) Pushed `SNAPSHOT_BIN` Cache + Event Wakeup**: `core-reader` caches pushed `SNAPSHOT_BIN` payloads in `ClientSessionSlot.latest_snapshot_bin` and emits `terminal://activity` (`emit_terminal_activity_from_core`) in the GUI process; `poll_terminal_snapshot_bin_bytes` consumes the cached `Vec<u8>` directly without Base64 or JSON round-trips.
+  4. **Complete Command Parity**: Added Channel 0 RPC handlers and `TerminalBridge` proxies for `session.scroll_viewport`, `session.find_text`, `session.clear_vt`, `session.set_presentation`, `session.report_agent_detected`, `session.dump_diagnostics`, `session.recent_text`, `session.read_output`, and `get_terminal_root_pids` (`11/11` `core_daemon` unit tests passing).
+- **L7 (2026-11-04)**: Completed backend unification tasks `T6`, `T7`, and `T8` ensuring the desktop app and daemon have a single shared authority for dispatches, lifecycle actions, and telemetry:
+  1. **`T6` Dispatch Routing & Daemon-to-GUI Event Forwarding (`S7`)**: Routed Tauri commands `dispatch_send`, `dispatch_publish`, `dispatch_osc`, `dispatch_ls`, `dispatch_run`, `dispatch_wait`, `dispatch_read`, `dispatch_report`, and `dispatch_pane_shown` in `src-tauri/src/dispatch_wire.rs` to `kite-core --daemon` via Channel 0 RPC `agent.dispatch` when `is_external_daemon_owner()` is `true`. Added `DAEMON_UI_EVENT_BROADCAST` in `src-tauri/src/core_daemon.rs` to stream UI notifications (`dispatch-open-pane`, `dispatch-prompt-projectile`) over Channel 0 `dispatch.event` frames, and wired `core-reader` to dispatch them directly into the GUI's `app.emit(event, data)`.
+  2. **`T7` Daemon-Backed Autopilot Restart & Provider Quiesce/Respawn (`S8`)**: Implemented Channel 0 RPC handlers for `session.restart_autopilot`, `session.quiesce_provider`, and `session.respawn_provider` in `src-tauri/src/core_daemon.rs`. Wired `restart_agent_terminal_for_autopilot`, `quiesce_provider_terminals`, and `respawn_provider_terminals` in `src-tauri/src/terminal.rs` to proxy to the daemon when `is_external_daemon_owner()` is `true`, with clean local fallback.
+  3. **`T8` Client Session Facts & Data-Plane Telemetry (`S8`)**: Implemented `get_client_session_facts` in `src-tauri/src/core_daemon.rs` extracting cached `FACTS` from `ClientSessionSlot`, exposed `dataPlane` snapshot counters in `core.status` RPC response, and updated `get_terminal_data_plane_snapshot()` in `src-tauri/src/terminal.rs` to retrieve daemon counters so `collect_benchmark_sample` reports accurate PTY/VT performance metrics in daemon mode.
+  4. **Verification**: 11/11 `core_daemon` Rust tests passing, full TypeScript check (`npx tsc --noEmit`) clean, sanitizer audit (`audit-references.mjs --check`) clean.

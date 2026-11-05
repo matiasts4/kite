@@ -5,6 +5,7 @@ import { invokeCommand } from '../../lib/ipc';
 
 vi.mock('../../lib/ipc', () => ({
   invokeCommand: vi.fn(),
+  isTauriEnvironment: () => false,
 }));
 
 describe('TerminalCanvasSurface', () => {
@@ -17,7 +18,9 @@ describe('TerminalCanvasSurface', () => {
 
     const { container } = render(<TerminalCanvasSurface sessionId="test-session-1" />);
 
-    expect(container.querySelector('canvas.terminal-canvas-surface')).toBeInTheDocument();
+    const canvas = container.querySelector('canvas.terminal-canvas-surface');
+    expect(canvas).toBeInTheDocument();
+    expect(canvas).toHaveStyle({ cursor: 'default' });
     expect(container.querySelector('textarea.terminal-canvas-surface__input')).toBeInTheDocument();
   });
 

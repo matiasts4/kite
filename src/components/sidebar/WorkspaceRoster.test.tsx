@@ -202,16 +202,17 @@ describe('WorkspaceRoster - Behavioral Tests', () => {
     );
 
     // Main session row is rendered
-    expect(screen.getByText('Orion (+2)')).toBeInTheDocument();
+    expect(screen.getByText('Ventana 1')).toBeInTheDocument();
     expect(screen.getByText('3')).toBeInTheDocument();
 
     // Auto-expanded sub-tree shows each individual terminal pane
     expect(screen.getByText('Orion')).toBeInTheDocument();
     expect(screen.getByText('Vega')).toBeInTheDocument();
     expect(screen.getByText('Terminal 1')).toBeInTheDocument();
-    expect(screen.getByText('claude')).toBeInTheDocument();
-    expect(screen.getByText('codex')).toBeInTheDocument();
-    expect(screen.getByText('shell')).toBeInTheDocument();
+    // Engine chips removed in favor of brand logos
+    expect(screen.queryByText('claude')).not.toBeInTheDocument();
+    expect(screen.queryByText('codex')).not.toBeInTheDocument();
+    expect(screen.queryByText('shell')).not.toBeInTheDocument();
 
     // Clicking an individual pane focuses it via window event
     const vegaBtn = screen.getByText('Vega').closest('button');

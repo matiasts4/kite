@@ -10,6 +10,7 @@ import {
   parseArgs,
   resolveScenarios,
   classifyProcess,
+  filterKiteProcessTree,
   percentile,
   aggregateSteadyState,
   generateMarkdownReport,
@@ -121,6 +122,7 @@ test('resolveScenarios applies an explicit --terminals override without duplicat
 });
 
 test('classifyProcess separates platform, ptyHost, and workload without overlap', () => {
+  assert.equal(classifyProcess('kite-gpui.exe'), 'platform');
   assert.equal(classifyProcess('kite-code.exe'), 'platform');
   assert.equal(classifyProcess('msedgewebview2.exe'), 'platform');
   assert.equal(classifyProcess('conhost.exe'), 'ptyHost');
@@ -128,6 +130,20 @@ test('classifyProcess separates platform, ptyHost, and workload without overlap'
   assert.equal(classifyProcess('pwsh.exe'), 'workload');
   assert.equal(classifyProcess('node.exe'), 'workload');
   assert.equal(classifyProcess('cargo.exe'), 'workload');
+});
+
+test('filterKiteProcessTree can pin Bucket A to the native gpu client', () => {
+  const processes = [
+    { id: 1, parentId: 0, name: 'kite-code.exe', commandLine: 'kite-code.exe', workingSetBytes: 500 },
+    { id: 2, parentId: 1, name: 'msedgewebview2.exe', commandLine: 'msedgewebview2.exe --type=renderer', workingSetBytes: 400 },
+    { id: 3, parentId: 0, name: 'kite-gpui.exe', commandLine: 'kite-gpui.exe --headless', workingSetBytes: 40 },
+    { id: 4, parentId: 0, name: 'kite-code.exe', commandLine: 'kite-code.exe --daemon', workingSetBytes: 20 },
+  ];
+  const native = filterKiteProcessTree(processes, { surface: 'gpui' });
+  const names = native.map((processInfo) => processInfo.name).sort();
+  assert.deepEqual(names, ['kite-code.exe', 'kite-gpui.exe']);
+  assert.ok(native.some((processInfo) => String(processInfo.commandLine).includes('--daemon')));
+  assert.ok(!native.some((processInfo) => processInfo.name.includes('msedge')));
 });
 
 test('percentile interpolates across the sample window instead of averaging', () => {

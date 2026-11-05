@@ -124,19 +124,18 @@ impl Port for LivePort {
 }
 
 fn emit_projectile(session_id: &str, text: &str, meta: &SubmitMeta) {
-    let Some(app) = crate::get_app_handle() else {
-        return;
-    };
-    let _ = app.emit(
-        "dispatch-prompt-projectile",
-        json!({
-            "sessionId": session_id,
-            "targetSessionId": session_id,
-            "sourceSessionId": meta.source,
-            "prompt": text,
-            "label": meta.label,
-        }),
-    );
+    let payload = json!({
+        "sessionId": session_id,
+        "targetSessionId": session_id,
+        "sourceSessionId": meta.source,
+        "prompt": text,
+        "label": meta.label,
+    });
+    if let Some(app) = crate::get_app_handle() {
+        let _ = app.emit("dispatch-prompt-projectile", payload);
+    } else {
+        crate::core_daemon::broadcast_daemon_ui_event("dispatch-prompt-projectile", payload);
+    }
 }
 
 fn pane_ids() -> &'static Mutex<HashSet<String>> {
@@ -153,17 +152,16 @@ fn mark_pane_shown(session_id: &str) {
 }
 
 fn emit_open_pane(session_id: &str, engine: &str, alias: Option<&str>) {
-    let Some(app) = crate::get_app_handle() else {
-        return;
-    };
-    let _ = app.emit(
-        "dispatch-open-pane",
-        json!({
-            "sessionId": session_id,
-            "engine": engine,
-            "alias": alias,
-        }),
-    );
+    let payload = json!({
+        "sessionId": session_id,
+        "engine": engine,
+        "alias": alias,
+    });
+    if let Some(app) = crate::get_app_handle() {
+        let _ = app.emit("dispatch-open-pane", payload);
+    } else {
+        crate::core_daemon::broadcast_daemon_ui_event("dispatch-open-pane", payload);
+    }
 }
 
 fn terminal_tail(session_id: &str) -> String {
@@ -801,8 +799,25 @@ fn req_value(request: Option<Value>) -> Value {
     request.get("request").cloned().unwrap_or(request)
 }
 
+fn proxy_dispatch(action: &str, request: Option<Value>) -> Option<Value> {
+    if !crate::core_daemon::is_external_daemon_owner() {
+        return None;
+    }
+    let mut payload = req_value(request);
+    if payload.is_null() {
+        payload = json!({});
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("action".to_string(), json!(action));
+    }
+    crate::core_daemon::send_core_daemon_rpc("agent.dispatch", Some(payload)).ok()
+}
+
 #[tauri::command]
 pub fn dispatch_send(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("send", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = request
         .get("id")
@@ -825,6 +840,9 @@ pub fn dispatch_send(request: Option<Value>) -> Value {
 
 #[tauri::command]
 pub fn dispatch_publish(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("publish", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = "publish".to_string();
     serde_json::to_value(direct_op(&request, "publish", &id)).unwrap_or(Value::Null)
@@ -832,12 +850,18 @@ pub fn dispatch_publish(request: Option<Value>) -> Value {
 
 #[tauri::command]
 pub fn dispatch_osc(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("osc", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     serde_json::to_value(direct_op(&request, "osc", "osc")).unwrap_or(Value::Null)
 }
 
 #[tauri::command]
 pub fn dispatch_ls(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("ls", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("ls");
     serde_json::to_value(execute_command(&request, &cli::Command::Ls, id)).unwrap_or(Value::Null)
@@ -845,6 +869,9 @@ pub fn dispatch_ls(request: Option<Value>) -> Value {
 
 #[tauri::command]
 pub fn dispatch_run(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("run", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("run").to_string();
     let via = match request.get("via").and_then(Value::as_str) {
@@ -872,6 +899,9 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
 
 #[tauri::command]
 pub fn dispatch_wait(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("wait", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("wait").to_string();
     let until = request
@@ -901,6 +931,9 @@ pub fn dispatch_wait(request: Option<Value>) -> Value {
 
 #[tauri::command]
 pub fn dispatch_read(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("read", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("read").to_string();
     let command = cli::Command::Read {
@@ -912,6 +945,9 @@ pub fn dispatch_read(request: Option<Value>) -> Value {
 
 #[tauri::command]
 pub fn dispatch_report(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("report", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("report").to_string();
     let command = cli::Command::Report {
@@ -931,6 +967,9 @@ pub fn dispatch_skill() -> Value {
 /// Records that a pane attached. Does not take the policy lock.
 #[tauri::command]
 pub fn dispatch_pane_shown(request: Option<Value>) -> Value {
+    if let Some(res) = proxy_dispatch("pane_shown", request.clone()) {
+        return res;
+    }
     let request = req_value(request);
     if let Some(id) = request.get("sessionId").and_then(Value::as_str) {
         mark_pane_shown(id);

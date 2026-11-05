@@ -171,6 +171,7 @@ export async function executeHandoffToAgentAction(
       const res = await appOperatorController.injectPrompt(target.sessionId, handoffPrompt, {
         sourceSessionId: source.sessionId,
         label,
+        caller: 'agent',
       });
 
       return {

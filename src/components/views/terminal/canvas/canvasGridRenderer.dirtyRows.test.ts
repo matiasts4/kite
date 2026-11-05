@@ -127,4 +127,13 @@ describe('renderCanvasGrid dirty rows', () => {
     expect(clearsViewport(fills)).toBe(true);
     expect(texts).toEqual(expect.arrayContaining(['A', 'B', 'C']));
   });
+
+  it('treats an empty dirty-row list as a full paint', () => {
+    const { canvas, fills, texts } = recordingCanvas();
+    const painted: number[] = [];
+    renderCanvasGrid(baseState(canvas, [], (row) => painted.push(row)));
+    expect(painted).toEqual([0, 1, 2]);
+    expect(clearsViewport(fills)).toBe(true);
+    expect(texts).toEqual(expect.arrayContaining(['A', 'B', 'C']));
+  });
 });

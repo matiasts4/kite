@@ -24,9 +24,8 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(screen.getByText('Altura de línea')).toBeInTheDocument();
     expect(screen.getByText('Estilo del cursor')).toBeInTheDocument();
 
-    // Default renderer is GhostGrid · 2D
-    const canvasBtn = screen.getByRole('button', { name: /GhostGrid · 2D/i });
-    expect(canvasBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getAllByText('GhostGrid · 2D').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /DOM · Clásico/i })).not.toBeInTheDocument();
 
     // Default font size is 13 px
     expect(screen.getByText('13 px')).toBeInTheDocument();
@@ -40,22 +39,16 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(cursorBar).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('switches renderer mode between Canvas (GhostGrid 2D) and DOM (Clásico)', async () => {
-    const user = userEvent.setup();
+  it('keeps GhostGrid as the only terminal renderer', () => {
     render(<SettingsView />);
 
     expect(screen.queryByRole('button', { name: /WebGL/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /DOM · Clásico/i })).not.toBeInTheDocument();
 
-    const domBtn = screen.getByRole('button', { name: /DOM · Clásico/i });
-    await user.click(domBtn);
+    act(() => {
+      setTerminalAppearancePrefs({ renderer: 'dom' });
+    });
 
-    expect(domBtn).toHaveAttribute('aria-pressed', 'true');
-    expect(getTerminalAppearancePrefs().renderer).toBe('dom');
-
-    const canvasBtn = screen.getByRole('button', { name: /GhostGrid · 2D/i });
-    await user.click(canvasBtn);
-
-    expect(canvasBtn).toHaveAttribute('aria-pressed', 'true');
     expect(getTerminalAppearancePrefs().renderer).toBe('canvas');
   });
 
@@ -134,10 +127,7 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     });
 
     expect(await screen.findByText('18 px')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /DOM · Clásico/i })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
+    expect(getTerminalAppearancePrefs().renderer).toBe('canvas');
     expect(screen.getByRole('button', { name: /Bloque/i })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /Balanceado \(1\.08\)/i })).toHaveAttribute(
       'aria-pressed',

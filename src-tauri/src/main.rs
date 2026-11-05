@@ -116,6 +116,55 @@ fn register_windows_shutdown_handler() {
     }
 }
 
+/// Keeps a visible Kite window painting when a game or another app sits beside it.
+///
+/// Chromium's native occlusion check treats that arrangement as a covered window
+/// and drops `requestAnimationFrame` to about one frame per second.
+#[cfg(windows)]
+fn install_webview_runtime_flags() {
+    let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    for flag in [
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=CalculateNativeWinOcclusion",
+    ] {
+        if args.contains(flag) {
+            continue;
+        }
+        if !args.is_empty() && !args.ends_with(' ') {
+            args.push(' ');
+        }
+        args.push_str(flag);
+    }
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
+}
+
+/// Windows puts a background process into Efficiency Mode while a game is in front.
+/// That throttles the PTY reader in this process, and a streaming agent blocks on write.
+#[cfg(windows)]
+fn opt_out_of_efficiency_mode() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    unsafe {
+        let mut state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &mut state as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
 fn main() {
     // Load local .env file in development if present
     dotenvy::dotenv().ok();
@@ -137,19 +186,9 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        // Ensure background windows and non-focused tabs in WebView2 are never
-        // timer-throttled, occluded-suspended, or backgrounded. This keeps long-running
-        // agent terminals (Grok, Claude, OpenCode) streaming in real time without lag.
-        let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        let flags = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
-        if !existing.contains("--disable-background-timer-throttling") {
-            let combined = if existing.is_empty() {
-                flags.to_string()
-            } else {
-                format!("{} {}", existing, flags)
-            };
-            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", combined);
-        }
+        // Runs for the window and for `kite-core`, before either path returns.
+        opt_out_of_efficiency_mode();
+        install_webview_runtime_flags();
     }
 
     let args: Vec<String> = std::env::args().collect();
@@ -164,6 +203,19 @@ fn main() {
     if args.len() >= 2 && args[1] == "dispatch" {
         let code = crate::dispatch_wire::run_dispatch_cli(&args[2..]);
         std::process::exit(code);
+    }
+
+    let mut ondemand_panel: Option<String> = None;
+    for idx in 1..args.len() {
+        if args[idx] == "--panel" {
+            if let Some(panel) = args.get(idx + 1) {
+                let normalized = panel.trim().to_ascii_lowercase();
+                if matches!(normalized.as_str(), "settings" | "browser" | "account") {
+                    std::env::set_var("KITE_ONDEMAND_PANEL", &normalized);
+                    ondemand_panel = Some(normalized);
+                }
+            }
+        }
     }
 
     std::panic::set_hook(Box::new(|info| {
@@ -210,18 +262,16 @@ fn main() {
             std::env::var("WEBVIEW2_USER_DATA_FOLDER").unwrap_or_default()
         ));
 
-        // Prevent aggressive Chromium background suspension, timer throttling, and occlusion sleeping
-        // which causes UI freeze (10s+) when switching back to Kite Code after 3+ minutes in background.
-        let base_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        let anti_freeze_args = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
-        if !base_args.contains("--disable-background-timer-throttling") {
-            let merged_args = if base_args.is_empty() {
-                anti_freeze_args.to_string()
-            } else {
-                format!("{base_args} {anti_freeze_args}")
-            };
-            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &merged_args);
-            log_trace(&format!("[PID {}] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = {:?}", pid, merged_args));
+        // Idempotent. The early windows block already merged these flags, including
+        // the occlusion opt-out. Log the value the WebView will actually see.
+        #[cfg(windows)]
+        {
+            install_webview_runtime_flags();
+            log_trace(&format!(
+                "[PID {}] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = {:?}",
+                pid,
+                std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default()
+            ));
         }
 
         let lock_path = webview_dir.join("Default").join("LOCK");
@@ -263,11 +313,13 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
+        .setup(move |app| {
             let _ = APP_HANDLE.set(app.handle().clone());
             log_trace("Setup hook running");
             if let Some(w) = app.get_webview_window("main") {
-                if cfg!(debug_assertions) {
+                if let Some(panel) = ondemand_panel.as_deref() {
+                    let _ = w.set_title(&format!("Kite Code — {}", panel));
+                } else if cfg!(debug_assertions) {
                     let _ = w.set_title("Kite Code (Dev)");
                 }
                 let _ = w.unminimize();
@@ -451,6 +503,7 @@ fn main() {
             poll_terminal_snapshot,
             set_terminal_presentation,
             scroll_terminal_viewport,
+            scroll_terminal_viewport_bin,
             find_terminal_text,
             dump_terminal_diagnostics,
             clear_terminal_vt,

@@ -555,10 +555,19 @@
   border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.08));
   color: var(--text-secondary, #9da2b4);
   cursor: grab;
-  opacity: 0.65;
+  opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
   user-select: none;
   margin: 0 auto;
+}
+
+.code-pane-header:hover .code-pane-grip,
+.code-pane-header:focus-within .code-pane-grip,
+.code-pane-grip:focus-visible,
+.code-pane-grip:active {
+  opacity: 0.75;
+  pointer-events: auto;
 }
 
 .code-pane-grip:hover {

@@ -123,7 +123,7 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
   const dashOffset = circumference - (clampedPct / 100) * circumference;
 
   const tooltipText = snapshot
-    ? `Consumo RAM App: ${appRamFormatted} (${snapshot.memory.appShareOfSystemPercent}% del equipo · Estado: ${pressureTheme.label}) · CPU: ${snapshot.cpu.appUsagePercent.toFixed(1)}% · Disco libre: ${formatBytes(snapshot.disk.availableBytes, 0)}. Clic para abrir el monitor de recursos.`
+    ? `Consumo RAM App (Privada): ${appRamFormatted} (Kite UI + Core: ${formatBytes(snapshot.memory.appCoreBytes)} · Terminales/Agentes: ${formatBytes(snapshot.memory.appTerminalsBytes)} · ${snapshot.memory.appShareOfSystemPercent}% del equipo · Estado: ${pressureTheme.label}) · CPU: ${snapshot.cpu.appUsagePercent.toFixed(1)}% · Disco libre: ${formatBytes(snapshot.disk.availableBytes, 0)}. Clic para abrir el monitor de recursos.`
     : 'Cargando consumo de memoria RAM y recursos del sistema...';
 
   return (

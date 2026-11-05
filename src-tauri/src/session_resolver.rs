@@ -430,6 +430,16 @@ pub fn resolve_provider_session_id_with_context(
             spawned_at_unix_ms,
             claimed_ids,
         ),
+        "grok" => {
+            let discovered = resolve_grok_session_id(
+                cwd,
+                terminal_session_id,
+                spawned_at_unix_ms,
+                claimed_ids,
+                last_user_input,
+            );
+            pick_bound_provider_id(valid_existing, discovered.as_deref(), claimed_ids)
+        }
         _ => valid_existing.map(|s| s.to_string()),
     }
 }
@@ -1164,6 +1174,379 @@ fn resolve_gemini_session_id(
         .map(|id| id.to_string())
 }
 
+/// Percent-encode a cwd the same way Grok CLI names `~/.grok/sessions/<encoded>`.
+/// Matches JavaScript `encodeURIComponent` on the raw path bytes.
+pub fn grok_encode_cwd(cwd: &str) -> String {
+    let mut out = String::with_capacity(cwd.len() * 3);
+    for &b in cwd.as_bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn grok_home_dir() -> Option<PathBuf> {
+    std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| user_home_dir().map(|home| home.join(".grok")))
+}
+
+fn grok_parse_active_session_ids(raw: &str) -> HashSet<String> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return HashSet::new();
+    };
+    let Some(arr) = val.as_array() else {
+        return HashSet::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            item.get("session_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn grok_active_session_ids_from_home(grok_home: &Path) -> HashSet<String> {
+    let Ok(raw) = std::fs::read_to_string(grok_home.join("active_sessions.json")) else {
+        return HashSet::new();
+    };
+    grok_parse_active_session_ids(&raw)
+}
+
+/// Mouse SGR (`[<btn;x;yM`) is not conversation text. Using it as a match key
+/// binds the pane to whichever Grok session happens to be last-active.
+fn usable_grok_user_input(raw: Option<&str>) -> Option<&str> {
+    let trimmed = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    if trimmed.matches("[<").count() >= 3 {
+        return None;
+    }
+    Some(trimmed)
+}
+
+/// Resume a Grok pane with a saved id, or discover one that is not already open.
+pub fn restore_grok_provider_id(
+    saved: Option<&str>,
+    claimed: &HashSet<String>,
+    cwd: &str,
+    terminal_session_id: &str,
+    spawned_at_unix_ms: i64,
+    last_user_input: Option<&str>,
+) -> Option<String> {
+    match grok_home_dir() {
+        Some(home) => restore_grok_provider_id_from_home(
+            &home,
+            saved,
+            claimed,
+            cwd,
+            terminal_session_id,
+            spawned_at_unix_ms,
+            last_user_input,
+        ),
+        None => choose_restore_provider_id(saved, claimed),
+    }
+}
+
+fn restore_grok_provider_id_from_home(
+    grok_home: &Path,
+    saved: Option<&str>,
+    claimed: &HashSet<String>,
+    cwd: &str,
+    terminal_session_id: &str,
+    spawned_at_unix_ms: i64,
+    last_user_input: Option<&str>,
+) -> Option<String> {
+    let active = grok_active_session_ids_from_home(grok_home);
+    if let Some(id) = choose_restore_provider_id(saved, claimed) {
+        if !active.contains(&id) {
+            return Some(id);
+        }
+    }
+    let mut blocked = claimed.clone();
+    blocked.extend(active);
+    resolve_grok_session_id_from_home(
+        grok_home,
+        cwd,
+        terminal_session_id,
+        spawned_at_unix_ms,
+        &blocked,
+        usable_grok_user_input(last_user_input),
+    )
+}
+
+fn grok_cwd_path_variants(cwd: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+    let push_unique = |list: &mut Vec<String>, value: String| {
+        if !value.is_empty() && !list.iter().any(|existing| existing == &value) {
+            list.push(value);
+        }
+    };
+    push_unique(&mut variants, cwd.to_string());
+    push_unique(&mut variants, cwd.replace('\\', "/"));
+    push_unique(&mut variants, cwd.replace('/', "\\"));
+    variants
+}
+
+fn grok_rfc3339_to_unix_ms(raw: &str) -> Option<i64> {
+    let s = raw.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    let year: i32 = std::str::from_utf8(&bytes[0..4]).ok()?.parse().ok()?;
+    let month: u32 = std::str::from_utf8(&bytes[5..7]).ok()?.parse().ok()?;
+    let day: u32 = std::str::from_utf8(&bytes[8..10]).ok()?.parse().ok()?;
+    let hour: u32 = std::str::from_utf8(&bytes[11..13]).ok()?.parse().ok()?;
+    let minute: u32 = std::str::from_utf8(&bytes[14..16]).ok()?.parse().ok()?;
+    let second: u32 = std::str::from_utf8(&bytes[17..19]).ok()?.parse().ok()?;
+    Some(civil_utc_to_unix_ms(year, month, day, hour, minute, second))
+}
+
+fn civil_utc_to_unix_ms(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let m = month as i64;
+    let d = day as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    days * 86_400_000
+        + hour as i64 * 3_600_000
+        + minute as i64 * 60_000
+        + second as i64 * 1_000
+}
+
+struct GrokSessionCandidate {
+    id: String,
+    created_at_ms: i64,
+    last_active_ms: i64,
+    title: String,
+    summary: String,
+}
+
+fn read_grok_session_candidate(dir: &Path) -> Option<GrokSessionCandidate> {
+    let summary_path = dir.join("summary.json");
+    let raw = std::fs::read_to_string(&summary_path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let info = val.get("info");
+    let folder_id = dir.file_name()?.to_str()?.to_string();
+    let id = info
+        .and_then(|info| info.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&folder_id)
+        .to_string();
+    let created_at_ms = val
+        .get("created_at")
+        .and_then(|v| v.as_str())
+        .and_then(grok_rfc3339_to_unix_ms)
+        .unwrap_or(0);
+    let last_active_ms = val
+        .get("last_active_at")
+        .and_then(|v| v.as_str())
+        .and_then(grok_rfc3339_to_unix_ms)
+        .unwrap_or(created_at_ms);
+    let title = val
+        .get("generated_title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let summary = val
+        .get("session_summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(GrokSessionCandidate {
+        id,
+        created_at_ms,
+        last_active_ms,
+        title,
+        summary,
+    })
+}
+
+fn grok_candidate_matches_cwd(summary_path: &Path, cwd: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(summary_path) else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(session_cwd) = val
+        .get("info")
+        .and_then(|info| info.get("cwd"))
+        .and_then(|v| v.as_str())
+    else {
+        return true;
+    };
+    paths_match(session_cwd, cwd)
+}
+
+fn score_grok_candidate(
+    candidate: &GrokSessionCandidate,
+    spawned_at_unix_ms: i64,
+    norm_user_input: Option<&str>,
+    norm_scrollback: &str,
+) -> u32 {
+    let mut score = 0u32;
+    if spawned_at_unix_ms > 0 && candidate.created_at_ms > 0 {
+        let delta = (candidate.created_at_ms - spawned_at_unix_ms).unsigned_abs();
+        if delta <= 120_000 {
+            score += 200;
+            score += ((120_000 - delta) / 1_000) as u32;
+        }
+    }
+    let haystack = format!(
+        "{} {}",
+        normalize_terminal_text(candidate.title.as_bytes()),
+        normalize_terminal_text(candidate.summary.as_bytes())
+    );
+    if let Some(input) = norm_user_input {
+        if input.len() >= 8 && haystack.contains(input) {
+            score += 80;
+        }
+        for phrase in extract_phrase_windows(input, 4) {
+            if haystack.contains(&phrase) {
+                score += 40;
+            }
+        }
+    }
+    if norm_scrollback.len() >= 16 {
+        for phrase in extract_phrase_windows(norm_scrollback, 4) {
+            if haystack.contains(&phrase) {
+                score += 25;
+            }
+        }
+    }
+    score
+}
+
+fn resolve_grok_session_id(
+    cwd: &str,
+    terminal_session_id: &str,
+    spawned_at_unix_ms: i64,
+    claimed_ids: &HashSet<String>,
+    last_user_input: Option<&str>,
+) -> Option<String> {
+    let home = grok_home_dir()?;
+    resolve_grok_session_id_from_home(
+        &home,
+        cwd,
+        terminal_session_id,
+        spawned_at_unix_ms,
+        claimed_ids,
+        last_user_input,
+    )
+}
+
+fn resolve_grok_session_id_from_home(
+    grok_home: &Path,
+    cwd: &str,
+    terminal_session_id: &str,
+    spawned_at_unix_ms: i64,
+    claimed_ids: &HashSet<String>,
+    last_user_input: Option<&str>,
+) -> Option<String> {
+    let mut session_dir = None;
+    for variant in grok_cwd_path_variants(cwd) {
+        let encoded = grok_home
+            .join("sessions")
+            .join(grok_encode_cwd(&variant));
+        if encoded.is_dir() {
+            session_dir = Some(encoded);
+            break;
+        }
+    }
+    let session_dir = session_dir?;
+    let entries = std::fs::read_dir(&session_dir).ok()?;
+
+    let sb_bytes = crate::terminal::read_scrollback_file(terminal_session_id);
+    let norm_scrollback = sb_bytes
+        .as_deref()
+        .map(normalize_terminal_text)
+        .unwrap_or_default();
+    let norm_user_input = usable_grok_user_input(last_user_input)
+        .map(|s| normalize_terminal_text(s.as_bytes()))
+        .filter(|s| s.trim().len() >= 8);
+    let active_ids = grok_active_session_ids_from_home(grok_home);
+
+    let mut best: Option<(u32, i64, i64, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let summary_path = path.join("summary.json");
+        if !summary_path.is_file() {
+            continue;
+        }
+        if !grok_candidate_matches_cwd(&summary_path, cwd) {
+            continue;
+        }
+        let Some(candidate) = read_grok_session_candidate(&path) else {
+            continue;
+        };
+        if candidate.id.is_empty()
+            || claimed_ids.contains(&candidate.id)
+            || active_ids.contains(&candidate.id)
+        {
+            continue;
+        }
+        let score = score_grok_candidate(
+            &candidate,
+            spawned_at_unix_ms,
+            norm_user_input.as_deref(),
+            &norm_scrollback,
+        );
+        let rank = (
+            score,
+            if spawned_at_unix_ms > 0 && candidate.created_at_ms > 0 {
+                -((candidate.created_at_ms - spawned_at_unix_ms).abs())
+            } else {
+                0
+            },
+            candidate.last_active_ms,
+            candidate.id.clone(),
+        );
+        match &best {
+            None => best = Some(rank),
+            Some(current) => {
+                if rank.0 > current.0
+                    || (rank.0 == current.0 && rank.1 > current.1)
+                    || (rank.0 == current.0 && rank.1 == current.1 && rank.2 > current.2)
+                {
+                    best = Some(rank);
+                }
+            }
+        }
+    }
+    best.map(|(_, _, _, id)| id)
+}
+
 pub fn map_executable_name_to_agent_engine(exe_name: &str) -> Option<String> {
     let lower = Path::new(exe_name)
         .file_name()
@@ -1185,6 +1568,7 @@ pub fn map_executable_name_to_agent_engine(exe_name: &str) -> Option<String> {
         "kimi" => Some("kimi".to_string()),
         "aider" => Some("aider".to_string()),
         "qwen" | "qwen-code" => Some("qwen-code".to_string()),
+        "grok" => Some("grok".to_string()),
         _ => None,
     }
 }
@@ -1450,6 +1834,135 @@ mod tests {
     }
 
     #[test]
+    fn grok_encode_cwd_matches_javascript_encode_uri_component() {
+        assert_eq!(grok_encode_cwd(r"E:\kite"), "E%3A%5Ckite");
+        assert_eq!(grok_encode_cwd("/home/user/kite"), "%2Fhome%2Fuser%2Fkite");
+    }
+
+    #[test]
+    fn grok_rfc3339_epoch_is_zero() {
+        assert_eq!(grok_rfc3339_to_unix_ms("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn resolve_grok_picks_unclaimed_cwd_session_closest_to_spawn() {
+        let home = std::env::temp_dir().join(format!("kite-grok-home-{}", uuid::Uuid::new_v4()));
+        let root = home.join("sessions").join(grok_encode_cwd(r"E:\kite"));
+        let older = "11111111-1111-1111-1111-111111111111";
+        let closer = "22222222-2222-2222-2222-222222222222";
+        let claimed = "33333333-3333-3333-3333-333333333333";
+        std::fs::create_dir_all(root.join(older)).unwrap();
+        std::fs::create_dir_all(root.join(closer)).unwrap();
+        std::fs::create_dir_all(root.join(claimed)).unwrap();
+        let write_summary = |id: &str, created: &str| {
+            let body = serde_json::json!({
+                "info": { "id": id, "cwd": r"E:\kite" },
+                "created_at": created,
+                "last_active_at": created,
+                "generated_title": "demo",
+                "session_summary": "demo"
+            });
+            std::fs::write(root.join(id).join("summary.json"), body.to_string()).unwrap();
+        };
+        write_summary(older, "2026-11-04T20:00:00Z");
+        write_summary(closer, "2026-11-04T22:53:34Z");
+        write_summary(claimed, "2026-11-04T22:53:30Z");
+        let mut taken = HashSet::new();
+        taken.insert(claimed.to_string());
+        let spawned = grok_rfc3339_to_unix_ms("2026-11-04T22:53:34Z").unwrap();
+        let picked = resolve_grok_session_id_from_home(
+            &home,
+            r"E:\kite",
+            "term-missing",
+            spawned,
+            &taken,
+            None,
+        );
+        assert_eq!(picked.as_deref(), Some(closer));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn grok_parse_active_session_ids_reads_session_id_field() {
+        let raw = r#"[{"session_id":"01a1a8c4-876b-7260-b545-c8f1d9ecd705","pid":14592,"cwd":"E:\\kite"}]"#;
+        let ids = grok_parse_active_session_ids(raw);
+        assert!(ids.contains("01a1a8c4-876b-7260-b545-c8f1d9ecd705"));
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn usable_grok_user_input_drops_sgr_mouse_noise() {
+        let mouse = "[<35;24;58M[<35;23;59M[<35;22;59M genera";
+        assert_eq!(usable_grok_user_input(Some(mouse)), None);
+        assert_eq!(
+            usable_grok_user_input(Some("investigar el primer frame")),
+            Some("investigar el primer frame")
+        );
+    }
+
+    #[test]
+    fn restore_grok_skips_active_saved_id_and_picks_next() {
+        let home = std::env::temp_dir().join(format!("kite-grok-home-{}", uuid::Uuid::new_v4()));
+        let root = home.join("sessions").join(grok_encode_cwd(r"E:\kite"));
+        let live = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let idle = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        std::fs::create_dir_all(root.join(live)).unwrap();
+        std::fs::create_dir_all(root.join(idle)).unwrap();
+        let write_summary = |id: &str, created: &str, active: &str| {
+            let body = serde_json::json!({
+                "info": { "id": id, "cwd": r"E:\kite" },
+                "created_at": created,
+                "last_active_at": active,
+                "generated_title": "demo",
+                "session_summary": "demo"
+            });
+            std::fs::write(root.join(id).join("summary.json"), body.to_string()).unwrap();
+        };
+        write_summary(live, "2026-11-04T22:53:34Z", "2026-11-05T00:34:00Z");
+        write_summary(idle, "2026-11-04T22:44:26Z", "2026-11-04T23:47:26Z");
+        std::fs::write(
+            home.join("active_sessions.json"),
+            format!(r#"[{{"session_id":"{live}","pid":14592,"cwd":"E:\\kite"}}]"#),
+        )
+        .unwrap();
+
+        let saved = restore_grok_provider_id_from_home(
+            &home,
+            Some(live),
+            &HashSet::new(),
+            r"E:\kite",
+            "term-grok",
+            grok_rfc3339_to_unix_ms("2026-11-05T00:23:40Z").unwrap(),
+            Some("[<35;24;58M[<35;23;59M[<35;22;59M"),
+        );
+        assert_eq!(saved.as_deref(), Some(idle));
+
+        let kept = restore_grok_provider_id_from_home(
+            &home,
+            Some(idle),
+            &HashSet::new(),
+            r"E:\kite",
+            "term-grok",
+            grok_rfc3339_to_unix_ms("2026-11-05T00:23:40Z").unwrap(),
+            None,
+        );
+        assert_eq!(kept.as_deref(), Some(idle));
+
+        let discovered = restore_grok_provider_id_from_home(
+            &home,
+            None,
+            &HashSet::new(),
+            r"E:\kite",
+            "term-grok",
+            grok_rfc3339_to_unix_ms("2026-11-04T22:44:26Z").unwrap(),
+            None,
+        );
+        assert_eq!(discovered.as_deref(), Some(idle));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn maps_executable_names_to_canonical_engines() {
         assert_eq!(
             map_executable_name_to_agent_engine("agy.exe"),
@@ -1470,6 +1983,10 @@ mod tests {
         assert_eq!(
             map_executable_name_to_agent_engine("gentle-shell.cmd"),
             Some("gentle-shell".to_string())
+        );
+        assert_eq!(
+            map_executable_name_to_agent_engine("grok.exe"),
+            Some("grok".to_string())
         );
         assert_eq!(
             canonical_agent_engine("gentle-shell"),

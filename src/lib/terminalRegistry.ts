@@ -423,11 +423,60 @@ function extractPathFolder(text: string): string | null {
   return null;
 }
 
+const lastPublishedPresence = new Map<string, string>();
+
+function mapPaneToPresence(state: string | undefined): string | undefined {
+  switch (state) {
+    case 'idle':
+    case 'working':
+    case 'done':
+    case 'error':
+      return state;
+    case 'waitingForYou':
+      return 'blocked';
+    case 'exited':
+      return 'gone';
+    default:
+      return undefined;
+  }
+}
+
+function inNativeApp(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+  return Boolean(host.__TAURI_INTERNALS__ || host.__TAURI__);
+}
+
+function publishObservedPresence(sessionId: string, state: string | undefined): void {
+  const mapped = mapPaneToPresence(state);
+  if (!sessionId || !mapped) return;
+  if (lastPublishedPresence.get(sessionId) === mapped) return;
+  lastPublishedPresence.set(sessionId, mapped);
+  if (!inNativeApp()) return;
+  const tail = sessionStates.get(sessionId)?.rollingBuffer;
+  void invokeCommand('dispatch_publish', {
+    address: `session:${sessionId}`,
+    state: mapped,
+    tail: tail ? tail.split('\n').slice(-80).join('\n') : undefined,
+  }).catch(() => {});
+}
+
+function publishOscReport(sessionId: string, raw: string): void {
+  if (!sessionId || !raw.includes('7501')) return;
+  if (!inNativeApp()) return;
+  void invokeCommand('dispatch_osc', {
+    address: `session:${sessionId}`,
+    raw,
+  }).catch(() => {});
+}
+
 function notifyTerminalUpdate(terminal: ActiveAgentTerminal) {
   try {
     const list = Array.from(terminalsMap.values()).filter((t) => !exitedSessionIds.has(t.sessionId));
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   } catch {}
+
+  publishObservedPresence(terminal.sessionId, terminal.state);
 
   window.dispatchEvent(
     new CustomEvent('kite:terminal-agent-update', {
@@ -449,6 +498,7 @@ export function recordTerminalOutput(
   }
 ) {
   if (!sessionId || exitedSessionIds.has(sessionId)) return;
+  publishOscReport(sessionId, rawText);
   const clean = cleanAnsi(rawText);
   if (!clean.trim()) return;
 
@@ -694,6 +744,7 @@ export function markTerminalExited(sessionId: string) {
     const list = Array.from(terminalsMap.values()).filter((t) => !exitedSessionIds.has(t.sessionId));
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   } catch {}
+  publishObservedPresence(sessionId, 'exited');
   window.dispatchEvent(new CustomEvent('kite:terminal-agent-update', { detail: { sessionId, state: 'exited' } }));
 }
 

@@ -16,6 +16,39 @@ import {
 } from './sidebarIcons';
 import { invokeCommand } from '../../lib/ipc';
 import { BrandLogo } from '../ui/BrandLogo';
+import { AGENT_CODENAMES, cleanAgentTitle } from '../../lib/agentNames';
+
+export function getTabDisplayName(tab: WorkspaceSessionTab, tabIndex: number): string {
+  const fallback = `Ventana ${tabIndex + 1}`;
+  const rawTitle = (tab.title || '').trim();
+  const cleaned = cleanAgentTitle(rawTitle);
+
+  if (
+    !cleaned ||
+    cleaned === 'Untitled' ||
+    cleaned === 'Terminal' ||
+    cleaned === 'Multi-seat Session'
+  ) {
+    return fallback;
+  }
+
+  const isAgentCodename = AGENT_CODENAMES.some((name) => {
+    if (cleaned.toLowerCase() === name.toLowerCase()) return true;
+    return new RegExp(`^${name}(\\s+\\d+)?$`, 'i').test(cleaned);
+  });
+
+  const matchesPaneAgent = tab.panes?.some((p) => {
+    if (p.agentName && cleaned.toLowerCase() === p.agentName.toLowerCase()) return true;
+    if (p.label && cleaned.toLowerCase() === p.label.toLowerCase()) return true;
+    return false;
+  });
+
+  if (isAgentCodename || matchesPaneAgent) {
+    return fallback;
+  }
+
+  return rawTitle;
+}
 
 export interface WorkspaceRosterProps {
   workspaces: Workspace[];
@@ -410,7 +443,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
           disabled: readOnly,
           action: () => {
             setRenamingTabId(tab.id);
-            setRenameTabValue(tab.title || '');
+            setRenameTabValue(getTabDisplayName(tab, tabIndex));
           },
         },
         {
@@ -431,7 +464,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
       x: e.clientX,
       y: e.clientY,
       targetId: tab.id,
-      header: { title: tab.title || 'Untitled' },
+      header: { title: getTabDisplayName(tab, tabIndex) },
       sections,
     });
   };
@@ -645,7 +678,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                     <form
                       key={tab.id}
                       className="workspace-rename-form chat-rail-rename chat-rail-rename--row chat-rail-rename--session"
-                      aria-label={`Rename ${tab.title || 'Untitled'}`}
+                      aria-label={`Rename ${getTabDisplayName(tab, tabIndex)}`}
                       onSubmit={(e) => {
                         e.preventDefault();
                         commitTabRename(ws.id, tab.id);
@@ -661,7 +694,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                         maxLength={256}
                         value={renameTabValue}
                         onChange={(e) => setRenameTabValue(e.target.value)}
-                        placeholder="Session title"
+                        placeholder={`Ventana ${tabIndex + 1}`}
                         onKeyDown={(e) => {
                           if (e.key === 'Escape') {
                             e.preventDefault();
@@ -713,7 +746,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                       {hasMultiplePanes ? (
                         <button
                           aria-expanded={isTabExpanded}
-                          aria-label={`${isTabExpanded ? 'Collapse' : 'Expand'} ${tab.title || 'Untitled'} terminals`}
+                          aria-label={`${isTabExpanded ? 'Collapse' : 'Expand'} ${getTabDisplayName(tab, tabIndex)} terminals`}
                           className={`workspace-tab-row__disclosure${
                             isTabExpanded ? ' workspace-tab-row__disclosure--expanded' : ''
                           }`}
@@ -778,7 +811,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                           />
                         )}
 
-                        <span className="workspace-tab-row__name">{tab.title || 'Untitled'}</span>
+                        <span className="workspace-tab-row__name">{getTabDisplayName(tab, tabIndex)}</span>
                         {hasMultiplePanes && (
                           <small>
                             {tab.paneCount}
@@ -788,7 +821,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                       </button>
                       {onCloseWorkspaceTab && (
                         <button
-                          aria-label={`Close ${tab.title || 'Untitled'} tab`}
+                          aria-label={`Close ${getTabDisplayName(tab, tabIndex)} tab`}
                           className="workspace-tab-row__close"
                           disabled={readOnly}
                           onClick={(e) => {
@@ -805,7 +838,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
 
                     {/* Sub-tree of individual terminal panes */}
                     {hasMultiplePanes && isTabExpanded && panes.length > 0 && (
-                      <div className="workspace-subpanes" role="group" aria-label={`${tab.title || 'Untitled'} terminals`}>
+                      <div className="workspace-subpanes" role="group" aria-label={`${getTabDisplayName(tab, tabIndex)} terminals`}>
                         {panes.map((pane, paneIdx) => {
                           const isPaneFocused = isTabActive && pane.isFocused;
                           return (
@@ -842,11 +875,6 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                                 />
                                 <span className="workspace-pane-item__name">
                                   {pane.label || pane.agentName || `Terminal ${paneIdx + 1}`}
-                                </span>
-                                <span className="workspace-pane-item__engine">
-                                  {pane.engine && pane.engine !== 'terminal' && pane.engine !== 'powershell'
-                                    ? pane.engine
-                                    : 'shell'}
                                 </span>
                               </button>
                             </div>

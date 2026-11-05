@@ -66,6 +66,7 @@ export function parseArgs(argv) {
     output: path.join(process.cwd(), 'bench-results', 'samples.jsonl'),
     report: path.join(process.cwd(), 'bench-results', 'summary.md'),
     dryRun: false,
+    surface: null,
   };
 
   const positiveInt = (value, fallback) => {
@@ -85,6 +86,7 @@ export function parseArgs(argv) {
     else if (arg === '--output' && argv[i + 1]) args.output = argv[++i];
     else if (arg === '--report' && argv[i + 1]) args.report = argv[++i];
     else if (arg === '--dry-run') args.dryRun = true;
+    else if (arg === '--surface' && argv[i + 1]) args.surface = argv[++i];
   }
   return args;
 }
@@ -495,7 +497,13 @@ export function filterKiteProcessTree(processes, options = {}) {
   const kiteProcs = processes.filter((p) => {
     const n = String(p.name || '').toLowerCase();
     const cmd = String(p.commandLine || '').toLowerCase();
-    if (!n.includes('kite-code') && !n.includes('kite-core') && !n.includes('kite_code')) {
+    if (
+      !n.includes('kite-code') &&
+      !n.includes('kite-core') &&
+      !n.includes('kite_code') &&
+      !n.includes('kite-gpui') &&
+      !n.includes('kite_gpui')
+    ) {
       return false;
     }
     if (cmd.includes('mcp tasks') || cmd.includes(' dispatch ')) {
@@ -516,7 +524,18 @@ export function filterKiteProcessTree(processes, options = {}) {
   const workspaceGui = guiCandidates.filter((p) =>
     String(p.commandLine || '').toLowerCase().includes('src-tauri')
   );
-  const chosenGuiPool = workspaceGui.length > 0 ? workspaceGui : guiCandidates;
+  const surface = options.surface;
+  const isGpui = (processInfo) => {
+    const name = String(processInfo.name || '').toLowerCase();
+    const command = String(processInfo.commandLine || '').toLowerCase();
+    return name.includes('kite-gpui') || name.includes('kite_gpui') || command.includes('kite-gpui');
+  };
+  let chosenGuiPool = workspaceGui.length > 0 ? workspaceGui : guiCandidates;
+  if (surface === 'gpui') {
+    chosenGuiPool = guiCandidates.filter(isGpui);
+  } else if (surface === 'webview') {
+    chosenGuiPool = guiCandidates.filter((processInfo) => !isGpui(processInfo));
+  }
   const primaryGui =
     chosenGuiPool.length > 0
       ? chosenGuiPool.reduce((best, cur) => (cur.id > best.id ? cur : best), chosenGuiPool[0])
@@ -786,7 +805,8 @@ export async function runScenario(scenarioConfig, options = {}) {
     const mode = SCENARIO_WORKLOAD_MODE[id] ?? 'idle';
     const runner = options.workloadRunner ?? defaultWorkloadRunner;
     const processSampler =
-      options.processSampler ?? createProcessSampler({ headlessOnly: id === 'E4-headless' });
+      options.processSampler ??
+        createProcessSampler({ headlessOnly: id === 'E4-headless', surface: options.surface });
     const liveVisibleTerminals = id === 'E4-headless' ? 0 : terminals;
 
     for (let sec = 1; sec <= totalSeconds; sec++) {

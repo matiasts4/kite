@@ -3,11 +3,7 @@ import { createPortal } from 'react-dom';
 import type { AgentEngineDescriptor, PaneOccupant } from './types';
 import { SquareTerminalIcon, SplitHorizontalIcon, PlusIcon } from './codeIcons';
 import { BrandLogo } from '../views/agents/engineMetadata';
-import {
-  getTerminalAppearancePrefs,
-  getTerminalRendererBadgeLabel,
-  togglePrimaryTerminalRenderer,
-} from '../../lib/terminalAppearancePrefs';
+
 import { invokeCommand } from '../../lib/ipc';
 
 export interface CodePaneActionsMenuProps {
@@ -181,20 +177,6 @@ export const CodePaneActionsMenu: React.FC<CodePaneActionsMenuProps> = ({
           >
             <span className="ui-menu__label">
               <span className="ui-menu__row-title">Smaller Text</span>
-            </span>
-          </div>
-          <div
-            role="menuitem"
-            className="ui-menu__row"
-            onClick={() => {
-              onCloseMenu();
-              togglePrimaryTerminalRenderer();
-            }}
-          >
-            <span className="ui-menu__label">
-              <span className="ui-menu__row-title">
-                Switch Renderer ({getTerminalRendererBadgeLabel(getTerminalAppearancePrefs().renderer)})
-              </span>
             </span>
           </div>
           <div

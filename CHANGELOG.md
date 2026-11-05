@@ -6,6 +6,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.47] - 2026-11-05
+
+> Restore de terminales AntiGravity y Grok
+
+### Added
+- Restore de sesiones Grok con descubrimiento en ~/.grok/sessions y arranque con -r <id>
+
+### Changed
+- Cursor de puntero por defecto sobre las terminales
+
+### Fixed
+- Primer frame al restaurar terminales: espera geometría estable del pane, snapshot completo tras el resize del PTY y un empujón de una fila para que AntiGravity y OpenCode redibujen
+- El canvas no pinta deltas vacíos hasta el primer frame completo
+- Caret visible en AntiGravity al restaurar
+
+---
+
+## [0.1.46] - 2026-11-04
+
+> Sidebar: nombres de ventana y remocion de badge de proveedor
+
+### Fixed
+- Reemplazar nombres de agente en la cabecera de ventana por 'Ventana N'
+- Eliminar badge de texto de proveedor en subpaneles de la barra lateral
+
+---
+
+## [0.1.45] - 2026-11-04
+
+> Kite Core Daemon framed IPC, terminal canvas binario y reordenamiento de paneles
+
+### Added
+- Arquitectura desacoplada 'kite-core' daemon con IPC framed binario de 9 bytes y control de flujo por créditos
+- Codec de snapshot binario empaquetado para terminal con reutilización de memoria in-place en Canvas 2D
+- Reordenamiento interactivo de paneles de terminal mediante arrastrar y soltar (drag & drop)
+- Árbol de sesiones multiterminal colapsable en la barra lateral con insignias de marcas y jerarquía visual
+
+### Changed
+- Eliminación definitiva de la superficie DOM heredada (XtermDomSurface) en favor del motor Canvas exclusivo
+- Telemetría de recursos del sistema con desglose detallado por proyecto y terminal en el monitor de memoria
+
+### Fixed
+- Recuperación y repintado forzado de pantalla completa ante pérdidas de secuencia de frames en el canvas
+
+---
+
 ## [0.1.44] - 2026-11-02
 
 > Estabilización de Terminal Canvas, Enfoque y Scroll en Agentes

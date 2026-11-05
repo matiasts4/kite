@@ -33,6 +33,86 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.47',
+    tag: 'v0.1.47',
+    date: 'Nov 4, 2026',
+    title: 'Restore de terminales AntiGravity y Grok',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Primer frame al restaurar terminales: espera geometría estable del pane, snapshot completo tras el resize del PTY y un empujón de una fila para que AntiGravity y OpenCode redibujen',
+      },
+      {
+        kind: 'fixed',
+        description: 'El canvas no pinta deltas vacíos hasta el primer frame completo',
+      },
+      {
+        kind: 'fixed',
+        description: 'Caret visible en AntiGravity al restaurar',
+      },
+      {
+        kind: 'changed',
+        description: 'Cursor de puntero por defecto sobre las terminales',
+      },
+      {
+        kind: 'added',
+        description: 'Restore de sesiones Grok con descubrimiento en ~/.grok/sessions y arranque con -r <id>',
+      },
+    ],
+  },
+  {
+    version: '0.1.46',
+    tag: 'v0.1.46',
+    date: 'Nov 4, 2026',
+    title: 'Sidebar: nombres de ventana y remocion de badge de proveedor',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Reemplazar nombres de agente en la cabecera de ventana por \'Ventana N\'',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminar badge de texto de proveedor en subpaneles de la barra lateral',
+      },
+    ],
+  },
+  {
+    version: '0.1.45',
+    tag: 'v0.1.45',
+    date: 'Nov 4, 2026',
+    title: 'Kite Core Daemon framed IPC, terminal canvas binario y reordenamiento de paneles',
+    items: [
+      {
+        kind: 'added',
+        description: 'Arquitectura desacoplada \'kite-core\' daemon con IPC framed binario de 9 bytes y control de flujo por créditos',
+      },
+      {
+        kind: 'added',
+        description: 'Codec de snapshot binario empaquetado para terminal con reutilización de memoria in-place en Canvas 2D',
+      },
+      {
+        kind: 'added',
+        description: 'Reordenamiento interactivo de paneles de terminal mediante arrastrar y soltar (drag & drop)',
+      },
+      {
+        kind: 'added',
+        description: 'Árbol de sesiones multiterminal colapsable en la barra lateral con insignias de marcas y jerarquía visual',
+      },
+      {
+        kind: 'fixed',
+        description: 'Recuperación y repintado forzado de pantalla completa ante pérdidas de secuencia de frames en el canvas',
+      },
+      {
+        kind: 'changed',
+        description: 'Eliminación definitiva de la superficie DOM heredada (XtermDomSurface) en favor del motor Canvas exclusivo',
+      },
+      {
+        kind: 'changed',
+        description: 'Telemetría de recursos del sistema con desglose detallado por proyecto y terminal en el monitor de memoria',
+      },
+    ],
+  },
+  {
     version: '0.1.44',
     tag: 'v0.1.44',
     date: 'Nov 2, 2026',

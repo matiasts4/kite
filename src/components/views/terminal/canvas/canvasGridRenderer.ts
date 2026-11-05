@@ -79,7 +79,7 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     canvas.width = targetPixelW;
     canvas.height = targetPixelH;
   }
-  const partial = !sizeChanged && Array.isArray(dirtyRows);
+  const partial = !sizeChanged && Array.isArray(dirtyRows) && dirtyRows.length > 0;
   const dirtySet = partial ? new Set(dirtyRows) : null;
   const paintRow = (row: number) => !dirtySet || dirtySet.has(row);
 

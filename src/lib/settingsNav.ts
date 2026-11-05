@@ -3,9 +3,9 @@
  * popover, notifications…) can send the user straight to a Settings tab
  * without prop-drilling through App.
  */
-export const OPEN_SETTINGS_EVENT = 'bmone:open-settings';
+export const OPEN_SETTINGS_EVENT = 'kite:open-settings';
 export const SETTINGS_TAB_STORAGE_KEY = 'kite.settingsTab';
-export const SETTINGS_PROVIDER_STORAGE_KEY = 'bmone.settingsProvider';
+export const SETTINGS_PROVIDER_STORAGE_KEY = 'kite.settingsProvider';
 
 export interface OpenSettingsDetail {
   tab: string;

@@ -8,8 +8,8 @@ import { invokeCommand } from '../../../lib/ipc';
 export interface MemoryProcessTabProps {
   snapshot: SystemMetricsSnapshot;
   onRefresh: () => void;
-  procCategoryFilter: 'all' | 'terminals' | 'webview' | 'core' | 'build';
-  setProcCategoryFilter: React.Dispatch<React.SetStateAction<'all' | 'terminals' | 'webview' | 'core' | 'build'>>;
+  procCategoryFilter: 'all' | 'terminals' | 'webview' | 'core' | 'build' | 'mcp' | 'agents';
+  setProcCategoryFilter: React.Dispatch<React.SetStateAction<'all' | 'terminals' | 'webview' | 'core' | 'build' | 'mcp' | 'agents'>>;
   procSearchQuery: string;
   setProcSearchQuery: React.Dispatch<React.SetStateAction<string>>;
   procViewMode: 'projects' | 'terminals' | 'flat';
@@ -255,8 +255,18 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
                             <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>PID {p.pid}</span>
                             <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{p.name}</span>
                             {p.label && <span style={{ color: 'var(--text-secondary)' }}>· {p.label}</span>}
+                            {p.role === 'mcp' && (
+                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(192, 132, 252, 0.15)', color: '#c084fc', fontWeight: 600 }}>
+                                MCP
+                              </span>
+                            )}
+                            {p.role === 'agent' && (
+                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(92, 143, 255, 0.15)', color: 'var(--accent, #5c8fff)', fontWeight: 600 }}>
+                                Agente
+                              </span>
+                            )}
                             {p.role === 'build' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: '4px', backgroundColor: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
+                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
                                 Build
                               </span>
                             )}
@@ -370,11 +380,19 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
                         <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--accent, #5c8fff)' }}>
                           {formatBytes(term.memoryBytes)}
                         </div>
-                        {term.privateBytes != null && (
-                          <div style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>
-                            {formatBytes(term.privateBytes)} priv
-                          </div>
-                        )}
+                        <div style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>
+                          {term.agentBytes != null && term.agentBytes > 0 && (
+                            <span>Agente: {formatBytes(term.agentBytes)}</span>
+                          )}
+                          {term.mcpBytes != null && term.mcpBytes > 0 && (
+                            <span style={{ color: '#c084fc', marginLeft: term.agentBytes ? '4px' : '0' }}>
+                              {term.agentBytes ? '· ' : ''}MCPs: {formatBytes(term.mcpBytes)}
+                            </span>
+                          )}
+                          {(!term.agentBytes && !term.mcpBytes && term.privateBytes != null) && (
+                            <span>{formatBytes(term.privateBytes)} priv</span>
+                          )}
+                        </div>
                       </div>
                       <button
                         type="button"
@@ -404,6 +422,21 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
                             <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>PID {p.pid}</span>
                             <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{p.name}</span>
                             {p.label && <span style={{ color: 'var(--text-secondary)' }}>· {p.label}</span>}
+                            {p.role === 'mcp' && (
+                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(192, 132, 252, 0.15)', color: '#c084fc', fontWeight: 600 }}>
+                                MCP
+                              </span>
+                            )}
+                            {p.role === 'agent' && (
+                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(92, 143, 255, 0.15)', color: 'var(--accent, #5c8fff)', fontWeight: 600 }}>
+                                Agente
+                              </span>
+                            )}
+                            {p.role === 'build' && (
+                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(168, 85, 247, 0.15)', color: '#a855f7', fontWeight: 600 }}>
+                                Build
+                              </span>
+                            )}
                           </div>
                           <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
                             {formatBytes(p.memoryBytes)}
@@ -421,7 +454,9 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
 
       {/* VIEW: FLAT LIST (Detailed Process List) */}
       {(procViewMode === 'flat' || (procViewMode === 'projects' && workspaces.length === 0) || (procViewMode === 'terminals' && terminals.length === 0)) && (() => {
-        const termCount = allProcs.filter((p) => p.category === 'terminals').length;
+        const agentCount = allProcs.filter((p) => p.role === 'agent' || p.category === 'agent').length;
+        const mcpCount = allProcs.filter((p) => p.role === 'mcp' || p.category === 'mcp').length;
+        const termCount = allProcs.filter((p) => p.category === 'terminals' && p.role !== 'mcp' && p.role !== 'agent').length;
         const webCount = allProcs.filter((p) => p.category === 'webview').length;
         const coreCount = allProcs.filter((p) => p.category === 'core').length;
         const buildCount = allProcs.filter((p) => p.role === 'build').length;
@@ -429,6 +464,12 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
         const filtered = allProcs.filter((p) => {
           if (procCategoryFilter === 'build') {
             if (p.role !== 'build') return false;
+          } else if (procCategoryFilter === 'mcp') {
+            if (p.role !== 'mcp' && p.category !== 'mcp') return false;
+          } else if (procCategoryFilter === 'agents') {
+            if (p.role !== 'agent' && p.category !== 'agent') return false;
+          } else if (procCategoryFilter === 'terminals') {
+            if (p.category !== 'terminals' || p.role === 'mcp' || p.role === 'agent') return false;
           } else if (procCategoryFilter !== 'all' && p.category !== procCategoryFilter) {
             return false;
           }
@@ -444,10 +485,18 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
           return true;
         });
 
-        const filterButtons: Array<{ id: 'all' | 'terminals' | 'build' | 'webview' | 'core'; label: string }> = [
+        const filterButtons: Array<{ id: 'all' | 'agents' | 'mcp' | 'terminals' | 'build' | 'webview' | 'core'; label: string }> = [
           { id: 'all', label: `Todos (${allProcs.length})` },
-          { id: 'terminals', label: `Terminales & Agentes (${termCount})` },
         ];
+        if (agentCount > 0) {
+          filterButtons.push({ id: 'agents', label: `Agentes AI (${agentCount})` });
+        }
+        if (mcpCount > 0) {
+          filterButtons.push({ id: 'mcp', label: `MCPs & Tools (${mcpCount})` });
+        }
+        filterButtons.push(
+          { id: 'terminals', label: `Shells PTY (${termCount})` }
+        );
         if (buildCount > 0) {
           filterButtons.push({ id: 'build', label: `Build / Tests (${buildCount})` });
         }
@@ -539,9 +588,11 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
                       ? Math.round((proc.memoryBytes / snapshot.memory.appTotalBytes) * 100)
                       : 0;
                   const catColor =
-                    proc.role === 'build'
+                    proc.role === 'mcp' || proc.category === 'mcp'
+                      ? '#c084fc'
+                      : proc.role === 'build'
                       ? '#a855f7'
-                      : proc.role === 'agent'
+                      : proc.role === 'agent' || proc.category === 'agent'
                       ? 'var(--accent, #5c8fff)'
                       : proc.category === 'terminals'
                       ? '#f59e0b'
@@ -550,9 +601,11 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
                       : 'var(--accent, #5c8fff)';
 
                   const catBadge =
-                    proc.role === 'build'
+                    proc.role === 'mcp' || proc.category === 'mcp'
+                      ? 'Servidor MCP'
+                      : proc.role === 'build'
                       ? 'Build / Test'
-                      : proc.role === 'agent'
+                      : proc.role === 'agent' || proc.category === 'agent'
                       ? 'Agente AI'
                       : proc.category === 'terminals'
                       ? 'Terminal PTY'

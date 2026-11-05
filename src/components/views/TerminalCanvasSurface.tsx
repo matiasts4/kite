@@ -22,12 +22,16 @@ import {
   type TerminalSurfaceHandle,
 } from './terminal/canvas/terminalCanvasTypes';
 import { renderCanvasGrid } from './terminal/canvas/canvasGridRenderer';
+import { cursorPaintPhase } from './terminal/canvas/cursorPaintPhase';
+import { finishPtyResize, planStartupNudge, requestPtyResize } from './terminal/canvas/ptyResizeGate';
 import { collectFindHits, type GridFindHit } from './terminal/canvas/terminalGridText';
 import './terminal/canvas/terminalCanvasChrome.css';
 import { encodeVtKey, normalizePasteText } from './terminal/canvas/terminalInputKeyEncoder';
 import { useTerminalMouseTracking } from './terminal/canvas/useTerminalMouseTracking';
 import { useTerminalSnapshotPoller } from './terminal/canvas/useTerminalSnapshotPoller';
 import { recordTerminalUserInput } from './terminal/canvas/terminalBenchMetrics';
+import { classifyBinaryPollPayload, decodeBinarySnapshot } from './terminal/canvas/binarySnapshotDecoder';
+import { OUTPUT_GAP_HIDDEN_HEARTBEAT_MS, type OutputPace } from './terminal/canvas/outputClock';
 
 export { measureTerminalCanvasGrid };
 export type { TerminalCanvasSurfaceProps };
@@ -100,6 +104,13 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const appliedPtyColsRef = useRef<number>(0);
   const appliedPtyRowsRef = useRef<number>(0);
   const resizeInFlightRef = useRef<boolean>(false);
+  const queuedPtyRef = useRef<{ cols: number; rows: number } | null>(null);
+  const reconcilePtySizeRef = useRef<(() => void) | null>(null);
+  const paintRetryRef = useRef(0);
+  const startupRepaintArmedRef = useRef(false);
+  const hasFullPaintRef = useRef(false);
+  const startupNudgeArmedRef = useRef(false);
+  const startupNudgeTimerRef = useRef<number | null>(null);
   const scrollInFlightRef = useRef<boolean>(false);
   const pendingScrollLinesRef = useRef<number>(0);
   const scrollFlushTimerRef = useRef<number | null>(null);
@@ -115,7 +126,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     row: 0,
     visible: true,
     shape: 'block',
-    blink: true,
+    blink: false,
   });
 
   const isComposingRef = useRef<boolean>(false);
@@ -136,6 +147,24 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     buttonsDownRef.current = 0;
     lastMouseReportRef.current = null;
     hasNotifiedExitRef.current = false;
+    queuedPtyRef.current = null;
+    paintRetryRef.current = 0;
+    startupRepaintArmedRef.current = false;
+    hasFullPaintRef.current = false;
+    startupNudgeArmedRef.current = false;
+    if (startupNudgeTimerRef.current !== null) {
+      window.clearTimeout(startupNudgeTimerRef.current);
+      startupNudgeTimerRef.current = null;
+    }
+    cursorBlinkOnRef.current = true;
+    paintRowsRef.current = null;
+    cursorRef.current = {
+      col: 0,
+      row: 0,
+      visible: true,
+      shape: 'block',
+      blink: false,
+    };
     selectionAnchorRef.current = null;
     selectionStartRef.current = null;
     selectionEndRef.current = null;
@@ -162,6 +191,10 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         window.clearTimeout(scrollFlushTimerRef.current);
         scrollFlushTimerRef.current = null;
       }
+      if (startupNudgeTimerRef.current !== null) {
+        window.clearTimeout(startupNudgeTimerRef.current);
+        startupNudgeTimerRef.current = null;
+      }
       if (liveTimerRef.current !== null) {
         window.clearTimeout(liveTimerRef.current);
         liveTimerRef.current = null;
@@ -173,7 +206,22 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const dirtyRows = paintRowsRef.current;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) {
+      // The restored pane has no box yet. Keep the pending rows and try again
+      // so the first snapshot is not discarded before layout commits.
+      if (paintRetryRef.current < 8) {
+        paintRetryRef.current += 1;
+        rafIdRef.current = window.requestAnimationFrame(() => {
+          rafIdRef.current = null;
+          renderCanvas();
+        });
+      }
+      return;
+    }
+    paintRetryRef.current = 0;
+
+    const dirtyRows = hasFullPaintRef.current ? paintRowsRef.current : null;
     paintRowsRef.current = [];
     spareYRef.current = renderCanvasGrid({
       canvas,
@@ -181,7 +229,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       matrix: matrixRef.current,
       cursor: cursorRef.current,
       dirtyRows,
-      cursorBlinkOn: cursorBlinkOnRef.current,
+      cursorBlinkOn: cursorPaintPhase(prefs.cursorBlink, cursorBlinkOnRef.current),
       selection: {
         start: selectionStartRef.current,
         end: selectionEndRef.current,
@@ -197,6 +245,18 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       gridRows: gridRowsRef.current,
       gridCols: gridColsRef.current,
     });
+    hasFullPaintRef.current = true;
+
+    // One extra full frame after the first real paint. Restore often commits
+    // the final pane box a frame after the first snapshot.
+    if (!startupRepaintArmedRef.current) {
+      startupRepaintArmedRef.current = true;
+      rafIdRef.current = window.requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        paintRowsRef.current = null;
+        renderCanvas();
+      });
+    }
   }, [prefs]);
 
   const paintRowsRef = useRef<number[] | null>([]);
@@ -204,7 +264,8 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const surfaceLiveRef = useRef(true);
 
   const scheduleRender = useCallback((rows?: number[]) => {
-    if (!rows) {
+    paintRetryRef.current = 0;
+    if (!rows || rows.length === 0) {
       paintRowsRef.current = null;
     } else if (paintRowsRef.current) {
       for (const row of rows) {
@@ -251,7 +312,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     }, 250);
   }, []);
 
-  const { immediatePoll, armFastPoll, applySnapshot, setSurfaceLive } = useTerminalSnapshotPoller({
+  const { immediatePoll, resumePoll, armFastPoll, applySnapshot, setSurfaceLive, setOutputPace } = useTerminalSnapshotPoller({
     sessionId,
     workspaceId,
     engine,
@@ -277,6 +338,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     onProcessExit,
     scheduleRender,
     resizeInFlightRef,
+    reconcilePtySizeRef,
     lastSeqRef,
     hasNotifiedExitRef,
   });
@@ -296,12 +358,32 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       }
       return !seenLayout;
     };
+    let heartbeat: number | null = null;
+    const stopHeartbeat = () => {
+      if (heartbeat !== null) {
+        window.clearInterval(heartbeat);
+        heartbeat = null;
+      }
+    };
     const publish = () => {
+      const hidden = document.visibilityState === 'hidden';
       const live = compute();
+      const pace: OutputPace = hidden ? 'hidden' : isFocusedRef.current ? 'focused' : 'visible';
+      setOutputPace(pace);
+      // A hidden window stops paint. Credit still gets a slow refill so a
+      // streaming agent is not stuck on an empty snapshot budget.
+      if (hidden && heartbeat === null) {
+        heartbeat = window.setInterval(() => {
+          void invokeCommand('replenish_terminal_credit', { sessionId, amount: 1 }).catch(() => {});
+        }, OUTPUT_GAP_HIDDEN_HEARTBEAT_MS);
+      } else if (!hidden) {
+        stopHeartbeat();
+      }
       if (published === live) return;
       published = live;
       surfaceLiveRef.current = live;
       setSurfaceLive(live);
+      if (live) scheduleRender();
       void invokeCommand('set_terminal_presentation', { sessionId, live }).catch(() => {});
     };
     publish();
@@ -313,6 +395,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         : null;
     if (observer && el) observer.observe(el);
     return () => {
+      stopHeartbeat();
       document.removeEventListener('visibilitychange', publish);
       window.removeEventListener('resize', publish);
       observer?.disconnect();
@@ -320,19 +403,26 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       setSurfaceLive(false);
       void invokeCommand('set_terminal_presentation', { sessionId, live: false }).catch(() => {});
     };
-  }, [sessionId, setSurfaceLive]);
+  }, [scheduleRender, sessionId, setOutputPace, setSurfaceLive]);
 
   useEffect(() => {
+    if (!prefs.cursorBlink) {
+      if (!cursorBlinkOnRef.current) {
+        cursorBlinkOnRef.current = true;
+        scheduleRender([cursorRef.current.row]);
+      }
+      return;
+    }
     const id = window.setInterval(() => {
       const cursor = cursorRef.current;
       if (!surfaceLiveRef.current) return;
-      if (!cursor.visible || cursor.blink === false) return;
+      if (!cursor.visible) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       cursorBlinkOnRef.current = !cursorBlinkOnRef.current;
       scheduleRender([cursor.row]);
     }, 530);
     return () => window.clearInterval(id);
-  }, [scheduleRender]);
+  }, [prefs.cursorBlink, scheduleRender]);
 
   const sendInput = useCallback(
     (data: string, clearSelection = true) => {
@@ -362,6 +452,41 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     [sendInput]
   );
 
+  const pullViewport = useCallback(
+    async (args: { deltaLines?: number; absoluteOffset?: number }) => {
+      try {
+        const bin = await invokeCommand<unknown>('scroll_terminal_viewport_bin', {
+          sessionId,
+          ...args,
+        });
+        const payload = classifyBinaryPollPayload(bin);
+        if (payload.kind === 'data') {
+          const decoded = decodeBinarySnapshot(payload.bytes);
+          if (decoded.snapshot && typeof decoded.snapshot.seq === 'number') {
+            applySnapshot(decoded.snapshot);
+          }
+          scheduleRender();
+          void invokeCommand('replenish_terminal_credit', { sessionId, amount: 1 }).catch(() => {});
+          return;
+        }
+        // Empty means the viewport did not move. A second JSON scroll would move it twice.
+        if (payload.kind === 'empty') {
+          scheduleRender();
+          return;
+        }
+      } catch {
+        // Older hosts have no binary scroll command.
+      }
+      const snapshot = await invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
+        sessionId,
+        ...args,
+      });
+      if (snapshot && typeof snapshot.seq === 'number') applySnapshot(snapshot);
+      scheduleRender();
+    },
+    [applySnapshot, scheduleRender, sessionId],
+  );
+
   const requestScrollLines = useCallback(
     (lines: number) => {
       if (!lines) return;
@@ -374,16 +499,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         }
         pendingScrollLinesRef.current = 0;
         scrollInFlightRef.current = true;
-        void invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
-          sessionId,
-          deltaLines: delta,
-        })
-          .then((snapshot) => {
-            if (snapshot && typeof snapshot.seq === 'number') {
-              applySnapshot(snapshot);
-            }
-            scheduleRender();
-          })
+        void pullViewport({ deltaLines: delta })
           .catch(() => {})
           .finally(() => {
             if (pendingScrollLinesRef.current !== 0) flush();
@@ -393,14 +509,25 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       if (scrollInFlightRef.current) return;
       flush();
     },
-    [applySnapshot, scheduleRender, sessionId]
+    [pullViewport]
   );
 
   const setPointerCursor = useCallback((pointer: boolean) => {
     if (canvasRef.current) {
-      canvasRef.current.style.cursor = pointer ? 'pointer' : 'text';
+      canvasRef.current.style.cursor = pointer ? 'pointer' : 'default';
     }
   }, []);
+
+  const scrollPaceTimerRef = useRef<number | null>(null);
+  const noteWheelPace = useCallback(() => {
+    setOutputPace('focused');
+    if (scrollPaceTimerRef.current !== null) window.clearTimeout(scrollPaceTimerRef.current);
+    scrollPaceTimerRef.current = window.setTimeout(() => {
+      scrollPaceTimerRef.current = null;
+      if (document.visibilityState === 'hidden') setOutputPace('hidden');
+      else if (!isFocusedRef.current) setOutputPace('visible');
+    }, 220);
+  }, [setOutputPace]);
 
   const {
     handleMouseDown,
@@ -436,10 +563,104 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     pasteTextToTerminal,
     scheduleRender,
     requestScrollLines,
+    onWheelActivity: noteWheelPace,
     setPointerCursor,
     onFocusInput: () => inputRef.current?.focus(),
     armFastPoll,
   });
+
+  const flushPtyResizeRef = useRef<() => void>(() => {});
+  const sendPtyResizeRef = useRef<(cols: number, rows: number, force?: boolean) => void>(() => {});
+
+  flushPtyResizeRef.current = () => {
+    const decision = finishPtyResize({
+      inFlight: false,
+      appliedCols: appliedPtyColsRef.current,
+      appliedRows: appliedPtyRowsRef.current,
+      queued: queuedPtyRef.current,
+    });
+    queuedPtyRef.current = decision.gate.queued;
+    appliedPtyColsRef.current = decision.gate.appliedCols;
+    appliedPtyRowsRef.current = decision.gate.appliedRows;
+    if (!decision.send) {
+      resizeInFlightRef.current = false;
+      resumePoll();
+      return;
+    }
+    resizeInFlightRef.current = true;
+    armFastPoll(350);
+    void invokeCommand('resize_terminal', {
+      sessionId,
+      columns: decision.send.cols,
+      rows: decision.send.rows,
+    })
+      .catch(() => {})
+      .finally(() => {
+        flushPtyResizeRef.current();
+      });
+  };
+
+  reconcilePtySizeRef.current = () => {
+    sendPtyResizeRef.current(
+      appliedPtyColsRef.current,
+      appliedPtyRowsRef.current,
+      true,
+    );
+  };
+
+  sendPtyResizeRef.current = (cols: number, rows: number, force = false) => {
+    const decision = requestPtyResize(
+      {
+        inFlight: resizeInFlightRef.current,
+        appliedCols: appliedPtyColsRef.current,
+        appliedRows: appliedPtyRowsRef.current,
+        queued: queuedPtyRef.current,
+      },
+      cols,
+      rows,
+      force,
+    );
+    queuedPtyRef.current = decision.gate.queued;
+    appliedPtyColsRef.current = decision.gate.appliedCols;
+    appliedPtyRowsRef.current = decision.gate.appliedRows;
+    resizeInFlightRef.current = decision.gate.inFlight;
+    if (!decision.send) return;
+    armFastPoll(350);
+    void invokeCommand('resize_terminal', {
+      sessionId,
+      columns: decision.send.cols,
+      rows: decision.send.rows,
+    })
+      .catch(() => {})
+      .finally(() => {
+        flushPtyResizeRef.current();
+      });
+  };
+
+  const armStartupNudge = (cols: number, rows: number) => {
+    if (startupNudgeArmedRef.current || isTerminalDividerDragging()) return;
+    const planned = planStartupNudge(cols, rows);
+    if (!planned) return;
+    startupNudgeArmedRef.current = true;
+    if (startupNudgeTimerRef.current !== null) {
+      window.clearTimeout(startupNudgeTimerRef.current);
+    }
+    const fire = () => {
+      startupNudgeTimerRef.current = null;
+      if (!containerRef.current) return;
+      if (isTerminalDividerDragging()) return;
+      if (resizeInFlightRef.current) {
+        startupNudgeTimerRef.current = window.setTimeout(fire, 50);
+        return;
+      }
+      const latest = measureTerminalCanvasGrid(containerRef.current, prefs);
+      const again = planStartupNudge(latest.cols, latest.rows);
+      if (!again) return;
+      sendPtyResizeRef.current(again.nudge.cols, again.nudge.rows, true);
+      sendPtyResizeRef.current(again.restore.cols, again.restore.rows, true);
+    };
+    startupNudgeTimerRef.current = window.setTimeout(fire, 350);
+  };
 
   const syncGridAndResizePty = useCallback(
     (forceImmediate = false) => {
@@ -463,31 +684,10 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         return;
       }
 
-      if (
-        !forceImmediate &&
-        metrics.cols === appliedPtyColsRef.current &&
-        metrics.rows === appliedPtyRowsRef.current
-      ) {
-        return;
-      }
-
-      appliedPtyColsRef.current = metrics.cols;
-      appliedPtyRowsRef.current = metrics.rows;
-      resizeInFlightRef.current = true;
-      armFastPoll(350);
-
-      void invokeCommand('resize_terminal', {
-        sessionId,
-        columns: metrics.cols,
-        rows: metrics.rows,
-      })
-        .catch(() => {})
-        .finally(() => {
-          resizeInFlightRef.current = false;
-          immediatePoll();
-        });
+      sendPtyResizeRef.current(metrics.cols, metrics.rows, forceImmediate);
+      armStartupNudge(metrics.cols, metrics.rows);
     },
-    [armFastPoll, immediatePoll, prefs, scheduleRender, sessionId]
+    [prefs, scheduleRender, sessionId]
   );
 
   const jumpToOffset = useCallback(
@@ -503,14 +703,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         pendingJumpRef.current = null;
         jumpInFlightRef.current = true;
         armFastPoll(250);
-        void invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
-          sessionId,
-          absoluteOffset: target,
-        })
-          .then((snapshot) => {
-            if (snapshot && typeof snapshot.seq === 'number') applySnapshot(snapshot);
-            scheduleRender();
-          })
+        void pullViewport({ absoluteOffset: target })
           .catch(() => {})
           .finally(() => {
             if (pendingJumpRef.current !== null) flush();
@@ -519,7 +712,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       };
       if (!jumpInFlightRef.current) flush();
     },
-    [applySnapshot, armFastPoll, scheduleRender, sessionId]
+    [armFastPoll, pullViewport]
   );
 
   const applyFindQuery = useCallback(
@@ -556,12 +749,8 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
             }
             return;
           }
-          const snapshot = await invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
-            sessionId,
-            absoluteOffset: hit.scrollbackOffset,
-          });
+          await pullViewport({ absoluteOffset: hit.scrollbackOffset });
           if (findQueryRef.current !== query) return;
-          if (snapshot && typeof snapshot.seq === 'number') applySnapshot(snapshot);
           const next = collectFindHits(matrixRef.current, rowWrappedRef.current, query);
           findHitsRef.current = next;
           setFindCount(next.length);
@@ -571,7 +760,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         })
         .catch(() => {});
     },
-    [applySnapshot, scheduleRender, sessionId]
+    [pullViewport, scheduleRender, sessionId]
   );
 
   const stepFind = useCallback(
@@ -641,6 +830,10 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         metrics.cols === appliedPtyColsRef.current &&
         metrics.rows === appliedPtyRowsRef.current
       ) {
+        if (resizeTimer !== null) {
+          window.clearTimeout(resizeTimer);
+          resizeTimer = null;
+        }
         return;
       }
 
@@ -657,28 +850,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         const latest = measureTerminalCanvasGrid(container, prefs);
         gridColsRef.current = latest.cols;
         gridRowsRef.current = latest.rows;
-        if (
-          latest.cols === appliedPtyColsRef.current &&
-          latest.rows === appliedPtyRowsRef.current
-        ) {
-          return;
-        }
-        appliedPtyColsRef.current = latest.cols;
-        appliedPtyRowsRef.current = latest.rows;
-        if (resizeInFlightRef.current) return;
-        resizeInFlightRef.current = true;
-        armFastPoll(350);
-
-        void invokeCommand('resize_terminal', {
-          sessionId,
-          columns: latest.cols,
-          rows: latest.rows,
-        })
-          .catch(() => {})
-          .finally(() => {
-            resizeInFlightRef.current = false;
-            immediatePoll();
-          });
+        sendPtyResizeRef.current(latest.cols, latest.rows, false);
       }, 32);
     };
 
@@ -712,7 +884,22 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       window.removeEventListener('kite:layout-resized', handleLayoutResize);
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
     };
-  }, [armFastPoll, immediatePoll, prefs, scheduleRender, sessionId, syncGridAndResizePty]);
+  }, [prefs, scheduleRender, syncGridAndResizePty]);
+
+  // Fonts often finish after the first grid measure. Remeasure once they are
+  // ready so the opening frame uses the real cell size.
+  useEffect(() => {
+    const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
+    if (!fonts?.ready) return;
+    let cancelled = false;
+    void fonts.ready.then(() => {
+      if (cancelled) return;
+      syncGridAndResizePty(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [syncGridAndResizePty]);
 
   // Appearance change subscription
   useEffect(() => {
@@ -740,9 +927,12 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   useEffect(() => {
     if (isFocused !== undefined) {
       isFocusedRef.current = Boolean(isFocused);
+      if (document.visibilityState !== 'hidden') {
+        setOutputPace(isFocused ? 'focused' : 'visible');
+      }
       scheduleRender([cursorRef.current.row]);
     }
-  }, [isFocused, scheduleRender]);
+  }, [isFocused, scheduleRender, setOutputPace]);
 
   // Auto-focus on mount or session change
   useEffect(() => {
@@ -929,7 +1119,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
           display: 'block',
           width: '100%',
           height: '100%',
-          cursor: 'text',
+          cursor: 'default',
         }}
       />
       {showScrollbar ? (

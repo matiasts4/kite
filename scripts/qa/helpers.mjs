@@ -18,8 +18,8 @@ export async function openLanePage(browser) {
   page.on('pageerror', (err) => pageErrors.push(String(err)));
   await page.addInitScript(() => {
     try {
-      localStorage.removeItem('bmone.cached_agents');
-      localStorage.removeItem('bmone.cached_workspaces');
+      localStorage.removeItem('kite.cached_agents');
+      localStorage.removeItem('kite.cached_workspaces');
     } catch {
       // ignore
     }

@@ -4,7 +4,7 @@ import { invokeCommand } from '../../lib/ipc';
 import { releaseTerminal } from '../views/TerminalView';
 import { setTerminalDividerDragging } from '../../lib/terminalViewport';
 import { pulseZedOrb } from '../../motion/contract';
-import { getNextAgentName } from '../../lib/agentNames';
+import { getNextAgentName, AGENT_CODENAMES } from '../../lib/agentNames';
 import {
   createLeaf,
   createSplit,
@@ -338,17 +338,10 @@ export function useWorkspaceLayoutState({
         ? remainingLeaves[0]?.id || activeTab.focusedLeafId
         : activeTab.focusedLeafId;
 
-    const title =
-      leaf.occupant.kind === 'terminal'
-        ? leaf.occupant.label ||
-          leaf.occupant.runtime?.workTitle ||
-          leaf.occupant.runtime?.displayName ||
-          'Terminal'
-        : leaf.occupant.title || 'Thread';
-
+    const tabNum = current.tabs.length + 1;
     const newTab: WorkspaceTab = {
       id: globalThis.crypto.randomUUID(),
-      title,
+      title: `Ventana ${tabNum}`,
       root: leaf,
       focusedLeafId: leaf.id,
     };
@@ -420,9 +413,10 @@ export function useWorkspaceLayoutState({
       );
 
       const current = latestLayoutRef.current;
+      const tabNum = current.tabs.length + 1;
       const newTab: WorkspaceTab = {
         id: globalThis.crypto.randomUUID(),
-        title: 'Terminal',
+        title: `Ventana ${tabNum}`,
         root: newLeaf,
         focusedLeafId: newLeaf.id,
       };
@@ -468,9 +462,10 @@ export function useWorkspaceLayoutState({
       );
 
       const current = latestLayoutRef.current;
+      const tabNum = current.tabs.length + 1;
       const newTab: WorkspaceTab = {
         id: globalThis.crypto.randomUUID(),
-        title: agentCodename,
+        title: `Ventana ${tabNum}`,
         root: newLeaf,
         focusedLeafId: newLeaf.id,
       };
@@ -570,14 +565,17 @@ export function useWorkspaceLayoutState({
         rootNode = createSplit('vertical', [leftSplit, rightSplit], [0.5, 0.5]);
       }
 
+      const current = latestLayoutRef.current;
+      const tabNum = current.tabs.length + 1;
+      const defaultTitle = `Ventana ${tabNum}`;
+      const isGeneric = !title || title === 'Terminal' || title === 'Multi-seat Session';
+      const isAgent = AGENT_CODENAMES.some((name) => name.toLowerCase() === title?.toLowerCase());
       const newTab: WorkspaceTab = {
         id: globalThis.crypto.randomUUID(),
-        title: title || 'Multi-seat Session',
+        title: isGeneric || isAgent ? defaultTitle : title,
         root: rootNode,
         focusedLeafId: leaves[0].id,
       };
-
-      const current = latestLayoutRef.current;
       const nextLayout: WorkspaceLayout = {
         ...current,
         workspaceId: workspace.id,

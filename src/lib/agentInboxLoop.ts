@@ -1,11 +1,12 @@
 /**
- * Polls .kite/inbox from the desktop backend and applies agent handoff plans.
+ * Polls .kite/inbox from the desktop backend.
+ * spawn and inject files are traces. Delivery is kite dispatch.
+ * agents still lists live terminals.
  */
 
 import { invokeCommand } from './ipc';
 import { getActiveAgentTerminals } from './terminalRegistry';
 import {
-  applyHandoffPlan,
   planHandoff,
   type HandoffRequest,
   type HandoffTerminalRow,
@@ -13,17 +14,6 @@ import {
 
 export interface AgentInboxRequest extends HandoffRequest {
   cwd?: string;
-}
-
-async function readTaskFileAtCwd(cwd: string, taskPath: string): Promise<string> {
-  const res = await invokeCommand<{ ok: boolean; text?: string; error?: string }>(
-    'read_cwd_relative_text',
-    { cwd, path: taskPath }
-  );
-  if (!res?.ok || res.text === undefined) {
-    throw new Error(res?.error || 'No se pudo leer el archivo de tarea.');
-  }
-  return res.text;
 }
 
 export async function processAgentInboxRequest(request: AgentInboxRequest): Promise<{
@@ -38,14 +28,11 @@ export async function processAgentInboxRequest(request: AgentInboxRequest): Prom
     return { ok: false, message: 'Falta cwd en la solicitud del buzón.' };
   }
 
-  let taskBody: string | undefined = request.taskBody;
-  if (request.taskPath && taskBody === undefined) {
-    try {
-      taskBody = await readTaskFileAtCwd(cwd, request.taskPath);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      return { ok: false, message };
-    }
+  if (request.op === 'spawn' || request.op === 'inject') {
+    return {
+      ok: true,
+      message: 'El buzón no abre terminales. La entrega es kite dispatch.',
+    };
   }
 
   const terminals = getActiveAgentTerminals().map((t) => ({
@@ -57,7 +44,7 @@ export async function processAgentInboxRequest(request: AgentInboxRequest): Prom
   }));
 
   const plan = planHandoff(
-    { ...request, taskBody, cwd },
+    { ...request, cwd },
     {
       terminals,
       readTask: (path) => {
@@ -85,21 +72,9 @@ export async function processAgentInboxRequest(request: AgentInboxRequest): Prom
     };
   }
 
-  applyHandoffPlan(plan);
-
-  if (plan.op === 'spawn') {
-    return {
-      ok: true,
-      message: 'Terminal hija solicitada; el prompt se entregará por vía staged.',
-      sessionId: plan.spawnDetail.sessionId,
-    };
-  }
-
   return {
     ok: true,
-    message: 'Proyectil de prompt despachado a la terminal objetivo.',
-    sessionId: plan.projectileDetail.targetSessionId,
-    agentName: plan.projectileDetail.agentName,
+    message: 'El buzón no abre terminales. La entrega es kite dispatch.',
   };
 }
 

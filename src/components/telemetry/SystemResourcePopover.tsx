@@ -45,7 +45,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   const popoverRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<ResourceTab>('overview');
   const [uiFps, setUiFps] = useState<number>(60);
-  const [procCategoryFilter, setProcCategoryFilter] = useState<'all' | 'terminals' | 'webview' | 'core' | 'build'>('all');
+  const [procCategoryFilter, setProcCategoryFilter] = useState<'all' | 'agents' | 'mcp' | 'terminals' | 'webview' | 'core' | 'build'>('all');
   const [procSearchQuery, setProcSearchQuery] = useState<string>('');
   const hasWorkspaces = Boolean(snapshot?.runtime.workspaces && snapshot.runtime.workspaces.length > 0);
   const [procViewMode, setProcViewMode] = useState<'projects' | 'terminals' | 'flat'>(hasWorkspaces ? 'projects' : 'flat');
@@ -445,6 +445,24 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                       </span>
                     )}
                   </div>
+                  <div
+                    style={{
+                      fontSize: '10px',
+                      color: 'var(--text-secondary)',
+                      fontVariantNumeric: 'tabular-nums',
+                      marginTop: '2px',
+                    }}
+                  >
+                    UI + Core: <strong style={{ color: 'var(--text-primary)' }}>{formatBytes(snapshot.memory.appCoreBytes)}</strong>
+                    {' · '}
+                    Agentes: <strong style={{ color: 'var(--text-primary)' }}>{formatBytes(snapshot.memory.appAgentsBytes ?? snapshot.memory.appTerminalsBytes)}</strong>
+                    {snapshot.memory.appMcpsBytes != null && snapshot.memory.appMcpsBytes > 0 && (
+                      <>
+                        {' · '}
+                        MCPs: <strong style={{ color: '#c084fc' }}>{formatBytes(snapshot.memory.appMcpsBytes)}</strong>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -498,7 +516,11 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                     : 0;
 
                 const color =
-                  group.id === 'terminals'
+                  group.id === 'mcps'
+                    ? '#c084fc'
+                    : group.id === 'agents'
+                    ? 'var(--accent, #5c8fff)'
+                    : group.id === 'terminals'
                     ? '#f59e0b'
                     : group.id === 'webview'
                     ? 'var(--status-running, #34c759)'

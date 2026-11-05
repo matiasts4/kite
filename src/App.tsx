@@ -66,7 +66,7 @@ export const App: React.FC = () => {
   const [workMode, setWorkMode] = useState<WorkMode>(() => {
     try {
       // Default to 'code' on app launch; ignore previously persisted 'chat' (Thread) mode
-      const saved = localStorage.getItem('bmone.workMode');
+      const saved = localStorage.getItem('kite.workMode');
       if (saved === 'code') {
         return 'code';
       }
@@ -83,7 +83,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     try {
-      localStorage.setItem('bmone.workMode', workMode);
+      localStorage.setItem('kite.workMode', workMode);
     } catch {}
   }, [workMode]);
 
@@ -183,14 +183,14 @@ export const App: React.FC = () => {
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>(() => {
     try {
-      const saved = localStorage.getItem('bmone.cached_workspaces');
+      const saved = localStorage.getItem('kite.cached_workspaces');
       if (saved) return JSON.parse(saved);
     } catch {}
     return [];
   });
   const [agents, setAgents] = useState<AgentProfile[]>(() => {
     try {
-      const saved = localStorage.getItem('bmone.cached_agents');
+      const saved = localStorage.getItem('kite.cached_agents');
       if (saved) return JSON.parse(saved);
     } catch {}
     return [];
@@ -198,7 +198,7 @@ export const App: React.FC = () => {
   const [threads, setThreads] = useState<ChatThreadSummary[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(() => {
     try {
-      return localStorage.getItem('bmone.selectedWorkspaceId') || null;
+      return localStorage.getItem('kite.selectedWorkspaceId') || null;
     } catch {
       return null;
     }
@@ -207,7 +207,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (selectedWorkspaceId) {
       try {
-        localStorage.setItem('bmone.selectedWorkspaceId', selectedWorkspaceId);
+        localStorage.setItem('kite.selectedWorkspaceId', selectedWorkspaceId);
       } catch {}
     }
   }, [selectedWorkspaceId]);
@@ -300,7 +300,7 @@ export const App: React.FC = () => {
   });
   const [loading, setLoading] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('kite.cached_workspaces') || localStorage.getItem('bmone.cached_workspaces');
+      const saved = localStorage.getItem('kite.cached_workspaces');
       return !saved;
     } catch {
       return true;
@@ -396,8 +396,8 @@ export const App: React.FC = () => {
       setWorkspaces(data.workspaces || []);
       setAgents(data.agents || []);
       try {
-        localStorage.setItem('bmone.cached_workspaces', JSON.stringify(data.workspaces || []));
-        localStorage.setItem('bmone.cached_agents', JSON.stringify(data.agents || []));
+        localStorage.setItem('kite.cached_workspaces', JSON.stringify(data.workspaces || []));
+        localStorage.setItem('kite.cached_agents', JSON.stringify(data.agents || []));
       } catch {}
 
       if (data.preferences) {
@@ -406,7 +406,7 @@ export const App: React.FC = () => {
           data.preferences.workMode &&
           ['agent', 'code', 'chat'].includes(data.preferences.workMode)
         ) {
-          const hasSavedMode = Boolean(localStorage.getItem('bmone.workMode'));
+          const hasSavedMode = Boolean(localStorage.getItem('kite.workMode'));
           if (!hasSavedMode && data.preferences.workMode === 'code') {
             setWorkMode('code');
           }
@@ -432,7 +432,7 @@ export const App: React.FC = () => {
           if (prev && data.workspaces.some((w) => w.id === prev)) {
             return prev;
           }
-          const saved = localStorage.getItem('bmone.selectedWorkspaceId');
+          const saved = localStorage.getItem('kite.selectedWorkspaceId');
           if (saved && data.workspaces.some((w) => w.id === saved)) {
             return saved;
           }
@@ -700,6 +700,53 @@ export const App: React.FC = () => {
       window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
       window.removeEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
       window.removeEventListener('kite:op-request', handleOpRequest);
+    };
+  }, []);
+
+  useEffect(() => {
+    const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+    if (!host.__TAURI_INTERNALS__ && !host.__TAURI__) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const timers = new Set<number>();
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<{ sessionId?: string; engine?: string; alias?: string | null }>(
+          'dispatch-open-pane',
+          (event) => {
+            const sessionId = event.payload?.sessionId;
+            if (!sessionId) return;
+            setWorkMode('code');
+            setSettingsOpen(false);
+            setRoutinesOpen(false);
+            const timer = window.setTimeout(() => {
+              timers.delete(timer);
+              const alias = event.payload?.alias || undefined;
+              window.dispatchEvent(
+                new CustomEvent('kite:spawn-agent-terminal', {
+                  detail: {
+                    sessionId,
+                    engine: event.payload?.engine || undefined,
+                    title: alias,
+                    agentName: alias,
+                    attachOnly: true,
+                  },
+                })
+              );
+            }, 200);
+            timers.add(timer);
+          }
+        )
+      )
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      for (const timer of timers) window.clearTimeout(timer);
     };
   }, []);
 

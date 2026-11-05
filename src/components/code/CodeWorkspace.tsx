@@ -412,9 +412,8 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         engines={availableEngines}
         onCancel={() => setComposerOpen(false)}
         onLaunch={(engineId, count) => {
-          const meta = availableEngines.find((engine) => engine.wireId === engineId);
           handleLaunchMultiSeat({
-            title: meta?.displayName || 'Terminal',
+            title: `Ventana ${layout.tabs.length + 1}`,
             engines: Array.from({ length: count }, () => engineId),
             task: '',
           });

@@ -1,7 +1,9 @@
 # Kite Code - Launch on User Desktop (WinSta0\Default)
 param (
     [switch]$Wait = $false,
-    [switch]$Rebuild = $false
+    [switch]$Rebuild = $false,
+    [switch]$NativeDeck = $false,
+    [switch]$KillDaemon = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,11 +18,13 @@ $env:TEMP = "E:\Temp"
 $env:TMP = "E:\Temp"
 $env:WEBVIEW2_USER_DATA_FOLDER = "$env:LOCALAPPDATA\dev.kite.code.dev\EBWebView"
 
-# 1. Clean up old DEV processes and locks (preserves installed production app)
-Write-Host "[1/4] Limpiando instancias de desarrollo previas y bloqueos WebView2..." -ForegroundColor Cyan
-Get-Process -Name "*kite*" -ErrorAction SilentlyContinue | Where-Object {
-    $_.Path -and ($_.Path -like "*\target\debug\*")
-} | Stop-Process -Force -ErrorAction SilentlyContinue
+# 1. Clean up old DEV GUI processes and locks (preserves installed production app and live kite-core --daemon)
+Write-Host "[1/4] Limpiando instancias GUI de desarrollo previas y bloqueos WebView2..." -ForegroundColor Cyan
+Get-CimInstance Win32_Process -Filter "Name = 'kite-code.exe' OR Name = 'kite-gpui.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    $isDevPath = $_.ExecutablePath -and (($_.ExecutablePath -like "*\target\debug\*") -or ($_.ExecutablePath -like "*\crates\kite-gpui\target\*"))
+    $isDaemon = $_.CommandLine -and ($_.CommandLine -like "*--daemon*")
+    $isDevPath -and ($KillDaemon -or (-not $isDaemon))
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 # Also terminate orphaned dev WebView2 processes to release EBWebView files
 Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue | Where-Object {
@@ -39,44 +43,48 @@ if (Test-Path $devEbLockPath) {
 }
 
 
-# 2. Check if Vite is running on port 1420, if not start it
-Write-Host "[2/4] Verificando servidor frontend en http://127.0.0.1:1420..." -ForegroundColor Cyan
-$viteRunning = $false
-if (-not $Rebuild) {
-    try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-        if ($resp.StatusCode -eq 200) { $viteRunning = $true }
-    } catch {}
-}
-
-if (-not $viteRunning) {
-    # Terminate any stale Vite processes on port 1420
-    Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*vite*") -and ($_.CommandLine -notlike "*launch-desktop-app*") } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    Write-Host "Iniciando servidor Vite..." -ForegroundColor Yellow
-    $viteProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run dev" -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
-    
-    # Wait for Vite to be ready and responsive (up to 30s)
-    $retries = 60
-    while ($retries -gt 0) {
-        Start-Sleep -Milliseconds 500
+# 2. Check if Vite is running on port 1420 (skipped when launching standalone -NativeDeck)
+if (-not $NativeDeck) {
+    Write-Host "[2/4] Verificando servidor frontend en http://127.0.0.1:1420..." -ForegroundColor Cyan
+    $viteRunning = $false
+    if (-not $Rebuild) {
         try {
-            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
-            if ($resp.StatusCode -eq 200) {
-                $viteRunning = $true
-                break
-            }
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+            if ($resp.StatusCode -eq 200) { $viteRunning = $true }
         } catch {}
-        $retries--
     }
+
     if (-not $viteRunning) {
-        Write-Error "No se pudo conectar al servidor Vite en http://127.0.0.1:1420 tras 30 segundos."
-        exit 1
+        # Terminate any stale Vite processes on port 1420
+        Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*vite*") -and ($_.CommandLine -notlike "*launch-desktop-app*") } | ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "Iniciando servidor Vite..." -ForegroundColor Yellow
+        $viteProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run dev" -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
+        
+        # Wait for Vite to be ready and responsive (up to 30s)
+        $retries = 60
+        while ($retries -gt 0) {
+            Start-Sleep -Milliseconds 500
+            try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
+                if ($resp.StatusCode -eq 200) {
+                    $viteRunning = $true
+                    break
+                }
+            } catch {}
+            $retries--
+        }
+        if (-not $viteRunning) {
+            Write-Error "No se pudo conectar al servidor Vite en http://127.0.0.1:1420 tras 30 segundos."
+            exit 1
+        }
+        Write-Host "Servidor Vite listo en http://127.0.0.1:1420." -ForegroundColor Green
+    } else {
+        Write-Host "Servidor Vite ya activo y respondiendo." -ForegroundColor Green
     }
-    Write-Host "Servidor Vite listo en http://127.0.0.1:1420." -ForegroundColor Green
 } else {
-    Write-Host "Servidor Vite ya activo y respondiendo." -ForegroundColor Green
+    Write-Host "[2/4] Modo NativeDeck activo (sin Vite ni WebView2 en el camino base)..." -ForegroundColor Green
 }
 
 # 3. Compile C# InteractiveLauncher for WinSta0\Default
@@ -166,14 +174,19 @@ public class DesktopManager {
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     public static int Launch(string appPath, string workingDir) {
+        return LaunchWithArgs(appPath, null, workingDir);
+    }
+
+    public static int LaunchWithArgs(string appPath, string args, string workingDir) {
         STARTUPINFO si = new STARTUPINFO();
         si.cb = Marshal.SizeOf(si);
         si.lpDesktop = @"WinSta0\Default";
+        string cmdLine = string.IsNullOrEmpty(args) ? null : string.Format("\"{0}\" {1}", appPath, args);
 
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
         bool success = CreateProcess(
             appPath,
-            null,
+            cmdLine,
             IntPtr.Zero,
             IntPtr.Zero,
             false,
@@ -187,7 +200,7 @@ public class DesktopManager {
         if (!success) {
             success = CreateProcess(
                 appPath,
-                null,
+                cmdLine,
                 IntPtr.Zero,
                 IntPtr.Zero,
                 false,
@@ -241,45 +254,68 @@ public class DesktopManager {
 "@
 Add-Type -TypeDefinition $csharpSource -ErrorAction SilentlyContinue
 
-# 3b. Verify Rust backend freshness for real-time dev mode
-$binary = Join-Path $SrcTauriDir "target\debug\kite-code.exe"
-$devMarker = Join-Path $SrcTauriDir "target\debug\.dev-mode"
-$needsBuild = $false
-
-if ($Rebuild -or (-not (Test-Path $binary)) -or (-not (Test-Path $devMarker))) {
-    $needsBuild = $true
+# 3b. Verify Rust backend freshness for real-time dev mode (or select NativeDeck binary)
+$launchArgs = $null
+if ($NativeDeck) {
+    $gpuiRelease = Join-Path $ProjectRoot "crates\kite-gpui\target\release\kite-gpui.exe"
+    $gpuiDebug = Join-Path $ProjectRoot "crates\kite-gpui\target\debug\kite-gpui.exe"
+    if ($Rebuild -or ((-not (Test-Path $gpuiRelease)) -and (-not (Test-Path $gpuiDebug)))) {
+        Write-Host "Compilando Native GPU Terminal Deck (crates/kite-gpui --features gpu)..." -ForegroundColor Yellow
+        cargo build --release --features gpu --manifest-path (Join-Path $ProjectRoot "crates\kite-gpui\Cargo.toml") --offline
+    }
+    $binary = if (Test-Path $gpuiRelease) { $gpuiRelease } else { $gpuiDebug }
+    $launchArgs = "--window"
+    Write-Host "Native Deck listo: $binary $launchArgs" -ForegroundColor Green
 } else {
-    $binTime = (Get-Item $binary).LastWriteTime
-    $newerSrc = Get-ChildItem (Join-Path $SrcTauriDir "src") -Recurse -Filter "*.rs" | Where-Object { $_.LastWriteTime -gt $binTime }
-    $cargoToml = Join-Path $SrcTauriDir "Cargo.toml"
-    $cargoTomlNewer = if (Test-Path $cargoToml) { (Get-Item $cargoToml).LastWriteTime -gt $binTime } else { $false }
-    if ($newerSrc -or $cargoTomlNewer) {
+    $binary = Join-Path $SrcTauriDir "target\debug\kite-code.exe"
+    $devMarker = Join-Path $SrcTauriDir "target\debug\.dev-mode"
+    $needsBuild = $false
+
+    if ($Rebuild -or (-not (Test-Path $binary)) -or (-not (Test-Path $devMarker))) {
         $needsBuild = $true
+    } else {
+        $binTime = (Get-Item $binary).LastWriteTime
+        $newerSrc = Get-ChildItem (Join-Path $SrcTauriDir "src") -Recurse -Filter "*.rs" | Where-Object { $_.LastWriteTime -gt $binTime }
+        $cargoToml = Join-Path $SrcTauriDir "Cargo.toml"
+        $cargoTomlNewer = if (Test-Path $cargoToml) { (Get-Item $cargoToml).LastWriteTime -gt $binTime } else { $false }
+        if ($newerSrc -or $cargoTomlNewer) {
+            $needsBuild = $true
+        }
+    }
+
+    if ($needsBuild) {
+        Write-Host "Liberando ejecutable debug previo (incluyendo --daemon si estaba activo) para re-enlazar Rust..." -ForegroundColor Yellow
+        Get-Process -Name "*kite*" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Path -and ($_.Path -like "*\target\debug\*")
+        } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 300
+
+        Write-Host "Compilando backend en modo desarrollo en tiempo real (Vite devUrl activo, sin custom-protocol)..." -ForegroundColor Yellow
+        Push-Location $SrcTauriDir
+        cargo build --bin kite-code --no-default-features
+        Pop-Location
+        if (-not (Test-Path $binary)) {
+            Write-Error "No se pudo compilar el ejecutable $binary."
+            exit 1
+        }
+        Set-Content -Path $devMarker -Value "dev-hmr" -Force
+    } else {
+        Write-Host "Backend listo (Vite HMR activo, kite-core --daemon preservado)." -ForegroundColor Green
     }
 }
 
-if ($needsBuild) {
-    Write-Host "Compilando backend en modo desarrollo en tiempo real (Vite devUrl activo, sin custom-protocol)..." -ForegroundColor Yellow
-    Push-Location $SrcTauriDir
-    cargo build --bin kite-code --no-default-features
-    Pop-Location
-    if (-not (Test-Path $binary)) {
-        Write-Error "No se pudo compilar el ejecutable $binary."
-        exit 1
-    }
-    Set-Content -Path $devMarker -Value "dev-hmr" -Force
-} else {
-    Write-Host "Backend listo (Vite HMR activo, sin necesidad de recompilar Rust)." -ForegroundColor Green
-}
-
-Write-Host "[4/4] Lanzando $binary en la pantalla del usuario (WinSta0\Default)..." -ForegroundColor Cyan
+Write-Host "[4/4] Lanzando $binary $launchArgs en la pantalla del usuario (WinSta0\Default)..." -ForegroundColor Cyan
 $appPid = 0
 try {
-    $appPid = [DesktopManager]::Launch($binary, $ProjectRoot)
+    $appPid = [DesktopManager]::LaunchWithArgs($binary, $launchArgs, $ProjectRoot)
     Write-Host "Proceso lanzado con PID: $appPid en WinSta0\Default." -ForegroundColor Green
 } catch {
-    Write-Host "DesktopManager::Launch ($($_.Exception.Message)) -> usando Start-Process..." -ForegroundColor Yellow
-    $proc = Start-Process -FilePath $binary -WorkingDirectory $ProjectRoot -PassThru
+    Write-Host "DesktopManager::LaunchWithArgs ($($_.Exception.Message)) -> usando Start-Process..." -ForegroundColor Yellow
+    if ($launchArgs) {
+        $proc = Start-Process -FilePath $binary -ArgumentList $launchArgs -WorkingDirectory $ProjectRoot -PassThru
+    } else {
+        $proc = Start-Process -FilePath $binary -WorkingDirectory $ProjectRoot -PassThru
+    }
     $appPid = $proc.Id
 }
 

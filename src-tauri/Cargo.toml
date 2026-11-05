@@ -1,6 +1,6 @@
 [package]
 name = "kite-code"
-version = "0.1.44"
+version = "0.1.47"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
@@ -28,6 +28,7 @@ windows = { version = "0.62", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
+    "Win32_System_Threading",
 ] }
 
 [build-dependencies]

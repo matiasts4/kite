@@ -110,7 +110,7 @@ const CATEGORY_META: Record<
   },
 };
 
-const ACK_KEY = 'bmone.releaseNotes.acknowledgedVersion';
+const ACK_KEY = 'kite.releaseNotes.acknowledgedVersion';
 
 function getUiScale(el: HTMLElement | null): number {
   const scaled = el?.closest('.app-frame--scaled') ?? document.querySelector('.app-frame--scaled');

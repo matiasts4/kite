@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invokeCommand, isTauriEnvironment } from '../../../../lib/ipc';
 import { recordTerminalOutput } from '../../../../lib/terminalRegistry';
 import { isTerminalDividerDragging } from '../../../../lib/terminalViewport';
-import { delayUntilNextPull, shouldScheduleFollowUp } from './outputClock';
+import { delayUntilNextPull, outputGapMs, shouldScheduleFollowUp, type OutputPace } from './outputClock';
 import { classifySnapshotApply, commitDirtyRows, syncGridState } from './snapshotApply';
 import { setTerminalBenchmarkActive } from './terminalBenchMetrics';
 import { visibleScreenText } from './terminalGridText';
@@ -61,6 +61,8 @@ export interface UseTerminalSnapshotPollerOptions {
   onProcessExit?: (exitCode: number | null) => void;
   scheduleRender: (dirtyRows?: number[]) => void;
   resizeInFlightRef?: React.MutableRefObject<boolean>;
+  /** Resend the measured grid when a snapshot still has a different size. */
+  reconcilePtySizeRef?: React.MutableRefObject<(() => void) | null>;
   lastSeqRef?: React.MutableRefObject<number>;
   hasNotifiedExitRef?: React.MutableRefObject<boolean>;
   preferBinarySnapshot?: boolean;
@@ -102,6 +104,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
   const fullResyncRef = useRef<(() => void) | null>(null);
   const internalResizeInFlightRef = useRef<boolean>(false);
   const resizeInFlightRef = options.resizeInFlightRef ?? internalResizeInFlightRef;
+  const reconcilePtySizeRef = options.reconcilePtySizeRef;
   const packedGridRef = useRef<GridState | null>(null);
   const preferBinarySnapshotRef = useRef(preferBinarySnapshot);
   preferBinarySnapshotRef.current = preferBinarySnapshot;
@@ -222,18 +225,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
           snapshot.rows !== appliedPtyRowsRef.current) &&
         !isTerminalDividerDragging()
       ) {
-        resizeInFlightRef.current = true;
-        armFastPoll(350);
-        void invokeCommand('resize_terminal', {
-          sessionId,
-          columns: appliedPtyColsRef.current,
-          rows: appliedPtyRowsRef.current,
-        })
-          .catch(() => {})
-          .finally(() => {
-            resizeInFlightRef.current = false;
-            immediatePollRef.current?.();
-          });
+        reconcilePtySizeRef?.current?.();
       }
 
       if (snapshot.full) {
@@ -270,6 +262,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
   );
 
   const liveRef = useRef(true);
+  const paceRef = useRef<OutputPace>('focused');
 
   useEffect(() => {
     let active = true;
@@ -291,7 +284,12 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
     const pull = async (immediate: boolean, full: boolean) => {
       if (!active || !liveRef.current) return;
       if (full) pendingFull = true;
-      const wait = delayUntilNextPull(lastPullAt, performance.now(), immediate || pendingFull);
+      const wait = delayUntilNextPull(
+        lastPullAt,
+        performance.now(),
+        immediate || pendingFull,
+        outputGapMs(paceRef.current),
+      );
       if (wait > 0) {
         pendingWake = true;
         if (gapTimer === null) {
@@ -493,6 +491,10 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
     immediatePollRef.current?.();
   }, []);
 
+  const resumePoll = useCallback(() => {
+    resumePollRef.current?.();
+  }, []);
+
   const setSurfaceLive = useCallback((live: boolean) => {
     const wasLive = liveRef.current;
     liveRef.current = live;
@@ -501,10 +503,16 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
     }
   }, []);
 
+  const setOutputPace = useCallback((pace: OutputPace) => {
+    paceRef.current = pace;
+  }, []);
+
   return {
     immediatePoll,
+    resumePoll,
     armFastPoll,
     applySnapshot,
     setSurfaceLive,
+    setOutputPace,
   };
 }

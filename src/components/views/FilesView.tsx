@@ -74,7 +74,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const [currentWsId, setCurrentWsId] = useState<string | null>(() => {
     return (
       workspaceId ||
-      (typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null)
+      (typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null)
     );
   });
   const [mode, setMode] = useState<'files' | 'changes'>(initialMode);
@@ -106,7 +106,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   // Auto-select workspace if none is selected
   useEffect(() => {
     if (!currentWsId && workspacesList.length > 0) {
-      const saved = typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null;
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
       const target = (saved && workspacesList.some((w) => w.id === saved)) ? saved : workspacesList[0].id;
       setCurrentWsId(target);
       onSelectWorkspace?.(target);
@@ -117,7 +117,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   useEffect(() => {
     if (currentWsId) {
       try {
-        localStorage.setItem('bmone.selectedWorkspaceId', currentWsId);
+        localStorage.setItem('kite.selectedWorkspaceId', currentWsId);
       } catch {}
     }
   }, [currentWsId]);
@@ -794,7 +794,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
                 style={{ justifyContent: 'flex-start', padding: '6px 12px', height: 'auto' }}
                 onClick={() => {
                   try {
-                    localStorage.setItem('bmone.selectedWorkspaceId', ws.id);
+                    localStorage.setItem('kite.selectedWorkspaceId', ws.id);
                   } catch {}
                   setCurrentWsId(ws.id);
                   onSelectWorkspace?.(ws.id);
@@ -836,7 +836,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
         onModeChange={setMode}
         onSelectWorkspace={(wsId) => {
           try {
-            localStorage.setItem('bmone.selectedWorkspaceId', wsId);
+            localStorage.setItem('kite.selectedWorkspaceId', wsId);
           } catch {}
           if (onSelectWorkspace) {
             onSelectWorkspace(wsId);

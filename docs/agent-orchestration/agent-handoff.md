@@ -1,5 +1,7 @@
 # Handoff agente → terminal hija (buzón `.kite/inbox`)
 
+Este buzón sigue siendo el canal que hoy ejecuta `scripts/kite-agent.mjs`. El plan que lo convierte en un cliente de Dispatch, sin depender de que la vista Code esté montada, está en `odd/tasks/agent-dispatch.md` (S18, corte D). Hasta ese corte, el comportamiento de esta página no cambia.
+
 Canal para que un agente que corre **dentro de una terminal de Kite** pida abrir otra terminal o inyectar un prompt, sin pasar el cuerpo de la tarea por argv del proceso hijo.
 
 ## Comandos (desde la terminal del agente padre)

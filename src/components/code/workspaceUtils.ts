@@ -9,7 +9,7 @@ import type {
 import { invokeCommand } from '../../lib/ipc';
 import { releaseTerminal } from '../views/TerminalView';
 import { getTerminalAppearancePrefs } from '../../lib/terminalAppearancePrefs';
-import { cleanAgentTitle } from '../../lib/agentNames';
+import { cleanAgentTitle, AGENT_CODENAMES } from '../../lib/agentNames';
 
 export interface LaunchedTerminalSlot {
   index: number;
@@ -92,11 +92,17 @@ export function sanitizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayou
   };
   return {
     ...layout,
-    tabs: (layout.tabs || []).map((tab) => ({
-      ...tab,
-      title: cleanAgentTitle(tab.title),
-      root: sanitizeNode(tab.root),
-    })),
+    tabs: (layout.tabs || []).map((tab, idx) => {
+      const clean = cleanAgentTitle(tab.title);
+      const isAgentName = AGENT_CODENAMES.some((name) => name.toLowerCase() === clean?.toLowerCase());
+      const isGeneric = !clean || clean === 'Terminal' || clean === 'Multi-seat Session' || clean === 'Untitled';
+      const title = isGeneric || isAgentName ? `Ventana ${idx + 1}` : clean;
+      return {
+        ...tab,
+        title,
+        root: sanitizeNode(tab.root),
+      };
+    }),
   };
 }
 

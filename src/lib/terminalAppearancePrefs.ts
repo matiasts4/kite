@@ -96,12 +96,7 @@ export function sanitizeTerminalAppearancePrefs(
   }
   const obj = input as Partial<Record<keyof TerminalAppearancePrefs, unknown>>;
 
-  const renderer: TerminalRendererMode =
-    obj.renderer === 'canvas'
-      ? 'canvas'
-      : obj.renderer === 'dom'
-      ? 'dom'
-      : base.renderer;
+  const renderer: TerminalRendererMode = 'canvas';
 
   const fontFamilyId: TerminalFontFamilyId =
     typeof obj.fontFamilyId === 'string' && obj.fontFamilyId in TERMINAL_FONT_MAP
@@ -143,7 +138,10 @@ export function getTerminalAppearancePrefs(): TerminalAppearancePrefs {
         const parsed = JSON.parse(raw);
         const migrated = localStorage.getItem(TERMINAL_APPEARANCE_MIGRATION_KEY) === '1';
         const prefs = sanitizeTerminalAppearancePrefs(parsed);
-        if (!migrated) {
+        const storedRenderer = parsed && typeof parsed === 'object'
+          ? (parsed as { renderer?: unknown }).renderer
+          : undefined;
+        if (!migrated || storedRenderer !== 'canvas') {
           prefs.renderer = 'canvas';
           localStorage.setItem(TERMINAL_APPEARANCE_STORAGE_KEY, JSON.stringify(prefs));
           localStorage.setItem(TERMINAL_APPEARANCE_MIGRATION_KEY, '1');
@@ -224,8 +222,6 @@ export function getTerminalRendererBadgeLabel(mode: TerminalRendererMode): strin
 }
 
 export function togglePrimaryTerminalRenderer(): TerminalAppearancePrefs {
-  const current = getTerminalAppearancePrefs();
-  const nextRenderer: TerminalRendererMode = current.renderer === 'canvas' ? 'dom' : 'canvas';
-  return setTerminalAppearancePrefs({ renderer: nextRenderer });
+  return setTerminalAppearancePrefs({ renderer: 'canvas' });
 }
 

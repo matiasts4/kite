@@ -99,7 +99,7 @@ describe('terminalAppearancePrefs', () => {
     });
 
     expect(updated).toEqual({
-      renderer: 'dom',
+      renderer: 'canvas',
       fontFamilyId: 'jetbrains',
       fontSize: 16,
       lineHeight: 1.08,

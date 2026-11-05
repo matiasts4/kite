@@ -1,0 +1,36 @@
+[package]
+name = "kite-gpui"
+version = "0.1.0"
+description = "Native GPU client surface for kite-core"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "kite_gpui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kite-gpui"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+[features]
+default = []
+# Consumable GPUI snapshot (gpui-pre 0.3.11). The protocol crate tests stay
+# free of this dependency so `cargo test` does not compile the GPU stack.
+gpu = ["dep:gpui", "dep:gpui_platform"]
+
+[dependencies.gpui]
+package = "gpui-pre"
+version = "=0.3.11"
+optional = true
+
+[dependencies.gpui_platform]
+package = "gpui-pre-platform"
+version = "=0.3.11"
+optional = true

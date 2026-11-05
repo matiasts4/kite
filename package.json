@@ -1,6 +1,6 @@
 {
   "name": "kite-code",
-  "version": "0.1.44",
+  "version": "0.1.47",
   "description": "Kite Code — Autonomous agentic development environment and native multi-model terminal desktop application",
   "main": "server/server.mjs",
   "type": "module",
@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "app": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/launch-desktop-app.ps1",
+    "app:deck": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/launch-desktop-app.ps1 -NativeDeck",
     "build:installer": "tauri build",
     "build:installer:nsis": "tauri build --bundles nsis",
     "build:installer:msi": "tauri build --bundles msi",

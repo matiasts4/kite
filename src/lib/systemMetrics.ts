@@ -6,7 +6,7 @@ export type MemoryPressureLevel = 'low' | 'normal' | 'moderate' | 'high' | 'crit
 export type BadgeMetricDisplayMode = 'ram_only' | 'ram_and_cpu' | 'ram_percent';
 
 export interface ProcessGroupBreakdown {
-  id: 'core' | 'webview' | 'terminals' | 'js_heap';
+  id: 'core' | 'webview' | 'terminals' | 'mcps' | 'agents' | 'js_heap';
   label: string;
   memoryBytes: number;
   privateBytes?: number;
@@ -18,8 +18,8 @@ export interface DetailedProcessMetric {
   parentPid?: number;
   name: string;
   label?: string;
-  category: 'core' | 'webview' | 'terminals' | 'agent' | 'build';
-  role?: 'core' | 'webview' | 'agent' | 'terminal' | 'build';
+  category: 'core' | 'webview' | 'terminals' | 'agent' | 'build' | 'mcp';
+  role?: 'core' | 'webview' | 'agent' | 'mcp' | 'terminal' | 'build';
   memoryBytes: number;
   privateBytes?: number;
   sessionId?: string;
@@ -47,6 +47,9 @@ export interface TerminalMetricsGroup {
   rootPid: number;
   memoryBytes: number;
   privateBytes?: number;
+  agentBytes?: number;
+  mcpBytes?: number;
+  shellBytes?: number;
   processCount: number;
   state?: string;
 }
@@ -61,6 +64,8 @@ export interface SystemMetricsSnapshot {
     appPrivateBytes?: number;
     appCoreBytes: number;
     appTerminalsBytes: number;
+    appAgentsBytes?: number;
+    appMcpsBytes?: number;
     jsHeapUsedBytes: number | null;
     jsHeapLimitBytes: number | null;
     systemTotalBytes: number;
@@ -493,6 +498,9 @@ export async function fetchSystemMetricsSnapshot(): Promise<SystemMetricsSnapsho
         rootPid: Number(t.rootPid || 0),
         memoryBytes: Number(t.memoryBytes || 0),
         privateBytes: t.privateBytes != null ? Number(t.privateBytes) : undefined,
+        agentBytes: t.agentBytes != null ? Number(t.agentBytes) : undefined,
+        mcpBytes: t.mcpBytes != null ? Number(t.mcpBytes) : undefined,
+        shellBytes: t.shellBytes != null ? Number(t.shellBytes) : undefined,
         processCount: Number(t.processCount || 0),
         state: t.state ? String(t.state) : undefined,
       }))
@@ -504,9 +512,9 @@ export async function fetchSystemMetricsSnapshot(): Promise<SystemMetricsSnapsho
         parentPid: item.parentPid != null ? Number(item.parentPid) : undefined,
         name: String(item.name || 'proc'),
         label: item.label ? String(item.label) : undefined,
-        category: (['core', 'webview', 'terminals', 'agent', 'build'].includes(item.category)
+        category: (['core', 'webview', 'terminals', 'agent', 'build', 'mcp'].includes(item.category)
           ? item.category
-          : 'terminals') as 'core' | 'webview' | 'terminals' | 'agent' | 'build',
+          : 'terminals') as 'core' | 'webview' | 'terminals' | 'agent' | 'build' | 'mcp',
         role: item.role ? (String(item.role) as any) : undefined,
         memoryBytes: Number(item.memoryBytes || 0),
         privateBytes: item.privateBytes != null ? Number(item.privateBytes) : undefined,
@@ -528,6 +536,8 @@ export async function fetchSystemMetricsSnapshot(): Promise<SystemMetricsSnapsho
       appPrivateBytes: mem.appPrivateBytes != null ? Number(mem.appPrivateBytes) : undefined,
       appCoreBytes: Number(mem.appCoreBytes || appTotalBytes),
       appTerminalsBytes: Number(mem.appTerminalsBytes || 0),
+      appAgentsBytes: mem.appAgentsBytes != null ? Number(mem.appAgentsBytes) : undefined,
+      appMcpsBytes: mem.appMcpsBytes != null ? Number(mem.appMcpsBytes) : undefined,
       jsHeapUsedBytes: heap.used,
       jsHeapLimitBytes: heap.limit,
       systemTotalBytes: sysTotalBytes,

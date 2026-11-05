@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import {
   prefersReducedMotion,
   pulseZedOrb,
@@ -443,7 +444,35 @@ export const PromptProjectileOverlay: React.FC = () => {
     };
 
     window.addEventListener('kite:dispatch-prompt-projectile', handleDispatch);
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const inApp =
+      typeof window !== 'undefined' &&
+      Boolean(
+        (window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }).__TAURI_INTERNALS__ ||
+          (window as Window & { __TAURI__?: unknown }).__TAURI__
+      );
+    if (inApp) {
+      void listen<PromptProjectileDetail>('dispatch-prompt-projectile', (event) => {
+        const payload = event.payload;
+        if (!payload?.prompt) return;
+        window.dispatchEvent(
+          new CustomEvent('kite:dispatch-prompt-projectile', {
+            detail: {
+              ...payload,
+              sessionId: payload.sessionId ?? payload.targetSessionId,
+              targetSessionId: payload.targetSessionId ?? payload.sessionId,
+            },
+          })
+        );
+      }).then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      });
+    }
     return () => {
+      cancelled = true;
+      unlisten?.();
       window.removeEventListener('kite:dispatch-prompt-projectile', handleDispatch);
       launchTimersRef.current.forEach((timer) => window.clearTimeout(timer));
       launchTimersRef.current = [];

@@ -831,33 +831,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <div className="ui-card__row settings-row">
                       <div className="settings-row__copy">
                         <h3 className="settings-row__title">Motor de renderizado</h3>
-                        <p>GhostGrid 2D (recomendado) usa emulación VT nativa en Rust con sprites procedurales de cero artefactos y soporte completo de protocolos TUI. DOM Clásico usa ClearType en el motor web tradicional.</p>
+                        <p>GhostGrid · 2D es el motor de la terminal: emulación VT en Rust y sprites en canvas.</p>
                       </div>
                       <div className="settings-row__control">
-                        <fieldset aria-label="Motor de renderizado" className="ui-segmented">
-                          <button
-                            aria-pressed={terminalAppearance.renderer === 'canvas'}
-                            className="ui-segmented__item"
-                            onClick={() => handleUpdateTerminalAppearance({ renderer: 'canvas' })}
-                            type="button"
-                          >
-                            {terminalAppearance.renderer === 'canvas' && (
-                              <SegmentedIndicator group="settings-terminal-renderer" />
-                            )}
-                            <span>GhostGrid · 2D</span>
-                          </button>
-                          <button
-                            aria-pressed={terminalAppearance.renderer === 'dom'}
-                            className="ui-segmented__item"
-                            onClick={() => handleUpdateTerminalAppearance({ renderer: 'dom' })}
-                            type="button"
-                          >
-                            {terminalAppearance.renderer === 'dom' && (
-                              <SegmentedIndicator group="settings-terminal-renderer" />
-                            )}
-                            <span>DOM · Clásico</span>
-                          </button>
-                        </fieldset>
+                        <span>GhostGrid · 2D</span>
                       </div>
                     </div>
 

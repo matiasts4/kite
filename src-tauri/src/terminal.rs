@@ -3,6 +3,7 @@ use crate::persist::workspace_path;
 use crate::session_resolver::{
     canonical_agent_engine, claude_session_file_exists, detect_child_agent_in_shell,
     choose_restore_provider_id, get_persisted_terminal_session, is_generic_shell_engine,
+    restore_grok_provider_id,
     read_persisted_terminal_sessions, remove_persisted_terminal_session,
     resolve_provider_session_id_with_context, upsert_persisted_terminal_session,
     upsert_persisted_terminal_session_clearing_provider, write_persisted_terminal_sessions,
@@ -118,7 +119,8 @@ pub(crate) fn bench_test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalDataPlaneSnapshot {
     pub active_terminals: usize,
     pub live_visible_terminals: usize,
@@ -131,6 +133,21 @@ pub struct TerminalDataPlaneSnapshot {
 }
 
 pub fn get_terminal_data_plane_snapshot() -> TerminalDataPlaneSnapshot {
+    if crate::core_daemon::is_external_daemon_owner() {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc("core.status", None) {
+            if let Some(plane) = res.get("dataPlane") {
+                if let Ok(parsed) =
+                    serde_json::from_value::<TerminalDataPlaneSnapshot>(plane.clone())
+                {
+                    return parsed;
+                }
+            }
+        }
+    }
+    get_terminal_data_plane_local_snapshot()
+}
+
+pub fn get_terminal_data_plane_local_snapshot() -> TerminalDataPlaneSnapshot {
     let (active_terminals, live_visible_terminals) = {
         if let Ok(map) = get_terminals().lock() {
             let active = map.len();
@@ -436,6 +453,28 @@ fn capture_terminal_output(
 
 fn emit_terminal_activity(session_id: &str, seq: u64, exited: bool, exit_code: Option<i64>) {
     bench_record_activity_event();
+    crate::core_daemon::notify_daemon_activity();
+    emit_terminal_activity_to_webview(session_id, seq, exited, exit_code);
+}
+
+/// Invoked by `CoreConnection`'s `core-reader` thread in the GUI process when
+/// `kite-core --daemon` pushes a `SNAPSHOT_BIN` or `CLOSE` frame over a channel.
+pub fn emit_terminal_activity_from_core(
+    session_id: &str,
+    seq: u64,
+    exited: bool,
+    exit_code: Option<i64>,
+) {
+    bench_record_activity_event();
+    emit_terminal_activity_to_webview(session_id, seq, exited, exit_code);
+}
+
+fn emit_terminal_activity_to_webview(
+    session_id: &str,
+    seq: u64,
+    exited: bool,
+    exit_code: Option<i64>,
+) {
     let Some(app) = crate::get_app_handle() else {
         return;
     };
@@ -609,9 +648,6 @@ fn spawn_pty_reader(
                 }
             }
             let _ = capture_terminal_output(&session_id, &inst, &temp[..n], now_unix_ms());
-            if wants_paint {
-                schedule_paint_activity(&session_id, &inst, seq_after);
-            }
             {
                 let mut b_guard = inst.buffer.lock().ok();
                 let mut s_guard = inst.scrollback.lock().ok();
@@ -630,6 +666,11 @@ fn spawn_pty_reader(
                     }
                     dirty = true;
                 }
+            }
+            if wants_paint {
+                schedule_paint_activity(&session_id, &inst, seq_after);
+            } else {
+                crate::core_daemon::notify_daemon_activity();
             }
             if dirty && last_flush.elapsed() >= std::time::Duration::from_millis(2500) {
                 let snapshot_bytes = inst.scrollback.lock().ok().map(|s| s.clone());
@@ -710,6 +751,23 @@ pub fn write_scrollback_file(session_id: &str, bytes: &[u8]) {
 }
 
 pub fn terminal_recent_text(session_id: &str) -> String {
+    if session_id.is_empty() {
+        return String::new();
+    }
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc(
+            "session.recent_text",
+            Some(serde_json::json!({ "sessionId": session_id })),
+        ) {
+            if let Some(text) = res.get("text").and_then(|v| v.as_str()) {
+                return text.to_string();
+            }
+        }
+    }
+    terminal_recent_text_local(session_id)
+}
+
+pub fn terminal_recent_text_local(session_id: &str) -> String {
     if session_id.is_empty() {
         return String::new();
     }
@@ -903,6 +961,7 @@ pub fn get_terminal_root_pids() -> HashSet<u32> {
             }
         }
     }
+    roots.extend(crate::core_daemon::get_client_session_root_pids());
     roots
 }
 
@@ -1930,8 +1989,22 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         let mut remote = req.clone();
         remote["sessionId"] = serde_json::Value::String(session_id.clone());
         if let Ok(res) = crate::core_daemon::send_core_daemon_rpc("session.create", Some(remote)) {
+            let eff_id = res
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&session_id)
+                .to_string();
+            let channel_id = res
+                .get("channelId")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let root_pid = res
+                .get("rootPid")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            crate::core_daemon::register_client_session_channel(&eff_id, channel_id, root_pid);
             return serde_json::json!({
-                "sessionId": res.get("sessionId").cloned().unwrap_or(serde_json::Value::String(session_id.clone())),
+                "sessionId": eff_id,
                 "attachedToExisting": false,
                 "scrollbackBase64": serde_json::Value::Null,
                 "host": { "backend": "conpty", "buildNumber": 22631 },
@@ -1943,6 +2016,16 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
         }
         // The daemon did not answer: fall back to an in-process spawn.
     }
+    start_terminal_local_sync(request)
+}
+
+pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let cwd = workspace_cwd(req);
     let workspace_id = extract_workspace_id(req);
@@ -2110,11 +2193,20 @@ pub fn attach_terminal_sync(request: serde_json::Value) -> serde_json::Value {
                 .get("exited")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let attached_to_existing = res
+            let root_pid = res
                 .get("rootPid")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                > 0;
+                .unwrap_or(0) as u32;
+            let channel_id = res
+                .get("channelId")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let attached_to_existing = root_pid > 0
+                || res
+                    .get("attachedToExisting")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+            crate::core_daemon::register_client_session_channel(&session_id, channel_id, root_pid);
             return serde_json::json!({
                 "sessionId": session_id,
                 "attachedToExisting": attached_to_existing,
@@ -2294,8 +2386,20 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
                     session_id
                 ));
             }
-            let resolved_provider_id =
-                choose_restore_provider_id(saved_provider_id, &claimed_ids);
+            let resolved_provider_id = if canonical_agent_engine(&engine) == "grok"
+                || canonical_agent_engine(&saved.active_engine) == "grok"
+            {
+                restore_grok_provider_id(
+                    saved_provider_id,
+                    &claimed_ids,
+                    &cwd,
+                    &session_id,
+                    saved.spawned_at_unix_ms,
+                    saved.last_user_input.as_deref(),
+                )
+            } else {
+                choose_restore_provider_id(saved_provider_id, &claimed_ids)
+            };
 
             // For generic shell terminals (PowerShell, Terminal, CMD), we ONLY resume an agent
             // if there was an explicitly verified provider session previously bound to this session.
@@ -2409,6 +2513,19 @@ pub async fn read_terminal_output(request: serde_json::Value) -> serde_json::Val
 pub fn read_terminal_output_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.read_output", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    read_terminal_output_local_sync(request)
+}
+
+pub fn read_terminal_output_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let instance = {
         let map = get_terminals().lock().unwrap();
         map.get(session_id).cloned()
@@ -2469,7 +2586,11 @@ pub async fn write_terminal(request: serde_json::Value) -> serde_json::Value {
 pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let input = req.get("input").and_then(|v| v.as_str()).unwrap_or("");
     if should_proxy_to_core_daemon(session_id) {
+        if crate::core_daemon::send_client_session_data(session_id, input.as_bytes()) {
+            return serde_json::json!({ "ok": true });
+        }
         if let Ok(res) = crate::core_daemon::send_core_daemon_rpc("session.write", Some(req.clone()))
         {
             return res;
@@ -2583,7 +2704,12 @@ pub async fn resize_terminal(request: serde_json::Value) -> serde_json::Value {
 pub fn resize_terminal_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let cols = req.get("columns").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+    let rows = req.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
     if should_proxy_to_core_daemon(session_id) {
+        if crate::core_daemon::send_client_session_resize(session_id, cols, rows) {
+            return serde_json::json!({ "ok": true, "columns": cols, "rows": rows });
+        }
         if let Ok(res) =
             crate::core_daemon::send_core_daemon_rpc("session.resize", Some(req.clone()))
         {
@@ -2834,6 +2960,10 @@ pub fn notify_session_credit_restored(session_id: &str) {
 /// way, so a paused channel resumes with one coalesced frame.
 pub fn poll_terminal_snapshot_bin_bytes(session_id: &str, since_seq: Option<u64>) -> Vec<u8> {
     if should_proxy_to_core_daemon(session_id) {
+        if let Some(pushed) = crate::core_daemon::take_client_cached_snapshot_bin(session_id) {
+            bench_record_snapshot_poll(pushed.len() as u64);
+            return pushed;
+        }
         let params = serde_json::json!({ "sessionId": session_id, "sinceSeq": since_seq });
         match crate::core_daemon::send_core_daemon_rpc("session.poll_snapshot_bin", Some(params)) {
             Ok(res) => {
@@ -2931,6 +3061,23 @@ pub fn set_terminal_presentation_sync(request: serde_json::Value) -> serde_json:
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let live = req.get("live").and_then(|v| v.as_bool()).unwrap_or(false);
+    if should_proxy_to_core_daemon(session_id) {
+        if crate::core_daemon::send_client_session_focus(session_id, live) {
+            return serde_json::json!({ "ok": true, "live": live });
+        }
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.set_presentation", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    set_terminal_presentation_local_sync(request)
+}
+
+pub fn set_terminal_presentation_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let live = req.get("live").and_then(|v| v.as_bool()).unwrap_or(false);
     let instance = {
         let map = get_terminals().lock().unwrap();
         map.get(session_id).cloned()
@@ -2997,7 +3144,82 @@ pub async fn scroll_terminal_viewport(
     scroll_terminal_viewport_sync(request)
 }
 
+/// Scrolls the viewport and returns one packed `SNAPSHOT_BIN` frame.
+///
+/// The JSON command stays for hosts that do not have this command yet. A scroll
+/// must not come back empty after the viewport moved, or the client would issue
+/// a second scroll.
+#[tauri::command]
+pub async fn scroll_terminal_viewport_bin(
+    request: serde_json::Value,
+) -> Result<tauri::ipc::Response, String> {
+    Ok(tauri::ipc::Response::new(scroll_terminal_viewport_bin_bytes(
+        request,
+    )?))
+}
+
+pub fn scroll_terminal_viewport_bin_bytes(request: serde_json::Value) -> Result<Vec<u8>, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        let res = crate::core_daemon::send_core_daemon_rpc(
+            "session.scroll_viewport_bin",
+            Some(req.clone()),
+        )?;
+        return Ok(res
+            .get("bytesBase64")
+            .and_then(|value| value.as_str())
+            .and_then(decode_base64)
+            .unwrap_or_default());
+    }
+    Ok(scroll_terminal_viewport_bin_local_bytes(request))
+}
+
+pub fn scroll_terminal_viewport_bin_local_bytes(request: serde_json::Value) -> Vec<u8> {
+    let session_id = request
+        .get("request")
+        .unwrap_or(&request)
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let snapshot = match scroll_terminal_viewport_local_sync(request) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return Vec::new(),
+    };
+    let bytes = crate::vt_engine::serialize_render_snapshot_bin(
+        &snapshot,
+        false,
+        None,
+        false,
+        is_bench_active(),
+        None,
+    );
+    if !session_id.is_empty() {
+        record_bin_polled_seq(&session_id, snapshot.seq);
+    }
+    bench_record_snapshot_poll(bytes.len() as u64);
+    bytes
+}
+
 pub fn scroll_terminal_viewport_sync(
+    request: serde_json::Value,
+) -> Result<crate::vt_engine::RenderSnapshot, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.scroll_viewport", Some(req.clone()))
+        {
+            if let Ok(snap) = serde_json::from_value(res) {
+                return Ok(snap);
+            }
+        }
+    }
+    scroll_terminal_viewport_local_sync(request)
+}
+
+pub fn scroll_terminal_viewport_local_sync(
     request: serde_json::Value,
 ) -> Result<crate::vt_engine::RenderSnapshot, String> {
     let req = request.get("request").unwrap_or(&request);
@@ -3048,6 +3270,21 @@ pub async fn find_terminal_text(request: serde_json::Value) -> Result<serde_json
 pub fn find_terminal_text_sync(request: serde_json::Value) -> Result<serde_json::Value, String> {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.find_text", Some(req.clone()))
+        {
+            return Ok(res);
+        }
+    }
+    find_terminal_text_local_sync(request)
+}
+
+pub fn find_terminal_text_local_sync(
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
     if session_id.is_empty() {
@@ -3067,6 +3304,25 @@ pub fn find_terminal_text_sync(request: serde_json::Value) -> Result<serde_json:
 
 #[tauri::command]
 pub async fn dump_terminal_diagnostics(request: serde_json::Value) -> Result<String, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req
+        .get("sessionId")
+        .or_else(|| req.get("session_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.dump_diagnostics", Some(req.clone()))
+        {
+            if let Some(path) = res.get("path").and_then(|v| v.as_str()) {
+                return Ok(path.to_string());
+            }
+        }
+    }
+    dump_terminal_diagnostics_local_sync(request)
+}
+
+pub fn dump_terminal_diagnostics_local_sync(request: serde_json::Value) -> Result<String, String> {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req
         .get("sessionId")
@@ -3129,6 +3385,19 @@ pub async fn clear_terminal_vt(request: serde_json::Value) -> serde_json::Value 
 pub fn clear_terminal_vt_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) =
+            crate::core_daemon::send_core_daemon_rpc("session.clear_vt", Some(req.clone()))
+        {
+            return res;
+        }
+    }
+    clear_terminal_vt_local_sync(request)
+}
+
+pub fn clear_terminal_vt_local_sync(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
 
     let instance = {
         let map = get_terminals().lock().unwrap();
@@ -3145,6 +3414,20 @@ pub fn clear_terminal_vt_sync(request: serde_json::Value) -> serde_json::Value {
 
 #[tauri::command]
 pub fn report_terminal_agent_detected(request: serde_json::Value) -> serde_json::Value {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc(
+            "session.report_agent_detected",
+            Some(req.clone()),
+        ) {
+            return res;
+        }
+    }
+    report_terminal_agent_detected_local(request)
+}
+
+pub fn report_terminal_agent_detected_local(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let engine = req.get("engine").and_then(|v| v.as_str()).unwrap_or("");
@@ -3402,6 +3685,7 @@ pub fn terminate_terminal_sync(request: serde_json::Value) -> serde_json::Value 
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     if should_proxy_to_core_daemon(session_id) {
+        crate::core_daemon::unregister_client_session(session_id);
         if let Ok(res) =
             crate::core_daemon::send_core_daemon_rpc("session.terminate", Some(req.clone()))
         {
@@ -3670,6 +3954,13 @@ fn write_session(session_id: &str, text: &str) -> bool {
     if session_id.is_empty() || text.is_empty() {
         return false;
     }
+    if should_proxy_to_core_daemon(session_id) {
+        let res = write_terminal_sync(serde_json::json!({
+            "sessionId": session_id,
+            "input": text,
+        }));
+        return res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    }
     let instance = {
         let map = get_terminals().lock().unwrap();
         map.get(session_id).cloned()
@@ -3852,6 +4143,25 @@ pub fn restart_agent_terminal_for_autopilot(request: serde_json::Value) -> serde
         .get("oldSessionId")
         .and_then(|value| value.as_str())
         .unwrap_or("");
+    if should_proxy_to_core_daemon(old_id) {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc(
+            "session.restart_autopilot",
+            Some(req.clone()),
+        ) {
+            return res;
+        }
+    }
+    restart_agent_terminal_for_autopilot_local_sync(request)
+}
+
+pub fn restart_agent_terminal_for_autopilot_local_sync(
+    request: serde_json::Value,
+) -> serde_json::Value {
+    let req = request_body(&request);
+    let old_id = req
+        .get("oldSessionId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let new_id = req
         .get("newSessionId")
         .and_then(|value| value.as_str())
@@ -3966,6 +4276,20 @@ pub fn terminal_matches_provider(inst: &TerminalInstance, provider: &str) -> boo
 /// Drains output buffer to scrollback and gracefully terminates Kite terminals associated with `provider`.
 /// Returns the list of quiesced terminals so they can be respawned after credentials swap.
 pub fn quiesce_provider_terminals(provider: &str) -> Vec<QuiescedTerminal> {
+    if crate::core_daemon::is_external_daemon_owner() {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc(
+            "session.quiesce_provider",
+            Some(serde_json::json!({ "provider": provider })),
+        ) {
+            if let Ok(quiesced) = serde_json::from_value::<Vec<QuiescedTerminal>>(res) {
+                return quiesced;
+            }
+        }
+    }
+    quiesce_provider_terminals_local(provider)
+}
+
+pub fn quiesce_provider_terminals_local(provider: &str) -> Vec<QuiescedTerminal> {
     log_trace(&format!("quiesce_provider_terminals invoked for provider={}", provider));
 
     let matching_sessions: Vec<(String, Arc<TerminalInstance>)> = {
@@ -4126,6 +4450,24 @@ pub fn quiesce_provider_terminals(provider: &str) -> Vec<QuiescedTerminal> {
 
 /// Respawns quiesced terminals with the updated environment and launches the provider agent.
 pub fn respawn_provider_terminals(
+    provider: &str,
+    new_account_label: &str,
+    quiesced: &[QuiescedTerminal],
+) {
+    if crate::core_daemon::is_external_daemon_owner() {
+        let params = serde_json::json!({
+            "provider": provider,
+            "newAccountLabel": new_account_label,
+            "quiesced": quiesced,
+        });
+        if crate::core_daemon::send_core_daemon_rpc("session.respawn_provider", Some(params)).is_ok() {
+            return;
+        }
+    }
+    respawn_provider_terminals_local(provider, new_account_label, quiesced);
+}
+
+pub fn respawn_provider_terminals_local(
     _provider: &str,
     _new_account_label: &str,
     quiesced: &[QuiescedTerminal],
@@ -4283,6 +4625,38 @@ mod tests {
             },
         );
         assert_eq!(opencode_args, vec!["--session", "ses_12345"]);
+
+        let (grok_args, grok_id) = build_agent_cli_args(
+            "grok",
+            "sess-grok",
+            r"E:\kite",
+            &SpawnMode::Resume {
+                provider_session_id: Some("01a1a8c4-876b-7260-b545-c8f1d9ecd705".to_string()),
+                allow_continue_fallback: true,
+                hybrid_shell_agent: None,
+            },
+        );
+        assert_eq!(
+            grok_args,
+            vec!["-r", "01a1a8c4-876b-7260-b545-c8f1d9ecd705"]
+        );
+        assert_eq!(
+            grok_id.as_deref(),
+            Some("01a1a8c4-876b-7260-b545-c8f1d9ecd705")
+        );
+
+        let (grok_none_args, grok_none_id) = build_agent_cli_args(
+            "grok",
+            "sess-grok-none",
+            r"E:\kite",
+            &SpawnMode::Resume {
+                provider_session_id: None,
+                allow_continue_fallback: true,
+                hybrid_shell_agent: None,
+            },
+        );
+        assert!(grok_none_args.is_empty());
+        assert!(grok_none_id.is_none());
 
         // Verify that missing provider_session_id never falls back to --continue / resume --last
         let (agy_none_args, agy_none_id) = build_agent_cli_args(

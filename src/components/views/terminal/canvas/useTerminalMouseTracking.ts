@@ -1,14 +1,15 @@
 import React, { useRef, useCallback, useEffect } from 'react';
 import { openFileInRightDock } from '../../../../lib/filePreviewNav';
 import {
-  extractTerminalLinks,
   openTerminalWebLink,
   getTerminalWebLinksTarget,
 } from '../../../../lib/terminalLinkNav';
+import { findGridLink } from './terminalGridText';
 import {
   type CellSnapshot,
   type HoveredLinkSpan,
   type SelectionPoint,
+  selectionRows,
   type TerminalMouseMode,
   PAD_X,
   PAD_Y,
@@ -24,6 +25,7 @@ export interface UseTerminalMouseTrackingOptions {
   cellHeightRef: React.MutableRefObject<number>;
   spareYRef: React.MutableRefObject<number>;
   matrixRef: React.MutableRefObject<CellSnapshot[][]>;
+  rowWrappedRef?: React.MutableRefObject<boolean[]>;
   alternateScreenRef?: React.MutableRefObject<boolean>;
   applicationCursorRef?: React.MutableRefObject<boolean>;
   mouseModeRef: React.MutableRefObject<TerminalMouseMode>;
@@ -38,8 +40,10 @@ export interface UseTerminalMouseTrackingOptions {
   workspaceId?: string | null;
   sendInput: (data: string, trackUser?: boolean) => void;
   pasteTextToTerminal?: (text: string) => void;
-  scheduleRender: () => void;
+  scheduleRender: (rows?: number[]) => void;
   requestScrollLines: (delta: number) => void;
+  /** Wheel activity. The surface uses this to raise the paint clock for one gesture. */
+  onWheelActivity?: () => void;
   setPointerCursor: (pointer: boolean) => void;
   onFocusInput: () => void;
   armFastPoll: (ms: number) => void;
@@ -55,6 +59,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     cellHeightRef,
     spareYRef,
     matrixRef,
+    rowWrappedRef,
     mouseModeRef,
     sgrMouseRef,
     sgrPixelsMouseRef,
@@ -66,11 +71,14 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     pasteTextToTerminal,
     scheduleRender,
     requestScrollLines,
+    onWheelActivity,
     setPointerCursor,
     onFocusInput,
     armFastPoll,
   } = options;
 
+  const internalWrappedRef = useRef<boolean[]>([]);
+  const wrappedRef = rowWrappedRef ?? internalWrappedRef;
   const internalAltRef = useRef<boolean>(false);
   const alternateScreenRef = options.alternateScreenRef ?? internalAltRef;
   const internalAppCursorRef = useRef<boolean>(false);
@@ -89,6 +97,9 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
   const lastDragClientXRef = useRef<number | null>(null);
   const wheelAccumYRef = useRef<number>(0);
   const wheelAccumXRef = useRef<number>(0);
+  const wheelFlushRef = useRef<number | null>(null);
+  const pendingWheelLinesRef = useRef(0);
+  const pendingWheelInputRef = useRef('');
 
   useEffect(() => {
     return () => {
@@ -193,27 +204,9 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
   const findLinkAtCell = useCallback(
     (rowIdx: number, colIdx: number): HoveredLinkSpan | null => {
-      const row = matrixRef.current[rowIdx];
-      if (!row) return null;
-      const fullText = row.map((c) => (c ? c.ch : ' ')).join('');
-      const links = extractTerminalLinks(fullText);
-
-      for (const link of links) {
-        const startCol = link.start;
-        const endCol = link.end;
-        if (colIdx >= startCol && colIdx < endCol) {
-          return {
-            row: rowIdx,
-            startCol,
-            endCol,
-            kind: link.kind,
-            text: link.text,
-          };
-        }
-      }
-      return null;
+      return findGridLink(matrixRef.current, wrappedRef.current, rowIdx, colIdx);
     },
-    [matrixRef]
+    [matrixRef, wrappedRef]
   );
 
   const stopSelectionAutoScroll = useCallback(() => {
@@ -271,21 +264,35 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
     const pt = clientToGrid(e.clientX, e.clientY);
 
-    // 1. Ctrl/Cmd + Click link navigation
+    const openLink = (link: HoveredLinkSpan) => {
+      const candidate = link.text.trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
+      if (link.kind === 'web') {
+        openTerminalWebLink(candidate, workspaceId);
+      } else {
+        openFileInRightDock({
+          candidate,
+          workspaceId,
+          collapseTree: true,
+        });
+      }
+    };
+
+    // 1. Ctrl/Cmd + Click always opens a link, even while the TUI owns the mouse.
     if ((e.ctrlKey || e.metaKey) && e.button === 0) {
       const link = findLinkAtCell(pt.row, pt.col);
       if (link) {
         e.preventDefault();
-        const candidate = link.text.trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
-        if (link.kind === 'web') {
-          openTerminalWebLink(candidate, workspaceId);
-        } else {
-          openFileInRightDock({
-            candidate,
-            workspaceId,
-            collapseTree: true,
-          });
-        }
+        openLink(link);
+        return;
+      }
+    }
+
+    // Plain click opens a link only when the terminal is not reporting the mouse.
+    if (e.button === 0 && !e.shiftKey && mouseModeRef.current === 'none') {
+      const link = findLinkAtCell(pt.row, pt.col);
+      if (link) {
+        e.preventDefault();
+        openLink(link);
         return;
       }
     }
@@ -317,10 +324,15 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
     const anchor = { col: pt.col, row: pt.row };
     selectionAnchorRef.current = anchor;
+    const previousStart = selectionStartRef.current;
+    const previousEnd = selectionEndRef.current;
     const [start, end] = computeExpandedSelection(anchor, anchor);
     selectionStartRef.current = start;
     selectionEndRef.current = end;
-    scheduleRender();
+    scheduleRender([
+      ...selectionRows(previousStart, previousEnd),
+      ...selectionRows(start, end),
+    ]);
 
     // Attach window-level drag listeners so dragging outside viewport auto-scrolls smoothly
     const onWindowMouseMove = (we: MouseEvent) => {
@@ -329,13 +341,18 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       lastDragClientYRef.current = we.clientY;
 
       const curPt = clientToGrid(we.clientX, we.clientY);
+      const previousStart = selectionStartRef.current;
+      const previousEnd = selectionEndRef.current;
       const [s, en] = computeExpandedSelection(selectionAnchorRef.current, {
         col: curPt.col,
         row: curPt.row,
       });
       selectionStartRef.current = s;
       selectionEndRef.current = en;
-      scheduleRender();
+      scheduleRender([
+        ...selectionRows(previousStart, previousEnd),
+        ...selectionRows(s, en),
+      ]);
 
       // Auto-scroll when dragging above or below the canvas in primary screen
       const canvas = canvasRef.current;
@@ -375,7 +392,6 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       stopSelectionAutoScroll();
       if (isSelectingRef.current) {
         isSelectingRef.current = false;
-        copySelectionToClipboard();
       }
     };
 
@@ -386,36 +402,43 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const pt = clientToGrid(e.clientX, e.clientY);
 
-    // Update Ctrl+Hover link state
-    if ((e.ctrlKey || e.metaKey) && !isSelectingRef.current && buttonsDownRef.current === 0) {
+    const hoverLinks =
+      mouseModeRef.current === 'none' || e.ctrlKey || e.metaKey;
+    if (hoverLinks && !isSelectingRef.current && buttonsDownRef.current === 0) {
       const link = findLinkAtCell(pt.row, pt.col);
       const prev = hoveredLinkRef.current;
       const changed =
         prev?.row !== link?.row ||
         prev?.startCol !== link?.startCol ||
-        prev?.endCol !== link?.endCol;
+        prev?.endCol !== link?.endCol ||
+        prev?.text !== link?.text;
       if (changed) {
         hoveredLinkRef.current = link;
         setPointerCursor(Boolean(link));
         if (canvasRef.current) {
           if (link) {
+            const needsModifier = mouseModeRef.current !== 'none';
+            const verb = needsModifier ? 'Ctrl + Click' : 'Clic';
             canvasRef.current.title =
               link.kind === 'web'
                 ? getTerminalWebLinksTarget() === 'external'
-                  ? 'Ctrl + Click para abrir en el navegador externo'
-                  : 'Ctrl + Click para abrir en el navegador integrado'
-                : 'Ctrl + Click para previsualizar archivo';
+                  ? `${verb} para abrir en el navegador externo`
+                  : `${verb} para abrir en el navegador integrado`
+                : `${verb} para previsualizar archivo`;
           } else {
             canvasRef.current.title = '';
           }
         }
-        scheduleRender();
+        scheduleRender(
+          [prev?.row, link?.row].filter((row): row is number => typeof row === 'number'),
+        );
       }
     } else if (hoveredLinkRef.current) {
+      const row = hoveredLinkRef.current.row;
       hoveredLinkRef.current = null;
       setPointerCursor(false);
       if (canvasRef.current) canvasRef.current.title = '';
-      scheduleRender();
+      scheduleRender([row]);
     }
 
     // Forward mouse motion to PTY when mouseMode is 'drag' or 'any'
@@ -465,10 +488,11 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
   const handleMouseLeave = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (hoveredLinkRef.current) {
+      const row = hoveredLinkRef.current.row;
       hoveredLinkRef.current = null;
       setPointerCursor(false);
       if (canvasRef.current) canvasRef.current.title = '';
-      scheduleRender();
+      scheduleRender([row]);
     }
     if (buttonsDownRef.current !== 0) {
       const pt = clientToGrid(e.clientX, e.clientY);
@@ -491,9 +515,11 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       return;
     }
     if (copySelectionToClipboard()) {
+      const start = selectionStartRef.current;
+      const end = selectionEndRef.current;
       selectionStartRef.current = null;
       selectionEndRef.current = null;
-      scheduleRender();
+      scheduleRender(selectionRows(start, end));
       return;
     }
     if (pasteTextToTerminal && typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
@@ -505,6 +531,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    onWheelActivity?.();
     armFastPoll(250);
 
     const discreteAxis = (delta: number) => {
@@ -529,8 +556,10 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       accum.current += delta;
       let steps = Math.trunc(accum.current / trackUnit);
       if (steps === 0) return 0;
+      if (cap > 0 && Math.abs(steps) > cap) {
+        steps = steps > 0 ? cap : -cap;
+      }
       accum.current -= steps * trackUnit;
-      if (cap > 0) steps = Math.max(-cap, Math.min(cap, steps));
       return steps;
     };
 
@@ -538,8 +567,10 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     const alt = alternateScreenRef.current;
     const cellH = Math.max(1, cellHeightRef.current || 16);
     const reportWheel = takesMouse || alt;
+    // One frame may carry a long flick. 120 steps is several pages; the rest stays
+    // in the accumulator for the next wheel event instead of being dropped at 3.
     const trackUnit = reportWheel ? Math.max(16, cellH * 1.25) : cellH;
-    const cap = reportWheel ? 3 : 0;
+    const cap = reportWheel ? 120 : 0;
     const stepsY = consume(e.deltaY, wheelAccumYRef, trackUnit, cap);
     const stepsX = reportWheel ? consume(e.deltaX, wheelAccumXRef, trackUnit, cap) : 0;
     const pt = clientToGrid(e.clientX, e.clientY);
@@ -554,15 +585,8 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
         const wheelCodeX = stepsX < 0 ? 66 : 67;
         out += encodeMouseReport(wheelCodeX, false, pt, e).repeat(Math.abs(stepsX));
       }
-      if (out) {
-        sendInput(out, false);
-      }
-      return;
-    }
-
-    if (stepsY === 0) return;
-
-    if (alt) {
+      if (out) pendingWheelInputRef.current += out;
+    } else if (stepsY !== 0 && alt) {
       const seq =
         stepsY < 0
           ? applicationCursorRef.current
@@ -571,12 +595,23 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
           : applicationCursorRef.current
             ? '\x1bOB'
             : '\x1b[B';
-      sendInput(seq.repeat(Math.abs(stepsY)), false);
-      return;
+      pendingWheelInputRef.current += seq.repeat(Math.abs(stepsY));
+    } else if (stepsY !== 0) {
+      const lines = discreteAxis(e.deltaY) ? (stepsY < 0 ? 3 : -3) : -stepsY;
+      pendingWheelLinesRef.current += lines;
     }
 
-    const lines = discreteAxis(e.deltaY) ? (stepsY < 0 ? 3 : -3) : -stepsY;
-    requestScrollLines(lines);
+    if (!pendingWheelInputRef.current && !pendingWheelLinesRef.current) return;
+    if (wheelFlushRef.current !== null) return;
+    wheelFlushRef.current = window.requestAnimationFrame(() => {
+      wheelFlushRef.current = null;
+      const input = pendingWheelInputRef.current;
+      const lines = pendingWheelLinesRef.current;
+      pendingWheelInputRef.current = '';
+      pendingWheelLinesRef.current = 0;
+      if (input) sendInput(input, false);
+      if (lines) requestScrollLines(lines);
+    });
   };
 
   useEffect(() => {
@@ -588,6 +623,10 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     canvas.addEventListener('wheel', onNativeWheel, { passive: false });
     return () => {
       canvas.removeEventListener('wheel', onNativeWheel);
+      if (wheelFlushRef.current !== null) {
+        window.cancelAnimationFrame(wheelFlushRef.current);
+        wheelFlushRef.current = null;
+      }
     };
   }, [canvasRef]);
 

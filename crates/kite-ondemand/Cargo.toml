@@ -1,0 +1,15 @@
+[package]
+name = "kite-ondemand"
+version = "0.1.0"
+description = "On-demand WebView2 host for settings, browser, and account"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "kite-ondemand"
+path = "src/main.rs"
+
+[dependencies]
+tao = "=0.35.3"
+wry = "=0.55.1"

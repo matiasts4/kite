@@ -19,7 +19,7 @@ export interface SavedSshEndpoint {
   lastConnectedAtUnixMs: number;
 }
 
-const STORAGE_KEY = 'bmone.ssh_recent_workspaces';
+const STORAGE_KEY = 'kite.ssh_recent_workspaces';
 
 function isRestrictedFolder(folder: string): boolean {
   const trimmed = folder.trim();

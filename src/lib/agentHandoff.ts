@@ -277,13 +277,15 @@ export function planHandoff(request: HandoffRequest, ctx: HandoffContext): Hando
   return { ok: false, error: `Operación desconocida: ${String(op)}` };
 }
 
-export function applyHandoffPlan(plan: HandoffPlan): boolean {
+export function applyHandoffPlan(plan: HandoffPlan, requestId?: string): boolean {
   if (!plan.ok) return false;
   if (typeof window === 'undefined') return false;
 
   if (plan.op === 'spawn') {
     window.dispatchEvent(
-      new CustomEvent('kite:spawn-agent-terminal', { detail: plan.spawnDetail })
+      new CustomEvent('kite:spawn-agent-terminal', {
+        detail: { ...plan.spawnDetail, requestId },
+      })
     );
     return true;
   }

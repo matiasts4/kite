@@ -499,15 +499,15 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
   });
 
   describe('appOperatorController.injectPrompt', () => {
-    it('writes the prompt through write_terminal when no terminal pane is mounted', async () => {
+    it('writes the prompt through dispatch_send when no terminal pane is mounted', async () => {
       const { invokeCommand } = await import('../ipc');
 
       const res = await appOperatorController.injectPrompt('term-1', 'corre los tests');
 
       expect(res.success).toBe(true);
       expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith(
-        'write_terminal',
-        expect.objectContaining({ sessionId: 'term-1' })
+        'dispatch_send',
+        expect.objectContaining({ address: 'session:term-1', body: 'corre los tests' })
       );
     });
   });

@@ -22,6 +22,28 @@ import { planTurnHeuristic, detectEngineFromText } from './planner/heuristic';
 import { suppressProactiveAnnouncement } from './proactiveWatcher';
 import { pulseZedOrb } from '../../motion/contract';
 
+function inNativeApp(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+  return Boolean(host.__TAURI_INTERNALS__ || host.__TAURI__);
+}
+
+function mapPaneToPresence(state: string | undefined): string | undefined {
+  switch (state) {
+    case 'idle':
+    case 'working':
+    case 'done':
+    case 'error':
+      return state;
+    case 'waitingForYou':
+      return 'blocked';
+    case 'exited':
+      return 'gone';
+    default:
+      return undefined;
+  }
+}
+
 export interface InjectPromptOptions {
   runId?: string;
   /** Terminal that threw the prompt; the projectile flies from it (S5/S7). */
@@ -29,6 +51,11 @@ export interface InjectPromptOptions {
   sourcePaneId?: string;
   /** Badge shown on the in-flight projectile capsule. */
   label?: string;
+  /** Who is sending. An agent send is wrapped. A person send stays raw. */
+  caller?: 'human' | 'agent' | 'script';
+  /** Stable id so a second pickup returns the stored receipt. */
+  requestId?: string;
+  from?: string;
 }
 
 export interface SpawnTerminalsOptions {
@@ -250,35 +277,64 @@ class AppOperatorController {
     const hasLiveReceiver =
       typeof document !== 'undefined' &&
       document.querySelector(`.terminal-view-container[data-session-id="${sessionId}"]`) !== null;
+    const inApp = inNativeApp();
+    const observed = getActiveAgentTerminals().find((t) => t.sessionId === sessionId)?.state;
 
-    if (typeof window !== 'undefined') {
-      if (!options?.sourceSessionId && !options?.sourcePaneId) {
-        pulseZedOrb();
-      }
-      window.dispatchEvent(
-        new CustomEvent('kite:dispatch-prompt-projectile', {
-          detail: {
-            sessionId,
-            targetSessionId: sessionId,
-            sourceSessionId: options?.sourceSessionId,
-            sourcePaneId: options?.sourcePaneId,
-            prompt,
-            label: options?.label,
-          },
-        })
-      );
-    }
-
-    const input = prompt.endsWith('\r') || prompt.endsWith('\n') ? prompt : `${prompt}\r\n`;
-
+    let receipt: { status?: string; error?: string; replayed?: boolean } = {};
     try {
-      // A mounted terminal receiver types the prompt when the projectile lands; writing
-      // here as well would execute the same instruction twice.
-      if (!hasLiveReceiver) {
-        await invokeCommand('write_terminal', {
-          sessionId,
-          input,
-        });
+      receipt = await invokeCommand('dispatch_send', {
+        id: options?.requestId,
+        address: `session:${sessionId}`,
+        body: prompt,
+        caller: options?.caller ?? 'human',
+        from: options?.from ?? (options?.sourceSessionId ? `session:${options.sourceSessionId}` : undefined),
+        mounted: hasLiveReceiver,
+        observed: mapPaneToPresence(observed),
+        presentationEmitted: !inApp,
+        source: options?.sourceSessionId,
+        label: options?.label,
+      });
+
+      const status = receipt?.status;
+      const failed = status === 'rejected' || status === 'failed' || status === 'stalled';
+      if (failed) {
+        const message = receipt.error || status || 'rejected';
+        if (runId) {
+          runLedger.recordToolEnd(runId, {
+            name: 'inject_prompt',
+            ok: false,
+            error: message,
+            errorCategory: 'pty_write_error',
+          });
+        }
+        return { success: false, message: `Error inyectando prompt: ${message}` };
+      }
+
+      const showLocalFlight = !inApp && !receipt?.replayed && status !== 'queued';
+      if (showLocalFlight && typeof window !== 'undefined') {
+        if (!options?.sourceSessionId && !options?.sourcePaneId) {
+          pulseZedOrb();
+        }
+        window.dispatchEvent(
+          new CustomEvent('kite:dispatch-prompt-projectile', {
+            detail: {
+              sessionId,
+              targetSessionId: sessionId,
+              sourceSessionId: options?.sourceSessionId,
+              sourcePaneId: options?.sourcePaneId,
+              prompt,
+              label: options?.label,
+            },
+          })
+        );
+      } else if (
+        inApp &&
+        !receipt?.replayed &&
+        status !== 'queued' &&
+        !options?.sourceSessionId &&
+        !options?.sourcePaneId
+      ) {
+        pulseZedOrb();
       }
 
       if (runId) {

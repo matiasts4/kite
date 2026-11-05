@@ -10,7 +10,6 @@ import { cleanAgentTitle, getNextAgentName } from '../../lib/agentNames';
 import { invokeCommand } from '../../lib/ipc';
 import { registerSpawnedTerminal } from '../../lib/terminalRegistry';
 import { waitForSpawnGeometry } from '../../lib/terminalHostSize';
-import { dispatchPromptWhenPaneReady } from '../../motion/contract';
 import { sendUiAck, type UiBusRequestPayload } from '../../lib/operator/executor/ui-bus';
 import { isTerminalTarget } from '../../lib/shortcuts/useGlobalShortcuts';
 
@@ -204,12 +203,14 @@ export function useWorkspaceEventListeners({
       agentName?: string;
       splitAxis?: 'vertical' | 'horizontal';
       initialPrompt?: string;
+      attachOnly?: boolean;
       autoApprove?: boolean;
       workspaceId?: string;
       sourceSessionId?: string;
       sourcePaneId?: string;
       label?: string;
       projectileLabel?: string;
+      requestId?: string;
     }) => {
       const paneId = globalThis.crypto.randomUUID();
       const wireEngine = detail.engine || 'powershell';
@@ -227,30 +228,36 @@ export function useWorkspaceEventListeners({
 
       const finalTitle = detail.title || (agentName ? `${agentName} (${wireEngine})` : `Terminal (${wireEngine})`);
       const leafLabel = agentName || cleanAgentTitle(finalTitle);
-      let dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
-      if (!isShell && dims.columns < 50) {
-        await waitForSpawnGeometry(canvasRef.current, dims.columns);
-        dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
+      const attachOnly = detail.attachOnly === true;
+
+      if (!attachOnly) {
+        let dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
+        if (!isShell && dims.columns < 50) {
+          await waitForSpawnGeometry(canvasRef.current, dims.columns);
+          dims = estimateTargetPaneGrid(canvasRef.current, 1, 'vertical');
+        }
+
+        try {
+          await invokeCommand('start_terminal', {
+            sessionId: detail.sessionId,
+            engine: wireEngine,
+            workspaceId: selectedWorkspace?.id || null,
+            paneId,
+            columns: dims.columns,
+            rows: dims.rows,
+            confirmedByBuilder: true,
+            agentName: agentName || undefined,
+            displayName: leafLabel,
+            initialPrompt: detail.initialPrompt,
+            autoApprove: detail.autoApprove ?? true,
+          });
+        } catch (err) {
+          console.warn('[ODD] Failed to start terminal:', err);
+          throw err;
+        }
       }
 
-      try {
-        await invokeCommand('start_terminal', {
-          sessionId: detail.sessionId,
-          engine: wireEngine,
-          workspaceId: selectedWorkspace?.id || null,
-          paneId,
-          columns: dims.columns,
-          rows: dims.rows,
-          confirmedByBuilder: true,
-          agentName: agentName || undefined,
-          displayName: leafLabel,
-          initialPrompt: undefined,
-          autoApprove: detail.autoApprove ?? true,
-        });
-      } catch (err) {
-        console.warn('[ODD] Failed to start terminal:', err);
-        throw err;
-      }
+      void invokeCommand('dispatch_pane_shown', { sessionId: detail.sessionId }).catch(() => {});
 
       registerSpawnedTerminal(detail.sessionId, {
         workspaceId: selectedWorkspace?.id || null,
@@ -278,9 +285,10 @@ export function useWorkspaceEventListeners({
       const currentTab = current.tabs.find((t) => t.id === current.activeTabId) || current.tabs[0];
 
       if (!currentTab) {
+        const tabNum = current.tabs.length + 1;
         const newTab: WorkspaceTab = {
           id: globalThis.crypto.randomUUID(),
-          title: leafLabel,
+          title: `Ventana ${tabNum}`,
           root: newLeaf,
           focusedLeafId: newLeaf.id,
         };
@@ -293,19 +301,6 @@ export function useWorkspaceEventListeners({
         latestLayoutRef.current = nextLayout;
         setFocusedLeafId(newLeaf.id);
         await persistLayout(nextLayout);
-
-        if (detail.initialPrompt) {
-          dispatchPromptWhenPaneReady({
-            targetPaneId: newLeaf.id,
-            targetSessionId: detail.sessionId,
-            agentName: leafLabel,
-            engine: wireEngine,
-            prompt: detail.initialPrompt,
-            sourceSessionId: detail.sourceSessionId,
-            sourcePaneId: detail.sourcePaneId,
-            label: detail.label ?? detail.projectileLabel,
-          });
-        }
         return;
       }
 
@@ -324,19 +319,6 @@ export function useWorkspaceEventListeners({
       latestLayoutRef.current = nextLayout;
       setFocusedLeafId(newLeaf.id);
       await persistLayout(nextLayout);
-
-      if (detail.initialPrompt) {
-        dispatchPromptWhenPaneReady({
-          targetPaneId: newLeaf.id,
-          targetSessionId: detail.sessionId,
-          agentName: leafLabel,
-          engine: wireEngine,
-          prompt: detail.initialPrompt,
-          sourceSessionId: detail.sourceSessionId,
-          sourcePaneId: detail.sourcePaneId,
-          label: detail.label ?? detail.projectileLabel,
-        });
-      }
     };
 
     const onSpawnAgentTerminal = (e: Event) => {
@@ -354,6 +336,8 @@ export function useWorkspaceEventListeners({
         sourcePaneId?: string;
         label?: string;
         projectileLabel?: string;
+        requestId?: string;
+        attachOnly?: boolean;
       }>;
       const detail = customEvent.detail;
       if (!detail) return;

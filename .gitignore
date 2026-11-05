@@ -1,6 +1,8 @@
 # Dependencies & Build Outputs
 node_modules/
 src-tauri/target/
+crates/**/target/
+target/
 dist/
 feed/
 releases/

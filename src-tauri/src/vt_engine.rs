@@ -6,7 +6,7 @@ const MAX_DEC2026_HOLD: Duration = Duration::from_millis(1000);
 const MAX_UNHANDLED_CSI_SAMPLES: usize = 16;
 const REP_MAX: usize = 512;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CellSnapshot {
     pub ch: String,
@@ -21,7 +21,7 @@ pub struct CellSnapshot {
     pub dim: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RowSnapshot {
     pub row_idx: u16,
@@ -31,7 +31,7 @@ pub struct RowSnapshot {
     pub wrapped: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorSnapshot {
     pub visible: bool,
@@ -42,7 +42,7 @@ pub struct CursorSnapshot {
     pub blink: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSnapshot {
     pub seq: u64,

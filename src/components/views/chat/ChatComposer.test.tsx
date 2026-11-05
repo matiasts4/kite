@@ -196,7 +196,21 @@ describe('ChatComposer - Behavioral Tests', () => {
 
     const dictationBtn = screen.getByRole('button', { name: /dictate message/i });
     expect(dictationBtn).toBeInTheDocument();
+    expect(dictationBtn.className).toContain('size-8');
+    expect(dictationBtn.className).toContain('rounded-control');
+    expect(dictationBtn.className).toContain('chat-dictate-control');
+    expect(dictationBtn.querySelector('svg')).toHaveAttribute('width', '14');
     await user.click(dictationBtn);
+  });
+
+  it('inserts a cited passage at the caret and keeps the surrounding draft', () => {
+    const onChangePrompt = vi.fn();
+    render(<ChatComposer {...defaultProps} prompt="Hello world" onChangePrompt={onChangePrompt} />);
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(6, 6);
+    window.dispatchEvent(new CustomEvent('kite:cite', { detail: 'the patch' }));
+    expect(onChangePrompt).toHaveBeenCalledWith('Hello > the patch\nworld');
   });
 
   it('stages pasted image files from clipboardData.files', () => {

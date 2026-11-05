@@ -17,6 +17,7 @@ import {
   formatBytes,
 } from './types';
 import type { ChatItem } from '../../../types';
+import { insertQuoteAtCaret } from './citeDraft';
 import { isControlDeclared, isProviderDeclared, undeclaredReason } from '../../../lib/session/declaration';
 import type { DriverDeclaration } from '../../../lib/session/types';
 import { ChatApprovalCard } from './ChatApprovalCard';
@@ -213,6 +214,26 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   useEffect(() => {
     historyStateRef.current = { owner: threadId, index: null, draft: '' };
   }, [threadId]);
+
+  useEffect(() => {
+    const onCite = (event: Event) => {
+      const passage = (event as CustomEvent<string>).detail;
+      if (typeof passage !== 'string') return;
+      const area = textareaRef.current;
+      const start = area?.selectionStart ?? prompt.length;
+      const end = area?.selectionEnd ?? start;
+      const next = insertQuoteAtCaret(prompt, start, end, passage);
+      onChangePrompt(next.text);
+      window.requestAnimationFrame(() => {
+        const field = textareaRef.current;
+        if (!field) return;
+        field.focus();
+        field.setSelectionRange(next.caret, next.caret);
+      });
+    };
+    window.addEventListener('kite:cite', onCite);
+    return () => window.removeEventListener('kite:cite', onCite);
+  }, [onChangePrompt, prompt]);
 
   // Dynamic textarea height
   useLayoutEffect(() => {
@@ -691,26 +712,26 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                   : dictationError || 'Dictate message'
               }
               aria-label={dictationState === 'recording' ? 'Finish dictation' : 'Dictate message'}
-              className={`size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-colors ${
+              className={`chat-dictate-control size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-colors ${
                 dictationState === 'recording'
-                  ? 'bg-destructive/20 text-destructive'
+                  ? 'text-destructive'
                   : 'text-muted-foreground hover:text-foreground hover:bg-hover-row'
               }`}
             >
               {dictationState === 'recording' ? (
-                <StopIcon size={11} />
+                <StopIcon size={14} />
               ) : dictationState === 'transcribing' ? (
                 <svg
-                  className="animate-spin"
-                  width="13"
-                  height="13"
+                  className="chat-dictate-glyph animate-spin"
+                  width="14"
+                  height="14"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
-                  strokeWidth="2.5"
+                  strokeWidth="2"
                   aria-hidden="true"
                 >
-                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                  <path d="M12 4a8 8 0 1 1-6.32 3.1" />
                 </svg>
               ) : (
                 <MicIcon size={14} />

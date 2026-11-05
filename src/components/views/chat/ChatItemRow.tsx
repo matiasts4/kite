@@ -3,20 +3,21 @@ import { motion } from 'motion/react';
 import { tweens } from '../../../motion/standard/tokens';
 import {
   ChevronRightIcon,
-  TerminalIcon,
-  WrenchIcon,
   AlertCircleIcon,
   FileCodeIcon,
   CheckIcon,
-  EyeIcon,
-  PencilIcon,
-  GlobeIcon,
-  BrainIcon,
-  CpuIcon,
   CopyIcon,
-  CompassIcon,
+  PencilIcon,
 } from './ChatIcons';
 import type { ChatItem } from '../../../types';
+import { ActivityGlyph } from './activityGlyph';
+import {
+  burstDurationSeconds,
+  commandStatusLabel,
+  commandStatusWord,
+  summarizeWorkBurst,
+  workedForLine,
+} from './activityPresentation';
 import { formatBytes } from './types';
 import { MarkdownMessage } from './MarkdownMessage';
 import { UnifiedDiffView } from './UnifiedDiffView';
@@ -176,38 +177,6 @@ function parseToolDisplayMeta(item: ChatItem): ParsedToolMeta {
   };
 }
 
-function getToolIcon(title: string | null, toolKind?: string | null, serverName?: string | null) {
-  if (serverName || toolKind === 'mcpToolCall') {
-    return <CpuIcon size={12} />;
-  }
-  if (toolKind === 'planUpdate') {
-    return <CompassIcon size={12} />;
-  }
-  if (toolKind === 'commandExecution') {
-    return <TerminalIcon size={12} />;
-  }
-  if (toolKind === 'fileChange') {
-    return <PencilIcon size={12} />;
-  }
-  if (toolKind === 'webSearch') {
-    return <GlobeIcon size={12} />;
-  }
-  const lower = (title || '').toLowerCase();
-  if (lower.includes('read') || lower.includes('cat') || lower.includes('view') || lower.includes('inspect')) {
-    return <EyeIcon size={12} />;
-  }
-  if (lower.includes('edit') || lower.includes('write') || lower.includes('replace') || lower.includes('patch')) {
-    return <PencilIcon size={12} />;
-  }
-  if (lower.includes('web') || lower.includes('fetch') || lower.includes('browser') || lower.includes('url') || lower.includes('search')) {
-    return <GlobeIcon size={12} />;
-  }
-  if (lower.includes('bash') || lower.includes('cmd') || lower.includes('shell') || lower.includes('terminal') || lower.includes('run')) {
-    return <TerminalIcon size={12} />;
-  }
-  return <WrenchIcon size={12} />;
-}
-
 export const ChatWorkEntry: React.FC<{
   item: ChatItem;
   running?: boolean;
@@ -228,6 +197,7 @@ export const ChatWorkEntry: React.FC<{
     item.status === 'failed' || (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0);
   const isCompleted = item.status === 'completed';
   const isRunning = Boolean(running || item.streaming || item.status === 'running' || item.status === 'inProgress');
+  const commandWord = isCommand ? commandStatusWord(item) : null;
 
   const durationBadge = useLiveDuration(isRunning, item.createdAtUnixMs, item.durationSeconds);
   const meta = parseToolDisplayMeta(item);
@@ -275,7 +245,7 @@ export const ChatWorkEntry: React.FC<{
         onClick={() => setExpanded((v) => !v)}
       >
         <span aria-hidden="true" className={`chat-work-entry__glyph ${isRunning ? 'chat-work-entry__glyph--active' : ''}`}>
-          {isCommand ? <TerminalIcon size={12} /> : getToolIcon(item.title, meta.toolKind, meta.serverName)}
+          <ActivityGlyph item={item} />
         </span>
 
         {meta.serverName && (
@@ -284,7 +254,9 @@ export const ChatWorkEntry: React.FC<{
           </span>
         )}
 
-        <strong>{meta.titleText}</strong>
+        <strong className={isRunning ? 'chat-activity-shine' : undefined}>
+          {isCommand ? commandStatusLabel(item) : meta.titleText}
+        </strong>
 
         {meta.detailText && (
           <span
@@ -356,7 +328,7 @@ export const ChatWorkEntry: React.FC<{
 
         <span
           className={`chat-work-entry__status ${
-            isFailed
+            isFailed || commandWord === 'Declined' || commandWord === 'Stopped'
               ? 'chat-work-entry__status--failed'
               : isCompleted
                 ? 'chat-work-entry__status--completed'
@@ -365,7 +337,17 @@ export const ChatWorkEntry: React.FC<{
                   : ''
           }`}
         >
-          {isFailed ? (
+          {commandWord === 'Failed' || commandWord === 'Declined' || commandWord === 'Stopped' ? (
+            <>
+              <AlertCircleIcon aria-hidden="true" size={9} strokeWidth={3} />
+              <span className="sr-only">{commandWord}</span>
+            </>
+          ) : commandWord === 'Ran' ? (
+            <>
+              <CheckIcon aria-hidden="true" size={9} strokeWidth={3} />
+              <span className="sr-only">{commandWord}</span>
+            </>
+          ) : isFailed ? (
             <>
               <AlertCircleIcon aria-hidden="true" size={9} strokeWidth={3} />
               <span className="sr-only">Failed</span>
@@ -420,16 +402,27 @@ export const ChatWorkGroup: React.FC<{
   items: ChatItem[];
   running?: boolean;
   enterFor?: (id: string) => boolean;
-}> = ({ items, running, enterFor }) => {
+  interrupted?: boolean;
+  durationSeconds?: number | null;
+}> = ({ items, running, enterFor, interrupted = false, durationSeconds = null }) => {
   const [expanded, setExpanded] = useState(false);
   const hiddenCount = Math.max(0, items.length - 1);
-  const visibleItems = expanded ? items : items.slice(-1);
+  const groupLive = items.some(
+    (item) => item.streaming || item.status === 'running' || item.status === 'inProgress',
+  );
+  const settled = !groupLive && !running;
+  const summary = summarizeWorkBurst(items);
+  const durationLine = interrupted
+    ? null
+    : workedForLine(durationSeconds ?? burstDurationSeconds(items));
+  const visibleItems = settled && !expanded && items.length > 1 ? [] : expanded ? items : items.slice(-1);
 
   const completedCount = items.filter((i) => i.status === 'completed').length;
   const failedCount = items.filter(
     (i) => i.status === 'failed' || (i.exitCode !== null && i.exitCode !== undefined && i.exitCode !== 0)
   ).length;
   const runningCount = items.filter((i) => i.streaming || i.status === 'running' || i.status === 'inProgress').length;
+  const collapsedLabel = summary || `${items.length} actions`;
 
   return (
     <div className={`chat-work-group ${expanded && items.length > 1 ? 'chat-work-group--expanded' : ''}`}>
@@ -446,10 +439,17 @@ export const ChatWorkGroup: React.FC<{
             className={`chat-chevron chat-chevron--flip ${expanded ? 'chat-chevron--open' : ''}`}
           />
           <span className="chat-work-group__label">
-            {expanded
-              ? `Ocultar registro de acciones (${items.length})`
-              : `+${hiddenCount} ${hiddenCount === 1 ? 'acción anterior' : 'acciones anteriores'}`}
+            {settled
+              ? expanded
+                ? `Hide ${items.length} actions`
+                : collapsedLabel
+              : expanded
+                ? `Hide ${items.length} actions`
+                : `+${hiddenCount} earlier`}
           </span>
+          {settled && durationLine && !expanded ? (
+            <span className="chat-work-group__label">{durationLine}</span>
+          ) : null}
           <span className="chat-work-group__badges" aria-hidden="true">
             {runningCount > 0 && (
               <span className="chat-work-group__badge chat-work-group__badge--running">
@@ -501,11 +501,8 @@ export const ChatItemRow: React.FC<{
   const [expandedReasoning, setExpandedReasoning] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
   const [copiedAssistant, setCopiedAssistant] = useState(false);
-  const reasoningDuration = useLiveDuration(
-    item.kind === 'reasoning' && item.streaming,
-    item.createdAtUnixMs,
-    item.durationSeconds
-  );
+  const [citation, setCitation] = useState<string | null>(null);
+  const assistantRef = useRef<HTMLDivElement>(null);
 
   // User row: no "You" or timestamp header
   if (item.kind === 'user') {
@@ -600,13 +597,39 @@ export const ChatItemRow: React.FC<{
 
     return (
       <motion.div
+        ref={assistantRef}
         className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}`}
         initial={enter ? { opacity: 0, y: 4 } : false}
         animate={{ opacity: 1, y: 0 }}
         transition={tweens.reveal}
+        onMouseUp={() => {
+          const selection = window.getSelection();
+          const root = assistantRef.current;
+          const anchor = selection?.anchorNode;
+          if (!selection || selection.isCollapsed || !root || !anchor || !root.contains(anchor)) {
+            setCitation(null);
+            return;
+          }
+          const passage = selection.toString().trim();
+          setCitation(passage || null);
+        }}
       >
         {!item.streaming && cleanText.trim().length > 0 && (
           <div className="chat-turn__actions">
+            {citation && (
+              <button
+                type="button"
+                className="chat-turn__action-btn"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('kite:cite', { detail: citation }));
+                  window.getSelection()?.removeAllRanges();
+                  setCitation(null);
+                }}
+              >
+                Citar en el compositor
+              </button>
+            )}
             <button
               type="button"
               className="chat-turn__action-btn"
@@ -645,20 +668,17 @@ export const ChatItemRow: React.FC<{
           title={expandedReasoning ? 'Collapse reasoning details' : 'Expand full reasoning'}
         >
           <span className="chat-reasoning-row__icon-wrap">
-            <BrainIcon size={13} className={item.streaming ? 'chat-reasoning-icon--pulse' : ''} />
+            <ActivityGlyph item={item} />
           </span>
           <ChevronRightIcon
             size={8}
             strokeWidth={2.5}
             className={`chat-chevron ${expandedReasoning ? 'chat-chevron--open' : ''}`}
           />
-          <strong className="chat-reasoning-row__label">
-            {item.streaming ? 'Thinking…' : reasoningDuration ? `Thought for ${reasoningDuration}` : 'Thought'}
+          <strong className={`chat-reasoning-row__label${item.streaming && !thoughtSummary ? ' chat-activity-shine' : ''}`}>
+            {item.streaming ? (thoughtSummary || 'Thinking') : 'Thought'}
           </strong>
-          {item.streaming && reasoningDuration && (
-            <span className="chat-reasoning-row__timer">{reasoningDuration}</span>
-          )}
-          {thoughtSummary && !expandedReasoning && (
+          {!item.streaming && thoughtSummary && !expandedReasoning && (
             <span className="chat-reasoning-row__headline">{thoughtSummary}</span>
           )}
         </button>

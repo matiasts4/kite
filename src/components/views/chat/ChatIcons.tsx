@@ -528,12 +528,23 @@ export const GlobeIcon = createIcon(
   "none"
 );
 
+export const BrowserIcon = createIcon(
+  16,
+  <>
+    <rect width="18" height="14" x="3" y="5" rx="2" />
+    <line x1="3" x2="21" y1="9" y2="9" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
 export const MicIcon = createIcon(
   14,
   <>
-    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-    <line x1="12" x2="12" y1="19" y2="22" />
+    <path d="M12 5.5a2.25 2.25 0 0 0-2.25 2.25v4.5a2.25 2.25 0 0 0 4.5 0v-4.5A2.25 2.25 0 0 0 12 5.5Z" />
+    <path d="M17 12.25v.5a5 5 0 0 1-10 0v-.5" />
+    <line x1="12" x2="12" y1="17.75" y2="19.25" />
   </>,
   "0 0 24 24",
   2,

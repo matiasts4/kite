@@ -90,10 +90,12 @@ export async function pollTurnUpdates({
         let items = [...target.items];
         let status = target.status;
         let pendingApproval = target.pendingApproval;
+        let stoppedByBuilder = Boolean(target.stoppedByBuilder);
 
         for (const ev of events) {
           if (ev.kind === 'status' && ev.status) {
             status = ev.status;
+            if (ev.status === 'running') stoppedByBuilder = false;
             if (ev.status === 'idle' || ev.status === 'error') {
               items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
             }
@@ -134,6 +136,7 @@ export async function pollTurnUpdates({
             pendingApproval = null;
           } else if (ev.kind === 'finished') {
             status = 'idle';
+            stoppedByBuilder = Boolean(ev.stoppedByBuilder);
             items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
             playCompletionChime(ev.ok !== false);
           }
@@ -153,6 +156,7 @@ export async function pollTurnUpdates({
             items,
             status,
             pendingApproval,
+            stoppedByBuilder,
           },
         };
       });

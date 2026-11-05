@@ -28,6 +28,7 @@ import {
   createWorkspaceBranch,
 } from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
+import { TurnActivityStatus } from './TurnActivityStatus';
 import { ChatComposer } from './ChatComposer';
 import { SessionLifecycleBar } from './SessionLifecycleBar';
 import { declarationFromCatalog } from './driverDeclaration';
@@ -704,6 +705,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                           items={row.items}
                           running={running}
                           enterFor={enterFor}
+                          interrupted={Boolean(thread.stoppedByBuilder)}
                         />
                       ) : (
                         <ChatItemRow
@@ -720,36 +722,13 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                       )
                     )}
 
-                    {/* Thinking / Running Stage Indicator */}
-                    {(running || thread.status === 'waiting') && (() => {
-                      const activeTool = [...thread.items]
-                        .reverse()
-                        .find((it) => (it.kind === 'tool' || it.kind === 'command') && (it.streaming || it.status === 'running'));
-                      const isStreamingAssistant = thread.items.some(
-                        (it) => it.kind === 'assistant' && it.streaming && it.text.trim().length > 0
-                      );
-                      const stageLabel = thread.pendingApproval
-                        ? `Waiting for approval · ${thread.pendingApproval.title || thread.pendingApproval.toolName}`
-                        : activeTool
-                          ? `Executing ${activeTool.title || activeTool.toolName || 'tool'}…`
-                          : isStreamingAssistant
-                            ? 'Generating response…'
-                            : 'Thinking…';
-                      return (
-                        <div
-                          className={`chat-working-row motion-row-in ${
-                            thread.pendingApproval ? 'chat-working-row--waiting' : ''
-                          }`}
-                        >
-                          <span className="chat-working-row__dots">
-                            <i />
-                            <i />
-                            <i />
-                          </span>
-                          <span className="chat-working-row__stage">{stageLabel}</span>
-                        </div>
-                      );
-                    })()}
+                    <TurnActivityStatus
+                      running={running}
+                      pendingApproval={thread.pendingApproval}
+                      items={thread.items}
+                      interrupted={Boolean(thread.stoppedByBuilder) && !running}
+                      durationSeconds={thread.usage?.durationSeconds}
+                    />
 
                     {/* Quota Handoff Banner */}
                     {thread.quotaHandoffOffer && (

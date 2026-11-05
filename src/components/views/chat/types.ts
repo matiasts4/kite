@@ -41,6 +41,7 @@ export const SPANISH_EFFORT_LABELS: Record<string, string> = {
   'extra-high': 'Muy Alto',
   'very-high': 'Muy Alto',
   max: 'Máximo',
+  ultra: 'Ultra',
 };
 
 export const SPANISH_EFFORT_DETAILS: Record<string, string> = {
@@ -53,6 +54,7 @@ export const SPANISH_EFFORT_DETAILS: Record<string, string> = {
   'extra-high': 'Razonamiento intensivo y verificación en múltiples pasos',
   'very-high': 'Razonamiento intensivo y verificación en múltiples pasos',
   max: 'Capacidad máxima de computación y verificación formal',
+  ultra: 'Razonamiento ultra para el techo del modelo',
 };
 
 export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
@@ -74,6 +76,8 @@ export interface ExtendedChatThread extends ChatThread {
    * provider's local spawn endpoint. Both fields are set together or not at all. */
   connectionId?: string | null;
   supportedEndpoint?: string | null;
+  /** Set when the user stopped the turn. Cleared when the next turn starts. */
+  stoppedByBuilder?: boolean;
 }
 
 export function getActivePlan(thread: ExtendedChatThread): ProposedPlan | null {

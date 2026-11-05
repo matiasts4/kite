@@ -85,6 +85,10 @@ pub enum AcpStreamEvent {
     Raw {
         line: String,
     },
+    /// A thought-shaped frame this build could not read. It stays visible as a notice.
+    UnknownFrame {
+        message: String,
+    },
 }
 
 /// Resolves the Antigravity ACP or CLI binary across standard installation paths.
@@ -282,6 +286,93 @@ pub(crate) fn summarize_tool_detail(params: &Value, output: &Option<String>, com
         }
     }
     parts.join("\n\n")
+}
+
+fn is_thought_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "thinking" | "reasoning" | "thought" | "thinking_delta" | "reasoning_delta" | "reasoning-delta" | "thought_delta"
+    ) || kind.contains("reasoning")
+}
+
+fn frame_is_thought(value: &Value) -> bool {
+    let marked = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(is_thought_kind)
+    };
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(is_thought_kind)
+        || marked("/delta/type")
+        || marked("/part/type")
+        || marked("/content_block/type")
+        || marked("/item/type")
+}
+
+fn string_field(value: &Value) -> Option<&str> {
+    value.as_str().map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// Text carried by a thought frame. Empty markers and ordinary answer deltas return `None`.
+pub fn extract_thought_text(value: &Value) -> Option<String> {
+    if let Some(parts) = value.pointer("/message/content").and_then(Value::as_array) {
+        for part in parts {
+            let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
+            if !is_thought_kind(kind) {
+                continue;
+            }
+            if let Some(text) = part
+                .get("thinking")
+                .or_else(|| part.get("text"))
+                .and_then(string_field)
+            {
+                return Some(text.to_string());
+            }
+        }
+    }
+    if !frame_is_thought(value) {
+        return None;
+    }
+    let text = value
+        .pointer("/delta/thinking")
+        .or_else(|| value.pointer("/delta/reasoning"))
+        .or_else(|| value.pointer("/item/text"))
+        .or_else(|| value.pointer("/item/thinking"))
+        .or_else(|| value.pointer("/part/text"))
+        .or_else(|| value.pointer("/part/thinking"))
+        .or_else(|| value.pointer("/delta/text"))
+        .or_else(|| value.get("delta"))
+        .or_else(|| value.get("thinking"))
+        .or_else(|| value.get("thought"))
+        .or_else(|| value.get("reasoning"))
+        .or_else(|| value.get("text"))
+        .or_else(|| value.get("summary"))
+        .or_else(|| value.pointer("/properties/text"))
+        .and_then(string_field)?;
+    Some(text.to_string())
+}
+
+/// A thought-shaped frame whose text is not in a field this build reads.
+pub fn thought_frame_without_text(value: &Value) -> bool {
+    frame_is_thought(value) && extract_thought_text(value).is_none() && !thought_marker_is_empty(value)
+}
+
+fn thought_marker_is_empty(value: &Value) -> bool {
+    let empty = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.trim().is_empty())
+    };
+    empty("/delta/thinking")
+        || empty("/delta/text")
+        || empty("/thinking")
+        || empty("/text")
+        || empty("/item/text")
+        || empty("/part/text")
 }
 
 /// Parses an incoming line from the agent process (supports agy stream-json, ACP JSON-RPC 2.0, and Claude/Codex stream events).
@@ -644,6 +735,22 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
 
     // 3. Check for Claude Code / Codex stream-json (`"type": ...`)
     if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
+        if let Some(text) = extract_thought_text(&val) {
+            return Some(AcpStreamEvent::ThoughtDelta {
+                text,
+                is_done: val.get("done").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || msg_type == "item.completed",
+                duration_seconds: val
+                    .get("duration_seconds")
+                    .or_else(|| val.get("durationSeconds"))
+                    .and_then(|v| v.as_f64()),
+            });
+        }
+        if thought_frame_without_text(&val) {
+            return Some(AcpStreamEvent::UnknownFrame {
+                message: format!("Unrecognized {msg_type} frame"),
+            });
+        }
         match msg_type {
             "system" | "session" | "session_init" => {
                 let conv_id = val
@@ -1359,6 +1466,61 @@ pub fn antigravity_set_active_google_account(email: String) -> Result<Value, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thought(line: &str) -> String {
+        match parse_acp_stream_line("thread-1", "run-1", line).expect("frame") {
+            AcpStreamEvent::ThoughtDelta { text, .. } => text,
+            other => panic!("expected a thought, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_thought_frames_keep_their_text() {
+        assert_eq!(
+            thought(r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Look at the tests."}}"#),
+            "Look at the tests."
+        );
+        assert_eq!(
+            thought(r#"{"type":"item.completed","item":{"type":"reasoning","text":"Checked the diff."}}"#),
+            "Checked the diff."
+        );
+        assert_eq!(
+            thought(r#"{"type":"text","part":{"type":"reasoning","text":"Planning the edit."}}"#),
+            "Planning the edit."
+        );
+        assert_eq!(
+            thought(r#"{"type":"response.reasoning_text.delta","delta":"Tracing the call."}"#),
+            "Tracing the call."
+        );
+        assert_eq!(
+            thought(r#"{"type":"thinking","thinking":"Reading the file."}"#),
+            "Reading the file."
+        );
+        assert_eq!(
+            thought(r#"{"type":"thought","text":"Searching the repo."}"#),
+            "Searching the repo."
+        );
+        assert_eq!(
+            thought(r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Opening the editor."}]}}"#),
+            "Opening the editor."
+        );
+    }
+
+    #[test]
+    fn an_unreadable_thought_frame_stays_a_notice() {
+        match parse_acp_stream_line(
+            "thread-1",
+            "run-1",
+            r#"{"type":"reasoning","encrypted_content":"abc"}"#,
+        )
+        .expect("frame")
+        {
+            AcpStreamEvent::UnknownFrame { message } => {
+                assert!(message.contains("reasoning"));
+            }
+            other => panic!("expected a notice, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_antigravity_list_google_accounts() {

@@ -1727,6 +1727,27 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                 persist();
                 return true;
             }
+            crate::acp::AcpStreamEvent::UnknownFrame { message } => {
+                let mut hash = 0u32;
+                for byte in message.bytes() {
+                    hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+                }
+                let note_id = format!("notice_{run_id}_{hash}");
+                let mut note = chat_item(&note_id, "note", &message, false);
+                note["title"] = json!("Unrecognized frame");
+                {
+                    let mut live = live_turns().lock().unwrap();
+                    if let Some(run) = live.runs.get_mut(run_id) {
+                        push_event(run, json!({ "kind": "upsert", "item": note.clone() }));
+                    }
+                }
+                live_cv().notify_all();
+                let mut items = threads().lock().unwrap();
+                if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
+                    upsert_item(thread, &note);
+                }
+                return true;
+            }
             crate::acp::AcpStreamEvent::PlanUpdate { step, status } => {
                 let plan_item_id = format!("plan_{}", run_id);
                 let is_streaming = status == "running" || status == "pending";

@@ -394,6 +394,25 @@ fn normalize_json_frame(provider: &str, raw: &str, value: &Value) -> Vec<Normali
         };
     }
 
+    if let Some(text) = crate::acp::extract_thought_text(value) {
+        return vec![NormalizedEvent::Reasoning {
+            text,
+            done: value.get("done").and_then(Value::as_bool).unwrap_or(false),
+            duration_seconds: value
+                .get("duration_seconds")
+                .or_else(|| value.get("durationSeconds"))
+                .and_then(Value::as_f64),
+        }];
+    }
+    if crate::acp::thought_frame_without_text(value) {
+        return notice(
+            provider,
+            "unknownThought",
+            raw,
+            "expected thinking, text, or delta text on a reasoning frame",
+        );
+    }
+
     if let Some(kind) = value.get("type").and_then(Value::as_str) {
         return match kind {
             "system" | "session" | "session_init" => Vec::new(),
@@ -1170,6 +1189,56 @@ mod tests {
     }
 
     #[test]
+    fn provider_thought_frames_become_reasoning_items() {
+        let samples = [
+            (
+                "claude",
+                r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Look at the tests."}}"#,
+                "Look at the tests.",
+            ),
+            (
+                "codex",
+                r#"{"type":"item.completed","item":{"type":"reasoning","text":"Checked the diff."}}"#,
+                "Checked the diff.",
+            ),
+            (
+                "opencode",
+                r#"{"type":"text","part":{"type":"reasoning","text":"Planning the edit."}}"#,
+                "Planning the edit.",
+            ),
+            (
+                "grok",
+                r#"{"type":"response.reasoning_text.delta","delta":"Tracing the call."}"#,
+                "Tracing the call.",
+            ),
+            (
+                "cursor",
+                r#"{"type":"thinking","thinking":"Reading the file."}"#,
+                "Reading the file.",
+            ),
+            (
+                "gemini",
+                r#"{"type":"thought","text":"Searching the repo."}"#,
+                "Searching the repo.",
+            ),
+            (
+                "antigravity",
+                r#"{"event":"step_update","step_update":{"step_type":"thought","state":"DONE","step_index":1,"text":"I checked the parser."}}"#,
+                "I checked the parser.",
+            ),
+        ];
+        for (provider, raw, text) in samples {
+            match &normalize_frame(provider, raw)[0] {
+                NormalizedEvent::Reasoning { text: got, .. } => assert_eq!(got, text, "{provider}"),
+                other => panic!("{provider} dropped a thought frame: {other:?}"),
+            }
+        }
+        match &normalize_frame("grok", r#"{"type":"reasoning","encrypted_content":"abc"}"#)[0] {
+            NormalizedEvent::Notice { code, .. } => assert_eq!(code, "unknownThought"),
+            other => panic!("unreadable thought was dropped: {other:?}"),
+        }
+    }
+
     fn reasoning_plan_usage_and_error_frames_normalize() {
         assert_eq!(
             normalize_frame(

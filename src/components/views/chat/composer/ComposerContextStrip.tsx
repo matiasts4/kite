@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import {
   FolderIcon,
   GitBranchIcon,
@@ -176,11 +177,11 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
               role="dialog"
               aria-label="Workspace Environment"
               className="kite-floating-card kite-context-menu"
-              style={{
+              style={composerMenuStyle({
                 left: `${envCoords.left}px`,
                 top: `${envCoords.top}px`,
                 width: '180px',
-              }}
+              })}
             >
               <button
                 type="button"
@@ -291,10 +292,10 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
               role="dialog"
               aria-label="Select Git Branch"
               className="kite-floating-card kite-context-menu"
-              style={{
+              style={composerMenuStyle({
                 left: `${branchCoords.left}px`,
                 top: `${branchCoords.top}px`,
-              }}
+              })}
             >
               {/* Branch Search Input */}
               <div className="kite-context-menu-search">

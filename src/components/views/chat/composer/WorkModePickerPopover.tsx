@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import { BotIcon, PencilRulerIcon, CheckIcon } from '../ChatIcons';
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
@@ -131,11 +132,11 @@ export const WorkModePickerPopover: React.FC<WorkModePickerPopoverProps> = ({
             role="dialog"
             aria-label="Select Work Mode or Agent"
             className="kite-floating-card kite-context-menu"
-            style={{
+            style={composerMenuStyle({
               left: `${coords.left}px`,
               top: `${coords.top}px`,
               width: `${PANEL_WIDTH}px`,
-            }}
+            })}
           >
             <div
               style={{

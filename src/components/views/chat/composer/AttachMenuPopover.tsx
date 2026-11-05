@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import { PaperclipIcon, FileCodeIcon, FolderIcon } from '../ChatIcons';
 import { ComposerControl } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
@@ -92,10 +93,10 @@ export const AttachMenuPopover: React.FC<AttachMenuPopoverProps> = ({
             role="dialog"
             aria-label="Attach to message"
             className="kite-floating-card kite-attach-menu"
-            style={{
+            style={composerMenuStyle({
               left: `${coords.left}px`,
               top: `${coords.top}px`,
-            }}
+            })}
           >
             <button
               type="button"

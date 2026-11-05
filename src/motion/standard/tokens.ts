@@ -71,6 +71,14 @@ export const tweens = {
   instant: { duration: 0 },
 } satisfies Record<string, TweenToken>;
 
+/** Footer menus. Enter is a short drift toward the control. Exit reuses the dismiss curve and stays shorter. */
+export const composerMenu = {
+  durationMs: 80,
+  ease: [0.32, 0.72, 0, 1] as Bezier,
+  driftPx: 4,
+  exit: { duration: 0.05, ease: eases.away },
+};
+
 export const scale = {
   press: 0.97,
   choice: 0.985,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createLabTokens } from '../animate/tokens';
-import { eases, scale, springs, tweens } from './tokens';
+import { composerMenu, eases, scale, springs, tweens } from './tokens';
 
 describe('production motion standard tokens (S2, S4)', () => {
   it('keeps the Animate UI role springs', () => {
@@ -21,6 +21,11 @@ describe('production motion standard tokens (S2, S4)', () => {
     expect(tweens.swap).toEqual({ duration: 0.15, ease: eases.out });
     expect(tweens.instant).toEqual({ duration: 0 });
     expect(scale.press).toBe(0.97);
+    expect(composerMenu.durationMs).toBe(80);
+    expect(composerMenu.driftPx).toBe(4);
+    expect(composerMenu.ease).toEqual([0.32, 0.72, 0, 1]);
+    expect(composerMenu.exit.duration).toBeLessThan(composerMenu.durationMs / 1000);
+    expect(composerMenu.exit.ease).toEqual(eases.away);
   });
 
   it('is the same source the dev lab derives from', () => {

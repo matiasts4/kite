@@ -244,7 +244,10 @@
   box-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.05);
   box-sizing: border-box;
   outline: none;
-  animation: kiteFadeIn 0.12s ease-out;
+  animation-name: kiteComposerMenu;
+  animation-duration: var(--composer-menu-ms, 80ms);
+  animation-timing-function: var(--composer-menu-ease, cubic-bezier(0.32, 0.72, 0, 1));
+  animation-fill-mode: both;
 }
 
 [data-theme='light'] .kite-floating-card {
@@ -253,15 +256,26 @@
   box-shadow: 0 16px 36px -12px rgba(15, 23, 42, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.04);
 }
 
-@keyframes kiteFadeIn {
+@keyframes kiteComposerMenu {
   from {
     opacity: 0;
-    transform: scale(0.97);
+    transform: translateY(var(--composer-menu-drift, 4px));
   }
   to {
     opacity: 1;
-    transform: scale(1);
+    transform: none;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-floating-card {
+    animation-name: kiteComposerMenuFade;
+  }
+}
+
+@keyframes kiteComposerMenuFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* 8. Reasoning Effort Discrete Slider Card (From Screenshot) */

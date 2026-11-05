@@ -7,6 +7,7 @@ import React, {
   useLayoutEffect,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import { ChatProvider, AUTOMATIC_MODEL_ID } from '../types';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
 import { BrandLogo } from '../../agents/engineMetadata';
@@ -298,10 +299,10 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
             role="dialog"
             aria-label="Select model and provider"
             className="kite-floating-card kite-model-picker-card"
-            style={{
+            style={composerMenuStyle({
               left: `${coords.left}px`,
               top: `${coords.top}px`,
-            }}
+            })}
           >
             {/* Left Rail: Favorites + Providers */}
             <div className="kite-model-rail">

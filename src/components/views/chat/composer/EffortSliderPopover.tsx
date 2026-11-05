@@ -7,6 +7,7 @@ import React, {
   useLayoutEffect,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
 import { SPANISH_EFFORT_LABELS } from '../types';
 import { ZapIcon, ChevronRightIcon } from '../ChatIcons';
@@ -236,10 +237,10 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
             role="dialog"
             aria-label="Reasoning effort slider"
             className="kite-floating-card kite-effort-slider-card"
-            style={{
+            style={composerMenuStyle({
               left: `${coords.left}px`,
               top: `${coords.top}px`,
-            }}
+            })}
           >
             {/* Header Row */}
             <div className="kite-effort-header-row">

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import { ChatMode } from '../types';
 import { DriverChoice } from '../../../../lib/session/types';
 import { LockIcon, CheckIcon } from '../ChatIcons';
@@ -103,11 +104,11 @@ export const PermissionPickerPopover: React.FC<PermissionPickerPopoverProps> = (
             role="dialog"
             aria-label="Permission mode"
             className="kite-floating-card kite-context-menu"
-            style={{
+            style={composerMenuStyle({
               left: `${coords.left}px`,
               top: `${coords.top}px`,
               width: `${PANEL_WIDTH}px`,
-            }}
+            })}
           >
             <div
               style={{

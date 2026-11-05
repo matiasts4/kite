@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { composerMenuStyle } from './composerMenu';
 import { CheckIcon } from '../ChatIcons';
 import { ComposerControl, ComposerControlChevron } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
@@ -102,11 +103,11 @@ export const ConnectionPickerPopover: React.FC<ConnectionPickerPopoverProps> = (
             role="dialog"
             aria-label="Account connection"
             className="kite-floating-card kite-context-menu"
-            style={{
+            style={composerMenuStyle({
               left: `${coords.left}px`,
               top: `${coords.top}px`,
               width: `${PANEL_WIDTH}px`,
-            }}
+            })}
           >
             <div
               style={{

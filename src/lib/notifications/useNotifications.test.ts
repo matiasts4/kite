@@ -6,11 +6,37 @@ vi.mock('../ipc', () => ({
   invokeCommand: vi.fn(),
 }));
 
+vi.mock('../toast', () => ({
+  toast: {
+    agentApproval: vi.fn(() => 'approval-toast'),
+    agentSettled: vi.fn(() => 'settled-toast'),
+  },
+}));
+
 import { invokeCommand } from '../ipc';
+import { toast } from '../toast';
+
+function snapshot(record: Record<string, unknown>, inputRequestsEnabled = true) {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    records: [record],
+    unreadCount: 1,
+    openInputRequestCount: 0,
+    authorization: 'authorized',
+    preferences: {
+      schemaVersion: 1,
+      osNotificationsEnabled: false,
+      finishSoundEnabled: false,
+      inputRequestsEnabled,
+    },
+  };
+}
 
 describe('useNotifications hook', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
   });
 
   it('fetches initial snapshot on mount and reflects unreadCount', async () => {
@@ -70,5 +96,85 @@ describe('useNotifications hook', () => {
 
     expect(invokeCommand).toHaveBeenCalledWith('notifications_mark_read', { recordId: 'n1' });
     expect(result.current.unreadCount).toBe(0);
+  });
+
+  it('does not toast a finished turn, including a failure', async () => {
+    vi.mocked(invokeCommand)
+      .mockResolvedValueOnce(snapshot({ id: 'seed', isRead: true, kind: { kind: 'settled', outcome: 'completed' } }))
+      .mockResolvedValueOnce(snapshot({ id: 'fail-1', isRead: false, kind: { kind: 'settled', outcome: 'failed' } }));
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+
+    const { result } = renderHook(() => useNotifications());
+    await waitFor(() => expect(result.current.unreadCount).toBe(1));
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(toast.agentSettled).not.toHaveBeenCalled();
+    expect(toast.agentApproval).not.toHaveBeenCalled();
+  });
+
+  it('toasts an approval only when the window is elsewhere and questions are enabled', async () => {
+    const approval = {
+      id: 'ask-1',
+      isRead: false,
+      isWaitingForInput: true,
+      kind: { kind: 'needsInput', requestKind: 'toolApproval' },
+      target: { source: 'codeThread', id: 'thread-1' },
+    };
+    vi.mocked(invokeCommand)
+      .mockResolvedValueOnce(snapshot({ id: 'seed', isRead: true, kind: { kind: 'settled', outcome: 'completed' } }))
+      .mockResolvedValueOnce(snapshot(approval));
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+
+    const { result } = renderHook(() => useNotifications());
+    await waitFor(() => expect(invokeCommand).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(toast.agentApproval).toHaveBeenCalledTimes(1);
+    expect(toast.agentSettled).not.toHaveBeenCalled();
+  });
+
+  it('keeps an approval in the thread when this window is already focused', async () => {
+    const approval = {
+      id: 'ask-2',
+      isRead: false,
+      isWaitingForInput: true,
+      kind: { kind: 'needsInput', requestKind: 'toolApproval' },
+    };
+    vi.mocked(invokeCommand)
+      .mockResolvedValueOnce(snapshot({ id: 'seed', isRead: true }))
+      .mockResolvedValueOnce(snapshot(approval));
+
+    const { result } = renderHook(() => useNotifications());
+    await waitFor(() => expect(invokeCommand).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(toast.agentApproval).not.toHaveBeenCalled();
+  });
+
+  it('stays quiet when questions from agents are turned off', async () => {
+    const approval = {
+      id: 'ask-3',
+      isRead: false,
+      isWaitingForInput: true,
+      kind: { kind: 'needsInput', requestKind: 'question' },
+    };
+    vi.mocked(invokeCommand)
+      .mockResolvedValueOnce(snapshot({ id: 'seed', isRead: true }, false))
+      .mockResolvedValueOnce(snapshot(approval, false));
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+
+    const { result } = renderHook(() => useNotifications());
+    await waitFor(() => expect(invokeCommand).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(toast.agentApproval).not.toHaveBeenCalled();
   });
 });

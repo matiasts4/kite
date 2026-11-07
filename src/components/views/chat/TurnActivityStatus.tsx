@@ -60,7 +60,9 @@ export function TurnActivityStatus({
       <p className="chat-turn-activity__working">{workingLine(turnStartUnixMs(items), now)}</p>
       {showBrain ? (
         <div className="chat-turn-activity__thinking">
-          <ActivityGlyph item={{ kind: 'reasoning' }} />
+          <span aria-hidden="true" className="chat-work-entry__glyph">
+            <ActivityGlyph item={{ kind: 'reasoning' }} size={16} />
+          </span>
           <span className="chat-activity-shine">Thinking</span>
         </div>
       ) : null}

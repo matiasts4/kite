@@ -27,7 +27,7 @@ import {
   switchWorkspaceBranch,
   createWorkspaceBranch,
 } from '../../../lib/ipc';
-import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
+import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
 import { TurnActivityStatus } from './TurnActivityStatus';
 import { ChatComposer } from './ChatComposer';
 import { SessionLifecycleBar } from './SessionLifecycleBar';
@@ -698,37 +698,52 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                       </div>
                     )}
 
-                    {displayedRows.map((row) =>
-                      row.kind === 'work' ? (
-                        <ChatWorkGroup
-                          key={row.id}
-                          items={row.items}
-                          running={running}
-                          enterFor={enterFor}
-                          interrupted={Boolean(thread.stoppedByBuilder)}
-                        />
-                      ) : (
-                        <ChatItemRow
-                          key={row.item.id}
-                          item={row.item}
-                          threadId={thread.id}
-                          enter={enterFor(row.item.id)}
-                          onEditUserMessage={(text) => {
-                            onChangePrompt(text);
-                            const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
-                            el?.focus();
-                          }}
-                        />
-                      )
-                    )}
+                    {displayedRows.map((row, index) => {
+                      const rowKey = row.kind === 'work' ? row.id : row.item.id;
+                      const liveAt = running ? liveActivityRowIndex(displayedRows) : -1;
+                      return (
+                        <React.Fragment key={rowKey}>
+                          {index === liveAt ? (
+                            <TurnActivityStatus
+                              running={running}
+                              pendingApproval={thread.pendingApproval}
+                              items={thread.items}
+                              interrupted={false}
+                              durationSeconds={thread.usage?.durationSeconds}
+                            />
+                          ) : null}
+                          {row.kind === 'work' ? (
+                            <ChatWorkGroup
+                              items={row.items}
+                              running={running}
+                              enterFor={enterFor}
+                              interrupted={Boolean(thread.stoppedByBuilder)}
+                            />
+                          ) : (
+                            <ChatItemRow
+                              item={row.item}
+                              threadId={thread.id}
+                              enter={enterFor(row.item.id)}
+                              onEditUserMessage={(text) => {
+                                onChangePrompt(text);
+                                const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+                                el?.focus();
+                              }}
+                            />
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
 
-                    <TurnActivityStatus
-                      running={running}
-                      pendingApproval={thread.pendingApproval}
-                      items={thread.items}
-                      interrupted={Boolean(thread.stoppedByBuilder) && !running}
-                      durationSeconds={thread.usage?.durationSeconds}
-                    />
+                    {liveActivityRowIndex(displayedRows) < 0 || !running ? (
+                      <TurnActivityStatus
+                        running={running}
+                        pendingApproval={thread.pendingApproval}
+                        items={thread.items}
+                        interrupted={Boolean(thread.stoppedByBuilder) && !running}
+                        durationSeconds={thread.usage?.durationSeconds}
+                      />
+                    ) : null}
 
                     {/* Quota Handoff Banner */}
                     {thread.quotaHandoffOffer && (

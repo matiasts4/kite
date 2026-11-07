@@ -135,7 +135,7 @@ describe('both transcript surfaces', () => {
         onApprovalDecision={() => undefined}
       />,
     );
-    expect(screen.getByText(/Working for/)).toBeInTheDocument();
+    expect(document.querySelector('.chat-turn-activity__working')?.textContent ?? '').toMatch(/Working ·/);
     expect(screen.getByText('Thinking')).toBeInTheDocument();
     expect(screen.queryByText('Thinking…')).not.toBeInTheDocument();
   });
@@ -169,7 +169,7 @@ describe('both transcript surfaces', () => {
         onUpdateConfig={() => undefined}
       />,
     );
-    expect(screen.getByText(/Working for/)).toBeInTheDocument();
+    expect(document.querySelector('.chat-turn-activity__working')?.textContent ?? '').toMatch(/Working ·/);
     expect(screen.getByText('Thinking')).toBeInTheDocument();
     expect(screen.queryByText('Thinking…')).not.toBeInTheDocument();
   });

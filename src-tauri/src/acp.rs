@@ -125,6 +125,73 @@ pub fn resolve_antigravity_acp_binary() -> Option<PathBuf> {
     None
 }
 
+fn scalar_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    } else if let Some(items) = value.as_array() {
+        let parts: Vec<&str> = items.iter().filter_map(|item| item.as_str()).collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
+    } else {
+        None
+    }
+}
+
+fn lookup_text(params: &Value, keys: &[&str]) -> Option<String> {
+    fn walk(params: &Value, keys: &[&str], depth: usize) -> Option<String> {
+        let obj = params.as_object()?;
+        for (key, value) in obj {
+            if keys.iter().any(|candidate| candidate.eq_ignore_ascii_case(key)) {
+                if let Some(text) = scalar_text(value) {
+                    return Some(text);
+                }
+            }
+        }
+        if depth >= 1 {
+            return None;
+        }
+        for (key, value) in obj {
+            if ["arguments", "args", "input", "parameters"]
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(key))
+            {
+                if let Some(found) = walk(value, keys, 1) {
+                    return Some(found);
+                }
+                if let Some(text) = value.as_str() {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                        if let Some(found) = walk(&parsed, keys, 1) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    if let Some(text) = params.as_str() {
+        let parsed = serde_json::from_str::<Value>(text).ok()?;
+        return walk(&parsed, keys, 0);
+    }
+    walk(params, keys, 0)
+}
+
+fn generic_tool_action(action: &str) -> bool {
+    matches!(
+        action.trim().to_ascii_lowercase().replace('_', " ").as_str(),
+        "read" | "read file" | "edit" | "edit file" | "write" | "write file" | "file" | "tool" | "tool execution"
+    )
+}
+
 pub(crate) fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option<String>, String, Option<String>, Option<String>, Option<usize>, Option<usize>) {
     let lower = raw_name.to_lowercase();
 
@@ -155,31 +222,27 @@ pub(crate) fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String,
         }
     }
 
-    let command = params
-        .get("CommandLine")
-        .or_else(|| params.get("command"))
-        .or_else(|| params.get("cmd"))
-        .and_then(|v| {
-            if let Some(s) = v.as_str() {
-                Some(s.to_string())
-            } else if let Some(arr) = v.as_array() {
-                let parts: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
-                if parts.is_empty() { None } else { Some(parts.join(" ")) }
-            } else {
-                None
-            }
-        });
+    let command = lookup_text(params, &["CommandLine", "command", "cmd"]);
 
-    let file_path = params
-        .get("TargetFile")
-        .or_else(|| params.get("AbsolutePath"))
-        .or_else(|| params.get("filePath"))
-        .or_else(|| params.get("file_path"))
-        .or_else(|| params.get("path"))
-        .or_else(|| params.get("target"))
-        .or_else(|| params.get("file"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let file_path = lookup_text(
+        params,
+        &[
+            "TargetFile",
+            "AbsolutePath",
+            "absolute_path",
+            "filePath",
+            "file_path",
+            "filepath",
+            "target_file",
+            "targetPath",
+            "path",
+            "target",
+            "file",
+            "uri",
+            "filename",
+            "file_name",
+        ],
+    );
 
     let pattern = params
         .get("pattern")
@@ -221,13 +284,8 @@ pub(crate) fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String,
         "dynamicToolCall"
     };
 
-    let explicit_action = params
-        .get("toolAction")
-        .or_else(|| params.get("toolSummary"))
-        .or_else(|| params.get("Instruction"))
-        .or_else(|| params.get("Description"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let explicit_action = lookup_text(params, &["toolAction", "toolSummary", "Instruction", "Description"])
+        .filter(|action| !generic_tool_action(action));
 
     let title = if let Some(action) = explicit_action {
         action
@@ -1520,6 +1578,24 @@ mod tests {
             }
             other => panic!("expected a notice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_file_keeps_a_capitalized_path() {
+        let params = serde_json::json!({
+            "Description": "Read file",
+            "EndLine": 50,
+            "Path": "C:/tmp/mcp/engram/mem_current_project.json",
+            "StartLine": 1
+        });
+        let (_kind, _server, title, command, file_path, _, _) =
+            classify_tool_metadata("read_file", &params);
+        assert!(command.is_none());
+        assert_eq!(
+            file_path.as_deref(),
+            Some("C:/tmp/mcp/engram/mem_current_project.json")
+        );
+        assert!(title.contains("mem_current_project.json"), "{title}");
     }
 
     #[test]

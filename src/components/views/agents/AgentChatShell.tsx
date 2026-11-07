@@ -7,7 +7,7 @@ import {
   CheckIcon,
   CalendarIcon,
 } from '../chat/ChatIcons';
-import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from '../chat/ChatItemRow';
+import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from '../chat/ChatItemRow';
 import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import { ChatComposer } from '../chat/ChatComposer';
 import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
@@ -624,40 +624,55 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                 }}
               >
                 <div className="chat-transcript__column">
-                  {groupTranscriptRows(activeThread.items).map((row) =>
-                    row.kind === 'work' ? (
-                      <ChatWorkGroup
-                        key={row.id}
-                        items={row.items}
-                        running={running}
-                        enterFor={enterFor}
-                        interrupted={Boolean(activeThread.stoppedByBuilder)}
-                      />
-                    ) : (
-                      <ChatItemRow
-                        key={row.item.id}
-                        item={row.item}
-                        threadId={activeThread.id}
-                        enter={enterFor(row.item.id)}
-                        onEditUserMessage={(text) => {
-                          onChangePrompt(text);
-                          const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
-                          if (el) {
-                            el.focus();
-                            el.setSelectionRange(text.length, text.length);
-                          }
-                        }}
-                      />
-                    )
-                  )}
+                  {groupTranscriptRows(activeThread.items).map((row, index, rows) => {
+                    const rowKey = row.kind === 'work' ? row.id : row.item.id;
+                    const liveAt = running ? liveActivityRowIndex(rows) : -1;
+                    return (
+                      <React.Fragment key={rowKey}>
+                        {index === liveAt ? (
+                          <TurnActivityStatus
+                            running={running}
+                            pendingApproval={activeThread.pendingApproval}
+                            items={activeThread.items}
+                            interrupted={false}
+                            durationSeconds={activeThread.usage?.durationSeconds}
+                          />
+                        ) : null}
+                        {row.kind === 'work' ? (
+                          <ChatWorkGroup
+                            items={row.items}
+                            running={running}
+                            enterFor={enterFor}
+                            interrupted={Boolean(activeThread.stoppedByBuilder)}
+                          />
+                        ) : (
+                          <ChatItemRow
+                            item={row.item}
+                            threadId={activeThread.id}
+                            enter={enterFor(row.item.id)}
+                            onEditUserMessage={(text) => {
+                              onChangePrompt(text);
+                              const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+                              if (el) {
+                                el.focus();
+                                el.setSelectionRange(text.length, text.length);
+                              }
+                            }}
+                          />
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
 
-                  <TurnActivityStatus
-                    running={running}
-                    pendingApproval={activeThread.pendingApproval}
-                    items={activeThread.items}
-                    interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
-                    durationSeconds={activeThread.usage?.durationSeconds}
-                  />
+                  {liveActivityRowIndex(groupTranscriptRows(activeThread.items)) < 0 || !running ? (
+                    <TurnActivityStatus
+                      running={running}
+                      pendingApproval={activeThread.pendingApproval}
+                      items={activeThread.items}
+                      interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
+                      durationSeconds={activeThread.usage?.durationSeconds}
+                    />
+                  ) : null}
 
                   {/* Quota Handoff Banner */}
                   {activeThread.quotaHandoffOffer && (

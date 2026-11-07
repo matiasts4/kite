@@ -20,17 +20,22 @@ export function useNotifications(): UseNotificationsResult {
 
   const processSnapshot = useCallback((snap: NotificationsSnapshot) => {
     const soundEnabled = snap.preferences?.finishSoundEnabled ?? true;
+    const asksForInput = snap.preferences?.inputRequestsEnabled !== false;
+    const lookingElsewhere = typeof document === 'undefined' || !document.hasFocus();
 
-    // Check for newly arrived unread notifications to trigger audio cue and ambient toast
+    // A toast is only for a question the user still has to answer, and only
+    // when this window is not already showing that question. A finished turn,
+    // including one that failed, stays in the thread.
     if (initialLoadDoneRef.current && Array.isArray(snap.records)) {
       for (const rec of snap.records as NotificationRecord[]) {
         if (!knownRecordIdsRef.current.has(rec.id) && !rec.isRead) {
           if (rec.kind?.kind === 'needsInput' && rec.isWaitingForInput) {
-            playApprovalChime(soundEnabled);
-            toast.agentApproval(rec);
-          } else if (rec.kind?.kind === 'settled') {
-            playCompletionChime(rec.kind.outcome !== 'failed', soundEnabled);
-            toast.agentSettled(rec);
+            if (lookingElsewhere && asksForInput) {
+              playApprovalChime(soundEnabled);
+              toast.agentApproval(rec);
+            }
+          } else if (rec.kind?.kind === 'settled' && rec.kind.outcome !== 'failed' && lookingElsewhere) {
+            playCompletionChime(true, soundEnabled);
           }
         }
       }

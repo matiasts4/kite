@@ -1430,7 +1430,8 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
                     }),
                 );
                 if decision != "denyAndStop" {
-                    push_event(run, json!({ "kind": "status", "status": "running" }));
+                    let status = if handle.is_some() { "running" } else { "idle" };
+                    push_event(run, json!({ "kind": "status", "status": status }));
                 }
             }
         }
@@ -1443,7 +1444,8 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
         if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
             thread["pendingApproval"] = Value::Null;
             if decision != "denyAndStop" {
-                thread["status"] = json!("running");
+                let status = if stdin_arc.is_some() { "running" } else { "idle" };
+                thread["status"] = json!(status);
             }
             touch(thread);
         }
@@ -1876,9 +1878,94 @@ pub fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_i
     }
 }
 
+/// A headless CLI that cannot ask prints this and stops. The permission name is
+/// the quoted word in `the "mcp" permission`. A long answer that merely mentions
+/// the sentence is left alone.
+pub fn headless_permission_denial(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.len() > 800 {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.contains("headless mode cannot prompt") || !lower.contains("auto-denied") {
+        return None;
+    }
+    let Some(open) = trimmed.find('"') else {
+        return Some("tool".to_string());
+    };
+    let rest = &trimmed[open + 1..];
+    let Some(end) = rest.find('"') else {
+        return Some("tool".to_string());
+    };
+    let name = rest[..end].trim();
+    if name.is_empty() || name.len() > 40 || name.contains(' ') {
+        return Some("tool".to_string());
+    }
+    Some(name.to_string())
+}
+
+fn open_headless_permission(thread_id: &str, run_id: &str, permission: &str) {
+    let request_id = format!("perm_{run_id}_headless");
+    let approval_val = json!({
+        "id": request_id,
+        "toolName": permission,
+        "title": format!("{permission} permission"),
+        "detail": format!("The {permission} tool was denied because headless mode cannot prompt."),
+        "risk": "unknown",
+        "impact": "Allow for session applies on the next send. This call already ended.",
+        "status": "pending"
+    });
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "approvalOpened", "approval": approval_val.clone() }));
+            push_event(run, json!({ "kind": "status", "status": "waiting" }));
+        }
+    }
+    live_cv().notify_all();
+    let profile_id = {
+        let mut items = threads().lock().unwrap();
+        if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
+            thread["pendingApproval"] = approval_val;
+            thread["status"] = json!("waiting");
+            touch(thread);
+            thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string())
+        } else {
+            None
+        }
+    };
+    let source = if profile_id.is_some() { "agentChat" } else { "codeThread" };
+    let notice = json!({
+        "id": request_id,
+        "runId": run_id,
+        "target": { "source": source, "id": thread_id },
+        "profileId": profile_id,
+        "routineId": Value::Null,
+        "kind": { "kind": "needsInput", "requestKind": "toolApproval" },
+        "resolution": Value::Null,
+        "createdAtUnixMs": now_ms(),
+        "isRead": false,
+        "isWaitingForInput": true
+    });
+    let mut notifs = notifications().lock().unwrap();
+    if let Some(pos) = notifs.iter().position(|n| n.get("id").and_then(|v| v.as_str()) == Some(request_id.as_str())) {
+        notifs[pos] = notice;
+    } else {
+        notifs.insert(0, notice);
+        if notifs.len() > 100 {
+            notifs.truncate(100);
+        }
+    }
+    persist();
+}
+
 pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str) {
     let clean = sanitize_chat_text(text);
     if clean.is_empty() {
+        return;
+    }
+    if let Some(permission) = headless_permission_denial(&clean) {
+        open_headless_permission(thread_id, run_id, &permission);
         return;
     }
     for chunk in chars_chunks(&clean, 8000) {
@@ -1949,17 +2036,30 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     };
 
     let final_item = chat_item(&assistant_id, "assistant", &assistant_text, false);
+    let mut waiting_for_permission = false;
 
     if !thread_id.is_empty() {
         let mut items = threads().lock().unwrap();
         if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id.as_str())) {
+            waiting_for_permission = thread
+                .get("pendingApproval")
+                .and_then(|value| value.as_object())
+                .is_some();
             if let Some(ref err_it) = error_item {
-                upsert_item(thread, err_it);
+                if !waiting_for_permission {
+                    upsert_item(thread, err_it);
+                }
             }
             if !assistant_text.is_empty() {
                 upsert_item(thread, &final_item);
             }
-            let final_status = if ok || stopped { "idle" } else { "error" };
+            let final_status = if waiting_for_permission {
+                "waiting"
+            } else if ok || stopped {
+                "idle"
+            } else {
+                "error"
+            };
             thread["status"] = json!(final_status);
 
             if let Some(arr) = thread.get_mut("items").and_then(|v| v.as_array_mut()) {
@@ -2137,19 +2237,25 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
         crate::agent_mind::apply_post_turn_reflection(pid, user_prompt, a_text);
     }
 
-    if let Some(routine_id) = routine_id.as_deref() {
-        if !thread_id.is_empty() {
-            settle_routine(run_id, &thread_id, routine_id, profile_for_routine.as_deref(), ok, stopped);
+    // The process already exited, but the person still has to answer. A settled
+    // notice here would announce a finished turn, including a failure chime.
+    if !waiting_for_permission {
+        if let Some(routine_id) = routine_id.as_deref() {
+            if !thread_id.is_empty() {
+                settle_routine(run_id, &thread_id, routine_id, profile_for_routine.as_deref(), ok, stopped);
+            }
+        } else if !thread_id.is_empty() {
+            settle_turn_notification(run_id, &thread_id, profile_for_routine.as_deref(), ok, stopped);
         }
-    } else if !thread_id.is_empty() {
-        settle_turn_notification(run_id, &thread_id, profile_for_routine.as_deref(), ok, stopped);
     }
 
     {
         let mut live = live_turns().lock().unwrap();
         if let Some(run) = live.runs.get_mut(run_id) {
             if let Some(ref err_it) = error_item {
-                append_event(run, json!({ "kind": "upsert", "item": err_it }), true);
+                if !waiting_for_permission {
+                    append_event(run, json!({ "kind": "upsert", "item": err_it }), true);
+                }
             }
             if let Some((ref handoff_item, ref offer)) = quota_events {
                 append_event(run, json!({ "kind": "upsert", "item": handoff_item }), true);
@@ -2159,9 +2265,15 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 if !assistant_text.is_empty() {
                     append_event(run, json!({ "kind": "upsert", "item": final_item }), true);
                 }
-                let final_status = if ok || stopped { "idle" } else { "error" };
-                append_event(run, json!({ "kind": "status", "status": final_status }), true);
-                append_event(run, json!({ "kind": "finished", "ok": ok && !stopped, "stoppedByBuilder": stopped }), true);
+                if waiting_for_permission {
+                    // The open transcript treats `finished` or idle/error as the
+                    // end of the turn and would hide the permission card.
+                    append_event(run, json!({ "kind": "status", "status": "waiting" }), true);
+                } else {
+                    let final_status = if ok || stopped { "idle" } else { "error" };
+                    append_event(run, json!({ "kind": "status", "status": final_status }), true);
+                    append_event(run, json!({ "kind": "finished", "ok": ok && !stopped, "stoppedByBuilder": stopped }), true);
+                }
                 run.finished = true;
             }
         }
@@ -2306,6 +2418,113 @@ mod tests {
 
     const OPENCODE_GO_CHAT: &str =
         "https://opencode.ai/inference/go/openai/v1/chat/completions";
+
+    #[test]
+    fn a_headless_permission_denial_names_the_tool_and_ignores_a_long_answer() {
+        let denial = "jetski: no output produced — a tool required the \"mcp\" permission that headless mode cannot prompt for, so it was auto-denied.";
+        assert_eq!(headless_permission_denial(denial).as_deref(), Some("mcp"));
+        let quoted = format!("The log said: {denial} and then the model kept writing. {}", "x".repeat(800));
+        assert_eq!(headless_permission_denial(&quoted), None);
+        assert_eq!(headless_permission_denial("the tool finished"), None);
+    }
+
+    struct HeadlessProbe {
+        thread_id: &'static str,
+        run_id: &'static str,
+    }
+
+    impl Drop for HeadlessProbe {
+        fn drop(&mut self) {
+            {
+                let mut live = live_turns().lock().unwrap();
+                live.runs.remove(self.run_id);
+                live.by_thread.remove(self.thread_id);
+            }
+            crate::chat::remove_thread(self.thread_id);
+        }
+    }
+
+    #[test]
+    fn a_headless_denial_stays_waiting_when_the_process_exits() {
+        let probe = HeadlessProbe {
+            thread_id: "headless-perm-thread",
+            run_id: "headless-perm-run",
+        };
+        {
+            let mut items = threads().lock().unwrap();
+            items.retain(|thread| thread.get("id").and_then(|v| v.as_str()) != Some(probe.thread_id));
+            items.push(json!({
+                "id": probe.thread_id,
+                "status": "waiting",
+                "title": "Probe",
+                "provider": "grok",
+                "pendingApproval": {
+                    "id": "perm_headless-perm-run_headless",
+                    "toolName": "mcp",
+                    "status": "pending"
+                },
+                "items": []
+            }));
+        }
+        {
+            let mut live = live_turns().lock().unwrap();
+            live.runs.insert(probe.run_id.to_string(), TurnRun {
+                revision: "rev".into(),
+                events: Vec::new(),
+                next_sequence: 0,
+                assistant_id: "asst".into(),
+                assistant_text: String::new(),
+                child: None,
+                stdin: None,
+                closing: false,
+                finished: false,
+                started_at_ms: now_ms(),
+                routine_id: None,
+            });
+            live.by_thread.insert(probe.thread_id.to_string(), probe.run_id.to_string());
+        }
+
+        finish_run(probe.run_id, false, false, "The provider command exited with an error.");
+
+        let stored = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(probe.thread_id))
+            .cloned()
+            .expect("probe thread");
+        assert_eq!(stored["status"], json!("waiting"));
+        assert!(stored["pendingApproval"].is_object());
+        let stored_items = stored.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        assert!(stored_items.iter().all(|item| item.get("kind").and_then(|v| v.as_str()) != Some("error")));
+
+        let live = live_turns().lock().unwrap();
+        let run = live.runs.get(probe.run_id).expect("probe run");
+        assert!(run.finished);
+        assert!(run.events.iter().all(|event| event.get("kind").and_then(|v| v.as_str()) != Some("finished")));
+        assert!(run.events.iter().any(|event| {
+            event.get("kind").and_then(|v| v.as_str()) == Some("status")
+                && event.get("status").and_then(|v| v.as_str()) == Some("waiting")
+        }));
+        assert!(run.events.iter().all(|event| {
+            event
+                .get("item")
+                .and_then(|item| item.get("kind"))
+                .and_then(|v| v.as_str())
+                != Some("error")
+        }));
+        drop(live);
+
+        let notices = notifications().lock().unwrap();
+        assert!(notices.iter().all(|notice| {
+            notice.get("runId").and_then(|v| v.as_str()) != Some(probe.run_id)
+                || notice
+                    .get("kind")
+                    .and_then(|kind| kind.get("kind"))
+                    .and_then(|v| v.as_str())
+                    != Some("settled")
+        }));
+    }
 
     fn send<'a>(
         model: Option<&'a str>,

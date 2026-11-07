@@ -3,12 +3,12 @@ import {
   BotIcon,
   BrainIcon,
   BrowserIcon,
-  CompassIcon,
-  CpuIcon,
   EyeIcon,
   GlobeIcon,
-  PencilIcon,
+  HammerIcon,
+  ListChecksIcon,
   SearchIcon,
+  SquarePenIcon,
   TerminalIcon,
   WrenchIcon,
 } from './ChatIcons';
@@ -16,14 +16,14 @@ import { activityIconKind, type ActivityIconKind, type ActivityItem } from './ac
 
 const GLYPHS: Record<ActivityIconKind, React.FC<{ size?: number }>> = {
   read: EyeIcon,
-  edit: PencilIcon,
+  edit: SquarePenIcon,
   shell: TerminalIcon,
   web: GlobeIcon,
   'code-search': SearchIcon,
   browser: BrowserIcon,
-  mcp: CpuIcon,
+  mcp: HammerIcon,
   subagent: BotIcon,
-  plan: CompassIcon,
+  plan: ListChecksIcon,
   reasoning: BrainIcon,
   tool: WrenchIcon,
 };

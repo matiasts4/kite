@@ -1202,8 +1202,8 @@ fn program_names(engine: &str) -> &'static [&'static str] {
     }
 }
 
-fn where_program(name: &str) -> Option<String> {
-    let path_var = std::env::var_os("PATH")?;
+fn search_path_var(name: &str, path_var: Option<std::ffi::OsString>) -> Option<String> {
+    let path_var = path_var?;
     let path_exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string())
@@ -1232,10 +1232,70 @@ fn where_program(name: &str) -> Option<String> {
     None
 }
 
+#[cfg(windows)]
+fn fresh_registry_path() -> Option<std::ffi::OsString> {
+    use std::process::Command;
+    let mut parts = Vec::new();
+    let query_keys = [
+        ("HKCU\\Environment", "Path"),
+        (
+            "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Environment",
+            "Path",
+        ),
+    ];
+    for (key, val_name) in query_keys {
+        if let Ok(output) = Command::new("reg")
+            .args(["query", key, "/v", val_name])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for line in s.lines() {
+                if let Some(idx) = line.find("REG_SZ") {
+                    let val = line[idx + "REG_SZ".len()..].trim();
+                    if !val.is_empty() {
+                        parts.push(val.to_string());
+                    }
+                } else if let Some(idx) = line.find("REG_EXPAND_SZ") {
+                    let val = line[idx + "REG_EXPAND_SZ".len()..].trim();
+                    if !val.is_empty() {
+                        parts.push(val.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(std::ffi::OsString::from(parts.join(";")))
+    }
+}
+
+fn where_program(name: &str) -> Option<String> {
+    if let Some(found) = search_path_var(name, std::env::var_os("PATH")) {
+        return Some(found);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(fresh_path) = fresh_registry_path() {
+            if let Some(found) = search_path_var(name, Some(fresh_path.clone())) {
+                if let Ok(curr) = std::env::var("PATH") {
+                    let updated = format!("{};{}", fresh_path.to_string_lossy(), curr);
+                    std::env::set_var("PATH", updated);
+                }
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn known_program_path(name: &str) -> Option<String> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let appdata = std::env::var("APPDATA").unwrap_or_default();
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
     let mut candidates = Vec::new();
     if name == "agy" {
         candidates.push(
@@ -1253,6 +1313,32 @@ fn known_program_path(name: &str) -> Option<String> {
                 .join("codex.exe"),
         );
     }
+    if name == "grok" {
+        candidates.push(
+            std::path::PathBuf::from(&home)
+                .join(".grok")
+                .join("bin")
+                .join("grok.exe"),
+        );
+        candidates.push(
+            std::path::PathBuf::from(&home)
+                .join(".grok")
+                .join("bin")
+                .join("grok"),
+        );
+    }
+    candidates.push(
+        std::path::PathBuf::from(&home)
+            .join(format!(".{name}"))
+            .join("bin")
+            .join(format!("{name}.exe")),
+    );
+    candidates.push(
+        std::path::PathBuf::from(&home)
+            .join(format!(".{name}"))
+            .join("bin")
+            .join(name),
+    );
     candidates.push(
         std::path::PathBuf::from(&appdata)
             .join("npm")
@@ -1266,9 +1352,21 @@ fn known_program_path(name: &str) -> Option<String> {
     );
     candidates.push(
         std::path::PathBuf::from(&home)
+            .join(".local")
+            .join("bin")
+            .join(name),
+    );
+    candidates.push(
+        std::path::PathBuf::from(&home)
             .join(".cargo")
             .join("bin")
             .join(format!("{name}.exe")),
+    );
+    candidates.push(
+        std::path::PathBuf::from(&home)
+            .join(".cargo")
+            .join("bin")
+            .join(name),
     );
     candidates
         .into_iter()
@@ -1662,6 +1760,7 @@ pub fn spawn_session_with_size(
         SpawnOptions {
             cols,
             rows,
+            auto_approve: is_agent_cli_engine(engine),
             ..Default::default()
         },
     )
@@ -1724,6 +1823,7 @@ pub fn spawn_session_with_options(
 
     let mut agent_terminal = false;
     let mut launcher = "powershell";
+    let mut resolved_program_path: Option<String> = None;
     let mut cmd = if let Some(ref hybrid_agent) = hybrid_agent_opt {
         // Hybrid shell resume: open PowerShell in the saved CWD and automatically invoke the agent's resume command
         let (agent_args, bound_id) = build_agent_cli_args_ext(
@@ -1739,6 +1839,7 @@ pub fn spawn_session_with_options(
         initial_detected_agent = Some(canonical_agent_engine(hybrid_agent));
 
         if let Some(program) = resolve_engine_program(hybrid_agent) {
+            resolved_program_path = Some(program.clone());
             agent_terminal = true;
             let (built, kind) = build_agent_command(&program, &agent_args, &target_dir);
             launcher = kind;
@@ -1750,6 +1851,7 @@ pub fn spawn_session_with_options(
             c
         }
     } else if let Some(program) = resolve_engine_program(engine) {
+        resolved_program_path = Some(program.clone());
         agent_terminal = true;
         let (agent_args, bound_id) = build_agent_cli_args_ext(
             engine,
@@ -1795,11 +1897,20 @@ pub fn spawn_session_with_options(
     cmd.env("KITE_SKILL_FILE", skill.display().to_string());
     let bin = crate::dispatch::cli::install_kite_shim();
     let inherited = std::env::var("PATH").unwrap_or_default();
-    let path_value = if inherited.is_empty() {
-        bin.display().to_string()
-    } else {
-        format!("{};{inherited}", bin.display())
-    };
+    let mut path_parts = vec![bin.display().to_string()];
+    if let Some(ref prog) = resolved_program_path {
+        if let Some(parent) = std::path::Path::new(prog).parent() {
+            let p_str = parent.display().to_string();
+            if !inherited.to_lowercase().contains(&p_str.to_lowercase()) {
+                path_parts.push(p_str);
+            }
+        }
+    }
+    if !inherited.is_empty() {
+        path_parts.push(inherited);
+    }
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let path_value = path_parts.join(sep);
     cmd.env("PATH", &path_value);
     cmd.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
     if agent_terminal {
@@ -2115,7 +2226,7 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
     let auto_approve = req
         .get("autoApprove")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or_else(|| is_agent_cli_engine(engine));
     let mut system_prompt = req
         .get("systemPrompt")
         .and_then(|v| v.as_str())
@@ -2462,6 +2573,11 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
         let resolved_pane_id = pane_id
             .or_else(|| persisted.as_ref().and_then(|p| p.pane_id.clone()));
 
+        let auto_approve = req
+            .get("autoApprove")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| is_agent_cli_engine(&engine));
+
         spawn_session_with_options(
             &session_id,
             &cwd,
@@ -2472,6 +2588,7 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
                 workspace_id: resolved_ws_id,
                 pane_id: resolved_pane_id,
                 mode,
+                auto_approve,
                 ..Default::default()
             },
         );
@@ -4744,6 +4861,44 @@ mod tests {
         assert_eq!(
             opencode_args,
             vec!["--auto", "--prompt", "Desarrolla la tarea ODD"]
+        );
+    }
+
+    #[test]
+    fn test_agent_cli_auto_approve_defaults() {
+        assert!(is_agent_cli_engine("antigravity"));
+        assert!(is_agent_cli_engine("agy"));
+        assert!(is_agent_cli_engine("claude-code"));
+        assert!(!is_agent_cli_engine("powershell"));
+        assert!(!is_agent_cli_engine("terminal"));
+
+        let (agy_no_prompt, _) = build_agent_cli_args_ext(
+            "agy",
+            "sess-agy-noprompt",
+            r"E:\kite",
+            &SpawnMode::Fresh,
+            None,
+            true,
+            None,
+        );
+        assert_eq!(agy_no_prompt, vec!["--dangerously-skip-permissions"]);
+
+        let (agy_resume, _) = build_agent_cli_args_ext(
+            "antigravity",
+            "sess-agy-res",
+            r"E:\kite",
+            &SpawnMode::Resume {
+                provider_session_id: Some("conv-123".to_string()),
+                allow_continue_fallback: true,
+                hybrid_shell_agent: None,
+            },
+            None,
+            true,
+            None,
+        );
+        assert_eq!(
+            agy_resume,
+            vec!["--conversation", "conv-123", "--dangerously-skip-permissions"]
         );
     }
 

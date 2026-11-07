@@ -161,6 +161,7 @@ export function useTerminalSession(options: UseTerminalSessionOptions) {
       }
 
       if (!restartedAgent) {
+        const autoApprove = isAgentEngine(currentEngine);
         await invokeCommand(attachExisting ? 'attach_terminal' : 'start_terminal', {
           sessionId: newSessionId,
           engine: currentEngine,
@@ -170,6 +171,7 @@ export function useTerminalSession(options: UseTerminalSessionOptions) {
           confirmedByBuilder: true,
           columns: measured.cols,
           rows: measured.rows,
+          autoApprove,
           // Ask the daemon for the packed grid stream so the canvas paints
           // `SNAPSHOT_BIN` frames and replenishes channel credit.
           mode: 'snapshot_bin',

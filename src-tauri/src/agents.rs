@@ -62,7 +62,7 @@ pub fn agent_profile_json(agent_id: &str) -> Value {
         "reflectionMode": "ask",
         "allowAgentScheduling": true,
         "allowAgentMessaging": true,
-        "defaultMode": "acceptEdits",
+        "defaultMode": "fullAccess",
         "defaultPlan": Value::Null,
         "defaultModel": Value::Null,
         "defaultProviderOptions": [],

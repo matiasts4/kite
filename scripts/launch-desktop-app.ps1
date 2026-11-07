@@ -13,9 +13,22 @@ $SrcTauriDir = Join-Path $ProjectRoot "src-tauri"
 $DistDir = Join-Path $ProjectRoot "dist"
 $SrcDir = Join-Path $ProjectRoot "src"
 
-# Configure temporary build directory on drive E: to guarantee ample space during compilation
-$env:TEMP = "E:\Temp"
-$env:TMP = "E:\Temp"
+# Prefer E:\Temp when that drive is present so Rust has room to compile.
+# Add-Type also writes its generated source there, so a missing drive must not replace TEMP.
+$originalTemp = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath().TrimEnd('\') }
+$originalTmp = if ($env:TMP) { $env:TMP } else { $originalTemp }
+if (Test-Path -LiteralPath "E:\") {
+    $buildTemp = "E:\Temp"
+    New-Item -ItemType Directory -Force -Path $buildTemp | Out-Null
+    $env:TEMP = $buildTemp
+    $env:TMP = $buildTemp
+} else {
+    if (-not (Test-Path -LiteralPath $originalTemp)) {
+        New-Item -ItemType Directory -Force -Path $originalTemp | Out-Null
+    }
+    $env:TEMP = $originalTemp
+    $env:TMP = $originalTmp
+}
 $env:WEBVIEW2_USER_DATA_FOLDER = "$env:LOCALAPPDATA\dev.kite.code.dev\EBWebView"
 
 # 1. Clean up old DEV GUI processes and locks (preserves installed production app and live kite-core --daemon)
@@ -252,7 +265,13 @@ public class DesktopManager {
     }
 }
 "@
-Add-Type -TypeDefinition $csharpSource -ErrorAction SilentlyContinue
+$desktopLauncherReady = $false
+try {
+    Add-Type -TypeDefinition $csharpSource -ErrorAction Stop
+    $desktopLauncherReady = $true
+} catch {
+    Write-Host "No se pudo preparar el lanzador de escritorio ($($_.Exception.Message)). Se usará Start-Process." -ForegroundColor Yellow
+}
 
 # 3b. Verify Rust backend freshness for real-time dev mode (or select NativeDeck binary)
 $launchArgs = $null
@@ -307,6 +326,9 @@ if ($NativeDeck) {
 Write-Host "[4/4] Lanzando $binary $launchArgs en la pantalla del usuario (WinSta0\Default)..." -ForegroundColor Cyan
 $appPid = 0
 try {
+    if (-not $desktopLauncherReady) {
+        throw "DesktopManager no está cargado"
+    }
     $appPid = [DesktopManager]::LaunchWithArgs($binary, $launchArgs, $ProjectRoot)
     Write-Host "Proceso lanzado con PID: $appPid en WinSta0\Default." -ForegroundColor Green
 } catch {
@@ -323,7 +345,13 @@ try {
 $found = $false
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 500
-    if ($appPid -gt 0) {
+    if ($appPid -le 0) {
+        $devProc = Get-Process -Name "kite-code" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Path -and ($_.Path -like "*\target\debug\*")
+        } | Select-Object -First 1
+        if ($devProc) { $appPid = $devProc.Id }
+    }
+    if ($appPid -gt 0 -and $desktopLauncherReady) {
         $windows = [DesktopManager]::CheckAndFocus($appPid)
         if ($windows.Count -gt 0) {
             Write-Host "¡Ventana detectada y enfocada en pantalla (PID: $appPid)!" -ForegroundColor Green
@@ -331,19 +359,12 @@ for ($i = 0; $i -lt 20; $i++) {
             $found = $true
             break
         }
-    } else {
-        $devProc = Get-Process -Name "kite-code" -ErrorAction SilentlyContinue | Where-Object {
-            $_.Path -and ($_.Path -like "*\target\debug\*")
-        } | Select-Object -First 1
-        if ($devProc) {
-            $appPid = $devProc.Id
-            $windows = [DesktopManager]::CheckAndFocus($appPid)
-            if ($windows.Count -gt 0) {
-                Write-Host "¡Ventana detectada y enfocada en pantalla (PID: $appPid)!" -ForegroundColor Green
-                $windows | ForEach-Object { Write-Host " - $_" -ForegroundColor Green }
-                $found = $true
-                break
-            }
+    } elseif ($appPid -gt 0) {
+        $alive = Get-Process -Id $appPid -ErrorAction SilentlyContinue
+        if ($alive) {
+            Write-Host "Proceso lanzado (PID: $appPid)." -ForegroundColor Green
+            $found = $true
+            break
         }
     }
 }

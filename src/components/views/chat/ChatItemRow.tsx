@@ -1,8 +1,7 @@
-import React, { useState, useId, useEffect, useRef } from 'react';
+import React, { useState, useId, useRef } from 'react';
 import { motion } from 'motion/react';
 import { tweens } from '../../../motion/standard/tokens';
 import {
-  ChevronRightIcon,
   AlertCircleIcon,
   FileCodeIcon,
   CheckIcon,
@@ -12,12 +11,17 @@ import {
 import type { ChatItem } from '../../../types';
 import { ActivityGlyph } from './activityGlyph';
 import {
+  activityTraceLabel,
   burstDurationSeconds,
-  commandStatusLabel,
   commandStatusWord,
+  expandableToolBody,
+  opensInFilesSidebar,
+  outputStatLabel,
   summarizeWorkBurst,
+  traceFilePath,
   workedForLine,
 } from './activityPresentation';
+import { prefersReducedMotion } from '../../../motion/contract';
 import { formatBytes } from './types';
 import { MarkdownMessage } from './MarkdownMessage';
 import { UnifiedDiffView } from './UnifiedDiffView';
@@ -72,33 +76,13 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   return result;
 }
 
-function useLiveDuration(active: boolean, createdAtUnixMs?: number, explicitSeconds?: number | null): string | null {
-  const startRef = useRef<number>(
-    createdAtUnixMs && createdAtUnixMs > 1_000_000_000_000 ? createdAtUnixMs : Date.now()
-  );
-  const [elapsedSec, setElapsedSec] = useState<number>(() => {
-    if (typeof explicitSeconds === 'number' && explicitSeconds > 0) return explicitSeconds;
-    if (!active) return 0;
-    return Math.max(0.1, (Date.now() - startRef.current) / 1000);
-  });
-
-  useEffect(() => {
-    if (typeof explicitSeconds === 'number' && explicitSeconds > 0) {
-      setElapsedSec(explicitSeconds);
-      return;
-    }
-    if (!active) return;
-    const timer = window.setInterval(() => {
-      setElapsedSec(Math.max(0.1, (Date.now() - startRef.current) / 1000));
-    }, 150);
-    return () => window.clearInterval(timer);
-  }, [active, explicitSeconds]);
-
-  if (typeof explicitSeconds === 'number' && explicitSeconds > 0) {
-    return explicitSeconds < 10 ? `${explicitSeconds.toFixed(1)}s` : `${Math.round(explicitSeconds)}s`;
-  }
-  if (elapsedSec <= 0.05) return null;
-  return elapsedSec < 10 ? `${elapsedSec.toFixed(1)}s` : `${Math.round(elapsedSec)}s`;
+/** Index of the trailing action group, so the working caption sits above it. */
+export function liveActivityRowIndex(rows: TranscriptRow[]): number {
+  const last = rows[rows.length - 1];
+  if (!last) return -1;
+  if (last.kind === 'work') return rows.length - 1;
+  if (last.kind === 'item' && last.item.kind === 'reasoning') return rows.length - 1;
+  return -1;
 }
 
 interface ParsedToolMeta {
@@ -189,18 +173,26 @@ export const ChatWorkEntry: React.FC<{
   enter = false,
 }) => {
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
   const id = useId();
   const isCommand = item.kind === 'command';
-  const hasText = Boolean(item.text && item.text.length > 0);
   const isFailed =
     item.status === 'failed' || (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0);
   const isCompleted = item.status === 'completed';
   const isRunning = Boolean(running || item.streaming || item.status === 'running' || item.status === 'inProgress');
-  const commandWord = isCommand ? commandStatusWord(item) : null;
-
-  const durationBadge = useLiveDuration(isRunning, item.createdAtUnixMs, item.durationSeconds);
+  const traceLabel = activityTraceLabel(item);
+  const statLabel = outputStatLabel(item.text);
+  const bodyText = expandableToolBody(item.text);
+  const openPath = traceFilePath(item);
+  const sidebarFile = opensInFilesSidebar(item);
+  const hasText = !sidebarFile && bodyText.length > 0;
   const meta = parseToolDisplayMeta(item);
+  const commandWord = isCommand || meta.toolKind === 'commandExecution' ? commandStatusWord(item) : null;
+  const failedMark =
+    commandWord === 'Failed' || commandWord === 'Declined' || commandWord === 'Stopped'
+      ? commandWord
+      : isFailed
+        ? 'Failed'
+        : null;
 
   const hasDiff = Boolean(
     item.text && (
@@ -209,15 +201,6 @@ export const ChatWorkEntry: React.FC<{
       item.text.includes('\n@@ -')
     )
   );
-
-  const livePreviewLines =
-    isRunning && !expanded && hasText && !hasDiff
-      ? item.text
-          .trim()
-          .split(/\r?\n/)
-          .filter((l) => l.trim().length > 0)
-          .slice(-2)
-      : [];
 
   const className = [
     'chat-work-entry',
@@ -233,7 +216,7 @@ export const ChatWorkEntry: React.FC<{
   return (
     <motion.div
       className={className}
-      initial={enter ? { opacity: 0, y: 4 } : false}
+      initial={enter && !prefersReducedMotion() ? { opacity: 0, y: 4 } : false}
       animate={{ opacity: 1, y: 0 }}
       transition={tweens.reveal}
     >
@@ -241,154 +224,56 @@ export const ChatWorkEntry: React.FC<{
         type="button"
         aria-expanded={hasText ? expanded : undefined}
         aria-controls={hasText ? id : undefined}
-        disabled={!hasText}
-        onClick={() => setExpanded((v) => !v)}
+        disabled={!hasText && !openPath}
+        title={openPath ? openPath : undefined}
+        onClick={(e) => {
+          if (e.button !== 0 || !openPath) {
+            if (!hasText) return;
+            setExpanded((v) => !v);
+            return;
+          }
+          const openInSidebar = sidebarFile || e.ctrlKey || e.metaKey;
+          if (openInSidebar) {
+            e.preventDefault();
+            openFileInRightDock({
+              candidate: openPath,
+              workspaceId: (item as { workspaceId?: string | null }).workspaceId || null,
+              collapseTree: true,
+              preferRendered: true,
+            });
+            return;
+          }
+          if (!hasText) return;
+          setExpanded((v) => !v);
+        }}
       >
-        <span aria-hidden="true" className={`chat-work-entry__glyph ${isRunning ? 'chat-work-entry__glyph--active' : ''}`}>
-          <ActivityGlyph item={item} />
+        <span aria-hidden="true" className="chat-work-entry__glyph">
+          <ActivityGlyph item={item} size={16} />
         </span>
 
-        {meta.serverName && (
-          <span className="chat-work-entry__mcp-badge" title={`MCP Server: ${meta.serverName}`}>
-            {meta.serverName}
-          </span>
-        )}
-
-        <strong className={isRunning ? 'chat-activity-shine' : undefined}>
-          {isCommand ? commandStatusLabel(item) : meta.titleText}
-        </strong>
-
-        {meta.detailText && (
-          <span
-            className="chat-work-entry__detail"
-            title="Ctrl + Click para previsualizar archivo"
-            onClick={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.button === 0) {
-                e.stopPropagation();
-                e.preventDefault();
-                openFileInRightDock({
-                  candidate: meta.detailText!,
-                  workspaceId: (item as any).workspaceId || null,
-                  collapseTree: true,
-                });
-              }
-            }}
-          >
-            {meta.detailText}
-          </span>
-        )}
-
-        {(meta.addedLines !== null || meta.removedLines !== null) && (
-          <span className="chat-work-entry__diff-stats" aria-label="Diff line changes">
-            {meta.addedLines !== null && meta.addedLines > 0 && (
-              <span className="chat-work-entry__diff-add">+{meta.addedLines}</span>
-            )}
-            {meta.removedLines !== null && meta.removedLines > 0 && (
-              <span className="chat-work-entry__diff-del">-{meta.removedLines}</span>
-            )}
-          </span>
-        )}
+        <strong className={isRunning ? 'chat-activity-shine' : undefined}>{traceLabel}</strong>
+        {statLabel ? <span className="chat-work-entry__meta">{statLabel}</span> : null}
 
         <i className="chat-work-entry__spacer" />
 
-        {meta.copyTarget && (
-          <span
-            role="button"
-            tabIndex={-1}
-            className="chat-work-entry__copy"
-            title={copied ? 'Copied!' : 'Copy'}
-            onClick={(e) => {
-              e.stopPropagation();
-              e.preventDefault();
-              navigator.clipboard?.writeText(meta.copyTarget || '');
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1400);
-            }}
-          >
-            {copied ? <CheckIcon size={10} /> : <CopyIcon size={10} />}
+        {failedMark ? (
+          <span className="chat-work-entry__status chat-work-entry__status--failed">
+            <AlertCircleIcon aria-hidden="true" size={12} strokeWidth={2} />
+            <span className="sr-only">{failedMark}</span>
           </span>
-        )}
-
-        {durationBadge && (
-          <span className={`chat-work-entry__duration ${isRunning ? 'chat-work-entry__duration--live' : ''}`}>
-            {durationBadge}
-          </span>
-        )}
-
-        {hasText && (
-          <ChevronRightIcon
-            aria-hidden="true"
-            size={8}
-            strokeWidth={2.5}
-            className={`chat-work-entry__chevron chat-chevron chat-chevron--flip ${
-              expanded ? 'chat-chevron--open' : ''
-            }`}
-          />
-        )}
-
-        <span
-          className={`chat-work-entry__status ${
-            isFailed || commandWord === 'Declined' || commandWord === 'Stopped'
-              ? 'chat-work-entry__status--failed'
-              : isCompleted
-                ? 'chat-work-entry__status--completed'
-                : isRunning
-                  ? 'chat-work-entry__status--running'
-                  : ''
-          }`}
-        >
-          {commandWord === 'Failed' || commandWord === 'Declined' || commandWord === 'Stopped' ? (
-            <>
-              <AlertCircleIcon aria-hidden="true" size={9} strokeWidth={3} />
-              <span className="sr-only">{commandWord}</span>
-            </>
-          ) : commandWord === 'Ran' ? (
-            <>
-              <CheckIcon aria-hidden="true" size={9} strokeWidth={3} />
-              <span className="sr-only">{commandWord}</span>
-            </>
-          ) : isFailed ? (
-            <>
-              <AlertCircleIcon aria-hidden="true" size={9} strokeWidth={3} />
-              <span className="sr-only">Failed</span>
-            </>
-          ) : isCompleted ? (
-            <>
-              <CheckIcon aria-hidden="true" size={9} strokeWidth={3} />
-              <span className="sr-only">Completed</span>
-            </>
-          ) : isRunning ? (
-            <>
-              <i aria-hidden="true" className="chat-work-entry__running" />
-              <span className="sr-only">Running</span>
-            </>
-          ) : null}
-        </span>
+        ) : null}
       </button>
 
-      {livePreviewLines.length > 0 && (
-        <div className="chat-work-entry__live-preview" onClick={() => setExpanded(true)}>
-          {livePreviewLines.map((line, idx) => (
-            <div key={idx} className="chat-work-entry__live-line">
-              {line}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {hasText && (
-        <div
-          className={`chat-collapsible ${expanded ? 'chat-collapsible--open' : ''}`}
-          aria-hidden={!expanded}
-        >
+      {hasText && expanded && (
+        <div className="chat-collapsible chat-collapsible--open">
           <div className="chat-collapsible__inner">
             <section aria-label="Operation details" id={id}>
               {hasDiff ? (
                 <div className="chat-work-entry__diff">
-                  <UnifiedDiffView diff={item.text} />
+                  <UnifiedDiffView diff={bodyText} />
                 </div>
               ) : (
-                <pre>{item.text}</pre>
+                <pre>{bodyText}</pre>
               )}
             </section>
           </div>
@@ -406,7 +291,6 @@ export const ChatWorkGroup: React.FC<{
   durationSeconds?: number | null;
 }> = ({ items, running, enterFor, interrupted = false, durationSeconds = null }) => {
   const [expanded, setExpanded] = useState(false);
-  const hiddenCount = Math.max(0, items.length - 1);
   const groupLive = items.some(
     (item) => item.streaming || item.status === 'running' || item.status === 'inProgress',
   );
@@ -415,59 +299,26 @@ export const ChatWorkGroup: React.FC<{
   const durationLine = interrupted
     ? null
     : workedForLine(durationSeconds ?? burstDurationSeconds(items));
-  const visibleItems = settled && !expanded && items.length > 1 ? [] : expanded ? items : items.slice(-1);
-
-  const completedCount = items.filter((i) => i.status === 'completed').length;
-  const failedCount = items.filter(
-    (i) => i.status === 'failed' || (i.exitCode !== null && i.exitCode !== undefined && i.exitCode !== 0)
-  ).length;
-  const runningCount = items.filter((i) => i.streaming || i.status === 'running' || i.status === 'inProgress').length;
-  const collapsedLabel = summary || `${items.length} actions`;
+  const showSummary = settled && items.length > 1;
+  const visibleItems = showSummary && !expanded ? [] : items;
+  const headerLabel = summary || `${items.length} actions`;
 
   return (
     <div className={`chat-work-group ${expanded && items.length > 1 ? 'chat-work-group--expanded' : ''}`}>
-      {hiddenCount > 0 && (
+      {showSummary && (
         <button
           type="button"
           aria-expanded={expanded}
           className="chat-work-group__toggle"
           onClick={() => setExpanded((v) => !v)}
         >
-          <ChevronRightIcon
-            size={10}
-            strokeWidth={2.5}
-            className={`chat-chevron chat-chevron--flip ${expanded ? 'chat-chevron--open' : ''}`}
-          />
-          <span className="chat-work-group__label">
-            {settled
-              ? expanded
-                ? `Hide ${items.length} actions`
-                : collapsedLabel
-              : expanded
-                ? `Hide ${items.length} actions`
-                : `+${hiddenCount} earlier`}
+          <span aria-hidden="true" className="chat-work-entry__glyph">
+            <ActivityGlyph item={items[0]} size={16} />
           </span>
+          <span className="chat-work-group__label">{headerLabel}</span>
           {settled && durationLine && !expanded ? (
-            <span className="chat-work-group__label">{durationLine}</span>
+            <span className="chat-work-group__duration">{durationLine}</span>
           ) : null}
-          <span className="chat-work-group__badges" aria-hidden="true">
-            {runningCount > 0 && (
-              <span className="chat-work-group__badge chat-work-group__badge--running">
-                <span className="chat-work-group__pulse" />
-                {completedCount}/{items.length}
-              </span>
-            )}
-            {failedCount > 0 && (
-              <span className="chat-work-group__badge chat-work-group__badge--failed">
-                {failedCount} {failedCount === 1 ? 'fallo' : 'fallos'}
-              </span>
-            )}
-            {runningCount === 0 && failedCount === 0 && (
-              <span className="chat-work-group__badge chat-work-group__badge--done">
-                ✓ {items.length} completadas
-              </span>
-            )}
-          </span>
         </button>
       )}
       <div className="chat-work-group__items">
@@ -668,13 +519,8 @@ export const ChatItemRow: React.FC<{
           title={expandedReasoning ? 'Collapse reasoning details' : 'Expand full reasoning'}
         >
           <span className="chat-reasoning-row__icon-wrap">
-            <ActivityGlyph item={item} />
+            <ActivityGlyph item={item} size={16} />
           </span>
-          <ChevronRightIcon
-            size={8}
-            strokeWidth={2.5}
-            className={`chat-chevron ${expandedReasoning ? 'chat-chevron--open' : ''}`}
-          />
           <strong className={`chat-reasoning-row__label${item.streaming && !thoughtSummary ? ' chat-activity-shine' : ''}`}>
             {item.streaming ? (thoughtSummary || 'Thinking') : 'Thought'}
           </strong>

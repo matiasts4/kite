@@ -985,7 +985,19 @@ fn fetch_live_quota(provider: &str) -> Option<LiveQuota> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_saved_accounts(request: Option<Value>) -> Value {
+pub async fn list_saved_accounts(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || list_saved_accounts_direct(request))
+        .await
+        .unwrap_or_else(|_| {
+            json!({
+                "schemaVersion": 1,
+                "profiles": [],
+                "unregisteredLiveSession": Value::Null
+            })
+        })
+}
+
+pub fn list_saved_accounts_direct(request: Option<Value>) -> Value {
     let req = crate::persist::body(&request);
     let provider = req
         .and_then(|r| r.get("provider"))
@@ -1916,6 +1928,13 @@ mod tests {
         assert_eq!(canon_provider("antigravity"), "agy");
         assert!(same_provider("antigravity", "agy"));
         assert!(!same_provider("agy", "gemini"));
+    }
+
+    #[test]
+    fn list_saved_accounts_direct_returns_schema_without_panicking() {
+        let value = list_saved_accounts_direct(Some(json!({ "provider": "agy" })));
+        assert_eq!(value.get("schemaVersion").and_then(|v| v.as_i64()), Some(1));
+        assert!(value.get("profiles").and_then(|v| v.as_array()).is_some());
     }
 
     #[test]

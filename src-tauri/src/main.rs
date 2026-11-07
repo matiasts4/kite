@@ -329,6 +329,9 @@ fn main() {
             if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
+            std::thread::spawn(|| {
+                let _ = crate::persist::initial_state();
+            });
             crate::chat::persistent::start_idle_reaper();
             // A detached core owns loopback dispatch; otherwise serve it here.
             if !crate::core_daemon::ensure_core_daemon_started() {

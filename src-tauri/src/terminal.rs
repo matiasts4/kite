@@ -1261,43 +1261,63 @@ fn search_path_var(name: &str, path_var: Option<std::ffi::OsString>) -> Option<S
     None
 }
 
-#[cfg(windows)]
-fn fresh_registry_path() -> Option<std::ffi::OsString> {
-    use std::process::Command;
-    let mut parts = Vec::new();
-    let query_keys = [
-        ("HKCU\\Environment", "Path"),
-        (
-            "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Environment",
-            "Path",
-        ),
-    ];
-    for (key, val_name) in query_keys {
-        if let Ok(output) = Command::new("reg")
-            .args(["query", key, "/v", val_name])
-            .output()
-        {
-            let s = String::from_utf8_lossy(&output.stdout);
-            for line in s.lines() {
-                if let Some(idx) = line.find("REG_SZ") {
-                    let val = line[idx + "REG_SZ".len()..].trim();
-                    if !val.is_empty() {
-                        parts.push(val.to_string());
-                    }
-                } else if let Some(idx) = line.find("REG_EXPAND_SZ") {
-                    let val = line[idx + "REG_EXPAND_SZ".len()..].trim();
-                    if !val.is_empty() {
-                        parts.push(val.to_string());
-                    }
-                }
+fn parse_reg_path_output(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let marker = if line.contains("REG_EXPAND_SZ") {
+            "REG_EXPAND_SZ"
+        } else if line.contains("REG_SZ") {
+            "REG_SZ"
+        } else {
+            continue;
+        };
+        if let Some(idx) = line.find(marker) {
+            let val = line[idx + marker.len()..].trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
             }
         }
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(std::ffi::OsString::from(parts.join(";")))
-    }
+    None
+}
+
+#[cfg(windows)]
+fn query_registry_path(key: &str, val_name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new("reg")
+        .args(["query", key, "/v", val_name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    parse_reg_path_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(windows)]
+fn fresh_registry_path() -> Option<std::ffi::OsString> {
+    static CACHED: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let query_keys = [
+                ("HKCU\\Environment", "Path"),
+                (
+                    "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Environment",
+                    "Path",
+                ),
+            ];
+            let mut parts = Vec::new();
+            for (key, val_name) in query_keys {
+                if let Some(val) = query_registry_path(key, val_name) {
+                    parts.push(val);
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(std::ffi::OsString::from(parts.join(";")))
+            }
+        })
+        .clone()
 }
 
 fn where_program(name: &str) -> Option<String> {
@@ -4750,6 +4770,30 @@ pub fn respawn_provider_terminals_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_reg_path_output_reads_reg_sz() {
+        let stdout = "\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_SZ    C:\\Tools;C:\\CLIs\r\n";
+        assert_eq!(
+            parse_reg_path_output(stdout).as_deref(),
+            Some("C:\\Tools;C:\\CLIs")
+        );
+    }
+
+    #[test]
+    fn parse_reg_path_output_prefers_expand_sz() {
+        let stdout = "\n    Path    REG_EXPAND_SZ    %USERPROFILE%\\.local\\bin\n";
+        assert_eq!(
+            parse_reg_path_output(stdout).as_deref(),
+            Some("%USERPROFILE%\\.local\\bin")
+        );
+    }
+
+    #[test]
+    fn parse_reg_path_output_skips_empty() {
+        assert_eq!(parse_reg_path_output("    Path    REG_SZ    \n"), None);
+        assert_eq!(parse_reg_path_output(""), None);
+    }
 
     #[test]
     fn resumed_grok_and_claude_keep_the_system_prompt() {

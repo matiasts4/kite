@@ -1261,6 +1261,7 @@ fn search_path_var(name: &str, path_var: Option<std::ffi::OsString>) -> Option<S
     None
 }
 
+#[cfg(test)]
 fn parse_reg_path_output(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let marker = if line.contains("REG_EXPAND_SZ") {
@@ -1281,16 +1282,96 @@ fn parse_reg_path_output(stdout: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
+fn expand_environment_strings(raw: &str) -> Option<String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+    unsafe {
+        let src = HSTRING::from(raw);
+        let needed = ExpandEnvironmentStringsW(&src, None);
+        if needed == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; needed as usize];
+        let written = ExpandEnvironmentStringsW(&src, Some(&mut buf));
+        if written == 0 {
+            return None;
+        }
+        let end = buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or((written as usize).saturating_sub(1));
+        let expanded = String::from_utf16_lossy(&buf[..end]);
+        if expanded.is_empty() {
+            None
+        } else {
+            Some(expanded)
+        }
+    }
+}
+
+/// Reads a registry string without spawning `reg.exe` (console-subsystem
+/// children flash Windows Terminal even with CREATE_NO_WINDOW).
+#[cfg(windows)]
 fn query_registry_path(key: &str, val_name: &str) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = Command::new("reg")
-        .args(["query", key, "/v", val_name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    parse_reg_path_output(&String::from_utf8_lossy(&output.stdout))
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+        KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+    };
+
+    let (root, subkey) = if let Some(rest) = key.strip_prefix("HKCU\\") {
+        (HKEY_CURRENT_USER, rest)
+    } else if let Some(rest) = key.strip_prefix("HKLM\\") {
+        (HKEY_LOCAL_MACHINE, rest)
+    } else {
+        return None;
+    };
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(root, &HSTRING::from(subkey), None, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+            return None;
+        }
+        let name = HSTRING::from(val_name);
+        let mut ty = REG_VALUE_TYPE(0);
+        let mut size = 0u32;
+        if RegQueryValueExW(hkey, &name, None, Some(&mut ty), None, Some(&mut size))
+            != ERROR_SUCCESS
+            || size == 0
+            || (ty != REG_SZ && ty != REG_EXPAND_SZ)
+        {
+            let _ = RegCloseKey(hkey);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let status = RegQueryValueExW(
+            hkey,
+            &name,
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        let word_count = (size as usize) / 2;
+        let words = std::slice::from_raw_parts(buf.as_ptr() as *const u16, word_count);
+        let trimmed = words.split(|&c| c == 0).next().unwrap_or(&[]);
+        if trimmed.is_empty() {
+            return None;
+        }
+        let raw = String::from_utf16_lossy(trimmed);
+        if ty == REG_EXPAND_SZ {
+            expand_environment_strings(&raw).or(Some(raw))
+        } else if raw.is_empty() {
+            None
+        } else {
+            Some(raw)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -4793,6 +4874,31 @@ mod tests {
     fn parse_reg_path_output_skips_empty() {
         assert_eq!(parse_reg_path_output("    Path    REG_SZ    \n"), None);
         assert_eq!(parse_reg_path_output(""), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn query_registry_path_reads_machine_path_without_reg_exe() {
+        let path = query_registry_path(
+            "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Environment",
+            "Path",
+        );
+        let path = path.expect("machine Path exists on Windows");
+        assert!(
+            path.contains('\\') || path.contains(';'),
+            "machine Path should look like directories, got {path:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_environment_strings_expands_windir() {
+        let expanded = expand_environment_strings("%WINDIR%").expect("WINDIR expands");
+        assert!(
+            expanded.contains('\\'),
+            "expanded WINDIR should be a path, got {expanded:?}"
+        );
+        assert!(!expanded.contains('%'), "got {expanded:?}");
     }
 
     #[test]

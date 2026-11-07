@@ -14,6 +14,8 @@ pub struct StartRequest {
     pub hidden: bool,
     /// The manual rides the engine's system-prompt argument. The port loads that text.
     pub manual_as_system: bool,
+    /// When non-empty, the process is this argv. The task is not also typed.
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +56,12 @@ pub trait Port {
     fn stop(&mut self, family: Family, id: &str) -> Result<(), DispatchError>;
 
     fn start_terminal(&mut self, request: &StartRequest) -> Result<Started, DispatchError>;
+
+    /// Write bytes exactly. Do not append Enter and do not play a flight.
+    fn type_bytes(&mut self, family: Family, id: &str, text: &str) -> Result<(), DispatchError>;
+
+    /// Ask the desktop to show a session that already exists.
+    fn reveal(&mut self, id: &str, engine: &str, name: Option<&str>) -> Result<(), DispatchError>;
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +69,7 @@ pub struct FakePort {
     pub writes: Vec<WriteRecord>,
     pub stops: Vec<(Family, String)>,
     pub starts: Vec<StartRequest>,
+    pub reveals: Vec<(String, String, Option<String>)>,
     pub buffers: Vec<((Family, String), String)>,
     next_id: u32,
 }
@@ -117,5 +126,22 @@ impl Port for FakePort {
             session_id: format!("term-{}", self.next_id),
             pane,
         })
+    }
+
+    fn type_bytes(&mut self, family: Family, id: &str, text: &str) -> Result<(), DispatchError> {
+        self.writes.push(WriteRecord {
+            family,
+            id: id.to_string(),
+            text: text.to_string(),
+            pty: true,
+            presentation: false,
+        });
+        Ok(())
+    }
+
+    fn reveal(&mut self, id: &str, engine: &str, name: Option<&str>) -> Result<(), DispatchError> {
+        self.reveals
+            .push((id.to_string(), engine.to_string(), name.map(|s| s.to_string())));
+        Ok(())
     }
 }

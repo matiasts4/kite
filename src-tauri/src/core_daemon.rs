@@ -611,6 +611,10 @@ pub fn handle_control_rpc_request(
                     "report" => crate::dispatch_wire::dispatch_report(Some(p.clone())),
                     "skill" => crate::dispatch_wire::dispatch_skill(),
                     "pane_shown" => crate::dispatch_wire::dispatch_pane_shown(Some(p.clone())),
+                    "kill" => crate::dispatch_wire::dispatch_kill(Some(p.clone())),
+                    "interrupt" => crate::dispatch_wire::dispatch_interrupt(Some(p.clone())),
+                    "keys" => crate::dispatch_wire::dispatch_keys(Some(p.clone())),
+                    "attach" => crate::dispatch_wire::dispatch_attach(Some(p.clone())),
                     _ => json!({ "error": format!("Unknown agent dispatch action: {}", action) }),
                 }
             };

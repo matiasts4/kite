@@ -889,6 +889,8 @@ pub struct SpawnOptions {
     pub initial_prompt: Option<String>,
     pub auto_approve: bool,
     pub system_prompt: Option<String>,
+    /// When set, this argv is the process. The agent CLI is not also started.
+    pub raw_argv: Option<Vec<String>>,
 }
 
 impl Default for SpawnOptions {
@@ -902,6 +904,7 @@ impl Default for SpawnOptions {
             initial_prompt: None,
             auto_approve: false,
             system_prompt: None,
+            raw_argv: None,
         }
     }
 }
@@ -1200,6 +1203,32 @@ fn program_names(engine: &str) -> &'static [&'static str] {
         "muse" => &["muse"],
         _ => &[],
     }
+}
+
+fn resolve_raw_program(word: &str) -> Option<String> {
+    let path = std::path::Path::new(word);
+    if path.is_file() {
+        return Some(word.to_string());
+    }
+    where_program(word)
+}
+
+/// `Ok(None)` means this start is not a raw argv. `Err` means the executable is missing.
+fn raw_argv_from_request(req: &serde_json::Value) -> Result<Option<Vec<String>>, ()> {
+    let Some(items) = req.get("argv").and_then(|value| value.as_array()) else {
+        return Ok(None);
+    };
+    let argv: Vec<String> = items
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    let Some(program) = argv.first().map(|word| word.trim()).filter(|word| !word.is_empty()) else {
+        return Err(());
+    };
+    if resolve_raw_program(program).is_none() {
+        return Err(());
+    }
+    Ok(Some(argv))
 }
 
 fn where_program(name: &str) -> Option<String> {
@@ -1724,7 +1753,15 @@ pub fn spawn_session_with_options(
 
     let mut agent_terminal = false;
     let mut launcher = "powershell";
-    let mut cmd = if let Some(ref hybrid_agent) = hybrid_agent_opt {
+    let mut cmd = if let Some(argv) = options.raw_argv.as_ref().filter(|argv| !argv.is_empty()) {
+        let mut c = CommandBuilder::new(&argv[0]);
+        if argv.len() > 1 {
+            c.args(&argv[1..]);
+        }
+        c.cwd(&target_dir);
+        launcher = "raw";
+        c
+    } else if let Some(ref hybrid_agent) = hybrid_agent_opt {
         // Hybrid shell resume: open PowerShell in the saved CWD and automatically invoke the agent's resume command
         let (agent_args, bound_id) = build_agent_cli_args_ext(
             hybrid_agent,
@@ -2048,6 +2085,13 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let raw_argv = match raw_argv_from_request(req) {
+        Ok(argv) => argv,
+        Err(()) => {
+            return serde_json::json!({ "error": "program_not_found" });
+        }
+    };
+
     let existing_scrollback = {
         let map = get_terminals().lock().unwrap();
         if let Some(inst) = map.get(&session_id) {
@@ -2138,6 +2182,7 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
             initial_prompt,
             auto_approve,
             system_prompt,
+            raw_argv,
         },
     );
 
@@ -4531,6 +4576,19 @@ pub fn respawn_provider_terminals_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_missing_raw_program_starts_no_session() {
+        let value = start_terminal_local_sync(serde_json::json!({
+            "engine": "kite-dispatch-no-such-program",
+            "argv": ["kite-dispatch-no-such-program"],
+        }));
+        assert_eq!(
+            value.get("error").and_then(|item| item.as_str()),
+            Some("program_not_found")
+        );
+        assert!(value.get("sessionId").is_none());
+    }
 
     #[test]
     fn direct_agent_executable_follows_npm_cmd_shim_and_skips_scripts() {

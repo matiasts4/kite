@@ -1569,6 +1569,10 @@ pub fn build_agent_cli_args_ext(
                         args.push("--permission-mode".to_string());
                         args.push("bypassPermissions".to_string());
                     }
+                    if let Some(sys) = system_prompt {
+                        args.push("--system-prompt".to_string());
+                        args.push(sys.to_string());
+                    }
                     if let Some(prompt) = initial_prompt {
                         args.push(prompt.to_string());
                     }
@@ -1595,6 +1599,10 @@ pub fn build_agent_cli_args_ext(
                     }
                     if auto_approve {
                         args.push("--always-approve".to_string());
+                    }
+                    if let Some(sys) = system_prompt {
+                        args.push("--system-prompt-override".to_string());
+                        args.push(sys.to_string());
                     }
                     if let Some(prompt) = initial_prompt {
                         args.push(prompt.to_string());
@@ -1696,6 +1704,43 @@ pub fn spawn_session_with_size(
     )
 }
 
+/// Puts the complete dispatch manual on a known agent.
+/// A system-prompt engine receives it as that argument, including on resume.
+/// Any other known agent receives it in the birth prompt. A resume does not
+/// turn that text into a new task. A raw argv is left untouched.
+fn attach_dispatch_manual(
+    engine: &str,
+    raw: bool,
+    resume: bool,
+    system_prompt: Option<String>,
+    initial_prompt: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if raw {
+        return (system_prompt, initial_prompt);
+    }
+    if crate::dispatch::programs::accepts_system_prompt(engine) {
+        let system_prompt =
+            system_prompt.or_else(|| Some(crate::dispatch::cli::skill_text().to_string()));
+        return (system_prompt, initial_prompt);
+    }
+    if resume || crate::dispatch::programs::canonical(engine).is_none() {
+        return (system_prompt, initial_prompt);
+    }
+    if initial_prompt
+        .as_deref()
+        .unwrap_or("")
+        .contains("Kite Dispatch")
+    {
+        return (system_prompt, initial_prompt);
+    }
+    let manual = crate::dispatch::cli::skill_text();
+    let initial_prompt = Some(match initial_prompt {
+        Some(task) if !task.trim().is_empty() => format!("{manual}\n\n{task}"),
+        _ => manual.to_string(),
+    });
+    (system_prompt, initial_prompt)
+}
+
 pub fn spawn_session_with_options(
     session_id: &str,
     cwd: &str,
@@ -1748,6 +1793,21 @@ pub fn spawn_session_with_options(
         _ => None,
     };
 
+    let resume = matches!(options.mode, SpawnMode::Resume { .. });
+    let raw = options
+        .raw_argv
+        .as_ref()
+        .filter(|argv| !argv.is_empty())
+        .is_some();
+    let manual_engine = hybrid_agent_opt.as_deref().unwrap_or(engine);
+    let (system_prompt, initial_prompt) = attach_dispatch_manual(
+        manual_engine,
+        raw,
+        resume,
+        options.system_prompt.clone(),
+        options.initial_prompt.clone(),
+    );
+
     let mut initial_provider_id: Option<String> = None;
     let mut initial_detected_agent: Option<String> = None;
 
@@ -1768,9 +1828,9 @@ pub fn spawn_session_with_options(
             session_id,
             &target_dir_str,
             &options.mode,
-            options.initial_prompt.as_deref(),
+            initial_prompt.as_deref(),
             options.auto_approve,
-            options.system_prompt.as_deref(),
+            system_prompt.as_deref(),
         );
         initial_provider_id = bound_id;
         initial_detected_agent = Some(canonical_agent_engine(hybrid_agent));
@@ -1793,9 +1853,9 @@ pub fn spawn_session_with_options(
             session_id,
             &target_dir_str,
             &options.mode,
-            options.initial_prompt.as_deref(),
+            initial_prompt.as_deref(),
             options.auto_approve,
-            options.system_prompt.as_deref(),
+            system_prompt.as_deref(),
         );
         initial_provider_id = bound_id;
         initial_detected_agent = Some(canonical_agent_engine(engine));
@@ -1862,7 +1922,7 @@ pub fn spawn_session_with_options(
     let trace_engine = initial_detected_agent
         .clone()
         .unwrap_or_else(|| engine.to_string());
-    let launch_text = options.initial_prompt.as_deref().unwrap_or("");
+    let launch_text = initial_prompt.as_deref().unwrap_or("");
     crate::dispatch::trace::record(&crate::dispatch::trace::handoff_event(
         "launch",
         launch_text,
@@ -1872,12 +1932,9 @@ pub fn spawn_session_with_options(
             engine: &trace_engine,
             status: "",
             pane: "",
-            writes: if options.initial_prompt.is_some() { 1 } else { 0 },
+            writes: if initial_prompt.is_some() { 1 } else { 0 },
             launcher,
-            manual: crate::dispatch::trace::manual_label(
-                options.system_prompt.is_some(),
-                launch_text,
-            ),
+            manual: crate::dispatch::trace::manual_label(system_prompt.is_some(), launch_text),
         },
     ));
 
@@ -4576,6 +4633,69 @@ pub fn respawn_provider_terminals_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resumed_grok_and_claude_keep_the_system_prompt() {
+        let grok = SpawnMode::Resume {
+            provider_session_id: Some("sess-1".into()),
+            allow_continue_fallback: false,
+            hybrid_shell_agent: None,
+        };
+        let (args, bound) = build_agent_cli_args_ext(
+            "grok",
+            "local",
+            "C:/tmp",
+            &grok,
+            Some("task"),
+            false,
+            Some("MANUAL"),
+        );
+        assert_eq!(bound.as_deref(), Some("sess-1"));
+        assert!(args.windows(2).any(|pair| pair == ["-r", "sess-1"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--system-prompt-override", "MANUAL"]));
+
+        let claude = SpawnMode::Resume {
+            provider_session_id: Some("not-a-session-file".into()),
+            allow_continue_fallback: false,
+            hybrid_shell_agent: None,
+        };
+        let (args, _) = build_agent_cli_args_ext(
+            "claude-code",
+            "local",
+            "C:/tmp",
+            &claude,
+            Some("task"),
+            false,
+            Some("MANUAL"),
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--system-prompt", "MANUAL"]));
+    }
+
+    #[test]
+    fn a_codex_birth_includes_the_manual_and_a_resume_does_not() {
+        let (system, prompt) =
+            attach_dispatch_manual("codex", false, false, None, Some("Look".into()));
+        assert!(system.is_none());
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("Look"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
+
+        let (system, prompt) = attach_dispatch_manual("codex", false, true, None, None);
+        assert!(system.is_none());
+        assert!(prompt.is_none());
+
+        let (system, prompt) =
+            attach_dispatch_manual("grok", false, true, None, Some("task".into()));
+        let system = system.unwrap();
+        assert!(system.contains("This text is the complete manual."));
+        assert!(!system.contains("KITE_SKILL_FILE"));
+        assert_eq!(prompt.as_deref(), Some("task"));
+    }
 
     #[test]
     fn dispatch_missing_raw_program_starts_no_session() {

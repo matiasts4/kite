@@ -22,7 +22,7 @@ Example: kite dispatch run grok \"Look at the login bug.\"
 The first word is the program. For a known agent, the remaining words are the task.
 A word that is neither a known agent nor a role file starts that program. The remaining words are its arguments, and they are not typed as a second prompt.
 An agent does not get a pane unless --pane. A person gets a pane unless --hidden. --hidden wins.
-The manual is in KITE_SKILL_FILE. The task arrives when the process starts.
+This text is the complete manual. Do not search the repository for these commands. Do not open a file to learn them. The task arrives when the process starts.
 A parent hears when a child enters blocked, done, error, or gone.
 Inbox files do not open panes. Delivery is this command.
 
@@ -786,7 +786,9 @@ mod tests {
         assert!(text.contains("kind permission"));
         assert!(text.contains("kite dispatch run <program>"));
         assert!(!text.contains("kite dispatch run <role>"));
-        assert!(text.contains("KITE_SKILL_FILE"));
+        assert!(text.contains("This text is the complete manual."));
+        assert!(text.contains("Do not search the repository"));
+        assert!(!text.contains("KITE_SKILL_FILE"));
         assert!(text.contains("--hidden"));
         assert!(text.contains("Inbox files do not open panes"));
         assert!(text.contains("An agent does not get a pane unless --pane"));
@@ -1039,7 +1041,9 @@ mod tests {
         let prompt = service.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Review the task."));
         assert!(prompt.contains("Revisa src/x.rs"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert_eq!(service.port_mut().pty_writes(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1222,7 +1226,8 @@ mod tests {
         let prompt = start.prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Preface from the role file."));
         assert!(prompt.contains("task text"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         let _ = std::fs::remove_dir_all(&dir);
     }

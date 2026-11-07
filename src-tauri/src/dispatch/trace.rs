@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 const TEXT_LIMIT: usize = 16_000;
 const BRACKET_START: &str = "\u{1b}[200~";
-const MANUAL_LINE: &str = "The manual is in KITE_SKILL_FILE.";
+const MANUAL_MARK: &str = "Kite Dispatch";
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -41,8 +41,8 @@ pub struct Fields<'a> {
 pub fn manual_label(system_prompt: bool, text: &str) -> &'static str {
     if system_prompt {
         "system-prompt"
-    } else if text.contains(MANUAL_LINE) {
-        "trailing-line"
+    } else if text.contains(MANUAL_MARK) {
+        "inline"
     } else {
         "none"
     }

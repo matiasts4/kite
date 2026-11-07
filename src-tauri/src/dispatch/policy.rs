@@ -1513,6 +1513,7 @@ impl Endpoint {
 }
 
 /// The process argument. A system-prompt engine keeps the manual out of this text.
+/// Every other known agent receives the complete manual here.
 fn receipt_status_label(status: ReceiptStatus) -> &'static str {
     match status {
         ReceiptStatus::Queued => "queued",
@@ -1541,10 +1542,13 @@ fn birth_prompt(body: &str, manual_as_system: bool) -> Option<String> {
         } else {
             Some(body.to_string())
         }
-    } else if body.is_empty() {
-        Some("The manual is in KITE_SKILL_FILE.".into())
     } else {
-        Some(format!("{body}\n\nThe manual is in KITE_SKILL_FILE."))
+        let manual = super::cli::skill_text();
+        if body.is_empty() {
+            Some(manual.to_string())
+        } else {
+            Some(format!("{manual}\n\n{body}"))
+        }
     }
 }
 
@@ -1815,7 +1819,9 @@ mod tests {
         assert_eq!(svc.port_mut().starts[0].engine, "codex");
         let prompt = svc.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Task body"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert!(!svc.port_mut().starts[0].manual_as_system);
         assert_eq!(svc.port_mut().pty_writes(), 0);
@@ -1849,7 +1855,9 @@ mod tests {
         assert_eq!(started.status, ReceiptStatus::Submitted);
         let prompt = svc.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Look at the tests"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert!(!svc.port_mut().starts[0].manual_as_system);
         assert_eq!(svc.port_mut().pty_writes(), 0);

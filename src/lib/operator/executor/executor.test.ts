@@ -263,8 +263,8 @@ describe('T5/S4 — close_terminals filter precedence & post-IPC exit', () => {
     expect(exitedSpy).toHaveBeenCalledWith('term-agy-1');
     expect(exitedSpy).not.toHaveBeenCalledWith('term-grok-1');
     expect(invokeCommand).toHaveBeenCalledWith(
-      'terminate_terminal',
-      expect.objectContaining({ sessionId: 'term-agy-1' })
+      'dispatch_kill',
+      expect.objectContaining({ address: 'session:term-agy-1' })
     );
   });
 
@@ -272,6 +272,20 @@ describe('T5/S4 — close_terminals filter precedence & post-IPC exit', () => {
     vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([antigravityOne] as any);
     const exitedSpy = vi.spyOn(terminalRegistry, 'markTerminalExited').mockImplementation(() => {});
     vi.mocked(invokeCommand).mockRejectedValueOnce(new Error('pty session already gone'));
+
+    const res = await appOperatorController.closeTerminals('antigravity');
+
+    expect(exitedSpy).not.toHaveBeenCalled();
+    expect(res.success).toBe(false);
+  });
+
+  it('does not mark a terminal exited when dispatch_kill returns a failed receipt', async () => {
+    vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([antigravityOne] as any);
+    const exitedSpy = vi.spyOn(terminalRegistry, 'markTerminalExited').mockImplementation(() => {});
+    vi.mocked(invokeCommand).mockResolvedValueOnce({
+      status: 'failed',
+      error: 'destination_gone',
+    } as any);
 
     const res = await appOperatorController.closeTerminals('antigravity');
 

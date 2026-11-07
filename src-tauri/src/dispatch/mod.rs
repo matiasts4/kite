@@ -6,6 +6,7 @@ pub mod audit;
 pub mod cli;
 pub mod envelope;
 pub mod files;
+pub mod keys;
 pub mod osc;
 pub mod policy;
 pub mod port;

@@ -19,9 +19,10 @@ Outside that environment the CLI still works for a person.
 Start another agent in one line:
   kite dispatch run <program> \"<task>\"
 Example: kite dispatch run grok \"Look at the login bug.\"
-The first word is the program. Remaining words are the task.
+The first word is the program. For a known agent, the remaining words are the task.
+A word that is neither a known agent nor a role file starts that program. The remaining words are its arguments, and they are not typed as a second prompt.
 An agent does not get a pane unless --pane. A person gets a pane unless --hidden. --hidden wins.
-The manual is in KITE_SKILL_FILE. The task arrives when the process starts.
+This text is the complete manual. Do not search the repository for these commands. Do not open a file to learn them. The task arrives when the process starts.
 A parent hears when a child enters blocked, done, error, or gone.
 Inbox files do not open panes. Delivery is this command.
 
@@ -38,6 +39,10 @@ Commands:
   kite dispatch wait <address> [--until idle,done,blocked] [--timeout <ms>] [--children all|any]
   kite dispatch read <address> [--lines 80]
   kite dispatch report --to <address> --body \"<text>\"
+  kite dispatch kill <address>
+  kite dispatch interrupt <address>
+  kite dispatch keys <address> <key...>
+  kite dispatch attach <address>
   kite dispatch skill
 
 Inside a Kite terminal the command is `kite` on PATH.
@@ -46,6 +51,12 @@ An agent does not get a pane unless --pane. A person gets a pane unless --hidden
 `ls` lines are `address`, then `alias:<name>` when set, then the engine when the run recorded one, then the state.
 When `--parent` is omitted and KITE_ADDRESS is `session:`, `thread:`, or `alias:`, that address is the parent. The words human and agent are not parents.
 `read` returns the screen text. It does not type.
+`wait` blocks until the destination matches or the timeout elapses. The default timeout is 30000 ms. A timeout exits 1 with error timeout.
+`interrupt` writes Ctrl+C and does not press Enter.
+`keys` writes the named keys and presses Enter only when the key is enter.
+`kill` ends that session and the children that do not outlive it.
+`attach` asks the desktop to show that session.
+`kill`, `interrupt`, `keys`, and `attach` work while the destination is working or blocked.
 
 Envelope:
 [kite from=\"<alias-or-address>\"]
@@ -82,6 +93,21 @@ pub enum Command {
         hidden: bool,
         pane: bool,
         program: Option<String>,
+        /// Remaining words after the program. Each word is one argument.
+        words: Vec<String>,
+    },
+    Kill {
+        address: String,
+    },
+    Interrupt {
+        address: String,
+    },
+    Keys {
+        address: String,
+        keys: Vec<String>,
+    },
+    Attach {
+        address: String,
     },
     Send {
         address: String,
@@ -127,7 +153,18 @@ pub fn parse_args(args: &[String]) -> Result<Command, DispatchError> {
         "wait" => parse_wait(&mut items),
         "read" => parse_read(&mut items),
         "report" => parse_report(&mut items),
+        "kill" => parse_address_command(&mut items, |address| Command::Kill { address }),
+        "interrupt" => parse_address_command(&mut items, |address| Command::Interrupt { address }),
+        "attach" => parse_address_command(&mut items, |address| Command::Attach { address }),
+        "keys" => parse_keys(&mut items),
         _ => Err(DispatchError::BadArgs),
+    }
+}
+
+pub fn blocking_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Wait { timeout_ms, .. }) => Some(timeout_ms),
+        _ => None,
     }
 }
 
@@ -179,6 +216,7 @@ fn parse_run<'a>(
         }
         program = Some(word);
     }
+    let words = positionals.clone();
     let task = if positionals.is_empty() {
         None
     } else {
@@ -197,7 +235,33 @@ fn parse_run<'a>(
         hidden,
         pane,
         program,
+        words,
     })
+}
+
+fn parse_address_command<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    build: impl FnOnce(String) -> Command,
+) -> Result<Command, DispatchError> {
+    let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    if address.starts_with("--") || items.next().is_some() {
+        return Err(DispatchError::BadArgs);
+    }
+    Ok(build(address))
+}
+
+fn parse_keys<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    if address.starts_with("--") {
+        return Err(DispatchError::BadArgs);
+    }
+    let keys: Vec<String> = items.map(|part| part.to_string()).collect();
+    if keys.is_empty() {
+        return Err(DispatchError::BadArgs);
+    }
+    Ok(Command::Keys { address, keys })
 }
 
 fn parse_send<'a>(
@@ -397,18 +461,6 @@ fn show_pane(hidden: bool, pane: bool, caller: Caller) -> bool {
     caller == Caller::Human
 }
 
-fn program_not_found(id: &str) -> Receipt {
-    Receipt::new(
-        id,
-        "run",
-        ReceiptStatus::Rejected,
-        "",
-        false,
-        None,
-        Some(DispatchError::ProgramNotFound.code().into()),
-    )
-}
-
 fn combine_task(file_text: Option<String>, words: Option<String>) -> Option<String> {
     match (file_text, words.filter(|value| !value.is_empty())) {
         (Some(mut file), Some(words)) => {
@@ -478,6 +530,7 @@ pub fn execute<P: Port>(
             hidden,
             pane,
             program,
+            words,
         } => {
             let file_text = match (file, ctx.workspace) {
                 (Some(path), Some(workspace)) => {
@@ -529,7 +582,30 @@ pub fn execute<P: Port>(
                     }
                 }
                 let Some(engine_name) = super::programs::canonical(word) else {
-                    return Ok(program_not_found(ctx.id));
+                    let mut argv = vec![word.clone()];
+                    if !words.is_empty() {
+                        argv.extend(words.clone());
+                    } else if let Some(rest) = task.clone().filter(|text| !text.is_empty()) {
+                        argv.push(rest);
+                    }
+                    let alias = name.clone().filter(|n| super::address::is_alias_name(n));
+                    return Ok(service.run(RunInput {
+                        id: ctx.id.to_string(),
+                        via: *via,
+                        engine: Some(word.clone()),
+                        command: Some(word.clone()),
+                        name: alias,
+                        parent,
+                        outlive: *outlive,
+                        role: None,
+                        role_missing: false,
+                        task: None,
+                        caller: ctx.caller,
+                        cwd,
+                        now_ms: ctx.now_ms,
+                        hidden: hide_pane,
+                        argv,
+                    }));
                 };
                 return Ok(service.run(RunInput {
                     id: ctx.id.to_string(),
@@ -546,6 +622,7 @@ pub fn execute<P: Port>(
                     cwd,
                     now_ms: ctx.now_ms,
                     hidden: hide_pane,
+                    argv: Vec::new(),
                 }));
             }
             Ok(service.run(RunInput {
@@ -563,6 +640,7 @@ pub fn execute<P: Port>(
                 cwd,
                 now_ms: ctx.now_ms,
                 hidden: hide_pane,
+                argv: Vec::new(),
             }))
         }
         Command::Send {
@@ -640,6 +718,10 @@ pub fn execute<P: Port>(
                 ctx.now_ms,
             ))
         }
+        Command::Kill { address } => Ok(service.kill(ctx.id, address)),
+        Command::Interrupt { address } => Ok(service.interrupt(ctx.id, address)),
+        Command::Keys { address, keys } => Ok(service.keys(ctx.id, address, keys)),
+        Command::Attach { address } => Ok(service.show(ctx.id, address)),
     }
 }
 
@@ -704,7 +786,9 @@ mod tests {
         assert!(text.contains("kind permission"));
         assert!(text.contains("kite dispatch run <program>"));
         assert!(!text.contains("kite dispatch run <role>"));
-        assert!(text.contains("KITE_SKILL_FILE"));
+        assert!(text.contains("This text is the complete manual."));
+        assert!(text.contains("Do not search the repository"));
+        assert!(!text.contains("KITE_SKILL_FILE"));
         assert!(text.contains("--hidden"));
         assert!(text.contains("Inbox files do not open panes"));
         assert!(text.contains("An agent does not get a pane unless --pane"));
@@ -864,6 +948,7 @@ mod tests {
                 hidden: false,
                 pane: false,
                 program: None,
+                words: Vec::new(),
             },
             &ExecContext {
                 id: "run-parent",
@@ -900,6 +985,7 @@ mod tests {
                 hidden: false,
                 pane: false,
                 program: None,
+                words: Vec::new(),
             },
             &ExecContext {
                 id: "run-human",
@@ -955,7 +1041,9 @@ mod tests {
         let prompt = service.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Review the task."));
         assert!(prompt.contains("Revisa src/x.rs"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert_eq!(service.port_mut().pty_writes(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1013,20 +1101,48 @@ mod tests {
     }
 
     #[test]
-    fn unknown_program_starts_nothing() {
-        let command = parse_args(&owned(&["dispatch", "run", "nosuch"])).unwrap();
+    fn unknown_word_starts_that_program_without_a_prompt() {
+        let command = parse_args(&owned(&["dispatch", "run", "cargo", "test"])).unwrap();
         let mut service = Service::new(FakePort::default());
-        let started = exec_run(&mut service, &command, "missing-program", Caller::Agent, None);
-        assert_eq!(started.status, ReceiptStatus::Rejected);
-        assert_eq!(started.error.as_deref(), Some("program_not_found"));
-        assert!(!started.submitted);
-        assert!(service.port_mut().starts.is_empty());
+        let started = exec_run(&mut service, &command, "cargo-test", Caller::Agent, None);
+        assert_eq!(started.status, ReceiptStatus::Submitted);
+        let start = &service.port_mut().starts[0];
+        assert_eq!(start.argv, vec!["cargo".to_string(), "test".to_string()]);
+        assert!(start.prompt.is_none());
 
         let review = parse_args(&owned(&["dispatch", "run", "review", "task"])).unwrap();
         let mut plain = Service::new(FakePort::default());
-        let rejected = exec_run(&mut plain, &review, "review-no-dir", Caller::Human, None);
-        assert_eq!(rejected.error.as_deref(), Some("program_not_found"));
-        assert!(plain.port_mut().starts.is_empty());
+        let started = exec_run(&mut plain, &review, "review-no-dir", Caller::Human, None);
+        assert_eq!(started.status, ReceiptStatus::Submitted);
+        let start = &plain.port_mut().starts[0];
+        assert_eq!(start.argv, vec!["review".to_string(), "task".to_string()]);
+        assert!(start.prompt.is_none());
+    }
+
+    #[test]
+    fn wait_defaults_to_thirty_seconds_and_control_commands_parse() {
+        assert_eq!(
+            blocking_wait_ms(&owned(&["dispatch", "wait", "review"])),
+            Some(30_000)
+        );
+        assert_eq!(
+            blocking_wait_ms(&owned(&["dispatch", "wait", "review", "--timeout", "1500"])),
+            Some(1_500)
+        );
+        assert!(blocking_wait_ms(&owned(&["dispatch", "ls"])).is_none());
+        let keys = parse_args(&owned(&["dispatch", "keys", "review", "up", "enter"])).unwrap();
+        match keys {
+            Command::Keys { address, keys } => {
+                assert_eq!(address, "review");
+                assert_eq!(keys, vec!["up".to_string(), "enter".to_string()]);
+            }
+            _ => panic!("expected keys"),
+        }
+        assert!(parse_args(&owned(&["dispatch", "kill"])).is_err());
+        assert!(matches!(
+            parse_args(&owned(&["dispatch", "interrupt", "review"])).unwrap(),
+            Command::Interrupt { .. }
+        ));
     }
 
     #[test]
@@ -1110,7 +1226,8 @@ mod tests {
         let prompt = start.prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Preface from the role file."));
         assert!(prompt.contains("task text"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         let _ = std::fs::remove_dir_all(&dir);
     }

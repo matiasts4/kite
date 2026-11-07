@@ -6,6 +6,7 @@ use std::path::Path;
 use super::address::{canonical, is_alias_name, parse_address, AddrRef};
 use super::envelope::{last_lines, wrap_envelope};
 use super::files::read_workspace_file;
+use super::keys::encode_key;
 use super::osc::{parse_osc_7501, OscReport};
 use super::port::{Port, StartRequest, SubmitMeta};
 use super::programs::accepts_system_prompt;
@@ -96,6 +97,8 @@ pub struct RunInput {
     pub cwd: Option<String>,
     pub now_ms: u64,
     pub hidden: bool,
+    /// Non-empty means the process argv. The task is not also a birth prompt.
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,24 +669,33 @@ impl<P: Port> Service<P> {
             .or(input.engine.clone())
             .or(input.command.clone())
             .unwrap_or_else(|| "powershell".into());
-        let opening = match input.role.as_ref() {
-            Some(role) => {
-                let mut body = role.body.clone();
-                if let Some(task) = input.task.as_deref() {
-                    if !body.is_empty() && !task.is_empty() {
-                        body.push_str("\n\n");
+        let raw = !input.argv.is_empty();
+        let opening = if raw {
+            String::new()
+        } else {
+            match input.role.as_ref() {
+                Some(role) => {
+                    let mut body = role.body.clone();
+                    if let Some(task) = input.task.as_deref() {
+                        if !body.is_empty() && !task.is_empty() {
+                            body.push_str("\n\n");
+                        }
+                        body.push_str(task);
                     }
-                    body.push_str(task);
+                    body
                 }
-                body
+                None => input.task.clone().unwrap_or_default(),
             }
-            None => input.task.clone().unwrap_or_default(),
         };
         if opening.chars().count() > BODY_LIMIT {
             return self.finish(rejected(&input.id, "run", "", DispatchError::BodyTooLarge));
         }
-        let manual_as_system = accepts_system_prompt(&engine);
-        let prompt = birth_prompt(&opening, manual_as_system);
+        let manual_as_system = !raw && accepts_system_prompt(&engine);
+        let prompt = if raw {
+            None
+        } else {
+            birth_prompt(&opening, manual_as_system)
+        };
         let started = self.port.start_terminal(&StartRequest {
             engine: engine.clone(),
             command: input.command.clone().or(input.role.as_ref().map(|r| r.command.clone())),
@@ -692,6 +704,7 @@ impl<P: Port> Service<P> {
             prompt: prompt.clone(),
             hidden: input.hidden,
             manual_as_system,
+            argv: input.argv.clone(),
         });
         let started = match started {
             Ok(started) => started,
@@ -772,6 +785,7 @@ impl<P: Port> Service<P> {
                 cwd: cwd.clone(),
                 now_ms,
                 hidden,
+                argv: Vec::new(),
             }),
             Err(_) => self.run(RunInput {
                 id: id.to_string(),
@@ -788,6 +802,7 @@ impl<P: Port> Service<P> {
                 cwd,
                 now_ms,
                 hidden,
+                argv: Vec::new(),
             }),
         }
     }
@@ -814,6 +829,152 @@ impl<P: Port> Service<P> {
     pub fn stop(&mut self, address: &str) -> Result<(), DispatchError> {
         let key = self.resolve(address)?;
         self.stop_key(&key)
+    }
+
+    /// Ends the session. An unseen `session:` id is still stopped.
+    pub fn kill(&mut self, id: &str, address: &str) -> Receipt {
+        if let Some(existing) = self.receipts.get(id) {
+            return existing.clone();
+        }
+        if !self.online {
+            return self.finish(rejected(id, "kill", address, DispatchError::RuntimeOffline));
+        }
+        match self.resolve(address) {
+            Ok(key) => match self.stop_key(&key) {
+                Ok(()) => self.finish(Receipt::new(
+                    id,
+                    "kill",
+                    ReceiptStatus::Settled,
+                    address,
+                    false,
+                    Some(PresenceState::Gone.as_str().into()),
+                    None,
+                )),
+                Err(err) => self.finish(rejected(id, "kill", address, err)),
+            },
+            Err(err) => {
+                if let Some(session) = address.strip_prefix("session:") {
+                    if session.is_empty() {
+                        return self.finish(rejected(id, "kill", address, DispatchError::BadArgs));
+                    }
+                    return match self.port.stop(Family::Terminal, session) {
+                        Ok(()) => self.finish(Receipt::new(
+                            id,
+                            "kill",
+                            ReceiptStatus::Settled,
+                            address,
+                            false,
+                            Some(PresenceState::Gone.as_str().into()),
+                            None,
+                        )),
+                        Err(stop_err) => self.finish(rejected(id, "kill", address, stop_err)),
+                    };
+                }
+                self.finish(rejected(id, "kill", address, err))
+            }
+        }
+    }
+
+    /// Writes Ctrl+C. Does not press Enter and does not use the send gate.
+    pub fn interrupt(&mut self, id: &str, address: &str) -> Receipt {
+        self.write_control(id, "interrupt", address, "\u{3}")
+    }
+
+    /// Writes the named keys. Enter is written only when a key is `enter`.
+    pub fn keys(&mut self, id: &str, address: &str, names: &[String]) -> Receipt {
+        if let Some(existing) = self.receipts.get(id) {
+            return existing.clone();
+        }
+        if names.is_empty() {
+            return self.finish(rejected(id, "keys", address, DispatchError::BadArgs));
+        }
+        let mut bytes = String::new();
+        for name in names {
+            match encode_key(name) {
+                Some(part) => bytes.push_str(&part),
+                None => return self.finish(rejected(id, "keys", address, DispatchError::BadArgs)),
+            }
+        }
+        self.write_control(id, "keys", address, &bytes)
+    }
+
+    /// Asks the desktop to show a session that already exists.
+    pub fn show(&mut self, id: &str, address: &str) -> Receipt {
+        if let Some(existing) = self.receipts.get(id) {
+            return existing.clone();
+        }
+        if !self.online {
+            return self.finish(rejected(id, "attach", address, DispatchError::RuntimeOffline));
+        }
+        let key = match self.resolve(address) {
+            Ok(key) => key,
+            Err(err) => return self.finish(rejected(id, "attach", address, err)),
+        };
+        let (session, engine, name) = {
+            let ep = match self.endpoints.get(&key) {
+                Some(ep) => ep,
+                None => {
+                    return self.finish(rejected(id, "attach", address, DispatchError::UnknownAddress))
+                }
+            };
+            if ep.family != Family::Terminal {
+                return self.finish(rejected(
+                    id,
+                    "attach",
+                    address,
+                    DispatchError::TransportUnsupported,
+                ));
+            }
+            (
+                ep.id.clone(),
+                ep.engine.clone().unwrap_or_default(),
+                ep.alias.clone(),
+            )
+        };
+        match self.port.reveal(&session, &engine, name.as_deref()) {
+            Ok(()) => self.finish(Receipt::new(
+                id,
+                "attach",
+                ReceiptStatus::Settled,
+                address,
+                false,
+                None,
+                None,
+            )),
+            Err(err) => self.finish(rejected(id, "attach", address, err)),
+        }
+    }
+
+    fn write_control(&mut self, id: &str, op: &str, address: &str, bytes: &str) -> Receipt {
+        if let Some(existing) = self.receipts.get(id) {
+            return existing.clone();
+        }
+        if !self.online {
+            return self.finish(rejected(id, op, address, DispatchError::RuntimeOffline));
+        }
+        let key = match self.resolve(address) {
+            Ok(key) => key,
+            Err(err) => return self.finish(rejected(id, op, address, err)),
+        };
+        let (family, session) = {
+            let ep = match self.endpoints.get(&key) {
+                Some(ep) => ep,
+                None => return self.finish(rejected(id, op, address, DispatchError::UnknownAddress)),
+            };
+            (ep.family, ep.id.clone())
+        };
+        match self.port.type_bytes(family, &session, bytes) {
+            Ok(()) => self.finish(Receipt::new(
+                id,
+                op,
+                ReceiptStatus::Submitted,
+                address,
+                true,
+                None,
+                None,
+            )),
+            Err(err) => self.finish(rejected(id, op, address, err)),
+        }
     }
 
     pub fn ls(&self) -> Vec<String> {
@@ -1179,15 +1340,22 @@ impl<P: Port> Service<P> {
                 return Ok(());
             }
             ep.live = false;
-            ep.observed = Some(Presence {
+            let seq = ep
+                .reported
+                .as_ref()
+                .map(|presence| presence.seq.saturating_add(1))
+                .unwrap_or(1);
+            let gone = |authority| Presence {
                 state: PresenceState::Gone,
                 kind: None,
                 message: None,
                 app: None,
-                seq: u64::MAX,
-                authority: Authority::Observed,
+                seq,
+                authority,
                 at_ms: 0,
-            });
+            };
+            ep.reported = Some(gone(Authority::Reported));
+            ep.observed = Some(gone(Authority::Observed));
             (ep.family, ep.id.clone(), ep.alias.clone())
         };
         if let Some(alias) = alias {
@@ -1345,6 +1513,7 @@ impl Endpoint {
 }
 
 /// The process argument. A system-prompt engine keeps the manual out of this text.
+/// Every other known agent receives the complete manual here.
 fn receipt_status_label(status: ReceiptStatus) -> &'static str {
     match status {
         ReceiptStatus::Queued => "queued",
@@ -1373,10 +1542,13 @@ fn birth_prompt(body: &str, manual_as_system: bool) -> Option<String> {
         } else {
             Some(body.to_string())
         }
-    } else if body.is_empty() {
-        Some("The manual is in KITE_SKILL_FILE.".into())
     } else {
-        Some(format!("{body}\n\nThe manual is in KITE_SKILL_FILE."))
+        let manual = super::cli::skill_text();
+        if body.is_empty() {
+            Some(manual.to_string())
+        } else {
+            Some(format!("{manual}\n\n{body}"))
+        }
     }
 }
 
@@ -1647,7 +1819,9 @@ mod tests {
         assert_eq!(svc.port_mut().starts[0].engine, "codex");
         let prompt = svc.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Task body"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert!(!svc.port_mut().starts[0].manual_as_system);
         assert_eq!(svc.port_mut().pty_writes(), 0);
@@ -1676,11 +1850,14 @@ mod tests {
             cwd: None,
             now_ms: 1_000,
             hidden: false,
+            argv: Vec::new(),
         });
         assert_eq!(started.status, ReceiptStatus::Submitted);
         let prompt = svc.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Look at the tests"));
-        assert!(prompt.contains("The manual is in KITE_SKILL_FILE."));
+        assert!(prompt.contains("This text is the complete manual."));
+        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert!(!svc.port_mut().starts[0].manual_as_system);
         assert_eq!(svc.port_mut().pty_writes(), 0);
@@ -1707,6 +1884,7 @@ mod tests {
             cwd: None,
             now_ms: 3_000,
             hidden: true,
+            argv: Vec::new(),
         });
         assert_eq!(grok.status, ReceiptStatus::Submitted);
         assert_eq!(grok.pane, Some(crate::dispatch::types::PaneVisibility::Hidden));
@@ -1861,5 +2039,99 @@ mod tests {
             .writes
             .iter()
             .all(|w| !w.text.contains("state: blocked") && !w.text.contains("state: gone")));
+    }
+
+    #[test]
+    fn a_report_blocks_send_until_the_session_is_killed() {
+        let mut svc = service();
+        svc.attach(Family::Terminal, "s1", Some("review"), None, false)
+            .unwrap();
+        assert!(svc
+            .publish_osc("review", "state=blocked:seq=2", 1_000)
+            .unwrap());
+        svc.publish_pane("review", "idle", 1_700_000_000_000, 1_100, None, None)
+            .unwrap();
+        let blocked = svc.send(send_to("review", "blocked-send", "hi", Caller::Agent));
+        assert_eq!(blocked.error.as_deref(), Some("destination_blocked"));
+        assert_eq!(svc.port_mut().pty_writes(), 0);
+
+        let killed = svc.kill("kill-review", "review");
+        assert_eq!(killed.status, ReceiptStatus::Settled);
+        assert_eq!(killed.presence_at_submit.as_deref(), Some("gone"));
+        assert!(svc.ls().is_empty());
+        assert!(svc.port_mut().stops.iter().any(|(_, id)| id == "s1"));
+    }
+
+    #[test]
+    fn kill_stops_a_session_the_service_has_not_attached() {
+        let mut svc = service();
+        let killed = svc.kill("kill-raw", "session:missing-pane");
+        assert_eq!(killed.status, ReceiptStatus::Settled);
+        assert!(svc
+            .port_mut()
+            .stops
+            .iter()
+            .any(|(family, id)| *family == Family::Terminal && id == "missing-pane"));
+    }
+
+    #[test]
+    fn interrupt_writes_ctrl_c_while_blocked_and_keys_do_not_add_enter() {
+        let mut svc = service();
+        svc.attach(Family::Terminal, "s1", Some("review"), None, false)
+            .unwrap();
+        svc.publish_osc("review", "state=working:seq=3", 1_000)
+            .unwrap();
+        let interrupted = svc.interrupt("int-1", "review");
+        assert_eq!(interrupted.status, ReceiptStatus::Submitted);
+        assert_eq!(svc.port_mut().writes.len(), 1);
+        assert_eq!(svc.port_mut().writes[0].text, "\u{3}");
+        assert!(svc.port_mut().writes[0].pty);
+        assert!(!svc.port_mut().writes[0].presentation);
+
+        let typed = svc.keys("keys-1", "review", &["up".into(), "enter".into()]);
+        assert_eq!(typed.status, ReceiptStatus::Submitted);
+        assert_eq!(svc.port_mut().writes[1].text, "\u{1b}[A\r");
+
+        let rejected = svc.keys("keys-bad", "review", &["not-a-key".into()]);
+        assert_eq!(rejected.error.as_deref(), Some("bad_args"));
+        assert_eq!(svc.port_mut().writes.len(), 2);
+    }
+
+    #[test]
+    fn attach_reveals_the_session_and_raw_argv_is_not_a_prompt() {
+        let mut svc = service();
+        svc.attach(Family::Terminal, "s1", Some("review"), None, false)
+            .unwrap();
+        if let Some(ep) = svc.endpoints.get_mut("session:s1") {
+            ep.engine = Some("codex".into());
+        }
+        let shown = svc.show("show-1", "review");
+        assert_eq!(shown.status, ReceiptStatus::Settled);
+        assert_eq!(
+            svc.port_mut().reveals,
+            vec![("s1".into(), "codex".into(), Some("review".into()))]
+        );
+
+        let started = svc.run(RunInput {
+            id: "raw-1".into(),
+            via: Family::Terminal,
+            engine: Some("cargo".into()),
+            command: Some("cargo".into()),
+            name: None,
+            parent: None,
+            outlive: false,
+            role: None,
+            role_missing: false,
+            task: Some("do not type this".into()),
+            caller: Caller::Agent,
+            cwd: None,
+            now_ms: 10,
+            hidden: true,
+            argv: vec!["cargo".into(), "test".into()],
+        });
+        assert_eq!(started.status, ReceiptStatus::Submitted);
+        let start = &svc.port_mut().starts[0];
+        assert_eq!(start.argv, vec!["cargo".to_string(), "test".to_string()]);
+        assert!(start.prompt.is_none());
     }
 }

@@ -1,4 +1,4 @@
-//! Presence record. Reported authority wins only when its sequence is newer.
+//! Presence record. A current program report wins over a later screen observation.
 
 use serde::Serialize;
 
@@ -115,11 +115,13 @@ pub fn map_pane_state(raw: &str) -> PresenceState {
     }
 }
 
+/// A current program report is the presence. Screen observation applies only
+/// after `clear` or when the program has never reported. Sequence numbers are
+/// not compared across authorities: a screen clock must not outrank a report.
 pub fn choose_effective(reported: Option<&Presence>, observed: Option<&Presence>) -> Presence {
     match (reported, observed) {
-        (Some(r), Some(o)) if r.seq > o.seq => r.clone(),
-        (Some(r), None) => r.clone(),
-        (_, Some(o)) => o.clone(),
+        (Some(reported), _) => reported.clone(),
+        (None, Some(observed)) => observed.clone(),
         (None, None) => Presence::unknown(0),
     }
 }
@@ -135,5 +137,48 @@ mod tests {
         assert_eq!(map_pane_state("working"), PresenceState::Working);
         assert_eq!(map_pane_state("idle"), PresenceState::Idle);
         assert_eq!(map_pane_state("done"), PresenceState::Done);
+    }
+
+    #[test]
+    fn a_report_wins_over_a_later_screen_clock() {
+        let reported = Presence {
+            state: PresenceState::Blocked,
+            kind: Some(BlockKind::Permission),
+            message: None,
+            app: None,
+            seq: 2,
+            authority: Authority::Reported,
+            at_ms: 10,
+        };
+        let observed = Presence {
+            state: PresenceState::Idle,
+            kind: None,
+            message: None,
+            app: None,
+            seq: 1_700_000_000_000,
+            authority: Authority::Observed,
+            at_ms: 11,
+        };
+        assert_eq!(
+            choose_effective(Some(&reported), Some(&observed)).state,
+            PresenceState::Blocked
+        );
+    }
+
+    #[test]
+    fn the_screen_applies_only_when_no_report_is_current() {
+        let observed = Presence {
+            state: PresenceState::Idle,
+            kind: None,
+            message: None,
+            app: None,
+            seq: 4,
+            authority: Authority::Observed,
+            at_ms: 10,
+        };
+        assert_eq!(
+            choose_effective(None, Some(&observed)).state,
+            PresenceState::Idle
+        );
     }
 }

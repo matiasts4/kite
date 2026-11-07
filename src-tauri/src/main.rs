@@ -659,6 +659,10 @@ fn main() {
             dispatch_wire::dispatch_report,
             dispatch_wire::dispatch_skill,
             dispatch_wire::dispatch_pane_shown,
+            dispatch_wire::dispatch_kill,
+            dispatch_wire::dispatch_interrupt,
+            dispatch_wire::dispatch_keys,
+            dispatch_wire::dispatch_attach,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {

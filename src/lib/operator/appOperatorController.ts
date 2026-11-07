@@ -562,14 +562,22 @@ class AppOperatorController {
       suppressProactiveAnnouncement(id);
 
       try {
-        // S1/S4: only a resolved terminate IPC proves the session is gone.
-        await invokeCommand('terminate_terminal', {
-          sessionId: id,
-          owner: 'operator',
+        // A close goes through dispatch so an unseen session is still stopped.
+        const receipt = await invokeCommand<{
+          error?: string | null;
+          status?: string;
+        } | null>('dispatch_kill', {
+          address: `session:${id}`,
         });
+        if (
+          receipt &&
+          (receipt.error || receipt.status === 'rejected' || receipt.status === 'failed')
+        ) {
+          throw new Error(String(receipt.error || receipt.status));
+        }
       } catch (err) {
         failedIds.push(id);
-        console.warn('[Operator] terminate_terminal failed:', id, err);
+        console.warn('[Operator] dispatch_kill failed:', id, err);
         continue;
       }
 
@@ -579,7 +587,7 @@ class AppOperatorController {
       if (runId) {
         runLedger.recordTerminalExec(runId, {
           terminalId: id,
-          command: 'terminate_terminal',
+          command: 'dispatch_kill',
           exitCode: 0,
         });
       }

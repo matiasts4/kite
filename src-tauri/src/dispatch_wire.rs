@@ -103,7 +103,20 @@ impl Port for LivePort {
         if request.manual_as_system {
             payload["systemPrompt"] = Value::String(skill_text().to_string());
         }
+        if !request.argv.is_empty() {
+            payload["argv"] = Value::Array(
+                request
+                    .argv
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            );
+        }
         let value = crate::terminal::start_terminal_sync(payload);
+        if value.get("error").and_then(Value::as_str) == Some("program_not_found") {
+            return Err(DispatchError::ProgramNotFound);
+        }
         let id = value
             .get("sessionId")
             .and_then(Value::as_str)
@@ -120,6 +133,28 @@ impl Port for LivePort {
             session_id: id,
             pane,
         })
+    }
+
+    fn type_bytes(&mut self, family: Family, id: &str, text: &str) -> Result<(), DispatchError> {
+        match family {
+            Family::Terminal => {
+                let written = crate::terminal::write_terminal_sync(json!({
+                    "sessionId": id,
+                    "input": text,
+                }));
+                if written.get("error").is_some() || written.get("ok") == Some(&Value::Bool(false))
+                {
+                    return Err(DispatchError::DestinationGone);
+                }
+                Ok(())
+            }
+            Family::Thread => Err(DispatchError::TransportUnsupported),
+        }
+    }
+
+    fn reveal(&mut self, id: &str, engine: &str, name: Option<&str>) -> Result<(), DispatchError> {
+        emit_open_pane(id, engine, name);
+        Ok(())
     }
 }
 
@@ -379,6 +414,10 @@ fn execute_command(request: &Value, command: &cli::Command, id: &str) -> Receipt
         cli::Command::Read { address, .. } => address.clone(),
         cli::Command::Wait { address, .. } => address.clone().unwrap_or_default(),
         cli::Command::Report { to, .. } => to.clone().unwrap_or_default(),
+        cli::Command::Kill { address }
+        | cli::Command::Interrupt { address }
+        | cli::Command::Keys { address, .. }
+        | cli::Command::Attach { address } => address.clone(),
         _ => request.get("address").and_then(Value::as_str).unwrap_or("").to_string(),
     };
     apply_switches(&mut guard, &address);
@@ -893,6 +932,17 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
         hidden: request.get("hidden").and_then(Value::as_bool).unwrap_or(false),
         pane: request.get("pane").and_then(Value::as_bool).unwrap_or(false),
         program: request.get("program").and_then(Value::as_str).map(|s| s.to_string()),
+        words: request
+            .get("words")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     serde_json::to_value(execute_command(&request, &command, &id)).unwrap_or(Value::Null)
 }
@@ -959,6 +1009,64 @@ pub fn dispatch_report(request: Option<Value>) -> Value {
     serde_json::to_value(execute_command(&request, &command, &id)).unwrap_or(Value::Null)
 }
 
+fn dispatch_address_command(
+    action: &str,
+    request: Option<Value>,
+    build: impl FnOnce(String, &Value) -> cli::Command,
+) -> Value {
+    if let Some(res) = proxy_dispatch(action, request.clone()) {
+        return res;
+    }
+    let request = req_value(request);
+    let id = request
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or(action)
+        .to_string();
+    let address = request
+        .get("address")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let command = build(address, &request);
+    serde_json::to_value(execute_command(&request, &command, &id)).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+pub fn dispatch_kill(request: Option<Value>) -> Value {
+    dispatch_address_command("kill", request, |address, _| cli::Command::Kill { address })
+}
+
+#[tauri::command]
+pub fn dispatch_interrupt(request: Option<Value>) -> Value {
+    dispatch_address_command("interrupt", request, |address, _| cli::Command::Interrupt {
+        address,
+    })
+}
+
+#[tauri::command]
+pub fn dispatch_keys(request: Option<Value>) -> Value {
+    dispatch_address_command("keys", request, |address, request| cli::Command::Keys {
+        address,
+        keys: request
+            .get("keys")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+pub fn dispatch_attach(request: Option<Value>) -> Value {
+    dispatch_address_command("attach", request, |address, _| cli::Command::Attach { address })
+}
+
 #[tauri::command]
 pub fn dispatch_skill() -> Value {
     json!({ "schemaVersion": 1, "text": skill_text() })
@@ -992,14 +1100,33 @@ fn attach_parent_console() {
 }
 
 fn emit_cli_line(text: &str) {
+    let mut stdout = std::io::stdout();
+    if writeln!(stdout, "{text}").is_ok() && stdout.flush().is_ok() {
+        return;
+    }
     #[cfg(windows)]
     {
         if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
             let _ = writeln!(file, "{text}");
-            return;
+            let _ = file.flush();
         }
     }
-    println!("{text}");
+}
+
+fn receipt_still_waiting(value: &Value) -> bool {
+    let receipt = value.get("receipt").unwrap_or(value);
+    receipt.get("op").and_then(Value::as_str) == Some("wait")
+        && receipt.get("status").and_then(Value::as_str) == Some("queued")
+}
+
+fn timeout_receipt(value: &Value) -> Value {
+    let mut receipt = value.get("receipt").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = receipt.as_object_mut() {
+        obj.insert("status".to_string(), json!("failed"));
+        obj.insert("error".to_string(), json!("timeout"));
+        obj.insert("submitted".to_string(), json!(false));
+    }
+    receipt
 }
 
 fn dispatch_over_core_pipe(args: &[String]) -> Option<Value> {
@@ -1108,25 +1235,42 @@ fn loopback_cli_response(args: &[String]) -> Option<Value> {
 
 pub fn run_dispatch_cli(args: &[String]) -> i32 {
     attach_parent_console();
-    let response = loopback_cli_response(args).or_else(|| dispatch_over_core_pipe(args));
-    let Some(value) = response else {
-        emit_cli_line(&serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default());
-        return 1;
-    };
-    if let Some(skill) = value.get("skill").and_then(Value::as_str) {
-        emit_cli_line(skill);
-        return 0;
+    let wait_for = cli::blocking_wait_ms(args);
+    let started = std::time::Instant::now();
+    loop {
+        let response = loopback_cli_response(args).or_else(|| dispatch_over_core_pipe(args));
+        let Some(value) = response else {
+            emit_cli_line(
+                &serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default(),
+            );
+            return 1;
+        };
+        if let Some(skill) = value.get("skill").and_then(Value::as_str) {
+            emit_cli_line(skill);
+            return 0;
+        }
+        if let Some(programs) = value.get("programs").and_then(Value::as_str) {
+            emit_cli_line(programs);
+            return 0;
+        }
+        if receipt_still_waiting(&value) {
+            let timed_out = wait_for
+                .map(|timeout_ms| started.elapsed() >= Duration::from_millis(timeout_ms))
+                .unwrap_or(true);
+            if timed_out {
+                emit_cli_line(&serde_json::to_string(&timeout_receipt(&value)).unwrap_or_default());
+                return 1;
+            }
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        if let Some(receipt) = value.get("receipt") {
+            emit_cli_line(&serde_json::to_string(receipt).unwrap_or_default());
+        } else {
+            emit_cli_line(&value.to_string());
+        }
+        return value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
     }
-    if let Some(programs) = value.get("programs").and_then(Value::as_str) {
-        emit_cli_line(programs);
-        return 0;
-    }
-    if let Some(receipt) = value.get("receipt") {
-        emit_cli_line(&serde_json::to_string(receipt).unwrap_or_default());
-    } else {
-        emit_cli_line(&value.to_string());
-    }
-    value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32
 }
 
 #[cfg(test)]
@@ -1165,5 +1309,17 @@ mod tests {
         let out = execute_argv_envelope(&json!({ "argv": argv, "id": "test-ls" }));
         assert!(out.get("exit").is_some(), "envelope must report an exit code");
         assert_eq!(out["receipt"]["op"], "ls");
+    }
+
+    #[test]
+    fn a_queued_wait_is_still_waiting_until_it_times_out() {
+        let queued = json!({ "exit": 0, "receipt": { "op": "wait", "status": "queued", "submitted": false } });
+        assert!(receipt_still_waiting(&queued));
+        let settled = json!({ "exit": 0, "receipt": { "op": "wait", "status": "settled" } });
+        assert!(!receipt_still_waiting(&settled));
+        let timed = timeout_receipt(&queued);
+        assert_eq!(timed["status"], "failed");
+        assert_eq!(timed["error"], "timeout");
+        assert_eq!(timed["submitted"], false);
     }
 }

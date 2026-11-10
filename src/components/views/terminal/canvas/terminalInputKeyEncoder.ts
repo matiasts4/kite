@@ -17,8 +17,13 @@ export function encodeWin32SpecialKey(
 
 export function normalizePasteText(text: string, bracketedPaste: boolean): string {
   if (!text) return '';
-  const normalized = text.replace(/\r?\n/g, '\r');
-  return bracketedPaste ? `\x1b[200~${normalized}\x1b[201~` : normalized;
+  const clean = text.replace(/\x1b\[20[01]~/g, '');
+  const isMultiline = clean.includes('\n') || clean.includes('\r');
+  if (bracketedPaste || isMultiline) {
+    const normalized = clean.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    return `\x1b[200~${normalized}\x1b[201~`;
+  }
+  return clean;
 }
 
 export interface EncodeVtKeyContext {

@@ -119,6 +119,8 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const selectionStartRef = useRef<SelectionPoint | null>(null);
   const selectionEndRef = useRef<SelectionPoint | null>(null);
   const hoveredLinkRef = useRef<HoveredLinkSpan | null>(null);
+  const rowCacheRef = useRef<Map<number, CellSnapshot[]>>(new Map());
+  const syncSelectionOnScrollRef = useRef<(() => void) | null>(null);
 
   const matrixRef = useRef<CellSnapshot[][]>([]);
   const cursorRef = useRef<CursorSnapshot>({
@@ -135,6 +137,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   useEffect(() => {
     lastSeqRef.current = 0;
     matrixRef.current = [];
+    rowCacheRef.current.clear();
     appliedPtyColsRef.current = 0;
     appliedPtyRowsRef.current = 0;
     scrollbackOffsetRef.current = 0;
@@ -329,6 +332,8 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     kittyKeyboardFlagsRef,
     scrollbackOffsetRef,
     rowWrappedRef,
+    rowCacheRef,
+    onScrollbackChange: () => syncSelectionOnScrollRef.current?.(),
     onViewportMetrics,
     onScreenText,
     appliedPtyColsRef,
@@ -439,7 +444,9 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         const end = selectionEndRef.current;
         selectionStartRef.current = null;
         selectionEndRef.current = null;
-        scheduleRender(selectionRows(start, end));
+        scheduleRender(
+          selectionRows(start, end, scrollbackOffsetRef.current, gridRowsRef.current),
+        );
       }
     },
     [armFastPoll, immediatePoll, scheduleRender, sessionId]
@@ -537,6 +544,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     handleContextMenu,
     handleWheel,
     copySelectionToClipboard,
+    syncSelectionOnScroll,
   } = useTerminalMouseTracking({
     canvasRef,
     cachedRectRef,
@@ -547,6 +555,9 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     spareYRef,
     matrixRef,
     rowWrappedRef,
+    rowCacheRef,
+    scrollbackOffsetRef,
+    sessionId,
     alternateScreenRef,
     applicationCursorRef,
     mouseModeRef,
@@ -568,6 +579,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     onFocusInput: () => inputRef.current?.focus(),
     armFastPoll,
   });
+  syncSelectionOnScrollRef.current = syncSelectionOnScroll;
 
   const flushPtyResizeRef = useRef<() => void>(() => {});
   const sendPtyResizeRef = useRef<(cols: number, rows: number, force?: boolean) => void>(() => {});
@@ -955,7 +967,9 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
           const end = selectionEndRef.current;
           selectionStartRef.current = null;
           selectionEndRef.current = null;
-          scheduleRender(selectionRows(start, end));
+          scheduleRender(
+            selectionRows(start, end, scrollbackOffsetRef.current, gridRowsRef.current),
+          );
           e.preventDefault();
           return;
         }

@@ -783,7 +783,7 @@ pub fn terminal_recent_text_local(session_id: &str) -> String {
             .map(|vt| vt.screen_text())
             .unwrap_or_default();
         if !screen.trim().is_empty() {
-            return screen;
+            return screen.trim_end().to_string();
         }
         // Same lock order as the reader: buffer, then scrollback. The grid lock is already dropped.
         let pending = inst.buffer.lock().ok().map(|buf| buf.clone()).unwrap_or_default();
@@ -1607,6 +1607,15 @@ pub fn build_agent_cli_args(
     build_agent_cli_args_ext(engine, session_id, cwd, mode, None, false, None)
 }
 
+fn sanitize_cli_system_prompt(sys: &str) -> String {
+    let body = crate::dispatch::cli::strip_skill_frontmatter(sys);
+    if body.starts_with('-') {
+        format!(" {body}")
+    } else {
+        body.to_string()
+    }
+}
+
 pub fn build_agent_cli_args_ext(
     engine: &str,
     session_id: &str,
@@ -1629,9 +1638,12 @@ pub fn build_agent_cli_args_ext(
                     }
                     if let Some(sys) = system_prompt {
                         args.push("--system-prompt-override".to_string());
-                        args.push(sys.to_string());
+                        args.push(sanitize_cli_system_prompt(sys));
                     }
                     if let Some(prompt) = initial_prompt {
+                        if prompt.trim_start().starts_with('-') {
+                            args.push("--".to_string());
+                        }
                         args.push(prompt.to_string());
                     }
                 }
@@ -1668,7 +1680,7 @@ pub fn build_agent_cli_args_ext(
                     }
                     if let Some(sys) = system_prompt {
                         args.push("--system-prompt".to_string());
-                        args.push(sys.to_string());
+                        args.push(sanitize_cli_system_prompt(sys));
                     }
                     if let Some(prompt) = initial_prompt {
                         args.push(prompt.to_string());
@@ -1770,7 +1782,7 @@ pub fn build_agent_cli_args_ext(
                     }
                     if let Some(sys) = system_prompt {
                         args.push("--system-prompt".to_string());
-                        args.push(sys.to_string());
+                        args.push(sanitize_cli_system_prompt(sys));
                     }
                     if let Some(prompt) = initial_prompt {
                         args.push(prompt.to_string());
@@ -1801,9 +1813,12 @@ pub fn build_agent_cli_args_ext(
                     }
                     if let Some(sys) = system_prompt {
                         args.push("--system-prompt-override".to_string());
-                        args.push(sys.to_string());
+                        args.push(sanitize_cli_system_prompt(sys));
                     }
                     if let Some(prompt) = initial_prompt {
+                        if prompt.trim_start().starts_with('-') {
+                            args.push("--".to_string());
+                        }
                         args.push(prompt.to_string());
                     }
                 }
@@ -1904,14 +1919,14 @@ pub fn spawn_session_with_size(
     )
 }
 
-/// Puts the complete dispatch manual on a known agent.
-/// A system-prompt engine receives it as that argument, including on resume.
-/// Any other known agent receives it in the birth prompt. A resume does not
-/// turn that text into a new task. A raw argv is left untouched.
+/// Puts the complete dispatch manual on a system-prompt engine as that argument,
+/// including on resume. Every other engine keeps the birth prompt as the task.
+/// Those engines load the manual from `kite-dispatch/SKILL.md`. A raw argv is
+/// left untouched.
 fn attach_dispatch_manual(
     engine: &str,
     raw: bool,
-    resume: bool,
+    _resume: bool,
     system_prompt: Option<String>,
     initial_prompt: Option<String>,
 ) -> (Option<String>, Option<String>) {
@@ -1919,25 +1934,11 @@ fn attach_dispatch_manual(
         return (system_prompt, initial_prompt);
     }
     if crate::dispatch::programs::accepts_system_prompt(engine) {
-        let system_prompt =
-            system_prompt.or_else(|| Some(crate::dispatch::cli::skill_text().to_string()));
+        let system_prompt = system_prompt
+            .map(|sys| sanitize_cli_system_prompt(&sys))
+            .or_else(|| Some(crate::dispatch::cli::manual_text().to_string()));
         return (system_prompt, initial_prompt);
     }
-    if resume || crate::dispatch::programs::canonical(engine).is_none() {
-        return (system_prompt, initial_prompt);
-    }
-    if initial_prompt
-        .as_deref()
-        .unwrap_or("")
-        .contains("Kite Dispatch")
-    {
-        return (system_prompt, initial_prompt);
-    }
-    let manual = crate::dispatch::cli::skill_text();
-    let initial_prompt = Some(match initial_prompt {
-        Some(task) if !task.trim().is_empty() => format!("{manual}\n\n{task}"),
-        _ => manual.to_string(),
-    });
     (system_prompt, initial_prompt)
 }
 
@@ -2435,7 +2436,7 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
         .map(|s| s.to_string())
         .filter(|text| !text.is_empty());
     if system_prompt.is_none() && crate::dispatch::programs::accepts_system_prompt(engine) {
-        system_prompt = Some(crate::dispatch::cli::skill_text().to_string());
+        system_prompt = Some(crate::dispatch::cli::manual_text().to_string());
     }
 
     spawn_session_with_options(
@@ -2454,6 +2455,12 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
             raw_argv,
         },
     );
+
+    let agent_name = req
+        .get("agentName")
+        .or_else(|| req.get("displayName"))
+        .and_then(|v| v.as_str());
+    crate::dispatch_wire::register_terminal_session(&session_id, engine, agent_name);
 
     let disk_scrollback_bytes = read_scrollback_file(&session_id);
     let disk_scrollback = disk_scrollback_bytes.as_deref().map(to_base64);
@@ -3620,6 +3627,61 @@ pub fn find_terminal_text_local_sync(
     let mut vt = inst.vt_engine.lock().map_err(|e| e.to_string())?;
     let hits = vt.find_text(query, limit);
     Ok(serde_json::json!({ "hits": hits }))
+}
+
+#[tauri::command]
+pub async fn get_terminal_selection_text(
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    get_terminal_selection_text_sync(request)
+}
+
+pub fn get_terminal_selection_text_sync(
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    if should_proxy_to_core_daemon(session_id) {
+        if let Ok(res) = crate::core_daemon::send_core_daemon_rpc(
+            "session.get_selection_text",
+            Some(req.clone()),
+        ) {
+            return Ok(res);
+        }
+    }
+    get_terminal_selection_text_local_sync(request)
+}
+
+pub fn get_terminal_selection_text_local_sync(
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let start_row = req.get("startRow").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let start_col = req
+        .get("startCol")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(u16::MAX as u64) as u16;
+    let end_row = req.get("endRow").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let end_col = req
+        .get("endCol")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(u16::MAX as u64) as u16;
+    if session_id.is_empty() {
+        return Err("Session not found".to_string());
+    }
+    let inst = {
+        let manager = get_terminals().lock().map_err(|e| e.to_string())?;
+        manager
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "Session not found".to_string())?
+    };
+    let vt = inst.vt_engine.lock().map_err(|e| e.to_string())?;
+    let text = vt.selection_text(start_row, start_col, end_row, end_col);
+    Ok(serde_json::json!({ "text": text }))
 }
 
 #[tauri::command]
@@ -4943,14 +5005,16 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_birth_includes_the_manual_and_a_resume_does_not() {
+    fn a_codex_birth_is_the_task_and_grok_keeps_the_system_prompt() {
         let (system, prompt) =
             attach_dispatch_manual("codex", false, false, None, Some("Look".into()));
         assert!(system.is_none());
-        let prompt = prompt.unwrap();
-        assert!(prompt.contains("This text is the complete manual."));
-        assert!(prompt.contains("Look"));
-        assert!(!prompt.contains("KITE_SKILL_FILE"));
+        assert_eq!(prompt.as_deref(), Some("Look"));
+
+        let (system, prompt) =
+            attach_dispatch_manual("antigravity", false, false, None, Some("Look".into()));
+        assert!(system.is_none());
+        assert_eq!(prompt.as_deref(), Some("Look"));
 
         let (system, prompt) = attach_dispatch_manual("codex", false, true, None, None);
         assert!(system.is_none());
@@ -4961,7 +5025,26 @@ mod tests {
         let system = system.unwrap();
         assert!(system.contains("This text is the complete manual."));
         assert!(!system.contains("KITE_SKILL_FILE"));
+        assert!(!system.trim_start().starts_with('-'));
         assert_eq!(prompt.as_deref(), Some("task"));
+
+        let (grok_args, _) = build_agent_cli_args_ext(
+            "grok",
+            "local",
+            "C:/tmp",
+            &SpawnMode::Fresh,
+            Some("- leading hyphen task"),
+            true,
+            Some(crate::dispatch::cli::skill_text()),
+        );
+        let override_idx = grok_args
+            .iter()
+            .position(|arg| arg == "--system-prompt-override")
+            .expect("grok override flag");
+        assert!(!grok_args[override_idx + 1].trim_start().starts_with('-'));
+        assert!(grok_args
+            .windows(2)
+            .any(|pair| pair == ["--", "- leading hyphen task"]));
     }
 
     #[test]

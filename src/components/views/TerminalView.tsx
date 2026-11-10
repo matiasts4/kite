@@ -273,6 +273,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           sessionId?: string;
           paneId?: string;
           prompt: string;
+          visualOnly?: boolean;
         }>
       ).detail;
       if (!detail?.prompt) return;
@@ -289,6 +290,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (!matchesSession && !matchesPane) return;
 
       triggerImpactPulse();
+      if (detail.visualOnly) {
+        return;
+      }
       setIsReceivingPrompt(true);
 
       const sid = sessionIdRef.current || propSessionId;
@@ -300,25 +304,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       await waitForTerminalReady(sid, { timeoutMs: 12000 });
       if (cancelled) return;
 
-      const text = detail.prompt;
-      const chunkSize = Math.max(3, Math.ceil(text.length / 24));
-      for (let i = 0; i < text.length; i += chunkSize) {
-        if (cancelled) return;
-        const chunk = text.slice(i, i + chunkSize);
-        await invokeCommand('write_terminal', {
-          sessionId: sid,
-          input: chunk,
-          owner: 'user',
-        }).catch(() => {});
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      const clean = detail.prompt
+        .replace(/\x1b\[20[01]~/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n+$/g, '');
+      const bracketed = `\x1b[200~${clean}\x1b[201~`;
+      await invokeCommand('write_terminal', {
+        sessionId: sid,
+        input: bracketed,
+        owner: 'user',
+      }).catch(() => {});
 
       if (cancelled) return;
 
-      await new Promise((r) => setTimeout(r, 120));
+      await new Promise((r) => setTimeout(r, 60));
       await invokeCommand('write_terminal', {
         sessionId: sid,
-        input: '\r\n',
+        input: '\r',
         owner: 'user',
       }).catch(() => {});
 

@@ -132,14 +132,28 @@ export interface SelectionPoint {
   row: number;
 }
 
-/** Inclusive row indexes covered by a selection. Empty when either end is missing. */
+/**
+ * Inclusive visible viewport row indexes covered by a buffer-relative selection
+ * (`relRow = viewportRow - scrollbackOffset`). Empty when either end is missing
+ * or the selection lies completely outside the visible viewport.
+ */
 export function selectionRows(
   start: SelectionPoint | null,
   end: SelectionPoint | null,
+  scrollbackOffset = 0,
+  gridRows?: number,
 ): number[] {
   if (!start || !end) return [];
-  const from = Math.min(start.row, end.row);
-  const to = Math.max(start.row, end.row);
+  let from = Math.min(start.row, end.row) + scrollbackOffset;
+  let to = Math.max(start.row, end.row) + scrollbackOffset;
+  if (gridRows !== undefined) {
+    if (to < 0 || from >= gridRows) return [];
+    from = Math.max(0, from);
+    to = Math.min(gridRows - 1, to);
+  } else {
+    if (to < 0) return [];
+    from = Math.max(0, from);
+  }
   const rows: number[] = [];
   for (let row = from; row <= to; row += 1) rows.push(row);
   return rows;

@@ -59,6 +59,8 @@ pub struct RenderSnapshot {
     pub win32_input_mode: bool,
     pub kitty_keyboard_flags: u8,
     pub scrollback_offset: u32,
+    #[serde(default)]
+    pub scrollback_depth: u32,
     pub cursor: CursorSnapshot,
     pub dirty_rows: Vec<RowSnapshot>,
     pub full: bool,
@@ -673,6 +675,19 @@ impl TerminalVtEngine {
         self.parser.screen().contents()
     }
 
+    /// Plain text between two buffer-relative positions (`rel_row = viewport_row - scrollback_offset`).
+    pub fn selection_text(
+        &self,
+        start_row: i32,
+        start_col: u16,
+        end_row: i32,
+        end_col: u16,
+    ) -> String {
+        self.parser
+            .screen()
+            .selection_text(start_row, start_col, end_row, end_col)
+    }
+
     /// Jump the viewport directly to an absolute scrollback offset.
     pub fn jump_scrollback(&mut self, offset: u32) {
         if self.parser.screen().alternate_screen() {
@@ -1243,6 +1258,7 @@ impl TerminalVtEngine {
             win32_input_mode: self.win32_input_mode,
             kitty_keyboard_flags: self.kitty_keyboard_flags(),
             scrollback_offset: 0,
+            scrollback_depth: 0,
             cursor: self.last_cursor.clone(),
             dirty_rows: Vec::new(),
             full: true,
@@ -1437,6 +1453,7 @@ impl TerminalVtEngine {
         let screen = self.parser.screen();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let scrollback_offset = screen.scrollback() as u32;
+        let scrollback_depth = screen.scrollback_depth() as u32;
         let cursor_visible = !screen.hide_cursor() && scrollback_offset == 0;
         let alternate_screen = screen.alternate_screen();
         let application_cursor = screen.application_cursor();
@@ -1614,6 +1631,7 @@ impl TerminalVtEngine {
             win32_input_mode,
             kitty_keyboard_flags,
             scrollback_offset,
+            scrollback_depth,
             cursor: current_cursor.clone(),
             dirty_rows: full_rows,
             full: true,
@@ -1636,6 +1654,7 @@ impl TerminalVtEngine {
             win32_input_mode,
             kitty_keyboard_flags,
             scrollback_offset,
+            scrollback_depth,
             cursor: current_cursor,
             dirty_rows,
             full: force_full,
@@ -1810,7 +1829,7 @@ pub fn serialize_render_snapshot_bin(
         win32_input_mode: snapshot.win32_input_mode,
         kitty_keyboard_flags: snapshot.kitty_keyboard_flags,
         scrollback_offset: snapshot.scrollback_offset,
-        scrollback_depth: 0,
+        scrollback_depth: snapshot.scrollback_depth,
         benchmark_active,
         observed_bytes_base64,
     };
@@ -2049,6 +2068,7 @@ pub fn decode_render_snapshot_bin(
         win32_input_mode: meta.as_ref().map(|m| m.win32_input_mode).unwrap_or(false),
         kitty_keyboard_flags: meta.as_ref().map(|m| m.kitty_keyboard_flags).unwrap_or(0),
         scrollback_offset: meta.as_ref().map(|m| m.scrollback_offset).unwrap_or(0),
+        scrollback_depth: meta.as_ref().map(|m| m.scrollback_depth).unwrap_or(0),
         cursor: CursorSnapshot {
             visible: cursor_visible,
             col: cursor_col,
@@ -2402,5 +2422,26 @@ mod tests {
             !String::from_utf8_lossy(&without_observed).contains("observedBytesBase64"),
             "an empty observed buffer must not emit the key at all"
         );
+    }
+
+    #[test]
+    fn extracts_selection_text_across_scrollback_and_active_screen() {
+        let mut engine = TerminalVtEngine::new(20, 4);
+        for i in 1..=8 {
+            if i < 8 {
+                engine.feed(format!("Line {i:02}\r\n").as_bytes());
+            } else {
+                engine.feed(format!("Line {i:02}").as_bytes());
+            }
+        }
+        // 8 lines in a 4-row terminal -> 4 lines in scrollback (-4..-1) and 4 in active screen (0..3)
+        let text = engine.selection_text(-4, 0, 3, 20);
+        assert_eq!(
+            text,
+            "Line 01\nLine 02\nLine 03\nLine 04\nLine 05\nLine 06\nLine 07\nLine 08"
+        );
+        // Partial column range across scrollback boundary (-1 to 0)
+        let partial = engine.selection_text(-1, 5, 0, 7);
+        assert_eq!(partial, "04\nLine 05");
     }
 }

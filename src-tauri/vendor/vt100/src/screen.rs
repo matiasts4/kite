@@ -134,6 +134,11 @@ impl Screen {
         self.grid().scrollback()
     }
 
+    #[must_use]
+    pub fn scrollback_depth(&self) -> usize {
+        self.grid().scrollback_depth()
+    }
+
     pub(crate) fn set_scrollback(&mut self, rows: usize) {
         self.grid_mut().set_scrollback(rows);
     }
@@ -229,6 +234,61 @@ impl Screen {
             }
             std::cmp::Ordering::Greater => String::new(),
         }
+    }
+
+    /// Returns the plain text between two buffer-relative positions
+    /// (`rel_row = viewport_row - scrollback_offset`).
+    #[must_use]
+    pub fn selection_text(
+        &self,
+        start_row: i32,
+        start_col: u16,
+        end_row: i32,
+        end_col: u16,
+    ) -> String {
+        let ((s_row, s_col), (e_row, e_col)) = if start_row > end_row
+            || (start_row == end_row && start_col > end_col)
+        {
+            ((end_row, end_col), (start_row, start_col))
+        } else {
+            ((start_row, start_col), (end_row, end_col))
+        };
+        if s_row == e_row && s_col >= e_col {
+            return String::new();
+        }
+        let (rows, cols) = self.size();
+        let min_row = -(self.grid().scrollback_depth() as i32);
+        let max_row = (rows as i32) - 1;
+        let from_row = s_row.max(min_row);
+        let to_row = e_row.min(max_row);
+        if from_row > to_row {
+            return String::new();
+        }
+        let mut lines: Vec<String> = Vec::with_capacity((to_row - from_row + 1) as usize);
+        for r in from_row..=to_row {
+            let Some(row) = self.grid().buffer_row(r) else {
+                lines.push(String::new());
+                continue;
+            };
+            let c_start = if r == s_row { s_col.min(cols) } else { 0 };
+            let c_end = if r == e_row { e_col.min(cols) } else { cols };
+            let mut line = String::with_capacity(cols as usize);
+            for c in c_start..c_end {
+                if let Some(cell) = row.get(c) {
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                    let ch = cell.contents();
+                    if ch.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.push_str(&ch);
+                    }
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines.join("\n")
     }
 
     /// Return escape codes sufficient to reproduce the entire contents of the

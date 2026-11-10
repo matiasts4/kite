@@ -189,6 +189,24 @@ impl Grid {
         self.scrollback_len
     }
 
+    pub fn scrollback_depth(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    pub fn buffer_row(&self, rel_row: i32) -> Option<&crate::row::Row> {
+        if rel_row >= 0 {
+            self.rows.get(rel_row as usize)
+        } else {
+            let sb_len = self.scrollback.len() as i32;
+            let idx = sb_len + rel_row;
+            if idx >= 0 {
+                self.scrollback.get(idx as usize)
+            } else {
+                None
+            }
+        }
+    }
+
     pub fn scrollback(&self) -> usize {
         self.scrollback_offset
     }

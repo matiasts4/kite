@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   hasWorkingMarkers,
   isWaitingForUserInput,
+  isBlockedOnQuestionOrApproval,
   registerSpawnedTerminal,
   markTerminalExited,
   isTerminalReadyForInput,
@@ -83,5 +84,21 @@ describe('terminalRegistry — Prompt readiness & startup decontamination', () =
     recordTerminalOutput('real-codex-cli', '  >_ OpenAI Codex (v0.164.0)\n     loading\n\n› Ask Codex to do anything\n', {
       engine: 'powershell',
     });
+  });
+
+  it('differentiates normal ready prompts from genuine question or permission prompts', () => {
+    // Normal ready prompts -> NOT blocked
+    expect(isBlockedOnQuestionOrApproval('> ')).toBe(false);
+    expect(isBlockedOnQuestionOrApproval('❯ ')).toBe(false);
+    expect(isBlockedOnQuestionOrApproval('$ ')).toBe(false);
+    expect(isBlockedOnQuestionOrApproval('What would you like to build?\n> ')).toBe(false);
+    expect(isBlockedOnQuestionOrApproval('What should we work on next?')).toBe(false);
+
+    // Question / confirmation prompts -> BLOCKED
+    expect(isBlockedOnQuestionOrApproval('Apply this change? (y/n)')).toBe(true);
+    expect(isBlockedOnQuestionOrApproval('Proceed with execution? [y/N]')).toBe(true);
+    expect(isBlockedOnQuestionOrApproval('Approval required before running command.')).toBe(true);
+    expect(isBlockedOnQuestionOrApproval('Allow once or deny?')).toBe(true);
+    expect(isBlockedOnQuestionOrApproval('Do you want to continue?')).toBe(true);
   });
 });

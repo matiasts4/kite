@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_TERMINAL_APPEARANCE_PREFS } from '../../../../lib/terminalAppearancePrefs';
 import { renderCanvasGrid } from './canvasGridRenderer';
-import type { CellSnapshot, CursorSnapshot } from './terminalCanvasTypes';
+import {
+  selectionRows,
+  SELECTION_BG,
+  type CellSnapshot,
+  type CursorSnapshot,
+} from './terminalCanvasTypes';
 
 function cell(ch: string): CellSnapshot {
   return {
@@ -19,7 +24,7 @@ function cell(ch: string): CellSnapshot {
 }
 
 function recordingCanvas() {
-  const fills: { x: number; y: number; w: number; h: number }[] = [];
+  const fills: { x: number; y: number; w: number; h: number; style: string }[] = [];
   const texts: string[] = [];
   const canvas = document.createElement('canvas');
   canvas.width = 200;
@@ -48,7 +53,7 @@ function recordingCanvas() {
     lineWidth: 1,
     globalAlpha: 1,
     fillRect(x: number, y: number, w: number, h: number) {
-      fills.push({ x, y, w, h });
+      fills.push({ x, y, w, h, style: this.fillStyle });
     },
     fillText(text: string) {
       texts.push(text);
@@ -135,5 +140,23 @@ describe('renderCanvasGrid dirty rows', () => {
     expect(painted).toEqual([0, 1, 2]);
     expect(clearsViewport(fills)).toBe(true);
     expect(texts).toEqual(expect.arrayContaining(['A', 'B', 'C']));
+  });
+
+  it('projects buffer-relative selection highlights across scrollback offsets', () => {
+    const { canvas, fills } = recordingCanvas();
+    // Selection anchored at buffer-relative row -2..0 while scrolled up by 2 lines (scrollbackOffset = 2)
+    // maps to visible rows 0, 1, 2.
+    renderCanvasGrid({
+      ...baseState(canvas, null),
+      scrollbackOffset: 2,
+      selection: {
+        start: { row: -2, col: 1 },
+        end: { row: 0, col: 3 },
+      },
+    });
+    const selFills = fills.filter((f) => f.style === SELECTION_BG);
+    expect(selFills).toHaveLength(3);
+    expect(selectionRows({ row: -2, col: 1 }, { row: 0, col: 3 }, 2, 3)).toEqual([0, 1, 2]);
+    expect(selectionRows({ row: -10, col: 0 }, { row: -5, col: 4 }, 2, 3)).toEqual([]);
   });
 });

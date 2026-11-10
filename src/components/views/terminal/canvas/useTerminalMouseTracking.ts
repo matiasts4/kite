@@ -1,4 +1,5 @@
 import React, { useRef, useCallback, useEffect } from 'react';
+import { invokeCommand } from '../../../../lib/ipc';
 import { openFileInRightDock } from '../../../../lib/filePreviewNav';
 import {
   openTerminalWebLink,
@@ -26,6 +27,9 @@ export interface UseTerminalMouseTrackingOptions {
   spareYRef: React.MutableRefObject<number>;
   matrixRef: React.MutableRefObject<CellSnapshot[][]>;
   rowWrappedRef?: React.MutableRefObject<boolean[]>;
+  rowCacheRef?: React.MutableRefObject<Map<number, CellSnapshot[]>>;
+  scrollbackOffsetRef?: React.MutableRefObject<number>;
+  sessionId?: string;
   alternateScreenRef?: React.MutableRefObject<boolean>;
   applicationCursorRef?: React.MutableRefObject<boolean>;
   mouseModeRef: React.MutableRefObject<TerminalMouseMode>;
@@ -60,6 +64,7 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     spareYRef,
     matrixRef,
     rowWrappedRef,
+    sessionId,
     mouseModeRef,
     sgrMouseRef,
     sgrPixelsMouseRef,
@@ -79,6 +84,10 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
 
   const internalWrappedRef = useRef<boolean[]>([]);
   const wrappedRef = rowWrappedRef ?? internalWrappedRef;
+  const internalRowCacheRef = useRef<Map<number, CellSnapshot[]>>(new Map());
+  const rowCacheRef = options.rowCacheRef ?? internalRowCacheRef;
+  const internalScrollbackOffsetRef = useRef<number>(0);
+  const scrollbackOffsetRef = options.scrollbackOffsetRef ?? internalScrollbackOffsetRef;
   const internalAltRef = useRef<boolean>(false);
   const alternateScreenRef = options.alternateScreenRef ?? internalAltRef;
   const internalAppCursorRef = useRef<boolean>(false);
@@ -163,6 +172,19 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     [sgrMouseRef, sgrPixelsMouseRef]
   );
 
+  const getRowByRelIndex = useCallback(
+    (relRow: number): CellSnapshot[] | undefined => {
+      const offset = scrollbackOffsetRef.current;
+      const vRow = relRow + offset;
+      const matrix = matrixRef.current;
+      if (vRow >= 0 && vRow < matrix.length) {
+        return matrix[vRow];
+      }
+      return rowCacheRef.current.get(relRow);
+    },
+    [matrixRef, rowCacheRef, scrollbackOffsetRef]
+  );
+
   const computeExpandedSelection = useCallback(
     (anchor: SelectionPoint, current: SelectionPoint): [SelectionPoint, SelectionPoint] => {
       let s: SelectionPoint = { ...anchor };
@@ -176,16 +198,15 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       }
 
       const mode = selectionModeRef.current;
-      const matrix = matrixRef.current;
 
       if (mode === 'word') {
-        const rowStart = matrix[s.row];
+        const rowStart = getRowByRelIndex(s.row);
         if (rowStart) {
           while (s.col > 0 && isWordChar(rowStart[s.col - 1]?.ch || '')) {
             s.col--;
           }
         }
-        const rowEnd = matrix[e.row];
+        const rowEnd = getRowByRelIndex(e.row);
         if (rowEnd) {
           while (e.col < rowEnd.length - 1 && isWordChar(rowEnd[e.col + 1]?.ch || '')) {
             e.col++;
@@ -193,13 +214,13 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
         }
       } else if (mode === 'line') {
         s.col = 0;
-        const rowEnd = matrix[e.row];
+        const rowEnd = getRowByRelIndex(e.row);
         e.col = rowEnd ? Math.max(0, rowEnd.length - 1) : gridColsRef.current - 1;
       }
 
       return [s, e];
     },
-    [gridColsRef, matrixRef]
+    [getRowByRelIndex, gridColsRef]
   );
 
   const findLinkAtCell = useCallback(
@@ -216,6 +237,48 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     }
   }, []);
 
+  const updateDragSelectionFromClientPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!isSelectingRef.current || !selectionAnchorRef.current) return;
+      const offset = scrollbackOffsetRef.current;
+      const curPt = clientToGrid(clientX, clientY);
+      const previousStart = selectionStartRef.current;
+      const previousEnd = selectionEndRef.current;
+      const [s, en] = computeExpandedSelection(selectionAnchorRef.current, {
+        col: curPt.col,
+        row: curPt.row - offset,
+      });
+      selectionStartRef.current = s;
+      selectionEndRef.current = en;
+      scheduleRender([
+        ...selectionRows(previousStart, previousEnd, offset, gridRowsRef.current),
+        ...selectionRows(s, en, offset, gridRowsRef.current),
+      ]);
+    },
+    [
+      clientToGrid,
+      computeExpandedSelection,
+      gridRowsRef,
+      scheduleRender,
+      scrollbackOffsetRef,
+      selectionAnchorRef,
+      selectionEndRef,
+      selectionStartRef,
+    ]
+  );
+
+  const syncSelectionOnScroll = useCallback(() => {
+    if (
+      !isSelectingRef.current ||
+      !selectionAnchorRef.current ||
+      lastDragClientXRef.current === null ||
+      lastDragClientYRef.current === null
+    ) {
+      return;
+    }
+    updateDragSelectionFromClientPoint(lastDragClientXRef.current, lastDragClientYRef.current);
+  }, [updateDragSelectionFromClientPoint]);
+
   const copySelectionToClipboard = useCallback((): boolean => {
     let selStart = selectionStartRef.current;
     let selEnd = selectionEndRef.current;
@@ -228,11 +291,18 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       selEnd = tmp;
     }
 
+    const offset = scrollbackOffsetRef.current;
     const matrix = matrixRef.current;
     const lines: string[] = [];
-    for (let r = selStart.row; r <= selEnd.row && r < matrix.length; r++) {
-      const row = matrix[r];
+    let missingOffscreenRows = false;
+
+    for (let r = selStart.row; r <= selEnd.row; r++) {
+      const row = getRowByRelIndex(r);
       if (!row) {
+        const vRow = r + offset;
+        if (vRow < 0 || vRow >= matrix.length) {
+          missingOffscreenRows = true;
+        }
         lines.push('');
         continue;
       }
@@ -248,12 +318,45 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     }
 
     const text = lines.join('\n');
-    if (text && typeof navigator !== 'undefined' && navigator.clipboard) {
+    const canWriteClipboard =
+      typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText);
+    if (text && canWriteClipboard) {
       void navigator.clipboard.writeText(text);
+    }
+
+    const spansOffscreen =
+      selStart.row + offset < 0 ||
+      selEnd.row + offset >= matrix.length ||
+      missingOffscreenRows;
+
+    if (spansOffscreen && sessionId && canWriteClipboard) {
+      const reqStart = { ...selStart };
+      const reqEnd = { ...selEnd };
+      void invokeCommand<{ text?: string }>('get_terminal_selection_text', {
+        sessionId,
+        startRow: reqStart.row,
+        startCol: reqStart.col,
+        endRow: reqEnd.row,
+        endCol: reqEnd.col,
+      })
+        .then((res) => {
+          if (res && typeof res.text === 'string' && res.text.length > 0) {
+            void navigator.clipboard.writeText(res.text);
+          }
+        })
+        .catch(() => {});
       return true;
     }
-    return false;
-  }, [matrixRef, selectionEndRef, selectionStartRef]);
+
+    return Boolean(text && canWriteClipboard);
+  }, [
+    getRowByRelIndex,
+    matrixRef,
+    scrollbackOffsetRef,
+    selectionEndRef,
+    selectionStartRef,
+    sessionId,
+  ]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     armFastPoll(1000);
@@ -321,8 +424,11 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       clicks >= 3 ? 'line' : clicks === 2 ? 'word' : 'char';
     selectionModeRef.current = mode;
     isSelectingRef.current = true;
+    lastDragClientXRef.current = e.clientX;
+    lastDragClientYRef.current = e.clientY;
 
-    const anchor = { col: pt.col, row: pt.row };
+    const offset = scrollbackOffsetRef.current;
+    const anchor = { col: pt.col, row: pt.row - offset };
     selectionAnchorRef.current = anchor;
     const previousStart = selectionStartRef.current;
     const previousEnd = selectionEndRef.current;
@@ -330,8 +436,8 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     selectionStartRef.current = start;
     selectionEndRef.current = end;
     scheduleRender([
-      ...selectionRows(previousStart, previousEnd),
-      ...selectionRows(start, end),
+      ...selectionRows(previousStart, previousEnd, offset, gridRowsRef.current),
+      ...selectionRows(start, end, offset, gridRowsRef.current),
     ]);
 
     // Attach window-level drag listeners so dragging outside viewport auto-scrolls smoothly
@@ -340,21 +446,9 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       lastDragClientXRef.current = we.clientX;
       lastDragClientYRef.current = we.clientY;
 
-      const curPt = clientToGrid(we.clientX, we.clientY);
-      const previousStart = selectionStartRef.current;
-      const previousEnd = selectionEndRef.current;
-      const [s, en] = computeExpandedSelection(selectionAnchorRef.current, {
-        col: curPt.col,
-        row: curPt.row,
-      });
-      selectionStartRef.current = s;
-      selectionEndRef.current = en;
-      scheduleRender([
-        ...selectionRows(previousStart, previousEnd),
-        ...selectionRows(s, en),
-      ]);
+      updateDragSelectionFromClientPoint(we.clientX, we.clientY);
 
-      // Auto-scroll when dragging above or below the canvas in primary screen
+      // Auto-scroll when dragging near or beyond top/bottom of the canvas in primary screen
       const canvas = canvasRef.current;
       if (canvas && !alternateScreenRef.current) {
         const rect = canvas.getBoundingClientRect();
@@ -519,7 +613,9 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
       const end = selectionEndRef.current;
       selectionStartRef.current = null;
       selectionEndRef.current = null;
-      scheduleRender(selectionRows(start, end));
+      scheduleRender(
+        selectionRows(start, end, scrollbackOffsetRef.current, gridRowsRef.current),
+      );
       return;
     }
     if (pasteTextToTerminal && typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
@@ -533,6 +629,10 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     e.preventDefault();
     onWheelActivity?.();
     armFastPoll(250);
+    if (isSelectingRef.current) {
+      lastDragClientXRef.current = e.clientX;
+      lastDragClientYRef.current = e.clientY;
+    }
 
     const discreteAxis = (delta: number) => {
       const abs = Math.abs(delta);
@@ -639,5 +739,6 @@ export function useTerminalMouseTracking(options: UseTerminalMouseTrackingOption
     handleWheel,
     copySelectionToClipboard,
     stopSelectionAutoScroll,
+    syncSelectionOnScroll,
   };
 }

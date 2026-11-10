@@ -51,6 +51,8 @@ interface InternalSessionTracker {
   lastOutputAt: number;
   settleTimer: any | null;
   state: 'waitingForYou' | 'working' | 'done' | 'idle' | 'exited';
+  sawWorking?: boolean;
+  alias?: string;
   latestLine: string | null;
   engine: string;
   who: string | null;
@@ -63,10 +65,12 @@ export function resetTerminalExitStatus(sessionId: string) {
   exitedSessionIds.delete(sessionId);
 }
 
-// Strip ANSI escape codes
+// Strip ANSI escape codes (both OSC and CSI sequences)
 function cleanAnsi(str: string): string {
   // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+  return str
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
 }
 
 // Check if a line is just persistent CLI chrome/footer (e.g. Antigravity's accept-edits footer, status bar)
@@ -247,7 +251,7 @@ export function hasWorkingMarkers(text: string): boolean {
   }
 
   // 3. Spinner glyphs (active dynamic animation frames)
-  if (/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(text)) {
+  if (/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/.test(text)) {
     return true;
   }
 
@@ -423,17 +427,66 @@ function extractPathFolder(text: string): string | null {
   return null;
 }
 
+export function isBlockedOnQuestionOrApproval(buffer: string): boolean {
+  const clean = cleanAnsi(buffer).trim();
+  const rawLines = clean.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (rawLines.length === 0) return false;
+
+  const meaningfulLines = rawLines.filter((line) => !isChromeFooterLine(line));
+  if (meaningfulLines.length === 0) return false;
+
+  const lastLine = meaningfulLines[meaningfulLines.length - 1];
+  const lastLineLower = lastLine.toLowerCase();
+
+  // Explicit approval / confirmation / choice keywords
+  if (
+    lastLineLower.includes('(y/n)') ||
+    lastLineLower.includes('[y/n]') ||
+    lastLineLower.includes('(yes/no)') ||
+    lastLineLower.includes('confirm?') ||
+    lastLineLower.includes('proceed?') ||
+    lastLineLower.includes('approval required') ||
+    lastLineLower.includes('allow once') ||
+    lastLineLower.includes('select an option') ||
+    lastLineLower.includes('enter choice') ||
+    lastLineLower.includes('press enter to continue') ||
+    lastLineLower.includes('do you want to')
+  ) {
+    return true;
+  }
+
+  // Question mark at the end of a non-chrome, non-placeholder line
+  if (lastLine.endsWith('?')) {
+    if (
+      lastLineLower.includes('what would you like') ||
+      lastLineLower.includes('what should') ||
+      lastLineLower.includes('ask a question') ||
+      lastLineLower.includes('ask anything')
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 const lastPublishedPresence = new Map<string, string>();
 
-function mapPaneToPresence(state: string | undefined): string | undefined {
+function mapPaneToPresence(sessionId: string, state: string | undefined): string | undefined {
   switch (state) {
     case 'idle':
     case 'working':
     case 'done':
     case 'error':
       return state;
-    case 'waitingForYou':
-      return 'blocked';
+    case 'waitingForYou': {
+      const tracker = sessionStates.get(sessionId);
+      if (tracker && isBlockedOnQuestionOrApproval(tracker.rollingBuffer)) {
+        return 'blocked';
+      }
+      return tracker?.sawWorking ? 'done' : 'idle';
+    }
     case 'exited':
       return 'gone';
     default:
@@ -448,16 +501,19 @@ function inNativeApp(): boolean {
 }
 
 function publishObservedPresence(sessionId: string, state: string | undefined): void {
-  const mapped = mapPaneToPresence(state);
+  const mapped = mapPaneToPresence(sessionId, state);
   if (!sessionId || !mapped) return;
   if (lastPublishedPresence.get(sessionId) === mapped) return;
   lastPublishedPresence.set(sessionId, mapped);
   if (!inNativeApp()) return;
-  const tail = sessionStates.get(sessionId)?.rollingBuffer;
+  const tracker = sessionStates.get(sessionId);
+  const tail = tracker?.rollingBuffer;
   void invokeCommand('dispatch_publish', {
     address: `session:${sessionId}`,
     state: mapped,
     tail: tail ? tail.split('\n').slice(-80).join('\n') : undefined,
+    alias: tracker?.alias || undefined,
+    engine: tracker?.engine || undefined,
   }).catch(() => {});
 }
 
@@ -526,12 +582,18 @@ export function recordTerminalOutput(
       lastOutputAt: now,
       settleTimer: null,
       state: 'idle',
+      sawWorking: false,
+      alias: meta?.agentName || undefined,
       latestLine: null,
       engine: authoritativeEngine || engine,
       who: resolvedWho,
       title: resolvedTitle,
     };
     sessionStates.set(sessionId, tracker);
+  }
+
+  if (meta?.agentName && !tracker.alias) {
+    tracker.alias = meta.agentName;
   }
 
   // Refine engine / model metadata ONLY if engine is generic or was initialized without model info
@@ -603,9 +665,11 @@ export function recordTerminalOutput(
     const hasWork = hasWorkingMarkers(clean);
     if (tracker.state === 'working') {
       // While already working, continue in working state
+      tracker.sawWorking = true;
       tracker.state = 'working';
     } else if (hasWork && !isChromeFooterLine(clean) && !clean.trim().endsWith('>')) {
       // Transition to working only on bona-fide active work indicators
+      tracker.sawWorking = true;
       tracker.state = 'working';
     }
 
@@ -695,6 +759,7 @@ export function registerSpawnedTerminal(
     engine?: string;
     title?: string;
     who?: string | null;
+    agentName?: string;
   }
 ): ActiveAgentTerminal {
   if (!sessionId) {
@@ -706,7 +771,12 @@ export function registerSpawnedTerminal(
   const authoritativeEngine = meta?.engine ? normalizeTerminalEngine(meta.engine) : 'grok';
   const folder = meta?.workspaceName || meta?.workspaceId || 'Workspace';
   const title = meta?.title || `[ODD] ${authoritativeEngine}`;
-  const who = meta?.who || authoritativeEngine;
+  const who = meta?.agentName || meta?.who || authoritativeEngine;
+
+  const existingTracker = sessionStates.get(sessionId);
+  if (existingTracker && meta?.agentName) {
+    existingTracker.alias = meta.agentName;
+  }
 
   const spawnedTerminal: ActiveAgentTerminal = {
     sessionId,
@@ -900,6 +970,7 @@ export function markTerminalPromptInjected(sessionId: string): void {
   if (!sessionId) return;
   const tracker = sessionStates.get(sessionId);
   if (tracker) {
+    tracker.sawWorking = true;
     tracker.state = 'working';
   }
   const term = terminalsMap.get(sessionId);

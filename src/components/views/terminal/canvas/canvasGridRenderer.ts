@@ -171,9 +171,10 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
       c = endCol;
     }
 
-    if (hasSelection && selStart && selEnd && r >= selStart.row && r <= selEnd.row) {
-      const startC = Math.max(0, r === selStart.row ? selStart.col : 0);
-      const endC = Math.min(visibleCols, r === selEnd.row ? selEnd.col : visibleCols);
+    const rowRel = r - scrollbackOffset;
+    if (hasSelection && selStart && selEnd && rowRel >= selStart.row && rowRel <= selEnd.row) {
+      const startC = Math.max(0, rowRel === selStart.row ? selStart.col : 0);
+      const endC = Math.min(visibleCols, rowRel === selEnd.row ? selEnd.col : visibleCols);
       if (endC > startC) {
         const sx0 = snap(ox + startC * cellW);
         const sx1 = snap(ox + endC * cellW);

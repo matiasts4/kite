@@ -52,6 +52,8 @@ export interface UseTerminalSnapshotPollerOptions {
   kittyKeyboardFlagsRef: React.MutableRefObject<number>;
   scrollbackOffsetRef: React.MutableRefObject<number>;
   rowWrappedRef?: React.MutableRefObject<boolean[]>;
+  rowCacheRef?: React.MutableRefObject<Map<number, CellSnapshot[]>>;
+  onScrollbackChange?: (offset: number) => void;
   onViewportMetrics?: (metrics: { offset: number; depth: number }) => void;
   onScreenText?: (text: string) => void;
   appliedPtyColsRef: React.MutableRefObject<number>;
@@ -86,6 +88,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
     kittyKeyboardFlagsRef,
     scrollbackOffsetRef,
     rowWrappedRef,
+    rowCacheRef,
     appliedPtyColsRef,
     appliedPtyRowsRef,
     onTitleChange,
@@ -117,6 +120,8 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
   workspaceIdRef.current = workspaceId;
   const engineRef = useRef(engine);
   engineRef.current = engine;
+  const onScrollbackChangeRef = useRef(options.onScrollbackChange);
+  onScrollbackChangeRef.current = options.onScrollbackChange;
   const onViewportMetricsRef = useRef(options.onViewportMetrics);
   onViewportMetricsRef.current = options.onViewportMetrics;
   const onScreenTextRef = useRef(options.onScreenText);
@@ -135,6 +140,9 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
         return;
       }
       const previousCursorRow = cursorRef.current.row;
+      const previousScrollbackOffset = scrollbackOffsetRef.current;
+      const nextScrollbackOffset = snapshot.scrollbackOffset ?? 0;
+      const scrollbackChanged = previousScrollbackOffset !== nextScrollbackOffset;
       lastSeqRef.current = snapshot.seq;
       cursorRef.current = snapshot.cursor;
       alternateScreenRef.current = Boolean(snapshot.alternateScreen);
@@ -146,7 +154,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
       focusReportingRef.current = Boolean(snapshot.focusReporting);
       win32InputModeRef.current = Boolean(snapshot.win32InputMode);
       kittyKeyboardFlagsRef.current = snapshot.kittyKeyboardFlags ?? 0;
-      scrollbackOffsetRef.current = snapshot.scrollbackOffset ?? 0;
+      scrollbackOffsetRef.current = nextScrollbackOffset;
       if (rowWrappedRef) {
         if (snapshot.full) {
           const flags = Array.from({ length: snapshot.rows }, () => false);
@@ -212,6 +220,27 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
       if (packedGrid) {
         syncGridState(packedGrid, matrixRef.current, snapshot.cols);
       }
+      if (rowCacheRef && !alternateScreenRef.current) {
+        const cache = rowCacheRef.current;
+        for (let r = 0; r < matrixRef.current.length; r += 1) {
+          const rowCells = matrixRef.current[r];
+          if (rowCells && rowCells.length > 0) {
+            cache.set(r - nextScrollbackOffset, rowCells.map((c) => ({ ...c })));
+          }
+        }
+        if (cache.size > 5500) {
+          const excess = cache.size - 5000;
+          let removed = 0;
+          for (const key of cache.keys()) {
+            cache.delete(key);
+            removed += 1;
+            if (removed >= excess) break;
+          }
+        }
+      }
+      if (scrollbackChanged) {
+        onScrollbackChangeRef.current?.(nextScrollbackOffset);
+      }
       onScreenTextRef.current?.(visibleScreenText(matrixRef.current));
       onViewportMetricsRef.current?.({
         offset: snapshot.scrollbackOffset ?? 0,
@@ -228,7 +257,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
         reconcilePtySizeRef?.current?.();
       }
 
-      if (snapshot.full) {
+      if (snapshot.full || scrollbackChanged) {
         scheduleRender();
       } else {
         const rows = snapshot.dirtyRows.map((row) => row.rowIdx);
@@ -250,6 +279,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
       lastSeqRef,
       matrixRef,
       mouseModeRef,
+      rowCacheRef,
       rowWrappedRef,
       resizeInFlightRef,
       scheduleRender,

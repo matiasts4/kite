@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::chat::drivers::{declaration, DriverVersion};
 use crate::chat::persistent::{
-    opencode_model_arg, unsupported_wire, AntigravitySession, OpenCodeServerSession,
-    PersistentControls, ANTIGRAVITY_DRIVER, OPENCODE_DRIVER,
+    opencode_model_arg, unsupported_wire, AntigravitySession, GrokSession, OpenCodeServerSession,
+    PersistentControls, ANTIGRAVITY_DRIVER, GROK_DRIVER, OPENCODE_DRIVER,
 };
 use crate::chat::recipe::{apply_recipe, snapshot_for_agent};
 use crate::chat::session::{
@@ -20,6 +20,10 @@ use crate::chat::session::{
 };
 use crate::chat::threads::{
     chat_item, load_thread, replace_thread, sanitize_chat_text, touch, upsert_item,
+};
+use crate::chat::normalize::{
+    automatic_approval_decision, effective_permission_mode, follow_up_uses_delta_only,
+    should_auto_approve, DeltaCoalescer, ProviderTurnEvent, ToolCallSnapshot, ToolCallTracker,
 };
 use crate::chat::utils::{chat_log, clip_argv, now_ms, resolve_bin};
 
@@ -124,18 +128,18 @@ impl ManagedSendError {
     }
 }
 
-fn persistent_flag_enabled(raw: Option<&str>) -> bool {
-    raw == Some("1")
+/// Sessions are on unless the process sets the gate to exactly `0`.
+pub fn sessions_enabled_from(raw: Option<&str>) -> bool {
+    raw != Some("0")
 }
 
 pub fn persistent_sessions_enabled() -> bool {
-    persistent_flag_enabled(std::env::var(PERSISTENT_SESSIONS_ENV).ok().as_deref())
+    sessions_enabled_from(std::env::var(PERSISTENT_SESSIONS_ENV).ok().as_deref())
 }
 
-/// The route a send may use. Only a driver that declared a lasting channel and
-/// a process that set the opt-in flag may keep a process open. Everything else
-/// keeps today's one-command path, so a resumable or unobservable driver never
-/// looks persistent.
+/// The route a send may use. A served lasting channel keeps its process.
+/// `false` is the explicit off switch. A driver without a served wire stays
+/// one command per turn.
 pub fn send_route(provider: &str, persistent_enabled: bool) -> SendRoute {
     let Some(declared) = declaration(provider) else {
         return SendRoute::OneShot;
@@ -149,7 +153,7 @@ pub fn send_route(provider: &str, persistent_enabled: bool) -> SendRoute {
         return SendRoute::OneShot;
     }
     match declared.driver.as_str() {
-        ANTIGRAVITY_DRIVER | OPENCODE_DRIVER => SendRoute::Persistent,
+        ANTIGRAVITY_DRIVER | OPENCODE_DRIVER | GROK_DRIVER => SendRoute::Persistent,
         _ => SendRoute::OneShot,
     }
 }
@@ -306,6 +310,7 @@ pub fn sync_thread_provider_session_id(thread_id: &str, handle: Option<&str>) {
 pub enum TransportKind {
     Antigravity,
     OpenCodeServer,
+    GrokAgent,
 }
 
 /// A lasting transport chosen from the declaration, plus the version evidence
@@ -341,6 +346,7 @@ pub fn select_persistent_transport(
     let kind = match declared.driver.as_str() {
         ANTIGRAVITY_DRIVER => TransportKind::Antigravity,
         OPENCODE_DRIVER => TransportKind::OpenCodeServer,
+        GROK_DRIVER => TransportKind::GrokAgent,
         other => {
             return Err(format!(
                 "Unsupported: {other} declares a lasting wire but this build has no adapter for it"
@@ -350,6 +356,7 @@ pub fn select_persistent_transport(
     let transport: Box<dyn SessionTransport> = match kind {
         TransportKind::Antigravity => Box::new(AntigravitySession::new(controls)),
         TransportKind::OpenCodeServer => Box::new(OpenCodeServerSession::with_controls(controls)),
+        TransportKind::GrokAgent => Box::new(GrokSession::new(controls)),
     };
     Ok(SelectedTransport {
         driver: declared.driver,
@@ -403,6 +410,7 @@ fn emit_notice_item(thread_id: &str, run_id: &str, message: &str) {
 fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: String) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(40));
+        flush_pipeline_deltas(&thread_id, &run_id, &assistant_id);
         let (events, handle) = {
             let mut manager = session_manager().lock().unwrap();
             let events = manager.poll(&thread_id).unwrap_or_default();
@@ -423,6 +431,11 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
                 "notice" => {
                     if let Some(text) = event.payload.get("text").and_then(Value::as_str) {
                         emit_notice_item(&thread_id, &run_id, text);
+                    }
+                }
+                "activity" => {
+                    if let Some(line) = event.payload.get("line").and_then(Value::as_str) {
+                        handle_stream_json_line(&thread_id, &run_id, &assistant_id, line);
                     }
                 }
                 "turnCompleted" => outcome = Some((true, String::new())),
@@ -487,6 +500,41 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
     });
 }
 
+/// Best-effort hidden ref before the provider starts. A miss does not fail the turn.
+fn remember_turn_checkpoint(thread: &mut Value, thread_id: &str, run_id: &str) {
+    let Some(ref_name) = crate::chat::checkpoints::capture_for_thread(thread, thread_id, run_id) else {
+        return;
+    };
+    crate::chat::checkpoints::record_checkpoint_ref(thread, &ref_name);
+    let found = threads()
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|item| item.get("id").and_then(|v| v.as_str()) == Some(thread_id));
+    if found {
+        set_thread_field(thread_id, "checkpointRef", json!(ref_name.clone()));
+        if let Some(stored) = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|item| item.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+        {
+            if let Some(revision) = stored.get("revision").cloned() {
+                thread["revision"] = revision;
+            }
+            if let Some(updated) = stored.get("updatedAtUnixMs").cloned() {
+                thread["updatedAtUnixMs"] = updated;
+            }
+        }
+    } else {
+        touch(thread);
+        replace_thread(thread);
+    }
+    chat_log(&format!(
+        "checkpoint: thread={thread_id} run={run_id} ref={ref_name}"
+    ));
+}
+
 pub fn start_turn(
     thread_id: &str,
     profile_id: Option<&str>,
@@ -539,7 +587,6 @@ pub fn start_turn_with_binding(
     ));
     let user_id = format!("u{}", Uuid::new_v4().simple());
     let assistant_id = format!("a{}", Uuid::new_v4().simple());
-    let revision = thread.get("revision").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut user_item = chat_item(&user_id, "user", prompt, false);
     if !attachments.is_empty() {
         user_item["attachments"] = Value::Array(attachments);
@@ -553,6 +600,12 @@ pub fn start_turn_with_binding(
             thread = stored.clone();
         }
     }
+    remember_turn_checkpoint(&mut thread, thread_id, &run_id);
+    let revision = thread
+        .get("revision")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let mut run = TurnRun {
         revision,
         events: Vec::new(),
@@ -818,7 +871,10 @@ pub fn launch_provider(
                 .map(|r| r.is_warm() || r.resume_handle.is_some())
                 .unwrap_or(false)
         };
-        let effective_prompt = if provider_session_id.is_some() || is_session_warm_or_has_handle {
+        let effective_prompt = if follow_up_uses_delta_only(
+            provider_session_id.as_deref(),
+            is_session_warm_or_has_handle,
+        ) {
             prompt.clone()
         } else {
             assemble_thread_context(&thread_clone, &prompt)
@@ -1246,7 +1302,12 @@ pub fn spawn_args(
                 "acceptEdits" => "acceptEdits",
                 _ => "bypassPermissions",
             };
-            let mut args = vec!["-p".into(), "--output-format".into(), "text".into(), "--permission-mode".into(), permission.into()];
+            let format = if resolved.session_id.is_some() {
+                "stream-json"
+            } else {
+                "text"
+            };
+            let mut args = vec!["-p".into(), "--output-format".into(), format.into(), "--permission-mode".into(), permission.into()];
             if let Some(sid) = resolved.session_id {
                 args.push("--resume".into());
                 args.push(sid.to_string());
@@ -1279,13 +1340,17 @@ pub fn spawn_args(
             args
         }
         "grok" => {
-            let permission = match mode {
-                "readOnly" => "plan",
-                "acceptEdits" => "acceptEdits",
-                _ => "bypassPermissions",
+            let effective = crate::chat::normalize::effective_permission_mode("grok", mode);
+            let permission = if mode == "readOnly" {
+                "plan"
+            } else {
+                crate::chat::normalize::grok_permission_flag(effective.effective)
             };
+            // `-p` is `--single <PROMPT>`. The prompt is the next argument.
+            // A flag in that slot makes the CLI reject the turn before it runs.
             let mut args = vec![
                 "-p".into(),
+                sent,
                 "--permission-mode".into(),
                 permission.into(),
             ];
@@ -1298,10 +1363,16 @@ pub fn spawn_args(
                 args.push("--effort".into());
                 args.push(effort.into());
             }
-            args.push(sent);
             args
         }
-        "cursor" => vec!["-p".into(), sent],
+        "cursor" => {
+            let mut args = vec!["-p".into(), sent];
+            if let Some(sid) = resolved.session_id {
+                args.push("--resume".into());
+                args.push(sid.to_string());
+            }
+            args
+        }
         "opencode" => {
             let mut args = vec!["run".into(), "--format".into(), "json".into()];
             if let Some(agent) = resolved.agent.or(values.agent) {
@@ -1413,6 +1484,30 @@ pub fn build_spawn(
     })
 }
 
+pub fn write_user_input_to_run(thread_id: &str, request_id: &str, answers: &Value) {
+    let line = format!(
+        "{}\n",
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "answers": answers }
+        })
+    );
+    write_approval_to_run(thread_id, request_id, "allowOnce");
+    let stdin_arc = {
+        let live = live_turns().lock().unwrap();
+        let run_id = live.by_thread.get(thread_id).cloned();
+        run_id.and_then(|rid| live.runs.get(&rid).and_then(|run| run.stdin.clone()))
+    };
+    if let Some(stdin_mutex) = stdin_arc {
+        if let Ok(mut stdin) = stdin_mutex.lock() {
+            let _ = stdin.write_all(line.as_bytes());
+            let _ = stdin.flush();
+        }
+    }
+    set_thread_field(thread_id, "pendingUserInput", Value::Null);
+}
+
 pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) {
     let stdin_arc = {
         let mut live = live_turns().lock().unwrap();
@@ -1488,9 +1583,7 @@ pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut
     let out_run = run_id.clone();
     let out_id = assistant_id.clone();
     let err_run = run_id.clone();
-    let err_id = assistant_id.clone();
     let out_thread = thread_id.clone();
-    let err_thread = thread_id.clone();
     let stdout_thread = std::thread::spawn(move || {
         if let Some(stdout) = stdout {
             read_pipe(stdout, &out_thread, &out_run, &out_id);
@@ -1498,7 +1591,7 @@ pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut
     });
     let stderr_thread = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
-            read_pipe(stderr, &err_thread, &err_run, &err_id);
+            read_stderr_ring(stderr, &err_run);
         }
     });
     let _ = stdout_thread.join();
@@ -1510,10 +1603,342 @@ pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut
         }
     }
     let status = shared.lock().ok().and_then(|mut child| child.wait().ok());
-    let ok = status.map(|code| code == 0).unwrap_or(false);
+    let exit_code = status.map(|code| code as i32);
+    let ok = exit_code.unwrap_or(1) == 0;
     chat_log(&format!("stream_child: process exited for run_id={}, pid={}, ok={}", run_id, pid, ok));
-    let message = if ok { String::new() } else { "The provider command exited with an error.".into() };
-    finish_run(&run_id, ok, false, &message);
+    let stderr_text = take_run_stderr(&run_id);
+    let provider = threads()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+        .and_then(|thread| thread.get("provider").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let projected = crate::chat::normalize::project_process_failure(
+        if ok { Some(0) } else { exit_code },
+        &stderr_text,
+        &provider,
+        &[],
+    );
+    if let Some(failure) = projected.failure {
+        record_turn_failure(&thread_id, &failure);
+        finish_run(&run_id, false, false, "");
+    } else {
+        let message = if ok {
+            String::new()
+        } else {
+            "The provider command exited with an error.".into()
+        };
+        finish_run(&run_id, ok, false, &message);
+    }
+}
+
+fn pipeline_runs() -> &'static Mutex<HashMap<String, (ToolCallTracker, DeltaCoalescer)>> {
+    static RUNS: std::sync::OnceLock<Mutex<HashMap<String, (ToolCallTracker, DeltaCoalescer)>>> =
+        std::sync::OnceLock::new();
+    RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn apply_known_turn_pipeline(thread_id: &str, run_id: &str, assistant_id: &str, frame: &Value) -> bool {
+    let now = Instant::now();
+    let (events, message, reasoning, holding) = {
+        let mut runs = pipeline_runs().lock().unwrap();
+        let (tools, deltas) = runs
+            .entry(run_id.to_string())
+            .or_insert_with(|| (ToolCallTracker::default(), DeltaCoalescer::default()));
+        let events = tools.ingest(frame);
+        // An empty ingest is not a known frame. Notices are known: they stay
+        // out of the assistant message and must not fall through to another parser.
+        if events.is_empty() {
+            return false;
+        }
+        let mut message = None;
+        let mut reasoning = None;
+        for event in &events {
+            match event {
+                ProviderTurnEvent::MessageDelta { text } => {
+                    if let Some(flushed) = deltas.push_message(text, false, now) {
+                        message = Some(flushed);
+                    }
+                }
+                ProviderTurnEvent::ReasoningDelta { text } => {
+                    if let Some(flushed) = deltas.push_reasoning(text, false, now) {
+                        reasoning = Some(flushed);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (due_message, due_reasoning) = deltas.poll_split(now);
+        if message.is_none() {
+            message = due_message;
+        }
+        if reasoning.is_none() {
+            reasoning = due_reasoning;
+        }
+        let holding = deltas.pending();
+        (events, message, reasoning, holding)
+    };
+    if let Some(text) = message {
+        emit_deltas(thread_id, run_id, assistant_id, &text);
+    }
+    if let Some(text) = reasoning {
+        append_reasoning_delta(thread_id, run_id, &text);
+    }
+    for event in events {
+        match event {
+            ProviderTurnEvent::MessageDelta { .. } | ProviderTurnEvent::ReasoningDelta { .. } => {}
+            ProviderTurnEvent::ToolCallUpdated { tool } => upsert_tool_snapshot(thread_id, run_id, &tool),
+            ProviderTurnEvent::ApprovalRequested {
+                request_id,
+                tool_name,
+                title,
+            } => project_approval(thread_id, run_id, &request_id, &tool_name, &title),
+            ProviderTurnEvent::UserInputRequested { request } => {
+                let value = serde_json::to_value(&request).unwrap_or(Value::Null);
+                set_thread_field(thread_id, "pendingUserInput", value);
+                set_thread_field(thread_id, "status", json!("waiting"));
+            }
+            ProviderTurnEvent::PlanUpdated { title, status, body } => {
+                project_plan(thread_id, run_id, &title, &status, &body);
+            }
+            ProviderTurnEvent::UsageUpdated { usage } => {
+                if let Ok(value) = serde_json::to_value(&usage) {
+                    set_thread_field(thread_id, "usage", value);
+                }
+            }
+            ProviderTurnEvent::TurnTerminal { failure } => {
+                if let Some(failure) = failure {
+                    record_turn_failure(thread_id, &failure);
+                }
+            }
+            ProviderTurnEvent::SessionStarted { provider_session_id } => {
+                if let Some(id) = provider_session_id {
+                    if !id.is_empty() {
+                        set_thread_field(thread_id, "providerSessionId", json!(id));
+                    }
+                }
+            }
+            ProviderTurnEvent::Notice { message, .. } => emit_notice_item(thread_id, run_id, &message),
+        }
+    }
+    if holding {
+        let thread = thread_id.to_string();
+        let run = run_id.to_string();
+        let assistant = assistant_id.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(crate::chat::normalize::DELTA_WINDOW);
+            flush_pipeline_deltas(&thread, &run, &assistant);
+        });
+    }
+    true
+}
+
+fn flush_pipeline_deltas(thread_id: &str, run_id: &str, assistant_id: &str) {
+    let (message, reasoning) = {
+        let mut runs = pipeline_runs().lock().unwrap();
+        let Some((_, deltas)) = runs.get_mut(run_id) else {
+            return;
+        };
+        deltas.flush_split()
+    };
+    if let Some(text) = message {
+        emit_deltas(thread_id, run_id, assistant_id, &text);
+    }
+    if let Some(text) = reasoning {
+        append_reasoning_delta(thread_id, run_id, &text);
+    }
+}
+
+fn set_thread_field(thread_id: &str, field: &str, value: Value) {
+    let mut items = threads().lock().unwrap();
+    if let Some(thread) = items
+        .iter_mut()
+        .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+    {
+        thread[field] = value;
+        touch(thread);
+    }
+    drop(items);
+    persist();
+}
+
+fn append_reasoning_delta(thread_id: &str, run_id: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let thought_id = format!("r_{run_id}_live");
+    let combined = {
+        let items = threads().lock().unwrap();
+        items
+            .iter()
+            .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+            .and_then(|thread| thread.get("items"))
+            .and_then(|v| v.as_array())
+            .and_then(|list| list.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(thought_id.as_str())))
+            .and_then(|it| it.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    } + text;
+    let item = chat_item(&thought_id, "reasoning", &combined, true);
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "upsert", "item": item.clone() }));
+        }
+    }
+    live_cv().notify_all();
+    let mut items = threads().lock().unwrap();
+    if let Some(thread) = items
+        .iter_mut()
+        .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+    {
+        upsert_item(thread, &item);
+    }
+}
+
+fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapshot) {
+    let streaming = matches!(
+        snap.status.as_str(),
+        "inProgress" | "running" | "pending" | "in_progress"
+    );
+    let mut item = chat_item(&snap.id, "tool", &snap.output, streaming);
+    let title = if snap.title.is_empty() {
+        snap.kind.clone()
+    } else {
+        snap.title.clone()
+    };
+    item["title"] = json!(title);
+    item["status"] = json!(snap.status);
+    item["toolKind"] = json!(snap.kind);
+    if let Some(path) = &snap.path {
+        item["filePath"] = json!(path);
+    }
+    if let Some(command) = &snap.command {
+        item["command"] = json!(command);
+    }
+    if let Some(additions) = snap.additions {
+        item["addedLines"] = json!(additions);
+    }
+    if let Some(deletions) = snap.deletions {
+        item["removedLines"] = json!(deletions);
+    }
+    {
+        let items = threads().lock().unwrap();
+        if let Some(existing) = items
+            .iter()
+            .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+            .and_then(|thread| thread.get("items"))
+            .and_then(|v| v.as_array())
+            .and_then(|list| list.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(snap.id.as_str())))
+        {
+            if snap.output.is_empty() {
+                if let Some(text) = existing.get("text") {
+                    item["text"] = text.clone();
+                }
+            }
+            for key in ["createdAtUnixMs", "serverName", "detail"] {
+                if item.get(key).is_none() {
+                    if let Some(value) = existing.get(key) {
+                        item[key] = value.clone();
+                    }
+                }
+            }
+        }
+    }
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "upsert", "item": item.clone() }));
+        }
+    }
+    live_cv().notify_all();
+    {
+        let mut items = threads().lock().unwrap();
+        if let Some(thread) = items
+            .iter_mut()
+            .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+        {
+            upsert_item(thread, &item);
+            touch(thread);
+        }
+    }
+    if !streaming {
+        persist();
+    }
+}
+
+fn project_approval(thread_id: &str, run_id: &str, request_id: &str, tool_name: &str, title: &str) {
+    let (provider, mode) = {
+        let items = threads().lock().unwrap();
+        let thread = items
+            .iter()
+            .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id));
+        (
+            thread
+                .and_then(|thread| thread.get("provider"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            thread
+                .and_then(|thread| thread.get("mode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("supervised")
+                .to_string(),
+        )
+    };
+    let effective = effective_permission_mode(&provider, &mode);
+    if should_auto_approve(effective.effective.as_str(), tool_name) {
+        let decision = automatic_approval_decision().as_str();
+        let _ = session_manager()
+            .lock()
+            .unwrap()
+            .respond_approval(thread_id, request_id, automatic_approval_decision());
+        write_approval_to_run(thread_id, request_id, decision);
+        return;
+    }
+    let approval_val = json!({
+        "id": request_id,
+        "toolName": tool_name,
+        "title": title,
+        "detail": title,
+        "status": "pending"
+    });
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "approvalOpened", "approval": approval_val.clone() }));
+            push_event(run, json!({ "kind": "status", "status": "waiting" }));
+        }
+    }
+    live_cv().notify_all();
+    set_thread_field(thread_id, "pendingApproval", approval_val);
+    set_thread_field(thread_id, "status", json!("waiting"));
+}
+
+fn project_plan(thread_id: &str, run_id: &str, title: &str, status: &str, body: &str) {
+    let plan_item_id = format!("plan_{run_id}");
+    let streaming = status == "running" || status == "pending";
+    let mut plan_item = chat_item(&plan_item_id, "tool", body, streaming);
+    plan_item["title"] = json!(format!("Plan · {title}"));
+    plan_item["status"] = json!(status);
+    plan_item["toolKind"] = json!("planUpdate");
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "upsert", "item": plan_item.clone() }));
+        }
+    }
+    live_cv().notify_all();
+    let mut items = threads().lock().unwrap();
+    if let Some(thread) = items
+        .iter_mut()
+        .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+    {
+        upsert_item(thread, &plan_item);
+    }
 }
 
 pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str, line: &str) -> bool {
@@ -1524,6 +1949,10 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
     let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
         return false;
     };
+
+    if apply_known_turn_pipeline(thread_id, run_id, assistant_id, &val) {
+        return true;
+    }
 
     if let Some(acp_event) = crate::acp::parse_acp_stream_line(thread_id, run_id, trimmed) {
         match acp_event {
@@ -1788,12 +2217,18 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                 duration_seconds,
                 ref status,
             } => {
-                let usage_val = json!({
+                let usage_val = serde_json::to_value(crate::chat::normalize::usage_from_provider(
+                    input_tokens,
+                    output_tokens,
+                    None,
+                    None,
+                    Some(duration_seconds),
+                ))
+                .unwrap_or_else(|_| json!({
                     "inputTokens": input_tokens,
                     "outputTokens": output_tokens,
-                    "durationSeconds": duration_seconds,
-                    "costUsd": (input_tokens as f64 * 0.000003) + (output_tokens as f64 * 0.000015)
-                });
+                    "durationSeconds": duration_seconds
+                }));
                 {
                     let mut live = live_turns().lock().unwrap();
                     if let Some(run) = live.runs.get_mut(run_id) {
@@ -1845,11 +2280,76 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
             || val.get("result").is_some()
             || val.get("error").is_some()
         {
+            let kind = val
+                .get("method")
+                .or_else(|| val.get("type"))
+                .or_else(|| val.get("event"))
+                .and_then(Value::as_str)
+                .unwrap_or("frame");
+            emit_notice_item(
+                thread_id,
+                run_id,
+                &format!("unrecognized frame `{kind}`"),
+            );
             return true;
         }
     }
 
     false
+}
+
+fn stderr_ring() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static RING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    RING.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn read_stderr_ring(mut pipe: impl Read, run_id: &str) {
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let Ok(count) = pipe.read(&mut buf) else { break };
+        if count == 0 {
+            break;
+        }
+        pending.extend_from_slice(&buf[..count]);
+    }
+    if pending.is_empty() {
+        return;
+    }
+    let text = String::from_utf8_lossy(&pending);
+    let mut ring = stderr_ring().lock().unwrap();
+    let entry = ring.entry(run_id.to_string()).or_default();
+    entry.push_str(&text);
+    if entry.len() > 16_000 {
+        let drain = entry.len() - 16_000;
+        entry.drain(..drain);
+    }
+}
+
+fn take_run_stderr(run_id: &str) -> String {
+    stderr_ring()
+        .lock()
+        .unwrap()
+        .remove(run_id)
+        .unwrap_or_default()
+}
+
+fn record_turn_failure(thread_id: &str, failure: &crate::chat::normalize::TurnFailure) {
+    let Ok(value) = serde_json::to_value(failure) else {
+        return;
+    };
+    let mut items = threads().lock().unwrap();
+    if let Some(thread) = items
+        .iter_mut()
+        .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+    {
+        thread["turnFailure"] = value;
+        thread["status"] = json!("error");
+        touch(thread);
+    }
+    drop(items);
+    persist();
 }
 
 pub fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_id: &str) {
@@ -2010,6 +2510,21 @@ pub fn chars_chunks(text: &str, size: usize) -> Vec<String> {
 
 pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     chat_log(&format!("finish_run starting: run_id={}, ok={}, stopped={}", run_id, ok, stopped));
+    if let Some((thread_id, assistant_id)) = {
+        let live = live_turns().lock().unwrap();
+        live.runs.get(run_id).map(|run| {
+            let thread_id = live
+                .by_thread
+                .iter()
+                .find(|(_, id)| id.as_str() == run_id)
+                .map(|(thread, _)| thread.clone())
+                .unwrap_or_default();
+            (thread_id, run.assistant_id.clone())
+        })
+    } {
+        flush_pipeline_deltas(&thread_id, run_id, &assistant_id);
+        pipeline_runs().lock().unwrap().remove(run_id);
+    }
     let (thread_id, assistant_id, assistant_text, routine_id) = {
         let mut live = live_turns().lock().unwrap();
         let thread_id = live.by_thread.iter().find(|(_, id)| id.as_str() == run_id).map(|(thread, _)| thread.clone());
@@ -2068,34 +2583,6 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                         it["streaming"] = json!(false);
                     }
                 }
-            }
-
-            let has_existing_usage = thread
-                .get("usage")
-                .and_then(|u| u.get("inputTokens"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) > 0;
-
-            if !has_existing_usage {
-                let out_tokens = (assistant_text.len() / 4).max(1) as i64;
-                let in_tokens = thread
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|it| it.get("text").and_then(|t| t.as_str()))
-                            .map(|s| s.len() / 4)
-                            .sum::<usize>() as i64
-                    })
-                    .unwrap_or(0);
-
-                let total_in = in_tokens.max(10);
-                let total_out = out_tokens;
-                thread["usage"] = json!({
-                    "inputTokens": total_in,
-                    "outputTokens": total_out,
-                    "costUsd": (total_in as f64 * 0.000003) + (total_out as f64 * 0.000015)
-                });
             }
 
             let title = thread.get("title").and_then(|v| v.as_str()).unwrap_or("");
@@ -2322,7 +2809,7 @@ pub fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_i
 }
 
 pub fn settle_turn_notification(run_id: &str, thread_id: &str, profile_id: Option<&str>, ok: bool, stopped: bool) {
-    if thread_id.is_empty() {
+    if thread_id.is_empty() || stopped {
         return;
     }
     let outcome = if stopped {
@@ -2657,13 +3144,13 @@ mod tests {
             spawn.args,
             vec![
                 "-p",
+                "hello",
                 "--permission-mode",
-                "acceptEdits",
+                "default",
                 "--model",
                 "grok-4.7",
                 "--effort",
                 "high",
-                "hello",
             ]
         );
 
@@ -2766,7 +3253,7 @@ mod tests {
             vec![
                 "-p",
                 "--output-format",
-                "text",
+                "stream-json",
                 "--permission-mode",
                 "acceptEdits",
                 "--resume",
@@ -2871,31 +3358,22 @@ mod tests {
 
     #[test]
     fn the_persistent_route_requires_a_persistent_declaration_and_the_flag() {
-        for driver in ["antigravity", "agy", "opencode"] {
+        for driver in ["antigravity", "agy", "opencode", "grok"] {
             assert_eq!(send_route(driver, true), SendRoute::Persistent, "{driver}");
             assert_eq!(send_route(driver, false), SendRoute::OneShot, "{driver}");
         }
-        for driver in ["codex", "gemini", "grok", "cursor", "claude", "not-a-driver"] {
+        for driver in ["codex", "gemini", "cursor", "claude", "not-a-driver"] {
             assert_eq!(send_route(driver, true), SendRoute::OneShot, "{driver}");
             assert_eq!(send_route(driver, false), SendRoute::OneShot, "{driver}");
         }
     }
 
     #[test]
-    fn only_the_exact_flag_value_enables_persistent_sessions() {
-        assert!(persistent_flag_enabled(Some("1")));
-        for raw in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("true"),
-            Some(" 1"),
-            Some("1 "),
-            Some("01"),
-            Some("1\n"),
-        ] {
-            assert!(!persistent_flag_enabled(raw), "{raw:?} must not enable sessions");
-        }
+    fn sessions_stay_on_unless_the_gate_is_exactly_zero() {
+        assert!(sessions_enabled_from(None));
+        assert!(sessions_enabled_from(Some("1")));
+        assert!(sessions_enabled_from(Some("")));
+        assert!(!sessions_enabled_from(Some("0")));
     }
 
     #[test]
@@ -3101,7 +3579,7 @@ mod tests {
 
     #[test]
     fn one_shot_notices_follow_the_driver_declaration() {
-        for driver in ["gemini", "grok", "cursor"] {
+        for driver in ["gemini", "cursor"] {
             let notice = one_shot_notice(driver, true).expect("resumable notice");
             assert!(notice.contains("provider-issued id"), "{driver}: {notice}");
             assert!(
@@ -3118,6 +3596,7 @@ mod tests {
         assert!(one_shot_notice("antigravity", true).is_none());
         assert!(one_shot_notice("codex", true).is_none());
         assert!(one_shot_notice("opencode", true).is_none());
+        assert!(one_shot_notice("grok", true).is_none());
         assert!(one_shot_notice("not-a-driver", true).is_none());
     }
 
@@ -3134,12 +3613,18 @@ mod tests {
         assert_eq!(opencode.kind, TransportKind::OpenCodeServer);
         assert_eq!(opencode.version.minimum.to_string(), "2.1.4");
 
+        let grok = select_persistent_transport("grok", PersistentControls::default())
+            .expect("grok transport");
+        assert_eq!(grok.kind, TransportKind::GrokAgent);
+        assert_eq!(grok.driver, "grok");
+        assert_eq!(grok.version.minimum.to_string(), "1.0.77");
+
         let codex = select_persistent_transport("codex", PersistentControls::default())
             .expect_err("codex documents no turn frame");
         assert!(codex.contains("Unsupported"), "{codex}");
         assert!(codex.contains("app-server"), "{codex}");
 
-        for driver in ["claude", "gemini", "grok", "cursor"] {
+        for driver in ["claude", "gemini", "cursor"] {
             let error = select_persistent_transport(driver, PersistentControls::default())
                 .expect_err("no lasting wire");
             assert!(error.contains("Unsupported"), "{driver}: {error}");

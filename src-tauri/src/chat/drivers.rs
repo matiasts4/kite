@@ -372,13 +372,15 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
                 "gemini: 0.64.0 documents --resume and --session-id only, so no lasting channel was observed",
             ),
         },
-        // `grok` 1.0.70 (`grok --help`, 2026-11-05) documents `-m/--model` and
-        // `--reasoning-effort` (alias `--effort`). The one-shot spawn passes
-        // the alias. Per-model levels come from the CLI catalog. `--resume`
-        // and `--session-id` still do not make a lasting channel.
+        // `grok` 1.0.77 (`grok --help`, `grok agent --help`, `grok agent stdio --help`,
+        // 2026-11-09) documents `agent stdio` as the lasting channel.
+        // `--permission-mode` is a top-level flag, so it sits before `agent`.
+        // Model and effort are set on that session, not as a one-shot flag.
+        // The one-shot arm still passes `-p`, then the prompt, then permission,
+        // model, and `--effort`.
         "grok" => DriverDeclaration {
             driver: driver.to_string(),
-            session_mode: Some(SessionMode::Resumable),
+            session_mode: Some(SessionMode::Persistent),
             accepts_model: true,
             accepts_effort: true,
             accepts_permission: true,
@@ -392,10 +394,13 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
             ]),
             accepts_resume: true,
             unsupported: Vec::new(),
-            version: None,
-            wire: WireSupport::unsupported(
-                "grok: 1.0.70 documents --resume and --session-id only, so no lasting channel was observed",
-            ),
+            version: Some(DriverVersion {
+                probe_args: vec!["--version"],
+                observed: Version::new(1, 0, 77),
+                minimum: Version::new(1, 0, 77),
+                fixture: "tests/fixtures/driver-grok.version.txt",
+            }),
+            wire: WireSupport::Supported,
         },
         // `opencode` 2.2.5 `run --help` (2026-11-05) documents
         // `--model provider/model#variant`. That variant is the effort level.
@@ -456,7 +461,7 @@ mod tests {
             ("codex", Some(SessionMode::Persistent), true, false, true, true),
             ("opencode", Some(SessionMode::Persistent), true, true, false, true),
             ("gemini", Some(SessionMode::Resumable), false, false, false, true),
-            ("grok", Some(SessionMode::Resumable), true, true, true, true),
+            ("grok", Some(SessionMode::Persistent), true, true, true, true),
             ("cursor", Some(SessionMode::Resumable), false, false, false, true),
             ("claude", None, true, false, true, true),
         ];
@@ -614,7 +619,7 @@ mod tests {
 
     #[test]
     fn every_implemented_wire_declares_a_probe_minimum_and_fixture() {
-        for driver in ["antigravity", "opencode"] {
+        for driver in ["antigravity", "opencode", "grok"] {
             let declared = declaration(driver)
                 .unwrap_or_else(|| panic!("{driver} declaration"));
             assert!(
@@ -674,7 +679,7 @@ mod tests {
 
     #[test]
     fn a_driver_without_a_wire_never_claims_version_evidence() {
-        for driver in ["claude", "cursor", "gemini", "grok"] {
+        for driver in ["claude", "cursor", "gemini"] {
             let declared = declaration(driver)
                 .unwrap_or_else(|| panic!("{driver} declaration"));
             assert!(!declared.wire.is_supported(), "{driver}");

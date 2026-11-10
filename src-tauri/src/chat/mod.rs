@@ -1,3 +1,4 @@
+pub mod checkpoints;
 pub mod contract;
 pub mod drivers;
 pub mod event_log;

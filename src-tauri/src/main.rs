@@ -73,6 +73,7 @@ use agent_mind::*;
 use browser::*;
 use chat::*;
 use chat_commands::*;
+use chat_commands::rewind_thread_transcript;
 use dictation::*;
 use handoff::*;
 use files::*;
@@ -163,6 +164,41 @@ fn opt_out_of_efficiency_mode() {
             std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
         );
     }
+}
+
+/// Dev WebView loads http://127.0.0.1:1420. If Vite is still coming up, Edge
+/// paints ERR_CONNECTION_REFUSED and never retries. Reload once the port opens.
+#[cfg(debug_assertions)]
+fn reload_main_when_vite_is_up(handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use std::net::TcpStream;
+        use std::time::Duration;
+        let addr = match "127.0.0.1:1420".parse() {
+            Ok(addr) => addr,
+            Err(_) => return,
+        };
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_millis(500));
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_err() {
+                continue;
+            }
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.eval(
+                    r#"(function () {
+  var t = (document.body && document.body.innerText) || '';
+  if (
+    t.indexOf('ERR_CONNECTION_REFUSED') !== -1 ||
+    t.indexOf('rechazó la conexión') !== -1 ||
+    t.indexOf("This site can't be reached") !== -1
+  ) {
+    location.reload();
+  }
+})()"#,
+                );
+            }
+            break;
+        }
+    });
 }
 
 fn main() {
@@ -326,6 +362,8 @@ fn main() {
                 let _ = w.show();
                 let _ = w.set_focus();
             }
+            #[cfg(debug_assertions)]
+            reload_main_when_vite_is_up(app.handle().clone());
             if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
@@ -508,6 +546,7 @@ fn main() {
             scroll_terminal_viewport,
             scroll_terminal_viewport_bin,
             find_terminal_text,
+            get_terminal_selection_text,
             dump_terminal_diagnostics,
             clear_terminal_vt,
             read_workspace_changes,
@@ -528,8 +567,11 @@ fn main() {
             report_terminal_agent_detected,
             resolve_file_link,
             respond_chat_approval,
+            respond_chat_user_input,
             restart_agent_terminal_for_autopilot,
             restore_archived_chat,
+            restore_thread_checkpoint,
+            rewind_thread_transcript,
             resume_prompt_get,
             resume_prompt_answer,
             retry_agent_draft_cleanup,

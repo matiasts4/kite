@@ -3,7 +3,69 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::chat::utils::resolve_bin;
+use crate::chat::normalize::catalog_cache_key;
+use crate::chat::utils::{binary_exists, resolve_bin};
+
+/// `missing-binary` when the launcher is absent, `signed-out` when a known
+/// auth file is absent, otherwise `ready`. An unknown sign-in signal stays
+/// `ready` so the picker does not invent a signed-out state.
+pub fn classify_catalog_availability(binary_present: bool, signed_in: Option<bool>) -> &'static str {
+    if !binary_present {
+        "missing-binary"
+    } else if signed_in == Some(false) {
+        "signed-out"
+    } else {
+        "ready"
+    }
+}
+
+fn provider_binary_present(canon: &str) -> bool {
+    match canon {
+        "antigravity" => binary_exists("agy") || binary_exists("antigravity"),
+        "codex" => binary_exists("codex"),
+        "cursor" => binary_exists("cursor") || binary_exists("agent"),
+        "grok" => binary_exists("grok"),
+        "opencode" => binary_exists("opencode"),
+        "claude" => binary_exists("claude"),
+        "gemini" => binary_exists("gemini"),
+        _ => true,
+    }
+}
+
+fn provider_signed_in(canon: &str) -> Option<bool> {
+    let home = crate::quota::utils::user_home_dir();
+    match canon {
+        "grok" => Some(
+            home.join(".grok").join("auth.json").exists()
+                || home.join(".grok").join("models_cache.json").exists(),
+        ),
+        "antigravity" => Some(crate::account_switcher::probe_live_provider_identity("agy").is_some()),
+        "codex" => Some(home.join(".codex").join("auth.json").exists()),
+        "claude" => Some(
+            home.join(".claude.json").exists()
+                || home.join(".claude").join(".credentials.json").exists(),
+        ),
+        "gemini" => Some(
+            home.join(".gemini").join("oauth_creds.json").exists()
+                || home.join(".gemini").join("google_accounts.json").exists(),
+        ),
+        _ => None,
+    }
+}
+
+fn catalog_payload(canon: &str, models: &[Value], cached: bool) -> Value {
+    let state = if models.is_empty() {
+        classify_catalog_availability(provider_binary_present(canon), provider_signed_in(canon))
+    } else {
+        "ready"
+    };
+    json!({
+        "provider": canon,
+        "models": models,
+        "cached": cached,
+        "catalogState": state,
+    })
+}
 
 pub(crate) struct CachedProviderModels {
     pub(crate) models: Vec<Value>,
@@ -73,43 +135,44 @@ fn save_provider_models_to_disk(provider: &str, models: &[Value]) {
 }
 
 pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
+    provider_models_for(provider, None, force_refresh)
+}
+
+pub fn provider_models_for(
+    provider: &str,
+    connection_id: Option<&str>,
+    force_refresh: bool,
+) -> Value {
     let canon = match provider {
         "agy" => "antigravity",
         "claude-code" => "claude",
         "open-code" => "opencode",
         other => other,
     };
+    let cache_key = catalog_cache_key(canon, connection_id);
 
     // 1. Check in-memory cache first unless force_refresh is requested
     if !force_refresh {
         if let Ok(cache) = model_cache().lock() {
-            if let Some(entry) = cache.get(canon) {
+            if let Some(entry) = cache.get(&cache_key) {
                 if entry.cached_at.elapsed() < MODEL_CACHE_TTL && !entry.models.is_empty() {
-                    return json!({
-                        "provider": canon,
-                        "models": entry.models,
-                        "cached": true,
-                    });
+                    return catalog_payload(canon, &entry.models, true);
                 }
             }
         }
 
         // 1b. Check disk cache if in-memory cache is cold
-        if let Some(disk_models) = load_provider_models_from_disk(canon) {
+        if let Some(disk_models) = load_provider_models_from_disk(&cache_key) {
             if let Ok(mut cache) = model_cache().lock() {
                 cache.insert(
-                    canon.to_string(),
+                    cache_key.clone(),
                     CachedProviderModels {
                         models: disk_models.clone(),
                         cached_at: Instant::now(),
                     },
                 );
             }
-            return json!({
-                "provider": canon,
-                "models": disk_models,
-                "cached": true,
-            });
+            return catalog_payload(canon, &disk_models, true);
         }
     }
 
@@ -130,21 +193,17 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
     if !fresh_models.is_empty() {
         if let Ok(mut cache) = model_cache().lock() {
             cache.insert(
-                canon.to_string(),
+                cache_key.clone(),
                 CachedProviderModels {
                     models: fresh_models.clone(),
                     cached_at: Instant::now(),
                 },
             );
         }
-        save_provider_models_to_disk(canon, &fresh_models);
+        save_provider_models_to_disk(&cache_key, &fresh_models);
     }
 
-    json!({
-        "provider": canon,
-        "models": fresh_models,
-        "cached": false,
-    })
+    catalog_payload(canon, &fresh_models, false)
 }
 
 pub fn fetch_antigravity_models_dynamic() -> Vec<Value> {
@@ -317,6 +376,15 @@ pub fn fetch_codex_models_dynamic() -> Vec<Value> {
 }
 
 pub fn fetch_grok_models_dynamic() -> Vec<Value> {
+    // The text `grok models` list is often empty on current CLIs
+    // (`Default model: <id> (not in list below)` then no bullets). The
+    // on-disk catalog is the account's live menu, so it is the first source.
+    if let Some(raw) = read_grok_models_cache_raw() {
+        let models = parse_grok_catalog_models(&raw);
+        if !models.is_empty() {
+            return models;
+        }
+    }
     if let Some(program) = resolve_bin("grok", &[]) {
         if let Ok(out) = crate::hidden_exec::run(&program, &["models"], Duration::from_secs(10)) {
             if out.success() {
@@ -333,14 +401,21 @@ pub fn fetch_grok_models_dynamic() -> Vec<Value> {
     Vec::new()
 }
 
+fn grok_models_cache_path() -> std::path::PathBuf {
+    crate::quota::utils::user_home_dir()
+        .join(".grok")
+        .join("models_cache.json")
+}
+
+fn read_grok_models_cache_raw() -> Option<String> {
+    std::fs::read_to_string(grok_models_cache_path()).ok()
+}
+
 /// Reads the Grok CLI catalog (`~/.grok/models_cache.json`) that records each
 /// model's `reasoning_efforts` menu. The text `grok models` list names ids
 /// only. A missing file leaves those rows without levels.
 fn read_grok_effort_menus() -> Option<HashMap<String, GrokEffortMenu>> {
-    let path = crate::quota::utils::user_home_dir()
-        .join(".grok")
-        .join("models_cache.json");
-    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = read_grok_models_cache_raw()?;
     let menus = parse_grok_effort_menus(&raw);
     if menus.is_empty() {
         None
@@ -423,10 +498,76 @@ pub fn apply_grok_effort_menus(models: &mut [Value], menus: &HashMap<String, Gro
     }
 }
 
-/// Parses `grok models`: a bulleted list under an `Available models:` header.
+/// Parses the Grok CLI catalog into picker rows. Hidden models stay out.
+/// Effort menus attach only when the catalog advertises at least two levels.
+pub fn parse_grok_catalog_models(raw: &str) -> Vec<Value> {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(models) = value.get("models").and_then(|entry| entry.as_object()) else {
+        return Vec::new();
+    };
+    let menus = parse_grok_effort_menus(raw);
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (id, entry) in models {
+        if !model_id_ok(id) || !seen.insert(id.clone()) {
+            continue;
+        }
+        let info = entry.get("info").unwrap_or(entry);
+        if info.get("hidden").and_then(|flag| flag.as_bool()) == Some(true) {
+            continue;
+        }
+        let name = info
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(id);
+        let description = info
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Listed by the Grok CLI");
+        let menu = menus.get(id);
+        rows.push(model_row(
+            id,
+            name,
+            description,
+            menu.is_some(),
+            menu.map(|entry| entry.levels.clone()),
+            menu.and_then(|entry| entry.default_effort.as_deref()),
+        ));
+    }
+    rows
+}
+
+/// Parses `grok models`: the default-model line, then a bulleted list under
+/// `Available models:`. Current CLIs often print the default as
+/// `(not in list below)` with an empty bullet list.
 pub fn parse_grok_models(raw: &str) -> Vec<Value> {
     let mut seen = std::collections::HashSet::new();
     let mut models = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("Default model:") else {
+            continue;
+        };
+        let id = rest.split_whitespace().next().unwrap_or("").trim();
+        if id.is_empty() || !model_id_ok(id) || !seen.insert(id.to_string()) {
+            break;
+        }
+        models.push(model_row(
+            id,
+            id,
+            "Listed by the Grok CLI",
+            false,
+            None,
+            None,
+        ));
+        break;
+    }
     for line in raw.lines() {
         let trimmed = line.trim();
         let entry = trimmed
@@ -781,6 +922,15 @@ mod tests {
     }
 
     #[test]
+    fn catalog_availability_names_the_three_empty_signals() {
+        assert_eq!(classify_catalog_availability(false, None), "missing-binary");
+        assert_eq!(classify_catalog_availability(false, Some(true)), "missing-binary");
+        assert_eq!(classify_catalog_availability(true, Some(false)), "signed-out");
+        assert_eq!(classify_catalog_availability(true, Some(true)), "ready");
+        assert_eq!(classify_catalog_availability(true, None), "ready");
+    }
+
+    #[test]
     fn providers_without_a_list_command_return_no_invented_models() {
         for provider in ["claude", "gemini", "codex"] {
             let value = provider_models(provider, true);
@@ -836,6 +986,93 @@ mod tests {
                 "grok-4.5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parses_grok_models_when_the_default_is_not_in_the_list() {
+        let raw = "You logged in with grok.com.\nDefault model: grok-4.6 (not in list below)\nAvailable models:\n";
+        let parsed: Vec<String> = parse_grok_models(raw)
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(parsed, vec!["grok-4.6".to_string()]);
+    }
+
+    #[test]
+    fn parses_grok_catalog_names_effort_and_skips_hidden() {
+        let raw = r#"{
+            "models": {
+                "grok-4.7": {
+                    "info": {
+                        "name": "Grok 4.7",
+                        "description": "Frontier",
+                        "hidden": false,
+                        "supports_reasoning_effort": true,
+                        "reasoning_effort": "high",
+                        "reasoning_efforts": [
+                            {"id": "xhigh"},
+                            {"id": "high"},
+                            {"id": "medium"},
+                            {"id": "low"}
+                        ]
+                    }
+                },
+                "grok-4.5": {
+                    "info": {
+                        "name": "Grok 4.5",
+                        "hidden": false,
+                        "supports_reasoning_effort": true,
+                        "reasoning_effort": "low",
+                        "reasoning_efforts": [{"id": "high"}, {"id": "medium"}, {"id": "low"}]
+                    }
+                },
+                "grok-hidden": {
+                    "info": {
+                        "name": "Hidden",
+                        "hidden": true,
+                        "supports_reasoning_effort": true,
+                        "reasoning_efforts": [{"id": "low"}, {"id": "high"}]
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_grok_catalog_models(raw);
+        let ids: Vec<&str> = parsed
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"grok-4.7"));
+        assert!(ids.contains(&"grok-4.5"));
+        assert!(!ids.contains(&"grok-hidden"));
+        let seven = parsed
+            .iter()
+            .find(|model| model.get("id").and_then(|value| value.as_str()) == Some("grok-4.7"))
+            .expect("grok-4.7");
+        assert_eq!(seven.get("name").and_then(|value| value.as_str()), Some("Grok 4.7"));
+        assert_eq!(seven.get("supportsEffort").and_then(|value| value.as_bool()), Some(true));
+        let levels: Vec<&str> = seven
+            .get("effortLevels")
+            .and_then(|value| value.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+        assert_eq!(levels, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(seven.get("defaultEffort").and_then(|value| value.as_str()), Some("high"));
+        let five = parsed
+            .iter()
+            .find(|model| model.get("id").and_then(|value| value.as_str()) == Some("grok-4.5"))
+            .expect("grok-4.5");
+        let five_levels: Vec<&str> = five
+            .get("effortLevels")
+            .and_then(|value| value.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+        assert_eq!(five_levels, vec!["low", "medium", "high"]);
     }
 
     #[test]

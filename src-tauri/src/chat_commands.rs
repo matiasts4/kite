@@ -1,6 +1,6 @@
 use crate::chat::{
     apply_launch_choices, archived_at_ms, cancel_turn, configure_thread, create_thread, history, live_turns,
-    load_thread, parse_attachments, provider_models, provider_ok, read_turn_updates, recover_thread,
+    load_thread, parse_attachments, provider_models_for, provider_ok, read_turn_updates, recover_thread,
     release_staged_attachment, remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned,
     stage_blob_attachment, stage_dropped_path, stage_dropped_paths, start_turn_with_binding, touch,
     SendBinding, ThreadEventLog,
@@ -384,7 +384,10 @@ pub fn list_chat_provider_models(request: Option<Value>) -> Value {
     let req = body(&request);
     let provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
     let force_refresh = req.and_then(|r| r.get("forceRefresh")).and_then(|v| v.as_bool()).unwrap_or(false);
-    provider_models(provider, force_refresh)
+    let connection_id = req
+        .and_then(|r| r.get("connectionId").or_else(|| r.get("connection_id")))
+        .and_then(|v| v.as_str());
+    provider_models_for(provider, connection_id, force_refresh)
 }
 
 #[tauri::command]
@@ -670,6 +673,35 @@ pub fn respond_chat_approval(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub fn respond_chat_user_input(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req
+        .and_then(|item| item.get("threadId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let answers = req
+        .and_then(|item| item.get("answers"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if thread_id.is_empty() {
+        return Value::Null;
+    }
+    let request_id = {
+        let items = threads().lock().unwrap();
+        items
+            .iter()
+            .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id))
+            .and_then(|thread| thread.get("pendingUserInput"))
+            .and_then(|pending| pending.get("requestId").or_else(|| pending.get("request_id")))
+            .and_then(|value| value.as_str())
+            .unwrap_or("user-input")
+            .to_string()
+    };
+    crate::chat::runtime::write_user_input_to_run(thread_id, &request_id, &answers);
+    load_thread(thread_id, None, "Chat")
+}
+
+#[tauri::command]
 pub fn load_thread_grid(_request: Option<Value>) -> Value {
     load_grid()
 }
@@ -763,6 +795,63 @@ pub fn stage_dropped_chat_attachments(request: Option<Value>) -> Value {
         }
     }
     Value::Array(stage_dropped_paths(thread_id, &paths))
+}
+
+#[tauri::command]
+pub fn rewind_thread_transcript(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req.and_then(|item| item.get("threadId")).and_then(|value| value.as_str()).unwrap_or("");
+    let message_id = req
+        .and_then(|item| item.get("messageId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match crate::chat::threads::rewind_thread_transcript(thread_id, message_id) {
+        Ok(text) => {
+            let thread = threads()
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id))
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({ "text": text, "thread": thread, "error": Value::Null })
+        }
+        Err(error) => json!({ "text": Value::Null, "thread": Value::Null, "error": error }),
+    }
+}
+
+/// Restores workspace files from the thread's stored checkpoint.
+///
+/// The folder comes from `workspaceId` via `persist::workspace_path`. A path in
+/// the request is ignored. Refusal runs before any git write.
+#[tauri::command]
+pub fn restore_thread_checkpoint(request: Option<Value>) -> Value {
+    let Some(thread_id) = request_thread_id(&request).filter(|id| !id.is_empty()) else {
+        return json!({ "restored": false, "error": "threadId is required" });
+    };
+    let thread = {
+        let stored = threads().lock().unwrap();
+        stored
+            .iter()
+            .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+            .cloned()
+    };
+    let Some(thread) = thread else {
+        return json!({
+            "restored": false,
+            "error": crate::chat::threads::REWIND_THREAD_MISSING
+        });
+    };
+    if let Some(reason) = crate::chat::checkpoints::file_restore_refusal(&thread) {
+        return json!({ "restored": false, "error": reason });
+    }
+    let Some(worktree) = crate::chat::checkpoints::workspace_dir(&thread) else {
+        return json!({ "restored": false, "error": "The workspace folder is unavailable." });
+    };
+    match crate::chat::checkpoints::restore_workspace_files(&thread, &worktree) {
+        Ok(()) => json!({ "restored": true, "error": Value::Null }),
+        Err(error) => json!({ "restored": false, "error": error }),
+    }
 }
 
 #[tauri::command]

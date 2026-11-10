@@ -122,8 +122,25 @@ pub fn load_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Va
     thread["sessionState"] = json!(session_state);
     thread["isWarm"] = json!(is_warm);
     thread["isSettled"] = json!(is_settled);
+    hydrate_thread_binding(&mut thread);
 
     thread
+}
+
+pub fn hydrate_thread_binding(thread: &mut Value) {
+    if let Some(effort) = crate::chat::normalize::hydrated_effort(thread) {
+        thread["effort"] = json!(effort);
+    } else if thread.get("effort").and_then(|value| value.as_str()).is_none() {
+        thread["effort"] = Value::Null;
+    }
+    if thread.get("connectionId").is_none() {
+        thread["connectionId"] = Value::Null;
+    }
+    if thread.get("agent").is_none() {
+        if let Some(agent) = thread.get("workMode").and_then(|value| value.as_str()) {
+            thread["agent"] = json!(agent);
+        }
+    }
 }
 
 pub fn rename_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Value {
@@ -226,11 +243,42 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
         if let Some(options) = patch.get("providerOptions").and_then(|v| v.as_array()) {
             thread["providerOptions"] = Value::Array(sanitize_options(options));
         }
+        if patch.get("effort").is_some() {
+            let effort = patch.get("effort").and_then(|value| value.as_str());
+            thread["providerOptions"] = crate::chat::normalize::effort_option(
+                &thread["providerOptions"],
+                effort,
+            );
+            thread["effort"] = match effort {
+                Some(value) if !value.trim().is_empty() => json!(value.trim()),
+                _ => Value::Null,
+            };
+        }
+        hydrate_thread_binding(thread);
         if provider != current_provider {
             thread["providerSessionId"] = Value::Null;
         }
         thread["provider"] = json!(provider);
         thread["mode"] = json!(mode);
+        if let Some(queue) = patch.get("queuedRuns").and_then(|value| value.as_array()) {
+            let rows: Vec<Value> = queue
+                .iter()
+                .filter_map(|row| {
+                    let text = row.get("text").and_then(|value| value.as_str())?.trim();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    let id = row
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or("queued");
+                    Some(json!({ "id": id, "text": text }))
+                })
+                .take(32)
+                .collect();
+            thread["queuedRuns"] = Value::Array(rows);
+        }
         if let Some(ws) = patch.get("workspaceId") {
             thread["workspaceId"] = if ws.is_null() {
                 Value::Null
@@ -439,6 +487,52 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
     }
 }
 
+pub const REWIND_THREAD_MISSING: &str = "That thread is not stored.";
+pub const REWIND_MESSAGE_MISSING: &str = "That message is not in this thread.";
+
+/// Drops the chosen user message and every later item.
+///
+/// This does not touch git and does not delete the thread. A missing thread or
+/// a missing user message leaves the stored thread unchanged.
+pub fn rewind_thread_transcript(thread_id: &str, message_id: &str) -> Result<String, String> {
+    if thread_id.is_empty() {
+        return Err(REWIND_THREAD_MISSING.to_string());
+    }
+    if message_id.is_empty() {
+        return Err(REWIND_MESSAGE_MISSING.to_string());
+    }
+    let mut stored = threads().lock().unwrap();
+    let Some(thread) = stored
+        .iter_mut()
+        .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id))
+    else {
+        return Err(REWIND_THREAD_MISSING.to_string());
+    };
+    let text = {
+        let Some(items) = thread.get_mut("items").and_then(|value| value.as_array_mut()) else {
+            return Err(REWIND_MESSAGE_MISSING.to_string());
+        };
+        let Some(index) = items.iter().position(|item| {
+            item.get("id").and_then(|value| value.as_str()) == Some(message_id)
+                && item.get("kind").and_then(|value| value.as_str()) == Some("user")
+        }) else {
+            return Err(REWIND_MESSAGE_MISSING.to_string());
+        };
+        let text = items
+            .get(index)
+            .and_then(|item| item.get("text"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        items.truncate(index);
+        text
+    };
+    touch(thread);
+    drop(stored);
+    persist();
+    Ok(text)
+}
+
 pub fn apply_launch_choices(thread_id: &str, req: Option<&Value>) {
     let Some(req) = req else {
         return;
@@ -452,5 +546,173 @@ pub fn apply_launch_choices(thread_id: &str, req: Option<&Value>) {
     }
     if !patch.is_empty() {
         configure_thread(thread_id, &Value::Object(patch));
+    }
+}
+
+#[cfg(test)]
+mod rewind {
+    use super::*;
+
+    struct RemoveThread(String);
+
+    impl Drop for RemoveThread {
+        fn drop(&mut self) {
+            remove_thread(&self.0);
+        }
+    }
+
+    fn item_ids(thread: &Value) -> Vec<String> {
+        thread
+            .get("items")
+            .and_then(|value| value.as_array())
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_str()).map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn truncation_removes_the_chosen_user_message_and_later_items_without_git() {
+        let created = create_thread(None, "Rewind Probe", "claude", None);
+        let thread_id = created
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+        let _cleanup = RemoveThread(thread_id.clone());
+        {
+            let mut stored = threads().lock().unwrap();
+            let thread = stored
+                .iter_mut()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .expect("created thread");
+            thread["items"] = json!([
+                chat_item("early", "user", "keep me", false),
+                chat_item("mid", "assistant", "earlier answer", false),
+                chat_item("target", "user", "rewrite this", false),
+                chat_item("later", "assistant", "later answer", false),
+                chat_item("tail", "tool", "later tool", false)
+            ]);
+        }
+
+        let before = {
+            let stored = threads().lock().unwrap();
+            stored
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .cloned()
+                .expect("thread before rewind")
+        };
+        let missing = rewind_thread_transcript(&thread_id, "missing-message").expect_err("missing id");
+        assert!(!missing.is_empty());
+        let assistant = rewind_thread_transcript(&thread_id, "mid").expect_err("not a user message");
+        assert!(!assistant.is_empty());
+        let unchanged = {
+            let stored = threads().lock().unwrap();
+            stored
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .cloned()
+                .expect("thread still stored")
+        };
+        assert_eq!(unchanged, before, "a missing id must not change the thread");
+        assert_eq!(item_ids(&unchanged), vec!["early", "mid", "target", "later", "tail"]);
+
+        let text = rewind_thread_transcript(&thread_id, "target").expect("rewind");
+        assert_eq!(text, "rewrite this");
+        let after = {
+            let stored = threads().lock().unwrap();
+            stored
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .cloned()
+                .expect("thread survives rewind")
+        };
+        assert_eq!(after.get("id").and_then(|value| value.as_str()), Some(thread_id.as_str()));
+        assert_eq!(after.get("title").and_then(|value| value.as_str()), Some("Rewind Probe"));
+        assert_eq!(item_ids(&after), vec!["early", "mid"]);
+        assert_eq!(after["items"][0]["text"], "keep me");
+        assert_eq!(after["items"][1]["text"], "earlier answer");
+    }
+
+    #[test]
+    fn restore_command_refuses_before_git_when_flags_are_false() {
+        let created = create_thread(None, "Restore Probe", "claude", None);
+        let thread_id = created
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+        let _cleanup = RemoveThread(thread_id.clone());
+        {
+            let mut stored = threads().lock().unwrap();
+            let thread = stored
+                .iter_mut()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .expect("created thread");
+            thread["providerCanRewind"] = json!(false);
+            thread["isolatedCheckout"] = json!(true);
+            thread["checkpointRef"] = json!("refs/kite/checkpoints/thread-1/run-1");
+            thread["items"] = json!([chat_item("keep", "user", "stay", false)]);
+        }
+        let before = {
+            let stored = threads().lock().unwrap();
+            stored
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .cloned()
+                .expect("thread before restore")
+        };
+
+        let refused = crate::chat_commands::restore_thread_checkpoint(Some(json!({
+            "threadId": thread_id,
+            "folder": "C:/this/path/must/not/be/used"
+        })));
+        assert_eq!(refused["restored"], json!(false));
+        assert_eq!(
+            refused["error"],
+            json!("The provider cannot rewind this conversation.")
+        );
+
+        {
+            let mut stored = threads().lock().unwrap();
+            let thread = stored
+                .iter_mut()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .expect("thread still stored");
+            thread["providerCanRewind"] = json!(true);
+            thread["isolatedCheckout"] = json!(false);
+        }
+        let shared = crate::chat_commands::restore_thread_checkpoint(Some(json!({
+            "threadId": thread_id,
+            "worktree": "/tmp/not-a-worktree"
+        })));
+        assert_eq!(shared["restored"], json!(false));
+        assert_eq!(
+            shared["error"],
+            json!("File restore stays off unless this thread has its own isolated checkout.")
+        );
+
+        let after = {
+            let stored = threads().lock().unwrap();
+            stored
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+                .cloned()
+                .expect("restore must not delete the thread")
+        };
+        assert_eq!(item_ids(&after), item_ids(&before));
+        assert_eq!(after["items"][0]["text"], "stay");
+
+        let unknown = "missing-rewind-thread-does-not-exist";
+        let missing = crate::chat_commands::restore_thread_checkpoint(Some(json!({
+            "threadId": unknown
+        })));
+        assert_eq!(missing["restored"], json!(false));
+        assert!(missing["error"].as_str().is_some_and(|text| !text.is_empty()));
+        let created_anyway = threads().lock().unwrap().iter().any(|thread| {
+            thread.get("id").and_then(|value| value.as_str()) == Some(unknown)
+        });
+        assert!(!created_anyway, "a missing thread must not be created");
     }
 }

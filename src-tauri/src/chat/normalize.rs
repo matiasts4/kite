@@ -17,6 +17,10 @@ use serde_json::Value;
 use crate::acp::{classify_tool_metadata, summarize_tool_detail, AcpToolCall};
 use crate::chat::session::ApprovalDecision;
 
+#[path = "turn_pipeline.rs"]
+mod pipeline;
+pub use pipeline::*;
+
 /// One normalized provider frame. Serde tags the variant as `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -1521,7 +1525,7 @@ mod tests {
                 assert_eq!(approval.request_id, "perm-agy-1");
                 assert_eq!(approval.tool_name, "ask_permission");
                 assert_eq!(approval.command.as_deref(), Some("cargo publish --dry-run"));
-                assert_eq!(approval.title, "Run `cargo publish --dry-run`");
+                assert_eq!(approval.title, "Publish the crate to the registry");
             }
             other => panic!("expected the antigravity approval shape, got {other:?}"),
         }

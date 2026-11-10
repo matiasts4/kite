@@ -1,6 +1,6 @@
 //! Lasting CLI transports for drivers whose wire can stay open.
 //!
-//! Two lasting wires are wired in this build, each from what its own CLI help
+//! Three lasting wires are wired in this build, each from what its own CLI help
 //! documents:
 //!
 //! - Antigravity's `agy` pair `--input-format stream-json` /
@@ -11,6 +11,11 @@
 //! - OpenCode's `serve` command plus its documented client flags `--server`,
 //!   `--session`, and `--prompt`: one server process holds the thread's session
 //!   and each turn is one documented client invocation against that server.
+//!
+//! - The grok lasting channel is `agent stdio`. `--permission-mode` is a
+//!   top-level flag, so it sits before `agent`. Model and effort are set on
+//!   the open session before the message. A stored accept-edits mode runs as
+//!   ask, not as auto-accept.
 //!
 //! Codex documents `app-server` as a transport but no request frame that
 //! accepts a user turn, so this build records that command and refuses the
@@ -23,7 +28,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -43,6 +48,9 @@ pub const ANTIGRAVITY_DRIVER: &str = "antigravity";
 /// The canonical OpenCode driver id.
 pub const OPENCODE_DRIVER: &str = "opencode";
 
+/// The canonical grok driver id.
+pub const GROK_DRIVER: &str = "grok";
+
 /// The argument prefix the lasting Antigravity wire needs. It is sourced directly from
 /// the observed flags: `--print` runs one turn without a prompt positional,
 /// `--input-format stream-json` reads one NDJSON message per line, and the
@@ -61,6 +69,13 @@ pub const OPENCODE_SERVE_HOST: &str = "127.0.0.1";
 /// How long a freshly started OpenCode server may take to accept a connection.
 /// A server that never answers fails the handshake before any turn is written.
 pub const OPENCODE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long `agent stdio` may take to answer `initialize` and `session/new`.
+/// A process that never answers fails before a message is written.
+pub const GROK_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Ask. The installed CLI documents this as `--permission-mode default`.
+pub const GROK_SUPERVISED_MODE: &str = "default";
 
 /// Upper bound for the server or client stderr kept for a diagnostics message.
 const MAX_TAIL_CHARS: usize = 4_000;
@@ -1157,6 +1172,777 @@ pub fn start_idle_reaper() {
     });
 }
 
+/// The lasting channel `grok agent stdio --help` documents. Permission flags
+/// from `grok --help` sit before `agent`. Model and effort are not argv here:
+/// they are set on the open session before the message.
+pub const GROK_STDIO_TAIL: [&str; 2] = ["agent", "stdio"];
+
+/// Env overrides this session applies. Empty on purpose: this build does not
+/// set `GROK_OAUTH2_REFERRER` or any other referrer.
+pub fn grok_session_env_overrides() -> &'static [(&'static str, &'static str)] {
+    &[]
+}
+
+/// Maps a stored mode onto a permission value the installed CLI documents.
+/// Accept-edits is not offered on this channel, so it runs as ask. `plan` is
+/// ignored by `agent stdio`, so a read-only store also runs as ask.
+pub fn grok_permission_mode(mode: Option<&str>) -> &'static str {
+    match mode.unwrap_or("").trim() {
+        "fullAccess" | "bypassPermissions" => "bypassPermissions",
+        "auto" => "auto",
+        "dontAsk" => "dontAsk",
+        _ => GROK_SUPERVISED_MODE,
+    }
+}
+
+/// Argv for one lasting process. Nothing here is invented: `--permission-mode`
+/// is a top-level flag, and `agent stdio` is the documented channel.
+pub fn grok_session_args(permission_mode: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--permission-mode".to_string(),
+        grok_permission_mode(permission_mode).to_string(),
+    ];
+    args.extend(GROK_STDIO_TAIL.iter().map(|arg| arg.to_string()));
+    args
+}
+
+fn rpc_line(id: u64, method: &str, params: Value) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    })
+    .to_string()
+}
+
+/// `initialize` as the installed agent-mode example documents it.
+pub fn grok_initialize_line(id: u64) -> String {
+    rpc_line(
+        id,
+        "initialize",
+        json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": { "readTextFile": true, "writeTextFile": true },
+                "terminal": true
+            }
+        }),
+    )
+}
+
+/// `session/new` as the installed session guide documents it. No `_meta`.
+pub fn grok_session_new_line(id: u64, cwd: &str) -> String {
+    rpc_line(
+        id,
+        "session/new",
+        json!({
+            "cwd": cwd,
+            "mcpServers": []
+        }),
+    )
+}
+
+/// `session/load` as the installed session guide documents it.
+pub fn grok_session_load_line(id: u64, session_id: &str, cwd: &str) -> String {
+    rpc_line(
+        id,
+        "session/load",
+        json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": []
+        }),
+    )
+}
+
+/// `session/set_config_option` for `model` or `reasoning_effort`.
+pub fn grok_config_line(id: u64, session_id: &str, config_id: &str, value: &str) -> String {
+    rpc_line(
+        id,
+        "session/set_config_option",
+        json!({
+            "sessionId": session_id,
+            "configId": config_id,
+            "value": { "value": value }
+        }),
+    )
+}
+
+/// `session/prompt` as the installed agent-mode example documents it.
+pub fn grok_prompt_line(id: u64, session_id: &str, prompt: &str) -> String {
+    rpc_line(
+        id,
+        "session/prompt",
+        json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": prompt }]
+        }),
+    )
+}
+
+fn trimmed_control(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Model, then effort, then the message. Each line is one documented request.
+pub fn grok_turn_lines(
+    session_id: &str,
+    controls: &PersistentControls,
+    prompt: &str,
+    next_id: &mut u64,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(model) = trimmed_control(&controls.model) {
+        lines.push(grok_config_line(*next_id, session_id, "model", model));
+        *next_id += 1;
+    }
+    if let Some(effort) = trimmed_control(&controls.effort) {
+        lines.push(grok_config_line(
+            *next_id,
+            session_id,
+            "reasoning_effort",
+            effort,
+        ));
+        *next_id += 1;
+    }
+    lines.push(grok_prompt_line(*next_id, session_id, prompt));
+    *next_id += 1;
+    lines
+}
+
+fn json_id(value: &Value) -> Option<u64> {
+    value.get("id").and_then(|id| {
+        id.as_u64()
+            .or_else(|| id.as_str().and_then(|text| text.parse().ok()))
+    })
+}
+
+fn session_id_of(value: &Value) -> Option<String> {
+    ["/result/sessionId", "/params/sessionId"]
+        .iter()
+        .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|candidate| !candidate.is_empty())
+        .map(str::to_string)
+}
+
+fn rpc_error_text(value: &Value) -> String {
+    value
+        .get("error")
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| error.as_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| "no detail was reported".to_string())
+}
+
+/// One stdout line from `agent stdio`. A known message chunk becomes text.
+/// A prompt response ends the turn. Anything else stays a notice.
+pub fn parse_grok_line(line: &str, prompt_id: Option<u64>) -> ParsedLine {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return ParsedLine::default();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return ParsedLine {
+            conversation_id: None,
+            events: vec![TransportEvent::Notice(bounded_notice(&format!(
+                "grok wrote a non-JSON line (schema=non-json): {trimmed}"
+            )))],
+        };
+    };
+
+    let id = json_id(&value);
+    let method = value.get("method").and_then(Value::as_str);
+    if method.is_none() && (value.get("result").is_some() || value.get("error").is_some()) {
+        let conversation_id = session_id_of(&value);
+        if prompt_id.is_some() && id == prompt_id {
+            if value.get("error").is_some() {
+                return ParsedLine {
+                    conversation_id,
+                    events: vec![TransportEvent::TurnFailed(bounded_notice(&format!(
+                        "grok reported an error: {}",
+                        rpc_error_text(&value)
+                    )))],
+                };
+            }
+            return ParsedLine {
+                conversation_id,
+                events: vec![TransportEvent::TurnEnded],
+            };
+        }
+        return ParsedLine {
+            conversation_id,
+            events: Vec::new(),
+        };
+    }
+
+    if method == Some("session/update") {
+        return parse_grok_update(trimmed, &value);
+    }
+    if matches!(
+        method,
+        Some("session/request_permission") | Some("permission/request")
+    ) {
+        return ParsedLine {
+            conversation_id: session_id_of(&value),
+            events: vec![TransportEvent::Activity(trimmed.to_string())],
+        };
+    }
+
+    ParsedLine {
+        conversation_id: session_id_of(&value),
+        events: vec![TransportEvent::Notice(bounded_notice(&format!(
+            "grok sent an unknown frame (schema={})",
+            frame_schema(&value)
+        )))],
+    }
+}
+
+fn parse_grok_update(raw: &str, value: &Value) -> ParsedLine {
+    let update = value.pointer("/params/update").cloned().unwrap_or(Value::Null);
+    let kind = update
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let text = update
+        .pointer("/content/text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let events = match kind {
+        "agent_message_chunk" if !text.is_empty() => {
+            vec![TransportEvent::Text(text.to_string())]
+        }
+        "agent_message_chunk" => Vec::new(),
+        // These frames are actions. A notice is not drawn in the transcript.
+        "agent_thought_chunk"
+        | "tool_call"
+        | "tool_call_update"
+        | "tool_call_content_chunk"
+        | "plan"
+        | "plan_update" => {
+            vec![TransportEvent::Activity(raw.to_string())]
+        }
+        other => vec![TransportEvent::Notice(bounded_notice(&format!(
+            "grok session update `{other}` is not projected (schema={})",
+            frame_schema(&update)
+        )))],
+    };
+    ParsedLine {
+        conversation_id: None,
+        events,
+    }
+}
+
+/// Resolves the grok launcher. A missing binary is a hard error so the caller
+/// keeps one command per turn instead of pretending a session exists.
+pub fn resolve_grok_program() -> Result<PathBuf, String> {
+    let home = crate::quota::utils::user_home_dir();
+    let grok_user = home.join(".grok").join("bin").join("grok.exe");
+    resolve_bin("grok", &[&grok_user.to_string_lossy()]).ok_or_else(|| {
+        "grok is not installed; a lasting session cannot start without it".to_string()
+    })
+}
+
+/// Lines a test session wrote, and the argv of the one process it spawned.
+#[derive(Debug, Clone, Default)]
+pub struct GrokRecord {
+    inner: Arc<Mutex<GrokRecordState>>,
+}
+
+#[derive(Debug, Default)]
+struct GrokRecordState {
+    spawns: u32,
+    args: Vec<String>,
+    written: Vec<String>,
+}
+
+impl GrokRecord {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn spawn_count(&self) -> u32 {
+        self.inner.lock().map(|state| state.spawns).unwrap_or(0)
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|state| state.args.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn written(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|state| state.written.clone())
+            .unwrap_or_default()
+    }
+
+    fn note_spawn(&self, args: &[String]) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.spawns += 1;
+            state.args = args.to_vec();
+        }
+    }
+
+    fn note_written(&self, lines: &[String]) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.written.extend(lines.iter().cloned());
+        }
+    }
+}
+
+/// One grok process on `agent stdio`. A second turn writes to that process.
+pub struct GrokSession {
+    controls: PersistentControls,
+    program: Option<PathBuf>,
+    probe: Box<dyn DriverProbe>,
+    record: Option<GrokRecord>,
+    child: Option<HiddenChild>,
+    stdin: Option<Box<dyn Write + Send>>,
+    reader: Option<JoinHandle<()>>,
+    events: Arc<Mutex<VecDeque<TransportEvent>>>,
+    responses: Arc<Mutex<VecDeque<Value>>>,
+    ready: Arc<Condvar>,
+    resume: Arc<Mutex<Option<String>>>,
+    prompt_id: Arc<Mutex<Option<u64>>>,
+    eof: Arc<AtomicBool>,
+    stopping: bool,
+    spawns: u32,
+    next_id: u64,
+}
+
+impl GrokSession {
+    pub fn new(controls: PersistentControls) -> Self {
+        Self::with_probe(controls, None, Box::new(SystemDriverProbe))
+    }
+
+    pub fn with_probe(
+        controls: PersistentControls,
+        program: Option<PathBuf>,
+        probe: Box<dyn DriverProbe>,
+    ) -> Self {
+        Self {
+            controls,
+            program,
+            probe,
+            record: None,
+            child: None,
+            stdin: None,
+            reader: None,
+            events: Arc::new(Mutex::new(VecDeque::new())),
+            responses: Arc::new(Mutex::new(VecDeque::new())),
+            ready: Arc::new(Condvar::new()),
+            resume: Arc::new(Mutex::new(None)),
+            prompt_id: Arc::new(Mutex::new(None)),
+            eof: Arc::new(AtomicBool::new(false)),
+            stopping: false,
+            spawns: 0,
+            next_id: 1,
+        }
+    }
+
+    /// Records argv and session frames without starting a process.
+    #[cfg(test)]
+    pub fn recorded(controls: PersistentControls) -> (Self, GrokRecord) {
+        let record = GrokRecord::new();
+        let mut session = Self::with_probe(
+            controls,
+            Some(PathBuf::from("kite-recorded-grok")),
+            Box::new(RecordedProbe),
+        );
+        session.record = Some(record.clone());
+        (session, record)
+    }
+
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn provider_session_id(&self) -> Option<String> {
+        self.resume.lock().ok().and_then(|handle| handle.clone())
+    }
+
+    fn stop_process(&mut self) {
+        self.stopping = true;
+        self.stdin = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+        }
+    }
+
+    fn fail_start(&mut self, reason: String) -> Result<(), String> {
+        self.stop_process();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        if let Ok(mut handle) = self.resume.lock() {
+            *handle = None;
+        }
+        Err(reason)
+    }
+
+    fn checked_launch(&self, spec: &TransportSpec) -> Result<(PathBuf, Vec<String>), String> {
+        let declared = declaration(&spec.driver)
+            .ok_or_else(|| format!("{} has no driver declaration in this build", spec.driver))?;
+        if declared.driver != GROK_DRIVER {
+            return Err(format!("{} does not speak the grok stdio wire", spec.driver));
+        }
+        let program = match self.program.clone() {
+            Some(program) => program,
+            None => resolve_grok_program()?,
+        };
+        verify_driver_version(GROK_DRIVER, &program, self.probe.as_ref())?;
+        let args = grok_session_args(self.controls.permission_mode.as_deref());
+        Ok((program, args))
+    }
+
+    fn spawn_recorded(&mut self, spec: &TransportSpec) -> Result<(), String> {
+        let (_program, args) = self.checked_launch(spec)?;
+        let record = self
+            .record
+            .clone()
+            .ok_or_else(|| "the recorded grok session has no record".to_string())?;
+        let session_id = spec
+            .resume_handle
+            .clone()
+            .filter(|handle| !handle.trim().is_empty())
+            .unwrap_or_else(|| "recorded-session".to_string());
+        if let Ok(mut handle) = self.resume.lock() {
+            *handle = Some(session_id);
+        }
+        record.note_spawn(&args);
+        self.spawns += 1;
+        self.stopping = false;
+        self.eof.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn write_raw(&mut self, frame: &str) -> Result<(), String> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err("the grok session has no open input".to_string());
+        };
+        stdin.write_all(frame.as_bytes()).map_err(|error| {
+            format!("could not write the message to the grok session: {error}")
+        })?;
+        stdin.write_all(b"\n").map_err(|error| {
+            format!("could not write the message to the grok session: {error}")
+        })?;
+        stdin
+            .flush()
+            .map_err(|error| format!("could not flush the grok session input: {error}"))
+    }
+
+    fn wait_response(&self, id: u64) -> Result<Value, String> {
+        let deadline = Instant::now() + GROK_HANDSHAKE_TIMEOUT;
+        let mut queue = self
+            .responses
+            .lock()
+            .map_err(|_| "the session queue lock was poisoned".to_string())?;
+        loop {
+            if let Some(index) = queue.iter().position(|value| json_id(value) == Some(id)) {
+                return Ok(queue.remove(index).expect("the matched response is present"));
+            }
+            if self.eof.load(Ordering::SeqCst) {
+                return Err("the session ended before it answered".to_string());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "the session did not answer within {} ms",
+                    GROK_HANDSHAKE_TIMEOUT.as_millis()
+                ));
+            }
+            let (next, _) = self
+                .ready
+                .wait_timeout(queue, deadline - now)
+                .map_err(|_| "the session queue lock was poisoned".to_string())?;
+            queue = next;
+        }
+    }
+
+    fn open_session(&mut self, spec: &TransportSpec) -> Result<(), String> {
+        let cwd = spec
+            .working_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or(".");
+        let init_id = self.alloc_id();
+        self.write_raw(&grok_initialize_line(init_id))?;
+        let initialized = self.wait_response(init_id)?;
+        if initialized.get("error").is_some() {
+            return Err(format!(
+                "the grok session refused initialize: {}",
+                rpc_error_text(&initialized)
+            ));
+        }
+        let open_id = self.alloc_id();
+        let open = if let Some(handle) = spec
+            .resume_handle
+            .as_deref()
+            .map(str::trim)
+            .filter(|handle| !handle.is_empty())
+        {
+            grok_session_load_line(open_id, handle, cwd)
+        } else {
+            grok_session_new_line(open_id, cwd)
+        };
+        self.write_raw(&open)?;
+        let opened = self.wait_response(open_id)?;
+        if opened.get("error").is_some() {
+            return Err(format!(
+                "the grok session refused to open: {}",
+                rpc_error_text(&opened)
+            ));
+        }
+        let session_id = session_id_of(&opened).or_else(|| {
+            spec.resume_handle
+                .as_deref()
+                .map(str::trim)
+                .filter(|handle| !handle.is_empty())
+                .map(str::to_string)
+        });
+        let Some(session_id) = session_id else {
+            return Err("the grok session did not return a session id".to_string());
+        };
+        if let Ok(mut handle) = self.resume.lock() {
+            *handle = Some(session_id);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for GrokSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrokSession")
+            .field("controls", &self.controls)
+            .field("program", &self.program)
+            .field("spawns", &self.spawns)
+            .finish()
+    }
+}
+
+impl SessionTransport for GrokSession {
+    fn spawn(&mut self, spec: &TransportSpec) -> Result<(), String> {
+        if self.record.is_some() {
+            return self.spawn_recorded(spec);
+        }
+        if let Some(reader) = self.reader.take() {
+            if reader.is_finished() {
+                // The process is gone; the handle is reaped below.
+            } else if self.stopping {
+                let _ = reader.join();
+            } else {
+                self.reader = Some(reader);
+                return Err("the grok session already has a running process".to_string());
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
+        self.stdin = None;
+
+        let (program, args) = self.checked_launch(spec)?;
+        let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let cwd = spec.working_directory.as_deref().map(Path::new);
+        let mut child = spawn_streaming(&program, &args_refs, cwd).map_err(|error| {
+            format!(
+                "could not start the grok session with {}: {error}",
+                program.display()
+            )
+        })?;
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            return Err("the grok session started without a readable stdout".to_string());
+        };
+        let stderr = child.stderr.take();
+        self.stdin = child.stdin.take();
+        self.child = Some(child);
+        self.events.lock().unwrap().clear();
+        self.responses.lock().unwrap().clear();
+        self.eof.store(false, Ordering::SeqCst);
+        self.stopping = false;
+        self.next_id = 1;
+
+        let events = Arc::clone(&self.events);
+        let responses = Arc::clone(&self.responses);
+        let ready = Arc::clone(&self.ready);
+        let resume = Arc::clone(&self.resume);
+        let prompt_id = Arc::clone(&self.prompt_id);
+        let eof = Arc::clone(&self.eof);
+        self.reader = Some(std::thread::spawn(move || {
+            read_grok_stdout(stdout, events, responses, ready, resume, prompt_id, eof)
+        }));
+        if let Some(mut stderr) = stderr {
+            std::thread::spawn(move || {
+                let tail = Arc::new(Mutex::new(String::new()));
+                read_tail(&mut stderr, tail);
+            });
+        }
+
+        if let Err(reason) = self.open_session(spec) {
+            return self.fail_start(reason);
+        }
+        self.spawns += 1;
+        Ok(())
+    }
+
+    fn write_turn(&mut self, prompt: &str) -> Result<(), String> {
+        let session_id = self
+            .provider_session_id()
+            .ok_or_else(|| "the grok session has no id, so the message was not written".to_string())?;
+        let lines = grok_turn_lines(&session_id, &self.controls, prompt, &mut self.next_id);
+        let prompt_line_id = self.next_id.saturating_sub(1);
+        if let Some(record) = &self.record {
+            record.note_written(&lines);
+            return Ok(());
+        }
+        if self.eof.load(Ordering::SeqCst) {
+            return Err("the grok session ended before the message was written".to_string());
+        }
+        if let Ok(mut id) = self.prompt_id.lock() {
+            *id = Some(prompt_line_id);
+        }
+        for line in &lines {
+            self.write_raw(line)?;
+        }
+        Ok(())
+    }
+
+    fn interrupt(&mut self) -> Result<(), String> {
+        self.stop_process();
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        self.stop_process();
+        Ok(())
+    }
+
+    fn spawn_count(&self) -> u32 {
+        self.spawns
+    }
+
+    fn resume_handle(&self) -> Option<String> {
+        self.provider_session_id()
+    }
+
+    fn drain(&mut self) -> Vec<TransportEvent> {
+        let mut events: Vec<TransportEvent> = self
+            .events
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        let reader_finished = self.reader.as_ref().map(JoinHandle::is_finished).unwrap_or(false);
+        if reader_finished && !self.stopping && self.eof.load(Ordering::SeqCst) {
+            if let Some(mut child) = self.child.take() {
+                let code = child.wait().ok();
+                let error = match code {
+                    Some(0) => None,
+                    Some(other) => Some(format!("grok exited with code {other}")),
+                    None => None,
+                };
+                events.push(TransportEvent::Exit { code, error });
+            }
+            self.reader = None;
+            self.stdin = None;
+        }
+        events
+    }
+}
+
+impl Drop for GrokSession {
+    fn drop(&mut self) {
+        self.stdin = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct RecordedProbe;
+
+#[cfg(test)]
+impl DriverProbe for RecordedProbe {
+    fn probe(
+        &self,
+        _driver: &str,
+        _program: &Path,
+        _evidence: &crate::chat::drivers::DriverVersion,
+    ) -> Result<String, String> {
+        Ok("grok 1.0.77 (50ca579fa996)".to_string())
+    }
+}
+
+fn read_grok_stdout(
+    stdout: Box<dyn Read + Send>,
+    events: Arc<Mutex<VecDeque<TransportEvent>>>,
+    responses: Arc<Mutex<VecDeque<Value>>>,
+    ready: Arc<Condvar>,
+    resume: Arc<Mutex<Option<String>>>,
+    prompt_id: Arc<Mutex<Option<u64>>>,
+    eof: Arc<AtomicBool>,
+) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let current = prompt_id.lock().ok().and_then(|id| *id);
+                let parsed = parse_grok_line(&line, current);
+                if let Some(conversation) = parsed.conversation_id.clone() {
+                    if let Ok(mut handle) = resume.lock() {
+                        *handle = Some(conversation);
+                    }
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                    if value.get("method").is_none()
+                        && (value.get("result").is_some() || value.get("error").is_some())
+                    {
+                        if let Ok(mut queue) = responses.lock() {
+                            queue.push_back(value);
+                        }
+                        ready.notify_all();
+                    }
+                }
+                if let Ok(mut queue) = events.lock() {
+                    for event in parsed.events {
+                        if matches!(
+                            event,
+                            TransportEvent::TurnEnded | TransportEvent::TurnFailed(_)
+                        ) {
+                            if let Ok(mut id) = prompt_id.lock() {
+                                *id = None;
+                            }
+                        }
+                        push_bounded(&mut queue, event);
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    eof.store(true, Ordering::SeqCst);
+    ready.notify_all();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,7 +2124,8 @@ mod tests {
         assert!(has_persistent_wire("antigravity"));
         assert!(has_persistent_wire("agy"));
         assert!(has_persistent_wire("opencode"));
-        for driver in ["codex", "claude", "gemini", "grok", "cursor", "unknown"] {
+        assert!(has_persistent_wire("grok"));
+        for driver in ["codex", "claude", "gemini", "cursor", "unknown"] {
             assert!(!has_persistent_wire(driver), "{driver} has no implemented wire");
         }
     }
@@ -1502,5 +2289,190 @@ mod tests {
             .expect_err("no listener must fail the handshake");
         assert!(error.contains("127.0.0.1"), "{error}");
         assert!(error.contains("150 ms"), "{error}");
+    }
+
+    fn grok_spec(thread_id: &str) -> crate::chat::session::SessionSpec {
+        crate::chat::session::SessionSpec {
+            thread_id: thread_id.to_string(),
+            driver: "grok".to_string(),
+            connection_id: None,
+            working_directory: Some("C:\\work".to_string()),
+            mode: SessionMode::Persistent,
+            recipe: None,
+            resume_handle: None,
+        }
+    }
+
+    fn method_of(line: &str) -> String {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|value| value.get("method").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_second_send_on_the_same_grok_thread_does_not_spawn_a_second_process() {
+        let (session, record) = GrokSession::recorded(controls(
+            Some("grok-4.7"),
+            Some("high"),
+            Some("acceptEdits"),
+        ));
+        let mut manager = crate::chat::session::SessionManager::new();
+
+        crate::chat::runtime::managed_send(
+            &mut manager,
+            grok_spec("thread-1"),
+            Box::new(session),
+            "command-1",
+            "first",
+        )
+        .expect("first grok send");
+        crate::chat::runtime::managed_send(
+            &mut manager,
+            grok_spec("thread-1"),
+            Box::new(GrokSession::recorded(controls(None, None, Some("acceptEdits"))).0),
+            "command-2",
+            "second",
+        )
+        .expect("second grok send");
+
+        assert_eq!(record.spawn_count(), 1, "one process for the thread");
+        let prompts: Vec<String> = record
+            .written()
+            .iter()
+            .filter(|line| method_of(line) == "session/prompt")
+            .cloned()
+            .collect();
+        assert_eq!(prompts.len(), 2, "both messages go to the same process");
+        assert!(prompts[0].contains("first"), "{}", prompts[0]);
+        assert!(prompts[1].contains("second"), "{}", prompts[1]);
+        assert_eq!(
+            record.args(),
+            vec![
+                "--permission-mode".to_string(),
+                "default".to_string(),
+                "agent".to_string(),
+                "stdio".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_sets_model_and_effort_on_the_session_before_the_message() {
+        let controls = controls(Some("grok-4.7"), Some("high"), Some("fullAccess"));
+        let (mut session, record) = GrokSession::recorded(controls);
+        session.spawn(&spec("grok")).expect("recorded session");
+        session.write_turn("hello").expect("turn");
+
+        let written = record.written();
+        let methods: Vec<String> = written.iter().map(|line| method_of(line)).collect();
+        assert_eq!(
+            methods,
+            vec![
+                "session/set_config_option".to_string(),
+                "session/set_config_option".to_string(),
+                "session/prompt".to_string(),
+            ]
+        );
+        let model_at = written
+            .iter()
+            .position(|line| line.contains("\"configId\":\"model\""))
+            .expect("model is set on the session");
+        let effort_at = written
+            .iter()
+            .position(|line| line.contains("\"configId\":\"reasoning_effort\""))
+            .expect("effort is set on the session");
+        let prompt_at = written
+            .iter()
+            .position(|line| line.contains("\"method\":\"session/prompt\""))
+            .expect("prompt");
+        assert!(model_at < prompt_at, "model is set before the message");
+        assert!(effort_at < prompt_at, "effort is set before the message");
+        assert!(written[model_at].contains("grok-4.7"), "{}", written[model_at]);
+        assert!(written[effort_at].contains("high"), "{}", written[effort_at]);
+        assert!(written[prompt_at].contains("hello"), "{}", written[prompt_at]);
+        assert!(!written.iter().any(|line| line.contains("--effort")));
+    }
+
+    #[test]
+    fn grok_accept_edits_runs_as_supervised_not_auto_accept() {
+        let args = grok_session_args(Some("acceptEdits"));
+        assert_eq!(
+            args,
+            vec![
+                "--permission-mode".to_string(),
+                "default".to_string(),
+                "agent".to_string(),
+                "stdio".to_string(),
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "acceptEdits"));
+        assert!(!args.iter().any(|arg| arg == "--always-approve"));
+        assert!(!args.iter().any(|arg| arg == "auto"));
+        assert_eq!(grok_permission_mode(Some("acceptEdits")), "default");
+
+        let full = grok_session_args(Some("fullAccess"));
+        assert_eq!(full[0], "--permission-mode");
+        assert_eq!(full[1], "bypassPermissions");
+        assert_eq!(&full[2..], ["agent".to_string(), "stdio".to_string()]);
+    }
+
+    #[test]
+    fn an_unknown_grok_frame_stays_a_notice() {
+        let parsed = parse_grok_line(
+            r#"{"jsonrpc":"2.0","method":"x.ai/fs/index","params":{"chunk":0}}"#,
+            None,
+        );
+        let Some(TransportEvent::Notice(notice)) = parsed.events.first() else {
+            panic!("a missing frame must stay a notice, got {:?}", parsed.events);
+        };
+        assert!(notice.contains("grok"));
+        assert!(notice.contains("schema="));
+        assert!(notice.chars().count() <= MAX_NOTICE_CHARS);
+        assert!(!notice.contains("invented"));
+
+        let text = parse_grok_line(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}"#,
+            None,
+        );
+        assert_eq!(text.events, vec![TransportEvent::Text("hello".to_string())]);
+    }
+
+    #[test]
+    fn a_grok_tool_update_is_an_action_not_a_notice() {
+        let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","title":"Read odd/tasks/response-thread.md","kind":"read","status":"in_progress","rawInput":{"path":"odd/tasks/response-thread.md"}}}}"#;
+        let parsed = parse_grok_line(line, None);
+        let Some(TransportEvent::Activity(raw)) = parsed.events.first() else {
+            panic!("a tool update must stay an action, got {:?}", parsed.events);
+        };
+        assert!(raw.contains("tool_call_update"));
+        let event = crate::acp::parse_acp_stream_line("thread-1", "run-1", raw)
+            .expect("the transcript builder must recognize the tool update");
+        match event {
+            crate::acp::AcpStreamEvent::ToolUpdate { tool } => {
+                assert_eq!(tool.id, "call-1");
+                assert!(tool.title.contains("response-thread.md") || tool.name.contains("response-thread.md"));
+                assert_eq!(tool.status, "running");
+            }
+            other => panic!("expected a tool row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_grok_session_does_not_set_a_referrer() {
+        let overrides = grok_session_env_overrides();
+        assert!(overrides.is_empty());
+        assert!(!overrides
+            .iter()
+            .any(|(key, _)| *key == "GROK_OAUTH2_REFERRER"));
+        let joined = grok_session_args(Some("acceptEdits")).join(" ");
+        assert!(!joined.contains("GROK_OAUTH2_REFERRER"));
+        let init = grok_initialize_line(1);
+        assert!(!init.contains("_meta"));
+        assert!(!init.contains("yoloMode"));
+        let created = grok_session_new_line(2, ".");
+        assert!(created.contains("session/new"));
+        assert!(!created.contains("yoloMode"));
+        assert!(!created.contains("_meta"));
     }
 }

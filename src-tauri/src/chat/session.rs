@@ -296,6 +296,9 @@ pub struct TransportSpec {
 pub enum TransportEvent {
     Text(String),
     Notice(String),
+    /// A provider frame the transcript already knows how to draw as an action.
+    /// The raw line is kept so the existing row builder can read it.
+    Activity(String),
     ApprovalRequest { id: String, kind: String },
     /// The provider finished answering this turn but the process still serves
     /// the session. A later turn writes onto the same process.
@@ -725,6 +728,9 @@ impl SessionManager {
                 }
                 TransportEvent::Notice(text) => {
                     push_event(session, "notice", json!({ "text": text }));
+                }
+                TransportEvent::Activity(line) => {
+                    push_event(session, "activity", json!({ "line": line }));
                 }
                 TransportEvent::ApprovalRequest { id, kind } => {
                     session.record.pending_approvals.push(id.clone());

@@ -663,7 +663,7 @@ mod tests {
     fn only_a_served_wire_can_keep_a_session() {
         // The declaration resolves to one command; no opt-in and no wiring can
         // promote it, and the thread says why.
-        for driver in ["claude", "cursor", "gemini", "grok"] {
+        for driver in ["claude", "cursor", "gemini"] {
             let declared = declaration(driver).unwrap_or_else(|| panic!("{driver} declaration"));
             assert_eq!(
                 declared_session_mode(&declared, true),
@@ -1116,7 +1116,7 @@ mod tests {
                 ],
             ),
             ("cursor", "cursor-agent -p", "acceptEdits", &["-p", "hello"]),
-            ("grok", "grok -p", "acceptEdits", &["-p", "--permission-mode", "acceptEdits", "hello"]),
+            ("grok", "grok -p", "acceptEdits", &["-p", "hello", "--permission-mode", "default"]),
             ("opencode", "opencode run", "acceptEdits", &["run", "--format", "json", "hello"]),
             ("gemini", "gemini --prompt", "acceptEdits", &["--prompt", "hello"]),
         ];
@@ -1199,7 +1199,7 @@ mod tests {
             ("codex", Some(SessionMode::Persistent), false),
             ("cursor", Some(SessionMode::Resumable), false),
             ("gemini", Some(SessionMode::Resumable), false),
-            ("grok", Some(SessionMode::Resumable), false),
+            ("grok", Some(SessionMode::Persistent), true),
             ("opencode", Some(SessionMode::Persistent), true),
         ];
 
@@ -1227,7 +1227,7 @@ mod tests {
             assert_eq!(
                 send_route(driver, false),
                 SendRoute::OneShot,
-                "{driver} stays one command without the opt-in"
+                "{driver} stays one command when the gate is off"
             );
             assert!(
                 one_shot_notice(driver, false).is_some(),
@@ -1240,7 +1240,7 @@ mod tests {
         for driver in DRIVERS {
             assert_eq!(
                 has_persistent_wire(driver),
-                matches!(driver, "antigravity" | "opencode"),
+                matches!(driver, "antigravity" | "opencode" | "grok"),
                 "{driver} served wire"
             );
         }

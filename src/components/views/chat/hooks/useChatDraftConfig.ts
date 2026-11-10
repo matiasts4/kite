@@ -5,7 +5,9 @@ import {
   getSavedSelectedProvider,
   saveSelectedProvider,
   getSavedSelectedAgent,
+  getSavedSelectedEffort,
   saveSelectedAgent,
+  saveSelectedEffort,
 } from '../modelPersistence';
 
 /** Configuration chosen for the Agent surface before the first thread exists. */
@@ -31,6 +33,7 @@ export type DraftThreadRequest = {
   provider: ChatProvider;
   mode: ChatMode;
   model: string | null;
+  effort: string | null;
   agent?: string | null;
 };
 
@@ -47,14 +50,15 @@ export function createDraftConfig(
   const provider = (savedProvider && ['claude', 'codex', 'cursor', 'grok', 'opencode', 'antigravity', 'gemini'].includes(savedProvider)
     ? (savedProvider as ChatProvider)
     : defaultProvider);
-  const savedModel = getSavedSelectedModel(provider);
+  const savedModel = defaultModel !== null ? defaultModel : getSavedSelectedModel(provider);
   const savedAgent = defaultAgent !== null ? defaultAgent : getSavedSelectedAgent(provider);
+  const savedEffort = getSavedSelectedEffort(provider, savedModel);
 
   return {
     provider,
     mode: 'acceptEdits',
-    model: defaultModel !== null ? defaultModel : savedModel,
-    effort: null,
+    model: savedModel,
+    effort: savedEffort,
     ...(savedAgent !== null && savedAgent !== undefined ? { agent: savedAgent } : {}),
   };
 }
@@ -99,7 +103,17 @@ export function applyDraftPatch(
     provider,
     mode: patch.mode ?? current.mode,
     model,
-    effort: patch.effort !== undefined ? patch.effort : current.effort,
+    effort: (() => {
+      if (patch.effort !== undefined) {
+        const nextEffort = patch.effort;
+        saveSelectedEffort(provider, model, nextEffort);
+        return nextEffort;
+      }
+      if (providerChanged || patch.model !== undefined) {
+        return getSavedSelectedEffort(provider, model) ?? current.effort;
+      }
+      return current.effort;
+    })(),
     ...(agent !== null && agent !== undefined ? { agent } : {}),
   };
 }
@@ -114,6 +128,7 @@ export function draftThreadRequest(
     provider: draft.provider,
     mode: draft.mode,
     model: draft.model,
+    effort: draft.effort,
     ...(draft.agent ? { agent: draft.agent } : {}),
   };
 }

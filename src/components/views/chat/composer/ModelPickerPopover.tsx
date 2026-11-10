@@ -9,6 +9,7 @@ import React, {
 import { createPortal } from 'react-dom';
 import { composerMenuStyle } from './composerMenu';
 import { ChatProvider, AUTOMATIC_MODEL_ID } from '../types';
+import { catalogEmptyMessage, type CatalogEmptyKind } from '../catalogEmptyState';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
 import { BrandLogo } from '../../agents/engineMetadata';
 import { SearchIcon, CheckIcon } from '../ChatIcons';
@@ -91,6 +92,7 @@ export interface ModelPickerPopoverProps {
   declaration: DriverDeclaration;
   disabled?: boolean;
   modelReason?: string | null;
+  catalogState?: CatalogEmptyKind | null;
   ensureDynamicModels?: (provider: ChatProvider) => void;
   onSelectModel: (modelId: string | null) => void;
   onSelectProvider: (provider: ChatProvider) => void;
@@ -105,6 +107,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
   declaration,
   disabled = false,
   modelReason,
+  catalogState = null,
   ensureDynamicModels,
   onSelectModel,
   onSelectProvider,
@@ -140,9 +143,11 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
       requestAnimationFrame(() => {
         searchInputRef.current?.focus();
       });
-      ensureDynamicModels?.(provider);
+      const requested =
+        activeRailTab === 'favorites' ? provider : (activeRailTab as ChatProvider);
+      ensureDynamicModels?.(requested);
     }
-  }, [isOpen, provider, ensureDynamicModels]);
+  }, [isOpen, provider, activeRailTab, ensureDynamicModels]);
 
   // Close on outside click or escape
   useEffect(() => {
@@ -269,10 +274,10 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
         aria-label="Model"
         aria-expanded={isOpen}
         title={modelReason || `Model: ${currentModelName}`}
-        disabled={disabled || models.length === 0}
+        disabled={disabled}
         data-state={isOpen ? 'open' : 'closed'}
         onClick={() => {
-          if (!disabled && models.length > 0) {
+          if (!disabled) {
             setIsOpen((prev) => !prev);
           }
         }}
@@ -335,6 +340,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                       aria-label={p.label}
                       onClick={() => {
                         setActiveRailTab(p.id as ChatProvider);
+                        ensureDynamicModels?.(p.id as ChatProvider);
                         if (p.id !== provider) {
                           onSelectProvider(p.id as ChatProvider);
                         }
@@ -475,7 +481,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                       ? `No models match "${searchQuery}"`
                       : activeRailTab === 'favorites'
                       ? 'No favorite models saved yet. Click the star on any model to save it here.'
-                      : 'No models available'}
+                      : catalogEmptyMessage(catalogState ?? 'empty', provider)}
                   </div>
                 )}
               </div>

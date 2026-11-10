@@ -5,6 +5,7 @@ import {
   draftThreadRequest,
   type ChatDraftConfig,
 } from './useChatDraftConfig';
+import { resetRememberedSelections } from '../modelPersistence';
 
 const draftWithModel = (): ChatDraftConfig => ({
   provider: 'antigravity',
@@ -127,6 +128,20 @@ describe('draftThreadRequest', () => {
       provider: 'claude',
       mode: 'fullAccess',
       model: 'sonnet',
+      effort: null,
+    });
+  });
+
+  it('inherits the remembered effort on a new thread', () => {
+    resetRememberedSelections();
+    applyDraftPatch(
+      { provider: 'codex', mode: 'fullAccess', model: null, effort: null },
+      { provider: 'grok', model: 'grok-4', effort: 'ultra' }
+    );
+    expect(createDraftConfig('codex')).toMatchObject({
+      provider: 'grok',
+      model: 'grok-4',
+      effort: 'ultra',
     });
   });
 
@@ -142,6 +157,7 @@ describe('draftThreadRequest', () => {
       provider: 'codex',
       mode: 'acceptEdits',
       model: null,
+      effort: null,
     });
   });
 });

@@ -11,6 +11,7 @@ import { composerMenuStyle } from './composerMenu';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
 import { SPANISH_EFFORT_LABELS } from '../types';
 import { ZapIcon, ChevronRightIcon } from '../ChatIcons';
+import { resolveEffortGlyph } from '../effortGlyph';
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
 
@@ -201,7 +202,9 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
     onChangeEffort(defaultStepId);
   };
 
-  const triggerTitle = unlistedReason || `Reasoning effort: ${activeLabel}`;
+  const glyph = resolveEffortGlyph(steps.map((step) => step.id), effectiveEffortId);
+  const triggerTitle = unlistedReason
+    || (glyph.disabled ? `${modelName} ${glyph.reason}` : `Reasoning effort: ${activeLabel}`);
 
   return (
     <>
@@ -212,7 +215,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
         aria-label="Reasoning effort"
         aria-expanded={isOpen}
         title={triggerTitle}
-        disabled={disabled || Boolean(unlistedReason)}
+        disabled={disabled || Boolean(unlistedReason) || glyph.disabled}
         data-state={isOpen ? 'open' : 'closed'}
         onClick={() => {
           if (!disabled && !unlistedReason) {
@@ -221,7 +224,20 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
         }}
       >
         <ComposerControlIcon icon={ZapIcon} size={14} className="text-primary" />
-        <span className="kite-composer-control-label">{activeLabel}</span>
+        <svg className="effort-glyph" width={glyph.heights.length * 4} height={14} aria-hidden="true">
+          {glyph.heights.map((height, index) => (
+            <rect
+              key={index}
+              x={index * 4}
+              y={14 - height}
+              width={2}
+              height={height}
+              fill="currentColor"
+              opacity={index <= glyph.filledUntil ? 1 : 0.4}
+            />
+          ))}
+        </svg>
+        <span className="kite-composer-control-label">{glyph.namedLabel || activeLabel}</span>
         <ComposerControlChevron />
       </ComposerControl>
 

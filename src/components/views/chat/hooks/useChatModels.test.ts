@@ -94,6 +94,25 @@ describe('useChatModels', () => {
     expect(result.current.isRefreshingModels).toBe(false);
   });
 
+  it('retries a provider whose first fetch was empty when asked again', async () => {
+    respondFrom(() => ({ models: [] }));
+    const { result } = renderHook(() => useChatModels());
+    const provider = dynamicProviders[0];
+
+    await waitFor(() =>
+      expect(vi.mocked(invokeCommand)).toHaveBeenCalledTimes(dynamicProviders.length)
+    );
+    expect(result.current.dynamicModelsMap[provider]).toBeUndefined();
+
+    respondFrom((next) => ({ models: liveModels(next) }));
+    await act(async () => {
+      await result.current.fetchDynamicModels(provider, false);
+    });
+
+    expect(invocationsFor(provider)).toHaveLength(2);
+    expect(result.current.dynamicModelsMap[provider]).toEqual(liveModels(provider));
+  });
+
   it('does not invent a model list when a fetch fails, and never clears a good list with an empty refresh', async () => {
     const provider = dynamicProviders[0];
     vi.mocked(invokeCommand).mockRejectedValue(new Error('provider CLI unavailable'));

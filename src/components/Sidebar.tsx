@@ -33,7 +33,13 @@ import { surfaceMotion } from '../motion/standard/surfaces';
 // Main Sidebar Component
 // ---------------------------------------------------------------------------
 
-export const Sidebar: React.FC<SidebarProps> = ({
+export type ThreadSidebarCallbacks = {
+  onRegenerateTitle?: (threadId: string) => void;
+  titlePending?: boolean;
+  onRestoreThread?: (threadId: string) => void;
+};
+
+export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
   hidden = false,
   onRailPresenceChange,
   mode,
@@ -81,6 +87,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onDeleteThread,
   onMoveWorkspace,
   onMoveAgent,
+  onRegenerateTitle,
+  titlePending = false,
+  onRestoreThread,
 }) => {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -395,6 +404,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   onTogglePinThread={onTogglePinThread}
                   onRenameThread={onRenameThread}
                   onDeleteThread={onDeleteThread}
+                  onRestoreThread={onRestoreThread}
+                  onRegenerateTitle={onRegenerateTitle}
+                  titlePending={titlePending}
                   onOpenArchivedChats={onOpenArchivedChats}
                   onOpenMenu={setContextMenu}
                   contextMenuTargetId={contextMenu?.targetId}

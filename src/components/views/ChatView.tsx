@@ -250,6 +250,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
       engineLabel={undefined}
       liveRunsCount={session.liveRuns.length}
       dynamicModelsMap={session.dynamicModelsMap}
+      catalogStateMap={session.catalogStateMap}
       dynamicAgentsMap={session.dynamicAgentsMap}
       ensureDynamicAgents={session.ensureDynamicAgents}
       sessionProjections={props.sessionProjections}

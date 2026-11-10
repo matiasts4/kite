@@ -23,6 +23,7 @@ import {
 } from './hooks/useChatDraftConfig';
 import { getSavedSelectedProvider } from './modelPersistence';
 import { pollTurnUpdates } from './turnPolling';
+import { expandCitations } from './citationChip';
 import {
   bindingForConnection,
   resolveConnectionBinding,
@@ -156,6 +157,7 @@ export function useChatSession({
 
   const {
     dynamicModelsMap,
+    catalogStateMap,
     isRefreshingModels,
     fetchDynamicModels,
     refreshModels,
@@ -545,6 +547,7 @@ export function useChatSession({
   };
 
   const handleCreateNewThread = async () => {
+    const latest = createDraftConfig(draftConfig.provider, null, draftConfig.agent ?? null);
     // Deduplicate empty draft threads in the same scope
     const existingDraft = knownThreadsList.find(
       (t) =>
@@ -552,12 +555,20 @@ export function useChatSession({
         (!t.items || t.items.length === 0 || (t as any).status === 'draft' || !t.title || t.title.toLowerCase().includes('draft') || t.title === 'New Chat')
     );
     if (existingDraft) {
+      await invokeCommand('update_chat_configuration', {
+        threadId: existingDraft.id,
+        provider: latest.provider,
+        model: latest.model,
+        effort: latest.effort,
+        mode: latest.mode,
+        ...(latest.agent ? { agent: latest.agent } : {}),
+      });
       void handleLoadThread(existingDraft.id);
       return;
     }
 
     try {
-      const request = draftThreadRequest(draftConfig, agentId);
+      const request = draftThreadRequest(latest, agentId);
       const thread = agentId
         ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
@@ -906,9 +917,11 @@ export function useChatSession({
     planAction?: PlanActionPayload
   ): Promise<boolean> => {
     const thread = overrideThread || threadsMap[threadId];
-    const promptText = (overridePrompt !== undefined ? overridePrompt : promptMap[threadId] || '').trim();
+    const rawPrompt = (overridePrompt !== undefined ? overridePrompt : promptMap[threadId] || '').trim();
+    const promptText = expandCitations(rawPrompt);
     const currentAttachments = attachmentsMap[threadId] || [];
 
+    if (promptText.length > 120_000) return false;
     if ((!promptText && currentAttachments.length === 0) || !thread || isRunning[threadId]) return false;
 
     setPromptMap((prev) => ({ ...prev, [threadId]: '' }));
@@ -1038,6 +1051,7 @@ export function useChatSession({
     setPromptMap,
     attachmentsMap,
     dynamicModelsMap,
+    catalogStateMap,
     dynamicAgentsMap,
     ensureDynamicAgents,
     refreshAgents,

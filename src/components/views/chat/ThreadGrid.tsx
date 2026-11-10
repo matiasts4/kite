@@ -8,6 +8,7 @@ import type {
   ChatProvider,
   ChatMode,
 } from './types';
+import type { CatalogAvailability } from './hooks/useChatModels';
 import type { PlanActionPayload } from './ChatPlanPanel';
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 
@@ -25,6 +26,7 @@ export interface ThreadGridProps {
   engineLabel?: string;
   liveRunsCount: number;
   dynamicModelsMap: Record<string, ModelOption[]>;
+  catalogStateMap?: Record<string, CatalogAvailability>;
   dynamicAgentsMap?: Record<string, any[]>;
   /** Session projections supplied by the caller, keyed by thread id. */
   sessionProjections?: Record<string, SessionProjection> | null;
@@ -155,6 +157,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   engineLabel,
   liveRunsCount,
   dynamicModelsMap,
+  catalogStateMap,
   dynamicAgentsMap,
   ensureDynamicAgents,
   sessionProjections,
@@ -370,6 +373,10 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 attachments={attachments}
                 liveRunsCount={liveRunsCount}
                 dynamicModels={dynamicModelsMap[thread.provider] || []}
+                catalogState={(() => {
+                  const state = catalogStateMap?.[thread.provider];
+                  return state && state !== 'ready' ? state : null;
+                })()}
                 dynamicAgents={dynamicAgentsMap?.[thread.provider] || []}
                 ensureDynamicAgents={ensureDynamicAgents}
                 driverDeclaration={driverDeclarations?.[tid] ?? null}
@@ -396,6 +403,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 onChangePrompt={(val) => onChangePrompt(tid, val)}
                 onSend={(overridePrompt, planAction) => onSend(tid, overridePrompt, planAction)}
                 onStop={() => onStop(tid)}
+                onStopThread={onStop}
                 onPickAttachments={(kind) => onPickAttachments(tid, kind)}
                 onStageFiles={(files) => onStageFiles(tid, files)}
                 onStagePaths={(paths) => onStagePaths(tid, paths)}

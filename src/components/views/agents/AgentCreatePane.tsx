@@ -3,6 +3,9 @@ import { invokeCommand } from '../../../lib/ipc';
 import type { AgentProfile } from '../../../types';
 import type { AvatarChoice } from '../../AgentAvatar';
 import { AgentAvatarCustomizer } from './AgentAvatarCustomizer';
+import { SelectMenu } from '../../ui/SelectMenu';
+import { AUTOMATIC_MODEL_ID, engineToChatProvider, type ModelOption } from '../chat/types';
+import { catalogEmptyMessage, type CatalogEmptyKind } from '../chat/catalogEmptyState';
 import {
   BrandLogo,
   TEAMMATE_ENGINE_IDS,
@@ -250,6 +253,10 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
   const [name, setName] = useState('');
   const [purpose, setPurpose] = useState('');
   const [engine, setEngine] = useState('antigravity');
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [liveModels, setLiveModels] = useState<ModelOption[]>([]);
+  const [modelsNote, setModelsNote] = useState<string | null>(null);
+  const [catalogKind, setCatalogKind] = useState<CatalogEmptyKind>('loading');
   const [avatar, setAvatar] = useState<AvatarChoice | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -287,6 +294,51 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+    setLiveModels([]);
+    setModelsNote(catalogEmptyMessage('loading', engineToChatProvider(engine)));
+    setCatalogKind('loading');
+    setDefaultModel(null);
+    const provider = engineToChatProvider(engine);
+    invokeCommand<{ models?: ModelOption[]; catalogState?: CatalogEmptyKind }>('list_chat_provider_models', {
+      provider,
+      forceRefresh: false,
+    })
+      .then((res) => {
+        if (!mounted) return;
+        const models = Array.isArray(res?.models) ? res.models : [];
+        const listed = models.filter((model) => model.id && model.id !== AUTOMATIC_MODEL_ID);
+        setLiveModels(listed);
+        const kind: CatalogEmptyKind =
+          listed.length > 0
+            ? 'empty'
+            : res?.catalogState === 'missing-binary' || res?.catalogState === 'signed-out'
+              ? res.catalogState
+              : 'empty';
+        setCatalogKind(kind);
+        setModelsNote(listed.length > 0 ? null : catalogEmptyMessage(kind, provider));
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setLiveModels([]);
+        setCatalogKind('empty');
+        setModelsNote(catalogEmptyMessage('empty', provider));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [engine]);
+
+  const modelRows = [
+    { id: AUTOMATIC_MODEL_ID, title: 'Automatic', detail: 'The connected program chooses.' },
+    ...liveModels.map((model) => ({
+      id: model.id,
+      title: model.name,
+      detail: model.description || 'Listed by the connected program',
+    })),
+  ];
+
   const trimmedName = name.trim();
   const duplicateName =
     trimmedName.length > 0 &&
@@ -314,6 +366,7 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
         engine,
         purpose: purpose.trim(),
         avatar,
+        defaultModel,
         confirmedByBuilder: true,
       });
       onCreated(created);
@@ -667,6 +720,24 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
                   Antigravity, Claude Code, Codex, Grok, OpenCode, Cursor, and Gemini all support direct Agent Chat with memory and skills.
                 </p>
               </fieldset>
+
+              <div className="form-field">
+                <label htmlFor="agent-model">Model</label>
+                <SelectMenu
+                  variant="field"
+                  label="Model"
+                  value={defaultModel || AUTOMATIC_MODEL_ID}
+                  triggerLabel={
+                    modelRows.find((row) => row.id === (defaultModel || AUTOMATIC_MODEL_ID))?.title ||
+                    'Automatic'
+                  }
+                  disabled={creating}
+                  rows={modelRows}
+                  emptyLabel={modelsNote || catalogEmptyMessage(catalogKind, engineToChatProvider(engine))}
+                  onSelect={(id) => setDefaultModel(id === AUTOMATIC_MODEL_ID ? null : id)}
+                />
+                {modelsNote ? <p className="form-field__hint">{modelsNote}</p> : null}
+              </div>
 
               <div className="form-field">
                 <label htmlFor="agent-purpose">Brief</label>

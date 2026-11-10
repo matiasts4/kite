@@ -78,6 +78,32 @@ export interface ExtendedChatThread extends ChatThread {
   supportedEndpoint?: string | null;
   /** Set when the user stopped the turn. Cleared when the next turn starts. */
   stoppedByBuilder?: boolean;
+  turnFailure?: {
+    kind: 'usageLimit' | 'authRequired' | 'cliUsageError' | 'processError';
+    message: string;
+    resetAtUnixMs?: number | null;
+    provider?: string;
+  } | null;
+  snoozedUntil?: number | null;
+  isolatedCheckout?: boolean;
+  providerCanRewind?: boolean;
+  parentThreadId?: string | null;
+  startedByAgent?: boolean;
+  sideChat?: boolean;
+  usageReported?: boolean;
+  contextWindowTokens?: number;
+  queuedRuns?: Array<{ id: string; text: string }>;
+  pendingUserInput?: {
+    requestId?: string;
+    questions?: Array<{
+      id: string;
+      header: string;
+      options: string[];
+      allowCustomAnswer?: boolean;
+      allowAttachments?: boolean;
+      multiSelect?: boolean;
+    }>;
+  } | null;
 }
 
 export function getActivePlan(thread: ExtendedChatThread): ProposedPlan | null {

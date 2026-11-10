@@ -18,6 +18,36 @@ import {
 } from './types';
 import type { ChatItem } from '../../../types';
 import { insertQuoteAtCaret } from './citeDraft';
+import { AssistantCitationChip } from './ChatItemRow';
+import {
+  citationSendLength,
+  draftHasCitation,
+  expandCitations,
+  readCitationClipboard,
+  writeCitationClipboard,
+  type CitationInput,
+} from './citationChip';
+import {
+  composerPartOffset,
+  deleteComposerChipKey,
+  draftHasMention,
+  expandMentions,
+  filterMentionMenu,
+  insertDropAtCaret,
+  insertMentionAtCaret,
+  KITE_FILES_MIME,
+  KITE_THREAD_MIME,
+  mentionChipLabel,
+  mentionFromTerminalExcerpt,
+  mentionQueryAt,
+  readMentionClipboard,
+  removeComposerPart,
+  replaceComposerCitationComment,
+  replaceComposerTextPart,
+  splitComposerDraft,
+  writeMentionClipboard,
+  type MentionPayload,
+} from './mentionChip';
 import { isControlDeclared, isProviderDeclared, undeclaredReason } from '../../../lib/session/declaration';
 import type { DriverDeclaration } from '../../../lib/session/types';
 import { ChatApprovalCard } from './ChatApprovalCard';
@@ -29,7 +59,20 @@ import {
 import { ComposerSurface } from './composer/ComposerSurface';
 import { ComposerControlSeparator } from './composer/ComposerControl';
 import { ModelPickerPopover } from './composer/ModelPickerPopover';
+import { catalogEmptyMessage } from './catalogEmptyState';
 import { EffortSliderPopover } from './composer/EffortSliderPopover';
+import { resolvePrimaryAction } from './composerPrimaryAction';
+import { ComposerCommandMenu } from './ComposerCommandMenu';
+import {
+  composerGoalStop,
+  restoreStash,
+  slashIntent,
+  stashDraft,
+  stashFileRestorable,
+  type StashEntry,
+} from './threadInteraction';
+import { pasteBecomesFile } from './threadInteraction';
+import { consumeFreshContext, resolveSessionCommand } from './sessionCommands';
 import { ComposerContextStrip } from './composer/ComposerContextStrip';
 import { AttachMenuPopover } from './composer/AttachMenuPopover';
 import { PermissionPickerPopover } from './composer/PermissionPickerPopover';
@@ -57,10 +100,12 @@ export interface ChatComposerProps {
   onSelectWorkspace?: (wsId: string) => void;
   declaration: DriverDeclaration;
   running: boolean;
+  paused?: boolean;
   prompt: string;
   attachments: ChatAttachment[];
   totalTokens: number;
   isRefreshingModels?: boolean;
+  catalogState?: 'missing-binary' | 'signed-out' | 'loading' | 'empty' | null;
   onRefreshModels?: (provider: ChatProvider) => void;
   ensureDynamicModels?: (provider: ChatProvider) => void;
   ensureDynamicAgents?: (provider: ChatProvider) => void;
@@ -68,6 +113,11 @@ export interface ChatComposerProps {
   pendingApproval?: ApprovalRequest | null;
   onChangePrompt: (val: string) => void;
   onSend: () => void;
+  /** Called when the next real message should start a fresh provider session. */
+  onFreshContext?: () => void;
+  /** Asks a supporting provider to compact. Does not invent a protocol frame. */
+  onCompact?: () => void;
+  onQueue?: (text: string) => void;
   onStop: () => void;
   onPickAttachments: (kind?: 'files' | 'folder') => void;
   onStageFiles: (files: File[]) => void;
@@ -84,6 +134,14 @@ export interface ChatComposerProps {
     connectionId?: string | null;
   }) => void;
   onSelectConnection?: (connectionId: string) => void;
+  files?: string[];
+  threads?: Array<{ id: string; title?: string }>;
+  models?: string[];
+  skills?: string[];
+  goal?: string | null;
+  onGoalStop?: (result: { goal: string | null; paused: boolean; turnEnded: boolean }) => void;
+  initialStashes?: StashEntry[];
+  stashEnvironment?: string;
   onApprovalDecision?: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
     requestId: string
@@ -129,6 +187,174 @@ function isPlainKey(e: React.KeyboardEvent): boolean {
   return !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
 }
 
+function MentionDraftChip({
+  mention,
+  token,
+  onRemove,
+}: {
+  mention: MentionPayload;
+  token: string;
+  onRemove: () => void;
+}) {
+  return (
+    <span
+      className="citation-chip rounded-sm"
+      contentEditable={false}
+      data-mention-token={token}
+      data-mention-kind={mention.kind}
+      onCopy={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        writeMentionClipboard(event.clipboardData, token);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+          event.preventDefault();
+          onRemove();
+        }
+      }}
+    >
+      <span className="citation-chip__jump">{mentionChipLabel(mention)}</span>
+    </span>
+  );
+}
+
+function CitationDraftEditor({
+  prompt,
+  onChange,
+  onKeyDown,
+  onPaste,
+  onCopy,
+  pendingCaret,
+  onPendingCaretApplied,
+  onCaret,
+  onDraftCaret,
+  caretRef,
+  testId,
+}: {
+  prompt: string;
+  onChange: (value: string) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onCopy: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  pendingCaret: number | null;
+  onPendingCaretApplied: () => void;
+  onCaret: (caret: number) => void;
+  onDraftCaret: (caret: number) => void;
+  caretRef: React.MutableRefObject<{ start: number; end: number }>;
+  testId?: string;
+}) {
+  const parts = splitComposerDraft(prompt);
+  const fields = useRef<Array<HTMLTextAreaElement | null>>([]);
+
+  useLayoutEffect(() => {
+    if (pendingCaret === null) return;
+    let cursor = 0;
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      const size = part.kind === 'text' ? part.text.length : part.token.length;
+      if (part.kind === 'text' && pendingCaret <= cursor + size) {
+        const field = fields.current[index];
+        const local = Math.max(0, pendingCaret - cursor);
+        field?.focus();
+        field?.setSelectionRange(local, local);
+        caretRef.current = { start: cursor + local, end: cursor + local };
+        break;
+      }
+      cursor += size;
+    }
+    onPendingCaretApplied();
+  }, [caretRef, onPendingCaretApplied, parts, pendingCaret]);
+
+  return (
+    <div className="kite-composer-draft">
+      {parts.map((part, index) => {
+        if (part.kind === 'citation') {
+          return (
+            <AssistantCitationChip
+              key={`cite-${index}-${part.citation.comment}`}
+              citation={part.citation}
+              token={part.token}
+              onEditComment={(comment) => onChange(replaceComposerCitationComment(prompt, index, comment))}
+              onRemove={() => {
+                const caret = composerPartOffset(parts, index);
+                caretRef.current = { start: caret, end: caret };
+                onCaret(caret);
+                onDraftCaret(caret);
+                onChange(removeComposerPart(prompt, index));
+              }}
+            />
+          );
+        }
+        if (part.kind === 'mention') {
+          return (
+            <MentionDraftChip
+              key={`mention-${index}-${part.mention.kind}-${part.mention.id}`}
+              mention={part.mention}
+              token={part.token}
+              onRemove={() => {
+                const caret = composerPartOffset(parts, index);
+                caretRef.current = { start: caret, end: caret };
+                onCaret(caret);
+                onDraftCaret(caret);
+                onChange(removeComposerPart(prompt, index));
+              }}
+            />
+          );
+        }
+        const offset = composerPartOffset(parts, index);
+        return (
+          <textarea
+            key={`text-${index}`}
+            ref={(node) => {
+              fields.current[index] = node;
+            }}
+            data-testid={index === 0 ? testId : undefined}
+            className="kite-composer-textarea kite-composer-draft__text"
+            value={part.text}
+            rows={1}
+            onSelect={(event) => {
+              const start = offset + (event.currentTarget.selectionStart ?? 0);
+              const end = offset + (event.currentTarget.selectionEnd ?? start);
+              caretRef.current = { start, end };
+              onDraftCaret(start);
+            }}
+            onChange={(event) => {
+              const local = event.target.selectionStart ?? event.target.value.length;
+              const nextCaret = offset + local;
+              caretRef.current = { start: nextCaret, end: nextCaret };
+              onDraftCaret(nextCaret);
+              onChange(replaceComposerTextPart(prompt, index, event.target.value));
+            }}
+            onKeyDown={(event) => {
+              const localStart = event.currentTarget.selectionStart ?? 0;
+              const localEnd = event.currentTarget.selectionEnd ?? localStart;
+              const draftStart = offset + localStart;
+              const draftEnd = offset + localEnd;
+              caretRef.current = { start: draftStart, end: draftEnd };
+              onDraftCaret(draftStart);
+              if ((event.key === 'Backspace' || event.key === 'Delete') && isPlainKey(event)) {
+                const deleted = deleteComposerChipKey(prompt, draftStart, draftEnd, event.key);
+                if (deleted) {
+                  event.preventDefault();
+                  caretRef.current = { start: deleted.caret, end: deleted.caret };
+                  onCaret(deleted.caret);
+                  onDraftCaret(deleted.caret);
+                  onChange(deleted.text);
+                  return;
+                }
+              }
+              onKeyDown(event);
+            }}
+            onPaste={onPaste}
+            onCopy={onCopy}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 const ControlReason: React.FC<{ reason: string }> = ({ reason }) => (
   <span className="sr-only">{reason}</span>
 );
@@ -154,14 +380,19 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onSelectWorkspace,
   declaration,
   running,
+  paused = false,
   prompt,
   attachments,
   totalTokens,
+  catalogState = null,
   ensureDynamicModels,
   ensureDynamicAgents,
   pendingApproval,
   onChangePrompt,
   onSend,
+  onFreshContext,
+  onCompact,
+  onQueue,
   onStop,
   onPickAttachments,
   onStageFiles,
@@ -170,8 +401,29 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onUpdateConfig,
   onSelectConnection,
   onApprovalDecision,
+  files = [],
+  threads = [],
+  models = [],
+  skills = [],
+  goal = null,
+  onGoalStop,
+  initialStashes,
+  stashEnvironment = '',
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const caretRef = useRef({ start: 0, end: 0 });
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null);
+  const [draftCaret, setDraftCaret] = useState(0);
+  const [stashes, setStashes] = useState<StashEntry[]>(initialStashes ?? []);
+  const [stashFileNotice, setStashFileNotice] = useState<ReturnType<typeof stashFileRestorable>>(null);
+  const [sideQuestion, setSideQuestion] = useState<string | null>(null);
+  const [newSessionArmed, setNewSessionArmed] = useState(false);
+  const [compactNotice, setCompactNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    setNewSessionArmed(false);
+    setCompactNotice(null);
+  }, [threadId]);
   const footerRef = useRef<HTMLDivElement>(null);
 
   const [connectionCandidates, setConnectionCandidates] = useState<ConnectionCandidate[]>([]);
@@ -200,6 +452,18 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     guidance: string;
   } | null>(null);
   const [dictationState, setDictationState] = useState<'idle' | 'starting' | 'recording' | 'transcribing'>('idle');
+  const [followUpFlip, setFollowUpFlip] = useState(false);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Control' || event.key === 'Meta') setFollowUpFlip(event.type === 'keydown');
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKey);
+    };
+  }, []);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const dictationReqIdRef = useRef<string | null>(null);
   const dictationPollRef = useRef<number | null>(null);
@@ -217,16 +481,19 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   useEffect(() => {
     const onCite = (event: Event) => {
-      const passage = (event as CustomEvent<string>).detail;
-      if (typeof passage !== 'string') return;
+      const detail = (event as CustomEvent<CitationInput>).detail;
+      if (typeof detail !== 'string' && (detail === null || typeof detail !== 'object')) return;
       const area = textareaRef.current;
-      const start = area?.selectionStart ?? prompt.length;
-      const end = area?.selectionEnd ?? start;
-      const next = insertQuoteAtCaret(prompt, start, end, passage);
+      const usingField = Boolean(area) && !draftHasCitation(prompt);
+      const start = usingField ? (area?.selectionStart ?? prompt.length) : caretRef.current.start;
+      const end = usingField ? (area?.selectionEnd ?? start) : caretRef.current.end;
+      const next = insertQuoteAtCaret(prompt, start, end, detail);
+      caretRef.current = { start: next.caret, end: next.caret };
+      setPendingCaret(next.caret);
       onChangePrompt(next.text);
       window.requestAnimationFrame(() => {
         const field = textareaRef.current;
-        if (!field) return;
+        if (!field || draftHasCitation(next.text)) return;
         field.focus();
         field.setSelectionRange(next.caret, next.caret);
       });
@@ -234,6 +501,34 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     window.addEventListener('kite:cite', onCite);
     return () => window.removeEventListener('kite:cite', onCite);
   }, [onChangePrompt, prompt]);
+
+  useEffect(() => {
+    const onExcerpt = (event: Event) => {
+      const mention = mentionFromTerminalExcerpt((event as CustomEvent).detail);
+      if (!mention) return;
+      const area = textareaRef.current;
+      const plain = Boolean(area) && !draftHasCitation(prompt) && !draftHasMention(prompt);
+      const start = plain ? (area?.selectionStart ?? caretRef.current.start) : caretRef.current.start;
+      const end = plain ? (area?.selectionEnd ?? start) : caretRef.current.end;
+      const next = insertMentionAtCaret(prompt, start, end, mention);
+      caretRef.current = { start: next.caret, end: next.caret };
+      setDraftCaret(next.caret);
+      setPendingCaret(next.caret);
+      onChangePrompt(next.text);
+    };
+    window.addEventListener('kite:terminal-excerpt', onExcerpt);
+    return () => window.removeEventListener('kite:terminal-excerpt', onExcerpt);
+  }, [onChangePrompt, prompt]);
+
+  useLayoutEffect(() => {
+    if (draftHasCitation(prompt) || draftHasMention(prompt) || pendingCaret === null) return;
+    const field = textareaRef.current;
+    if (!field) return;
+    const caret = Math.min(pendingCaret, field.value.length);
+    field.focus();
+    field.setSelectionRange(caret, caret);
+    setPendingCaret(null);
+  }, [pendingCaret, prompt]);
 
   // Dynamic textarea height
   useLayoutEffect(() => {
@@ -360,8 +655,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const insertAtCursor = (insertion: string, isMention: boolean = false) => {
     const target = textareaRef.current;
-    const start = target?.selectionStart ?? prompt.length;
-    const end = target?.selectionEnd ?? start;
+    const start = target?.selectionStart ?? caretRef.current.start;
+    const end = target?.selectionEnd ?? caretRef.current.end;
     const before = prompt.slice(0, start);
     const formatted = isMention
       ? `${before.length === 0 || /\s$/u.test(before) ? '' : ' '}@${insertion} `
@@ -379,7 +674,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     if (running) return null;
     const types = event.dataTransfer?.types ?? [];
     if (types.includes('application/x-kite-prompt')) return 'prompt';
-    if (types.includes('application/x-kite-files-entry')) return 'mention';
+    if (types.includes(KITE_THREAD_MIME) || types.includes(KITE_FILES_MIME)) return 'mention';
     if (types.includes('Files')) return 'attach';
     return null;
   };
@@ -399,16 +694,20 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       return;
     }
 
-    if (types.includes('application/x-kite-files-entry')) {
-      try {
-        const raw = event.dataTransfer.getData('application/x-kite-files-entry');
-        const parsed = JSON.parse(raw);
-        const path = parsed.relativePath || parsed.path || parsed.name;
-        if (path) insertAtCursor(path, true);
-      } catch {
-        const text = event.dataTransfer.getData('text/plain');
-        if (text) insertAtCursor(text, true);
-      }
+    if (types.includes(KITE_THREAD_MIME) || types.includes(KITE_FILES_MIME)) {
+      const threadRaw = types.includes(KITE_THREAD_MIME) ? event.dataTransfer.getData(KITE_THREAD_MIME) : '';
+      const mime = threadRaw ? KITE_THREAD_MIME : KITE_FILES_MIME;
+      const raw = threadRaw || event.dataTransfer.getData(KITE_FILES_MIME);
+      const area = textareaRef.current;
+      const plain = Boolean(area) && !draftHasCitation(prompt) && !draftHasMention(prompt);
+      const start = plain ? (area?.selectionStart ?? caretRef.current.start) : caretRef.current.start;
+      const end = plain ? (area?.selectionEnd ?? start) : caretRef.current.end;
+      const next = insertDropAtCaret(prompt, start, end, mime, raw);
+      if (!next) return;
+      caretRef.current = { start: next.caret, end: next.caret };
+      setDraftCaret(next.caret);
+      setPendingCaret(next.caret);
+      onChangePrompt(next.text);
       return;
     }
 
@@ -428,7 +727,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     if ((!isUp && e.key !== 'ArrowDown') || !isPlainKey(e)) return false;
 
     const target = e.currentTarget;
-    const { selectionStart, selectionEnd } = target;
+    const fullField = target.value === prompt;
+    const selectionStart = fullField ? target.selectionStart : caretRef.current.start;
+    const selectionEnd = fullField ? target.selectionEnd : caretRef.current.end;
     if (selectionStart !== selectionEnd) return false;
 
     if (isUp ? !isNoNewlineBefore(prompt, selectionStart) : !isNoNewlineAfter(prompt, selectionStart)) {
@@ -456,6 +757,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       const nextText = nextIdx === null ? historyStateRef.current.draft : (history[nextIdx] ?? '');
       onChangePrompt(nextText);
       requestAnimationFrame(() => {
+        if (!fullField) return;
         target.focus();
         target.setSelectionRange(nextText.length, nextText.length);
       });
@@ -467,10 +769,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const providerDeclared = isProviderDeclared(declaration, threadProvider);
   const providerReason = providerDeclared ? null : undeclaredReason(declaration, 'provider');
 
-  const models = declaration.models ?? [];
-  const liveModels = models.filter((model) => model.id !== AUTOMATIC_MODEL_ID);
-  const modelReason = liveModels.length > 0 ? null : undeclaredReason(declaration, 'model');
-  const currentModelOption = models.find((model) => model.id === threadModel);
+  const declaredModels = declaration.models ?? [];
+  const liveModels = declaredModels.filter((model) => model.id !== AUTOMATIC_MODEL_ID);
+  const modelReason =
+    liveModels.length > 0
+      ? null
+      : catalogState
+        ? catalogEmptyMessage(catalogState, threadProvider)
+        : undeclaredReason(declaration, 'model');
+  const currentModelOption = declaredModels.find((model) => model.id === threadModel);
   const currentModelName =
     !threadModel || threadModel === AUTOMATIC_MODEL_ID
       ? 'Automatic'
@@ -483,7 +790,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const permissionDeclared = isControlDeclared(declaration.permission);
   const permissionReason = permissionDeclared ? null : undeclaredReason(declaration, 'permission');
 
-  const canSend = Boolean(prompt.trim() || attachments.length > 0);
+  const measuredLength = citationSendLength(prompt);
+  const draftOverLimit = measuredLength > 120_000;
+  const canSend = !draftOverLimit && Boolean(prompt.trim() || attachments.length > 0);
 
   const composerPlaceholder = agentName
     ? running
@@ -499,6 +808,170 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     ? 'Ask about the code. Nothing gets changed.'
     : 'Ask anything, or describe the change…';
 
+  const onComposerCopy = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const field = event.currentTarget;
+    const fullField = field.value === prompt;
+    const start = fullField ? (field.selectionStart ?? 0) : caretRef.current.start;
+    const end = fullField ? (field.selectionEnd ?? start) : caretRef.current.end;
+    const selected = prompt.slice(start, end);
+    if (draftHasMention(selected)) {
+      event.preventDefault();
+      writeMentionClipboard(event.clipboardData, selected);
+      return;
+    }
+    if (!draftHasCitation(selected)) return;
+    event.preventDefault();
+    writeCitationClipboard(event.clipboardData, selected);
+  };
+
+  const onComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (running) return;
+    const dt = event.clipboardData;
+    if (!dt) return;
+
+    let files: File[] = Array.from(dt.files ?? []);
+    if (files.length === 0 && dt.items) {
+      const itemFiles = Array.from(dt.items)
+        .filter((item) => item.kind === 'file' || item.type.startsWith('image/'))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null);
+      if (itemFiles.length > 0) files = itemFiles;
+    }
+    if (files.length > 0) {
+      event.preventDefault();
+      onStageFiles(files);
+      return;
+    }
+
+    const mentioned = readMentionClipboard(dt);
+    const kite = mentioned ?? readCitationClipboard(dt);
+    if (kite) {
+      event.preventDefault();
+      const field = event.currentTarget;
+      const fullField = !draftHasCitation(prompt) || field.value === prompt;
+      const start = fullField ? (field.selectionStart ?? prompt.length) : caretRef.current.start;
+      const end = fullField ? (field.selectionEnd ?? start) : caretRef.current.end;
+      const next = `${prompt.slice(0, start)}${kite}${prompt.slice(end)}`;
+      const caret = start + kite.length;
+      caretRef.current = { start: caret, end: caret };
+      setPendingCaret(caret);
+      onChangePrompt(next);
+      return;
+    }
+
+    if (typeof dt.getData !== 'function') return;
+    const text = dt.getData('text/plain');
+    if (!text) return;
+    const flags = event.nativeEvent as { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean };
+    const forceInline = Boolean((flags.ctrlKey || flags.metaKey) && flags.shiftKey);
+    const bytes = new TextEncoder().encode(text).length;
+    if (!pasteBecomesFile(bytes, measuredLength, text.length, forceInline)) return;
+    event.preventDefault();
+    onStageFiles([new File([text], 'pasted-text.txt', { type: 'text/plain' })]);
+  };
+
+  const deliverDraft = (mode: 'send' | 'queue') => {
+    const command = resolveSessionCommand(prompt, threadProvider);
+    if (command.kind === 'compact') {
+      onChangePrompt('');
+      onCompact?.();
+      return;
+    }
+    if (command.kind === 'refuse-compact') {
+      setCompactNotice(command.notice);
+      onChangePrompt('');
+      return;
+    }
+    if (command.kind === 'arm-clear') {
+      setNewSessionArmed(true);
+      onChangePrompt('');
+      return;
+    }
+    if (mode === 'queue' && onQueue && prompt.trim()) {
+      onQueue(expandMentions(expandCitations(prompt)));
+      onChangePrompt('');
+      return;
+    }
+    const fresh = consumeFreshContext(newSessionArmed);
+    setNewSessionArmed(fresh.armed);
+    if (fresh.freshContext) onFreshContext?.();
+    onSend();
+  };
+
+  const onComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.nativeEvent as { isComposing?: boolean }).isComposing) return;
+    const field = event.currentTarget;
+    const fullField = field.value === prompt;
+    if (fullField && (event.key === 'Backspace' || event.key === 'Delete') && isPlainKey(event)) {
+      const deleted = deleteComposerChipKey(
+        prompt,
+        field.selectionStart ?? 0,
+        field.selectionEnd ?? 0,
+        event.key,
+      );
+      if (deleted) {
+        event.preventDefault();
+        caretRef.current = { start: deleted.caret, end: deleted.caret };
+        setPendingCaret(deleted.caret);
+        onChangePrompt(deleted.text);
+        return;
+      }
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault();
+      if (prompt.trim()) {
+        const next = stashDraft(stashes, prompt, Date.now());
+        setStashes(next.entries);
+        setStashFileNotice(null);
+        if (next.cleared) onChangePrompt('');
+      } else {
+        const entry = stashes.length === 1 ? stashes[0] : null;
+        const fileRestore = entry ? stashFileRestorable(entry, Date.now(), stashEnvironment) : null;
+        const restored = restoreStash(stashes);
+        setStashes(restored.entries);
+        setStashFileNotice(fileRestore);
+        if (restored.text) onChangePrompt(restored.text);
+      }
+      return;
+    }
+    if (handleHistoryKey(event)) return;
+
+    if (event.key === 'Backspace' && !prompt && attachments.length > 0 && isPlainKey(event)) {
+      event.preventDefault();
+      onRemoveAttachment(attachments[attachments.length - 1].resourceId);
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      if (!canSend) return;
+      historyStateRef.current = { owner: threadId, index: null, draft: '' };
+      const intent = slashIntent(prompt, threadProvider);
+      if (intent === 'side') {
+        const question = prompt.replace(/^\/(side|btw)\s*/i, '').trim() || prompt;
+        setSideQuestion(question);
+        window.dispatchEvent(new CustomEvent('kite:side-chat', { detail: { threadId, question } }));
+        onChangePrompt('');
+        return;
+      }
+      deliverDraft(running && onQueue ? 'queue' : 'send');
+    }
+  };
+
+  const mentionQuery = mentionQueryAt(prompt, draftCaret);
+  const mentionRows = mentionQuery ? filterMentionMenu(mentionQuery.query, { files, threads, models }) : [];
+  const pickMention = (row: (typeof mentionRows)[number]) => {
+    if (!mentionQuery) return;
+    const next = insertMentionAtCaret(prompt, mentionQuery.start, draftCaret, {
+      kind: row.kind,
+      id: row.id,
+      label: row.label,
+    });
+    caretRef.current = { start: next.caret, end: next.caret };
+    setDraftCaret(next.caret);
+    setPendingCaret(next.caret);
+    onChangePrompt(next.text);
+  };
+
   return (
     <div className="kite-composer-shell" style={{ boxSizing: 'border-box' }}>
       {/* Approval Card integrated above Composer */}
@@ -507,6 +980,20 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           <ChatApprovalCard approval={pendingApproval} onDecision={onApprovalDecision} />
         </div>
       )}
+
+      {compactNotice ? (
+        <p className="chat-note-row" role="status">
+          {compactNotice}
+        </p>
+      ) : null}
+      {newSessionArmed ? (
+        <div className="chat-note-row" role="status">
+          <span>New session</span>
+          <button type="button" onClick={() => setNewSessionArmed(false)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
 
       {/* Tier 1: Main Floating Glass Card */}
       <ComposerSurface.Main
@@ -551,55 +1038,84 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           </div>
         )}
 
+        {prompt.startsWith('/') || prompt.startsWith('$') ? (
+          <ComposerCommandMenu
+            query={prompt}
+            skills={skills}
+            onPick={(value) => onChangePrompt(value.startsWith('/') ? `${value} ` : value)}
+          />
+        ) : null}
+        {mentionQuery ? (
+          <div className="composer-command-menu rounded-card" role="listbox" aria-label="Mentions">
+            {mentionRows.map((row) => (
+              <button
+                key={`${row.kind}:${row.id}`}
+                type="button"
+                role="option"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pickMention(row)}
+              >
+                {row.menuLabel}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {stashFileNotice === 'attach-again' ? (
+          <button type="button" onClick={() => onPickAttachments()}>
+            Attach again
+          </button>
+        ) : null}
+        {stashFileNotice === 'wrong-environment' ? (
+          <p role="status">Uploaded files stay in the environment that saved them.</p>
+        ) : null}
+        {sideQuestion ? (
+          <p className="chat-note-row" role="status">
+            Side: {sideQuestion}
+          </p>
+        ) : null}
+
         {/* Textarea Input */}
-        <textarea
-          ref={textareaRef}
-          data-testid={agentName ? 'agent-chat-input' : undefined}
-          data-drop-targeted={dropKind !== null ? true : undefined}
-          value={prompt}
-          disabled={running}
-          onPaste={(event) => {
-            if (running) return;
-            const dt = event.clipboardData;
-            if (!dt) return;
-
-            let files: File[] = Array.from(dt.files ?? []);
-            if (files.length === 0 && dt.items) {
-              const itemFiles = Array.from(dt.items)
-                .filter((item) => item.kind === 'file' || item.type.startsWith('image/'))
-                .map((item) => item.getAsFile())
-                .filter((f): f is File => f !== null);
-              if (itemFiles.length > 0) {
-                files = itemFiles;
-              }
-            }
-
-            if (files.length === 0) return;
-            event.preventDefault();
-            onStageFiles(files);
-          }}
-          onChange={(e) => onChangePrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.nativeEvent as any).isComposing) return;
-            if (handleHistoryKey(e)) return;
-
-            if (e.key === 'Backspace' && !prompt && attachments.length > 0 && isPlainKey(e)) {
-              e.preventDefault();
-              onRemoveAttachment(attachments[attachments.length - 1].resourceId);
-              return;
-            }
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              if (canSend) {
-                historyStateRef.current = { owner: threadId, index: null, draft: '' };
-                onSend();
-              }
-            }
-          }}
-          placeholder={composerPlaceholder}
-          rows={2}
-          className="kite-composer-textarea"
-        />
+        {draftHasCitation(prompt) || draftHasMention(prompt) ? (
+          <CitationDraftEditor
+            prompt={prompt}
+            onChange={onChangePrompt}
+            onKeyDown={onComposerKeyDown}
+            onPaste={onComposerPaste}
+            onCopy={onComposerCopy}
+            pendingCaret={pendingCaret}
+            onPendingCaretApplied={() => setPendingCaret(null)}
+            onCaret={setPendingCaret}
+            onDraftCaret={setDraftCaret}
+            caretRef={caretRef}
+            testId={agentName ? 'agent-chat-input' : undefined}
+          />
+        ) : (
+          <textarea
+            ref={textareaRef}
+            data-testid={agentName ? 'agent-chat-input' : undefined}
+            data-drop-targeted={dropKind !== null ? true : undefined}
+            value={prompt}
+            onPaste={onComposerPaste}
+            onCopy={onComposerCopy}
+            onChange={(event) => {
+              const start = event.target.selectionStart ?? event.target.value.length;
+              const end = event.target.selectionEnd ?? start;
+              caretRef.current = { start, end };
+              setDraftCaret(start);
+              onChangePrompt(event.target.value);
+            }}
+            onKeyDown={onComposerKeyDown}
+            onSelect={(event) => {
+              const start = event.currentTarget.selectionStart ?? 0;
+              const end = event.currentTarget.selectionEnd ?? start;
+              caretRef.current = { start, end };
+              setDraftCaret(start);
+            }}
+            placeholder={composerPlaceholder}
+            rows={2}
+            className="kite-composer-textarea"
+          />
+        )}
 
         {/* Drop Hint */}
         {dropKind && (
@@ -623,6 +1139,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               declaration={declaration}
               disabled={running}
               modelReason={modelReason}
+              catalogState={catalogState}
               ensureDynamicModels={ensureDynamicModels}
               onSelectModel={(modelId) => onUpdateConfig({ model: modelId })}
               onSelectProvider={(provider) => onUpdateConfig({ provider })}
@@ -744,31 +1261,64 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                 {formatTokens(totalTokens)}
               </span>
             )}
-
-            {/* Circular Send / Stop Primary Button */}
-            {running ? (
-              <button
-                type="button"
-                aria-label="Stop generation"
-                title="Stop execution"
-                onClick={onStop}
-                className="kite-composer-action-btn kite-composer-action-btn--stop"
-              >
-                <StopIcon size={11} className="fill-current" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                aria-label="Send message"
-                title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
-                disabled={!canSend}
-                data-testid={agentName ? 'agent-chat-send' : undefined}
-                onClick={onSend}
-                className="kite-composer-action-btn kite-composer-action-btn--send"
-              >
-                <ArrowUpIcon size={16} />
-              </button>
+            {draftOverLimit && (
+              <span className="text-2xs font-mono text-destructive px-1 select-none" role="status">
+                {measuredLength.toLocaleString()} / 120,000
+              </span>
             )}
+
+            {/* Send / Interrupt / Queue / Steer / Resume */}
+            {(() => {
+              const action = resolvePrimaryAction({
+                running,
+                draftEmpty: prompt.trim().length === 0 && attachments.length === 0,
+                paused,
+                steerSupported: threadProvider === 'codex' || threadProvider === 'claude' || threadProvider === 'grok',
+                defaultFollowUp: 'queue',
+                flip: followUpFlip,
+              });
+              if (action === 'interrupt') {
+                return (
+                  <button
+                    type="button"
+                    aria-label="Interrupt"
+                    title="Interrupt"
+                    onClick={() => {
+                      const stopped = composerGoalStop(threadProvider, goal ?? null);
+                      onGoalStop?.(stopped);
+                      onStop();
+                    }}
+                    className="kite-composer-action-btn kite-composer-action-btn--stop"
+                  >
+                    <StopIcon size={11} className="fill-current" />
+                  </button>
+                );
+              }
+              const label = action === 'queue' ? 'Queue' : action === 'steer' ? 'Steer' : action === 'resume' ? 'Resume' : 'Send message';
+              return (
+                <button
+                  type="button"
+                  aria-label={label}
+                  title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
+                  disabled={action === 'send' && !canSend}
+                  data-testid={agentName ? 'agent-chat-send' : undefined}
+                  onClick={() => {
+                    if (action === 'resume') {
+                      onSend();
+                      return;
+                    }
+                    if ((action === 'queue' || action === 'steer') && onQueue && prompt.trim()) {
+                      deliverDraft('queue');
+                      return;
+                    }
+                    deliverDraft('send');
+                  }}
+                  className="kite-composer-action-btn kite-composer-action-btn--send"
+                >
+                  <ArrowUpIcon size={16} />
+                </button>
+              );
+            })()}
           </div>
         </div>
       </ComposerSurface.Main>

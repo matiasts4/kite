@@ -67,6 +67,8 @@ export interface PromptProjectileDispatchDetail {
   /** Stable id so a repeated pickup does not submit twice. */
   requestId?: string;
   caller?: 'human' | 'agent' | 'script';
+  /** When true, the backend already wrote the prompt to the PTY; play the flight and impact only. */
+  visualOnly?: boolean;
 }
 
 export type PromptFlightDetail = PromptProjectileDispatchDetail;
@@ -87,7 +89,7 @@ function panePresence(state: string | undefined): string | undefined {
     case 'error':
       return state;
     case 'waitingForYou':
-      return 'blocked';
+      return 'idle';
     case 'exited':
       return 'gone';
     default:

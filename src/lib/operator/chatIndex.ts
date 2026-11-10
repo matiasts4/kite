@@ -1,3 +1,5 @@
+import { listChatSummaries, loadChatThread } from '../ipc';
+
 export interface ChatIndexEntry {
   id: string;
   title: string;
@@ -34,7 +36,7 @@ export async function consultChats(
     ...(entry.lastDecision ? { lastDecision: sanitizeDecision(entry.lastDecision) } : {}),
   }));
 
-  const reviewPattern = /(?:review|consult|revisa|consulta|read|leer|inside of(?: the)?)\s+(?:the\s+)?([a-z0-9_-]+(?:\s+[a-z0-9_-]+)?)\s+(?:chat|thread|hilo)/i;
+  const reviewPattern = /(?:review|consult|revisa|consulta|read|leer|lee|inside of(?: the)?)\s+(?:the\s+|el\s+|la\s+)?([a-z0-9_-]+(?:\s+[a-z0-9_-]+)?)\s+(?:chat|thread|hilo|conversaci[oó]n)/i;
   const match = reviewPattern.exec(prompt);
 
   if (!match) {
@@ -89,3 +91,37 @@ export async function consultChats(
     };
   }
 }
+
+export async function fetchLiveChatCatalog(): Promise<{ entries: ChatIndexEntry[] }> {
+  try {
+    const list = await listChatSummaries();
+    return {
+      entries: list.map((c) => ({
+        id: c.id,
+        title: c.title || 'Conversación',
+        cli: c.provider || 'antigravity',
+        lastDecision: c.sessionState || (c.status === 'running' ? 'En ejecución' : undefined),
+      })),
+    };
+  } catch {
+    return { entries: [] };
+  }
+}
+
+export const liveChatReader: ChatReader = {
+  async read(id: string): Promise<string> {
+    try {
+      const thread = await loadChatThread(id);
+      const items = (thread as any)?.items || (thread as any)?.messages || [];
+      if (!thread || items.length === 0) {
+        return 'No hay mensajes en esta conversación.';
+      }
+      return items
+        .slice(-8)
+        .map((m: any) => `${m.role || m.kind || 'usuario'}: ${typeof m.text === 'string' ? m.text : (m.content || '')}`)
+        .join('\n');
+    } catch (e: any) {
+      throw new Error(`No se pudo leer la conversación ${id}: ${e?.message || e}`);
+    }
+  },
+};

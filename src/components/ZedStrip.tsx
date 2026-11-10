@@ -158,6 +158,8 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   // Voice dictation hook (Grok Cloud / Native Speech Engine)
   const [isVoiceSessionActive, setIsVoiceSessionActive] = useState(false);
   const isVoiceSessionActiveRef = useRef(false);
+  const lastSpokenTurnKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
     isVoiceSessionActiveRef.current = isVoiceSessionActive;
     if (typeof window !== 'undefined') {
@@ -195,10 +197,23 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     },
   });
 
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+
   // When turn finishes with reply, auto-speak if TTS is enabled and not muted
   useEffect(() => {
     const reply = manualCommandResult?.reply || turn.lastTurn?.reply;
+    const turnKey = manualCommandResult
+      ? `manual-${manualCommandResult.reply}`
+      : turn.lastTurn
+        ? `turn-${turn.lastTurn.turnId || turn.lastTurn.reply}`
+        : null;
+
     if (turn.stage === 'done' && reply && !call.speakerMuted) {
+      if (turnKey && lastSpokenTurnKeyRef.current === turnKey) {
+        return;
+      }
+      lastSpokenTurnKeyRef.current = turnKey;
       setSpeakingTts(true);
       const opConfig = loadOperatorConfig();
       ttsNarrator.speak(reply, {
@@ -209,21 +224,21 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
           setSpeakingTts(false);
           // S5: A voice session survives a reply. Re-arm the microphone for the next turn.
           if (isVoiceSessionActiveRef.current) {
-            void voice.startListening();
+            void voiceRef.current.startListening();
           }
         },
         onError: () => {
           setSpeakingTts(false);
           if (isVoiceSessionActiveRef.current) {
-            void voice.startListening();
+            void voiceRef.current.startListening();
           }
         },
       });
-    } else if (turn.stage === 'done' && isVoiceSessionActiveRef.current && !voice.isListening) {
+    } else if (turn.stage === 'done' && isVoiceSessionActiveRef.current && !voiceRef.current.isListening) {
       // Re-arm microphone if TTS was muted or had no reply
-      void voice.startListening();
+      void voiceRef.current.startListening();
     }
-  }, [turn.stage, turn.lastTurn, manualCommandResult, call.speakerMuted, voice]);
+  }, [turn.stage, turn.lastTurn, manualCommandResult, call.speakerMuted]);
 
   // Toggle continuous voice session (S5)
   const handleToggleVoiceSession = useCallback(async () => {

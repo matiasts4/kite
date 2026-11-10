@@ -423,6 +423,19 @@ pub fn operator_trace_path() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn operator_trace_reveal(_request: Option<Value>) -> Value {
+    let dir = crate::persist::roaming_app_dir().join("operator-traces");
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&dir).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    Value::Null
+}
+
+#[tauri::command]
 pub fn operator_trace_append(line: Option<String>, request: Option<Value>) -> Result<(), String> {
     use std::io::Write;
     let line_str = if let Some(l) = line {

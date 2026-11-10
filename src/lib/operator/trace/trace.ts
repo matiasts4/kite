@@ -369,3 +369,11 @@ export async function getOperatorTraceDiskPath(): Promise<string> {
     return '';
   }
 }
+
+export async function revealOperatorTraceDiskFolder(): Promise<void> {
+  try {
+    await invokeCommand('operator_trace_reveal');
+  } catch (err) {
+    console.warn('[Trace] No se pudo abrir la carpeta de trazas:', err);
+  }
+}

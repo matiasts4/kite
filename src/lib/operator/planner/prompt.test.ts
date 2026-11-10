@@ -122,5 +122,27 @@ describe('buildOperatorSystemPrompt local notes', () => {
     expect(prompt).toContain('Proyecto actual: "kite"');
     expect(prompt).toContain('ID="ses-1"');
     expect(prompt).toContain('Motor=powershell');
+    expect(prompt).toContain('launch_thread');
+  });
+
+  it('injects chatReach index and read context when provided', () => {
+    const promptWithIndex = buildOperatorSystemPrompt(undefined, {
+      kind: 'index',
+      entries: [
+        { id: 'chat-antigravity', title: 'Plan de Auth', cli: 'antigravity', lastDecision: 'Aprobado' },
+      ],
+      text: 'Plan de Auth (antigravity)',
+    });
+    expect(promptWithIndex).toContain('ÍNDICE DE CONVERSACIONES Y CHATS (CLIs / HILOS DISPONIBLES):');
+    expect(promptWithIndex).toContain('Plan de Auth [Motor: antigravity, ID: chat-antigravity]: Aprobado');
+
+    const promptWithRead = buildOperatorSystemPrompt(undefined, {
+      kind: 'read',
+      entry: { id: 'chat-antigravity', title: 'Plan de Auth', cli: 'antigravity' },
+      body: 'Usuario: ¿Cómo va el backend?\nAsistente: Todo listo.',
+      text: 'Plan de Auth\nUsuario: ¿Cómo va el backend?\nAsistente: Todo listo.',
+    });
+    expect(promptWithRead).toContain('CONTENIDO DE LA CONVERSACIÓN CONSULTADA (Plan de Auth - antigravity):');
+    expect(promptWithRead).toContain('Usuario: ¿Cómo va el backend?');
   });
 });

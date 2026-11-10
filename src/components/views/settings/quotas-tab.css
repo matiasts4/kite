@@ -739,29 +739,32 @@
 .qt-modal-scrim {
   position: fixed;
   inset: 0;
-  z-index: 10005;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(8px);
+  z-index: 10100;
+  background: var(--scrim, rgba(0, 0, 0, 0.72));
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: var(--space-4, 16px);
 }
 .qt-modal-container {
   width: 100%;
-  max-width: 680px;
-  max-height: 85vh;
-  background: var(--pane);
-  border: 1px solid var(--panel-stroke);
-  border-radius: var(--radius-panel);
-  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  max-width: min(640px, calc(100vw - 64px));
+  max-height: min(540px, calc(100vh - 120px));
+  background: var(--pane, #141416);
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border-radius: var(--dialog-radius, 14px);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 .qt-modal-container--compact {
-  max-width: 520px;
+  max-width: min(500px, calc(100vw - 64px));
+  max-height: min(480px, calc(100vh - 140px));
 }
 .qt-modal-header {
   display: flex;
@@ -867,6 +870,8 @@
   padding: 16px 20px;
   overflow-y: auto;
   flex: 1;
+  min-height: 180px;
+  max-height: 320px;
 }
 .qt-modal-footer {
   padding: 12px 20px;
@@ -997,6 +1002,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 250px;
+  overflow-y: auto;
 }
 .qt-account-row {
   display: flex;

@@ -419,6 +419,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   useEffect(() => {
     if (isOpen === false) return;
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') {
         e.stopPropagation();
         handleClose();
@@ -1221,7 +1222,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   );
 
   if (typeof document !== 'undefined') {
-    return createPortal(modalNode, document.body);
+    const portalTarget = document.querySelector('.app-frame--scaled') ?? document.body;
+    return createPortal(modalNode, portalTarget);
   }
 
   return modalNode;

@@ -41,6 +41,8 @@ export interface PlanCreatedTraceEvent extends BaseTraceEvent {
   reply?: string;
   rawModelOutputTruncated?: string;
   fallbackReason?: string;
+  chatReachKind?: string;
+  chatReachText?: string;
 }
 
 export interface ActionStartTraceEvent extends BaseTraceEvent {

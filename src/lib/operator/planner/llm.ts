@@ -9,6 +9,12 @@ import { ActionSchema, type OperatorPlan, type TurnContext, type OperatorContrac
 import type { PlannerProvider, ProviderMessage } from '../providers/types';
 import { emitTrace } from '../trace/trace';
 import { runLedger } from '../runLedger';
+import {
+  consultChats,
+  fetchLiveChatCatalog,
+  liveChatReader,
+  type ConsultChatsResult,
+} from '../chatIndex';
 
 const EXPLICIT_CLOSE_REASON = 'filtered-unsafe-close';
 
@@ -158,7 +164,27 @@ export async function planTurnLLM(
     runLedger.startRun(input, { runId: currentTurnId, taskType: 'llm_plan' });
   }
 
-  const systemPrompt = buildOperatorSystemPrompt(context);
+  let chatReach: ConsultChatsResult | undefined;
+  try {
+    const catalog = await fetchLiveChatCatalog();
+    if (catalog.entries.length > 0) {
+      chatReach = await consultChats(input, catalog, liveChatReader);
+      if (chatReach && (chatReach.kind === 'read' || chatReach.kind === 'index')) {
+        emitTrace({
+          turnId: currentTurnId,
+          ev: 'plan.created',
+          strategy: 'llm',
+          actions: [],
+          chatReachKind: chatReach.kind,
+          chatReachText: chatReach.text,
+        });
+      }
+    }
+  } catch (chatErr) {
+    console.warn('[Zed] Error consultando índice de chats:', chatErr);
+  }
+
+  const systemPrompt = buildOperatorSystemPrompt(context, chatReach);
 
   const messages = buildPlannerMessages(systemPrompt, input, history);
 

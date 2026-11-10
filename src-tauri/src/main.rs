@@ -676,6 +676,7 @@ fn main() {
             query_operator_agent,
             proxy_operator_http,
             operator_trace_path,
+            operator_trace_reveal,
             operator_trace_append,
             operator_duck_audio,
             operator_restore_audio,

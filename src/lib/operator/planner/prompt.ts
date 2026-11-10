@@ -2,10 +2,14 @@
 // Single source of truth for operator instructions, few-shot examples, and JSON schema.
 
 import type { TurnContext } from '../contract';
+import type { ConsultChatsResult } from '../chatIndex';
 import { cleanAgentTitle } from '../../agentNames';
 import { loadZedMemoryNotes } from '../operatorConfig';
 
-export function buildOperatorSystemPrompt(context?: TurnContext): string {
+export function buildOperatorSystemPrompt(
+  context?: TurnContext,
+  chatReach?: ConsultChatsResult
+): string {
   let terminalsDesc = 'No hay terminales activas en este momento.';
   if (context?.activeTerminals && context.activeTerminals.length > 0) {
     terminalsDesc = context.activeTerminals
@@ -24,6 +28,19 @@ export function buildOperatorSystemPrompt(context?: TurnContext): string {
     notes.length > 0
       ? `\n\nNOTAS DE MEMORIA DEL ASISTENTE:\n${notes.map((note) => `- ${note.content}`).join('\n')}`
       : '';
+
+  let chatReachSection = '';
+  if (chatReach) {
+    if (chatReach.kind === 'read') {
+      chatReachSection = `\n\nCONTENIDO DE LA CONVERSACIÓN CONSULTADA (${chatReach.entry.title} - ${chatReach.entry.cli}):\n${chatReach.body}`;
+    } else if (chatReach.kind === 'index' && chatReach.entries.length > 0) {
+      chatReachSection = `\n\nÍNDICE DE CONVERSACIONES Y CHATS (CLIs / HILOS DISPONIBLES):\n${chatReach.entries
+        .map((e) => `- ${e.title} [Motor: ${e.cli}, ID: ${e.id}]${e.lastDecision ? `: ${e.lastDecision}` : ''}`)
+        .join('\n')}`;
+    } else if (chatReach.kind === 'miss') {
+      chatReachSection = `\n\nBÚSQUEDA DE CHATS: No se encontró ninguna conversación que coincida con "${chatReach.named}".`;
+    }
+  }
 
   return `Eres el Asistente Operador de Kite Code. Tu función es interpretar órdenes del usuario en español para controlar el entorno de desarrollo y ejecutar acciones sobre terminales y agentes.
 
@@ -84,6 +101,7 @@ ESQUEMA JSON PERMITIDO:
     // { "type": "handoff_to_agent", "sourceTarget": <numero|"nombre"|"motor">, "targetEngine": "opencode" | "claude" | "codex" | "antigravity" | "grok", "targetSession": <numero|"nombre">, "spawnNew": true, "artifactKind": "odd" | "output", "customPrompt": "opcional" }
     // { "type": "manage_pane_layout", "operation": "equalize" | "split-horizontal" | "split-vertical" | "focus" | "zoom", "target": <numero|"nombre"|"motor"> }
     // { "type": "switch_workspace", "workspaceQuery": "nombre del proyecto", "viewMode": "agents" | "code" | "threads" }
+    // { "type": "launch_thread", "threadId": "id opcional", "body": "mensaje a enviar", "title": "título nuevo opcional" }
     // { "type": "stop_speaking" }
   ],
   "answer": "Respuesta solo para preguntas informativas o de ayuda"
@@ -166,9 +184,13 @@ Entrada: "no cierres las terminales"
 Salida:
 {"reply": "Entendido, no cerraré ninguna terminal.", "actions": [], "answer": "Entendido, no cerraré ninguna terminal."}
 
+Entrada: "abre un hilo para investigar el problema de autenticación"
+Salida:
+{"reply": "Iniciando un hilo para investigar el problema de autenticación.", "actions": [{"type": "launch_thread", "body": "investigar el problema de autenticación"}]}
+
 CONTEXTO ACTUAL DEL SISTEMA:
 Proyecto actual: ${context?.workspaceName ? `"${context.workspaceName}"` : 'Proyecto activo'}${context?.workspacePath ? ` (Ruta: ${context.workspacePath})` : ''}${context?.workspaceId ? ` [ID: ${context.workspaceId}]` : ''}
 Modo actual: ${context?.mode || 'code'}
 Terminales abiertas en este proyecto:
-${terminalsDesc}${notesSection}`;
+${terminalsDesc}${notesSection}${chatReachSection}`;
 }

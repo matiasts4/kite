@@ -1,9 +1,10 @@
 .shortcut-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 9999;
-  background: var(--scrim, rgba(0, 0, 0, 0.65));
-  backdrop-filter: blur(8px);
+  z-index: 10100;
+  background: var(--scrim, rgba(0, 0, 0, 0.72));
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -13,11 +14,12 @@
 
 .shortcut-modal-card {
   width: 100%;
-  max-width: 460px;
+  max-width: min(460px, calc(100vw - 64px));
+  max-height: min(480px, calc(100vh - 140px));
   background: var(--menu-plate, #1e1e1e);
   border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.12));
   border-radius: var(--dialog-radius, 14px);
-  box-shadow: var(--shadow-sheet, 0 24px 60px rgba(0, 0, 0, 0.5));
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
   overflow: hidden;
   display: flex;
   flex-direction: column;

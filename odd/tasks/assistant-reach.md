@@ -63,6 +63,33 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
   - No voice CLI. No command for another agent to read voice status. No per-packet audio trace.
   - Acceptance: a session survives a reply and a barge-in. Playback begins before the full audio body exists. One-shot dictation still resolves one transcript and stops. A finished launched agent produces one spoken notice.
 
+- **S6 — Single speech playback per turn (no double speaking)**:
+  - User verbatim: `"Como dije, está contestando dos veces, ya sea utilizando la forma heurística o la forma con el modelo de IA, cosa errónea claramente."`
+  - Accepted behavior: a reply is narrated exactly once per turn.
+  - Speech playback in `ZedStrip.tsx` is guarded by turn ID so re-renders or state changes during the `'done'` window do not re-trigger narration.
+  - Calling `runOperatorTurn` from the UI orb does not fire concurrent dual speech against `ZedStrip` auto-speak.
+  - Acceptance: a heuristic turn and an LLM turn both speak the reply once and never trigger duplicate speech playback.
+
+- **S7 — Natural speech playback duration without arbitrary cutoff**:
+  - User verbatim: `"la duración de las respuestas no se procesan en su totalidad, si es que llega hasta cierto segundo, se corta. Deben ser 15 segundos exactos y se corta si es que la respuesta se pasa de eso, cosa que está mal."`
+  - Accepted behavior: speech narration plays to completion regardless of duration.
+  - In browser synthesis fallback, long text is spoken without hitting the Chromium 15-second freeze by chunking sentences or maintaining active keepalive heartbeats, and safety timers scale strictly with text length.
+  - In ElevenLabs streaming playback, audio streams continuously until the end of stream without synthetic truncation.
+  - Acceptance: a response lasting longer than 15 seconds plays through to completion without prematurely cutting off.
+
+- **S8 — Prior chat transcripts and memory reach wired to live LLM planner**:
+  - User verbatim: `"Le pregunté sobre cosas como la memoria o si tuviera si tiene contexto de conversaciones anteriores de, no lo sé, antigravity o demás. Bueno, eso me respondió que no tiene acceso a nada."`
+  - Accepted behavior: the live LLM planner receives cross-CLI chat reach and existing memory notes.
+  - When the user asks about prior conversations, chats, or historical decisions (e.g. antigravity, claude, codex, kite), `consultChats` is invoked and the relevant transcript or chat catalog is injected into the planner prompt.
+  - `launch_thread` is documented in the LLM system prompt's JSON schema so the AI planner can directly launch threads when requested.
+  - Acceptance: asking the assistant about prior conversations with an agent or antigravity reads the matching chat context instead of claiming zero access.
+
+- **S9 — Comprehensive operator trace logging & quick debug access**:
+  - User verbatim: `"La idea es poder llegar a testear y debuguear de forma rápida dejando o almacenando logs de toda la traza que se ejecute por el asistente Zed. Es decir, si yo le hablo, quiero que se deje registrado qué fue lo que hizo, qué cosas consultó y así, básicamente para luego llegar a debuguear una traza de acciones que hizo."`
+  - Accepted behavior: every operator turn, whether executed via heuristic or LLM, records full event traces (input, strategy, provider, latency, actions, receipts, tools consulted, consultChats results) to disk via `operator_trace_append`.
+  - Settings UI (`ZedTab.tsx`) and the operator strip provide direct one-click access to open the operator traces log directory on disk for fast debugging and testing.
+  - Acceptance: executing a turn appends the complete trace to the disk JSONL file, and the settings view offers a functional button to reveal the trace logs folder.
+
 ## Tasks
 
 - [x] **T1** (`S2`) — Route: `inline` — Cross-CLI index and one-chat read (`chatIndex.ts` + `chatIndex.test.ts` 5/5 green). Commit: `d4a4e2f`.
@@ -70,8 +97,12 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
 - [x] **T3** (`S3`) — Route: `inline` — Assistant launches a thread through the existing dispatch thread family, and still launches a terminal (`heuristic.ts` + `launchThread.ts` + `executor.test.ts` 23/23 green). Commit: `d4a4e2f`.
 - [x] **T4** (`S5`) — Route: `inline` — Open voice session on the orb, streamed narration, barge-in, same actions (`ttsNarrator.ts` + `ZedStrip.tsx` + tests 21/21 green). Commit: `830efa1`.
 - [x] **T5** (`S1`, `S5`) — Route: `inline` — Spoken notice when a launched agent finishes (`proactiveWatcher.ts` + `proactiveWatcher.test.ts` 9/9 green, wired to session). Commit: `d4a4e2f` / `830efa1`.
+- [ ] **T6** (`S6`) — Route: `inline` — Guard speech narration to strictly once per turn using `lastSpokenTurnIdRef` in `ZedStrip.tsx` and prevent dual TTS dispatch in `runOperatorTurn`.
+- [ ] **T7** (`S7`) — Route: `inline` — Prevent 15s premature cutoff in `ttsNarrator.ts` (sentence chunking/heartbeat in browser synthesis, extended safety timer, uninterrupted streaming).
+- [ ] **T8** (`S8`) — Route: `inline` — Wire `consultChats` into `planTurnLLM` and prompt context, and add `launch_thread` to LLM system prompt schema.
+- [ ] **T9** (`S9`) — Route: `inline` — Ensure complete trace logging (including chat consultations) to disk JSONL and expose a direct button to reveal logs folder in `ZedTab.tsx`.
 
-T1–T5 share the operator turn. They are not independent. Do not split them across parallel writers.
+T1–T9 share the operator turn. They are not independent. Do not split them across parallel writers.
 
 ## Log
 
@@ -82,3 +113,4 @@ T1–T5 share the operator turn. They are not independent. Do not split them acr
 - **L5 (2026-11-10)**: `"quiero que se implemente en su totalidad, quiero que uses la mayor canditidad de agnetes en paralelo posible para hacelro mas rapido quiero decir un tope  de 5 agentes en paralelo sin que se solapen claramente y cuando sea posible"`
   Parallel writers are allowed only on disjoint files. The parent owns `planner/prompt.ts` index lines, `ZedStrip.tsx`, and git. Do not switch branches.
 - **L6 (2026-11-10)**: User requested full completion verbatim: `"quiero que lo temrines completmaente"`. Verified and completed T1 through T5 across streaming narration, continuous voice mode, barge-in, thread launches, notes injection, and cross-cli chat index. All 110 unit tests passing, tsc clean, audit references clean.
+- **L7 (2026-11-10)**: User reported 4 critical defects verbatim: `"la duración de las respuestas no se procesan en su totalidad, si es que llega hasta cierto segundo, se corta. Deben ser 15 segundos exactos y se corta si es que la respuesta se pasa de eso, cosa que está mal."` `"Como dije, está contestando dos veces, ya sea utilizando la forma heurística o la forma con el modelo de IA, cosa errónea claramente."` `"Le pregunté sobre cosas como la memoria o si tuviera si tiene contexto de conversaciones anteriores de, no lo sé, antigravity o demás. Bueno, eso me respondió que no tiene acceso a nada."` `"La idea es poder llegar a testear y debuguear de forma rápida dejando o almacenando logs de toda la traza que se ejecute por el asistente Zed. Es decir, si yo le hablo, quiero que se deje registrado qué fue lo que hizo, qué cosas consultó y así, básicamente para luego llegar a debuguear una traza de acciones que hizo. Eso creo que ya existe, pero quiero tal vez mejorarlo, si es que no existe, hay que implementarlo. Para tenerlo estructurado, también hay que actualizar el ODD con respecto a esto. Quiero que implementes todo."` Appended specs S6–S9 and tasks T6–T9.

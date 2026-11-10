@@ -192,10 +192,25 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
+      e.preventDefault();
       e.stopPropagation();
       onClose();
     }
   };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleWindowKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleWindowKey, true);
+    return () => window.removeEventListener('keydown', handleWindowKey, true);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -205,7 +220,10 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       {...surfaceMotion('scrim')}
       transition={tweens.overlay}
       className="qt-modal-scrim"
-      onClick={onClose}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClose();
+      }}
       onKeyDown={handleKeyDown}
       tabIndex={-1}
     >

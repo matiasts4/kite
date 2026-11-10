@@ -84,4 +84,44 @@ describe('SettingsModal / SettingsView as Modal', () => {
     // Header updates to Shortcuts
     expect(screen.getByRole('heading', { level: 2, name: 'Shortcuts' })).toBeInTheDocument();
   });
+
+  it('portals into .app-frame--scaled when present in the DOM', () => {
+    const frame = document.createElement('div');
+    frame.className = 'app-frame app-frame--scaled';
+    document.body.appendChild(frame);
+
+    render(<SettingsModal isOpen={true} onClose={vi.fn()} />);
+    const backdrop = screen.getByTestId('settings-modal-backdrop');
+    expect(frame.contains(backdrop)).toBe(true);
+
+    document.body.removeChild(frame);
+  });
+
+  it('does not close settings modal when an open submodal intercepts Escape', async () => {
+    const onCloseSettings = vi.fn();
+    const user = userEvent.setup();
+
+    render(<SettingsModal isOpen={true} onClose={onCloseSettings} />);
+
+    // Switch to Cuentas y Proveedores tab
+    const quotasTab = screen.getByRole('button', { name: /Cuentas y Proveedores/i });
+    await user.click(quotasTab);
+
+    // Open AddProviderModal
+    const addBtns = screen.getAllByRole('button', { name: /\+ agregar proveedor/i });
+    await user.click(addBtns[0]);
+
+    // Verify AddProviderModal is in the document
+    expect(screen.getByText('Agregar proveedores de IA')).toBeInTheDocument();
+
+    // Press Escape - should close only AddProviderModal, not SettingsModal
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(onCloseSettings).not.toHaveBeenCalled();
+    expect(screen.queryByText('Agregar proveedores de IA')).toBeNull();
+
+    // Now that the submodal is closed, pressing Escape closes SettingsModal
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onCloseSettings).toHaveBeenCalledTimes(1);
+  });
 });

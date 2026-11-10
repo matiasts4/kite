@@ -100,6 +100,28 @@ export const ZedMemorySection: React.FC<ZedMemorySectionProps> = ({
         </div>
 
         {/* Memory Notes List */}
+        <div className="ui-card__row settings-row">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Registro de auditoría y trazas (Logs)</h3>
+            <p>
+              Guarda en formato JSONL cada orden, decisión, herramientas consultadas y resultado de
+              las acciones para depuración técnica.
+            </p>
+          </div>
+          <div className="settings-row__control">
+            <button
+              type="button"
+              className="secondary-button"
+              title="Abre la carpeta operator-traces con los archivos .jsonl del asistente."
+              onClick={() => {
+                void invokeCommand('operator_trace_reveal').catch(() => {});
+              }}
+            >
+              Abrir carpeta de trazas
+            </button>
+          </div>
+        </div>
+
         <div
           className="ui-card__row"
           style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '14px 18px' }}

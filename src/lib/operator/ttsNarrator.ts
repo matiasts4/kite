@@ -210,6 +210,28 @@ export function resolveBestVoice(
   return bestVoice || candidatePool[0] || null;
 }
 
+export function splitIntoSpeechSentences(text: string): string[] {
+  const sentences = text.match(/[^.!?;\n\r]+[.!?;\n\r]+|[^.!?;\n\r]+$/g);
+  if (!sentences) return [text];
+  const chunks: string[] = [];
+  for (const raw of sentences) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.length > 160) {
+      const subParts = trimmed.match(/[^,]+,+|[^,]+$/g);
+      if (subParts && subParts.length > 1) {
+        for (const sp of subParts) {
+          const t = sp.trim();
+          if (t) chunks.push(t);
+        }
+        continue;
+      }
+    }
+    chunks.push(trimmed);
+  }
+  return chunks.length > 0 ? chunks : [text];
+}
+
 class TTSNarrator {
   private speaking = false;
   private activeUtterance: SpeechSynthesisUtterance | null = null;
@@ -217,6 +239,7 @@ class TTSNarrator {
   private activeAudioUrl: string | null = null;
   private activeAbortController: AbortController | null = null;
   private safetyTimer: any = null;
+  private keepAliveInterval: any = null;
   private generation = 0;
 
   public isAvailable(): boolean {
@@ -262,6 +285,10 @@ class TTSNarrator {
     if (this.safetyTimer) {
       clearTimeout(this.safetyTimer);
       this.safetyTimer = null;
+    }
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval);
+      this.keepAliveInterval = null;
     }
     this.speaking = false;
     this.activeUtterance = null;
@@ -644,41 +671,39 @@ class TTSNarrator {
     const voices = await getAvailableVoices();
     if (myGen !== undefined && this.generation !== myGen) return;
 
+    const chunks = splitIntoSpeechSentences(textToSpeak);
+
+    const lang =
+      options.lang ||
+      (/[áéíóúñ¿¡]|\b(el|la|los|las|de|en|y|o|para|con)\b/i.test(textToSpeak)
+        ? 'es-ES'
+        : 'en-US');
+
+    const selectedVoice = resolveBestVoice(voices, options.voiceName, lang);
+
+    const profileKey = Object.keys(PERSONA_VOICE_PROFILES).find(
+      (k) => k.toLowerCase() === (options.voiceName || 'Ara').toLowerCase()
+    );
+    const profile = profileKey ? PERSONA_VOICE_PROFILES[profileKey] : PERSONA_VOICE_PROFILES.Ara;
+
+    const baseRate = options.rate ?? 1.0;
+    const basePitch = options.pitch ?? 1.0;
+
+    const tunedRate = Math.min(1.45, Math.max(0.75, baseRate * profile.rateMultiplier));
+    const tunedPitch = Math.min(1.3, Math.max(0.8, basePitch * profile.pitchMultiplier));
+
     return new Promise<void>((resolve) => {
-      const utterance = new SpeechSynthesisUtterance(textToSpeak);
-      this.activeUtterance = utterance;
+      let chunkIdx = 0;
+      let hasStarted = false;
+      let isDone = false;
 
-      const lang =
-        options.lang ||
-        (/[áéíóúñ¿¡]|\b(el|la|los|las|de|en|y|o|para|con)\b/i.test(textToSpeak)
-          ? 'es-ES'
-          : 'en-US');
-      utterance.lang = lang;
-
-      const selectedVoice = resolveBestVoice(voices, options.voiceName, lang);
-      if (selectedVoice) {
-        utterance.voice = selectedVoice;
-      }
-
-      const profileKey = Object.keys(PERSONA_VOICE_PROFILES).find(
-        (k) => k.toLowerCase() === (options.voiceName || 'Ara').toLowerCase()
-      );
-      const profile = profileKey ? PERSONA_VOICE_PROFILES[profileKey] : PERSONA_VOICE_PROFILES.Ara;
-
-      const baseRate = options.rate ?? 1.0;
-      const basePitch = options.pitch ?? 1.0;
-
-      const tunedRate = Math.min(1.45, Math.max(0.75, baseRate * profile.rateMultiplier));
-      const tunedPitch = Math.min(1.3, Math.max(0.8, basePitch * profile.pitchMultiplier));
-
-      utterance.rate = tunedRate;
-      utterance.pitch = tunedPitch;
-      utterance.volume = options.volume ?? 1.0;
-
-      let finished = false;
-      const finish = () => {
-        if (finished) return;
-        finished = true;
+      const finishAll = () => {
+        if (isDone) return;
+        isDone = true;
+        if (this.keepAliveInterval) {
+          clearInterval(this.keepAliveInterval);
+          this.keepAliveInterval = null;
+        }
         if (this.safetyTimer) {
           clearTimeout(this.safetyTimer);
           this.safetyTimer = null;
@@ -688,49 +713,91 @@ class TTSNarrator {
         resolve();
       };
 
-      // Generous safety ceiling (at least 15s or 250 words/min equivalent with breathing room)
-      const maxMs = Math.max(15000, Math.ceil((textToSpeak.length / 4) * 1000) + 10000);
-      this.safetyTimer = setTimeout(() => {
-        if (!finished) {
-          options.onEnd?.();
-          finish();
+      if (this.keepAliveInterval) {
+        clearInterval(this.keepAliveInterval);
+      }
+      this.keepAliveInterval = setInterval(() => {
+        if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.speaking) {
+          window.speechSynthesis.pause();
+          window.speechSynthesis.resume();
         }
-      }, maxMs);
+      }, 8000);
 
-      utterance.onstart = () => {
-        this.speaking = true;
-        // Refresh timer on actual speech start
-        if (this.safetyTimer) clearTimeout(this.safetyTimer);
-        this.safetyTimer = setTimeout(() => {
-          if (!finished) {
-            options.onEnd?.();
-            finish();
+      const speakNextChunk = () => {
+        if (myGen !== undefined && this.generation !== myGen) {
+          finishAll();
+          return;
+        }
+
+        if (chunkIdx >= chunks.length) {
+          options.onEnd?.();
+          finishAll();
+          return;
+        }
+
+        const chunkText = chunks[chunkIdx];
+        chunkIdx++;
+
+        const utterance = new SpeechSynthesisUtterance(chunkText);
+        this.activeUtterance = utterance;
+        utterance.lang = lang;
+        if (selectedVoice) {
+          utterance.voice = selectedVoice;
+        }
+        utterance.rate = tunedRate;
+        utterance.pitch = tunedPitch;
+        utterance.volume = options.volume ?? 1.0;
+
+        let chunkFinished = false;
+        const finishChunk = () => {
+          if (chunkFinished) return;
+          chunkFinished = true;
+          if (this.safetyTimer) {
+            clearTimeout(this.safetyTimer);
+            this.safetyTimer = null;
           }
-        }, maxMs);
-        options.onStart?.();
+        };
+
+        const chunkMaxMs = Math.max(8000, Math.ceil((chunkText.length / 4) * 1000) + 6000);
+        this.safetyTimer = setTimeout(() => {
+          if (!chunkFinished) {
+            finishChunk();
+            speakNextChunk();
+          }
+        }, chunkMaxMs);
+
+        utterance.onstart = () => {
+          this.speaking = true;
+          if (!hasStarted) {
+            hasStarted = true;
+            options.onStart?.();
+          }
+        };
+
+        utterance.onend = () => {
+          finishChunk();
+          speakNextChunk();
+        };
+
+        utterance.onerror = (e) => {
+          finishChunk();
+          if (chunkIdx >= chunks.length) {
+            options.onError?.(e);
+            finishAll();
+          } else {
+            speakNextChunk();
+          }
+        };
+
+        try {
+          window.speechSynthesis.speak(utterance);
+        } catch (err) {
+          options.onError?.(err);
+          finishAll();
+        }
       };
 
-      utterance.onend = () => {
-        options.onEnd?.();
-        finish();
-      };
-
-      utterance.onerror = (e) => {
-        options.onError?.(e);
-        finish();
-      };
-
-      if (myGen !== undefined && this.generation !== myGen) {
-        finish();
-        return;
-      }
-
-      try {
-        window.speechSynthesis.speak(utterance);
-      } catch (speakErr) {
-        options.onError?.(speakErr);
-        finish();
-      }
+      speakNextChunk();
     });
   }
 }

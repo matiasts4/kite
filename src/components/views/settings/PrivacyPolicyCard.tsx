@@ -1,39 +1,70 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 export type LegalNoticeKind = 'privacy' | 'terms';
 
 export const LegalNoticeModal: React.FC<{
   kind: LegalNoticeKind;
   onClose: () => void;
-}> = ({ kind, onClose }) => (
-  <div role="dialog" aria-modal="true" className="legal-notice" onClick={onClose}>
-    <div className="legal-notice__panel" onClick={(event) => event.stopPropagation()}>
-      <h3 className="legal-notice__title">
-        {kind === 'privacy' ? 'Privacidad y Protección de Datos' : 'Términos de Kite'}
-      </h3>
-      <div className="legal-notice__body">
-        {kind === 'privacy' ? (
-          <p>
-            Kite funciona bajo una arquitectura <strong>Local-First y Zero-Telemetry</strong>.
-            Todas las sesiones de agentes, tokens de acceso y código son gestionados por el binario nativo en tu propio dispositivo.
-            No existe intermediación en la nube para interceptar tus tareas ni recolectar datos de telemetría.
-          </p>
-        ) : (
-          <p>
-            Kite se proporciona para acelerar flujos de trabajo de ingeniería de software y automatización.
-            La responsabilidad de ejecución de comandos en terminales y modificación de archivos recae en el usuario,
-            con confirmación previa requerida para operaciones de riesgo.
-          </p>
-        )}
-      </div>
-      <div className="legal-notice__actions">
-        <button type="button" className="settings-control ui-button ui-button--primary" onClick={onClose}>
-          Entendido
-        </button>
+}> = ({ kind, onClose }) => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [onClose]);
+
+  const content = (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="legal-notice"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClose();
+      }}
+    >
+      <div className="legal-notice__panel" onClick={(event) => event.stopPropagation()}>
+        <h3 className="legal-notice__title">
+          {kind === 'privacy' ? 'Privacidad y Protección de Datos' : 'Términos de Kite'}
+        </h3>
+        <div className="legal-notice__body">
+          {kind === 'privacy' ? (
+            <p>
+              Kite funciona bajo una arquitectura <strong>Local-First y Zero-Telemetry</strong>.
+              Todas las sesiones de agentes, tokens de acceso y código son gestionados por el binario nativo en tu propio dispositivo.
+              No existe intermediación en la nube para interceptar tus tareas ni recolectar datos de telemetría.
+            </p>
+          ) : (
+            <p>
+              Kite se proporciona para acelerar flujos de trabajo de ingeniería de software y automatización.
+              La responsabilidad de ejecución de comandos en terminales y modificación de archivos recae en el usuario,
+              con confirmación previa requerida para operaciones de riesgo.
+            </p>
+          )}
+        </div>
+        <div className="legal-notice__actions">
+          <button type="button" className="settings-control ui-button ui-button--primary" onClick={onClose}>
+            Entendido
+          </button>
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
+    content,
+    document.querySelector('.app-frame--scaled') ?? document.body
+  );
+};
 
 /** Shared privacy and terms entry. Does not mount CLI session lists. */
 export const PrivacyPolicyCard: React.FC = () => {

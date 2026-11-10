@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { ShortcutItem, SupportedPlatform, ShortcutValidationResult } from '../../lib/shortcuts/types';
 import {
   eventToKeyCombination,
@@ -52,6 +53,7 @@ export const ShortcutRecordModal: React.FC<ShortcutRecordModalProps> = ({
         if (shortcut.id !== 'back-esc') {
           e.preventDefault();
           e.stopPropagation();
+          e.stopImmediatePropagation();
           onClose();
           return;
         }
@@ -94,17 +96,22 @@ export const ShortcutRecordModal: React.FC<ShortcutRecordModalProps> = ({
     recordedKeys.length === shortcut.defaultKeys.length &&
     recordedKeys.every((k, i) => k.toLowerCase() === shortcut.defaultKeys[i]?.toLowerCase());
 
-  return (
+  const modalContent = (
     <div
       className="shortcut-modal-overlay"
       onClick={(e) => {
+        e.stopPropagation();
         if (e.target === e.currentTarget) onClose();
       }}
       role="dialog"
       aria-modal="true"
       aria-labelledby="shortcut-modal-title"
     >
-      <div className="shortcut-modal-card" ref={containerRef}>
+      <div
+        className="shortcut-modal-card"
+        ref={containerRef}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="shortcut-modal-header">
           <h2 id="shortcut-modal-title" className="shortcut-modal-header__title">
             Editar atajo de teclado
@@ -194,5 +201,12 @@ export const ShortcutRecordModal: React.FC<ShortcutRecordModalProps> = ({
         </div>
       </div>
     </div>
+  );
+
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
+    modalContent,
+    document.querySelector('.app-frame--scaled') ?? document.body
   );
 };

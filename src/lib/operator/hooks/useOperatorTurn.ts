@@ -14,10 +14,9 @@ import {
   getTurnTrace,
   clearTurnTraces,
   subscribeTrace,
-  getOperatorTraceDiskPath,
+  revealOperatorTraceDiskFolder,
 } from '../trace/trace';
 import type { OperatorTurnTrace, TraceEvent } from '../trace/types';
-import { invokeCommand } from '../../ipc';
 import {
   enqueueTurn,
   takeQueuedTurn,
@@ -145,6 +144,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
         const result = await withTurnTimeout(
           runOperatorTurn(input, {
             workspaceId: defaultWorkspaceIdRef.current,
+            ttsEnabled: opts?.ttsEnabled ?? false,
             ...opts,
             ...historyOptions,
           })
@@ -227,10 +227,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
 
   const openLogsFolder = useCallback(async (): Promise<void> => {
     try {
-      const diskPath = await getOperatorTraceDiskPath();
-      if (diskPath) {
-        await invokeCommand('show_in_folder', { path: diskPath });
-      }
+      await revealOperatorTraceDiskFolder();
     } catch (e) {
       console.warn('[useOperatorTurn] No se pudo abrir carpeta de logs:', e);
     }

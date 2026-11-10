@@ -223,21 +223,7 @@ export async function runOperatorTurn(
       actionCount: plan.actions.length,
     });
 
-    emitTrace({
-      turnId,
-      ev: 'turn.end',
-      overallSuccess,
-      durationMs,
-      ...(providerFailure ? { error: providerFailure } : {}),
-    });
-
-    // S1: a run ledger run opened while planning (e.g. `llm_plan`) is closed here.
-    runLedger.completeRun(turnId, {
-      reply,
-      outcome: overallSuccess ? 'success' : 'failure',
-    });
-
-    return {
+    const turnResult: OperatorTurnResult = {
       turnId,
       plan,
       receipts,
@@ -248,6 +234,24 @@ export async function runOperatorTurn(
       providerId: provider.id,
       fallbackReason: plan.fallbackReason,
     };
+
+    emitTrace({
+      turnId,
+      ev: 'turn.end',
+      overallSuccess,
+      durationMs,
+      reply,
+      turnResult,
+      ...(providerFailure ? { error: providerFailure } : {}),
+    });
+
+    // S1: a run ledger run opened while planning (e.g. `llm_plan`) is closed here.
+    runLedger.completeRun(turnId, {
+      reply,
+      outcome: overallSuccess ? 'success' : 'failure',
+    });
+
+    return turnResult;
   } catch (err: any) {
     const errorMsg = err?.message || 'Error inesperado durante la ejecución del turno';
     const durationMs = Date.now() - startTime;

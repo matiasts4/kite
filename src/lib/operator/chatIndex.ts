@@ -36,8 +36,12 @@ export async function consultChats(
     ...(entry.lastDecision ? { lastDecision: sanitizeDecision(entry.lastDecision) } : {}),
   }));
 
-  const reviewPattern = /(?:review|consult|revisa|consulta|read|leer|lee|inside of(?: the)?)\s+(?:the\s+|el\s+|la\s+)?([a-z0-9_-]+(?:\s+[a-z0-9_-]+)?)\s+(?:chat|thread|hilo|conversaci[oó]n)/i;
-  const match = reviewPattern.exec(prompt);
+  const reviewPattern =
+    /(?:review|consult|revisa|consulta|read|leer|lee|inside of(?: the)?)\s+(?:the\s+|el\s+|la\s+)?(?!(?:el|la|the)\s+)([a-z0-9_áéíóúñ-]+(?:\s+[a-z0-9_áéíóúñ-]+)?)\s+(?:chat|thread|hilo|conversaci[oó]n)/i;
+  const reviewPatternAlt =
+    /(?:review|consult|revisa|consulta|read|leer|lee|ver|qu[eé]\s+hay\s+en)\s+(?:el\s+|la\s+|the\s+)?(?:chat|thread|hilo|conversaci[oó]n)\s+(?:de\s+|sobre\s+|llamado\s+)?([a-z0-9_áéíóúñ-]+(?:\s+[a-z0-9_áéíóúñ-]+)?)/i;
+
+  const match = reviewPatternAlt.exec(prompt) || reviewPattern.exec(prompt);
 
   if (!match) {
     const lines = sanitizedEntries.map(

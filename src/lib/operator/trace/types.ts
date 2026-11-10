@@ -108,6 +108,8 @@ export interface TurnEndTraceEvent extends BaseTraceEvent {
   overallSuccess: boolean;
   durationMs?: number;
   error?: string;
+  reply?: string;
+  turnResult?: any;
 }
 
 export type TraceEvent =

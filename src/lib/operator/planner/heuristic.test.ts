@@ -535,6 +535,12 @@ describe('T3 / S3 — launch a thread or keep the terminal', () => {
     expect(action.body).toMatch(/revisar el login/i);
     expect(created.actions.some((item) => item.type === 'open_terminals')).toBe(false);
 
+    const withNuevo = planTurnHeuristic('abre un nuevo thread con Grok');
+    const actionNuevo = withNuevo.actions[0] as any;
+    expect(actionNuevo.type).toBe('launch_thread');
+    expect(actionNuevo.provider).toBe('grok');
+    expect(actionNuevo.body).toBeUndefined();
+
     const hijack = planTurnHeuristic('abre un thread para revisar el bug de claude');
     expect((hijack.actions[0] as any).provider).toBeUndefined();
     expect((hijack.actions[0] as any).body).toMatch(/bug de claude/i);

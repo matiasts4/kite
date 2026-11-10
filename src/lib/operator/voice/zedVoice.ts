@@ -13,6 +13,7 @@
 import { loadOperatorConfig, syncNativeCredentialsWithVault } from '../operatorConfig';
 import { isTauriEnvironment, proxyOperatorHttp } from '../../ipc';
 import { startAudioDucking, stopAudioDucking } from './audioDucking';
+import { emitTrace } from '../trace/trace';
 
 export interface VoiceEngineStatus {
   available: boolean;
@@ -1118,6 +1119,30 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
 
   // If still empty, check diagnostic reason without trapping into a scary permanent red error
   if (!finalText) {
+    const discardReason =
+      !audioBlob || audioBlob.size <= 200
+        ? 'Grabación vacía o de duración mínima'
+        : lastError && !(currentSpeechTranscript || lastInterimTranscript)
+          ? `Fallo al transcribir: ${lastError}`
+          : 'No se detectaron palabras legibles en el audio';
+
+    try {
+      const voiceTurnId = `voice-${Date.now()}`;
+      emitTrace({
+        turnId: voiceTurnId,
+        ev: 'turn.start',
+        input: `[captura de voz descartada: ${discardReason}]`,
+        source: 'voz',
+      });
+      emitTrace({
+        turnId: voiceTurnId,
+        ev: 'turn.end',
+        overallSuccess: false,
+        error: discardReason,
+        durationMs: Math.round(durationSecs * 1000),
+      });
+    } catch {}
+
     if (!audioBlob || audioBlob.size <= 200) {
       console.log('[ZedVoice] Grabación vacía o de duración mínima, volviendo a reposo limpiamente.');
     } else if (lastError && !(currentSpeechTranscript || lastInterimTranscript)) {

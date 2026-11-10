@@ -640,6 +640,21 @@ export const App: React.FC = () => {
     window.addEventListener('kite:navigate-mode', handleNavigate);
     window.addEventListener('kite:select-workspace', handleSelectWorkspace);
 
+    const handleSelectThread = (e: Event) => {
+      const custom = e as CustomEvent<string | { threadId?: string; mode?: WorkMode }>;
+      const threadId =
+        typeof custom.detail === 'string' ? custom.detail : custom.detail?.threadId;
+      if (threadId) {
+        setSelectedThreadId(threadId);
+        const targetMode =
+          typeof custom.detail === 'object' && custom.detail?.mode ? custom.detail.mode : 'chat';
+        setWorkMode(targetMode);
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+      }
+    };
+    window.addEventListener('kite:select-thread', handleSelectThread);
+
     const handleOpenFilePreview = (e: Event) => {
       const custom = e as CustomEvent<{ workspaceId?: string | null }>;
       setRightDockVisible(true);
@@ -695,6 +710,7 @@ export const App: React.FC = () => {
 
     return () => {
       window.removeEventListener('kite:navigate-mode', handleNavigate);
+      window.removeEventListener('kite:select-thread', handleSelectThread);
       window.removeEventListener('kite:select-workspace', handleSelectWorkspace);
       window.removeEventListener('kite:open-right-dock-file', handleOpenFilePreview);
       window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);

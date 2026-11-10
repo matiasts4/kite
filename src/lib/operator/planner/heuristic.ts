@@ -1070,10 +1070,10 @@ export function parseLaunchThreadIntent(text: string): LaunchThreadAction | null
     return null;
   }
 
-  // 1. "abre/crea/lanza/inicia un thread/hilo [de <provider>] [para/con/: <body...>]"
+  // 1. "abre/crea/lanza/inicia un [nuevo] thread/hilo [de/con <provider>] [para/con/: <body...>]"
   const openMatch = text.match(
     new RegExp(
-      `^(?:${OPEN_VERB_SOURCE})\\s+(?:un\\s+)?(?:thread|hilo)(?:\\s+de\\s+([a-zA-Z0-9_\\-]+))?(?:\\s+(?:para|con|:)\\s+(.+)|\\s+(.+))?$`,
+      `^(?:${OPEN_VERB_SOURCE})\\s+(?:un\\s+)?(?:nuevo\\s+)?(?:thread|hilo)(?:\\s+(?:de|con)\\s+([a-zA-Z0-9_\\-]+))?(?:\\s+(?:para|:)\\s+(.+)|\\s+(.+))?$`,
       'i'
     )
   );

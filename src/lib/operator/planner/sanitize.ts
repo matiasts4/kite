@@ -94,7 +94,7 @@ export function isPredominantlyEnglish(text: string): boolean {
 export function sanitizeReply(
   text: string,
   fallbackTemplate: string = 'Acción completada con éxito.',
-  maxLength: number = 280
+  maxLength: number = 1200
 ): string {
   if (!text || !text.trim()) {
     return fallbackTemplate;
@@ -142,9 +142,25 @@ export function sanitizeReply(
     return fallbackTemplate;
   }
 
-  // Enforce max length constraint (<= maxLength characters, default 800 for 2-4 lines of speech)
+  // Enforce max length constraint (<= maxLength characters, default 1200 for natural spoken responses)
   if (cleaned.length > maxLength) {
-    cleaned = cleaned.slice(0, maxLength - 3).trim() + '...';
+    const candidate = cleaned.slice(0, maxLength);
+    const lastSentenceEnd = Math.max(
+      candidate.lastIndexOf('. '),
+      candidate.lastIndexOf('! '),
+      candidate.lastIndexOf('? '),
+      candidate.lastIndexOf('.\n')
+    );
+    if (lastSentenceEnd > maxLength * 0.4) {
+      cleaned = candidate.slice(0, lastSentenceEnd + 1).trim();
+    } else {
+      const lastSpace = candidate.lastIndexOf(' ');
+      if (lastSpace > maxLength * 0.4) {
+        cleaned = candidate.slice(0, lastSpace).trim() + '...';
+      } else {
+        cleaned = candidate.slice(0, maxLength - 3).trim() + '...';
+      }
+    }
   }
 
   return cleaned || fallbackTemplate;

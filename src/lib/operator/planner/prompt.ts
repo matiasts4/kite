@@ -86,6 +86,9 @@ REGLAS CRÍTICAS:
 13. CONTROL ESPACIAL DE PANELES:
    - Autoajustar / igualar dimensiones ("autoajusta las terminales", "iguala los paneles") => {"type": "manage_pane_layout", "operation": "equalize"}.
    - También existen "split-horizontal", "split-vertical", "focus" y "zoom" con "target" opcional.
+14. CONTEXTO DE CONVERSACIONES Y CHATS PREVIOS:
+   - Si el usuario pregunta si tienes contexto, memoria o registro de chats anteriores, o sobre un motor específico (AntiGravity, Grok, Claude, etc.), REVISA la sección ÍNDICE DE CONVERSACIONES Y CHATS provista al final del contexto.
+   - Responde afirmativamente confirmando los temas y decisiones registrados en dicho índice (o del contenido si está cargado). NUNCA digas que no tienes acceso a nada cuando el índice o el chat esté en tu contexto.
 
 ESQUEMA JSON PERMITIDO:
 {
@@ -101,7 +104,7 @@ ESQUEMA JSON PERMITIDO:
     // { "type": "handoff_to_agent", "sourceTarget": <numero|"nombre"|"motor">, "targetEngine": "opencode" | "claude" | "codex" | "antigravity" | "grok", "targetSession": <numero|"nombre">, "spawnNew": true, "artifactKind": "odd" | "output", "customPrompt": "opcional" }
     // { "type": "manage_pane_layout", "operation": "equalize" | "split-horizontal" | "split-vertical" | "focus" | "zoom", "target": <numero|"nombre"|"motor"> }
     // { "type": "switch_workspace", "workspaceQuery": "nombre del proyecto", "viewMode": "agents" | "code" | "threads" }
-    // { "type": "launch_thread", "threadId": "id opcional", "body": "mensaje a enviar", "title": "título nuevo opcional" }
+    // { "type": "launch_thread", "threadId": "id opcional", "provider": "grok" | "claude" | "codex" | "antigravity" | "opencode", "body": "mensaje a enviar", "title": "título nuevo opcional" }
     // { "type": "stop_speaking" }
   ],
   "answer": "Respuesta solo para preguntas informativas o de ayuda"
@@ -187,6 +190,10 @@ Salida:
 Entrada: "abre un hilo para investigar el problema de autenticación"
 Salida:
 {"reply": "Iniciando un hilo para investigar el problema de autenticación.", "actions": [{"type": "launch_thread", "body": "investigar el problema de autenticación"}]}
+
+Entrada: "abre un nuevo thread con Grok"
+Salida:
+{"reply": "Iniciando un nuevo hilo con Grok.", "actions": [{"type": "launch_thread", "provider": "grok"}]}
 
 CONTEXTO ACTUAL DEL SISTEMA:
 Proyecto actual: ${context?.workspaceName ? `"${context.workspaceName}"` : 'Proyecto activo'}${context?.workspacePath ? ` (Ruta: ${context.workspacePath})` : ''}${context?.workspaceId ? ` [ID: ${context.workspaceId}]` : ''}

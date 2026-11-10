@@ -104,6 +104,12 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
         setStage('speaking');
         setStageLabel(getStageLabelEs('speaking'));
       } else if (ev.ev === 'turn.end') {
+        if (ev.turnResult) {
+          setLastTurn(ev.turnResult);
+        } else if (ev.reply) {
+          setLastTurn((prev) => ({ ...(prev || {}), turnId: ev.turnId, reply: ev.reply, overallSuccess: ev.overallSuccess } as any));
+        }
+
         if (ev.error) {
           toast.error('Asistente Zed', ev.error);
         }

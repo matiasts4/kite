@@ -14,6 +14,17 @@ export async function executeLaunchThreadAction(
   context?: TurnContext
 ): Promise<ActionReceipt> {
   let targetThreadId = action.threadId;
+  let provider = action.provider;
+
+  // Infer provider from body if not explicitly set
+  if (!provider && action.body) {
+    const lowerBody = action.body.toLowerCase();
+    if (lowerBody.includes('grok')) provider = 'grok';
+    else if (lowerBody.includes('claude')) provider = 'claude';
+    else if (lowerBody.includes('codex')) provider = 'codex';
+    else if (lowerBody.includes('antigravity') || lowerBody.includes('agy')) provider = 'antigravity';
+    else if (lowerBody.includes('opencode')) provider = 'opencode';
+  }
 
   // If no threadId was given, create a general chat thread
   if (!targetThreadId) {
@@ -21,8 +32,8 @@ export async function executeLaunchThreadAction(
       const createPayload: Record<string, unknown> = {
         workspaceId: context?.workspaceId,
       };
-      if (action.provider) {
-        createPayload.provider = action.provider;
+      if (provider) {
+        createPayload.provider = provider;
       }
       const created = await invokeCommand<{ id?: string }>('create_general_chat', createPayload);
       if (!created || !created.id) {
@@ -76,11 +87,28 @@ export async function executeLaunchThreadAction(
     }
   }
 
+  // S11: Refresh thread list and switch/focus thread in UI
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', {
+          detail: { threadId: targetThreadId, mode: 'chat' },
+        })
+      );
+    } catch {}
+  }
+
+  const providerLabel = provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : '';
+  const summaryEs = providerLabel
+    ? `Nuevo hilo con ${providerLabel} iniciado correctamente.`
+    : 'Nuevo hilo iniciado correctamente.';
+
   return {
     actionIdx,
     type: 'launch_thread',
     ok: true,
-    summaryEs: `Hilo ${targetThreadId} iniciado correctamente.`,
-    data: { threadId: targetThreadId },
+    summaryEs,
+    data: { threadId: targetThreadId, ...(provider ? { provider } : {}) },
   };
 }

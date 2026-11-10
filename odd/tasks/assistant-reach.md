@@ -90,6 +90,33 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
   - Settings UI (`ZedTab.tsx`) and the operator strip provide direct one-click access to open the operator traces log directory on disk for fast debugging and testing.
   - Acceptance: executing a turn appends the complete trace to the disk JSONL file, and the settings view offers a functional button to reveal the trace logs folder.
 
+- **S10 — Uncapped natural spoken replies without mid-word or 280-character slicing**:
+  - User verbatim: `"No me respondió en los primeros dos. En el último que sí me respondió, se cortó."`
+  - User verbatim: `"la duración de las respuestas no se procesan en su totalidad, si es que llega hasta cierto segundo, se corta. Deben ser 15 segundos exactos y se corta si es que la respuesta se pasa de eso, cosa que está mal."`
+  - Accepted behavior: conversational answers (`answer` and `reply`) are not sliced down by a short 280-character default in `sanitizeReply`.
+  - The default limit for conversational text is raised to at least 1200 characters, and trimming preserves complete sentence boundaries without appending trailing ellipses mid-word.
+  - Acceptance: a conversational answer longer than 280 characters is not chopped mid-sentence or mid-word.
+
+- **S11 — Visual thread navigation, provider recognition, and human receipt speech**:
+  - User verbatim: `"le dije que que que abriera un nuevo thread con Grok. Y me respondió. Utilizando un código, creo. Como el código de. Identificador de esa, de ese thread. Me dijo que lo abrió, no veo nada."`
+  - Accepted behavior: `launch_thread` schemas in planner prompts and heuristics accept `"provider"` (`grok`, `claude`, `codex`, `antigravity`, `opencode`) and pass it to chat creation.
+  - Creating or opening a thread emits `kite:threads-changed` and `kite:select-thread` so the application switches to thread view and focuses the new thread on screen.
+  - The receipt speech (`summaryEs`) speaks clean, human-friendly status (e.g. `"Nuevo hilo con Grok iniciado."`) without reading raw UUIDs aloud.
+  - Acceptance: asking the assistant to launch a thread with a provider creates the thread with that provider, opens and focuses it visually in the UI, and speaks a friendly message without UUIDs.
+
+- **S12 — Intent-based cross-CLI chat transcript reach in consultChats**:
+  - User verbatim: `"Le pregunté sobre cosas como la memoria o si tuviera si tiene contexto de conversaciones anteriores de, no lo sé, antigravity o demás. Bueno, eso me respondió que no tiene acceso a nada."`
+  - Accepted behavior: `consultChats` recognizes natural queries asking about prior chats, history, or context of a provider or CLI (e.g. antigravity, grok, claude).
+  - When matching multiple candidates for a provider query, it reads the most recent chat transcript instead of rejecting with `not-one`.
+  - The LLM prompt explicitly instructs the model to explain prior discussions based on the retrieved transcript context rather than asserting lack of access.
+  - Acceptance: natural questions about previous chats with antigravity or grok load transcript context and produce informative answers.
+
+- **S13 — Turn synchronization and empty/discarded mic capture tracing**:
+  - User verbatim: `"No me respondió en los primeros dos. En el último que sí me respondió, se cortó."`
+  - Accepted behavior: `useOperatorTurn` updates `lastTurn` atomically with the `'done'` / `'error'` stage transition to eliminate state race conditions in auto-speak.
+  - Discarded voice captures (empty audio, silence, or failed STT) in `zedVoice.ts` emit trace records so all mic interaction attempts are persisted and observable in `operator-traces/*.jsonl`.
+  - Acceptance: silence or discarded microphone input leaves an explicit trace entry in the JSONL log file.
+
 ## Tasks
 
 - [x] **T1** (`S2`) — Route: `inline` — Cross-CLI index and one-chat read (`chatIndex.ts` + `chatIndex.test.ts` 5/5 green). Commit: `d4a4e2f`.
@@ -101,8 +128,12 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
 - [x] **T7** (`S7`) — Route: `inline` — Prevent 15s premature cutoff in `ttsNarrator.ts` (sentence chunking/heartbeat in browser synthesis, extended safety timer, uninterrupted streaming). Commit: `f57cf34`.
 - [x] **T8** (`S8`) — Route: `inline` — Wire `consultChats` into `planTurnLLM` and prompt context, and add `launch_thread` to LLM system prompt schema. Commit: `f57cf34`.
 - [x] **T9** (`S9`) — Route: `inline` — Ensure complete trace logging (including chat consultations) to disk JSONL and expose a direct button to reveal logs folder in `ZedTab.tsx`. Commit: `f57cf34`.
+- [x] **T10** (`S10`) — Route: `inline` — Uncap conversational replies in `sanitizeReply` and `composeReplyFromReceipts` with sentence-boundary trimming (`sanitize.ts` + `sanitize.test.ts` 13/13 green).
+- [x] **T11** (`S11`) — Route: `inline` — Wire `launch_thread` provider support, UI navigation event (`kite:select-thread`), and clean receipt speech in `launchThread.ts`, `prompt.ts`, `App.tsx` (`executor.test.ts` 23/23 green).
+- [x] **T12** (`S12`) — Route: `inline` — Expand `consultChats` in `chatIndex.ts` for provider history queries and prompt LLM to summarize from transcripts (`chatIndex.test.ts` 6/6 green, `prompt.test.ts` 5/5 green).
+- [x] **T13** (`S13`) — Route: `inline` — Synchronize `lastTurn` with `stage = 'done'` in `useOperatorTurn.ts` and trace discarded mic captures in `zedVoice.ts` (`zedVoice.test.ts` 9/9 green, `useOperatorTurn.test.ts` 16/16 green).
 
-T1–T9 share the operator turn. They are not independent. Do not split them across parallel writers.
+T1–T13 share the operator turn. They are not independent. Do not split them across parallel writers.
 
 ## Log
 
@@ -114,3 +145,4 @@ T1–T9 share the operator turn. They are not independent. Do not split them acr
   Parallel writers are allowed only on disjoint files. The parent owns `planner/prompt.ts` index lines, `ZedStrip.tsx`, and git. Do not switch branches.
 - **L6 (2026-11-10)**: User requested full completion verbatim: `"quiero que lo temrines completmaente"`. Verified and completed T1 through T5 across streaming narration, continuous voice mode, barge-in, thread launches, notes injection, and cross-cli chat index. All 110 unit tests passing, tsc clean, audit references clean.
 - **L7 (2026-11-10)**: User reported 4 critical defects verbatim: `"la duración de las respuestas no se procesan en su totalidad, si es que llega hasta cierto segundo, se corta. Deben ser 15 segundos exactos y se corta si es que la respuesta se pasa de eso, cosa que está mal."` `"Como dije, está contestando dos veces, ya sea utilizando la forma heurística o la forma con el modelo de IA, cosa errónea claramente."` `"Le pregunté sobre cosas como la memoria o si tuviera si tiene contexto de conversaciones anteriores de, no lo sé, antigravity o demás. Bueno, eso me respondió que no tiene acceso a nada."` `"La idea es poder llegar a testear y debuguear de forma rápida dejando o almacenando logs de toda la traza que se ejecute por el asistente Zed. Es decir, si yo le hablo, quiero que se deje registrado qué fue lo que hizo, qué cosas consultó y así, básicamente para luego llegar a debuguear una traza de acciones que hizo. Eso creo que ya existe, pero quiero tal vez mejorarlo, si es que no existe, hay que implementarlo. Para tenerlo estructurado, también hay que actualizar el ODD con respecto a esto. Quiero que implementes todo."` Appended specs S6–S9 and tasks T6–T9.
+- **L8 (2026-11-10)**: User evaluated live traces and approved 4-point fix plan verbatim: `"Okey, estoy probando. Me gustaría saber si puedes obtener esa, esos intentos que estuve haciendo. Como consideración. No me respondió en los primeros dos. En el último que sí me respondió, se cortó. Bueno, por las casualidades, le dije que que que abriera un nuevo thread con Grok. Y me respondió. Utilizando un código, creo. Como el código de. Identificador de esa, de ese thread. Me dijo que lo abrió, no veo nada. No sé exactamente si tiene las capacidades como para abrir threads, pero bueno. Fue lo que intenté. Eh, tenemos que planear una corrección bastante más grande. No quiero que llegues y corrijas, sino que me digas realmente qué es lo que intentarás corregir como tal en esta iteración. Para que evaluemos si es que está correcto o no."` and `"si vamos con eso"`. Appended specs S10–S13 and tasks T10–T13.

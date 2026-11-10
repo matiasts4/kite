@@ -179,4 +179,21 @@ describe('consultChats', () => {
     expect(reach.text).toBe('More than one chat matches. Not reading them.');
     expect(reach.text).not.toContain(TRANSCRIPT_MARKER);
   });
+
+  it('reads the chat when requested with natural Spanish phrasing "revisa el chat de billing"', async () => {
+    const { reader, calls } = readerTracking({
+      'billing-1': `billing body ${TRANSCRIPT_MARKER}`,
+      'auth-2': `auth body ${TRANSCRIPT_MARKER}`,
+      'grok-3': `grok body ${TRANSCRIPT_MARKER}`,
+      'grok-4': `quota body ${TRANSCRIPT_MARKER}`,
+    });
+
+    const reach = await consultChats('revisa el chat de billing', catalog, reader);
+
+    expect(calls).toEqual(['billing-1']);
+    expect(reach.kind).toBe('read');
+    if (reach.kind !== 'read') return;
+    expect(reach.entry.id).toBe('billing-1');
+    expect(reach.body).toContain(TRANSCRIPT_MARKER);
+  });
 });

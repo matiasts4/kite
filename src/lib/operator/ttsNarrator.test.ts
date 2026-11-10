@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ttsNarrator, cleanTextForSpeech, resolveBestVoice } from './ttsNarrator';
+import { ttsNarrator, cleanTextForSpeech, resolveBestVoice, splitIntoSpeechSentences } from './ttsNarrator';
 
 describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
   beforeEach(() => {
@@ -331,6 +331,27 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
 
       // Crucial: Browser synthesis MUST NOT be called!
       expect(speakSpy).not.toHaveBeenCalled();
+    });
+
+    it('splitIntoSpeechSentences breaks multi-sentence text to prevent 15s freeze (S7)', () => {
+      const longText =
+        'Esta es la primera oración completa del asistente. Aquí viene la segunda parte con más detalles sobre la tarea. Y finalmente cerramos con las conclusiones.';
+      const chunks = splitIntoSpeechSentences(longText);
+
+      expect(chunks.length).toBe(3);
+      expect(chunks[0]).toBe('Esta es la primera oración completa del asistente.');
+      expect(chunks[1]).toBe('Aquí viene la segunda parte con más detalles sobre la tarea.');
+      expect(chunks[2]).toBe('Y finalmente cerramos con las conclusiones.');
+    });
+
+    it('speaks multiple sentence chunks sequentially without cutting off (S7)', async () => {
+      const speakSpy = vi.spyOn(window.speechSynthesis, 'speak');
+      const text = 'Primera oración clara. Segunda oración con más contexto.';
+
+      await ttsNarrator.speak(text, { engine: 'browser' });
+
+      // Must have spoken each sentence chunk separately
+      expect(speakSpy).toHaveBeenCalledTimes(2);
     });
   });
 });

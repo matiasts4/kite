@@ -241,4 +241,18 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     // Session remains active
     expect((window as any).__kiteVoiceSessionActive).toBe(true);
   });
+
+  it('does not re-narrate the same turn on subsequent component re-renders (S6)', async () => {
+    const { ttsNarrator } = await import('../lib/operator/ttsNarrator');
+    vi.mocked(ttsNarrator.speak).mockClear();
+
+    const { rerender } = render(<ZedStripHost call={activeCall} />);
+
+    // Force re-render with unchanged call state
+    rerender(<ZedStripHost call={{ ...activeCall }} />);
+    rerender(<ZedStripHost call={{ ...activeCall, muted: false }} />);
+
+    // Should never trigger multiple speak calls for the same idle state
+    expect(ttsNarrator.speak).not.toHaveBeenCalled();
+  });
 });

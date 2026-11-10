@@ -97,10 +97,10 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
 - [x] **T3** (`S3`) — Route: `inline` — Assistant launches a thread through the existing dispatch thread family, and still launches a terminal (`heuristic.ts` + `launchThread.ts` + `executor.test.ts` 23/23 green). Commit: `d4a4e2f`.
 - [x] **T4** (`S5`) — Route: `inline` — Open voice session on the orb, streamed narration, barge-in, same actions (`ttsNarrator.ts` + `ZedStrip.tsx` + tests 21/21 green). Commit: `830efa1`.
 - [x] **T5** (`S1`, `S5`) — Route: `inline` — Spoken notice when a launched agent finishes (`proactiveWatcher.ts` + `proactiveWatcher.test.ts` 9/9 green, wired to session). Commit: `d4a4e2f` / `830efa1`.
-- [ ] **T6** (`S6`) — Route: `inline` — Guard speech narration to strictly once per turn using `lastSpokenTurnIdRef` in `ZedStrip.tsx` and prevent dual TTS dispatch in `runOperatorTurn`.
-- [ ] **T7** (`S7`) — Route: `inline` — Prevent 15s premature cutoff in `ttsNarrator.ts` (sentence chunking/heartbeat in browser synthesis, extended safety timer, uninterrupted streaming).
-- [ ] **T8** (`S8`) — Route: `inline` — Wire `consultChats` into `planTurnLLM` and prompt context, and add `launch_thread` to LLM system prompt schema.
-- [ ] **T9** (`S9`) — Route: `inline` — Ensure complete trace logging (including chat consultations) to disk JSONL and expose a direct button to reveal logs folder in `ZedTab.tsx`.
+- [x] **T6** (`S6`) — Route: `inline` — Guard speech narration to strictly once per turn using `lastSpokenTurnIdRef` in `ZedStrip.tsx` and prevent dual TTS dispatch in `runOperatorTurn`. Commit: `f57cf34`.
+- [x] **T7** (`S7`) — Route: `inline` — Prevent 15s premature cutoff in `ttsNarrator.ts` (sentence chunking/heartbeat in browser synthesis, extended safety timer, uninterrupted streaming). Commit: `f57cf34`.
+- [x] **T8** (`S8`) — Route: `inline` — Wire `consultChats` into `planTurnLLM` and prompt context, and add `launch_thread` to LLM system prompt schema. Commit: `f57cf34`.
+- [x] **T9** (`S9`) — Route: `inline` — Ensure complete trace logging (including chat consultations) to disk JSONL and expose a direct button to reveal logs folder in `ZedTab.tsx`. Commit: `f57cf34`.
 
 T1–T9 share the operator turn. They are not independent. Do not split them across parallel writers.
 

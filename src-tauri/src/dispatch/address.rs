@@ -38,13 +38,19 @@ pub fn parse_address(raw: &str) -> Result<AddrRef, DispatchError> {
         return non_empty(rest).map(AddrRef::Agent);
     }
     if let Some(rest) = raw.strip_prefix("alias:") {
-        if !is_alias_name(rest) {
-            return Err(DispatchError::BadArgs);
+        if is_alias_name(rest) {
+            return Ok(AddrRef::Alias(rest.to_string()));
         }
-        return Ok(AddrRef::Alias(rest.to_string()));
+        if super::programs::is_codename(rest) {
+            return Ok(AddrRef::Alias(rest.to_ascii_lowercase()));
+        }
+        return Err(DispatchError::BadArgs);
     }
     if is_alias_name(raw) {
         return Ok(AddrRef::Alias(raw.to_string()));
+    }
+    if super::programs::is_codename(raw) {
+        return Ok(AddrRef::Alias(raw.to_ascii_lowercase()));
     }
     Err(DispatchError::UnknownAddress)
 }

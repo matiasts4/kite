@@ -7,7 +7,7 @@ use super::port::Port;
 use super::presence::PresenceState;
 use super::types::{exit_code, Caller, DispatchError, Family, Receipt, ReceiptStatus};
 
-fn compose_skill() -> String {
+fn compose_manual() -> String {
     let names = super::programs::lines();
     format!(
         "\
@@ -71,6 +71,19 @@ Force rule: only a human caller may set force. An agent or a script that sets fo
 Ready means idle or done. working is queued. blocked is rejected. gone is destination_gone.
 A stall means the text was submitted and presence did not change. Read before sending the same body again. The service does not send a second Enter.
 "
+    )
+}
+
+fn compose_skill() -> String {
+    let manual = manual_text();
+    format!(
+        "\
+---
+name: kite-dispatch
+description: \"Trigger: kite dispatch, spawn agent, KITE_DISPATCH. Use the Kite Dispatch CLI to start, send, wait, and read other agents.\"
+---
+
+{manual}"
     )
 }
 
@@ -386,9 +399,35 @@ fn need<'a>(
     }
 }
 
+pub fn manual_text() -> &'static str {
+    static MANUAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MANUAL.get_or_init(compose_manual).as_str()
+}
+
 pub fn skill_text() -> &'static str {
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TEXT.get_or_init(compose_skill).as_str()
+}
+
+/// Strips a leading YAML frontmatter block (`---\n...\n---\n`) when present so
+/// CLI flags like `--system-prompt-override` never receive a leading hyphen token.
+pub fn strip_skill_frontmatter(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    if let Some(after_open) = trimmed
+        .strip_prefix("---\r\n")
+        .or_else(|| trimmed.strip_prefix("---\n"))
+    {
+        if let Some(close_idx) = after_open.find("\n---") {
+            let rest = &after_open[close_idx + "\n---".len()..];
+            if let Some(body) = rest
+                .strip_prefix("\r\n")
+                .or_else(|| rest.strip_prefix('\n'))
+            {
+                return body.trim_start();
+            }
+        }
+    }
+    trimmed
 }
 
 pub fn check_token(expected: &str, presented: &str) -> bool {
@@ -441,12 +480,58 @@ pub fn install_kite_shim() -> std::path::PathBuf {
     dir
 }
 
-/// Writes the same manual `kite dispatch skill` prints, and returns that path.
+fn user_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+}
+
+fn existing_skill_roots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    [
+        home.join(".claude").join("skills"),
+        home.join(".grok").join("skills"),
+        home.join(".codex").join("skills"),
+        home.join(".cursor").join("skills"),
+        home.join(".gemini").join("antigravity-cli").join("skills"),
+        home.join(".gemini").join("antigravity").join("skills"),
+        home.join(".gemini").join("skills"),
+        home.join(".agents").join("skills"),
+        home.join(".config").join("agents").join("skills"),
+        home.join(".config").join("opencode").join("skills"),
+        home.join(".copilot").join("skills"),
+        home.join(".kimi").join("skills"),
+        home.join(".amp").join("skills"),
+        home.join(".config").join("amp").join("skills"),
+        home.join(".factory").join("skills"),
+        home.join(".droid").join("skills"),
+    ]
+    .into_iter()
+    .filter(|root| root.is_dir())
+    .collect()
+}
+
+/// Copies the manual into each existing user skill root as `kite-dispatch/SKILL.md`.
+/// A missing root is left untouched.
+pub(crate) fn copy_skill_into_existing_roots(home: &std::path::Path, text: &str) {
+    for root in existing_skill_roots(home) {
+        let dest = root.join("kite-dispatch");
+        if std::fs::create_dir_all(&dest).is_ok() {
+            let _ = std::fs::write(dest.join("SKILL.md"), text);
+        }
+    }
+}
+
+/// Writes the same manual `kite dispatch skill` prints, copies it into existing
+/// agent skill directories, and returns the app-data path.
 pub fn install_dispatch_skill() -> std::path::PathBuf {
     let dir = crate::persist::roaming_app_dir().join("dispatch");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("SKILL.md");
-    let _ = std::fs::write(&path, skill_text());
+    let text = skill_text();
+    let _ = std::fs::write(&path, text);
+    if let Some(home) = user_home_dir() {
+        copy_skill_into_existing_roots(&home, text);
+    }
     path
 }
 
@@ -786,6 +871,7 @@ mod tests {
         assert!(text.contains("kind permission"));
         assert!(text.contains("kite dispatch run <program>"));
         assert!(!text.contains("kite dispatch run <role>"));
+        assert!(text.contains("name: kite-dispatch"));
         assert!(text.contains("This text is the complete manual."));
         assert!(text.contains("Do not search the repository"));
         assert!(!text.contains("KITE_SKILL_FILE"));
@@ -793,6 +879,37 @@ mod tests {
         assert!(text.contains("Inbox files do not open panes"));
         assert!(text.contains("An agent does not get a pane unless --pane"));
         assert!(text.contains(&super::super::programs::lines()));
+
+        let manual = manual_text();
+        assert!(manual.starts_with("Kite Dispatch\n"));
+        assert!(!manual.contains("name: kite-dispatch"));
+        assert_eq!(strip_skill_frontmatter(text), manual);
+    }
+
+    #[test]
+    fn copy_skill_writes_only_into_existing_roots() {
+        let home = std::env::temp_dir().join(format!(
+            "kite-skill-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let grok = home.join(".grok").join("skills");
+        let opencode = home.join(".config").join("opencode").join("skills");
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&opencode).unwrap();
+        copy_skill_into_existing_roots(&home, "SKILL BODY");
+        let written = grok.join("kite-dispatch").join("SKILL.md");
+        let written_opencode = opencode.join("kite-dispatch").join("SKILL.md");
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), "SKILL BODY");
+        assert_eq!(
+            std::fs::read_to_string(&written_opencode).unwrap(),
+            "SKILL BODY"
+        );
+        assert!(!home.join(".claude").join("skills").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -1041,8 +1158,8 @@ mod tests {
         let prompt = service.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Review the task."));
         assert!(prompt.contains("Revisa src/x.rs"));
-        assert!(prompt.contains("This text is the complete manual."));
-        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("This text is the complete manual."));
+        assert!(!prompt.contains("kite dispatch kill"));
         assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert_eq!(service.port_mut().pty_writes(), 0);
@@ -1226,7 +1343,7 @@ mod tests {
         let prompt = start.prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Preface from the role file."));
         assert!(prompt.contains("task text"));
-        assert!(prompt.contains("This text is the complete manual."));
+        assert!(!prompt.contains("This text is the complete manual."));
         assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         let _ = std::fs::remove_dir_all(&dir);

@@ -56,6 +56,23 @@ pub fn accepts_system_prompt(engine: &str) -> bool {
     matches!(canonical(engine), Some("grok" | "claude-code"))
 }
 
+/// Canonical agent codenames in lowercase alias form (`orion`, `nova`, `atlas`, ...),
+/// matching `AGENT_CODENAMES` in `src/lib/agentNames.ts`.
+pub fn codenames() -> &'static [&'static str] {
+    &[
+        "orion", "nova", "atlas", "vega", "titan", "echo", "phoenix", "lyra", "apex", "zenith",
+        "cygnus", "helios", "falcon", "sirius", "altair", "polaris", "castor", "pollux", "astra",
+        "cosmo", "vortex", "nebula", "specter", "sol", "aura", "quantum", "nexus", "pulse",
+        "ranger", "draco",
+    ]
+}
+
+/// True when `word` matches a canonical agent codename (case-insensitive).
+pub fn is_codename(word: &str) -> bool {
+    let lower = word.trim().to_ascii_lowercase();
+    codenames().contains(&lower.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

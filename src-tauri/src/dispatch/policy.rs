@@ -176,16 +176,78 @@ impl<P: Port> Service<P> {
         outlive: bool,
     ) -> Result<String, DispatchError> {
         let key = canonical(family == Family::Terminal, id);
-        if self.endpoints.contains_key(&key) {
+        if let Some(existing_has_alias) = self
+            .endpoints
+            .get(&key)
+            .filter(|ep| ep.live)
+            .map(|ep| ep.alias.is_some())
+        {
+            if !existing_has_alias {
+                if let Some(raw_alias) = alias {
+                    let normalized = if super::programs::is_codename(raw_alias) {
+                        raw_alias.to_ascii_lowercase()
+                    } else {
+                        raw_alias.to_string()
+                    };
+                    if let Ok(claimed) = self.claim_alias(Some(&normalized), &key) {
+                        if let Some(ep) = self.endpoints.get_mut(&key) {
+                            ep.alias = claimed;
+                        }
+                    }
+                }
+            } else if let Some(raw_alias) = alias {
+                if !is_alias_name(raw_alias) && !super::programs::is_codename(raw_alias) {
+                    return Err(DispatchError::BadArgs);
+                }
+                let normalized = raw_alias.to_ascii_lowercase();
+                if let Some(owner) = self.aliases.get(&normalized) {
+                    if owner != &key {
+                        return Err(DispatchError::NameTaken);
+                    }
+                }
+            }
             return Ok(key);
         }
         let parent_key = self.resolve_parent(parent)?;
-        let alias = self.claim_alias(alias, &key)?;
+        let normalized_alias = alias.map(|raw| {
+            if super::programs::is_codename(raw) {
+                raw.to_ascii_lowercase()
+            } else {
+                raw.to_string()
+            }
+        });
+        let alias = self.claim_alias(normalized_alias.as_deref(), &key)?;
         self.endpoints.insert(
             key.clone(),
             Endpoint::new(family, id, alias, parent_key, outlive),
         );
         Ok(key)
+    }
+
+    pub fn set_endpoint_engine(&mut self, key: &str, engine: &str) {
+        if let Some(ep) = self.endpoints.get_mut(key) {
+            if ep.engine.is_none() && !engine.trim().is_empty() {
+                ep.engine = Some(engine.to_string());
+            }
+        }
+    }
+
+    fn next_codename(&self) -> String {
+        for &name in super::programs::codenames() {
+            if !self.aliases.contains_key(name) {
+                return name.to_string();
+            }
+        }
+        let mut num = 2usize;
+        loop {
+            for &name in super::programs::codenames() {
+                let candidate = format!("{name}-{num}");
+                if !self.aliases.contains_key(&candidate) {
+                    return candidate;
+                }
+            }
+            num += 1;
+        }
     }
 
     pub fn bind_agent(&mut self, profile_id: &str, thread_id: &str) -> Result<(), DispatchError> {
@@ -644,14 +706,35 @@ impl<P: Port> Service<P> {
                 DispatchError::TransportUnsupported,
             ));
         }
-        if let Some(name) = input.name.as_deref() {
-            if !is_alias_name(name) {
+        let raw = !input.argv.is_empty();
+        let requested_name = input
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let auto_codename = !raw
+            && input.role.is_none()
+            && requested_name
+                .map(|n| super::programs::canonical(n).is_some())
+                .unwrap_or(true);
+        let effective_name = if auto_codename {
+            Some(self.next_codename())
+        } else if let Some(name) = requested_name {
+            let normalized = if super::programs::is_codename(name) {
+                name.to_ascii_lowercase()
+            } else {
+                name.to_string()
+            };
+            if !is_alias_name(&normalized) {
                 return self.finish(rejected(&input.id, "run", name, DispatchError::BadArgs));
             }
-            if self.aliases.contains_key(name) {
+            if self.aliases.contains_key(&normalized) {
                 return self.finish(rejected(&input.id, "run", name, DispatchError::NameTaken));
             }
-        }
+            Some(normalized)
+        } else {
+            None
+        };
         if let Some(parent) = input.parent.as_deref() {
             if self.resolve(parent).is_err() {
                 return self.finish(rejected(
@@ -669,7 +752,6 @@ impl<P: Port> Service<P> {
             .or(input.engine.clone())
             .or(input.command.clone())
             .unwrap_or_else(|| "powershell".into());
-        let raw = !input.argv.is_empty();
         let opening = if raw {
             String::new()
         } else {
@@ -699,7 +781,7 @@ impl<P: Port> Service<P> {
         let started = self.port.start_terminal(&StartRequest {
             engine: engine.clone(),
             command: input.command.clone().or(input.role.as_ref().map(|r| r.command.clone())),
-            name: input.name.clone(),
+            name: effective_name.clone(),
             cwd: input.cwd.clone(),
             prompt: prompt.clone(),
             hidden: input.hidden,
@@ -715,13 +797,20 @@ impl<P: Port> Service<P> {
         let key = match self.attach(
             Family::Terminal,
             &session_id,
-            input.name.as_deref(),
+            effective_name.as_deref(),
             input.parent.as_deref(),
             input.outlive,
         ) {
             Ok(key) => key,
             Err(err) => return self.finish(rejected(&input.id, "run", &session_id, err)),
         };
+        if auto_codename {
+            if let Some(engine_alias) = requested_name.filter(|n| is_alias_name(n)) {
+                self.aliases
+                    .entry(engine_alias.to_string())
+                    .or_insert_with(|| key.clone());
+            }
+        }
         if let Some(ep) = self.endpoints.get_mut(&key) {
             ep.engine = Some(engine.clone());
         }
@@ -1105,6 +1194,19 @@ impl<P: Port> Service<P> {
         ) {
             return;
         }
+        let (family, raw_id) = match self.endpoints.get(key) {
+            Some(ep) => {
+                if ep.last_noticed == Some(state) || ep.sent_report_since_working || ep.parent.is_none() {
+                    return;
+                }
+                (ep.family, ep.id.clone())
+            }
+            None => return,
+        };
+        let loaded = self
+            .port
+            .read(family, &raw_id, NOTICE_TAIL_LINES)
+            .unwrap_or_default();
         let planned = {
             let ep = match self.endpoints.get_mut(key) {
                 Some(ep) => ep,
@@ -1122,7 +1224,12 @@ impl<P: Port> Service<P> {
                 .clone()
                 .map(|alias| format!("alias:{alias}"))
                 .unwrap_or_else(|| key.to_string());
-            let tail = last_lines(&ep.tail, NOTICE_TAIL_LINES);
+            let source = if !loaded.trim().is_empty() {
+                loaded.as_str()
+            } else {
+                ep.tail.as_str()
+            };
+            let tail = clean_notice_tail(source, NOTICE_TAIL_LINES);
             let fact = ep.exit_fact.clone().unwrap_or_else(|| "unknown".into());
             let body = format!("state: {}\nexit: {}\n{}", state.as_str(), fact, tail);
             (parent, from, body)
@@ -1247,9 +1354,13 @@ impl<P: Port> Service<P> {
                     Family::Terminal => "pty",
                     Family::Thread => "thread",
                 };
+                let traced = match family {
+                    Family::Terminal => format_terminal_paste(&text),
+                    Family::Thread => text.clone(),
+                };
                 record(&handoff_event(
                     channel,
-                    &text,
+                    &traced,
                     Fields {
                         op: "submit",
                         session: &raw,
@@ -1361,6 +1472,7 @@ impl<P: Port> Service<P> {
         if let Some(alias) = alias {
             self.aliases.remove(&alias);
         }
+        self.aliases.retain(|_, target| target != key);
         self.agents.retain(|_, target| target != key);
         self.port.stop(family, &id)?;
         Ok(())
@@ -1534,22 +1646,47 @@ fn pane_label(pane: PaneVisibility) -> &'static str {
     }
 }
 
-fn birth_prompt(body: &str, manual_as_system: bool) -> Option<String> {
+fn birth_prompt(body: &str, _manual_as_system: bool) -> Option<String> {
     let body = body.trim();
-    if manual_as_system {
-        if body.is_empty() {
-            None
-        } else {
-            Some(body.to_string())
-        }
+    if body.is_empty() {
+        None
     } else {
-        let manual = super::cli::skill_text();
-        if body.is_empty() {
-            Some(manual.to_string())
-        } else {
-            Some(format!("{manual}\n\n{body}"))
-        }
+        Some(body.to_string())
     }
+}
+
+pub fn format_terminal_paste(text: &str) -> String {
+    let clean = text
+        .replace("\u{1b}[200~", "")
+        .replace("\u{1b}[201~", "")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let trimmed = clean.trim_end_matches('\n');
+    format!("\u{1b}[200~{trimmed}\u{1b}[201~")
+}
+
+fn is_spinner_frame_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    ('\u{2800}'..='\u{28ff}').contains(&first)
+}
+
+fn clean_notice_tail(source: &str, max_lines: usize) -> String {
+    let trimmed = source.trim_end();
+    if trimmed.is_empty() || max_lines == 0 {
+        return String::new();
+    }
+    let filtered: Vec<&str> = trimmed
+        .lines()
+        .filter(|line| !is_spinner_frame_line(line))
+        .collect();
+    if filtered.is_empty() {
+        return last_lines(trimmed, max_lines);
+    }
+    let start = filtered.len().saturating_sub(max_lines);
+    filtered[start..].join("\n")
 }
 
 fn rejected(id: &str, op: &str, address: &str, err: DispatchError) -> Receipt {
@@ -1819,8 +1956,8 @@ mod tests {
         assert_eq!(svc.port_mut().starts[0].engine, "codex");
         let prompt = svc.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Task body"));
-        assert!(prompt.contains("This text is the complete manual."));
-        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("This text is the complete manual."));
+        assert!(!prompt.contains("kite dispatch kill"));
         assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert!(!svc.port_mut().starts[0].manual_as_system);
@@ -1855,8 +1992,8 @@ mod tests {
         assert_eq!(started.status, ReceiptStatus::Submitted);
         let prompt = svc.port_mut().starts[0].prompt.clone().unwrap_or_default();
         assert!(prompt.contains("Look at the tests"));
-        assert!(prompt.contains("This text is the complete manual."));
-        assert!(prompt.contains("kite dispatch kill"));
+        assert!(!prompt.contains("This text is the complete manual."));
+        assert!(!prompt.contains("kite dispatch kill"));
         assert!(!prompt.contains("KITE_SKILL_FILE"));
         assert!(!prompt.contains("kite dispatch run <role>"));
         assert!(!svc.port_mut().starts[0].manual_as_system);
@@ -2133,5 +2270,65 @@ mod tests {
         let start = &svc.port_mut().starts[0];
         assert_eq!(start.argv, vec!["cargo".to_string(), "test".to_string()]);
         assert!(start.prompt.is_none());
+    }
+
+    #[test]
+    fn default_engine_runs_receive_canonical_codenames_and_clean_notice_tails() {
+        let mut svc = service();
+        // Parent claims Orion (even with Title Case)
+        svc.attach(Family::Terminal, "parent", Some("Orion"), None, false)
+            .unwrap();
+        svc.publish_pane("Orion", "idle", 1, 1_000, None, None)
+            .unwrap();
+
+        let first = svc.run(RunInput {
+            id: "del-1".into(),
+            via: Family::Terminal,
+            engine: Some("antigravity".into()),
+            command: None,
+            name: Some("antigravity".into()),
+            parent: Some("alias:Orion".into()),
+            outlive: false,
+            role: None,
+            role_missing: false,
+            task: Some("Audit repo".into()),
+            caller: Caller::Agent,
+            cwd: None,
+            now_ms: 1_100,
+            hidden: false,
+            argv: Vec::new(),
+        });
+        assert_eq!(first.status, ReceiptStatus::Submitted);
+        assert_eq!(svc.port_mut().starts[0].name.as_deref(), Some("nova"));
+
+        let second = svc.run(RunInput {
+            id: "del-2".into(),
+            via: Family::Terminal,
+            engine: Some("antigravity".into()),
+            command: None,
+            name: Some("antigravity".into()),
+            parent: Some("Orion".into()),
+            outlive: false,
+            role: None,
+            role_missing: false,
+            task: Some("Audit tests".into()),
+            caller: Caller::Agent,
+            cwd: None,
+            now_ms: 1_200,
+            hidden: false,
+            argv: Vec::new(),
+        });
+        assert_eq!(second.status, ReceiptStatus::Submitted);
+        assert_eq!(svc.port_mut().starts[1].name.as_deref(), Some("atlas"));
+
+        let ls = svc.ls();
+        assert!(ls.iter().any(|row| row.contains("alias:orion")));
+        assert!(ls.iter().any(|row| row.contains("alias:nova antigravity")));
+        assert!(ls.iter().any(|row| row.contains("alias:atlas antigravity")));
+
+        let pasted = format_terminal_paste("line 1\r\nline 2\n");
+        assert_eq!(pasted, "\u{1b}[200~line 1\nline 2\u{1b}[201~");
+        let tail = clean_notice_tail("⢿  Running...\n⣻  Running...\nSummary complete\n\n", 20);
+        assert_eq!(tail, "Summary complete");
     }
 }

@@ -42,18 +42,23 @@ impl Port for LivePort {
                 if meta.mounted {
                     return Ok(());
                 }
-                let mut input = text.to_string();
-                if !input.ends_with('\n') && !input.ends_with('\r') {
-                    input.push_str("\r\n");
-                }
+                let bracketed = crate::dispatch::policy::format_terminal_paste(text);
                 let written = crate::terminal::write_terminal_sync(json!({
                     "sessionId": id,
-                    "input": input,
+                    "input": bracketed,
                 }));
                 if written.get("error").is_some()
                     || written.get("ok") == Some(&Value::Bool(false))
                 {
                     // No live PTY answered: never report a delivery that never happened.
+                    return Err(DispatchError::DestinationGone);
+                }
+                thread::sleep(Duration::from_millis(45));
+                let enter = crate::terminal::write_terminal_sync(json!({
+                    "sessionId": id,
+                    "input": "\r",
+                }));
+                if enter.get("error").is_some() || enter.get("ok") == Some(&Value::Bool(false)) {
                     return Err(DispatchError::DestinationGone);
                 }
                 Ok(())
@@ -101,7 +106,7 @@ impl Port for LivePort {
             payload["initialPrompt"] = Value::String(prompt.clone());
         }
         if request.manual_as_system {
-            payload["systemPrompt"] = Value::String(skill_text().to_string());
+            payload["systemPrompt"] = Value::String(cli::manual_text().to_string());
         }
         if !request.argv.is_empty() {
             payload["argv"] = Value::Array(
@@ -165,12 +170,29 @@ fn emit_projectile(session_id: &str, text: &str, meta: &SubmitMeta) {
         "sourceSessionId": meta.source,
         "prompt": text,
         "label": meta.label,
+        "visualOnly": !meta.mounted,
     });
     if let Some(app) = crate::get_app_handle() {
         let _ = app.emit("dispatch-prompt-projectile", payload);
     } else {
         crate::core_daemon::broadcast_daemon_ui_event("dispatch-prompt-projectile", payload);
     }
+}
+
+pub fn register_terminal_session(session_id: &str, engine: &str, alias: Option<&str>) {
+    if session_id.trim().is_empty() {
+        return;
+    }
+    let mut guard = match service().lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    };
+    let clean_alias = alias
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("terminal"));
+    let _ = guard.attach(Family::Terminal, session_id, clean_alias, None, false);
+    let key = crate::dispatch::address::canonical(true, session_id);
+    guard.set_endpoint_engine(&key, engine);
 }
 
 fn pane_ids() -> &'static Mutex<HashSet<String>> {
@@ -372,6 +394,17 @@ fn direct_op(request: &Value, op: &str, id: &str) -> Receipt {
     }
     apply_switches(&mut guard, address);
     prepare(&mut guard, address, request.get("observed").and_then(Value::as_str));
+    if let Some(alias) = request.get("alias").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(sid) = address.strip_prefix("session:") {
+            let _ = guard.attach(Family::Terminal, sid, Some(alias), None, false);
+        }
+    }
+    if let Some(engine) = request.get("engine").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(sid) = address.strip_prefix("session:") {
+            let key = crate::dispatch::address::canonical(true, sid);
+            guard.set_endpoint_engine(&key, engine);
+        }
+    }
     match op {
         "publish" => {
             let state = request.get("state").and_then(Value::as_str).unwrap_or("unknown");

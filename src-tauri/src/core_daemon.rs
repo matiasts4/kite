@@ -524,6 +524,11 @@ pub fn handle_control_rpc_request(
             crate::terminal::find_terminal_text_local_sync(p)
         }
 
+        "session.get_selection_text" => {
+            let p = params.unwrap_or_else(|| json!({}));
+            crate::terminal::get_terminal_selection_text_local_sync(p)
+        }
+
         "session.clear_vt" => {
             let p = params.unwrap_or_else(|| json!({}));
             Ok(crate::terminal::clear_terminal_vt_local_sync(p))

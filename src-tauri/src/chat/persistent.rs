@@ -161,10 +161,16 @@ pub fn antigravity_args(
         Some("readOnly") if declared.has_work_mode("plan") => {
             args.push("--mode".to_string());
             args.push("plan".to_string());
+            if declared.accepts_permission {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
         }
         Some("acceptEdits") if declared.has_work_mode("accept-edits") => {
             args.push("--mode".to_string());
             args.push("accept-edits".to_string());
+            if declared.accepts_permission {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
         }
         Some("fullAccess") if declared.accepts_permission => {
             args.push("--dangerously-skip-permissions".to_string());
@@ -279,6 +285,26 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
                 events.push(TransportEvent::Notice(bounded_notice(&format!(
                     "antigravity ended the turn with status {status}"
                 ))));
+            }
+            if let Some(err) = value.pointer("/result/error").and_then(Value::as_str) {
+                let trimmed_err = err.trim();
+                if !trimmed_err.is_empty() {
+                    events.push(TransportEvent::Notice(bounded_notice(&format!(
+                        "antigravity error: {trimmed_err}"
+                    ))));
+                }
+            }
+            if let Some(denied) = value.pointer("/result/denied_actions").and_then(Value::as_array) {
+                if !denied.is_empty() {
+                    let actions: Vec<&str> = denied
+                        .iter()
+                        .filter_map(|d| d.get("action").or_else(|| d.get("display_name")).and_then(Value::as_str))
+                        .collect();
+                    events.push(TransportEvent::Notice(bounded_notice(&format!(
+                        "antigravity auto-denied tools in headless mode: {}",
+                        actions.join(", ")
+                    ))));
+                }
             }
             events.push(TransportEvent::TurnEnded);
             ParsedLine {
@@ -2052,9 +2078,11 @@ mod tests {
 
         let read_only = antigravity_args(&declared, &controls(None, None, Some("readOnly")), None);
         assert!(read_only.windows(2).any(|pair| pair == ["--mode", "plan"]));
+        assert!(read_only.iter().any(|arg| arg == "--dangerously-skip-permissions"));
 
         let edits = antigravity_args(&declared, &controls(None, None, Some("acceptEdits")), None);
         assert!(edits.windows(2).any(|pair| pair == ["--mode", "accept-edits"]));
+        assert!(edits.iter().any(|arg| arg == "--dangerously-skip-permissions"));
 
         let unknown = antigravity_args(&declared, &controls(None, None, Some("somethingElse")), None);
         assert!(!unknown.iter().any(|arg| arg == "--mode"));

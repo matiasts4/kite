@@ -477,6 +477,27 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
             if let Some(h) = handle.as_deref() {
                 sync_thread_provider_session_id(&thread_id, Some(h));
             }
+            if !ok {
+                let provider = threads()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(&thread_id))
+                    .and_then(|t| t.get("provider").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let projected = crate::chat::normalize::project_process_failure(
+                    Some(1),
+                    &error,
+                    &provider,
+                    &[],
+                );
+                if let Some(failure) = projected.failure {
+                    record_turn_failure(&thread_id, &failure);
+                    finish_run(&run_id, false, false, "");
+                    return;
+                }
+            }
             finish_run(&run_id, ok, false, &error);
             return;
         }

@@ -192,6 +192,8 @@ pub struct DiskState {
     pub agents: Vec<AgentProfile>,
     pub threads: Vec<Value>,
     pub last_provider: String,
+    pub last_model: Option<String>,
+    pub last_effort: Option<String>,
     pub grid: Value,
     pub revision: u64,
     pub routines: Vec<Value>,
@@ -284,6 +286,8 @@ fn default_disk_state() -> DiskState {
         agents: seed_agents(),
         threads: Vec::new(),
         last_provider: "claude".into(),
+        last_model: None,
+        last_effort: None,
         grid: Value::Null,
         revision: 1,
         routines: seed_routines(),
@@ -435,6 +439,8 @@ fn load_or_migrate_sqlite() -> DiskState {
     let threads: Vec<Value> = th_rows.flatten().filter(|v| !v.is_null()).collect();
 
     let mut last_provider = "claude".to_string();
+    let mut last_model: Option<String> = None;
+    let mut last_effort: Option<String> = None;
     let mut grid = Value::Null;
     let mut revision = 1u64;
     let mut routines_seeded = false;
@@ -450,6 +456,8 @@ fn load_or_migrate_sqlite() -> DiskState {
     for (k, v) in app_rows.flatten() {
         match k.as_str() {
             "lastProvider" => last_provider = v,
+            "lastModel" => last_model = if v.trim().is_empty() { None } else { Some(v) },
+            "lastEffort" => last_effort = if v.trim().is_empty() { None } else { Some(v) },
             "grid" => grid = serde_json::from_str(&v).unwrap_or(Value::Null),
             "revision" => revision = v.parse().unwrap_or(1),
             "routinesSeeded" => routines_seeded = v == "1",
@@ -486,6 +494,8 @@ fn load_or_migrate_sqlite() -> DiskState {
         agents,
         threads,
         last_provider,
+        last_model,
+        last_effort,
         grid,
         revision,
         routines,
@@ -743,8 +753,12 @@ fn sync_notifications(tx: &Transaction<'_>, notifications: &[Value]) -> Result<(
 fn sync_app_state(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlite::Error> {
     let grid = serde_json::to_string(&state.grid).unwrap_or_default();
     let revision = state.revision.to_string();
+    let last_model_val = state.last_model.as_deref().unwrap_or("");
+    let last_effort_val = state.last_effort.as_deref().unwrap_or("");
     let rows = [
         ("lastProvider", state.last_provider.as_str()),
+        ("lastModel", last_model_val),
+        ("lastEffort", last_effort_val),
         ("grid", grid.as_str()),
         ("revision", revision.as_str()),
         ("routinesSeeded", "1"),
@@ -815,6 +829,16 @@ pub fn last_provider() -> &'static Mutex<String> {
     CELL.get_or_init(|| Mutex::new(initial_state().last_provider.clone()))
 }
 
+pub fn last_model() -> &'static Mutex<Option<String>> {
+    static CELL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(initial_state().last_model.clone()))
+}
+
+pub fn last_effort() -> &'static Mutex<Option<String>> {
+    static CELL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(initial_state().last_effort.clone()))
+}
+
 pub fn grid_slot() -> &'static Mutex<Value> {
     static CELL: std::sync::OnceLock<Mutex<Value>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| Mutex::new(initial_state().grid.clone()))
@@ -842,6 +866,8 @@ pub fn persist() {
         agents: agents().lock().unwrap().clone(),
         threads: threads().lock().unwrap().clone(),
         last_provider: last_provider().lock().unwrap().clone(),
+        last_model: last_model().lock().unwrap().clone(),
+        last_effort: last_effort().lock().unwrap().clone(),
         grid: grid_slot().lock().unwrap().clone(),
         revision: *revision_counter().lock().unwrap(),
         routines: routines().lock().unwrap().clone(),
@@ -961,6 +987,8 @@ mod tests {
             }],
             threads: vec![json!({ "id": thread_id, "createdAtUnixMs": 11, "updatedAtUnixMs": 33, "title": "kept" })],
             last_provider: "claude".into(),
+            last_model: None,
+            last_effort: None,
             grid: json!({ "cols": 2 }),
             revision: 4,
             routines: vec![json!({ "id": routine_id, "enabled": true, "name": "once" })],

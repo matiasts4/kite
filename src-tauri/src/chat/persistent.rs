@@ -358,6 +358,8 @@ pub struct AntigravitySession {
     child: Option<HiddenChild>,
     stdin: Option<Box<dyn Write + Send>>,
     reader: Option<JoinHandle<()>>,
+    stderr_reader: Option<JoinHandle<()>>,
+    stderr_tail: Arc<Mutex<String>>,
     events: Arc<Mutex<VecDeque<TransportEvent>>>,
     resume: Arc<Mutex<Option<String>>>,
     eof: Arc<AtomicBool>,
@@ -390,6 +392,8 @@ impl AntigravitySession {
             child: None,
             stdin: None,
             reader: None,
+            stderr_reader: None,
+            stderr_tail: Arc::new(Mutex::new(String::new())),
             events: Arc::new(Mutex::new(VecDeque::new())),
             resume: Arc::new(Mutex::new(None)),
             eof: Arc::new(AtomicBool::new(false)),
@@ -403,6 +407,9 @@ impl AntigravitySession {
         self.stdin = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -462,6 +469,7 @@ impl SessionTransport for AntigravitySession {
             let _ = child.kill();
             return Err("the antigravity session started without a readable stdout".to_string());
         };
+        let stderr = child.stderr.take();
 
         self.stdin = child.stdin.take();
         self.child = Some(child);
@@ -477,6 +485,12 @@ impl SessionTransport for AntigravitySession {
         self.reader = Some(std::thread::spawn(move || {
             read_antigravity_stdout(stdout, events, resume, eof)
         }));
+
+        let tail = Arc::new(Mutex::new(String::new()));
+        self.stderr_tail = Arc::clone(&tail);
+        self.stderr_reader = stderr.map(|mut pipe| {
+            std::thread::spawn(move || read_tail(&mut pipe, tail))
+        });
         Ok(())
     }
 
@@ -524,15 +538,23 @@ impl SessionTransport for AntigravitySession {
         if reader_finished && !self.stopping && self.eof.load(Ordering::SeqCst) {
             if let Some(mut child) = self.child.take() {
                 let code = child.wait().ok();
+                let tail = self
+                    .stderr_tail
+                    .lock()
+                    .map(|tail| tail.clone())
+                    .unwrap_or_default();
                 let error = match code {
                     Some(0) => None,
-                    Some(other) => Some(format!("antigravity exited with code {other}")),
+                    Some(other) => Some(format!("antigravity exited with code {other}{}", tail_detail(&tail))),
                     None => None,
                 };
                 events.push(TransportEvent::Exit { code, error });
             }
             self.reader = None;
             self.stdin = None;
+            if let Some(reader) = self.stderr_reader.take() {
+                let _ = reader.join();
+            }
         }
 
         events

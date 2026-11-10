@@ -42,6 +42,32 @@ pub fn blank_thread(
 ) -> Value {
     let now = now_ms();
     let provider = if provider_ok(provider) { provider } else { "antigravity" };
+    let default_model_val = crate::persist::last_model()
+        .lock()
+        .unwrap()
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| json!(m))
+        .unwrap_or(Value::Null);
+    let default_effort_val = crate::persist::last_effort()
+        .lock()
+        .unwrap()
+        .clone();
+    let provider_options = if let Some(ref effort) = default_effort_val {
+        if !effort.trim().is_empty() {
+            vec![json!({ "id": "effort", "value": effort })]
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let effort_json = default_effort_val
+        .as_deref()
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| json!(e))
+        .unwrap_or(Value::Null);
+
     json!({
         "schemaVersion": 1,
         "revision": next_revision(),
@@ -54,8 +80,9 @@ pub fn blank_thread(
         "plans": [],
         "mode": default_mode(provider),
         "plan": false,
-        "model": Value::Null,
-        "providerOptions": [],
+        "model": default_model_val,
+        "effort": effort_json,
+        "providerOptions": provider_options,
         "status": "idle",
         "usage": { "inputTokens": 0, "outputTokens": 0, "costUsd": 0.0 },
         "workspaceId": workspace_id,
@@ -238,7 +265,13 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
             }
         }
         if patch.get("model").is_some() {
-            thread["model"] = normalize_model(patch.get("model"));
+            let normalized = normalize_model(patch.get("model"));
+            if let Some(m) = normalized.as_str() {
+                if !m.trim().is_empty() {
+                    *crate::persist::last_model().lock().unwrap() = Some(m.trim().to_string());
+                }
+            }
+            thread["model"] = normalized;
         }
         if let Some(options) = patch.get("providerOptions").and_then(|v| v.as_array()) {
             thread["providerOptions"] = Value::Array(sanitize_options(options));
@@ -250,7 +283,10 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
                 effort,
             );
             thread["effort"] = match effort {
-                Some(value) if !value.trim().is_empty() => json!(value.trim()),
+                Some(value) if !value.trim().is_empty() => {
+                    *crate::persist::last_effort().lock().unwrap() = Some(value.trim().to_string());
+                    json!(value.trim())
+                }
                 _ => Value::Null,
             };
         }
@@ -544,6 +580,12 @@ pub fn apply_launch_choices(thread_id: &str, req: Option<&Value>) {
     if let Some(mode) = req.get("mode").and_then(|v| v.as_str()) {
         patch.insert("mode".to_string(), json!(mode));
     }
+    if let Some(model) = req.get("model") {
+        patch.insert("model".to_string(), model.clone());
+    }
+    if let Some(effort) = req.get("effort") {
+        patch.insert("effort".to_string(), effort.clone());
+    }
     if !patch.is_empty() {
         configure_thread(thread_id, &Value::Object(patch));
     }
@@ -714,5 +756,21 @@ mod rewind {
             thread.get("id").and_then(|value| value.as_str()) == Some(unknown)
         });
         assert!(!created_anyway, "a missing thread must not be created");
+    }
+
+    #[test]
+    fn blank_thread_remembers_last_selected_model_and_effort() {
+        let tid = "temp-thread-model-memory";
+        let _cleanup = RemoveThread(tid.to_string());
+        configure_thread(tid, &json!({
+            "model": "gemini-3.8-flash",
+            "effort": "medium"
+        }));
+        let blank = blank_thread("blank-probe-id", None, "New Chat", "antigravity", None);
+        assert_eq!(blank["model"], json!("gemini-3.8-flash"));
+        assert_eq!(blank["effort"], json!("medium"));
+        assert!(blank["providerOptions"].as_array().unwrap().iter().any(|opt| {
+            opt["id"] == "effort" && opt["value"] == "medium"
+        }));
     }
 }

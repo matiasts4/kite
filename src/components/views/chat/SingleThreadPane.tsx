@@ -40,6 +40,7 @@ import { getSavedSelectedModel, getSavedSelectedAgent } from './modelPersistence
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
 import { ThreadErrorBanner } from './ThreadErrorBanner';
+import { openSettingsTab } from '../../../lib/settingsNav';
 import { ChangedFilesCard } from './ChangedFilesCard';
 import { HtmlRenderFrame } from './HtmlRenderFrame';
 import { ComposerPendingUserInputPanel } from './ComposerPendingUserInputPanel';
@@ -429,7 +430,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
         window.setTimeout(() => onSend(), delay);
       }}
       onSignIn={() => {
-        window.dispatchEvent(new CustomEvent('kite:open-provider-connections'));
+        openSettingsTab('quotas', thread.provider);
       }}
     />
   ) : null;

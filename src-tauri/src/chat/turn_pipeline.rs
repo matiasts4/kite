@@ -492,6 +492,9 @@ pub fn classify_turn_failure(exit_code: Option<i32>, stderr: &str, provider: &st
         || lower.contains("not logged")
         || lower.contains("auth required")
         || lower.contains("unauthorized")
+        || lower.contains("not authenticated")
+        || lower.contains("authentication required")
+        || lower.contains("login")
     {
         return Some(TurnFailure::AuthRequired {
             provider: provider.to_string(),
@@ -502,6 +505,9 @@ pub fn classify_turn_failure(exit_code: Option<i32>, stderr: &str, provider: &st
         || lower.contains("usage:")
         || lower.contains("unexpected argument")
         || lower.contains("unrecognized")
+        || lower.contains("flags provided but not defined")
+        || lower.contains("invalid model selection")
+        || lower.contains("invalid flag")
     {
         return Some(TurnFailure::CliUsageError {
             command: provider.to_string(),
@@ -934,6 +940,30 @@ mod tests {
             projected.failure,
             Some(TurnFailure::CliUsageError { .. })
         ));
+    }
+
+    #[test]
+    fn auth_and_cli_flag_failures_classify_correctly() {
+        let auth = classify_turn_failure(
+            Some(1),
+            "error: not authenticated. Run 'agy auth' to log in.",
+            "antigravity",
+        );
+        assert!(matches!(auth, Some(TurnFailure::AuthRequired { .. })));
+
+        let flag_err = classify_turn_failure(
+            Some(2),
+            "flags provided but not defined: -invalid-flag",
+            "antigravity",
+        );
+        assert!(matches!(flag_err, Some(TurnFailure::CliUsageError { .. })));
+
+        let model_err = classify_turn_failure(
+            Some(1),
+            "error: invalid model selection (--model \"Gemini 3.0 Flash\"): invalid model",
+            "antigravity",
+        );
+        assert!(matches!(model_err, Some(TurnFailure::CliUsageError { .. })));
     }
 
     #[test]

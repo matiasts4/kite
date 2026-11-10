@@ -158,7 +158,7 @@ export function useOperatorVoice({
             err instanceof Error ? err.message : 'No se pudo ejecutar la orden de voz.';
           setErrorWithAutoClear(message);
         }
-      } else {
+      } else if (!(typeof window !== 'undefined' && (window as any).__kiteVoiceSessionActive)) {
         setErrorWithAutoClear(
           'No te entendí o el audio quedó en silencio. Habla un poco más cerca del micrófono e inténtalo de nuevo.'
         );

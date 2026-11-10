@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ChatComposer } from './ChatComposer';
 import { VoiceTurnTraceCard } from './VoiceTurnTraceCard';
 import { VoiceCommentaryRow } from './VoiceCommentaryRow';
+import { ZedStripHost } from '../../ZedStrip';
 import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import { declarationFromCatalog } from './driverDeclaration';
 
@@ -218,5 +219,36 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
     expect(turns).toHaveLength(1);
     expect(turns[0].userPrompt).toBe('Hola asistente');
     expect(turns[0].reply).toBe('¡Hola! ¿En qué puedo ayudarte?');
+  });
+
+  it('mounts ZedStripHost engine in background when Thread Voice Mode starts with operatorOpen=false and hands off to orb on surface switch (S5, S7)', () => {
+    render(
+      <ZedStripHost
+        call={{
+          isActive: false,
+          status: 'connected',
+          toolCalls: [],
+        }}
+      />
+    );
+
+    // Initially inactive -> not mounted
+    expect(screen.queryByTestId('zed-card')).not.toBeInTheDocument();
+
+    // Activate Thread Voice Mode
+    act(() => {
+      voiceSessionStore.startSession('thread-live-1', 'thread');
+    });
+
+    // Engine is now mounted in background, with floating orb visually hidden on 'thread' surface
+    const zedCard = screen.getByTestId('zed-card');
+    expect(zedCard).toBeInTheDocument();
+    expect(zedCard).toHaveStyle({ display: 'none' });
+
+    // Switch surface to 'orb' (e.g. user navigates to Code mode) -> floating orb becomes visible
+    act(() => {
+      voiceSessionStore.setActiveSurface('orb');
+    });
+    expect(zedCard).not.toHaveStyle({ display: 'none' });
   });
 });

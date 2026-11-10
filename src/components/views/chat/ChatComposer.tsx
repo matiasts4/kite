@@ -1269,10 +1269,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                   : dictationError || 'Dictate message'
               }
               aria-label={dictationState === 'recording' ? 'Finish dictation' : 'Dictate message'}
-              className={`chat-dictate-control size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-colors ${
-                dictationState === 'recording'
-                  ? 'text-destructive'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-hover-row'
+              className={`chat-dictate-control size-8 rounded-control ${
+                dictationState === 'recording' ? 'chat-dictate-control--recording' : ''
               }`}
             >
               {dictationState === 'recording' ? (
@@ -1301,15 +1299,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               disabled={running}
               onClick={() => {
                 voice.startSession(threadId, 'thread');
-                window.dispatchEvent(
-                  new CustomEvent('kite:toggle-voice-session', {
-                    detail: { threadId, surface: 'thread' },
-                  })
-                );
               }}
               title="Iniciar sesión de voz"
               aria-label="Iniciar sesión de voz"
-              className="chat-voice-mode-control size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent text-muted-foreground hover:text-foreground hover:bg-hover-row cursor-pointer transition-colors"
+              className="chat-voice-mode-control size-8 rounded-control"
             >
               <svg
                 width="14"
@@ -1400,17 +1393,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       </ComposerSurface.Main>
 
       {/* Tier 2: Recessed Lower Context Strip */}
-      {!isVoiceModeActive && (
-        <ComposerContextStrip
-          currentBranch={threadBranch || 'main'}
-          branches={branches}
-          currentWorkspace={threadWorkspaceName || 'Local'}
-          workspaces={workspaces}
-          onSelectBranch={onSwitchBranch}
-          onCreateBranch={onCreateBranch}
-          onSelectWorkspace={onSelectWorkspace}
-        />
-      )}
+      <ComposerContextStrip
+        currentBranch={threadBranch || 'main'}
+        branches={branches}
+        currentWorkspace={threadWorkspaceName || 'Local'}
+        workspaces={workspaces}
+        onSelectBranch={onSwitchBranch}
+        onCreateBranch={onCreateBranch}
+        onSelectWorkspace={onSelectWorkspace}
+      />
     </div>
   );
 };

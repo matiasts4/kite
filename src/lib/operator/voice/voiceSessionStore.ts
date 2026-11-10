@@ -3,9 +3,68 @@
 
 import { useSyncExternalStore } from 'react';
 import type { ActionReceipt } from '../contract';
+import { loadOperatorConfig } from '../operatorConfig';
+import { resolveVerifiedModel } from '../providers/resolvePlanner';
 
 export type VoiceSessionPhase = 'inactive' | 'starting' | 'active' | 'stopping';
 export type VoiceSurface = 'orb' | 'thread';
+
+export interface ConfiguredAssistantDisplay {
+  personaName: string;
+  providerId: string;
+  providerLabel: string;
+  modelId: string;
+  ttsEngine: 'native' | 'elevenlabs';
+  ttsLabel: string;
+  voiceName: string;
+  language: 'es-ES' | 'en-US';
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  grok: 'Grok',
+  antigravity: 'Antigravity',
+  opencode: 'OpenCode',
+  vercel: 'Vercel',
+  cloudflare: 'Cloudflare',
+  local: 'Local',
+};
+
+export function getConfiguredAssistantDisplay(): ConfiguredAssistantDisplay {
+  const opConfig = loadOperatorConfig();
+  const activeId = opConfig.activeProvider || 'grok';
+  const requestedModel =
+    activeId === 'opencode'
+      ? opConfig.opencodeModel
+      : activeId === 'vercel'
+      ? opConfig.vercelModel
+      : activeId === 'cloudflare'
+      ? opConfig.cloudflareModel
+      : activeId === 'antigravity'
+      ? opConfig.antigravityModel
+      : activeId === 'grok'
+      ? opConfig.grokModel
+      : undefined;
+  const providerLabel = PROVIDER_LABELS[activeId] || activeId.toUpperCase();
+  const modelId =
+    activeId === 'local'
+      ? 'heurístico'
+      : resolveVerifiedModel(activeId, requestedModel);
+  const ttsEngine = opConfig.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'native';
+  const ttsLabel = ttsEngine === 'elevenlabs' ? 'ElevenLabs' : 'Voz Nativa';
+  const voiceName = opConfig.persona?.voice || 'Ara';
+  const language = opConfig.persona?.language === 'en' ? 'en-US' : 'es-ES';
+
+  return {
+    personaName: opConfig.persona?.name || 'Zed',
+    providerId: activeId,
+    providerLabel,
+    modelId,
+    ttsEngine,
+    ttsLabel,
+    voiceName,
+    language,
+  };
+}
 
 export interface VoiceTurnRecord {
   turnId: string;
@@ -13,6 +72,7 @@ export interface VoiceTurnRecord {
   source: 'voz' | 'texto';
   strategy?: string;
   providerId?: string;
+  modelId?: string;
   durationMs?: number;
   overallSuccess?: boolean;
   receipts?: ActionReceipt[];
@@ -36,7 +96,18 @@ export interface VoiceSessionState {
   liveAudioLevel: number;
   activeTurnStage?: string;
   activeTurnDetail?: string;
+  isListening?: boolean;
+  isTranscribing?: boolean;
+  isSpeaking?: boolean;
+  interimTranscript?: string;
+  turnsVersion?: number;
 }
+
+export type VoiceTextTurnExecutor = (
+  text: string,
+  threadId: string,
+  workspaceId?: string
+) => Promise<void>;
 
 class VoiceSessionStore {
   private state: VoiceSessionState = {
@@ -47,9 +118,15 @@ class VoiceSessionStore {
     speakerMuted: false,
     isPausedForDictation: false,
     liveAudioLevel: 0,
+    isListening: false,
+    isTranscribing: false,
+    isSpeaking: false,
+    interimTranscript: '',
+    turnsVersion: 0,
   };
 
   private turnsByThread: Record<string, VoiceTurnRecord[]> = {};
+  private textTurnExecutor: VoiceTextTurnExecutor | null = null;
 
   private listeners = new Set<() => void>();
 
@@ -137,6 +214,10 @@ class VoiceSessionStore {
       liveAudioLevel: 0,
       activeTurnStage: undefined,
       activeTurnDetail: undefined,
+      isListening: false,
+      isTranscribing: false,
+      isSpeaking: false,
+      interimTranscript: '',
     };
     this.notify();
   }
@@ -201,12 +282,45 @@ class VoiceSessionStore {
   }
 
   setActiveTurnStage(stage?: string, detail?: string) {
+    if (this.state.activeTurnStage === stage && this.state.activeTurnDetail === detail) return;
     this.state = {
       ...this.state,
       activeTurnStage: stage,
       activeTurnDetail: detail,
     };
     this.notify();
+  }
+
+  setVoiceRuntimeState(
+    patch: Partial<
+      Pick<VoiceSessionState, 'isListening' | 'isTranscribing' | 'isSpeaking' | 'interimTranscript'>
+    >
+  ) {
+    const next = { ...this.state, ...patch };
+    if (
+      next.isListening === this.state.isListening &&
+      next.isTranscribing === this.state.isTranscribing &&
+      next.isSpeaking === this.state.isSpeaking &&
+      next.interimTranscript === this.state.interimTranscript
+    ) {
+      return;
+    }
+    this.state = next;
+    this.notify();
+  }
+
+  registerTextTurnExecutor(executor: VoiceTextTurnExecutor | null) {
+    this.textTurnExecutor = executor;
+  }
+
+  hasTextTurnExecutor(): boolean {
+    return this.textTurnExecutor !== null;
+  }
+
+  async submitTextTurn(text: string, threadId: string, workspaceId?: string): Promise<boolean> {
+    if (!this.textTurnExecutor) return false;
+    await this.textTurnExecutor(text, threadId, workspaceId);
+    return true;
   }
 
   getThreadVoiceTurns(threadId: string): VoiceTurnRecord[] {
@@ -232,6 +346,10 @@ class VoiceSessionStore {
         localStorage.setItem(`kite.voiceTurns.${threadId}`, JSON.stringify(updated));
       }
     } catch {}
+    this.state = {
+      ...this.state,
+      turnsVersion: (this.state.turnsVersion || 0) + 1,
+    };
     this.notify();
   }
 
@@ -243,6 +361,10 @@ class VoiceSessionStore {
         localStorage.removeItem(`kite.voiceTurns.${threadId}`);
       }
     } catch {}
+    this.state = {
+      ...this.state,
+      turnsVersion: (this.state.turnsVersion || 0) + 1,
+    };
     this.notify();
   }
 }

@@ -814,3 +814,435 @@
 .kite-composer-action-btn--stop:hover {
   background: color-mix(in srgb, var(--destructive, #ef4444) 85%, #000000);
 }
+
+/* 13. Dictation & Voice Mode Composer Triggers + Voice Mode Footer Bar */
+.chat-dictate-control,
+.chat-voice-mode-control {
+  width: 1.75rem; /* 28px compact toolbar control */
+  height: 1.75rem;
+  border-radius: var(--control-radius, 8px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--secondary-label, #a1a1aa);
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.chat-dictate-control:hover:not(:disabled),
+.chat-voice-mode-control:hover:not(:disabled) {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #ffffff);
+}
+
+.chat-dictate-control:disabled,
+.chat-voice-mode-control:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-dictate-control--recording {
+  color: var(--destructive, #ef4444);
+  background: color-mix(in srgb, var(--destructive, #ef4444) 14%, transparent);
+  border-color: color-mix(in srgb, var(--destructive, #ef4444) 30%, transparent);
+}
+
+.kite-voice-mode-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0.75rem 0.625rem;
+  min-height: 2.25rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.kite-voice-locked-badge {
+  height: 1.75rem; /* 28px */
+  padding: 0 0.5rem;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: rgba(255, 255, 255, 0.04);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-primary, #ffffff);
+  user-select: none;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.kite-voice-lock-icon {
+  color: var(--muted-foreground, #71717a);
+  flex-shrink: 0;
+}
+
+.kite-voice-badge-main {
+  white-space: nowrap;
+  color: var(--secondary-label, #d4d4d8);
+}
+
+.kite-voice-badge-model {
+  padding: 0.0625rem 0.375rem;
+  border-radius: var(--vl-radius-xs, 4px);
+  background: rgba(51, 156, 255, 0.14);
+  color: #60a5fa;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.kite-voice-status-pill {
+  height: 1.75rem;
+  padding: 0 0.5rem;
+  border-radius: var(--control-radius, 8px);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  color: var(--secondary-label, #a1a1aa);
+  min-width: 0;
+  max-width: 18rem;
+  overflow: hidden;
+  user-select: none;
+}
+
+.kite-voice-status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kite-voice-status-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 9999px;
+  flex-shrink: 0;
+  background: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
+
+.kite-voice-status-dot--thinking {
+  background: #a855f7;
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.65);
+}
+
+.kite-voice-status-dot--speaking {
+  background: #339cff;
+  box-shadow: 0 0 8px rgba(51, 156, 255, 0.65);
+}
+
+.kite-voice-status-dot--muted {
+  background: #ef4444;
+  box-shadow: none;
+}
+
+.kite-voice-call-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+.kite-voice-ctrl-btn {
+  width: 1.75rem; /* 28px */
+  height: 1.75rem;
+  border-radius: var(--control-radius, 8px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--secondary-label, #a1a1aa);
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  box-sizing: border-box;
+}
+
+.kite-voice-ctrl-btn:hover:not(:disabled) {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.07));
+  color: var(--text-primary, #ffffff);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.kite-voice-ctrl-btn:disabled,
+.kite-voice-ctrl-btn--disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  border-color: transparent;
+  background: transparent;
+}
+
+.kite-voice-ctrl-btn--muted {
+  color: var(--destructive, #ef4444);
+  background: color-mix(in srgb, var(--destructive, #ef4444) 12%, transparent);
+  border-color: color-mix(in srgb, var(--destructive, #ef4444) 32%, transparent);
+}
+
+.kite-voice-end-pill {
+  height: 1.875rem; /* 30px */
+  min-width: 6.25rem;
+  padding: 0 0.75rem;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4375rem;
+  background: #339cff;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(51, 156, 255, 0.28);
+  transition: background-color 0.12s ease, transform 0.1s ease;
+  user-select: none;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.kite-voice-end-pill:hover {
+  background: #2b8beb;
+}
+
+.kite-voice-end-pill:active {
+  transform: scale(0.97);
+}
+
+/* 14. Thread Voice Timeline Cards, Bubbles & Live Hero */
+.kite-voice-empty-hero {
+  margin: 2rem auto 1.25rem;
+  max-width: 34rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: var(--card-radius, 12px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: rgba(24, 24, 27, 0.55);
+  backdrop-filter: blur(16px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.625rem;
+}
+
+.kite-voice-empty-hero__badge {
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border-radius: 9999px;
+  background: rgba(51, 156, 255, 0.12);
+  border: 1px solid rgba(51, 156, 255, 0.25);
+  color: #60a5fa;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.kite-voice-empty-hero__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary, #ffffff);
+}
+
+.kite-voice-empty-hero__subtitle {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--secondary-label, #a1a1aa);
+}
+
+.kite-voice-empty-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  margin-top: 0.25rem;
+}
+
+.kite-voice-empty-hero__chip {
+  padding: 0.1875rem 0.5rem;
+  border-radius: var(--vl-radius-sm, 6px);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 0.6875rem;
+  color: var(--secondary-label, #a1a1aa);
+}
+
+.kite-voice-turn-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin: 0.75rem 0;
+}
+
+.kite-voice-user-bubble {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0.125rem 0;
+}
+
+.kite-voice-user-bubble__card {
+  max-width: 85%;
+  padding: 0.5rem 0.875rem;
+  border-radius: var(--card-radius, 12px);
+  background: rgba(39, 39, 42, 0.85);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #ffffff);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.kite-voice-assistant-bubble {
+  display: flex;
+  justify-content: flex-start;
+  margin: 0.125rem 0;
+}
+
+.kite-voice-assistant-bubble__card {
+  max-width: 85%;
+  padding: 0.625rem 0.875rem;
+  border-radius: var(--card-radius, 12px);
+  background: rgba(24, 24, 27, 0.65);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #ffffff);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.kite-voice-bubble-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--secondary-label, #a1a1aa);
+  margin-bottom: 0.25rem;
+}
+
+.kite-voice-bubble-header--assistant {
+  color: #60a5fa;
+}
+
+.kite-voice-trace-card {
+  border-radius: var(--card-radius, 12px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: rgba(24, 24, 27, 0.45);
+  margin: 0.25rem 0;
+  overflow: hidden;
+  font-size: 0.75rem;
+}
+
+.kite-voice-trace-card__header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary, #ffffff);
+  user-select: none;
+  transition: background-color 0.12s ease;
+  box-sizing: border-box;
+}
+
+.kite-voice-trace-card__header:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.kite-voice-trace-card__header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.kite-voice-trace-card__header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.kite-voice-trace-card__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  flex-shrink: 0;
+}
+
+.kite-voice-trace-card__dot--ok {
+  background: #10b981;
+}
+
+.kite-voice-trace-card__dot--err {
+  background: #ef4444;
+}
+
+.kite-voice-trace-card__status-badge {
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--vl-radius-xs, 4px);
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kite-voice-trace-card__status-badge--ok {
+  background: rgba(16, 185, 129, 0.14);
+  color: #10b981;
+}
+
+.kite-voice-trace-card__status-badge--err {
+  background: rgba(239, 68, 68, 0.14);
+  color: #ef4444;
+}
+
+.kite-voice-trace-card__body {
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  padding: 0.625rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(18, 18, 21, 0.6);
+}
+
+.kite-voice-trace-card__action-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: var(--vl-radius-sm, 6px);
+  background: rgba(39, 39, 42, 0.6);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+}
+
+.kite-voice-commentary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--secondary-label, #a1a1aa);
+  user-select: none;
+}
+

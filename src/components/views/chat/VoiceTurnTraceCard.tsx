@@ -9,6 +9,7 @@ export interface VoiceTurnTraceCardProps {
   turnId: string;
   strategy?: string;
   providerId?: string;
+  modelId?: string;
   durationMs?: number;
   overallSuccess?: boolean;
   receipts?: ActionReceipt[];
@@ -25,6 +26,7 @@ export const VoiceTurnTraceCard: React.FC<VoiceTurnTraceCardProps> = ({
   turnId,
   strategy = 'llm',
   providerId = 'grok',
+  modelId,
   durationMs = 0,
   overallSuccess = true,
   receipts = [],
@@ -66,61 +68,63 @@ export const VoiceTurnTraceCard: React.FC<VoiceTurnTraceCardProps> = ({
   return (
     <div
       data-testid="voice-turn-trace-card"
-      className={`kite-voice-trace-card rounded-card border border-[var(--vl-border-subtle)] bg-[var(--vl-surface-glass-dim)] my-2 overflow-hidden text-xs transition-colors ${className}`}
+      className={`kite-voice-trace-card ${className}`}
     >
       {/* Header bar */}
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left bg-transparent hover:bg-[var(--vl-surface-glass)] cursor-pointer border-0 select-none transition-colors"
+        className="kite-voice-trace-card__header"
       >
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="kite-voice-trace-card__header-left">
           <span
-            className={`size-2 rounded-full shrink-0 ${
-              overallSuccess ? 'bg-[var(--vl-accent-green,#10b981)]' : 'bg-[var(--vl-accent-red,#ef4444)]'
+            className={`kite-voice-trace-card__dot ${
+              overallSuccess ? 'kite-voice-trace-card__dot--ok' : 'kite-voice-trace-card__dot--err'
             }`}
           />
-          <span className="font-medium text-[var(--vl-text-primary)]">
+          <span style={{ fontWeight: 600 }}>
             Traza del Asistente Zed
           </span>
-          <span className="text-[var(--vl-text-muted)] truncate">({summaryText})</span>
+          <span style={{ color: 'var(--secondary-label, #a1a1aa)' }}>({summaryText})</span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="kite-voice-trace-card__header-right">
           <span
-            className={`px-1.5 py-0.5 rounded-sm text-2xs font-semibold uppercase tracking-wider ${
+            className={`kite-voice-trace-card__status-badge ${
               overallSuccess
-                ? 'bg-[var(--vl-accent-green-subtle,#10b98120)] text-[var(--vl-accent-green,#10b981)]'
-                : 'bg-[var(--vl-accent-red-subtle,#ef444420)] text-[var(--vl-accent-red,#ef4444)]'
+                ? 'kite-voice-trace-card__status-badge--ok'
+                : 'kite-voice-trace-card__status-badge--err'
             }`}
           >
             {overallSuccess ? 'OK' : 'Error'}
           </span>
           <ChevronDownIcon
             size={12}
-            className={`text-[var(--vl-text-muted)] transition-transform duration-150 ${
-              expanded ? 'rotate-180' : ''
-            }`}
+            style={{
+              color: 'var(--secondary-label, #a1a1aa)',
+              transform: expanded ? 'rotate(180deg)' : 'none',
+              transition: 'transform 0.15s ease',
+            }}
           />
         </div>
       </button>
 
       {/* Expanded detail section */}
       {expanded && (
-        <div className="border-t border-[var(--vl-border-subtle)] px-3 py-2.5 space-y-2 bg-[var(--vl-surface-glass)]">
-          <div className="text-2xs text-[var(--vl-text-muted)]">
-            Estrategia: <span className="font-mono text-[var(--vl-text-secondary)]">{strategy}</span> · Proveedor: <span className="font-mono text-[var(--vl-text-secondary)]">{providerId}</span>
+        <div className="kite-voice-trace-card__body">
+          <div style={{ fontSize: '0.6875rem', color: 'var(--secondary-label, #a1a1aa)' }}>
+            Estrategia: <span style={{ fontFamily: 'var(--font-mono, monospace)', color: 'var(--text-primary, #ffffff)' }}>{strategy}</span> · Proveedor: <span style={{ fontFamily: 'var(--font-mono, monospace)', color: 'var(--text-primary, #ffffff)' }}>{providerId}{modelId ? ` (${modelId})` : ''}</span>
           </div>
 
           {/* Chat / Memory Reach info */}
           {consultChatsInfo && (
-            <div className="flex items-start gap-2 text-[var(--vl-text-secondary)]">
-              <SearchIcon size={13} className="text-[var(--vl-text-muted)] mt-0.5 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <span className="font-medium text-[var(--vl-text-primary)]">Alcance de conversaciones: </span>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', color: 'var(--secondary-label, #a1a1aa)' }}>
+              <SearchIcon size={13} style={{ marginTop: '2px', flexShrink: 0 }} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary, #ffffff)' }}>Alcance de conversaciones: </span>
                 {consultChatsInfo.kind === 'read' ? (
                   <span>
-                    Leído chat <strong className="text-[var(--vl-text-primary)]">«{consultChatsInfo.title}»</strong> ({consultChatsInfo.cli})
+                    Leído chat <strong style={{ color: 'var(--text-primary, #ffffff)' }}>«{consultChatsInfo.title}»</strong> ({consultChatsInfo.cli})
                   </span>
                 ) : consultChatsInfo.kind === 'index' ? (
                   <span>Consultado índice de conversaciones del proyecto</span>
@@ -133,33 +137,33 @@ export const VoiceTurnTraceCard: React.FC<VoiceTurnTraceCardProps> = ({
 
           {/* Action Receipts */}
           {receipts.length > 0 ? (
-            <div className="space-y-1.5 pt-1">
-              <div className="text-2xs font-semibold uppercase tracking-wider text-[var(--vl-text-muted)]">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem', paddingTop: '0.25rem' }}>
+              <div style={{ fontSize: '0.625rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--secondary-label, #a1a1aa)' }}>
                 Acciones Ejecutadas
               </div>
               {receipts.map((receipt, idx) => (
                 <div
                   key={`${turnId}-act-${idx}`}
-                  className="flex items-start justify-between gap-2 p-1.5 rounded-sm bg-[var(--vl-surface-raised)] border border-[var(--vl-border-subtle)]"
+                  className="kite-voice-trace-card__action-row"
                 >
-                  <div className="flex items-start gap-2 min-w-0">
-                    <span className="mt-0.5">{getActionIcon(receipt.type)}</span>
-                    <div className="min-w-0">
-                      <div className="text-[var(--vl-text-primary)] font-medium truncate">
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', minWidth: 0 }}>
+                    <span style={{ marginTop: '2px' }}>{getActionIcon(receipt.type)}</span>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ color: 'var(--text-primary, #ffffff)', fontWeight: 500 }}>
                         {receipt.summaryEs}
                       </div>
-                      <div className="text-2xs text-[var(--vl-text-muted)]">
-                        Tipo: <code className="font-mono">{receipt.type}</code>
+                      <div style={{ fontSize: '0.6875rem', color: 'var(--secondary-label, #a1a1aa)' }}>
+                        Tipo: <code style={{ fontFamily: 'var(--font-mono, monospace)' }}>{receipt.type}</code>
                         {receipt.durationMs ? ` · ${receipt.durationMs} ms` : ''}
                       </div>
                     </div>
                   </div>
 
                   <span
-                    className={`px-1 py-0.5 rounded-xs text-2xs font-medium shrink-0 ${
+                    className={`kite-voice-trace-card__status-badge ${
                       receipt.ok
-                        ? 'text-[var(--vl-accent-green,#10b981)] bg-[var(--vl-accent-green-subtle,#10b98115)]'
-                        : 'text-[var(--vl-accent-red,#ef4444)] bg-[var(--vl-accent-red-subtle,#ef444415)]'
+                        ? 'kite-voice-trace-card__status-badge--ok'
+                        : 'kite-voice-trace-card__status-badge--err'
                     }`}
                   >
                     {receipt.ok ? 'Verificado' : 'Fallo'}
@@ -168,7 +172,7 @@ export const VoiceTurnTraceCard: React.FC<VoiceTurnTraceCardProps> = ({
               ))}
             </div>
           ) : (
-            <div className="text-2xs text-[var(--vl-text-muted)] italic">
+            <div style={{ fontSize: '0.6875rem', color: 'var(--secondary-label, #a1a1aa)', fontStyle: 'italic' }}>
               No se requirieron acciones operativas sobre terminales.
             </div>
           )}

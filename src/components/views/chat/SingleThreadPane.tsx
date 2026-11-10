@@ -12,7 +12,12 @@ import {
   MicIcon,
   SparklesIcon,
 } from './ChatIcons';
-import { useVoiceSession, type VoiceTurnRecord } from '../../../lib/operator/voice/voiceSessionStore';
+import {
+  useVoiceSession,
+  voiceSessionStore,
+  getConfiguredAssistantDisplay,
+  type VoiceTurnRecord,
+} from '../../../lib/operator/voice/voiceSessionStore';
 import { VoiceTurnTraceCard } from './VoiceTurnTraceCard';
 import { VoiceCommentaryRow } from './VoiceCommentaryRow';
 import { subscribeTrace } from '../../../lib/operator/trace/trace';
@@ -409,8 +414,21 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   } | null>(null);
 
   useEffect(() => {
+    const vs = voiceSessionStore.getSnapshot();
+    if (vs.phase === 'active' || vs.phase === 'starting') {
+      voiceSessionStore.setActiveSurface('thread');
+    }
+    return () => {
+      const latest = voiceSessionStore.getSnapshot();
+      if (latest.phase === 'active' || latest.phase === 'starting') {
+        voiceSessionStore.setActiveSurface('orb');
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     setVoiceTurns(voice.getThreadVoiceTurns(thread.id));
-  }, [thread.id, voice.phase]);
+  }, [thread.id, voice.phase, voice.turnsVersion]);
 
   useEffect(() => {
     return subscribeTrace((event) => {
@@ -450,14 +468,19 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   }, [thread.id, voice.boundThreadId, voice.activeSurface]);
 
   const handleSendVoiceTurn = useCallback(async (text: string) => {
-    if (!text.trim()) return;
+    const clean = text.trim();
+    if (!clean) return;
     try {
       setLiveVoiceTurn({
         turnId: `turn-${Date.now()}`,
         stage: 'planning',
         detail: 'Pensando…',
       });
-      const res = await runOperatorTurn(text.trim(), {
+      if (voiceSessionStore.hasTextTurnExecutor()) {
+        await voiceSessionStore.submitTextTurn(clean, thread.id, thread.workspaceId ?? undefined);
+        return;
+      }
+      const res = await runOperatorTurn(clean, {
         workspaceId: thread.workspaceId ?? undefined,
         source: 'texto',
         ttsEnabled: !voice.speakerMuted,
@@ -466,7 +489,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
       if (res) {
         voice.addThreadVoiceTurn(thread.id, {
           turnId: res.turnId,
-          userPrompt: text.trim(),
+          userPrompt: clean,
           source: 'texto',
           strategy: res.strategy,
           providerId: res.providerId,
@@ -973,21 +996,58 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                       />
                     ) : null}
 
+                    {/* Live Voice Mode Empty Stage Hero when no turns have occurred yet */}
+                    {isVoiceActiveHere &&
+                      transcriptItems.length === 0 &&
+                      voiceTurns.length === 0 &&
+                      !liveVoiceTurn && (() => {
+                        const assistantDisplay = getConfiguredAssistantDisplay();
+                        return (
+                          <div className="kite-voice-empty-hero" data-testid="voice-empty-hero">
+                            <div className="kite-voice-empty-hero__badge">
+                              <SparklesIcon size={12} />
+                              <span>Sesión de voz activa · {assistantDisplay.personaName}</span>
+                            </div>
+                            <h2 className="kite-voice-empty-hero__title">
+                              {voice.interimTranscript
+                                ? `«${voice.interimTranscript}»`
+                                : voice.micMuted
+                                ? 'Micrófono en silencio'
+                                : 'Escuchando en vivo… Hablá o escribí abajo'}
+                            </h2>
+                            <p className="kite-voice-empty-hero__subtitle">
+                              Cada turno muestra tu mensaje, la tarjeta de traza verificada de acciones y la respuesta hablada del asistente.
+                            </p>
+                            <div className="kite-voice-empty-hero__meta">
+                              <span className="kite-voice-empty-hero__chip">
+                                Cerebro: {assistantDisplay.providerLabel} · {assistantDisplay.modelId}
+                              </span>
+                              <span className="kite-voice-empty-hero__chip">
+                                Voz: {assistantDisplay.ttsLabel} ({assistantDisplay.voiceName})
+                              </span>
+                              <span className="kite-voice-empty-hero__chip">
+                                Memoria: 14 turnos + alcance de chats
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                     {/* Voice Turns Recorded for This Thread (S4, S6) */}
                     {voiceTurns.map((turnRecord) => (
                       <div
                         key={turnRecord.turnId}
-                        className="kite-voice-turn-group my-2"
+                        className="kite-voice-turn-group"
                         data-testid={`voice-turn-${turnRecord.turnId}`}
                       >
                         {/* 1. User Voice Bubble */}
-                        <div className="kite-voice-user-bubble flex justify-end my-1">
-                          <div className="max-w-[85%] rounded-card px-3.5 py-2 bg-[var(--vl-surface-raised)] border border-[var(--vl-border-subtle)] text-xs text-[var(--vl-text-primary)] shadow-xs">
-                            <div className="flex items-center gap-1.5 text-2xs text-[var(--vl-text-muted)] mb-1">
-                              <MicIcon size={11} className="text-[#339cff]" />
+                        <div className="kite-voice-user-bubble">
+                          <div className="kite-voice-user-bubble__card">
+                            <div className="kite-voice-bubble-header">
+                              <MicIcon size={11} style={{ color: '#339cff' }} />
                               <span>{turnRecord.source === 'voz' ? 'Voz' : 'Texto (Sesión de voz)'}</span>
                             </div>
-                            <div className="whitespace-pre-wrap">{turnRecord.userPrompt}</div>
+                            <div style={{ whiteSpace: 'pre-wrap' }}>{turnRecord.userPrompt}</div>
                           </div>
                         </div>
 
@@ -996,6 +1056,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                           turnId={turnRecord.turnId}
                           strategy={turnRecord.strategy}
                           providerId={turnRecord.providerId}
+                          modelId={turnRecord.modelId}
                           durationMs={turnRecord.durationMs}
                           overallSuccess={turnRecord.overallSuccess}
                           receipts={turnRecord.receipts}
@@ -1004,13 +1065,13 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
                         {/* 3. Assistant Reply Bubble */}
                         {turnRecord.reply && (
-                          <div className="kite-voice-assistant-bubble flex justify-start my-1">
-                            <div className="max-w-[85%] rounded-card px-3.5 py-2.5 bg-[var(--vl-surface-glass)] border border-[var(--vl-border-subtle)] text-xs text-[var(--vl-text-primary)]">
-                              <div className="flex items-center gap-1.5 text-2xs font-medium text-[#339cff] mb-1">
+                          <div className="kite-voice-assistant-bubble">
+                            <div className="kite-voice-assistant-bubble__card">
+                              <div className="kite-voice-bubble-header kite-voice-bubble-header--assistant">
                                 <SparklesIcon size={12} />
                                 <span>Asistente Zed</span>
                               </div>
-                              <div className="whitespace-pre-wrap leading-relaxed">{turnRecord.reply}</div>
+                              <div style={{ whiteSpace: 'pre-wrap' }}>{turnRecord.reply}</div>
                             </div>
                           </div>
                         )}

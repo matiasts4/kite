@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { VoiceModeFooterBar } from './VoiceModeFooterBar';
 import { voiceSessionStore } from '../../../../lib/operator/voice/voiceSessionStore';
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
@@ -31,7 +31,7 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
     vi.clearAllMocks();
   });
 
-  it('renders locked assistant model badge (non-editable as per S2)', () => {
+  it('renders locked assistant model badge with resolved brain model and live status pill (non-editable as per S2)', () => {
     voiceSessionStore.startSession('thread-test-1', 'thread');
 
     render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
@@ -39,6 +39,25 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
     const badge = screen.getByTestId('voice-locked-assistant-badge');
     expect(badge).toBeInTheDocument();
     expect(badge).toHaveTextContent('Zed · GROK · ElevenLabs');
+    expect(badge).toHaveTextContent('grok-4.7');
+
+    const statusPill = screen.getByTestId('voice-live-status-pill');
+    expect(statusPill).toHaveTextContent('Escuchando…');
+  });
+
+  it('updates live status pill when interim speech or thinking stage occurs', () => {
+    voiceSessionStore.startSession('thread-test-1', 'thread');
+    render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
+
+    act(() => {
+      voiceSessionStore.setVoiceRuntimeState({ interimTranscript: 'abrime dos terminales' });
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('«abrime dos terminales»');
+
+    act(() => {
+      voiceSessionStore.setActiveTurnStage('planning', 'Planificando con Grok…');
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Planificando con Grok…');
   });
 
   it('renders disabled attach button in voice mode', () => {

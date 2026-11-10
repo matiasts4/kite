@@ -9,7 +9,14 @@ import {
   ChevronDownIcon,
   SearchIcon,
   PencilIcon,
+  MicIcon,
+  SparklesIcon,
 } from './ChatIcons';
+import { useVoiceSession, type VoiceTurnRecord } from '../../../lib/operator/voice/voiceSessionStore';
+import { VoiceTurnTraceCard } from './VoiceTurnTraceCard';
+import { VoiceCommentaryRow } from './VoiceCommentaryRow';
+import { subscribeTrace } from '../../../lib/operator/trace/trace';
+import { runOperatorTurn } from '../../../lib/operator';
 import {
   ExtendedChatThread,
   ChatAttachment,
@@ -391,7 +398,101 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     };
   }, [thread.workspaceId, workspaceId]);
 
-  const isDraft = transcriptItems.length === 0 && !running;
+  const voice = useVoiceSession();
+  const [voiceTurns, setVoiceTurns] = useState<VoiceTurnRecord[]>(() =>
+    voice.getThreadVoiceTurns(thread.id)
+  );
+  const [liveVoiceTurn, setLiveVoiceTurn] = useState<{
+    turnId: string;
+    stage: string;
+    detail?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setVoiceTurns(voice.getThreadVoiceTurns(thread.id));
+  }, [thread.id, voice.phase]);
+
+  useEffect(() => {
+    return subscribeTrace((event) => {
+      const isBound = voice.boundThreadId === thread.id || voice.activeSurface === 'thread';
+      if (!isBound && voice.boundThreadId !== null) return;
+
+      if (event.ev === 'turn.start') {
+        setLiveVoiceTurn({
+          turnId: event.turnId,
+          stage: 'planning',
+          detail: 'Pensando y planificando acciones…',
+        });
+      } else if (event.ev === 'plan.created') {
+        const detail = (event as any).chatReachKind === 'read'
+          ? 'Leyendo conversación anterior…'
+          : (event as any).chatReachKind === 'index'
+          ? 'Consultando índice de conversaciones…'
+          : 'Planificando con ' + ((event as any).provider || 'asistente') + '…';
+        setLiveVoiceTurn((prev) => (prev ? { ...prev, stage: 'planning', detail } : null));
+      } else if (event.ev === 'action.start') {
+        setLiveVoiceTurn((prev) =>
+          prev ? { ...prev, stage: 'executing', detail: `Ejecutando ${(event as any).type}…` } : null
+        );
+      } else if (event.ev === 'action.verify') {
+        setLiveVoiceTurn((prev) =>
+          prev ? { ...prev, stage: 'verifying', detail: 'Verificando recibo…' } : null
+        );
+      } else if (event.ev === 'tts.speak') {
+        setLiveVoiceTurn((prev) =>
+          prev ? { ...prev, stage: 'speaking', detail: 'Sintetizando respuesta de voz…' } : null
+        );
+      } else if (event.ev === 'turn.end') {
+        setLiveVoiceTurn(null);
+        setVoiceTurns(voice.getThreadVoiceTurns(thread.id));
+      }
+    });
+  }, [thread.id, voice.boundThreadId, voice.activeSurface]);
+
+  const handleSendVoiceTurn = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    try {
+      setLiveVoiceTurn({
+        turnId: `turn-${Date.now()}`,
+        stage: 'planning',
+        detail: 'Pensando…',
+      });
+      const res = await runOperatorTurn(text.trim(), {
+        workspaceId: thread.workspaceId ?? undefined,
+        source: 'texto',
+        ttsEnabled: !voice.speakerMuted,
+        muted: voice.speakerMuted,
+      });
+      if (res) {
+        voice.addThreadVoiceTurn(thread.id, {
+          turnId: res.turnId,
+          userPrompt: text.trim(),
+          source: 'texto',
+          strategy: res.strategy,
+          providerId: res.providerId,
+          durationMs: res.durationMs,
+          overallSuccess: res.overallSuccess,
+          receipts: res.receipts,
+          reply: res.reply,
+          createdAt: Date.now(),
+        });
+      }
+    } catch (err: any) {
+      console.warn('[SingleThreadPane] Failed to execute voice turn:', err);
+    } finally {
+      setLiveVoiceTurn(null);
+    }
+  }, [thread.id, thread.workspaceId, voice.speakerMuted]);
+
+  const isVoiceActiveHere =
+    (voice.phase === 'active' || voice.phase === 'starting') &&
+    (voice.boundThreadId === thread.id || (voice.activeSurface === 'thread' && !voice.boundThreadId));
+  const isDraft =
+    transcriptItems.length === 0 &&
+    voiceTurns.length === 0 &&
+    !liveVoiceTurn &&
+    !isVoiceActiveHere &&
+    !running;
   const [toolVisibility, setToolVisibility] = useState<ToolVisibilityMode>(() => readToolVisibility());
   const [queuedRuns, setQueuedRuns] = useState(thread.queuedRuns ?? []);
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
@@ -872,6 +973,55 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                       />
                     ) : null}
 
+                    {/* Voice Turns Recorded for This Thread (S4, S6) */}
+                    {voiceTurns.map((turnRecord) => (
+                      <div
+                        key={turnRecord.turnId}
+                        className="kite-voice-turn-group my-2"
+                        data-testid={`voice-turn-${turnRecord.turnId}`}
+                      >
+                        {/* 1. User Voice Bubble */}
+                        <div className="kite-voice-user-bubble flex justify-end my-1">
+                          <div className="max-w-[85%] rounded-card px-3.5 py-2 bg-[var(--vl-surface-raised)] border border-[var(--vl-border-subtle)] text-xs text-[var(--vl-text-primary)] shadow-xs">
+                            <div className="flex items-center gap-1.5 text-2xs text-[var(--vl-text-muted)] mb-1">
+                              <MicIcon size={11} className="text-[#339cff]" />
+                              <span>{turnRecord.source === 'voz' ? 'Voz' : 'Texto (Sesión de voz)'}</span>
+                            </div>
+                            <div className="whitespace-pre-wrap">{turnRecord.userPrompt}</div>
+                          </div>
+                        </div>
+
+                        {/* 2. Structured Trace Card */}
+                        <VoiceTurnTraceCard
+                          turnId={turnRecord.turnId}
+                          strategy={turnRecord.strategy}
+                          providerId={turnRecord.providerId}
+                          durationMs={turnRecord.durationMs}
+                          overallSuccess={turnRecord.overallSuccess}
+                          receipts={turnRecord.receipts}
+                          consultChatsInfo={turnRecord.consultChatsInfo}
+                        />
+
+                        {/* 3. Assistant Reply Bubble */}
+                        {turnRecord.reply && (
+                          <div className="kite-voice-assistant-bubble flex justify-start my-1">
+                            <div className="max-w-[85%] rounded-card px-3.5 py-2.5 bg-[var(--vl-surface-glass)] border border-[var(--vl-border-subtle)] text-xs text-[var(--vl-text-primary)]">
+                              <div className="flex items-center gap-1.5 text-2xs font-medium text-[#339cff] mb-1">
+                                <SparklesIcon size={12} />
+                                <span>Asistente Zed</span>
+                              </div>
+                              <div className="whitespace-pre-wrap leading-relaxed">{turnRecord.reply}</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
+                    {/* Live Stage Commentary Shimmer Row (S4) */}
+                    {liveVoiceTurn && (
+                      <VoiceCommentaryRow stage={liveVoiceTurn.stage} detail={liveVoiceTurn.detail} />
+                    )}
+
                     {/* Quota Handoff Banner */}
                     {thread.quotaHandoffOffer && (
                       <QuotaHandoffBanner
@@ -1070,6 +1220,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 void onSend(text);
               }}
               onStop={stopRunning}
+              onSendVoiceTurn={handleSendVoiceTurn}
               paused={!running && thread.turnFailure?.kind === 'usageLimit'}
               onPickAttachments={onPickAttachments}
               onStageFiles={onStageFiles}

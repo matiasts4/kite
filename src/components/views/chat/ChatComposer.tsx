@@ -63,6 +63,8 @@ import { catalogEmptyMessage } from './catalogEmptyState';
 import { EffortSliderPopover } from './composer/EffortSliderPopover';
 import { resolvePrimaryAction } from './composerPrimaryAction';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { useVoiceSession } from '../../../lib/operator/voice/voiceSessionStore';
+import { VoiceModeFooterBar } from './composer/VoiceModeFooterBar';
 import {
   composerGoalStop,
   restoreStash,
@@ -146,6 +148,7 @@ export interface ChatComposerProps {
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
     requestId: string
   ) => void;
+  onSendVoiceTurn?: (text: string) => void;
 }
 
 function extractUserPromptHistory(items: ChatItem[] = []): string[] {
@@ -409,7 +412,12 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onGoalStop,
   initialStashes,
   stashEnvironment = '',
+  onSendVoiceTurn,
 }) => {
+  const voice = useVoiceSession();
+  const isVoiceModeActive =
+    (voice.phase === 'active' || voice.phase === 'starting') &&
+    (voice.boundThreadId === threadId || (voice.activeSurface === 'thread' && !voice.boundThreadId));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const caretRef = useRef({ start: 0, end: 0 });
   const [pendingCaret, setPendingCaret] = useState<number | null>(null);
@@ -574,6 +582,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           supportedSchemaVersion: 1,
         }).catch(() => undefined);
         dictationReqIdRef.current = null;
+        voice.resumeFromDictation();
       }
     };
   }, []);
@@ -592,6 +601,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         setDictationError(err?.message || 'Error stopping dictation.');
         setDictationState('idle');
         dictationReqIdRef.current = null;
+        voice.resumeFromDictation();
       }
       return;
     }
@@ -601,6 +611,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     const id = crypto.randomUUID();
     dictationReqIdRef.current = id;
     setDictationState('starting');
+    voice.pauseForDictation();
 
     try {
       await invokeCommand('start_dictation', { id, supportedSchemaVersion: 1 });
@@ -625,6 +636,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             }
             dictationReqIdRef.current = null;
             setDictationState('idle');
+            voice.resumeFromDictation();
             const transcript = (take.transcript || '').trim();
             if (transcript) {
               onChangePrompt(prompt.trim() ? `${prompt.trimEnd()} ${transcript}` : transcript);
@@ -636,6 +648,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             }
             dictationReqIdRef.current = null;
             setDictationState('idle');
+            voice.resumeFromDictation();
             if (take.error?.message) {
               setDictationError(take.error.message);
             } else if (take.message) {
@@ -649,6 +662,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     } catch (err: any) {
       dictationReqIdRef.current = null;
       setDictationState('idle');
+      voice.resumeFromDictation();
       setDictationError(err?.message || 'Dictation could not start.');
     }
   };
@@ -794,7 +808,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const draftOverLimit = measuredLength > 120_000;
   const canSend = !draftOverLimit && Boolean(prompt.trim() || attachments.length > 0);
 
-  const composerPlaceholder = agentName
+  const composerPlaceholder = isVoiceModeActive
+    ? 'Escribir en la sesión de voz…'
+    : agentName
     ? running
       ? 'Write a follow-up while your agent works…'
       : `Message ${agentName}…`
@@ -871,6 +887,17 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   };
 
   const deliverDraft = (mode: 'send' | 'queue') => {
+    if (isVoiceModeActive && prompt.trim()) {
+      const text = expandMentions(expandCitations(prompt)).trim();
+      onChangePrompt('');
+      if (onSendVoiceTurn) {
+        onSendVoiceTurn(text);
+      } else {
+        onSend();
+      }
+      return;
+    }
+
     const command = resolveSessionCommand(prompt, threadProvider);
     if (command.kind === 'compact') {
       onChangePrompt('');
@@ -943,6 +970,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
+      if (isVoiceModeActive) {
+        if (!prompt.trim()) return;
+        deliverDraft('send');
+        return;
+      }
       if (!canSend) return;
       historyStateRef.current = { owner: threadId, index: null, draft: '' };
       const intent = slashIntent(prompt, threadProvider);
@@ -1129,7 +1161,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         )}
 
         {/* Footer Bar */}
-        <div ref={footerRef} className="kite-composer-footer">
+        {isVoiceModeActive ? (
+          <VoiceModeFooterBar
+            threadId={threadId}
+            hasDraftText={Boolean(prompt.trim())}
+            onSendDraft={() => deliverDraft('send')}
+            onEndSession={() => voice.stopSession()}
+          />
+        ) : (
+          <div ref={footerRef} className="kite-composer-footer">
           {/* Left Controls */}
           <div className="kite-composer-footer-left">
             {/* Model & Provider Picker Popover */}
@@ -1255,6 +1295,41 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               )}
             </button>
 
+            {/* Voice Mode Button (S1, S7) */}
+            <button
+              type="button"
+              disabled={running}
+              onClick={() => {
+                voice.startSession(threadId, 'thread');
+                window.dispatchEvent(
+                  new CustomEvent('kite:toggle-voice-session', {
+                    detail: { threadId, surface: 'thread' },
+                  })
+                );
+              }}
+              title="Iniciar sesión de voz"
+              aria-label="Iniciar sesión de voz"
+              className="chat-voice-mode-control size-8 rounded-control inline-flex items-center justify-center border-0 bg-transparent text-muted-foreground hover:text-foreground hover:bg-hover-row cursor-pointer transition-colors"
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M4 10v4" />
+                <path d="M8 6v12" />
+                <path d="M12 3v18" />
+                <path d="M16 7v10" />
+                <path d="M20 11v2" />
+              </svg>
+            </button>
+
             {/* Token Counter */}
             {totalTokens > 0 && (
               <span className="text-2xs font-mono text-muted-foreground px-1 select-none">
@@ -1321,18 +1396,21 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             })()}
           </div>
         </div>
+      )}
       </ComposerSurface.Main>
 
       {/* Tier 2: Recessed Lower Context Strip */}
-      <ComposerContextStrip
-        currentBranch={threadBranch || 'main'}
-        branches={branches}
-        currentWorkspace={threadWorkspaceName || 'Local'}
-        workspaces={workspaces}
-        onSelectBranch={onSwitchBranch}
-        onCreateBranch={onCreateBranch}
-        onSelectWorkspace={onSelectWorkspace}
-      />
+      {!isVoiceModeActive && (
+        <ComposerContextStrip
+          currentBranch={threadBranch || 'main'}
+          branches={branches}
+          currentWorkspace={threadWorkspaceName || 'Local'}
+          workspaces={workspaces}
+          onSelectBranch={onSwitchBranch}
+          onCreateBranch={onCreateBranch}
+          onSelectWorkspace={onSelectWorkspace}
+        />
+      )}
     </div>
   );
 };

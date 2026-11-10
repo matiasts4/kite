@@ -4,6 +4,7 @@ Objective: Make the existing assistant more useful. It keeps a short memory, con
 Branch: `feat/response-thread`. Do not switch branches. Commits for this feature contain only this feature's files.
 Delivery strategy: `ask-on-risk`. Forecast: implementation exceeds about 400 authored lines. Ask before the slice that crosses that count.
 Test runner: `npx vitest run`, `npx tsc --noEmit`, `node .kite/sanitizer/audit-references.mjs --check`.
+Connected ODD: `odd/tasks/thread-voice-mode.md` (Thread-integrated live voice session, inline trace timeline, and locked assistant footer built on top of `S1–S13`).
 
 Constraints: no second assistant, no new pane, no new send protocol, and no full transcript dump on a normal turn. Existing one-shot dictation, terminal launch, and dispatch flags stay. Do not delete or rewrite existing memory notes.
 

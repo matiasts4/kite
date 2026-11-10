@@ -8,6 +8,7 @@ import { resolveZedOrbState } from '../lib/operator/hooks/useOperatorTurnLogic';
 import { isBrowserTestLane } from '../lib/browserTestLane';
 import { useOperatorVoice } from '../lib/operator/hooks/useOperatorVoice';
 import { releaseOperatorCapture } from '../lib/operator/voice/zedVoice';
+import { voiceSessionStore } from '../lib/operator/voice/voiceSessionStore';
 import { isTerminalTarget } from '../lib/shortcuts/useGlobalShortcuts';
 import './zedFloat.css';
 
@@ -187,7 +188,22 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         }
       } else {
         try {
-          await turn.runTurn(text);
+          const res = await turn.runTurn(text, { source: 'voz', workspaceId });
+          const vs = voiceSessionStore.getSnapshot();
+          if (vs.boundThreadId && res) {
+            voiceSessionStore.addThreadVoiceTurn(vs.boundThreadId, {
+              turnId: res.turnId,
+              userPrompt: text,
+              source: 'voz',
+              strategy: res.strategy,
+              providerId: res.providerId,
+              durationMs: res.durationMs,
+              overallSuccess: res.overallSuccess,
+              receipts: res.receipts,
+              reply: res.reply,
+              createdAt: Date.now(),
+            });
+          }
         } catch (err) {
           const message =
             err instanceof Error ? err.message : 'No se pudo ejecutar la orden.';
@@ -200,6 +216,48 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
 
+  useEffect(() => {
+    return voiceSessionStore.subscribe(() => {
+      const vs = voiceSessionStore.getSnapshot();
+      const shouldBeActive = vs.phase === 'active' || vs.phase === 'starting';
+
+      if (shouldBeActive && !isVoiceSessionActiveRef.current) {
+        setIsVoiceSessionActive(true);
+        isVoiceSessionActiveRef.current = true;
+        turn.resetStage();
+        if (!voiceRef.current.isListening && !vs.isPausedForDictation && !vs.micMuted) {
+          void voiceRef.current.startListening();
+        }
+      } else if (!shouldBeActive && isVoiceSessionActiveRef.current) {
+        setIsVoiceSessionActive(false);
+        isVoiceSessionActiveRef.current = false;
+        voiceRef.current.stopListening();
+        ttsNarrator.stop();
+        setSpeakingTts(false);
+      } else if (shouldBeActive) {
+        if (vs.isPausedForDictation || vs.micMuted) {
+          if (voiceRef.current.isListening) {
+            voiceRef.current.stopListening();
+          }
+        } else if (!voiceRef.current.isListening) {
+          void voiceRef.current.startListening();
+        }
+        if (vs.speakerMuted && speakingTts) {
+          ttsNarrator.stop();
+          setSpeakingTts(false);
+        }
+      }
+    });
+  }, [speakingTts, turn]);
+
+  useEffect(() => {
+    voiceSessionStore.setLiveAudioLevel(voice.audioLevel);
+  }, [voice.audioLevel]);
+
+  useEffect(() => {
+    voiceSessionStore.setActiveTurnStage(turn.stage, turn.stageLabel);
+  }, [turn.stage, turn.stageLabel]);
+
   // When turn finishes with reply, auto-speak if TTS is enabled and not muted
   useEffect(() => {
     const reply = manualCommandResult?.reply || turn.lastTurn?.reply;
@@ -209,7 +267,8 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         ? `turn-${turn.lastTurn.turnId || turn.lastTurn.reply}`
         : null;
 
-    if (turn.stage === 'done' && reply && !call.speakerMuted) {
+    const vs = voiceSessionStore.getSnapshot();
+    if (turn.stage === 'done' && reply && !call.speakerMuted && !vs.speakerMuted) {
       if (turnKey && lastSpokenTurnKeyRef.current === turnKey) {
         return;
       }
@@ -243,6 +302,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   // Toggle continuous voice session (S5)
   const handleToggleVoiceSession = useCallback(async () => {
     if (isVoiceSessionActiveRef.current) {
+      voiceSessionStore.stopSession();
       setIsVoiceSessionActive(false);
       isVoiceSessionActiveRef.current = false;
       if (typeof window !== 'undefined') {
@@ -263,6 +323,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       voice.clearError();
     }
     turn.resetStage();
+    voiceSessionStore.startSession(null, 'orb');
     setIsVoiceSessionActive(true);
     isVoiceSessionActiveRef.current = true;
     if (typeof window !== 'undefined') {
@@ -272,6 +333,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     try {
       await voice.startListening();
     } catch {
+      voiceSessionStore.stopSession();
       setIsVoiceSessionActive(false);
       isVoiceSessionActiveRef.current = false;
       if (typeof window !== 'undefined') {
@@ -530,7 +592,22 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         });
       }
     } else {
-      await turn.runTurn(text);
+      const res = await turn.runTurn(text, { source: 'texto', workspaceId });
+      const vs = voiceSessionStore.getSnapshot();
+      if (vs.boundThreadId && res) {
+        voiceSessionStore.addThreadVoiceTurn(vs.boundThreadId, {
+          turnId: res.turnId,
+          userPrompt: text,
+          source: 'texto',
+          strategy: res.strategy,
+          providerId: res.providerId,
+          durationMs: res.durationMs,
+          overallSuccess: res.overallSuccess,
+          receipts: res.receipts,
+          reply: res.reply,
+          createdAt: Date.now(),
+        });
+      }
     }
   };
 

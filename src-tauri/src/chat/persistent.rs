@@ -52,11 +52,10 @@ pub const OPENCODE_DRIVER: &str = "opencode";
 pub const GROK_DRIVER: &str = "grok";
 
 /// The argument prefix the lasting Antigravity wire needs. It is sourced directly from
-/// the observed flags: `--print` runs one turn without a prompt positional,
-/// `--input-format stream-json` reads one NDJSON message per line, and the
+/// the observed flags: `--input-format stream-json` reads one NDJSON message per line, and the
 /// matching output format is required by the observed launcher.
-pub const ANTIGRAVITY_STREAM_ARGS: [&str; 5] =
-    ["--print", "--input-format", "stream-json", "--output-format", "stream-json"];
+pub const ANTIGRAVITY_STREAM_ARGS: [&str; 4] =
+    ["--input-format", "stream-json", "--output-format", "stream-json"];
 
 /// The command `codex app-server --help` documents for its transport. The help
 /// output stops at the transport: no request frame that carries a user turn is
@@ -193,7 +192,12 @@ pub fn antigravity_args(
 /// One user message as one NDJSON line. `serde_json` escapes embedded newlines,
 /// so a multi-line prompt stays a single frame and a single turn.
 pub fn turn_line(prompt: &str) -> String {
-    let message = json!({ "type": "user", "content": prompt });
+    let message = json!({
+        "event": "user",
+        "message": {
+            "content": prompt
+        }
+    });
     format!("{message}\n")
 }
 
@@ -259,12 +263,9 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
                     }
                 }
             } else {
-                let state = step.get("state").and_then(Value::as_str).unwrap_or("unknown");
                 ParsedLine {
                     conversation_id: None,
-                    events: vec![TransportEvent::Notice(bounded_notice(&format!(
-                        "antigravity {step_type} step ({state}) is not projected by this session yet"
-                    )))],
+                    events: vec![TransportEvent::Activity(trimmed.to_string())],
                 }
             }
         }
@@ -303,7 +304,14 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
 }
 
 fn conversation_id(value: &Value) -> Option<String> {
-    ["/init/conversation_id", "/init/conversationId", "/init/session_id", "/init/sessionId"]
+    [
+        "/conversation_id",
+        "/conversationId",
+        "/init/conversation_id",
+        "/init/conversationId",
+        "/init/session_id",
+        "/init/sessionId",
+    ]
         .iter()
         .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
         .map(str::trim)
@@ -1981,7 +1989,6 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "--print".to_string(),
                 "--input-format".to_string(),
                 "stream-json".to_string(),
                 "--output-format".to_string(),
@@ -2053,9 +2060,9 @@ mod tests {
         assert!(line.ends_with('\n'));
         assert_eq!(line.matches('\n').count(), 1, "a prompt stays one frame");
         let value: Value = serde_json::from_str(line.trim_end()).expect("one JSON object");
-        assert_eq!(value.get("type").and_then(Value::as_str), Some("user"));
+        assert_eq!(value.get("event").and_then(Value::as_str), Some("user"));
         assert_eq!(
-            value.get("content").and_then(Value::as_str),
+            value.pointer("/message/content").and_then(Value::as_str),
             Some("first line\nsecond line")
         );
     }

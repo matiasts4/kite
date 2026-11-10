@@ -141,6 +141,93 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
       expect(onEnd).toHaveBeenCalled();
     });
 
+    it('begins audio playback as chunks arrive before full audio finishes (S5 streamed narration)', async () => {
+      const chunk1 = new Uint8Array([1, 2, 3]);
+
+      class MockSourceBuffer {
+        onupdateend?: () => void;
+        addEventListener = vi.fn((event: string, cb: () => void) => {
+          if (event === 'updateend') this.onupdateend = cb;
+        });
+        appendBuffer = vi.fn(() => {
+          setTimeout(() => this.onupdateend?.(), 5);
+        });
+      }
+
+      class MockMediaSource {
+        readyState = 'open';
+        addEventListener = vi.fn((event: string, cb: () => void) => {
+          if (event === 'sourceopen') setTimeout(cb, 5);
+        });
+        addSourceBuffer = vi.fn(() => new MockSourceBuffer());
+        endOfStream = vi.fn();
+        static isTypeSupported = vi.fn(() => true);
+      }
+      (globalThis as any).MediaSource = MockMediaSource;
+
+      let mockAudioInstance: any = null;
+      class MockStreamingAudio {
+        src = '';
+        volume = 1;
+        paused = true;
+        onplay: (() => void) | null = null;
+        onended: (() => void) | null = null;
+        onerror: ((err: any) => void) | null = null;
+        constructor(src: string) {
+          this.src = src;
+          mockAudioInstance = this;
+        }
+        play() {
+          this.paused = false;
+          this.onplay?.();
+          return Promise.resolve();
+        }
+        pause() {
+          this.paused = true;
+        }
+      }
+      (globalThis as any).Audio = MockStreamingAudio;
+
+      const mockReader = {
+        read: vi
+          .fn()
+          .mockResolvedValueOnce({ done: false, value: chunk1 })
+          .mockResolvedValueOnce({ done: true, value: undefined }),
+        cancel: vi.fn(),
+      };
+
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { getReader: () => mockReader },
+      } as any);
+
+      (globalThis as any).URL = {
+        createObjectURL: vi.fn(() => 'blob:http://localhost/stream-audio'),
+        revokeObjectURL: vi.fn(),
+      };
+
+      const onStart = vi.fn();
+      const onEnd = vi.fn();
+
+      const speakPromise = ttsNarrator.speak('Texto para streaming en tiempo real.', {
+        engine: 'elevenlabs',
+        elevenlabsApiKey: 'xi_test_stream_key',
+        onStart,
+        onEnd,
+      });
+
+      setTimeout(() => {
+        mockAudioInstance?.onended?.();
+      }, 30);
+
+      await speakPromise;
+
+      expect(mockReader.read).toHaveBeenCalled();
+      expect(onStart).toHaveBeenCalled();
+      expect(onEnd).toHaveBeenCalled();
+    });
+
     it('falls back seamlessly to browser speechSynthesis if ElevenLabs request fails', async () => {
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.spyOn(globalThis, 'fetch').mockResolvedValue({

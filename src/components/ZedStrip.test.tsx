@@ -195,4 +195,50 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     vi.useRealTimers();
   });
 
+  it('toggles continuous voice session and keeps one-shot dictation separate (S5)', async () => {
+    render(<ZedStripHost call={activeCall} />);
+
+    // Voice mode continuous session button exists
+    const sessionBtn = screen.getByLabelText(/iniciar sesión de voz/i);
+    expect(sessionBtn).toBeInTheDocument();
+
+    // One-shot dictation button exists
+    const dictationBtn = screen.getByLabelText(/dictar por voz/i);
+    expect(dictationBtn).toBeInTheDocument();
+
+    // Click to start continuous voice session
+    fireEvent.click(sessionBtn);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/finalizar sesión de voz/i)).toBeInTheDocument();
+      expect((window as any).__kiteVoiceSessionActive).toBe(true);
+    });
+
+    // Clicking again ends continuous session
+    fireEvent.click(screen.getByLabelText(/finalizar sesión de voz/i));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/iniciar sesión de voz/i)).toBeInTheDocument();
+      expect((window as any).__kiteVoiceSessionActive).toBe(false);
+    });
+  });
+
+  it('barge-in stops TTS playback and keeps the voice session open (S5)', async () => {
+    const { ttsNarrator } = await import('../lib/operator/ttsNarrator');
+    render(<ZedStripHost call={activeCall} />);
+
+    // Start voice session
+    fireEvent.click(screen.getByLabelText(/iniciar sesión de voz/i));
+    await waitFor(() => {
+      expect((window as any).__kiteVoiceSessionActive).toBe(true);
+    });
+
+    // When TTS starts or user triggers speech while speaking, stop is called immediately
+    const dictationBtn = screen.getByLabelText(/dictar por voz/i);
+    fireEvent.click(dictationBtn);
+
+    expect(ttsNarrator.stop).toHaveBeenCalled();
+    // Session remains active
+    expect((window as any).__kiteVoiceSessionActive).toBe(true);
+  });
 });

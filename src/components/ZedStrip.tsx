@@ -156,6 +156,20 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   const turn = useOperatorTurn(workspaceId ?? null);
 
   // Voice dictation hook (Grok Cloud / Native Speech Engine)
+  const [isVoiceSessionActive, setIsVoiceSessionActive] = useState(false);
+  const isVoiceSessionActiveRef = useRef(false);
+  useEffect(() => {
+    isVoiceSessionActiveRef.current = isVoiceSessionActive;
+    if (typeof window !== 'undefined') {
+      (window as any).__kiteVoiceSessionActive = isVoiceSessionActive;
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__kiteVoiceSessionActive = false;
+      }
+    };
+  }, [isVoiceSessionActive]);
+
   const voice = useOperatorVoice({
     language: 'es-ES',
     onFinalTranscript: async (text) => {
@@ -191,15 +205,69 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         voiceName: opConfig.persona?.voice || 'Ara',
         rate: opConfig.ttsRate || 1.0,
         lang: opConfig.persona?.language === 'en' ? 'en-US' : 'es-ES',
-        onEnd: () => setSpeakingTts(false),
-        onError: () => setSpeakingTts(false),
+        onEnd: () => {
+          setSpeakingTts(false);
+          // S5: A voice session survives a reply. Re-arm the microphone for the next turn.
+          if (isVoiceSessionActiveRef.current) {
+            void voice.startListening();
+          }
+        },
+        onError: () => {
+          setSpeakingTts(false);
+          if (isVoiceSessionActiveRef.current) {
+            void voice.startListening();
+          }
+        },
       });
+    } else if (turn.stage === 'done' && isVoiceSessionActiveRef.current && !voice.isListening) {
+      // Re-arm microphone if TTS was muted or had no reply
+      void voice.startListening();
     }
-  }, [turn.stage, turn.lastTurn, manualCommandResult, call.speakerMuted]);
+  }, [turn.stage, turn.lastTurn, manualCommandResult, call.speakerMuted, voice]);
 
-  // Toggle voice dictation
+  // Toggle continuous voice session (S5)
+  const handleToggleVoiceSession = useCallback(async () => {
+    if (isVoiceSessionActiveRef.current) {
+      setIsVoiceSessionActive(false);
+      isVoiceSessionActiveRef.current = false;
+      if (typeof window !== 'undefined') {
+        (window as any).__kiteVoiceSessionActive = false;
+      }
+      voice.stopListening();
+      ttsNarrator.stop();
+      setSpeakingTts(false);
+      return;
+    }
+
+    ttsNarrator.stop();
+    setSpeakingTts(false);
+    if (call.muted && onToggleMute) {
+      onToggleMute();
+    }
+    if (voice.error) {
+      voice.clearError();
+    }
+    turn.resetStage();
+    setIsVoiceSessionActive(true);
+    isVoiceSessionActiveRef.current = true;
+    if (typeof window !== 'undefined') {
+      (window as any).__kiteVoiceSessionActive = true;
+    }
+
+    try {
+      await voice.startListening();
+    } catch {
+      setIsVoiceSessionActive(false);
+      isVoiceSessionActiveRef.current = false;
+      if (typeof window !== 'undefined') {
+        (window as any).__kiteVoiceSessionActive = false;
+      }
+    }
+  }, [call.muted, onToggleMute, turn, voice]);
+
+  // Toggle one-shot voice dictation
   const handleToggleVoice = useCallback(async () => {
-    // Unconditionally stop TTS on user interruption
+    // Unconditionally stop TTS on user interruption (barge-in)
     ttsNarrator.stop();
     setSpeakingTts(false);
 
@@ -356,13 +424,18 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     const handleVoiceEvent = () => {
       handleToggleVoice();
     };
+    const handleVoiceSessionEvent = () => {
+      void handleToggleVoiceSession();
+    };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('kite:toggle-voice', handleVoiceEvent);
+    window.addEventListener('kite:toggle-voice-session', handleVoiceSessionEvent);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('kite:toggle-voice', handleVoiceEvent);
+      window.removeEventListener('kite:toggle-voice-session', handleVoiceSessionEvent);
     };
-  }, [handleToggleVoice, onEndCall, voice]);
+  }, [handleToggleVoice, handleToggleVoiceSession, onEndCall, voice]);
 
   // Keep orb within bounds on window resize
   useEffect(() => {
@@ -523,6 +596,32 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
             <rect x="9" y="2" width="6" height="12" rx="3" />
             <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
             <line x1="12" y1="19" x2="12" y2="22" />
+          </svg>
+        </button>
+
+        {/* Button 1b: Modo Voz Continuo / Voice Session (S5) */}
+        <button
+          type="button"
+          className={`zed-float__control ${isVoiceSessionActive ? 'zed-float__control--active zed-float__control--live' : ''}`}
+          onClick={handleToggleVoiceSession}
+          title={
+            isVoiceSessionActive
+              ? 'Finalizar sesión de voz continua'
+              : 'Iniciar sesión de voz continua en tiempo real'
+          }
+          aria-label={
+            isVoiceSessionActive
+              ? 'Finalizar sesión de voz'
+              : 'Iniciar sesión de voz'
+          }
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2 10v3" />
+            <path d="M6 6v11" />
+            <path d="M10 3v18" />
+            <path d="M14 8v7" />
+            <path d="M18 5v13" />
+            <path d="M22 10v3" />
           </svg>
         </button>
 

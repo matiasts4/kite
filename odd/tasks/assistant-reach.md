@@ -65,11 +65,11 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
 
 ## Tasks
 
-- [ ] **T1** (`S2`) — Route: `inline` — Cross-CLI index and one-chat read. Re-evaluate the route at implementation. No commit yet.
-- [ ] **T2** (`S4`) — Route: `inline` — Load the existing short notes on the live turn, without a second store. No commit yet.
-- [ ] **T3** (`S3`) — Route: `inline` — Assistant launches a thread through the existing dispatch thread family, and still launches a terminal. No commit yet.
-- [ ] **T4** (`S5`) — Route: `inline` — Open voice session on the orb, streamed narration, barge-in, same actions. No commit yet.
-- [ ] **T5** (`S1`, `S5`) — Route: `inline` — Spoken notice when a launched agent finishes. No commit yet.
+- [x] **T1** (`S2`) — Route: `inline` — Cross-CLI index and one-chat read (`chatIndex.ts` + `chatIndex.test.ts` 5/5 green). Commit: `d4a4e2f`.
+- [x] **T2** (`S4`) — Route: `inline` — Load the existing short notes on the live turn, without a second store (`prompt.ts` + `prompt.test.ts` 4/4 green). Commit: `d4a4e2f`.
+- [x] **T3** (`S3`) — Route: `inline` — Assistant launches a thread through the existing dispatch thread family, and still launches a terminal (`heuristic.ts` + `launchThread.ts` + `executor.test.ts` 23/23 green). Commit: `d4a4e2f`.
+- [x] **T4** (`S5`) — Route: `inline` — Open voice session on the orb, streamed narration, barge-in, same actions (`ttsNarrator.ts` + `ZedStrip.tsx` + tests 21/21 green). Commit: `830efa1`.
+- [x] **T5** (`S1`, `S5`) — Route: `inline` — Spoken notice when a launched agent finishes (`proactiveWatcher.ts` + `proactiveWatcher.test.ts` 9/9 green, wired to session). Commit: `d4a4e2f` / `830efa1`.
 
 T1–T5 share the operator turn. They are not independent. Do not split them across parallel writers.
 
@@ -81,3 +81,4 @@ T1–T5 share the operator turn. They are not independent. Do not split them acr
 - **L4 (2026-11-10)**: User confirmed the four parts: index then one read, launch a thread as well as a terminal, short memory always loaded and separate from chats, and voice as the mouth of this assistant with an open session and streamed narration. Verbatim: `"si me parece correcto, arma el odd compeltamente, considera no cambiar de rama, haz tus commits relacionados con esto solametne para separar de lo otro que estamos trabajando en paralelo"`
 - **L5 (2026-11-10)**: `"quiero que se implemente en su totalidad, quiero que uses la mayor canditidad de agnetes en paralelo posible para hacelro mas rapido quiero decir un tope  de 5 agentes en paralelo sin que se solapen claramente y cuando sea posible"`
   Parallel writers are allowed only on disjoint files. The parent owns `planner/prompt.ts` index lines, `ZedStrip.tsx`, and git. Do not switch branches.
+- **L6 (2026-11-10)**: User requested full completion verbatim: `"quiero que lo temrines completmaente"`. Verified and completed T1 through T5 across streaming narration, continuous voice mode, barge-in, thread launches, notes injection, and cross-cli chat index. All 110 unit tests passing, tsc clean, audit references clean.

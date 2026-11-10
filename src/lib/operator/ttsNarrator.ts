@@ -404,6 +404,149 @@ class TTSNarrator {
       throw new Error(`ElevenLabs API devolvió HTTP ${res.status}: ${res.statusText}`);
     }
 
+    const canStream =
+      typeof MediaSource !== 'undefined' &&
+      typeof MediaSource.isTypeSupported === 'function' &&
+      MediaSource.isTypeSupported('audio/mpeg') &&
+      Boolean(res.body && typeof res.body.getReader === 'function');
+
+    if (canStream && res.body) {
+      return new Promise<void>((resolve, reject) => {
+        const mediaSource = new MediaSource();
+        const audioUrl = URL.createObjectURL(mediaSource);
+        this.activeAudioUrl = audioUrl;
+        const audio = new Audio(audioUrl);
+        this.activeAudio = audio;
+        audio.volume = options.volume ?? 1.0;
+
+        let finished = false;
+        const cleanup = () => {
+          if (finished) return;
+          finished = true;
+          this.speaking = false;
+          if (this.activeAudio === audio) {
+            this.activeAudio = null;
+          }
+          if (this.activeAudioUrl === audioUrl) {
+            try {
+              URL.revokeObjectURL(audioUrl);
+            } catch {}
+            this.activeAudioUrl = null;
+          }
+          if (this.activeAbortController === controller) {
+            this.activeAbortController = null;
+          }
+        };
+
+        audio.onplay = () => {
+          if (this.generation !== myGen || controller.signal.aborted) {
+            cleanup();
+            try {
+              audio.pause();
+            } catch {}
+            resolve();
+            return;
+          }
+          this.speaking = true;
+          options.onStart?.();
+        };
+
+        audio.onended = () => {
+          cleanup();
+          options.onEnd?.();
+          resolve();
+        };
+
+        audio.onerror = (e) => {
+          cleanup();
+          options.onError?.(e);
+          reject(e);
+        };
+
+        mediaSource.addEventListener('sourceopen', async () => {
+          if (this.generation !== myGen || controller.signal.aborted) {
+            cleanup();
+            resolve();
+            return;
+          }
+
+          let sourceBuffer: SourceBuffer;
+          try {
+            sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+          } catch {
+            cleanup();
+            resolve();
+            return;
+          }
+
+          const reader = res.body!.getReader();
+          let startedPlayback = false;
+          const queue: Uint8Array[] = [];
+          let isAppending = false;
+          let readerDone = false;
+
+          const pump = () => {
+            if (isAppending || queue.length === 0 || !sourceBuffer || mediaSource.readyState !== 'open') return;
+            const chunk = queue.shift()!;
+            try {
+              isAppending = true;
+              sourceBuffer.appendBuffer(chunk as unknown as BufferSource);
+            } catch {
+              isAppending = false;
+            }
+          };
+
+          sourceBuffer.addEventListener('updateend', () => {
+            isAppending = false;
+            if (!startedPlayback && audio.paused) {
+              startedPlayback = true;
+              void audio.play().catch(() => {});
+            }
+            if (queue.length > 0) {
+              pump();
+            } else if (readerDone && mediaSource.readyState === 'open') {
+              try {
+                mediaSource.endOfStream();
+              } catch {}
+            }
+          });
+
+          try {
+            while (true) {
+              if (this.generation !== myGen || controller.signal.aborted) {
+                try {
+                  void reader.cancel();
+                } catch {}
+                cleanup();
+                resolve();
+                return;
+              }
+              const { done, value } = await reader.read();
+              if (done) {
+                readerDone = true;
+                if (!isAppending && queue.length === 0 && mediaSource.readyState === 'open') {
+                  try {
+                    mediaSource.endOfStream();
+                  } catch {}
+                }
+                break;
+              }
+              if (value && value.length > 0) {
+                queue.push(value);
+                pump();
+              }
+            }
+          } catch (readErr) {
+            if (this.generation === myGen && !controller.signal.aborted) {
+              cleanup();
+              options.onError?.(readErr);
+              reject(readErr);
+            }
+          }
+        });
+      });
+    }
+
     const blob = await res.blob();
     if (this.generation !== myGen || controller.signal.aborted) return;
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { executePlan, composeReplyFromReceipts } from './index';
+import { executePlan, executeOperatorCommand, composeReplyFromReceipts } from './index';
 import { sendUiAck, type UiBusRequestPayload } from './ui-bus';
 import * as terminalRegistry from '../../terminalRegistry';
 import * as proactiveWatcher from '../proactiveWatcher';
@@ -136,7 +136,7 @@ describe('T5/S1 — Universal action.verify & filtered-plan honesty', () => {
     vi.restoreAllMocks();
     vi.mocked(invokeCommand).mockResolvedValue({} as any);
     vi.clearAllMocks();
-    localStorage.clear();
+    window.localStorage.clear();
     (window as any).__kiteCodeWorkspaceMounted = true;
   });
 
@@ -241,7 +241,7 @@ describe('T5/S4 — close_terminals filter precedence & post-IPC exit', () => {
     vi.restoreAllMocks();
     vi.mocked(invokeCommand).mockResolvedValue({} as any);
     vi.clearAllMocks();
-    localStorage.clear();
+    window.localStorage.clear();
   });
 
   it('applies the engine filter before the generic "abiertas" wildcard and slices from the first match', async () => {
@@ -299,7 +299,7 @@ describe('T5/S7 — handoff_to_agent', () => {
     vi.restoreAllMocks();
     vi.mocked(invokeCommand).mockResolvedValue({} as any);
     vi.clearAllMocks();
-    localStorage.clear();
+    window.localStorage.clear();
     (window as any).__kiteCodeWorkspaceMounted = true;
   });
 
@@ -484,7 +484,7 @@ describe('T5/S8 — manage_pane_layout', () => {
     vi.restoreAllMocks();
     vi.mocked(invokeCommand).mockResolvedValue({} as any);
     vi.clearAllMocks();
-    localStorage.clear();
+    window.localStorage.clear();
   });
 
   it('dispatches the equalize request and reports a Spanish receipt', async () => {
@@ -514,12 +514,12 @@ describe('T5/S9 — switch_workspace', () => {
     vi.restoreAllMocks();
     vi.mocked(invokeCommand).mockResolvedValue({} as any);
     vi.clearAllMocks();
-    localStorage.clear();
+    window.localStorage.clear();
     (window as any).__kiteCodeWorkspaceMounted = true;
   });
 
   it('switches workspace, changes view mode and retargets a chained open_terminals', async () => {
-    localStorage.setItem(
+    window.localStorage.setItem(
       'kite.cached_workspaces',
       JSON.stringify([
         { id: 'ws-alpha', displayName: 'Alpha Project', path: '/code/alpha' },
@@ -577,5 +577,156 @@ describe('T5/S9 — switch_workspace', () => {
     expect(spawnPayloads[0].workspaceId).toBe('ws-beta');
     expect(res.overallSuccess).toBe(true);
     expect(res.reply).toContain('Beta Project');
+  });
+});
+
+describe('T3 / S3 — launch_thread', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(invokeCommand).mockResolvedValue({} as any);
+    vi.clearAllMocks();
+    (window as any).__kiteCodeWorkspaceMounted = true;
+  });
+
+  function watchTerminalSpawns() {
+    const spawns: unknown[] = [];
+    const navigates: unknown[] = [];
+    const modes: unknown[] = [];
+    const onRequest = (event: Event) => {
+      const detail = (event as CustomEvent<UiBusRequestPayload>).detail;
+      if (detail?.kind === 'spawn-terminal') spawns.push(detail.payload);
+      if (detail?.kind === 'navigate') navigates.push(detail.payload);
+    };
+    const onLegacySpawn = (event: Event) => spawns.push((event as CustomEvent).detail);
+    const onMode = (event: Event) => modes.push((event as CustomEvent).detail);
+    window.addEventListener('kite:op-request', onRequest);
+    window.addEventListener('kite:spawn-agent-terminal', onLegacySpawn);
+    window.addEventListener('kite:navigate-mode', onMode);
+    return {
+      spawns,
+      navigates,
+      modes,
+      stop() {
+        window.removeEventListener('kite:op-request', onRequest);
+        window.removeEventListener('kite:spawn-agent-terminal', onLegacySpawn);
+        window.removeEventListener('kite:navigate-mode', onMode);
+      },
+    };
+  }
+
+  it('submits a new thread through dispatch and does not spawn a terminal', async () => {
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'create_general_chat') return { id: 'thread-new' };
+      if (cmd === 'dispatch_send') return { status: 'submitted' };
+      return {};
+    });
+    const watch = watchTerminalSpawns();
+
+    const res = await executeOperatorCommand('abre un thread para revisar el login', 'ws-1');
+    watch.stop();
+
+    expect(res.success).toBe(true);
+    expect(invokeCommand).toHaveBeenCalledWith(
+      'create_general_chat',
+      expect.objectContaining({ workspaceId: 'ws-1' })
+    );
+    const createArgs = vi.mocked(invokeCommand).mock.calls.find((call) => call[0] === 'create_general_chat')?.[1] as
+      | Record<string, unknown>
+      | undefined;
+    expect(createArgs).not.toHaveProperty('provider');
+    expect(invokeCommand).toHaveBeenCalledWith('dispatch_send', {
+      address: 'thread:thread-new',
+      body: expect.stringMatching(/revisar el login/i),
+      caller: 'agent',
+    });
+    expect(invokeCommand).not.toHaveBeenCalledWith('start_chat_turn', expect.anything());
+    expect(watch.spawns).toHaveLength(0);
+    expect(watch.navigates).toHaveLength(0);
+    expect(watch.modes).toHaveLength(0);
+    expect(res.data?.map((receipt: { type: string }) => receipt.type)).toEqual(['launch_thread']);
+  });
+
+  it('does not create a thread when the person named one', async () => {
+    vi.mocked(invokeCommand).mockResolvedValue({ status: 'submitted' } as any);
+    const watch = watchTerminalSpawns();
+
+    const res = await executePlan({
+      strategy: 'heuristic',
+      actions: [{ type: 'launch_thread', threadId: 'auth-1', body: 'revisa el login' }],
+    } as OperatorPlan);
+    watch.stop();
+
+    expect(res.overallSuccess).toBe(true);
+    expect(invokeCommand).not.toHaveBeenCalledWith('create_general_chat', expect.anything());
+    expect(invokeCommand).toHaveBeenCalledWith('dispatch_send', {
+      address: 'thread:auth-1',
+      body: 'revisa el login',
+      caller: 'agent',
+    });
+    expect(invokeCommand).not.toHaveBeenCalledWith('start_chat_turn', expect.anything());
+    expect(watch.spawns).toHaveLength(0);
+    expect(watch.navigates).toHaveLength(0);
+  });
+
+  it('reports a failed thread launch and does not retry it as a terminal', async () => {
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'create_general_chat') throw new Error('el hilo no se pudo crear');
+      return {};
+    });
+    const watch = watchTerminalSpawns();
+
+    const res = await executeOperatorCommand('abre un thread');
+    watch.stop();
+
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/no pude abrir el hilo/i);
+    expect(res.message).not.toMatch(/terminal/i);
+    expect(watch.spawns).toHaveLength(0);
+    expect(watch.navigates).toHaveLength(0);
+    expect(watch.modes).toHaveLength(0);
+    expect(invokeCommand).not.toHaveBeenCalledWith('start_terminal', expect.anything());
+    expect(invokeCommand).not.toHaveBeenCalledWith('start_chat_turn', expect.anything());
+    expect(res.data?.some((receipt: { type: string }) => receipt.type === 'open_terminals')).toBe(false);
+  });
+
+  it('reports a rejected thread send and does not open a terminal instead', async () => {
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'create_general_chat') return { id: 'thread-new' };
+      if (cmd === 'dispatch_send') return { status: 'rejected', error: 'destino bloqueado' };
+      return {};
+    });
+    const watch = watchTerminalSpawns();
+
+    const res = await executeOperatorCommand('abre un thread para revisar el login');
+    watch.stop();
+
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/no pude enviar el mensaje al hilo/i);
+    expect(watch.spawns).toHaveLength(0);
+    expect(res.data?.map((receipt: { type: string }) => receipt.type)).toEqual(['launch_thread']);
+  });
+
+  it('does not call create_general_chat when the person asked for a terminal', async () => {
+    const terminals: Array<{ sessionId: string; engine: string }> = [];
+    vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockImplementation(() => terminals as any);
+    const handleUiRequest = (event: Event) => {
+      const custom = event as CustomEvent<UiBusRequestPayload>;
+      if (custom.detail.kind === 'navigate') {
+        sendUiAck({ reqId: custom.detail.reqId, ok: true });
+      } else if (custom.detail.kind === 'spawn-terminal') {
+        const sid = (custom.detail.payload as { sessionId?: string }).sessionId || 'term-1';
+        terminals.push({ sessionId: sid, engine: 'powershell' });
+        sendUiAck({ reqId: custom.detail.reqId, ok: true, sessionId: sid });
+      }
+    };
+    window.addEventListener('kite:op-request', handleUiRequest);
+
+    const res = await executeOperatorCommand('abre una terminal');
+    window.removeEventListener('kite:op-request', handleUiRequest);
+
+    expect(res.success).toBe(true);
+    expect(res.message).toMatch(/terminal/i);
+    expect(invokeCommand).not.toHaveBeenCalledWith('create_general_chat', expect.anything());
+    expect(terminals).toHaveLength(1);
   });
 });

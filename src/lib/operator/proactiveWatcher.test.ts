@@ -248,6 +248,109 @@ describe('proactiveWatcher — agent completion voice & notifications', () => {
     markTerminalExited('sess-registry');
   });
 
+  it('speaks a finished-agent notice through an open voice session, otherwise through the existing sink, and never opens a session', () => {
+    const sessionSpeak = vi.fn();
+    const openVoiceSession = vi.fn();
+    const notice = 'El agente Lyra terminó en la terminal: Listo.';
+
+    startProactiveAgentWatcher({
+      speak,
+      sessionSpeak,
+      openVoiceSession,
+      isVoiceSessionOpen: () => true,
+      now: () => clock,
+    });
+
+    emitTerminalUpdate({ sessionId: 'sess-voice-open', state: 'working', engine: 'grok', who: 'Lyra' });
+    emitTerminalUpdate({
+      sessionId: 'sess-voice-open',
+      state: 'done',
+      engine: 'grok',
+      who: 'Lyra',
+      latestLine: 'Listo',
+    });
+
+    expect(sessionSpeak).toHaveBeenCalledTimes(1);
+    expect(sessionSpeak).toHaveBeenCalledWith(notice);
+    expect(speak).not.toHaveBeenCalled();
+    expect(openVoiceSession).not.toHaveBeenCalled();
+    expect(invokeCommandMock).toHaveBeenCalledTimes(1);
+    expect(invokeCommandMock).toHaveBeenCalledWith('notifications_report_attention', {
+      payload: expect.objectContaining({
+        kind: 'settled',
+        title: 'Lyra terminó',
+        sessionId: 'sess-voice-open',
+      }),
+    });
+
+    // One finish transition speaks once. A repeated done does not speak again.
+    emitTerminalUpdate({
+      sessionId: 'sess-voice-open',
+      state: 'done',
+      engine: 'grok',
+      who: 'Lyra',
+      latestLine: 'Listo',
+    });
+    expect(sessionSpeak).toHaveBeenCalledTimes(1);
+    expect(openVoiceSession).not.toHaveBeenCalled();
+
+    speak.mockClear();
+    sessionSpeak.mockClear();
+    openVoiceSession.mockClear();
+    invokeCommandMock.mockClear();
+
+    startProactiveAgentWatcher({
+      speak,
+      sessionSpeak,
+      openVoiceSession,
+      isVoiceSessionOpen: () => false,
+      now: () => clock,
+    });
+
+    emitTerminalUpdate({ sessionId: 'sess-voice-closed', state: 'working', engine: 'grok', who: 'Lyra' });
+    emitTerminalUpdate({
+      sessionId: 'sess-voice-closed',
+      state: 'done',
+      engine: 'grok',
+      who: 'Lyra',
+      latestLine: 'Listo',
+    });
+
+    expect(speak).toHaveBeenCalledTimes(1);
+    expect(speak).toHaveBeenCalledWith(notice);
+    expect(sessionSpeak).not.toHaveBeenCalled();
+    expect(openVoiceSession).not.toHaveBeenCalled();
+    expect(invokeCommandMock).toHaveBeenCalledTimes(1);
+
+    speak.mockClear();
+    sessionSpeak.mockClear();
+    openVoiceSession.mockClear();
+    invokeCommandMock.mockClear();
+
+    // Absent flag is the same as closed: existing sink, no session.
+    startProactiveAgentWatcher({
+      speak,
+      sessionSpeak,
+      openVoiceSession,
+      now: () => clock,
+    });
+
+    emitTerminalUpdate({ sessionId: 'sess-voice-absent', state: 'working', engine: 'grok', who: 'Lyra' });
+    emitTerminalUpdate({
+      sessionId: 'sess-voice-absent',
+      state: 'done',
+      engine: 'grok',
+      who: 'Lyra',
+      latestLine: 'Listo',
+    });
+
+    expect(speak).toHaveBeenCalledTimes(1);
+    expect(speak).toHaveBeenCalledWith(notice);
+    expect(sessionSpeak).not.toHaveBeenCalled();
+    expect(openVoiceSession).not.toHaveBeenCalled();
+    expect(invokeCommandMock).toHaveBeenCalledTimes(1);
+  });
+
   it('detaches from terminal updates when stopped', () => {
     const stop = startWatcher();
     stop();

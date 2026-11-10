@@ -82,6 +82,13 @@ export const SwitchWorkspaceActionSchema = z.object({
   viewMode: z.enum(['agents', 'code', 'threads']).optional(),
 });
 
+export const LaunchThreadActionSchema = z.object({
+  type: z.literal('launch_thread'),
+  threadId: z.string().optional(),
+  provider: EngineSchema.optional(),
+  body: z.string().optional(),
+});
+
 export const ActionSchema = z.discriminatedUnion('type', [
   OpenTerminalsActionSchema,
   CloseTerminalsActionSchema,
@@ -93,9 +100,11 @@ export const ActionSchema = z.discriminatedUnion('type', [
   HandoffToAgentActionSchema,
   ManagePaneLayoutActionSchema,
   SwitchWorkspaceActionSchema,
+  LaunchThreadActionSchema,
 ]);
 
 export type OperatorContractAction = z.infer<typeof ActionSchema>;
+export type LaunchThreadAction = z.infer<typeof LaunchThreadActionSchema>;
 export type HandoffToAgentAction = z.infer<typeof HandoffToAgentActionSchema>;
 export type ManagePaneLayoutAction = z.infer<typeof ManagePaneLayoutActionSchema>;
 export type SwitchWorkspaceAction = z.infer<typeof SwitchWorkspaceActionSchema>;

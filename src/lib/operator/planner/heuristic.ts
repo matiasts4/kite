@@ -5,6 +5,7 @@
 import type {
   OperatorPlan,
   Engine,
+  LaunchThreadAction,
   HandoffToAgentAction,
   ManagePaneLayoutAction,
   PaneLayoutOperation,
@@ -1061,6 +1062,68 @@ export function parseWorkspaceSwitchIntent(rawText: string): WorkspaceSwitchInte
   };
 }
 
+export function parseLaunchThreadIntent(text: string): LaunchThreadAction | null {
+  const lower = text.toLowerCase().trim();
+
+  // If the command explicitly requests opening a terminal or console, terminal wins!
+  if (OPEN_VERB_RE.test(lower) && COMPATIBLE_TERMINAL_OBJECT_RE.test(lower)) {
+    return null;
+  }
+
+  // 1. "abre/crea/lanza/inicia un thread/hilo [de <provider>] [para/con/: <body...>]"
+  const openMatch = text.match(
+    new RegExp(
+      `^(?:${OPEN_VERB_SOURCE})\\s+(?:un\\s+)?(?:thread|hilo)(?:\\s+de\\s+([a-zA-Z0-9_\\-]+))?(?:\\s+(?:para|con|:)\\s+(.+)|\\s+(.+))?$`,
+      'i'
+    )
+  );
+
+  if (openMatch) {
+    const rawEngine = openMatch[1];
+    let provider: Engine | undefined = undefined;
+    if (rawEngine) {
+      provider = detectEngineFromText(rawEngine);
+    }
+    const body = (openMatch[2] || openMatch[3] || '').trim() || undefined;
+
+    return {
+      type: 'launch_thread',
+      ...(provider ? { provider } : {}),
+      ...(body ? { body } : {}),
+    };
+  }
+
+  // 2. "en el thread/hilo [<threadId>] [<body...>]"
+  const enThreadMatch = text.match(
+    /^en\s+el\s+(?:thread|hilo)(?:\s+([a-zA-Z0-9_\\-]+))?(?:\s+(.+))?$/i
+  );
+
+  if (enThreadMatch) {
+    const rawId = enThreadMatch[1]?.trim();
+    const rawBody = enThreadMatch[2]?.trim();
+
+    let threadId = 'active';
+    let body = rawBody;
+
+    if (rawId) {
+      if (/^(?:revisa|escribe|manda|ejecuta|pregunta|dile|consulta|para)/i.test(rawId)) {
+        threadId = 'active';
+        body = [rawId, rawBody].filter(Boolean).join(' ');
+      } else {
+        threadId = rawId;
+      }
+    }
+
+    return {
+      type: 'launch_thread',
+      threadId,
+      ...(body ? { body } : {}),
+    };
+  }
+
+  return null;
+}
+
 /**
  * Plans a turn deterministically using the heuristic engine.
  */
@@ -1147,6 +1210,23 @@ export function planTurnHeuristic(input: string): OperatorPlan {
         reply: describePaneLayout(paneLayout),
       };
     }
+  }
+
+  // S3: launch or message a thread through the dispatch family.
+  const launchThread = parseLaunchThreadIntent(text);
+  if (launchThread) {
+    const threadDesc = launchThread.threadId
+      ? launchThread.threadId === 'active'
+        ? 'el hilo actual'
+        : `el hilo "${launchThread.threadId}"`
+      : 'un nuevo hilo';
+    const providerDesc = launchThread.provider ? ` con ${launchThread.provider}` : '';
+    const bodyDesc = launchThread.body ? ` para "${launchThread.body}"` : '.';
+    return {
+      strategy: 'heuristic',
+      actions: [launchThread],
+      reply: `Abriendo ${threadDesc}${providerDesc}${bodyDesc}`,
+    };
   }
 
   const intent = parseOperatorIntent(text);

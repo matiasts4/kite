@@ -3,6 +3,7 @@
 
 import type { TurnContext } from '../contract';
 import { cleanAgentTitle } from '../../agentNames';
+import { loadZedMemoryNotes } from '../operatorConfig';
 
 export function buildOperatorSystemPrompt(context?: TurnContext): string {
   let terminalsDesc = 'No hay terminales activas en este momento.';
@@ -16,6 +17,13 @@ export function buildOperatorSystemPrompt(context?: TurnContext): string {
       )
       .join('\n');
   }
+
+  // Existing local notes only. A chat transcript is not a note and is not loaded here.
+  const notes = loadZedMemoryNotes();
+  const notesSection =
+    notes.length > 0
+      ? `\n\nNOTAS DE MEMORIA DEL ASISTENTE:\n${notes.map((note) => `- ${note.content}`).join('\n')}`
+      : '';
 
   return `Eres el Asistente Operador de Kite Code. Tu función es interpretar órdenes del usuario en español para controlar el entorno de desarrollo y ejecutar acciones sobre terminales y agentes.
 
@@ -162,5 +170,5 @@ CONTEXTO ACTUAL DEL SISTEMA:
 Proyecto actual: ${context?.workspaceName ? `"${context.workspaceName}"` : 'Proyecto activo'}${context?.workspacePath ? ` (Ruta: ${context.workspacePath})` : ''}${context?.workspaceId ? ` [ID: ${context.workspaceId}]` : ''}
 Modo actual: ${context?.mode || 'code'}
 Terminales abiertas en este proyecto:
-${terminalsDesc}`;
+${terminalsDesc}${notesSection}`;
 }

@@ -491,3 +491,69 @@ it('prioritizes specific terminal number over state adjectives like vacía', () 
     expect((plan.actions[1] as any).target).toBe('idle');
   });
 });
+
+describe('T3 / S3 — launch a thread or keep the terminal', () => {
+  it('keeps abre una terminal on open_terminals with powershell', () => {
+    const plan = planTurnHeuristic('abre una terminal');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('open_terminals');
+    expect((plan.actions[0] as any).engine).toBe('powershell');
+    expect(plan.actions.some((action) => action.type === 'launch_thread')).toBe(false);
+  });
+
+  it('plans abre un thread as launch_thread and does not open a terminal', () => {
+    const plan = planTurnHeuristic('abre un thread');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('launch_thread');
+    expect((plan.actions[0] as any).threadId).toBeUndefined();
+    expect(plan.actions.some((action) => action.type === 'open_terminals')).toBe(false);
+  });
+
+  it('plans abre un hilo as launch_thread and does not open a terminal', () => {
+    const plan = planTurnHeuristic('abre un hilo');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('launch_thread');
+    expect((plan.actions[0] as any).threadId).toBeUndefined();
+    expect(plan.actions.some((action) => action.type === 'open_terminals')).toBe(false);
+  });
+
+  it('plans en el thread as launch_thread against the current thread', () => {
+    const plan = planTurnHeuristic('en el thread');
+    expect(plan.actions).toHaveLength(1);
+    const action = plan.actions[0] as any;
+    expect(action.type).toBe('launch_thread');
+    expect(action.threadId).toBe('active');
+    expect(plan.actions.some((item) => item.type === 'open_terminals')).toBe(false);
+  });
+
+  it('names the engine only in the open clause and keeps the task as the body', () => {
+    const created = planTurnHeuristic('abre un thread de claude para revisar el login');
+    const action = created.actions[0] as any;
+    expect(action.type).toBe('launch_thread');
+    expect(action.provider).toBe('claude');
+    expect(action.threadId).toBeUndefined();
+    expect(action.body).toMatch(/revisar el login/i);
+    expect(created.actions.some((item) => item.type === 'open_terminals')).toBe(false);
+
+    const hijack = planTurnHeuristic('abre un thread para revisar el bug de claude');
+    expect((hijack.actions[0] as any).provider).toBeUndefined();
+    expect((hijack.actions[0] as any).body).toMatch(/bug de claude/i);
+  });
+
+  it('messages a named thread and does not plan a terminal', () => {
+    const plan = planTurnHeuristic('en el thread auth-1 revisa el login');
+    expect(plan.actions).toHaveLength(1);
+    const action = plan.actions[0] as any;
+    expect(action.type).toBe('launch_thread');
+    expect(action.threadId).toBe('auth-1');
+    expect(action.body).toMatch(/revisa el login/i);
+    expect(plan.actions.some((item) => item.type === 'open_terminals')).toBe(false);
+  });
+
+  it('does not replace a terminal request with a thread when both words appear', () => {
+    const plan = planTurnHeuristic('abre una terminal en el thread');
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('open_terminals');
+    expect(plan.actions.some((action) => action.type === 'launch_thread')).toBe(false);
+  });
+});

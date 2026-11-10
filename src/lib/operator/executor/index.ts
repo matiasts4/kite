@@ -16,6 +16,7 @@ import { executeStopSpeakingAction } from './actions/stopSpeaking';
 import { executeHandoffToAgentAction } from './actions/handoffToAgent';
 import { executeManagePaneLayoutAction } from './actions/managePaneLayout';
 import { executeSwitchWorkspaceAction } from './actions/switchWorkspace';
+import { executeLaunchThreadAction } from './actions/launchThread';
 
 export function composeReplyFromReceipts(
   plan: OperatorPlan,
@@ -111,6 +112,10 @@ export async function executePlan(
 
         case 'switch_workspace':
           receipt = await executeSwitchWorkspaceAction(action, idx, context);
+          break;
+
+        case 'launch_thread':
+          receipt = await executeLaunchThreadAction(action, idx, context);
           break;
 
         default:

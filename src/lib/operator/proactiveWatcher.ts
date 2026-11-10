@@ -43,8 +43,23 @@ export interface ProactiveAttentionPayload {
 }
 
 export interface ProactiveWatcherOptions {
-  /** Speech sink; defaults to `ttsNarrator.speak`. Injected in tests. */
+  /** Speech sink used when no voice session is open. Defaults to `ttsNarrator.speak`. Injected in tests. */
   speak?: (text: string) => void | Promise<void>;
+  /**
+   * Speaks a notice through an already-open voice session.
+   * Used only when `isVoiceSessionOpen` returns true. Never opens a session.
+   */
+  sessionSpeak?: (text: string) => void | Promise<void>;
+  /**
+   * Live flag, read when a notice is spoken. Absent or false means no voice session is open.
+   * Do not pass one-shot dictation or the orb call flag here.
+   */
+  isVoiceSessionOpen?: () => boolean;
+  /**
+   * Accepted so a caller can inject a session opener. The watcher never calls it.
+   * A finish notice must not open a voice session.
+   */
+  openVoiceSession?: () => void | Promise<void>;
   /** Attention sink; defaults to the `notifications_report_attention` IPC bridge. Injected in tests. */
   reportAttention?: (payload: ProactiveAttentionPayload) => void;
   /** Per-session silence window in ms. Defaults to `PROACTIVE_COOLDOWN_MS`. */
@@ -71,6 +86,8 @@ interface WatchedSession {
 
 interface WatcherSettings {
   speak: (text: string) => void | Promise<void>;
+  sessionSpeak?: (text: string) => void | Promise<void>;
+  isVoiceSessionOpen?: () => boolean;
   reportAttention: (payload: ProactiveAttentionPayload) => void;
   cooldownMs: number;
   now: () => number;
@@ -261,9 +278,23 @@ function buildAnnouncement(
   return null;
 }
 
-function speakSafely(settings: WatcherSettings, text: string): void {
+function voiceSessionIsOpen(settings: WatcherSettings): boolean {
+  if (!settings.isVoiceSessionOpen) return false;
   try {
-    const result: unknown = settings.speak(text);
+    return settings.isVoiceSessionOpen() === true;
+  } catch {
+    // A broken flag must not open a session or stop the notice.
+    return false;
+  }
+}
+
+function speakSafely(settings: WatcherSettings, text: string): void {
+  // An open session is the mouth. A closed or absent session uses the existing sink.
+  // Never call a session opener from here.
+  const sink =
+    voiceSessionIsOpen(settings) && settings.sessionSpeak ? settings.sessionSpeak : settings.speak;
+  try {
+    const result: unknown = sink(text);
     if (result instanceof Promise) {
       void result.catch(() => {});
     }
@@ -342,6 +373,8 @@ export function startProactiveAgentWatcher(options: ProactiveWatcherOptions = {}
 
   const settings: WatcherSettings = {
     speak: options.speak ?? defaultSpeak,
+    sessionSpeak: options.sessionSpeak,
+    isVoiceSessionOpen: options.isVoiceSessionOpen,
     reportAttention: options.reportAttention ?? defaultReportAttention,
     cooldownMs: options.cooldownMs ?? PROACTIVE_COOLDOWN_MS,
     now: options.now ?? (() => Date.now()),

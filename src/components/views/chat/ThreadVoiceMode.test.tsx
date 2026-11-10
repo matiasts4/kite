@@ -5,7 +5,6 @@ import { VoiceTurnTraceCard } from './VoiceTurnTraceCard';
 import { VoiceCommentaryRow } from './VoiceCommentaryRow';
 import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import { declarationFromCatalog } from './driverDeclaration';
-import { invokeCommand, listConnections } from '../../../lib/ipc';
 
 vi.mock('../../../lib/ipc', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../lib/ipc')>();

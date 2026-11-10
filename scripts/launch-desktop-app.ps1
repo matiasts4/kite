@@ -55,53 +55,76 @@ if (Test-Path $devEbLockPath) {
     Remove-Item $devEbLockPath -Force -ErrorAction SilentlyContinue
 }
 
+$KiteViteUrl = "http://127.0.0.1:1420/"
 
-# 2. Check if Vite is running on port 1420 (skipped when launching standalone -NativeDeck)
-if (-not $NativeDeck) {
-    Write-Host "[2/4] Verificando servidor frontend en http://127.0.0.1:1420..." -ForegroundColor Cyan
-    $viteRunning = $false
-    if (-not $Rebuild) {
-        try {
-            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($resp.StatusCode -eq 200) { $viteRunning = $true }
-        } catch {}
+function Test-KiteVite {
+    try {
+        $resp = Invoke-WebRequest -Uri $KiteViteUrl -UseBasicParsing -TimeoutSec 2
+        return ($resp.StatusCode -eq 200)
+    } catch {
+        return $false
     }
-
-    if (-not $viteRunning) {
-        # Terminate any stale Vite processes on port 1420
-        Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*vite*") -and ($_.CommandLine -notlike "*launch-desktop-app*") } | ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-        Write-Host "Iniciando servidor Vite..." -ForegroundColor Yellow
-        $viteProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run dev" -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
-        
-        # Wait for Vite to be ready and responsive (up to 30s)
-        $retries = 60
-        while ($retries -gt 0) {
-            Start-Sleep -Milliseconds 500
-            try {
-                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:1420/src/main.tsx" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
-                if ($resp.StatusCode -eq 200) {
-                    $viteRunning = $true
-                    break
-                }
-            } catch {}
-            $retries--
-        }
-        if (-not $viteRunning) {
-            Write-Error "No se pudo conectar al servidor Vite en http://127.0.0.1:1420 tras 30 segundos."
-            exit 1
-        }
-        Write-Host "Servidor Vite listo en http://127.0.0.1:1420." -ForegroundColor Green
-    } else {
-        Write-Host "Servidor Vite ya activo y respondiendo." -ForegroundColor Green
-    }
-} else {
-    Write-Host "[2/4] Modo NativeDeck activo (sin Vite ni WebView2 en el camino base)..." -ForegroundColor Green
 }
 
-# 3. Compile C# InteractiveLauncher for WinSta0\Default
-Write-Host "[3/4] Preparando lanzador para el escritorio interactivo (WinSta0\Default)..." -ForegroundColor Cyan
+function Stop-KiteVitePort {
+    Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique |
+        ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+}
+
+function Start-KiteViteProcess {
+    $viteJs = Join-Path $ProjectRoot "node_modules\vite\bin\vite.js"
+    if (-not (Test-Path -LiteralPath $viteJs)) {
+        Write-Error "No se encontró Vite en $viteJs. Ejecuta npm install."
+        exit 1
+    }
+    $nodeCmd = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) {
+        Write-Error "node.exe no está en PATH; no se puede iniciar Vite."
+        exit 1
+    }
+    if (-not $script:desktopLauncherReady) {
+        Write-Error "DesktopManager no está listo; Vite no sobreviviría al cierre de npm."
+        exit 1
+    }
+    Write-Host "Iniciando servidor Vite (sin consola, independiente de npm)..." -ForegroundColor Yellow
+    $viteArgs = '"{0}" --host 127.0.0.1 --port 1420' -f $viteJs
+    $vitePid = [DesktopManager]::LaunchHidden($nodeCmd.Source, $viteArgs, $ProjectRoot)
+    Write-Host "Vite lanzado con PID $vitePid." -ForegroundColor Yellow
+}
+
+function Wait-KiteVite {
+    param([int]$TimeoutSec = 30)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-KiteVite) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Ensure-KiteVite {
+    if ($Rebuild) {
+        Stop-KiteVitePort
+        Start-Sleep -Milliseconds 300
+    } elseif (Test-KiteVite) {
+        Write-Host "Servidor Vite ya activo en $KiteViteUrl" -ForegroundColor Green
+        return
+    }
+    if (-not (Test-KiteVite)) {
+        Stop-KiteVitePort
+        Start-Sleep -Milliseconds 300
+        Start-KiteViteProcess
+        if (-not (Wait-KiteVite -TimeoutSec 30)) {
+            Write-Error "No se pudo conectar al servidor Vite en $KiteViteUrl."
+            exit 1
+        }
+    }
+    Write-Host "Servidor Vite listo en $KiteViteUrl" -ForegroundColor Green
+}
+
+# 2. Compile C# launcher first — Vite must break away from npm's job or :1420 dies when npm exits.
+Write-Host "[2/4] Preparando lanzador para el escritorio interactivo (WinSta0\Default)..." -ForegroundColor Cyan
 $csharpSource = @"
 using System;
 using System.Collections.Generic;
@@ -235,6 +258,53 @@ public class DesktopManager {
         return pi.dwProcessId;
     }
 
+    public static int LaunchHidden(string appPath, string args, string workingDir) {
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(si);
+        si.lpDesktop = @"WinSta0\Default";
+        si.dwFlags = 0x00000001; // STARTF_USESHOWWINDOW
+        si.wShowWindow = 0; // SW_HIDE
+        string cmdLine = string.IsNullOrEmpty(args) ? null : string.Format("\"{0}\" {1}", appPath, args);
+
+        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+        bool success = CreateProcess(
+            appPath,
+            cmdLine,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            false,
+            0x09000208, // BREAKAWAY_FROM_JOB | NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS
+            IntPtr.Zero,
+            workingDir,
+            ref si,
+            out pi
+        );
+
+        if (!success) {
+            success = CreateProcess(
+                appPath,
+                cmdLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                false,
+                0x08000208, // NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS
+                IntPtr.Zero,
+                workingDir,
+                ref si,
+                out pi
+            );
+        }
+
+        if (!success) {
+            int err = Marshal.GetLastWin32Error();
+            throw new Exception("Error al crear proceso oculto: " + err);
+        }
+
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return pi.dwProcessId;
+    }
+
     public static List<string> CheckAndFocus(uint targetPid) {
         var list = new List<string>();
         EnumDesktopWindowsProc callback = (hWnd, lParam) => {
@@ -265,12 +335,20 @@ public class DesktopManager {
     }
 }
 "@
-$desktopLauncherReady = $false
+$script:desktopLauncherReady = $false
 try {
     Add-Type -TypeDefinition $csharpSource -ErrorAction Stop
-    $desktopLauncherReady = $true
+    $script:desktopLauncherReady = $true
 } catch {
     Write-Host "No se pudo preparar el lanzador de escritorio ($($_.Exception.Message)). Se usará Start-Process." -ForegroundColor Yellow
+}
+
+# 3. Vite must answer on 127.0.0.1:1420 before the WebView opens (skipped for -NativeDeck)
+if (-not $NativeDeck) {
+    Write-Host "[3/4] Verificando servidor frontend en $KiteViteUrl ..." -ForegroundColor Cyan
+    Ensure-KiteVite
+} else {
+    Write-Host "[3/4] Modo NativeDeck activo (sin Vite ni WebView2 en el camino base)..." -ForegroundColor Green
 }
 
 # 3b. Verify Rust backend freshness for real-time dev mode (or select NativeDeck binary)
@@ -321,6 +399,11 @@ if ($NativeDeck) {
     } else {
         Write-Host "Backend listo (Vite HMR activo, kite-core --daemon preservado)." -ForegroundColor Green
     }
+}
+
+if (-not $NativeDeck) {
+    Write-Host "Reconfirmando Vite antes de abrir la ventana..." -ForegroundColor Cyan
+    Ensure-KiteVite
 }
 
 Write-Host "[4/4] Lanzando $binary $launchArgs en la pantalla del usuario (WinSta0\Default)..." -ForegroundColor Cyan

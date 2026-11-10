@@ -648,6 +648,19 @@ export async function deleteChatThread(threadId: string): Promise<void> {
   return invokeCommand<void>('delete_chat_thread', { supportedSchemaVersion: 1, threadId });
 }
 
+export async function rewindThreadTranscript(
+  threadId: string,
+  messageId: string,
+): Promise<{ text: string | null; thread: ExtendedChatThread | null; error: string | null }> {
+  return invokeCommand('rewind_thread_transcript', { threadId, messageId });
+}
+
+export async function restoreThreadCheckpoint(
+  threadId: string,
+): Promise<{ restored: boolean; error: string | null }> {
+  return invokeCommand('restore_thread_checkpoint', { threadId });
+}
+
 // Tickets & Tasks
 export async function getTicketSnapshot(): Promise<TicketSnapshot> {
   return invokeCommand<TicketSnapshot>('ticket_snapshot');

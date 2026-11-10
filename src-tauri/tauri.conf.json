@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/tooling/cli/schema.json",
   "productName": "Kite Code",
-  "version": "0.1.47",
+  "version": "0.1.51",
   "identifier": "dev.kite.code",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -46,7 +46,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFNEE3MkExMDFBOTFCODYKUldTR0c2a0JvWEpLVHF0b2NwMUpZK3RiVGRBaEVpb3BNdFFQWjk4ZTJVZkZIb3RTMU9MNDJwS1AK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU5QTU5MDI1MDUzQTQ4RDQKUldUVVNEb0ZKWkNsV1liaHpUbXV0bE5yMzFETFNrblRDYnJKZFVVUldtN3hubG4wSVRSRUd2eE0K",
       "endpoints": [
         "http://127.0.0.1:9101/studio/latest.json"
       ],

@@ -33,6 +33,78 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.51',
+    tag: 'v0.1.51',
+    date: 'Nov 7, 2026',
+    title: 'Delegation paste stability and canonical codename assignment',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'wrap multiline terminal paste in bracketed paste to prevent queue flooding',
+      },
+      {
+        kind: 'fixed',
+        description: 'assign canonical codenames to delegated agents',
+      },
+      {
+        kind: 'fixed',
+        description: 'distinguish idle/done prompts from genuine blocked approvals',
+      },
+    ],
+  },
+  {
+    version: '0.1.50',
+    tag: 'v0.1.50',
+    date: 'Nov 7, 2026',
+    title: 'Dispatch manual CLI & skill roots fix',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Strip SKILL.md YAML frontmatter and guard leading hyphens when passing system prompts to Grok and Claude Code CLI',
+      },
+      {
+        kind: 'added',
+        description: 'Expand dispatch skill installation across OpenCode, Gemini, Copilot, Kimi, Amp, and shared agent skill directories',
+      },
+    ],
+  },
+  {
+    version: '0.1.49',
+    tag: 'v0.1.49',
+    date: 'Nov 7, 2026',
+    title: 'Dispatch skill channel',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Agents receive the dispatch manual as a skill file, not the first chat message.',
+      },
+      {
+        kind: 'added',
+        description: 'The dispatch skill is installed into existing agent skill directories.',
+      },
+    ],
+  },
+  {
+    version: '0.1.48',
+    tag: 'v0.1.48',
+    date: 'Nov 7, 2026',
+    title: 'Dispatch and local updates',
+    items: [
+      {
+        kind: 'added',
+        description: 'dispatch CLI to launch, send, wait, and kill agents',
+      },
+      {
+        kind: 'added',
+        description: 'agents receive the complete dispatch manual at start',
+      },
+      {
+        kind: 'fixed',
+        description: 'updater signing key for the local feed',
+      },
+    ],
+  },
+  {
     version: '0.1.47',
     tag: 'v0.1.47',
     date: 'Nov 4, 2026',

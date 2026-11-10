@@ -68,6 +68,13 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
 1. **Dual-Tier ODDs**:
    - Public task specifications live under `odd/tasks/<slug>.md`. They must be 100% product-focused and clean of external donor or cloning references.
    - Internal investigation tasks live under `.kite/tasks/<slug>.md` (gitignored).
+   - A correction that belongs to an existing ODD updates that document in the same change: append the user's words to `## Log`, rewrite the affected `S#`, and reopen or add the linked task. Do not leave the fix floating only in code.
 2. **Quality Verification**:
    - Always verify changes with `npx tsc --noEmit` and `npx vitest run`.
    - Before any commit or push, run `node .kite/sanitizer/audit-references.mjs --check`.
+3. **Matching another product**:
+   - Write gate: inventory the source as a person and as an agent before any code. Cover how the feature is delivered, how it is read, how it is shown, CLI, flags, env gates, instruction/skill loading, engines, lifecycle, panes, persistence, and every other user-visible behavior of the requested feature.
+   - A missing instruction channel, environment gate, skill-file install, or presentation detail is a missed feature.
+   - Discovery before specs: suggest every copyable part with its behavior and look, confirm totality, then land detailed `S#` on the ODD. Do not implement one slice as the whole feature.
+   - Public `odd/tasks`, docs, UI copy, and comments stay product-focused. They never name the source product. Internal notes live under `.kite/tasks/` (gitignored).
+   - Follow `port-from-product` when that skill is loaded.

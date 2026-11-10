@@ -59,6 +59,7 @@ export function dispatchTerminalStagedPrompt(detail: PromptProjectileDetail): vo
         prompt: detail.prompt,
         agentName: detail.agentName,
         engine: detail.engine,
+        visualOnly: detail.visualOnly,
       },
     })
   );

@@ -1,5 +1,7 @@
 # Thread Composer Enhancements: Selectors Motion, Grok Models, Reasoning Detection & Notification Refinements
 
+Status: overlapping menu motion, Grok catalog, and effort collapsing are owned by `odd/tasks/thread-provider-runtime.md` and `odd/tasks/thread-composer-and-navigation.md`. The confirmed menu motion is 80ms, a 4px drift, `cubic-bezier(0.32, 0.72, 0, 1)`, and no scale. Do not implement the 0.13s scale motion in S1 of this file.
+
 Objective: upgrade the Thread chat surface with snappy directional popover animations, fix Grok model discovery and interaction, automatically detect and collapse multi-tier thinking models into the discrete effort slider, and eliminate inaccurate cancellation toasts and notification spam.
 Branch: `feat/ui-composer`. Do not commit on `main`.
 Delivery strategy: `ask-on-risk`.
@@ -52,7 +54,7 @@ Acceptance:
 ## Tasks
 
 - T1. Directional popover animations (`data-origin`, `kitePopUp`, `kitePopDown`, 130ms snappy spring curve). S1.
-- T2. Grok driver declaration, CLI model parsing, and fallback catalog. S2.
+- T2. Grok driver declaration, CLI model parsing, and fallback catalog. S2. Status: implemented. The live catalog is `~/.grok/models_cache.json`; `grok models` on 1.0.77 prints a default that is not in the list and no bullets. The picker stays clickable while that list is empty.
 - T3. Reasoning effort detector & variant model collapser in model discovery and execution bridge. S3.
 - T4. Cancellation notification suppression & thread toast refinement. S4.
 

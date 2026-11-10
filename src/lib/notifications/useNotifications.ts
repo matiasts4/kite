@@ -34,7 +34,7 @@ export function useNotifications(): UseNotificationsResult {
               playApprovalChime(soundEnabled);
               toast.agentApproval(rec);
             }
-          } else if (rec.kind?.kind === 'settled' && rec.kind.outcome !== 'failed' && lookingElsewhere) {
+          } else if (rec.kind?.kind === 'settled' && rec.kind.outcome === 'completed' && !lookingElsewhere) {
             playCompletionChime(true, soundEnabled);
           }
         }

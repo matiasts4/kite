@@ -6,7 +6,7 @@ import {
   collectActiveAgentNames,
   estimateTargetPaneGrid,
 } from './workspaceUtils';
-import { cleanAgentTitle, getNextAgentName } from '../../lib/agentNames';
+import { cleanAgentTitle, resolveCanonicalAgentName } from '../../lib/agentNames';
 import { invokeCommand } from '../../lib/ipc';
 import { registerSpawnedTerminal } from '../../lib/terminalRegistry';
 import { waitForSpawnGeometry } from '../../lib/terminalHostSize';
@@ -217,16 +217,13 @@ export function useWorkspaceEventListeners({
       const isShell = wireEngine === 'powershell' || wireEngine === 'terminal';
 
       let agentName = detail.agentName;
-      if (!agentName && !isShell) {
-        if (detail.title && !detail.title.startsWith('[ODD]') && !detail.title.startsWith('Agent ')) {
-          agentName = cleanAgentTitle(detail.title);
-        } else {
-          const activeNames = collectActiveAgentNames(latestLayoutRef.current.tabs);
-          agentName = getNextAgentName(activeNames);
-        }
+      if (!isShell) {
+        const activeNames = collectActiveAgentNames(latestLayoutRef.current.tabs);
+        const candidate = agentName || (detail.title && !detail.title.startsWith('[ODD]') && !detail.title.startsWith('Agent ') ? cleanAgentTitle(detail.title) : undefined);
+        agentName = resolveCanonicalAgentName(candidate, activeNames);
       }
 
-      const finalTitle = detail.title || (agentName ? `${agentName} (${wireEngine})` : `Terminal (${wireEngine})`);
+      const finalTitle = agentName ? `${agentName} (${wireEngine})` : (detail.title || `Terminal (${wireEngine})`);
       const leafLabel = agentName || cleanAgentTitle(finalTitle);
       const attachOnly = detail.attachOnly === true;
 
@@ -265,6 +262,7 @@ export function useWorkspaceEventListeners({
         engine: wireEngine,
         title: finalTitle,
         who: agentName || leafLabel,
+        agentName,
       });
 
       const newLeaf = createLeaf({

@@ -6,6 +6,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.51] - 2026-11-07
+
+> Delegation paste stability and canonical codename assignment
+
+### Fixed
+- wrap multiline terminal paste in bracketed paste to prevent queue flooding
+- assign canonical codenames to delegated agents
+- distinguish idle/done prompts from genuine blocked approvals
+
+---
+
+## [0.1.50] - 2026-11-07
+
+> Dispatch manual CLI & skill roots fix
+
+### Added
+- Expand dispatch skill installation across OpenCode, Gemini, Copilot, Kimi, Amp, and shared agent skill directories
+
+### Fixed
+- Strip SKILL.md YAML frontmatter and guard leading hyphens when passing system prompts to Grok and Claude Code CLI
+
+---
+
+## [0.1.49] - 2026-11-07
+
+> Dispatch skill channel
+
+### Added
+- The dispatch skill is installed into existing agent skill directories.
+
+### Fixed
+- Agents receive the dispatch manual as a skill file, not the first chat message.
+
+---
+
+## [0.1.48] - 2026-11-07
+
+> Dispatch and local updates
+
+### Added
+- dispatch CLI to launch, send, wait, and kill agents
+- agents receive the complete dispatch manual at start
+
+### Fixed
+- updater signing key for the local feed
+
+---
+
 ## [0.1.47] - 2026-11-05
 
 > Restore de terminales AntiGravity y Grok

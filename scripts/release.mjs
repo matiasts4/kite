@@ -478,6 +478,15 @@ for (const b of built) {
   fs.copyFileSync(path.join(outDir, b.assetName), path.join(dir, b.assetName));
   fs.writeFileSync(path.join(dir, 'latest.json'), JSON.stringify(b.manifest, null, 2));
   pruneOldArtifacts(dir, 2);
+
+  const installedAppDir = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Kite Code') : '';
+  if (installedAppDir && fs.existsSync(installedAppDir)) {
+    const installedFeedDir = path.join(installedAppDir, 'feed', b.key);
+    fs.mkdirSync(installedFeedDir, { recursive: true });
+    fs.copyFileSync(path.join(outDir, b.assetName), path.join(installedFeedDir, b.assetName));
+    fs.writeFileSync(path.join(installedFeedDir, 'latest.json'), JSON.stringify(b.manifest, null, 2));
+    pruneOldArtifacts(installedFeedDir, 2);
+  }
 }
 pruneOldReleases(path.join(root, 'releases'), 2);
 const ok = await ensureFeedServer();

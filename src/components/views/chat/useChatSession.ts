@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import type { ChatItem } from '../../../types';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { invokeCommand, listConnections, type ConnectionSummary } from '../../../lib/ipc';
+import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import {
   ChatProvider,
   ChatMode,
@@ -546,13 +547,15 @@ export function useChatSession({
     onThreadsChanged?.();
   };
 
-  const handleCreateNewThread = async () => {
+  const handleCreateNewThread = async (): Promise<string | undefined> => {
     const latest = createDraftConfig(draftConfig.provider, null, draftConfig.agent ?? null);
-    // Deduplicate empty draft threads in the same scope
+    // Deduplicate empty draft threads in the same scope. A thread that already holds voice turns
+    // is a real conversation (its turns live outside the provider transcript), never a blank draft.
     const existingDraft = knownThreadsList.find(
       (t) =>
         (agentId ? t.profileId === agentId : (t.workspaceId ?? null) === (workspaceId ?? null)) &&
-        (!t.items || t.items.length === 0 || (t as any).status === 'draft' || !t.title || t.title.toLowerCase().includes('draft') || t.title === 'New Chat')
+        (!t.items || t.items.length === 0 || (t as any).status === 'draft' || !t.title || t.title.toLowerCase().includes('draft') || t.title === 'New Chat') &&
+        voiceSessionStore.getThreadVoiceTurns(t.id).length === 0
     );
     if (existingDraft) {
       await invokeCommand('update_chat_configuration', {
@@ -564,7 +567,7 @@ export function useChatSession({
         ...(latest.agent ? { agent: latest.agent } : {}),
       });
       void handleLoadThread(existingDraft.id);
-      return;
+      return existingDraft.id;
     }
 
     try {
@@ -587,8 +590,10 @@ export function useChatSession({
       void persistGrid(nextGrid, tid);
       setShowHistoryPopover(false);
       notifyThreadsChanged();
+      return tid;
     } catch (err) {
       console.error('[ChatView] Failed to create new chat:', err);
+      return undefined;
     }
   };
 

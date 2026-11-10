@@ -9,17 +9,9 @@ import {
   ChevronDownIcon,
   SearchIcon,
   PencilIcon,
-  MicIcon,
-  SparklesIcon,
 } from './ChatIcons';
-import {
-  useVoiceSession,
-  voiceSessionStore,
-  getConfiguredAssistantDisplay,
-  type VoiceTurnRecord,
-} from '../../../lib/operator/voice/voiceSessionStore';
-import { VoiceTurnTraceCard } from './VoiceTurnTraceCard';
-import { VoiceCommentaryRow } from './VoiceCommentaryRow';
+import { useVoiceSession, voiceSessionStore, type VoiceTurnRecord } from '../../../lib/operator/voice/voiceSessionStore';
+import { liveVoiceStageItem, mergeTimeline, voiceTurnsToChatItems } from './voiceTranscript';
 import { subscribeTrace } from '../../../lib/operator/trace/trace';
 import { runOperatorTurn } from '../../../lib/operator';
 import {
@@ -39,6 +31,7 @@ import {
   createWorkspaceBranch,
   rewindThreadTranscript,
   restoreThreadCheckpoint,
+  renameChatThread,
 } from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
 import { filterTranscriptForVisibility, readToolVisibility, TOOL_VISIBILITY_EVENT, type ToolVisibilityMode } from './toolVisibility';
@@ -120,7 +113,7 @@ export interface SingleThreadPaneProps {
   onClosePane: () => void;
   onToggleSplit?: () => void;
   onToggleHistory?: () => void;
-  onNewThread: () => void;
+  onNewThread: () => void | Promise<string | null | undefined | void>;
   onSelectHistoryThread?: (id: string) => void;
   onPinThread?: (id: string, e: React.MouseEvent) => void;
   onArchiveThread?: (id: string, e: React.MouseEvent) => void;
@@ -420,11 +413,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     }
     return () => {
       const latest = voiceSessionStore.getSnapshot();
-      if (latest.phase === 'active' || latest.phase === 'starting') {
+      if (
+        (latest.phase === 'active' || latest.phase === 'starting') &&
+        latest.boundThreadId === thread.id
+      ) {
         voiceSessionStore.setActiveSurface('orb');
       }
     };
-  }, []);
+  }, [thread.id]);
 
   useEffect(() => {
     setVoiceTurns(voice.getThreadVoiceTurns(thread.id));
@@ -510,12 +506,38 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const isVoiceActiveHere =
     (voice.phase === 'active' || voice.phase === 'starting') &&
     (voice.boundThreadId === thread.id || (voice.activeSurface === 'thread' && !voice.boundThreadId));
-  const isDraft =
-    transcriptItems.length === 0 &&
-    voiceTurns.length === 0 &&
-    !liveVoiceTurn &&
-    !isVoiceActiveHere &&
-    !running;
+
+  // Voice turns are projected as regular chat items so they render with the exact same rows,
+  // widths and spacing as any other conversation.
+  const timelineItems = React.useMemo(() => {
+    const merged = mergeTimeline(transcriptItems, voiceTurnsToChatItems(voiceTurns));
+    return liveVoiceTurn ? [...merged, liveVoiceStageItem(liveVoiceTurn)] : merged;
+  }, [transcriptItems, voiceTurns, liveVoiceTurn]);
+
+  // A voice session always opens its own conversation: reuse the current thread only when it is
+  // still blank, otherwise start a fresh thread and bind the session to it.
+  const startVoiceMode = useCallback(async () => {
+    const isBlank = transcriptItems.length === 0 && voiceTurns.length === 0 && !running;
+    if (isBlank) {
+      voiceSessionStore.startSession(thread.id, 'thread');
+      return;
+    }
+    let targetId: string | null = thread.id;
+    try {
+      const created = await onNewThread();
+      if (typeof created === 'string' && created) targetId = created;
+    } catch (err) {
+      console.warn('[SingleThreadPane] Could not open a new voice thread:', err);
+    }
+    voiceSessionStore.startSession(targetId, 'thread');
+    if (targetId && targetId !== thread.id) {
+      void renameChatThread(targetId, 'Sesión de voz')
+        .then(() => window.dispatchEvent(new CustomEvent('kite:threads-changed')))
+        .catch(() => undefined);
+    }
+  }, [thread.id, transcriptItems.length, voiceTurns.length, running, onNewThread]);
+
+  const isDraft = timelineItems.length === 0 && !running;
   const [toolVisibility, setToolVisibility] = useState<ToolVisibilityMode>(() => readToolVisibility());
   const [queuedRuns, setQueuedRuns] = useState(thread.queuedRuns ?? []);
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
@@ -538,7 +560,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     window.addEventListener(TOOL_VISIBILITY_EVENT, onVisibility);
     return () => window.removeEventListener(TOOL_VISIBILITY_EVENT, onVisibility);
   }, []);
-  const transcriptRows = groupTranscriptRows(filterTranscriptForVisibility(transcriptItems, toolVisibility));
+  const transcriptRows = groupTranscriptRows(filterTranscriptForVisibility(timelineItems, toolVisibility));
   const totalRows = transcriptRows.length;
   const displayedRows =
     totalRows > visibleLimit
@@ -996,93 +1018,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                       />
                     ) : null}
 
-                    {/* Live Voice Mode Empty Stage Hero when no turns have occurred yet */}
-                    {isVoiceActiveHere &&
-                      transcriptItems.length === 0 &&
-                      voiceTurns.length === 0 &&
-                      !liveVoiceTurn && (() => {
-                        const assistantDisplay = getConfiguredAssistantDisplay();
-                        return (
-                          <div className="kite-voice-empty-hero" data-testid="voice-empty-hero">
-                            <div className="kite-voice-empty-hero__badge">
-                              <SparklesIcon size={12} />
-                              <span>Sesión de voz activa · {assistantDisplay.personaName}</span>
-                            </div>
-                            <h2 className="kite-voice-empty-hero__title">
-                              {voice.interimTranscript
-                                ? `«${voice.interimTranscript}»`
-                                : voice.micMuted
-                                ? 'Micrófono en silencio'
-                                : 'Escuchando en vivo… Hablá o escribí abajo'}
-                            </h2>
-                            <p className="kite-voice-empty-hero__subtitle">
-                              Cada turno muestra tu mensaje, la tarjeta de traza verificada de acciones y la respuesta hablada del asistente.
-                            </p>
-                            <div className="kite-voice-empty-hero__meta">
-                              <span className="kite-voice-empty-hero__chip">
-                                Cerebro: {assistantDisplay.providerLabel} · {assistantDisplay.modelId}
-                              </span>
-                              <span className="kite-voice-empty-hero__chip">
-                                Voz: {assistantDisplay.ttsLabel} ({assistantDisplay.voiceName})
-                              </span>
-                              <span className="kite-voice-empty-hero__chip">
-                                Memoria: 14 turnos + alcance de chats
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                    {/* Voice Turns Recorded for This Thread (S4, S6) */}
-                    {voiceTurns.map((turnRecord) => (
-                      <div
-                        key={turnRecord.turnId}
-                        className="kite-voice-turn-group"
-                        data-testid={`voice-turn-${turnRecord.turnId}`}
-                      >
-                        {/* 1. User Voice Bubble */}
-                        <div className="kite-voice-user-bubble">
-                          <div className="kite-voice-user-bubble__card">
-                            <div className="kite-voice-bubble-header">
-                              <MicIcon size={11} style={{ color: '#339cff' }} />
-                              <span>{turnRecord.source === 'voz' ? 'Voz' : 'Texto (Sesión de voz)'}</span>
-                            </div>
-                            <div style={{ whiteSpace: 'pre-wrap' }}>{turnRecord.userPrompt}</div>
-                          </div>
-                        </div>
-
-                        {/* 2. Structured Trace Card */}
-                        <VoiceTurnTraceCard
-                          turnId={turnRecord.turnId}
-                          strategy={turnRecord.strategy}
-                          providerId={turnRecord.providerId}
-                          modelId={turnRecord.modelId}
-                          durationMs={turnRecord.durationMs}
-                          overallSuccess={turnRecord.overallSuccess}
-                          receipts={turnRecord.receipts}
-                          consultChatsInfo={turnRecord.consultChatsInfo}
-                        />
-
-                        {/* 3. Assistant Reply Bubble */}
-                        {turnRecord.reply && (
-                          <div className="kite-voice-assistant-bubble">
-                            <div className="kite-voice-assistant-bubble__card">
-                              <div className="kite-voice-bubble-header kite-voice-bubble-header--assistant">
-                                <SparklesIcon size={12} />
-                                <span>Asistente Zed</span>
-                              </div>
-                              <div style={{ whiteSpace: 'pre-wrap' }}>{turnRecord.reply}</div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-
-                    {/* Live Stage Commentary Shimmer Row (S4) */}
-                    {liveVoiceTurn && (
-                      <VoiceCommentaryRow stage={liveVoiceTurn.stage} detail={liveVoiceTurn.detail} />
-                    )}
-
                     {/* Quota Handoff Banner */}
                     {thread.quotaHandoffOffer && (
                       <QuotaHandoffBanner
@@ -1099,7 +1034,15 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             {isDraft ? (
               <div className={agentName ? 'chat-draft-hero agent-chat-hero scroll-quiet' : 'chat-draft-hero scroll-quiet'}>
                 <h1>
-                  {agentName ? (
+                  {isVoiceActiveHere ? (
+                    voice.interimTranscript ? (
+                      `«${voice.interimTranscript}»`
+                    ) : voice.micMuted ? (
+                      'Micrófono en silencio'
+                    ) : (
+                      'Te escucho'
+                    )
+                  ) : agentName ? (
                     'What should we build?'
                   ) : effectiveWorkspaceName ? (
                     <>
@@ -1111,7 +1054,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                   )}
                 </h1>
                 <p>
-                  {agentName
+                  {isVoiceActiveHere
+                    ? 'Hablá o escribí. Zed responde con voz y deja cada acción en esta conversación.'
+                    : agentName
                     ? null
                     : effectiveWorkspaceName
                     ? 'Pick a model. Then say the work.'
@@ -1282,6 +1227,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               }}
               onStop={stopRunning}
               onSendVoiceTurn={handleSendVoiceTurn}
+              onStartVoiceMode={() => void startVoiceMode()}
               paused={!running && thread.turnFailure?.kind === 'usageLimit'}
               onPickAttachments={onPickAttachments}
               onStageFiles={onStageFiles}

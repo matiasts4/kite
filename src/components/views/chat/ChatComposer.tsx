@@ -149,6 +149,8 @@ export interface ChatComposerProps {
     requestId: string
   ) => void;
   onSendVoiceTurn?: (text: string) => void;
+  /** Opens Voice Mode in its own conversation. Falls back to binding the current thread. */
+  onStartVoiceMode?: () => void;
 }
 
 function extractUserPromptHistory(items: ChatItem[] = []): string[] {
@@ -413,6 +415,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   initialStashes,
   stashEnvironment = '',
   onSendVoiceTurn,
+  onStartVoiceMode,
 }) => {
   const voice = useVoiceSession();
   const isVoiceModeActive =
@@ -1298,6 +1301,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               type="button"
               disabled={running}
               onClick={() => {
+                if (onStartVoiceMode) {
+                  onStartVoiceMode();
+                  return;
+                }
                 voice.startSession(threadId, 'thread');
               }}
               title="Iniciar sesión de voz"

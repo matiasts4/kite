@@ -31,40 +31,41 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
     vi.clearAllMocks();
   });
 
-  it('renders locked assistant model badge with resolved brain model and live status pill (non-editable as per S2)', () => {
+  it('renders the locked brain model and voice engine from the Zed Assistant settings (S2)', () => {
     voiceSessionStore.startSession('thread-test-1', 'thread');
 
     render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
 
     const badge = screen.getByTestId('voice-locked-assistant-badge');
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent('Zed · GROK · ElevenLabs');
-    expect(badge).toHaveTextContent('grok-4.7');
-
-    const statusPill = screen.getByTestId('voice-live-status-pill');
-    expect(statusPill).toHaveTextContent('Escuchando…');
+    expect(badge.tagName).toBe('SPAN'); // not a button: it cannot be changed mid-session
+    expect(badge).toHaveTextContent('Zed · grok-4.7');
+    expect(screen.getByTestId('voice-engine-badge')).toHaveTextContent('ElevenLabs');
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Escuchando…');
   });
 
-  it('updates live status pill when interim speech or thinking stage occurs', () => {
-    voiceSessionStore.startSession('thread-test-1', 'thread');
+  it('reuses the standard composer footer geometry (S7)', () => {
     render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
 
-    act(() => {
-      voiceSessionStore.setVoiceRuntimeState({ interimTranscript: 'abrime dos terminales' });
-    });
-    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('«abrime dos terminales»');
+    const footer = screen.getByTestId('voice-mode-footer-bar');
+    expect(footer).toHaveClass('kite-composer-footer');
+    expect(footer.querySelector('.kite-composer-footer-left')).not.toBeNull();
+    expect(footer.querySelector('.kite-composer-footer-right')).not.toBeNull();
+    expect(screen.getByTestId('voice-locked-assistant-badge')).toHaveClass('kite-composer-control-pill');
+  });
+
+  it('updates the live status when thinking or speaking (S2)', () => {
+    voiceSessionStore.startSession('thread-test-1', 'thread');
+    render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
 
     act(() => {
       voiceSessionStore.setActiveTurnStage('planning', 'Planificando con Grok…');
     });
     expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Planificando con Grok…');
-  });
 
-  it('renders disabled attach button in voice mode', () => {
-    render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
-
-    const attachBtn = screen.getByLabelText('Adjuntos desactivados');
-    expect(attachBtn).toBeDisabled();
+    act(() => {
+      voiceSessionStore.setActiveTurnStage('speaking');
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Hablando…');
   });
 
   it('toggles mic mute state on click', () => {

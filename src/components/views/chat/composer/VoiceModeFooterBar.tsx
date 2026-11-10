@@ -1,13 +1,15 @@
 // Kite Code — Voice Mode Footer Bar for Thread Composer
-// Replaces standard model/effort pickers with a locked Assistant model badge on the left and live call controls on the right.
+// Same footer geometry as the standard composer: the editable pickers become a locked Assistant
+// brain/voice summary on the left, and the call controls take the right-hand action slot.
 
 import React, { useEffect, useRef } from 'react';
-import { LockIcon, ArrowUpIcon, PaperclipIcon } from '../ChatIcons';
+import { LockIcon, ArrowUpIcon } from '../ChatIcons';
 import {
   useVoiceSession,
   getConfiguredAssistantDisplay,
 } from '../../../../lib/operator/voice/voiceSessionStore';
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
+import { ComposerControlSeparator } from './ComposerControl';
 
 export interface VoiceModeFooterBarProps {
   threadId?: string | null;
@@ -16,6 +18,18 @@ export interface VoiceModeFooterBarProps {
   onEndSession?: () => void;
   className?: string;
 }
+
+const iconProps = {
+  width: 14,
+  height: 14,
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 2,
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+  'aria-hidden': true,
+};
 
 export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   threadId,
@@ -27,39 +41,35 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   const voice = useVoiceSession();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Resolve configured assistant brain model & TTS info from Zed Assistant settings
-  const assistantDisplay = getConfiguredAssistantDisplay();
-  const assistantLabel = `${assistantDisplay.personaName} · ${assistantDisplay.providerId.toUpperCase()} · ${assistantDisplay.ttsLabel}`;
+  // Brain model and voice engine come straight from the Zed Assistant settings.
+  const assistant = getConfiguredAssistantDisplay();
 
-  // Determine live voice status indicator
-  const isThinkingStage =
+  const isThinking =
     voice.activeTurnStage === 'planning' ||
     voice.activeTurnStage === 'executing' ||
     voice.activeTurnStage === 'verifying';
-  const isSpeakingStage =
-    Boolean(voice.isSpeaking) || voice.activeTurnStage === 'speaking';
+  const isSpeaking = Boolean(voice.isSpeaking) || voice.activeTurnStage === 'speaking';
 
   const statusText = (() => {
     if (voice.micMuted) return 'Micrófono silenciado';
-    if (voice.isPausedForDictation) return 'Pausado por dictado…';
-    if (isThinkingStage) return voice.activeTurnDetail || 'Pensando…';
-    if (isSpeakingStage) return 'Hablando…';
+    if (voice.isPausedForDictation) return 'Pausado por dictado';
+    if (isThinking) return voice.activeTurnDetail || 'Pensando…';
+    if (isSpeaking) return 'Hablando…';
     if (voice.isTranscribing) return 'Transcribiendo…';
-    if (voice.interimTranscript) return `«${voice.interimTranscript}»`;
     return 'Escuchando…';
   })();
 
-  const statusDotClass = voice.micMuted
-    ? 'kite-voice-status-dot kite-voice-status-dot--muted'
-    : isThinkingStage
-    ? 'kite-voice-status-dot kite-voice-status-dot--thinking'
-    : isSpeakingStage
-    ? 'kite-voice-status-dot kite-voice-status-dot--speaking'
-    : 'kite-voice-status-dot';
+  const statusTone = voice.micMuted
+    ? 'muted'
+    : isThinking
+    ? 'thinking'
+    : isSpeaking
+    ? 'speaking'
+    : 'listening';
 
   // Live waveform animation on canvas (28px × 12px)
   useEffect(() => {
-    let animId: number;
+    let animId = 0;
     let tick = 0;
 
     const render = () => {
@@ -84,13 +94,13 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
       for (let i = 0; i < barCount; i++) {
         const x = startX + i * (barWidth + gap);
         const levelBoost = Math.max(0, Math.min(1, voice.liveAudioLevel || 0)) * 0.45;
-        const dynamicFactor =
+        const factor =
           voice.phase === 'active'
             ? voice.micMuted
               ? 0.2
               : Math.min(1, 0.38 + levelBoost + 0.55 * Math.abs(Math.sin(tick + i * 1.1)))
             : 0.3;
-        const barHeight = Math.max(3, Math.min(height, height * dynamicFactor));
+        const barHeight = Math.max(3, Math.min(height, height * factor));
         const y = (height - barHeight) / 2;
         ctx.beginPath();
         if (typeof ctx.roundRect === 'function') {
@@ -125,45 +135,51 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
     <div
       data-testid="voice-mode-footer-bar"
       data-thread-id={threadId || undefined}
-      className={`kite-voice-mode-footer ${className}`}
+      className={`kite-composer-footer kite-voice-footer ${className}`.trim()}
     >
-      {/* 1. Left Cluster: Locked Assistant & Brain Model Badge + Live Status Pill */}
+      {/* Left cluster — same slot as the model / effort / permission pickers */}
       <div className="kite-composer-footer-left">
-        <div
+        <span
           data-testid="voice-locked-assistant-badge"
-          title={`Configuración del Asistente ${assistantDisplay.personaName}: ${assistantDisplay.providerLabel} (${assistantDisplay.modelId}) · ${assistantDisplay.ttsLabel} (${assistantDisplay.voiceName})`}
-          className="kite-voice-locked-badge"
+          title={`${assistant.personaName} · ${assistant.providerLabel} (${assistant.modelId}). Bloqueado durante la sesión de voz.`}
+          className="kite-composer-control-pill kite-voice-pill--static"
         >
-          <LockIcon size={11} className="kite-voice-lock-icon" />
-          <span className="kite-voice-badge-main">{assistantLabel}</span>
-          <span className="kite-voice-badge-model">{assistantDisplay.modelId}</span>
-        </div>
+          <LockIcon size={12} className="kite-voice-pill__icon" />
+          <span className="kite-composer-control-label">
+            {assistant.personaName} · {assistant.modelId}
+          </span>
+        </span>
 
-        <span className="kite-composer-control-separator" aria-hidden="true" />
+        <ComposerControlSeparator />
 
-        <div
+        <span
+          data-testid="voice-engine-badge"
+          title={`Voz: ${assistant.ttsLabel} (${assistant.voiceName})`}
+          className="kite-composer-control-pill kite-voice-pill--static"
+        >
+          <svg {...iconProps} width={12} height={12} className="kite-voice-pill__icon">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+          </svg>
+          <span className="kite-composer-control-label">{assistant.ttsLabel}</span>
+        </span>
+
+        <ComposerControlSeparator />
+
+        <span
           data-testid="voice-live-status-pill"
-          className="kite-voice-status-pill"
+          className="kite-voice-status"
+          data-tone={statusTone}
           role="status"
           aria-live="polite"
         >
-          <span className={statusDotClass} aria-hidden="true" />
-          <span className="kite-voice-status-text">{statusText}</span>
-        </div>
+          <span className="kite-voice-status__dot" aria-hidden="true" />
+          <span className="kite-voice-status__text">{statusText}</span>
+        </span>
       </div>
 
-      {/* 2. Right Cluster: Disabled Attach + Call Controls or Send Button */}
+      {/* Right cluster — call controls, or Send while a draft is typed */}
       <div className="kite-composer-footer-right">
-        <button
-          type="button"
-          disabled
-          title="Adjuntos no disponibles durante llamada de voz"
-          aria-label="Adjuntos desactivados"
-          className="kite-voice-ctrl-btn kite-voice-ctrl-btn--disabled"
-        >
-          <PaperclipIcon size={14} />
-        </button>
-
         {hasDraftText ? (
           <button
             type="button"
@@ -176,17 +192,17 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
           </button>
         ) : (
           <div className="kite-voice-call-controls" data-testid="voice-call-controls">
-            {/* Button 1: Mic Mute */}
             <button
               type="button"
               onClick={() => voice.toggleMicMuted()}
               title={voice.micMuted ? 'Activar micrófono' : 'Silenciar micrófono'}
               aria-label={voice.micMuted ? 'Activar micrófono' : 'Silenciar micrófono'}
               aria-pressed={voice.micMuted}
-              className={`kite-voice-ctrl-btn ${voice.micMuted ? 'kite-voice-ctrl-btn--muted' : ''}`}
+              className="kite-voice-ctrl-btn"
+              data-muted={voice.micMuted || undefined}
             >
               {voice.micMuted ? (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg {...iconProps}>
                   <line x1="2" y1="2" x2="22" y2="22" />
                   <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
                   <path d="M5 10v2a7 7 0 0 0 12 5" />
@@ -195,7 +211,7 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
                   <line x1="12" y1="19" x2="12" y2="22" />
                 </svg>
               ) : (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg {...iconProps}>
                   <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
                   <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
                   <line x1="12" y1="19" x2="12" y2="22" />
@@ -203,23 +219,23 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
               )}
             </button>
 
-            {/* Button 2: Speaker Mute */}
             <button
               type="button"
               onClick={handleToggleSpeaker}
               title={voice.speakerMuted ? 'Activar voz en altavoz' : 'Silenciar voz en altavoz'}
               aria-label={voice.speakerMuted ? 'Activar voz en altavoz' : 'Silenciar voz en altavoz'}
               aria-pressed={voice.speakerMuted}
-              className={`kite-voice-ctrl-btn ${voice.speakerMuted ? 'kite-voice-ctrl-btn--muted' : ''}`}
+              className="kite-voice-ctrl-btn"
+              data-muted={voice.speakerMuted || undefined}
             >
               {voice.speakerMuted ? (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg {...iconProps}>
                   <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
                   <line x1="22" y1="9" x2="16" y2="15" />
                   <line x1="16" y1="9" x2="22" y2="15" />
                 </svg>
               ) : (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg {...iconProps}>
                   <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
                   <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
                   <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
@@ -227,7 +243,6 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
               )}
             </button>
 
-            {/* Button 3: Active Waveform & End Stadium Pill */}
             <button
               type="button"
               onClick={handleEnd}
@@ -239,7 +254,7 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
                 ref={canvasRef}
                 width={28}
                 height={12}
-                style={{ width: '28px', height: '12px', flexShrink: 0 }}
+                className="kite-voice-end-pill__wave"
                 aria-hidden="true"
               />
               <span>Finalizar</span>

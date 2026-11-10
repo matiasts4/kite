@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ChatComposer } from './ChatComposer';
-import { VoiceTurnTraceCard } from './VoiceTurnTraceCard';
-import { VoiceCommentaryRow } from './VoiceCommentaryRow';
+import { liveVoiceStageItem, mergeTimeline, voiceTurnsToChatItems } from './voiceTranscript';
 import { ZedStripHost } from '../../ZedStrip';
 import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import { declarationFromCatalog } from './driverDeclaration';
@@ -139,64 +138,52 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
     });
   });
 
-  it('renders VoiceTurnTraceCard with ActionReceipts, badges, and reach details (S4)', () => {
-    const receipts = [
+  it('projects voice turns as standard chat items: user, consult, action receipts, assistant (S4)', () => {
+    const items = voiceTurnsToChatItems([
       {
-        actionIdx: 0,
-        type: 'open_terminals',
-        ok: true,
-        summaryEs: '2 terminales con Grok abiertas',
-        durationMs: 140,
+        turnId: 'turn-101',
+        userPrompt: 'Abrime dos terminales con Grok',
+        source: 'voz',
+        overallSuccess: true,
+        receipts: [
+          { actionIdx: 0, type: 'open_terminals', ok: true, summaryEs: '2 terminales con Grok abiertas', durationMs: 140 },
+          { actionIdx: 1, type: 'launch_thread', ok: false, summaryEs: 'Hilo con Claude para auth', durationMs: 200 },
+        ],
+        consultChatsInfo: { kind: 'read', title: 'Configuracion de auth', cli: 'claude' },
+        reply: 'Abrí 2 terminales con Grok.',
+        createdAt: 1000,
       },
-      {
-        actionIdx: 1,
-        type: 'launch_thread',
-        ok: true,
-        summaryEs: 'Hilo con Claude para auth',
-        durationMs: 200,
-      },
-    ];
+    ]);
 
-    const consultChatsInfo = {
-      kind: 'read',
-      title: 'Configuracion de auth',
-      cli: 'claude',
-    };
-
-    render(
-      <VoiceTurnTraceCard
-        turnId="turn-101"
-        strategy="llm"
-        providerId="grok"
-        durationMs={340}
-        overallSuccess={true}
-        receipts={receipts}
-        consultChatsInfo={consultChatsInfo}
-      />
-    );
-
-    expect(screen.getByText('Traza del Asistente Zed')).toBeInTheDocument();
-    expect(screen.getByText('(2 acciones · 1 consulta · 340 ms)')).toBeInTheDocument();
-    expect(screen.getByText('OK')).toBeInTheDocument();
-
-    // Expand trace card
-    fireEvent.click(screen.getByText('Traza del Asistente Zed'));
-
-    expect(screen.getByText('2 terminales con Grok abiertas')).toBeInTheDocument();
-    expect(screen.getByText('Hilo con Claude para auth')).toBeInTheDocument();
-    expect(screen.getAllByText('Verificado')).toHaveLength(2);
-    expect(screen.getByText(/Configuracion de auth/)).toBeInTheDocument();
+    expect(items.map((item) => item.kind)).toEqual(['user', 'tool', 'tool', 'tool', 'assistant']);
+    expect(items[0].text).toBe('Abrime dos terminales con Grok');
+    expect(items[1].title).toBe('Leyó el chat «Configuracion de auth»');
+    expect(items[2]).toMatchObject({ title: '2 terminales con Grok abiertas', status: 'completed' });
+    expect(items[3]).toMatchObject({ title: 'Hilo con Claude para auth', status: 'failed' });
+    expect(items[4].text).toBe('Abrí 2 terminales con Grok.');
   });
 
-  it('renders VoiceCommentaryRow with live stage indicator and detail (S4)', () => {
-    const { rerender } = render(
-      <VoiceCommentaryRow stage="planning" detail="Planificando con Grok…" />
-    );
+  it('renders the live stage as a streaming reasoning item and interleaves by time (S4)', () => {
+    const live = liveVoiceStageItem({ turnId: 'turn-9', stage: 'executing', detail: 'Ejecutando open_terminals…' });
+    expect(live).toMatchObject({ kind: 'reasoning', streaming: true, text: 'Ejecutando open_terminals…' });
 
-    expect(screen.getByTestId('voice-commentary-row')).toHaveTextContent('Planificando con Grok…');
+    const provider = [{ ...live, id: 'p1', kind: 'user' as const, streaming: false, createdAtUnixMs: 2000, text: 'hola' }];
+    const voice = voiceTurnsToChatItems([
+      { turnId: 't-early', userPrompt: 'antes', source: 'texto', createdAt: 1000 },
+      { turnId: 't-late', userPrompt: 'después', source: 'texto', createdAt: 3000 },
+    ]);
+    expect(mergeTimeline(provider, voice).map((item) => item.text)).toEqual(['antes', 'hola', 'después']);
+  });
 
-    rerender(<VoiceCommentaryRow stage="executing" detail="Ejecutando open_terminals…" />);
-    expect(screen.getByTestId('voice-commentary-row')).toHaveTextContent('Ejecutando open_terminals…');
+  it('opens Voice Mode in a new conversation when the current thread already has content (S1)', async () => {
+    const onStartVoiceMode = vi.fn();
+    render(<ChatComposer {...baseComposerProps} onStartVoiceMode={onStartVoiceMode} />);
+
+    fireEvent.click(screen.getByLabelText('Iniciar sesión de voz'));
+
+    expect(onStartVoiceMode).toHaveBeenCalledTimes(1);
+    // The pane decides which thread to bind; the composer must not bind the current one itself.
+    expect(voiceSessionStore.getSnapshot().phase).toBe('inactive');
   });
 
   it('persists thread voice turns in voiceSessionStore across re-mounts (S6)', () => {

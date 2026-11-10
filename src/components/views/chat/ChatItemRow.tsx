@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { tweens } from '../../../motion/standard/tokens';
 import {
   AlertCircleIcon,
+  CloseIcon,
   FileCodeIcon,
   CheckIcon,
   CopyIcon,
@@ -19,6 +20,7 @@ import {
   outputStatLabel,
   summarizeWorkBurst,
   traceFilePath,
+  interruptedTurnLine,
   workedForLine,
 } from './activityPresentation';
 import { prefersReducedMotion } from '../../../motion/contract';
@@ -27,6 +29,22 @@ import { MarkdownMessage } from './MarkdownMessage';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
+import {
+  citationChipLabel,
+  citationTextFromNodes,
+  draftHasCitation,
+  expandCitations,
+  locateCitationSource,
+  readableQuoteWithoutSource,
+  revealCitationSource,
+  splitDraft,
+  writeCitationClipboard,
+  type CitationPayload,
+} from './citationChip';
+
+export function userMessageFolds(text: string): boolean {
+  return text.length > 500 || text.split('\n').length > 12;
+}
 
 export function liveThoughtLine(markdown?: string | null): string {
   if (!markdown) return '';
@@ -251,14 +269,14 @@ export const ChatWorkEntry: React.FC<{
           <ActivityGlyph item={item} size={16} />
         </span>
 
-        <strong className={isRunning ? 'chat-activity-shine' : undefined}>{traceLabel}</strong>
+        <strong className={isRunning ? 'live-tool-shine chat-activity-shine' : undefined}>{traceLabel}</strong>
         {statLabel ? <span className="chat-work-entry__meta">{statLabel}</span> : null}
 
         <i className="chat-work-entry__spacer" />
 
         {failedMark ? (
           <span className="chat-work-entry__status chat-work-entry__status--failed">
-            <AlertCircleIcon aria-hidden="true" size={12} strokeWidth={2} />
+            <CloseIcon aria-hidden="true" size={12} />
             <span className="sr-only">{failedMark}</span>
           </span>
         ) : null}
@@ -297,7 +315,7 @@ export const ChatWorkGroup: React.FC<{
   const settled = !groupLive && !running;
   const summary = summarizeWorkBurst(items);
   const durationLine = interrupted
-    ? null
+    ? interruptedTurnLine(durationSeconds ?? burstDurationSeconds(items))
     : workedForLine(durationSeconds ?? burstDurationSeconds(items));
   const showSummary = settled && items.length > 1;
   const visibleItems = showSummary && !expanded ? [] : items;
@@ -336,31 +354,155 @@ export const ChatWorkGroup: React.FC<{
   );
 };
 
+export function AssistantCitationChip({
+  citation,
+  token,
+  onEditComment,
+  onRemove,
+}: {
+  citation: CitationPayload;
+  token: string;
+  onEditComment?: (comment: string) => void;
+  onRemove?: () => void;
+}) {
+  const [quoteOpen, setQuoteOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draftComment, setDraftComment] = useState(citation.comment);
+  const label = citationChipLabel(citation);
+
+  const activate = () => {
+    const sourcePresent = Boolean(citation.messageId) && locateCitationSource(citation.messageId) !== null;
+    if (sourcePresent && revealCitationSource(citation.messageId)) {
+      setQuoteOpen(false);
+      return;
+    }
+    setQuoteOpen(true);
+  };
+
+  return (
+    <span
+      className="citation-chip rounded-sm"
+      contentEditable={false}
+      data-citation-token={token}
+      onCopy={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        writeCitationClipboard(event.clipboardData, token);
+      }}
+      onKeyDown={(event) => {
+        if ((event.key === 'Backspace' || event.key === 'Delete') && onRemove) {
+          event.preventDefault();
+          onRemove();
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="citation-chip__jump"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={activate}
+      >
+        {label}
+      </button>
+      {onEditComment ? (
+        <button
+          type="button"
+          className="citation-chip__edit"
+          aria-label="Edit comment"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            setDraftComment(citation.comment);
+            setEditing((open) => !open);
+          }}
+        >
+          <PencilIcon size={11} />
+        </button>
+      ) : null}
+      {quoteOpen ? (
+        <span className="citation-chip__quote" role="dialog" aria-label="Saved quote">
+          {readableQuoteWithoutSource(citation)}
+        </span>
+      ) : null}
+      {editing && onEditComment ? (
+        <span className="citation-chip__note" role="dialog" aria-label="Edit comment">
+          <input
+            aria-label="Comment"
+            value={draftComment}
+            onChange={(event) => setDraftComment(event.target.value)}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              onEditComment(draftComment);
+              setEditing(false);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              onEditComment(draftComment);
+              setEditing(false);
+            }}
+          >
+            Save
+          </button>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function restoreErrorText(error: unknown): string {
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return 'File restore did not run.';
+}
+
+function restoreCommandMissing(text: string): boolean {
+  return /not found|unavailable/i.test(text);
+}
+
 export const ChatItemRow: React.FC<{
   item: ChatItem;
   threadId?: string;
   /** True when this row is new and should animate in. */
   enter?: boolean;
   onEditUserMessage?: (text: string) => void;
+  onRewindTranscript?: (messageId: string) => void | Promise<void>;
+  onRestoreFiles?: (messageId: string) => void | Promise<void>;
+  fileRestoreEnabled?: boolean;
+  /** False when the restore command cannot be invoked. Defaults to available. */
+  restoreCommandAvailable?: boolean;
 }> = ({
   item,
   threadId,
   enter = false,
   onEditUserMessage,
+  onRewindTranscript,
+  onRestoreFiles,
+  fileRestoreEnabled = false,
+  restoreCommandAvailable = true,
 }) => {
-  const [folded, setFolded] = useState(false);
+  const [folded, setFolded] = useState(() => item.kind === 'user' && userMessageFolds(item.text));
   const [expandedReasoning, setExpandedReasoning] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
+  const [rewindOpen, setRewindOpen] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreUnavailable, setRestoreUnavailable] = useState(false);
   const [copiedAssistant, setCopiedAssistant] = useState(false);
   const [citation, setCitation] = useState<string | null>(null);
-  const assistantRef = useRef<HTMLDivElement>(null);
+  const assistantRef = useRef<HTMLDivElement | null>(null);
 
   // User row: no "You" or timestamp header
   if (item.kind === 'user') {
-    const isLong = item.text.length > 500;
+    const isLong = userMessageFolds(item.text);
     return (
       <motion.article
-        className={`chat-turn chat-turn--user chat-user-row ${folded ? 'chat-user-row--folded' : ''}`}
+        className={`chat-turn chat-turn--user chat-user-row chat-user-row--bubble ${folded ? 'chat-user-row--folded' : ''}`}
         initial={enter ? { opacity: 0, y: 4 } : false}
         animate={{ opacity: 1, y: 0 }}
         transition={tweens.reveal}
@@ -371,25 +513,68 @@ export const ChatItemRow: React.FC<{
             className="chat-turn__action-btn"
             title={copiedUser ? 'Copiado!' : 'Copiar mensaje'}
             onClick={() => {
-              navigator.clipboard?.writeText(item.text);
+              navigator.clipboard?.writeText(expandCitations(item.text));
               setCopiedUser(true);
               setTimeout(() => setCopiedUser(false), 1500);
             }}
           >
             {copiedUser ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
-            <span>{copiedUser ? 'Copiado' : 'Copiar'}</span>
+            <span>Copiar</span>
           </button>
           {onEditUserMessage && (
             <button
               type="button"
               className="chat-turn__action-btn"
-              title="Volver al mensaje y reescribirlo"
-              onClick={() => onEditUserMessage(item.text)}
+              title="Editar desde aquí"
+              onClick={() => setRewindOpen((open) => !open)}
             >
               <PencilIcon size={12} />
-              <span>Editar</span>
+              <span>Editar desde aquí</span>
             </button>
           )}
+          {rewindOpen && onEditUserMessage ? (
+            <div className="chat-rewind" role="dialog" aria-label="Editar desde aquí">
+              <button
+                type="button"
+                onClick={() => {
+                  onEditUserMessage(item.text);
+                  if (!onRewindTranscript) return;
+                  void Promise.resolve(onRewindTranscript(item.id)).catch((error: unknown) => {
+                    setRestoreError(restoreErrorText(error));
+                  });
+                }}
+              >
+                Revertir y mantener cambios en archivos
+              </button>
+              <button
+                type="button"
+                disabled={!fileRestoreEnabled || !restoreCommandAvailable || restoreUnavailable}
+                title={
+                  !restoreCommandAvailable || restoreUnavailable
+                    ? 'File restore is unavailable.'
+                    : fileRestoreEnabled
+                      ? undefined
+                      : 'File restore stays off unless this thread has its own isolated checkout.'
+                }
+                onClick={() => {
+                  if (!fileRestoreEnabled || !restoreCommandAvailable || restoreUnavailable || !onRestoreFiles) return;
+                  void Promise.resolve(onRestoreFiles(item.id))
+                    .then(() => {
+                      setRestoreError(null);
+                      onEditUserMessage(item.text);
+                    })
+                    .catch((error: unknown) => {
+                      const text = restoreErrorText(error);
+                      setRestoreError(text);
+                      if (restoreCommandMissing(text)) setRestoreUnavailable(true);
+                    });
+                }}
+              >
+                Revertir archivos también
+              </button>
+              {restoreError ? <p role="alert">{restoreError}</p> : null}
+            </div>
+          ) : null}
         </div>
 
         {/* User Attachments */}
@@ -405,14 +590,37 @@ export const ChatItemRow: React.FC<{
           </ul>
         )}
 
-        <p>{item.text}</p>
+        <p
+          className={folded ? 'chat-user-row__text chat-user-row__text--folded' : 'chat-user-row__text'}
+          onCopy={(event) => {
+            if (!draftHasCitation(item.text)) return;
+            const selection = window.getSelection();
+            if (!selection || selection.rangeCount === 0) return;
+            const holder = document.createElement('div');
+            holder.appendChild(selection.getRangeAt(0).cloneContents());
+            const selected = citationTextFromNodes(holder);
+            if (!draftHasCitation(selected)) return;
+            event.preventDefault();
+            writeCitationClipboard(event.clipboardData, selected);
+          }}
+        >
+          {draftHasCitation(item.text)
+            ? splitDraft(item.text).map((part, index) =>
+                part.kind === 'text' ? (
+                  <span key={`text-${index}`}>{part.text}</span>
+                ) : (
+                  <AssistantCitationChip key={`cite-${index}`} citation={part.citation} token={part.token} />
+                ),
+              )
+            : item.text}
+        </p>
         {isLong && (
           <button
             type="button"
             className="chat-user-row__toggle"
             onClick={() => setFolded((v) => !v)}
           >
-            {folded ? 'Show more' : 'Show less'}
+            {folded ? 'Mostrar más' : 'Mostrar menos'}
           </button>
         )}
       </motion.article>
@@ -448,7 +656,10 @@ export const ChatItemRow: React.FC<{
 
     return (
       <motion.div
-        ref={assistantRef}
+        ref={(node) => {
+          assistantRef.current = node;
+          if (node) node.dataset.messageId = item.id;
+        }}
         className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}`}
         initial={enter ? { opacity: 0, y: 4 } : false}
         animate={{ opacity: 1, y: 0 }}
@@ -465,6 +676,7 @@ export const ChatItemRow: React.FC<{
           setCitation(passage || null);
         }}
       >
+        <div id={item.id} data-message-id={item.id}>
         {!item.streaming && cleanText.trim().length > 0 && (
           <div className="chat-turn__actions">
             {citation && (
@@ -473,7 +685,9 @@ export const ChatItemRow: React.FC<{
                 className="chat-turn__action-btn"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
-                  window.dispatchEvent(new CustomEvent('kite:cite', { detail: citation }));
+                  window.dispatchEvent(
+                    new CustomEvent('kite:cite', { detail: { messageId: item.id, quote: citation } }),
+                  );
                   window.getSelection()?.removeAllRanges();
                   setCitation(null);
                 }}
@@ -497,6 +711,7 @@ export const ChatItemRow: React.FC<{
           </div>
         )}
         <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
+        </div>
       </motion.div>
     );
   }
@@ -524,6 +739,9 @@ export const ChatItemRow: React.FC<{
           <strong className={`chat-reasoning-row__label${item.streaming && !thoughtSummary ? ' chat-activity-shine' : ''}`}>
             {item.streaming ? (thoughtSummary || 'Thinking') : 'Thought'}
           </strong>
+          {item.streaming && !expandedReasoning && item.text.trim().length > 0 && (
+            <span className="chat-reasoning-row__preview">{item.text}</span>
+          )}
           {!item.streaming && thoughtSummary && !expandedReasoning && (
             <span className="chat-reasoning-row__headline">{thoughtSummary}</span>
           )}

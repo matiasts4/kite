@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
 import type { ChatItem } from '../../../types';
 import { OPEN_RIGHT_DOCK_FILE_EVENT, type FilePreviewRequest } from '../../../lib/filePreviewNav';
+import { encodeCitation } from './citationChip';
 
 function mockItem(partial: Partial<ChatItem> & { id: string; kind: ChatItem['kind']; text: string }): ChatItem {
   return {
@@ -41,14 +42,20 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
 
     render(<ChatItemRow item={item} onEditUserMessage={onEdit} />);
 
-    expect(screen.getByText('Explica cómo funciona la arquitectura de agentes')).toBeInTheDocument();
+    const message = screen.getByText('Explica cómo funciona la arquitectura de agentes');
+    expect(message).toBeInTheDocument();
+    expect(message.closest('article')).toHaveClass('chat-user-row--bubble');
     const copyBtn = screen.getByTitle('Copiar mensaje');
     expect(copyBtn).toBeInTheDocument();
-    const editBtn = screen.getByTitle('Volver al mensaje y reescribirlo');
+    const editBtn = screen.getByTitle('Editar desde aquí');
     expect(editBtn).toBeInTheDocument();
 
     fireEvent.click(editBtn);
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Editar desde aquí' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Revertir y mantener cambios en archivos' }));
     expect(onEdit).toHaveBeenCalledWith('Explica cómo funciona la arquitectura de agentes');
+    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeDisabled();
 
     fireEvent.click(copyBtn);
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Explica cómo funciona la arquitectura de agentes');
@@ -92,6 +99,7 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
       />,
     );
     const passage = screen.getByText('Ship the timer before the summary.');
+    expect(document.querySelector('[data-message-id="a2"]')).toBeInTheDocument();
     const range = document.createRange();
     range.selectNodeContents(passage);
     const selection = window.getSelection();
@@ -100,6 +108,53 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     fireEvent.mouseUp(passage);
     fireEvent.click(screen.getByRole('button', { name: 'Citar en el compositor' }));
     expect(selection?.toString()).toBe('');
+  });
+
+  it('keeps file restore disabled unless the thread can restore files', () => {
+    const item = mockItem({ id: 'u3', kind: 'user', text: 'rewrite this' });
+    const { rerender } = render(<ChatItemRow item={item} onEditUserMessage={vi.fn()} />);
+    fireEvent.click(screen.getByTitle('Editar desde aquí'));
+    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeDisabled();
+    rerender(<ChatItemRow item={item} onEditUserMessage={vi.fn()} fileRestoreEnabled />);
+    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeEnabled();
+  });
+
+  it('does not call restore when file restore is off', () => {
+    const onRestore = vi.fn();
+    const item = mockItem({ id: 'u4', kind: 'user', text: 'rewrite this' });
+    render(
+      <ChatItemRow
+        item={item}
+        onEditUserMessage={vi.fn()}
+        fileRestoreEnabled={false}
+        onRestoreFiles={onRestore}
+      />,
+    );
+    fireEvent.click(screen.getByTitle('Editar desde aquí'));
+    fireEvent.click(screen.getByRole('button', { name: 'Revertir archivos también' }));
+    expect(onRestore).not.toHaveBeenCalled();
+  });
+
+  it('shows a restore refusal and does not claim files changed', async () => {
+    const onEdit = vi.fn();
+    const onRestore = vi.fn().mockRejectedValue(new Error('The provider cannot rewind this conversation.'));
+    const item = mockItem({ id: 'u5', kind: 'user', text: 'rewrite this' });
+    render(
+      <ChatItemRow item={item} onEditUserMessage={onEdit} fileRestoreEnabled onRestoreFiles={onRestore} />,
+    );
+    fireEvent.click(screen.getByTitle('Editar desde aquí'));
+    fireEvent.click(screen.getByRole('button', { name: 'Revertir archivos también' }));
+    expect(await screen.findByText('The provider cannot rewind this conversation.')).toBeInTheDocument();
+    expect(screen.queryByText(/files changed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/archivos restaurados/i)).not.toBeInTheDocument();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it('renders a sent citation chip and keeps the quote readable when the source is gone', () => {
+    const token = encodeCitation({ messageId: '', quote: 'saved passage', comment: '' });
+    render(<ChatItemRow item={mockItem({ id: 'u-cite', kind: 'user', text: `See ${token} please` })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'saved passage' }));
+    expect(screen.getByRole('dialog', { name: 'Saved quote' })).toHaveTextContent('saved passage');
   });
 
   it('shows the latest thought while streaming and Thought when it finishes', () => {

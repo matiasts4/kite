@@ -9,6 +9,7 @@ import {
   summarizeWorkBurst,
   turnStartUnixMs,
   workedForLine,
+  compactingForLine,
   workingLine,
   type ActivityItem,
 } from './activityPresentation';
@@ -19,9 +20,14 @@ function item(partial: ActivityItem): ActivityItem {
 
 describe('working line', () => {
   it('reads Working · plus a live timer when the turn has a start', () => {
-    expect(workingLine(1_000, 4_200)).toBe('Working · 3.2s');
+    expect(workingLine(1_000, 4_200)).toBe('Working · 3s');
     expect(workingLine(1_000, 16_000)).toBe('Working · 15s');
     expect(workingLine(1_000, 126_000)).toBe('Working · 2m 5s');
+  });
+
+  it('reads Compacting · with the same clock', () => {
+    expect(compactingForLine(1_000, 126_000)).toBe('Compacting · 2m 5s');
+    expect(compactingForLine(null, 5_000)).toBe('Compacting…');
   });
 
   it('reads Working… when the turn has no start', () => {

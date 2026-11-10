@@ -48,9 +48,28 @@ export function formatDurationLabel(seconds: number): string {
 }
 
 export function workingLine(startedAtUnixMs: number | null | undefined, nowMs: number): string {
+  return workingForLine(startedAtUnixMs, nowMs);
+}
+
+/** `Working · 12s`, `Working · 2m 5s`, or `Working…` when the turn has no start. */
+export function formatWorkingClock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  if (whole < 60) return `${whole}s`;
+  const minutes = Math.floor(whole / 60);
+  const remain = whole % 60;
+  return `${minutes}m ${remain}s`;
+}
+
+export function workingForLine(startedAtUnixMs: number | null | undefined, nowMs: number): string {
   if (typeof startedAtUnixMs !== 'number' || startedAtUnixMs <= 0) return 'Working…';
   const seconds = Math.max(0, (nowMs - startedAtUnixMs) / 1000);
-  return `Working · ${formatDurationLabel(seconds)}`;
+  return `Working · ${formatWorkingClock(seconds)}`;
+}
+
+export function compactingForLine(startedAtUnixMs: number | null | undefined, nowMs: number): string {
+  if (typeof startedAtUnixMs !== 'number' || startedAtUnixMs <= 0) return 'Compacting…';
+  const seconds = Math.max(0, (nowMs - startedAtUnixMs) / 1000);
+  return `Compacting · ${formatWorkingClock(seconds)}`;
 }
 
 export function turnStartUnixMs(items: ActivityItem[]): number | null {

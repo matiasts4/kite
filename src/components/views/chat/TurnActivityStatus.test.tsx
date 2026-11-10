@@ -41,7 +41,7 @@ function thread(partial: Partial<ExtendedChatThread> = {}): ExtendedChatThread {
 }
 
 describe('TurnActivityStatus', () => {
-  it('shows Working… and Thinking until an action exists, with no bouncing dots', () => {
+  it('shows Working... and Thinking until an action exists, with no bouncing dots', () => {
     const { container, rerender } = render(<TurnActivityStatus running items={[]} />);
     expect(screen.getByText('Working…')).toBeInTheDocument();
     expect(screen.getByText('Thinking')).toBeInTheDocument();

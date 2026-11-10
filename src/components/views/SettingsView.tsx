@@ -37,6 +37,7 @@ import {
   DictationSettings,
 } from './settings/types';
 import { GeneralTab } from './settings/GeneralTab';
+import { ChatSettingsTab } from './settings/ChatSettingsTab';
 import { AppearanceTab } from './settings/AppearanceTab';
 import { VoiceTab } from './settings/VoiceTab';
 import { KeybindingsTab } from './settings/KeybindingsTab';
@@ -118,6 +119,7 @@ const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'customizations', label: 'Customizations', blurb: 'Temas, colores y aspecto visual.', icon: PaletteIcon },
   { id: 'terminal', label: 'Terminal', blurb: 'Apariencia, tipografía, motor de renderizado, shell y enlaces web.', icon: SquareTerminalIcon },
   { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
+  { id: 'chat', label: 'Chat', blurb: 'Visibilidad de las acciones del hilo.', icon: BellIcon },
   { id: 'voice', label: 'Voice & Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
   { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
   { id: 'quotas', label: 'Cuentas y Proveedores', blurb: 'Bóveda de credenciales, cuentas CLI y límites de cuota.', icon: GaugeIcon },
@@ -740,6 +742,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <kbd className="settings-modal-close__kbd">Esc</kbd>
               </button>
             </header>
+
+            {activeTab === 'chat' && <ChatSettingsTab />}
 
             {activeTab === 'general' && (
               <GeneralTab

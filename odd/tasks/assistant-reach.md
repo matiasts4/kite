@@ -128,10 +128,10 @@ Constraints: no second assistant, no new pane, no new send protocol, and no full
 - [x] **T7** (`S7`) — Route: `inline` — Prevent 15s premature cutoff in `ttsNarrator.ts` (sentence chunking/heartbeat in browser synthesis, extended safety timer, uninterrupted streaming). Commit: `f57cf34`.
 - [x] **T8** (`S8`) — Route: `inline` — Wire `consultChats` into `planTurnLLM` and prompt context, and add `launch_thread` to LLM system prompt schema. Commit: `f57cf34`.
 - [x] **T9** (`S9`) — Route: `inline` — Ensure complete trace logging (including chat consultations) to disk JSONL and expose a direct button to reveal logs folder in `ZedTab.tsx`. Commit: `f57cf34`.
-- [x] **T10** (`S10`) — Route: `inline` — Uncap conversational replies in `sanitizeReply` and `composeReplyFromReceipts` with sentence-boundary trimming (`sanitize.ts` + `sanitize.test.ts` 13/13 green).
-- [x] **T11** (`S11`) — Route: `inline` — Wire `launch_thread` provider support, UI navigation event (`kite:select-thread`), and clean receipt speech in `launchThread.ts`, `prompt.ts`, `App.tsx` (`executor.test.ts` 23/23 green).
-- [x] **T12** (`S12`) — Route: `inline` — Expand `consultChats` in `chatIndex.ts` for provider history queries and prompt LLM to summarize from transcripts (`chatIndex.test.ts` 6/6 green, `prompt.test.ts` 5/5 green).
-- [x] **T13** (`S13`) — Route: `inline` — Synchronize `lastTurn` with `stage = 'done'` in `useOperatorTurn.ts` and trace discarded mic captures in `zedVoice.ts` (`zedVoice.test.ts` 9/9 green, `useOperatorTurn.test.ts` 16/16 green).
+- [x] **T10** (`S10`) — Route: `inline` — Uncap conversational replies in `sanitizeReply` and `composeReplyFromReceipts` with sentence-boundary trimming (`sanitize.ts` + `sanitize.test.ts` 13/13 green). Commit: `97265d9`.
+- [x] **T11** (`S11`) — Route: `inline` — Wire `launch_thread` provider support, UI navigation event (`kite:select-thread`), and clean receipt speech in `launchThread.ts`, `prompt.ts`, `App.tsx` (`executor.test.ts` 23/23 green). Commit: `97265d9`.
+- [x] **T12** (`S12`) — Route: `inline` — Expand `consultChats` in `chatIndex.ts` for provider history queries and prompt LLM to summarize from transcripts (`chatIndex.test.ts` 6/6 green, `prompt.test.ts` 5/5 green). Commit: `97265d9`.
+- [x] **T13** (`S13`) — Route: `inline` — Synchronize `lastTurn` with `stage = 'done'` in `useOperatorTurn.ts` and trace discarded mic captures in `zedVoice.ts` (`zedVoice.test.ts` 9/9 green, `useOperatorTurn.test.ts` 16/16 green). Commit: `97265d9`.
 
 T1–T13 share the operator turn. They are not independent. Do not split them across parallel writers.
 

@@ -89,6 +89,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     expect(screen.getByText(/Terminales PTY & Agentes/i)).toBeInTheDocument();
     expect(screen.getByText(/Procesador \(CPU\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Disco \(E:\\\)/i)).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Headroom' })).toBeInTheDocument();
 
     // Switch to CPU tab
     await user.click(screen.getByRole('tab', { name: 'CPU' }));

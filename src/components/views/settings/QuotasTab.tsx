@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './quotas-tab.css';
+import { SettingsMasterDetail } from './SettingsMasterDetail';
 import { AccountVault, MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { AddProviderModal } from '../../quota/AddProviderModal';
@@ -386,9 +387,12 @@ export const QuotasTab: React.FC = () => {
             </button>
           </div>
         ) : (
-          <div className="qt-providers-container" style={{ marginTop: '12px' }}>
-            {/* Left Column: Connected Providers List + Add Provider Row at bottom */}
-            <div className="qt-providers-sidebar">
+          <SettingsMasterDetail
+            label="Proveedores conectados"
+            detailKey={activeProvider ?? 'none'}
+            style={{ marginTop: '12px' }}
+            sidebar={
+              <>
               <div className="qt-providers-sidebar__scroll">
                 {enabledIds.map((id) => {
                   const q = quotas[id];
@@ -473,11 +477,9 @@ export const QuotasTab: React.FC = () => {
                 </svg>
                 <span>Agregar proveedor</span>
               </button>
-            </div>
-
-            {/* Right Column: Selected Provider Inspector & Editor */}
-            <div className="qt-providers-detail">
-              {activeProvider ? (
+              </>
+            }
+            detail={activeProvider ? (
                 <>
                   <div className="qt-providers-detail__header">
                     <div className="qt-providers-detail__brand">
@@ -715,9 +717,9 @@ export const QuotasTab: React.FC = () => {
                   <strong>Selecciona un proveedor de la lista</strong>
                   <span>Elige un proveedor para ver su diagnóstico, cuentas y opciones.</span>
                 </div>
-              )}
-            </div>
-          </div>
+              )
+            }
+          />
         )}
       </section>
 

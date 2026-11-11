@@ -18,6 +18,7 @@ import { MemoryProcessTab } from './tabs/MemoryProcessTab';
 import { OverviewTab } from './tabs/OverviewTab';
 import { CpuTab } from './tabs/CpuTab';
 import { DiskTab } from './tabs/DiskTab';
+import { HeadroomTab } from './tabs/HeadroomTab';
 
 export interface SystemResourcePopoverProps {
   snapshot: SystemMetricsSnapshot;
@@ -30,7 +31,7 @@ export interface SystemResourcePopoverProps {
   phase?: 'in' | 'out';
 }
 
-type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk';
+type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk' | 'headroom';
 
 export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   snapshot,
@@ -320,7 +321,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
         aria-label="Categorías de consumo"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
+          gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
           gap: '4px',
           padding: '3px',
           backgroundColor: 'var(--block-fill)',
@@ -335,6 +336,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
             { id: 'memory', label: 'RAM' },
             { id: 'cpu', label: 'CPU' },
             { id: 'disk', label: 'Disco' },
+            { id: 'headroom', label: 'Headroom' },
           ] as const
         ).map((tab) => {
           const isSelected = activeTab === tab.id;
@@ -346,9 +348,10 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
               aria-selected={isSelected}
               onClick={() => setActiveTab(tab.id)}
               style={{
-                padding: '5px 8px',
+                padding: '5px 4px',
                 borderRadius: '6px',
-                fontSize: '11px',
+                fontSize: '10px',
+                whiteSpace: 'nowrap',
                 fontWeight: isSelected ? 600 : 500,
                 border: isSelected
                   ? '1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.35))'
@@ -698,6 +701,8 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
             diskColor={diskColor}
           />
         )}
+
+        {activeTab === 'headroom' && <HeadroomTab />}
       </div>
 
       {/* Footer Controls: Update Frequency & Badge Display Mode */}

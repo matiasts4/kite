@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { motion } from 'motion/react';
+import { springs, tweens } from '../../../motion/standard/tokens';
 import { ttsNarrator, getAvailableVoices } from '../../../lib/operator/ttsNarrator';
 import { toast } from '../../../lib/toast';
 import {
@@ -34,8 +36,60 @@ import { ZedLatencySection } from './zed/ZedLatencySection';
 import { ZedAudioSection } from './zed/ZedAudioSection';
 import { ZedPersonaSection } from './zed/ZedPersonaSection';
 import { ZedMemorySection } from './zed/ZedMemorySection';
+import { BrainIcon, CircleUserRoundIcon, GaugeIcon, GlobeIcon, MicIcon } from './icons';
+
+type ZedSectionId = 'provider' | 'latency' | 'voice' | 'persona' | 'memory';
+
+const ZED_SECTIONS: { id: ZedSectionId; label: string; icon: React.ReactNode }[] = [
+  {
+    id: 'provider',
+    label: 'Proveedor',
+    icon: (
+      <span aria-hidden="true">
+        <GlobeIcon size={14} />
+      </span>
+    ),
+  },
+  {
+    id: 'latency',
+    label: 'Latencia',
+    icon: (
+      <span aria-hidden="true">
+        <GaugeIcon size={14} />
+      </span>
+    ),
+  },
+  {
+    id: 'voice',
+    label: 'Voz',
+    icon: (
+      <span aria-hidden="true">
+        <MicIcon size={14} />
+      </span>
+    ),
+  },
+  {
+    id: 'persona',
+    label: 'Persona',
+    icon: (
+      <span aria-hidden="true">
+        <CircleUserRoundIcon size={14} />
+      </span>
+    ),
+  },
+  {
+    id: 'memory',
+    label: 'Memoria',
+    icon: (
+      <span aria-hidden="true">
+        <BrainIcon size={14} />
+      </span>
+    ),
+  },
+];
 
 export const ZedTab: React.FC = () => {
+  const [section, setSection] = useState<ZedSectionId>('provider');
   const [config, setConfig] = useState<OperatorConfig>(() => loadOperatorConfig());
   const [records, setRecords] = useState(() => loadLatencyRecords());
   const [memoryNotes, setMemoryNotes] = useState<ZedMemoryNote[]>(() => loadZedMemoryNotes());
@@ -351,54 +405,45 @@ export const ZedTab: React.FC = () => {
   const summaries = computeLatencySummaries(records);
   const openingPreview = buildZedOpeningPreview(persona);
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Hero Banner with Spherical ZedOrb */}
-      <ZedHeroCard
-        persona={persona}
-        config={config}
-        savedToast={savedToast}
-        testingProvider={testingProvider}
-        onRunProbe={handleRunProbe}
-      />
+  const providerSection = (
+    <ZedProvidersSection
+      config={config}
+      onFieldChange={handleFieldChange}
+      onPersistConfig={persistConfig}
+      showApiKeys={showApiKeys}
+      onToggleApiKey={(provider) =>
+        setShowApiKeys((prev) => ({ ...prev, [provider]: !prev[provider] }))
+      }
+      testingProvider={testingProvider}
+      onRunProbe={handleRunProbe}
+      openCodeGoCredential={openCodeGoCredential}
+      effectiveOpenCodeModels={effectiveOpenCodeModels}
+      syncingModels={syncingModels}
+      openCodeSavedAt={openCodeSavedAt}
+      onSyncModels={handleSyncModels}
+      effectiveVercelModels={effectiveVercelModels}
+      syncingVercelModels={syncingVercelModels}
+      vercelSavedAt={vercelSavedAt}
+      onSyncVercelModels={handleSyncVercelModels}
+      effectiveCloudflareModels={effectiveCloudflareModels}
+      syncingCloudflareModels={syncingCloudflareModels}
+      cloudflareSavedAt={cloudflareSavedAt}
+      onSyncCloudflareModels={handleSyncCloudflareModels}
+    />
+  );
 
-      {/* Section 1: Provider Gateway & Multi-Model Selector */}
-      <ZedProvidersSection
-        config={config}
-        onFieldChange={handleFieldChange}
-        onPersistConfig={persistConfig}
-        showApiKeys={showApiKeys}
-        onToggleApiKey={(provider) =>
-          setShowApiKeys((prev) => ({ ...prev, [provider]: !prev[provider] }))
-        }
-        testingProvider={testingProvider}
-        onRunProbe={handleRunProbe}
-        openCodeGoCredential={openCodeGoCredential}
-        effectiveOpenCodeModels={effectiveOpenCodeModels}
-        syncingModels={syncingModels}
-        openCodeSavedAt={openCodeSavedAt}
-        onSyncModels={handleSyncModels}
-        effectiveVercelModels={effectiveVercelModels}
-        syncingVercelModels={syncingVercelModels}
-        vercelSavedAt={vercelSavedAt}
-        onSyncVercelModels={handleSyncVercelModels}
-        effectiveCloudflareModels={effectiveCloudflareModels}
-        syncingCloudflareModels={syncingCloudflareModels}
-        cloudflareSavedAt={cloudflareSavedAt}
-        onSyncCloudflareModels={handleSyncCloudflareModels}
-      />
-
-      {/* Section 2: Latency Benchmark per Provider & Task */}
+  const sectionDetail =
+    section === 'provider' ? (
+      providerSection
+    ) : section === 'latency' ? (
       <ZedLatencySection
         testMessage={testMessage}
         summaries={summaries}
         onClearMetrics={handleClearMetrics}
       />
-
-      {/* Section 3: Audio Input & Mic Controls */}
+    ) : section === 'voice' ? (
       <ZedAudioSection config={config} onFieldChange={handleFieldChange} />
-
-      {/* Section 4: Identity & Personality */}
+    ) : section === 'persona' ? (
       <ZedPersonaSection
         config={config}
         persona={persona}
@@ -409,8 +454,7 @@ export const ZedTab: React.FC = () => {
         onTestVoice={handleTestVoice}
         openingPreview={openingPreview}
       />
-
-      {/* Section 5: Shared Memory */}
+    ) : (
       <ZedMemorySection
         persona={persona}
         onPersonaChange={handlePersonaChange}
@@ -420,6 +464,82 @@ export const ZedTab: React.FC = () => {
         onAddMemoryNote={handleAddMemoryNote}
         onDeleteMemoryNote={handleDeleteMemoryNote}
       />
+    );
+
+  const selectSection = (id: ZedSectionId) => {
+    setSection(id);
+  };
+
+  const moveSection = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') {
+      return;
+    }
+    event.preventDefault();
+    const nextIndex =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? ZED_SECTIONS.length - 1
+          : event.key === 'ArrowRight'
+            ? Math.min(index + 1, ZED_SECTIONS.length - 1)
+            : Math.max(index - 1, 0);
+    const next = ZED_SECTIONS[nextIndex];
+    if (!next || next.id === section) return;
+    selectSection(next.id);
+    const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+      '[data-zed-section]'
+    );
+    buttons?.[nextIndex]?.focus();
+  };
+
+  return (
+    <div className="zed-settings">
+      <ZedHeroCard
+        persona={persona}
+        config={config}
+        savedToast={savedToast}
+        testingProvider={testingProvider}
+        onRunProbe={handleRunProbe}
+      />
+
+      <nav className="zed-section-nav" aria-label="Secciones del asistente">
+        {ZED_SECTIONS.map((item, index) => {
+          const selected = item.id === section;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              data-zed-section=""
+              aria-current={selected ? 'page' : undefined}
+              className="zed-section-nav__item"
+              onClick={() => selectSection(item.id)}
+              onKeyDown={(event) => moveSection(event, index)}
+            >
+              {selected ? (
+                <motion.span
+                  layoutId="zed-section-nav-indicator"
+                  className="zed-section-nav__indicator"
+                  transition={springs.selection}
+                  initial={false}
+                  aria-hidden="true"
+                />
+              ) : null}
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      <motion.div
+        key={section}
+        className="zed-section-panel"
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
+      >
+        {sectionDetail}
+      </motion.div>
     </div>
   );
 };

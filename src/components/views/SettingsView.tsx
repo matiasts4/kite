@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { motion } from 'motion/react';
-import { springs } from '../../motion/standard/tokens';
+import { AnimatePresence, motion } from 'motion/react';
+import { springs, tweens } from '../../motion/standard/tokens';
 import {
   ChevronLeftIcon,
   SettingsIcon,
@@ -157,6 +157,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   embedded = false,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
+  const [paneDirection, setPaneDirection] = useState(1);
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
   const [localMode, setLocalMode] = useState<'dark' | 'light'>('dark');
   const [localPalette, setLocalPalette] = useState<string>('kite-dark');
 
@@ -398,6 +401,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, []);
 
   const handleSelectTab = useCallback((tabId: SettingsTabId) => {
+    const next = SETTINGS_TABS.findIndex((tab) => tab.id === tabId);
+    const prev = SETTINGS_TABS.findIndex((tab) => tab.id === activeTabRef.current);
+    setPaneDirection(next >= prev ? 1 : -1);
     setActiveTab(tabId);
     try {
       writeKitePref('settingsTab', tabId);
@@ -668,8 +674,38 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     aria-current={isSelected ? 'page' : undefined}
                     aria-description={tab.blurb}
+                    data-settings-nav={tab.id}
                     className={`sidebar-row settings-rail__row${isSelected ? ' sidebar-row--selected' : ''}`}
                     onClick={() => handleSelectTab(tab.id)}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key !== 'ArrowDown' &&
+                        event.key !== 'ArrowUp' &&
+                        event.key !== 'Home' &&
+                        event.key !== 'End'
+                      ) {
+                        return;
+                      }
+                      event.preventDefault();
+                      const index = SETTINGS_TABS.findIndex((item) => item.id === tab.id);
+                      const nextIndex =
+                        event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? SETTINGS_TABS.length - 1
+                            : event.key === 'ArrowDown'
+                              ? Math.min(index + 1, SETTINGS_TABS.length - 1)
+                              : Math.max(index - 1, 0);
+                      const next = SETTINGS_TABS[nextIndex];
+                      if (!next || next.id === tab.id) return;
+                      handleSelectTab(next.id);
+                      const rail = event.currentTarget.closest('.settings-rail');
+                      queueMicrotask(() => {
+                        rail
+                          ?.querySelector<HTMLButtonElement>(`[data-settings-nav="${next.id}"]`)
+                          ?.focus();
+                      });
+                    }}
                     type="button"
                   >
                     {isSelected && (
@@ -700,15 +736,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Main Settings Content Pane */}
       <section className="application-settings-pane" data-settings-tab={activeTab}>
         <div className="application-settings scroll-quiet">
-          <div
+          <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            key={activeTab}
             className={`application-settings__column${
               activeTab === 'plugins' ||
               activeTab === 'quotas' ||
+              activeTab === 'zed' ||
               activeTab === 'customizations' ||
               activeTab === 'appearance'
                 ? ' application-settings__column--wide'
                 : ''
             }`}
+            initial={{ opacity: 0, x: paneDirection * 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: paneDirection * -10 }}
+            transition={tweens.panelIn}
           >
             {/* Header */}
             <header className="application-settings__heading">
@@ -1195,7 +1238,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
 
 
-          </div>
+          </motion.div>
+          </AnimatePresence>
         </div>
       </section>
     </div>

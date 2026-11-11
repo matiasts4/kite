@@ -96,6 +96,7 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     expect(screen.getByText(/Canal y Pasarela de Proveedor IA/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /^OpenCode Go/ }));
     expect(screen.getAllByText(/DeepSeek.*4\.1.*Flash/i).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: /^Latencia$/ }));
     expect(screen.getByText(/Rendimiento y Latencia por Proveedor/i)).toBeInTheDocument();
 
     // Verify no emoji characters exist in rendered text

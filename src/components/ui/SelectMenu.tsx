@@ -114,6 +114,24 @@ const LockIcon: React.FC<{ size?: number; className?: string }> = ({ size = 9, c
   </svg>
 );
 
+const MENU_Z = 60;
+const OVERLAY_LIFT = 20;
+
+/** Lists portaled beside a modal must paint above that modal, not behind it. */
+function overlayMenuZIndex(element: HTMLElement): number {
+  let max = 0;
+  let node: HTMLElement | null = element;
+  while (node) {
+    const style = window.getComputedStyle(node);
+    const positioned =
+      style.position === 'fixed' || style.position === 'absolute' || style.position === 'sticky';
+    const z = Number.parseInt(style.zIndex, 10);
+    if (positioned && Number.isFinite(z) && z > max) max = z;
+    node = node.parentElement;
+  }
+  return Math.max(MENU_Z, max + OVERLAY_LIFT);
+}
+
 function getAnchoredGeometry(element: HTMLElement) {
   const scaledHost = element.closest('.app-frame--scaled') as HTMLElement | null;
   const hostRect = scaledHost?.getBoundingClientRect();
@@ -485,6 +503,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
                 }`}
                 style={{
                   position: 'fixed',
+                  zIndex: triggerRef.current ? overlayMenuZIndex(triggerRef.current) : MENU_Z,
                   left: `${coords.left}px`,
                   top: `${coords.top}px`,
                   width: `${coords.width}px`,

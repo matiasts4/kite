@@ -10,7 +10,8 @@ import {
 } from '../../../../lib/operator/operatorProviders';
 import type { ConnectionSummary } from '../../../../lib/ipc';
 import { ModelSearchField } from './ModelSearchField';
-import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
+import { BrandLogo } from '../../../ui/BrandLogo';
+import { SettingsMasterDetail, SettingsMasterDetailList } from '../SettingsMasterDetail';
 
 export interface ZedProvidersSectionProps {
   config: OperatorConfig;
@@ -620,55 +621,39 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
   };
 
   return (
-    <section className="settings-group">
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 8,
-        }}
-      >
-        <h2 className="settings-group__title" style={{ margin: 0 }}>
-          Canal y Pasarela de Proveedor IA
-        </h2>
-        <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-          Selecciona cómo responde el asistente esférico
-        </span>
-      </div>
-
-      <div className="ui-card">
-        <div className="ui-card__row zed-provider-switcher-row">
-          <div className="zed-provider-switcher-copy">
-            <h3 className="settings-row__title">Proveedor activo</h3>
-            <p>
-              Elige el proveedor que usa el asistente de Zed. Abajo se muestra solo la
-              configuración del proveedor seleccionado.
-            </p>
+    <SettingsMasterDetail
+      label="Proveedores del asistente"
+      detailKey={config.activeProvider}
+      sidebar={
+        <SettingsMasterDetailList
+          label="Proveedores del asistente"
+          selectedId={config.activeProvider}
+          onSelect={(id) => onFieldChange('activeProvider', id as OperatorProviderId)}
+          items={PROVIDERS.map((provider) => ({
+            id: provider.id,
+            label: provider.name,
+            icon: <BrandLogo engine={provider.id} size={18} />,
+            meta:
+              config.activeProvider === provider.id ? (
+                <span className="qt-chip" data-tone="ok">
+                  Activo
+                </span>
+              ) : null,
+          }))}
+        />
+      }
+      detail={
+        <>
+          <div className="qt-providers-detail__header">
+            <div className="qt-providers-detail__title-col">
+              <h2 className="settings-group__title">Canal y Pasarela de Proveedor IA</h2>
+              <p className="qt-lead" style={{ margin: 0 }}>
+                Selecciona cómo responde el asistente esférico
+              </p>
+            </div>
           </div>
-          <fieldset aria-label="Proveedor IA" className="ui-segmented zed-provider-switcher">
-            {PROVIDERS.map((provider) => {
-              const isSelected = config.activeProvider === provider.id;
-              return (
-                <button
-                  key={provider.id}
-                  type="button"
-                  aria-pressed={isSelected}
-                  className="ui-segmented__item"
-                  onClick={() => onFieldChange('activeProvider', provider.id)}
-                >
-                  {isSelected && <SegmentedIndicator group="settings-zed-provider" />}
-                  <span>{provider.name}</span>
-                </button>
-              );
-            })}
-          </fieldset>
-        </div>
-
-        <div className="zed-provider__panel">{renderProviderBody(config.activeProvider)}</div>
-      </div>
-
-      {verifiedChatConnections.length > 0 ? (
+          <div className="zed-provider__panel">{renderProviderBody(config.activeProvider)}</div>
+          {verifiedChatConnections.length > 0 ? (
         <div className="ui-card" style={{ marginTop: 4 }}>
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
@@ -703,7 +688,9 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
             );
           })}
         </div>
-      ) : null}
-    </section>
+          ) : null}
+        </>
+      }
+    />
   );
 };

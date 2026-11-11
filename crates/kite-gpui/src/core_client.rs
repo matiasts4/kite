@@ -253,17 +253,22 @@ pub fn pipe_name() -> String {
             return trimmed.to_string();
         }
     }
+    let stem = if cfg!(debug_assertions) {
+        "kite-core-v1-dev"
+    } else {
+        "kite-core-v1"
+    };
     #[cfg(windows)]
     {
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
-        return format!(r"\\.\pipe\kite-core-v1-{user}");
+        return format!(r"\\.\pipe\{stem}-{user}");
     }
     #[cfg(not(windows))]
     {
         if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-            format!("{xdg}/kite-core-v1.sock")
+            format!("{xdg}/{stem}.sock")
         } else {
-            "/tmp/kite-core-v1.sock".to_string()
+            format!("/tmp/{stem}.sock")
         }
     }
 }

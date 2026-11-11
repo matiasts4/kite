@@ -918,6 +918,7 @@ mod tests {
             finished: false,
             started_at_ms: 1234567890,
             routine_id: None,
+            delivered_through: 0,
         };
         {
             let mut live = live_turns().lock().unwrap();

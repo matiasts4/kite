@@ -431,14 +431,21 @@ pub fn resolve_provider_session_id_with_context(
             claimed_ids,
         ),
         "grok" => {
-            let discovered = resolve_grok_session_id(
-                cwd,
-                terminal_session_id,
-                spawned_at_unix_ms,
-                claimed_ids,
-                last_user_input,
-            );
-            pick_bound_provider_id(valid_existing, discovered.as_deref(), claimed_ids)
+            let pids = root_pid
+                .filter(|&pid| pid > 0)
+                .map(collect_process_tree_pids)
+                .unwrap_or_default();
+            if !pids.is_empty() {
+                if let Some(home) = grok_home_dir() {
+                    let owners = grok_active_owners_from_home(&home);
+                    if let Some(owned) = grok_owned_session_id(&owners, &pids) {
+                        if let Some(id) = provider_id_if_unclaimed(Some(&owned), claimed_ids) {
+                            return Some(id);
+                        }
+                    }
+                }
+            }
+            valid_existing.map(|id| id.to_string())
         }
         _ => valid_existing.map(|s| s.to_string()),
     }
@@ -1204,22 +1211,105 @@ fn grok_home_dir() -> Option<PathBuf> {
         .or_else(|| user_home_dir().map(|home| home.join(".grok")))
 }
 
-fn grok_parse_active_session_ids(raw: &str) -> HashSet<String> {
+struct GrokActiveOwner {
+    session_id: String,
+    pid: u32,
+}
+
+fn grok_parse_active_owners(raw: &str) -> Vec<GrokActiveOwner> {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return HashSet::new();
+        return Vec::new();
     };
     let Some(arr) = val.as_array() else {
-        return HashSet::new();
+        return Vec::new();
     };
     arr.iter()
         .filter_map(|item| {
-            item.get("session_id")
+            let session_id = item
+                .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
+                .filter(|id| !id.is_empty())?
+                .to_string();
+            let pid = item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            Some(GrokActiveOwner { session_id, pid })
         })
         .collect()
+}
+
+fn grok_parse_active_session_ids(raw: &str) -> HashSet<String> {
+    grok_parse_active_owners(raw)
+        .into_iter()
+        .map(|owner| owner.session_id)
+        .collect()
+}
+
+fn grok_active_owners_from_home(grok_home: &Path) -> Vec<GrokActiveOwner> {
+    let Ok(raw) = std::fs::read_to_string(grok_home.join("active_sessions.json")) else {
+        return Vec::new();
+    };
+    grok_parse_active_owners(&raw)
+}
+
+/// The session this process tree is actually running. A cwd guess is not an owner.
+fn grok_owned_session_id(owners: &[GrokActiveOwner], pids: &HashSet<u32>) -> Option<String> {
+    owners
+        .iter()
+        .find(|owner| owner.pid > 0 && pids.contains(&owner.pid))
+        .map(|owner| owner.session_id.clone())
+}
+
+/// Resume the id saved for this pane. A live foreign owner blocks it.
+/// A dead active-session record does not, and a missing id is not replaced.
+fn choose_grok_restore_id(
+    saved: Option<&str>,
+    claimed: &HashSet<String>,
+    owners: &[GrokActiveOwner],
+    pid_alive: impl Fn(u32) -> bool,
+) -> Option<String> {
+    let saved = saved.map(str::trim).filter(|id| !id.is_empty())?;
+    if claimed.contains(saved) {
+        return None;
+    }
+    let live_owner = owners.iter().any(|owner| {
+        owner.session_id == saved && owner.pid > 0 && pid_alive(owner.pid)
+    });
+    if live_owner {
+        return None;
+    }
+    Some(saved.to_string())
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return std::io::Error::last_os_error().raw_os_error() == Some(5);
+        }
+        CloseHandle(handle);
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    std::path::Path::new(&format!("/proc/{pid}")).is_dir()
 }
 
 fn grok_active_session_ids_from_home(grok_home: &Path) -> HashSet<String> {
@@ -1239,7 +1329,7 @@ fn usable_grok_user_input(raw: Option<&str>) -> Option<&str> {
     Some(trimmed)
 }
 
-/// Resume a Grok pane with a saved id, or discover one that is not already open.
+/// Resume the Grok conversation saved for this pane. Never a sibling conversation.
 pub fn restore_grok_provider_id(
     saved: Option<&str>,
     claimed: &HashSet<String>,
@@ -1266,27 +1356,13 @@ fn restore_grok_provider_id_from_home(
     grok_home: &Path,
     saved: Option<&str>,
     claimed: &HashSet<String>,
-    cwd: &str,
-    terminal_session_id: &str,
-    spawned_at_unix_ms: i64,
-    last_user_input: Option<&str>,
+    _cwd: &str,
+    _terminal_session_id: &str,
+    _spawned_at_unix_ms: i64,
+    _last_user_input: Option<&str>,
 ) -> Option<String> {
-    let active = grok_active_session_ids_from_home(grok_home);
-    if let Some(id) = choose_restore_provider_id(saved, claimed) {
-        if !active.contains(&id) {
-            return Some(id);
-        }
-    }
-    let mut blocked = claimed.clone();
-    blocked.extend(active);
-    resolve_grok_session_id_from_home(
-        grok_home,
-        cwd,
-        terminal_session_id,
-        spawned_at_unix_ms,
-        &blocked,
-        usable_grok_user_input(last_user_input),
-    )
+    let owners = grok_active_owners_from_home(grok_home);
+    choose_grok_restore_id(saved, claimed, &owners, process_is_alive)
 }
 
 fn grok_cwd_path_variants(cwd: &str) -> Vec<String> {
@@ -1443,24 +1519,6 @@ fn score_grok_candidate(
         }
     }
     score
-}
-
-fn resolve_grok_session_id(
-    cwd: &str,
-    terminal_session_id: &str,
-    spawned_at_unix_ms: i64,
-    claimed_ids: &HashSet<String>,
-    last_user_input: Option<&str>,
-) -> Option<String> {
-    let home = grok_home_dir()?;
-    resolve_grok_session_id_from_home(
-        &home,
-        cwd,
-        terminal_session_id,
-        spawned_at_unix_ms,
-        claimed_ids,
-        last_user_input,
-    )
 }
 
 fn resolve_grok_session_id_from_home(
@@ -1883,6 +1941,25 @@ mod tests {
     }
 
     #[test]
+    fn grok_owned_session_id_matches_only_this_process_tree() {
+        let owners = vec![
+            GrokActiveOwner {
+                session_id: "owned".to_string(),
+                pid: 42,
+            },
+            GrokActiveOwner {
+                session_id: "sibling".to_string(),
+                pid: 99,
+            },
+        ];
+        let mut pids = HashSet::new();
+        pids.insert(42);
+        assert_eq!(grok_owned_session_id(&owners, &pids).as_deref(), Some("owned"));
+        pids.clear();
+        assert_eq!(grok_owned_session_id(&owners, &pids), None);
+    }
+
+    #[test]
     fn grok_parse_active_session_ids_reads_session_id_field() {
         let raw = r#"[{"session_id":"01a1a8c4-876b-7260-b545-c8f1d9ecd705","pid":14592,"cwd":"E:\\kite"}]"#;
         let ids = grok_parse_active_session_ids(raw);
@@ -1901,13 +1978,13 @@ mod tests {
     }
 
     #[test]
-    fn restore_grok_skips_active_saved_id_and_picks_next() {
+    fn restore_grok_keeps_saved_id_and_does_not_substitute() {
         let home = std::env::temp_dir().join(format!("kite-grok-home-{}", uuid::Uuid::new_v4()));
         let root = home.join("sessions").join(grok_encode_cwd(r"E:\kite"));
-        let live = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-        let idle = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-        std::fs::create_dir_all(root.join(live)).unwrap();
-        std::fs::create_dir_all(root.join(idle)).unwrap();
+        let saved_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let sibling = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        std::fs::create_dir_all(root.join(saved_id)).unwrap();
+        std::fs::create_dir_all(root.join(sibling)).unwrap();
         let write_summary = |id: &str, created: &str, active: &str| {
             let body = serde_json::json!({
                 "info": { "id": id, "cwd": r"E:\kite" },
@@ -1918,35 +1995,43 @@ mod tests {
             });
             std::fs::write(root.join(id).join("summary.json"), body.to_string()).unwrap();
         };
-        write_summary(live, "2026-11-04T22:53:34Z", "2026-11-05T00:34:00Z");
-        write_summary(idle, "2026-11-04T22:44:26Z", "2026-11-04T23:47:26Z");
+        write_summary(saved_id, "2026-11-04T22:53:34Z", "2026-11-05T00:34:00Z");
+        write_summary(sibling, "2026-11-04T22:44:26Z", "2026-11-04T23:47:26Z");
         std::fs::write(
             home.join("active_sessions.json"),
-            format!(r#"[{{"session_id":"{live}","pid":14592,"cwd":"E:\\kite"}}]"#),
+            format!(r#"[{{"session_id":"{saved_id}","pid":0,"cwd":"E:\\kite"}}]"#),
         )
         .unwrap();
 
-        let saved = restore_grok_provider_id_from_home(
+        let kept = restore_grok_provider_id_from_home(
             &home,
-            Some(live),
+            Some(saved_id),
             &HashSet::new(),
             r"E:\kite",
             "term-grok",
             grok_rfc3339_to_unix_ms("2026-11-05T00:23:40Z").unwrap(),
             Some("[<35;24;58M[<35;23;59M[<35;22;59M"),
         );
-        assert_eq!(saved.as_deref(), Some(idle));
+        assert_eq!(kept.as_deref(), Some(saved_id));
 
-        let kept = restore_grok_provider_id_from_home(
+        std::fs::write(
+            home.join("active_sessions.json"),
+            format!(
+                r#"[{{"session_id":"{saved_id}","pid":{},"cwd":"E:\\kite"}}]"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        let blocked = restore_grok_provider_id_from_home(
             &home,
-            Some(idle),
+            Some(saved_id),
             &HashSet::new(),
             r"E:\kite",
             "term-grok",
             grok_rfc3339_to_unix_ms("2026-11-05T00:23:40Z").unwrap(),
             None,
         );
-        assert_eq!(kept.as_deref(), Some(idle));
+        assert_eq!(blocked, None);
 
         let discovered = restore_grok_provider_id_from_home(
             &home,
@@ -1957,7 +2042,7 @@ mod tests {
             grok_rfc3339_to_unix_ms("2026-11-04T22:44:26Z").unwrap(),
             None,
         );
-        assert_eq!(discovered.as_deref(), Some(idle));
+        assert_eq!(discovered, None);
 
         let _ = std::fs::remove_dir_all(&home);
     }

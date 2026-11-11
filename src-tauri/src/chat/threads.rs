@@ -497,14 +497,22 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
         .iter()
         .position(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
     {
+        let prev_text_len = list[pos]
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .len();
+        let new_text_len = item
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .len();
         let move_assistant_to_tail = item.get("kind").and_then(|v| v.as_str()) == Some("assistant")
-            && !item.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty()
-            && list[pos]
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .is_empty()
-            && pos + 1 < list.len();
+            && new_text_len > prev_text_len
+            && pos + 1 < list.len()
+            && !list[pos + 1..]
+                .iter()
+                .any(|later| later.get("kind").and_then(|v| v.as_str()) == Some("user"));
         let slot = &mut list[pos];
         if let (Some(existing_obj), Some(new_obj)) = (slot.as_object_mut(), item.as_object()) {
             for (k, v) in new_obj {
@@ -785,5 +793,34 @@ mod rewind {
         assert!(blank["providerOptions"].as_array().unwrap().iter().any(|opt| {
             opt["id"] == "effort" && opt["value"] == "medium"
         }));
+    }
+
+    #[test]
+    fn upsert_item_moves_assistant_to_tail_when_new_text_arrives_after_tools() {
+        let mut thread = json!({
+            "id": "t-order",
+            "items": [
+                { "id": "u1", "kind": "user", "text": "check status" },
+                { "id": "a1", "kind": "assistant", "text": "Checking repository...", "streaming": true },
+                { "id": "tool-1", "kind": "tool", "title": "Read README.md", "text": "" },
+                { "id": "tool-2", "kind": "tool", "title": "Searched status", "text": "" }
+            ]
+        });
+
+        upsert_item(
+            &mut thread,
+            &json!({
+                "id": "a1",
+                "kind": "assistant",
+                "text": "Checking repository...\n\nAll checks passed.",
+                "streaming": true
+            }),
+        );
+
+        assert_eq!(
+            item_ids(&thread),
+            vec!["u1", "tool-1", "tool-2", "a1"],
+            "assistant response must move below tools when new text arrives after tools"
+        );
     }
 }

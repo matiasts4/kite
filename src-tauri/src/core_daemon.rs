@@ -176,6 +176,15 @@ pub struct LiveSessionSummary {
     pub spawned_at_unix_ms: i64,
 }
 
+/// Installed and development builds must not share a daemon endpoint.
+pub fn core_pipe_stem() -> &'static str {
+    if cfg!(debug_assertions) {
+        "kite-core-v1-dev"
+    } else {
+        "kite-core-v1"
+    }
+}
+
 pub fn get_core_pipe_name() -> String {
     if let Ok(custom) = std::env::var("KITE_CORE_PIPE") {
         let trimmed = custom.trim();
@@ -183,18 +192,19 @@ pub fn get_core_pipe_name() -> String {
             return trimmed.to_string();
         }
     }
+    let stem = core_pipe_stem();
     #[cfg(windows)]
     {
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
-        format!(r"\\.\pipe\kite-core-v1-{}", user)
+        format!(r"\\.\pipe\{stem}-{user}")
     }
     #[cfg(not(windows))]
     {
         if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-            format!("{}/kite-core-v1.sock", xdg)
+            format!("{xdg}/{stem}.sock")
         } else {
             let uid = unsafe { libc::getuid() };
-            format!("/tmp/kite-core-v1-{}.sock", uid)
+            format!("/tmp/{stem}-{uid}.sock")
         }
     }
 }
@@ -701,7 +711,7 @@ pub fn on_client_window_close() {
     // Do NOT call snapshot_and_shutdown_all_terminals!
 }
 
-/// Starts the standalone daemon server event loop on `\\.\pipe\kite-core-v1-<username>`.
+/// Starts the standalone daemon server event loop on this build's pipe.
 pub fn run_core_daemon_main() {
     CORE_DAEMON_RUNNING.store(true, Ordering::SeqCst);
     // Loopback agent dispatch lives inside the daemon so an external script can
@@ -1939,6 +1949,25 @@ mod tests {
             "rows": rows,
             "confirmedByBuilder": true
         }))
+    }
+
+    #[test]
+    fn development_build_uses_its_own_daemon_pipe() {
+        let stem = core_pipe_stem();
+        let other = if stem == "kite-core-v1-dev" {
+            "kite-core-v1"
+        } else {
+            "kite-core-v1-dev"
+        };
+        let pipe = format!(r"\\.\pipe\{stem}-alice");
+        let foreign = format!(r"\\.\pipe\{other}-alice");
+        assert_ne!(pipe, foreign);
+        assert!(pipe.contains(stem));
+        if cfg!(debug_assertions) {
+            assert_eq!(stem, "kite-core-v1-dev");
+        } else {
+            assert_eq!(stem, "kite-core-v1");
+        }
     }
 
     #[test]

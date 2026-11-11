@@ -88,6 +88,10 @@ test('corePipePath resolves the per-user kite-core named pipe', () => {
     corePipePath({ XDG_RUNTIME_DIR: '/run/user/7' }, 'linux'),
     '/run/user/7/kite-core-v1.sock'
   );
+  assert.equal(
+    corePipePath({ USERNAME: 'alice', KITE_CORE_CHANNEL: 'dev' }, 'win32'),
+    '\\\\.\\pipe\\kite-core-v1-dev-alice'
+  );
 });
 
 test('coreDispatchParams maps workspace requests onto daemon dispatch actions', () => {

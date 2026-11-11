@@ -41,6 +41,7 @@ pub mod local_feed;
 pub mod account_switcher;
 pub mod handoff;
 pub mod system_metrics;
+pub mod headroom_monitor;
 pub mod acp;
 pub mod odd_tasks;
 pub mod operator_runtime;
@@ -84,6 +85,7 @@ use quota::*;
 use routines::*;
 use session::*;
 use system_metrics::*;
+use headroom_monitor::fetch_headroom_monitor;
 use terminal::*;
 use tickets::*;
 use updater::*;
@@ -664,6 +666,7 @@ fn main() {
             recommend_continuation_targets,
             get_handoff_preview,
             get_system_metrics,
+            fetch_headroom_monitor,
             start_terminal_benchmark,
             stop_terminal_benchmark,
             get_terminal_benchmark_sample,

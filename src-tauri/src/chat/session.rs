@@ -299,6 +299,9 @@ pub enum TransportEvent {
     /// A provider frame the transcript already knows how to draw as an action.
     /// The raw line is kept so the existing row builder can read it.
     Activity(String),
+    /// A JSON-RPC request this build does not handle. It still has an id, so
+    /// the session must answer or the provider waits forever.
+    UnhandledRequest { id: String },
     ApprovalRequest { id: String, kind: String },
     /// The provider finished answering this turn but the process still serves
     /// the session. A later turn writes onto the same process.
@@ -318,6 +321,11 @@ pub trait SessionTransport: fmt::Debug + Send {
     fn spawn_count(&self) -> u32;
     fn resume_handle(&self) -> Option<String>;
     fn drain(&mut self) -> Vec<TransportEvent>;
+    /// A client frame for the process that already owns the session.
+    /// One-shot runs keep their own stdin; a lasting session must use this.
+    fn write_frame(&mut self, _frame: &str) -> Result<(), String> {
+        Err("this session has no client frame channel".to_string())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -326,6 +334,7 @@ struct ScriptedState {
     stops: u32,
     specs: Vec<TransportSpec>,
     turns: Vec<String>,
+    frames: Vec<String>,
     pending: Vec<TransportEvent>,
     resume_handle: Option<String>,
     fail_spawn: Option<String>,
@@ -342,6 +351,10 @@ pub struct ScriptedTransport {
 impl ScriptedTransport {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn written_frames(&self) -> Vec<String> {
+        self.state.lock().unwrap().frames.clone()
     }
 
     pub fn script(&self, event: TransportEvent) {
@@ -422,6 +435,11 @@ impl SessionTransport for ScriptedTransport {
     fn drain(&mut self) -> Vec<TransportEvent> {
         let mut state = self.state.lock().unwrap();
         std::mem::take(&mut state.pending)
+    }
+
+    fn write_frame(&mut self, frame: &str) -> Result<(), String> {
+        self.state.lock().unwrap().frames.push(frame.to_string());
+        Ok(())
     }
 }
 
@@ -701,6 +719,18 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Writes one client frame to the process that owns this thread.
+    pub fn write_frame(&mut self, thread_id: &str, frame: &str) -> Result<(), SessionError> {
+        let session = self
+            .sessions
+            .get_mut(thread_id)
+            .ok_or_else(|| SessionError::NotAttached(thread_id.to_string()))?;
+        session
+            .transport
+            .write_frame(frame)
+            .map_err(SessionError::Transport)
+    }
+
     pub fn stop(&mut self, thread_id: &str) -> Result<(), SessionError> {
         let session = self
             .sessions
@@ -731,6 +761,9 @@ impl SessionManager {
                 }
                 TransportEvent::Activity(line) => {
                     push_event(session, "activity", json!({ "line": line }));
+                }
+                TransportEvent::UnhandledRequest { id } => {
+                    push_event(session, "unhandledRequest", json!({ "id": id }));
                 }
                 TransportEvent::ApprovalRequest { id, kind } => {
                     session.record.pending_approvals.push(id.clone());
@@ -1164,6 +1197,20 @@ mod tests {
         let error = manager.send_turn("thread-1", "command-1", "other").unwrap_err();
 
         assert_eq!(error, SessionError::CommandConflict("command-1".to_string()));
+    }
+
+    #[test]
+    fn a_client_frame_reaches_the_session_that_owns_the_process() {
+        let mut manager = SessionManager::new();
+        let transport = attach(&mut manager, spec("thread-1", SessionMode::Persistent, None), ScriptedTransport::new());
+        manager.start("thread-1").unwrap();
+
+        manager.write_frame("thread-1", "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}").unwrap();
+
+        assert_eq!(
+            transport.written_frames(),
+            vec!["{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}".to_string()]
+        );
     }
 
     #[test]

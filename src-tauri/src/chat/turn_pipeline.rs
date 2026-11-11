@@ -216,6 +216,18 @@ impl ToolCallTracker {
             "session/request_permission" | "permission/request" => {
                 vec![approval_event(frame)]
             }
+            "turn_completed" | "turn_complete" | "turn.completed" | "usage_update" | "step_finish" => {
+                usage_events(update, frame)
+            }
+            "available_commands_update"
+            | "session_info_update"
+            | "hook_execution"
+            | "config_option_update"
+            | "current_mode_update"
+            | "mode_update"
+            | "commands_update"
+            | "user_message_chunk"
+            | "step_start" => Vec::new(),
             _ if frame.get("method").is_some() || frame.get("type").is_some() => {
                 vec![ProviderTurnEvent::Notice {
                     code: "unknownFrame".into(),
@@ -297,7 +309,7 @@ impl ToolCallTracker {
                 entry.command = string_field(input, &["command", "cmd", "CommandLine"]);
             }
             if entry.query.is_none() {
-                entry.query = string_field(input, &["query", "pattern", "q"]);
+                entry.query = string_field(input, &["query", "pattern", "q", "regex", "search"]);
             }
         }
         if entry.path.is_none() {
@@ -809,6 +821,58 @@ fn reasoning_delta(update: &Value) -> Vec<ProviderTurnEvent> {
             text: text.to_string(),
         }]
     }
+}
+
+fn usage_events(update: &Value, frame: &Value) -> Vec<ProviderTurnEvent> {
+    let usage = update
+        .get("usage")
+        .or_else(|| update.pointer("/part/tokens"))
+        .or_else(|| frame.get("usage"))
+        .unwrap_or(update);
+    let input_tokens = usage
+        .get("inputTokens")
+        .or_else(|| usage.get("input_tokens"))
+        .or_else(|| usage.get("input"))
+        .and_then(Value::as_i64);
+    let output_tokens = usage
+        .get("outputTokens")
+        .or_else(|| usage.get("output_tokens"))
+        .or_else(|| usage.get("output"))
+        .and_then(Value::as_i64);
+    if input_tokens.is_none() && output_tokens.is_none() {
+        return Vec::new();
+    }
+    let cached_input_tokens = usage
+        .get("cachedReadTokens")
+        .or_else(|| usage.get("cachedInputTokens"))
+        .or_else(|| usage.get("cached_input_tokens"))
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .or_else(|| usage.pointer("/cache/read"))
+        .and_then(Value::as_i64);
+    let context_window_tokens = usage
+        .get("contextWindowTokens")
+        .or_else(|| usage.get("context_window_tokens"))
+        .and_then(Value::as_i64);
+    let duration_seconds = usage
+        .get("durationSeconds")
+        .or_else(|| usage.get("duration_seconds"))
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            usage
+                .get("elapsed_ms")
+                .or_else(|| update.get("elapsed_ms"))
+                .and_then(Value::as_f64)
+                .map(|ms| ms / 1000.0)
+        });
+    vec![ProviderTurnEvent::UsageUpdated {
+        usage: usage_from_provider(
+            input_tokens.unwrap_or(0),
+            output_tokens.unwrap_or(0),
+            cached_input_tokens,
+            context_window_tokens,
+            duration_seconds,
+        ),
+    }]
 }
 
 fn explicit_tool_id(update: &Value) -> Option<String> {

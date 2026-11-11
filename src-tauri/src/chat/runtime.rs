@@ -39,6 +39,9 @@ pub struct TurnRun {
     pub finished: bool,
     pub started_at_ms: i64,
     pub routine_id: Option<String>,
+    /// Highest sequence a client has already been given. Older events can leave
+    /// the buffer without hiding a row the transcript has not seen.
+    pub delivered_through: u64,
 }
 
 pub struct LiveTurns {
@@ -404,11 +407,71 @@ fn emit_notice_item(thread_id: &str, run_id: &str, message: &str) {
     persist();
 }
 
+fn emit_note_item(thread_id: &str, run_id: &str, message: &str) {
+    let item = chat_item(
+        &format!("n{}", Uuid::new_v4().simple()),
+        "note",
+        &bounded_notice(message),
+        false,
+    );
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            append_event(run, json!({ "kind": "upsert", "item": item.clone() }), true);
+        }
+    }
+    {
+        let mut items = threads().lock().unwrap();
+        if let Some(thread) = items
+            .iter_mut()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+        {
+            upsert_item(thread, &item);
+            touch(thread);
+        }
+    }
+    live_cv().notify_all();
+    persist();
+}
+
+/// Writes a client frame to the one-shot pipe when that pipe exists, and to
+/// the lasting session otherwise. A persistent Grok process does not publish
+/// its stdin on the live run.
+fn write_session_frame(thread_id: &str, line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let stdin_arc = {
+        let live = live_turns().lock().unwrap();
+        live.by_thread
+            .get(thread_id)
+            .and_then(|run_id| live.runs.get(run_id))
+            .and_then(|run| run.stdin.clone())
+    };
+    if let Some(stdin_mutex) = stdin_arc {
+        if let Ok(mut stdin) = stdin_mutex.lock() {
+            let payload = format!("{trimmed}\n");
+            if stdin.write_all(payload.as_bytes()).is_ok() && stdin.flush().is_ok() {
+                return true;
+            }
+        }
+    }
+    session_manager()
+        .lock()
+        .ok()
+        .and_then(|mut manager| manager.write_frame(thread_id, trimmed).ok())
+        .is_some()
+}
+
 /// Reads a lasting session's normalized events into the live chat run. The
 /// pump stops at a completed turn, a provider exit, a failure, or a run the
 /// user already finished.
 fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: String) {
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        let mut last_progress = Instant::now();
+        let mut quiet_noted = false;
+        loop {
         std::thread::sleep(Duration::from_millis(40));
         flush_pipeline_deltas(&thread_id, &run_id, &assistant_id);
         let (events, handle) = {
@@ -417,6 +480,19 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
             let handle = manager.status(&thread_id).and_then(|r| r.resume_handle.clone());
             (events, handle)
         };
+        if events.is_empty() {
+            if !quiet_noted && last_progress.elapsed() >= Duration::from_secs(20) {
+                emit_note_item(
+                    &thread_id,
+                    &run_id,
+                    "The provider has not sent an update. Stop the turn if this stays quiet.",
+                );
+                quiet_noted = true;
+            }
+        } else {
+            last_progress = Instant::now();
+            quiet_noted = false;
+        }
         if let Some(h) = handle.as_deref() {
             sync_thread_provider_session_id(&thread_id, Some(h));
         }
@@ -436,6 +512,17 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
                 "activity" => {
                     if let Some(line) = event.payload.get("line").and_then(Value::as_str) {
                         handle_stream_json_line(&thread_id, &run_id, &assistant_id, line);
+                    }
+                }
+                "unhandledRequest" => {
+                    if let Some(id) = event.payload.get("id").and_then(Value::as_str) {
+                        let reply = crate::chat::persistent::unhandled_request_reply(id);
+                        let _ = write_session_frame(&thread_id, &reply);
+                        emit_note_item(
+                            &thread_id,
+                            &run_id,
+                            "The provider asked for something this build does not handle. The request was declined so the turn can continue.",
+                        );
                     }
                 }
                 "turnCompleted" => outcome = Some((true, String::new())),
@@ -517,6 +604,7 @@ fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: Stri
                 sync_thread_provider_session_id(&thread_id, Some(h));
             }
             return;
+        }
         }
     });
 }
@@ -639,6 +727,7 @@ pub fn start_turn_with_binding(
         finished: false,
         started_at_ms: now_ms(),
         routine_id: routine_id.map(|id| id.to_string()),
+        delivered_through: 0,
     };
     push_event(&mut run, json!({ "kind": "status", "status": "running" }));
     push_event(&mut run, json!({ "kind": "upsert", "item": user_item }));
@@ -660,8 +749,27 @@ pub fn push_event(run: &mut TurnRun, event: Value) {
     append_event(run, event, false);
 }
 
+fn compact_delivered(run: &mut TurnRun) {
+    if run.delivered_through == 0 || run.events.len() < 400 {
+        return;
+    }
+    let delivered = run.delivered_through;
+    run.events.retain(|event| {
+        event
+            .get("sequence")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            > delivered
+    });
+}
+
 pub fn append_event(run: &mut TurnRun, mut event: Value, force: bool) {
-    if run.finished || (!force && run.events.len() >= 400) {
+    if run.finished {
+        return;
+    }
+    compact_delivered(run);
+    // Undelivered events stay. Dropping them is what made a live turn look frozen.
+    if !force && run.events.len() >= 2_000 {
         return;
     }
     run.next_sequence += 1;
@@ -675,7 +783,7 @@ pub fn read_turn_updates(run_id: &str, after_sequence: u64, wait_ms: u64) -> Val
     loop {
         let mut live = live_turns().lock().unwrap();
         prune_stale_runs(&mut live);
-        let (events, revision, finished) = match live.runs.get(run_id) {
+        let (events, revision, finished) = match live.runs.get_mut(run_id) {
             Some(run) => {
                 let events: Vec<Value> = run
                     .events
@@ -684,6 +792,15 @@ pub fn read_turn_updates(run_id: &str, after_sequence: u64, wait_ms: u64) -> Val
                     .take(32)
                     .cloned()
                     .collect();
+                if let Some(next) = events
+                    .last()
+                    .and_then(|event| event.get("sequence"))
+                    .and_then(|value| value.as_u64())
+                {
+                    if next > run.delivered_through {
+                        run.delivered_through = next;
+                    }
+                }
                 (events, run.revision.clone(), run.finished)
             }
             None => (Vec::new(), format!("{:064x}", 1), true),
@@ -1515,28 +1632,16 @@ pub fn write_user_input_to_run(thread_id: &str, request_id: &str, answers: &Valu
         })
     );
     write_approval_to_run(thread_id, request_id, "allowOnce");
-    let stdin_arc = {
-        let live = live_turns().lock().unwrap();
-        let run_id = live.by_thread.get(thread_id).cloned();
-        run_id.and_then(|rid| live.runs.get(&rid).and_then(|run| run.stdin.clone()))
-    };
-    if let Some(stdin_mutex) = stdin_arc {
-        if let Ok(mut stdin) = stdin_mutex.lock() {
-            let _ = stdin.write_all(line.as_bytes());
-            let _ = stdin.flush();
-        }
-    }
+    let _ = write_session_frame(thread_id, &line);
     set_thread_field(thread_id, "pendingUserInput", Value::Null);
 }
 
 pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) {
-    let stdin_arc = {
+    {
         let mut live = live_turns().lock().unwrap();
         let run_id = live.by_thread.get(thread_id).cloned();
-        let mut handle = None;
         if let Some(ref rid) = run_id {
             if let Some(run) = live.runs.get_mut(rid) {
-                handle = run.stdin.clone();
                 push_event(
                     run,
                     json!({
@@ -1546,13 +1651,11 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
                     }),
                 );
                 if decision != "denyAndStop" {
-                    let status = if handle.is_some() { "running" } else { "idle" };
-                    push_event(run, json!({ "kind": "status", "status": status }));
+                    push_event(run, json!({ "kind": "status", "status": "running" }));
                 }
             }
         }
-        handle
-    };
+    }
     live_cv().notify_all();
 
     {
@@ -1560,8 +1663,7 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
         if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
             thread["pendingApproval"] = Value::Null;
             if decision != "denyAndStop" {
-                let status = if stdin_arc.is_some() { "running" } else { "idle" };
-                thread["status"] = json!(status);
+                thread["status"] = json!("running");
             }
             touch(thread);
         }
@@ -1576,13 +1678,8 @@ pub fn write_approval_to_run(thread_id: &str, request_id: &str, decision: &str) 
     }
     persist();
 
-    if let Some(stdin_mutex) = stdin_arc {
-        if let Ok(mut stdin) = stdin_mutex.lock() {
-            let line = crate::acp::format_acp_approval_response(request_id, decision);
-            let _ = stdin.write_all(line.as_bytes());
-            let _ = stdin.flush();
-        }
-    }
+    let line = crate::acp::format_acp_approval_response(request_id, decision);
+    let _ = write_session_frame(thread_id, &line);
 }
 
 pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut child: crate::hidden_exec::HiddenChild) {
@@ -1727,6 +1824,20 @@ fn apply_known_turn_pipeline(thread_id: &str, run_id: &str, assistant_id: &str, 
             }
             ProviderTurnEvent::PlanUpdated { title, status, body } => {
                 project_plan(thread_id, run_id, &title, &status, &body);
+                if matches!(
+                    frame.get("method").and_then(Value::as_str),
+                    Some("x.ai/exit_plan_mode") | Some("_x.ai/exit_plan_mode")
+                ) {
+                    if let Some(id) = frame
+                        .get("id")
+                        .and_then(|value| value.as_i64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_string)))
+                    {
+                        let _ = write_session_frame(
+                            thread_id,
+                            &crate::chat::persistent::plan_request_ack(&id),
+                        );
+                    }
+                }
             }
             ProviderTurnEvent::UsageUpdated { usage } => {
                 if let Ok(value) = serde_json::to_value(&usage) {
@@ -1844,6 +1955,9 @@ fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapshot) 
     if let Some(command) = &snap.command {
         item["command"] = json!(command);
     }
+    if let Some(query) = &snap.query {
+        item["query"] = json!(query);
+    }
     if let Some(additions) = snap.additions {
         item["addedLines"] = json!(additions);
     }
@@ -1864,7 +1978,15 @@ fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapshot) 
                     item["text"] = text.clone();
                 }
             }
-            for key in ["createdAtUnixMs", "serverName", "detail"] {
+            for key in [
+                "createdAtUnixMs",
+                "serverName",
+                "toolName",
+                "detail",
+                "query",
+                "filePath",
+                "command",
+            ] {
                 if item.get(key).is_none() {
                     if let Some(value) = existing.get(key) {
                         item[key] = value.clone();
@@ -2992,6 +3114,7 @@ mod tests {
                 finished: false,
                 started_at_ms: now_ms(),
                 routine_id: None,
+                delivered_through: 0,
             });
             live.by_thread.insert(probe.thread_id.to_string(), probe.run_id.to_string());
         }

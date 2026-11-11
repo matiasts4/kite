@@ -170,17 +170,20 @@ function askLoopback(id, request) {
 
 /**
  * Resolves the `kite-core` daemon endpoint for this platform.
- * Windows: `\\.\pipe\kite-core-v1-<username>`; Unix: the XDG runtime socket.
+ * Installed builds use `kite-core-v1`. Development builds set
+ * `KITE_CORE_CHANNEL=dev` and use `kite-core-v1-dev`.
+ * Windows: `\\.\pipe\<stem>-<username>`; Unix: the XDG runtime socket.
  */
 export function corePipePath(env = process.env, platform = process.platform) {
   if (env.KITE_CORE_PIPE) return env.KITE_CORE_PIPE;
+  const stem = env.KITE_CORE_CHANNEL === 'dev' ? 'kite-core-v1-dev' : 'kite-core-v1';
   if (platform === 'win32') {
     const user = env.USERNAME || env.USER || 'default';
-    return `\\\\.\\pipe\\kite-core-v1-${user}`;
+    return `\\\\.\\pipe\\${stem}-${user}`;
   }
-  if (env.XDG_RUNTIME_DIR) return `${env.XDG_RUNTIME_DIR}/kite-core-v1.sock`;
+  if (env.XDG_RUNTIME_DIR) return `${env.XDG_RUNTIME_DIR}/${stem}.sock`;
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'default';
-  return `/tmp/kite-core-v1-${uid}.sock`;
+  return `/tmp/${stem}-${uid}.sock`;
 }
 
 /** Candidate `core-session.token` locations, dev build first. */

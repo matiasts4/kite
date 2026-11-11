@@ -172,6 +172,11 @@ pub fn antigravity_args(
                 args.push("--dangerously-skip-permissions".to_string());
             }
         }
+        Some("auto") if declared.accepts_permission => {
+            args.push("--mode".to_string());
+            args.push("auto".to_string());
+            args.push("--dangerously-skip-permissions".to_string());
+        }
         Some("fullAccess") if declared.accepts_permission => {
             args.push("--dangerously-skip-permissions".to_string());
         }
@@ -547,6 +552,22 @@ impl SessionTransport for AntigravitySession {
             .map_err(|error| format!("could not flush the antigravity session input: {error}"))
     }
 
+    fn write_frame(&mut self, frame: &str) -> Result<(), String> {
+        if self.eof.load(Ordering::SeqCst) {
+            return Err("the antigravity session ended before the frame was written".to_string());
+        }
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err("the antigravity session has no open input".to_string());
+        };
+        let line = format!("{}\n", frame.trim_end());
+        stdin.write_all(line.as_bytes()).map_err(|error| {
+            format!("could not write the frame to the antigravity session: {error}")
+        })?;
+        stdin.flush().map_err(|error| {
+            format!("could not flush the antigravity session input: {error}")
+        })
+    }
+
     fn interrupt(&mut self) -> Result<(), String> {
         self.stop_process();
         Ok(())
@@ -778,12 +799,46 @@ pub fn wait_for_server(port: u16, timeout: Duration) -> Result<(), String> {
     }
 }
 
-/// The CLI documents flags, not output frames, so a turn's output is projected
-/// as plain text. No JSON shape is invented for it.
+/// Structured provider JSON frames (`tool_call`, `tool_use`, `tool_result`,
+/// `thinking`, `reasoning`, `step_start`, `step_finish`, `session/update`)
+/// are routed as `Activity`; plain text and unrecognized objects stay `Text`.
 pub fn opencode_line_event(line: &str) -> Option<TransportEvent> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            let kind = value
+                .get("type")
+                .or_else(|| value.get("event"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+            if matches!(
+                kind,
+                "tool_call"
+                    | "tool_use"
+                    | "tool_result"
+                    | "thinking"
+                    | "reasoning"
+                    | "text_delta"
+                    | "content_block_delta"
+                    | "step_start"
+                    | "step_finish"
+                    | "turn.completed"
+                    | "turn_completed"
+            ) || matches!(
+                method,
+                "session/update"
+                    | "_x.ai/session/update"
+                    | "x.ai/session/update"
+                    | "session/request_permission"
+                    | "permission/request"
+            ) {
+                return Some(TransportEvent::Activity(trimmed.to_string()));
+            }
+        }
     }
     Some(TransportEvent::Text(trimmed.to_string()))
 }
@@ -1284,17 +1339,15 @@ fn rpc_line(id: u64, method: &str, params: Value) -> String {
     .to_string()
 }
 
-/// `initialize` as the installed agent-mode example documents it.
+/// `initialize` for ACP stdio. Client `fs` and `terminal` overrides are omitted
+/// so the provider executes its native filesystem and shell tools directly.
 pub fn grok_initialize_line(id: u64) -> String {
     rpc_line(
         id,
         "initialize",
         json!({
             "protocolVersion": 1,
-            "clientCapabilities": {
-                "fs": { "readTextFile": true, "writeTextFile": true },
-                "terminal": true
-            }
+            "clientCapabilities": {}
         }),
     )
 }
@@ -1382,6 +1435,55 @@ pub fn grok_turn_lines(
     lines
 }
 
+fn rpc_request_id(value: &Value) -> Option<String> {
+    let id = value.get("id")?;
+    if id.is_null() {
+        return None;
+    }
+    if let Some(number) = id.as_u64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = id.as_i64() {
+        return Some(number.to_string());
+    }
+    let text = id.as_str()?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// Declines a request this build does not handle, so the provider cannot wait
+/// on an answer that will never be written.
+pub fn unhandled_request_reply(id: &str) -> String {
+    let rpc_id = id
+        .parse::<i64>()
+        .map(|number| json!(number))
+        .unwrap_or_else(|_| json!(id));
+    json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "error": { "code": -32601, "message": "method not handled" }
+    })
+    .to_string()
+}
+
+/// Acknowledges a plan request so the provider gate opens. The plan stays in
+/// the transcript; this does not approve implementation.
+pub fn plan_request_ack(id: &str) -> String {
+    let rpc_id = id
+        .parse::<i64>()
+        .map(|number| json!(number))
+        .unwrap_or_else(|_| json!(id));
+    json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "result": {}
+    })
+    .to_string()
+}
+
 fn json_id(value: &Value) -> Option<u64> {
     value.get("id").and_then(|id| {
         id.as_u64()
@@ -1452,17 +1554,35 @@ pub fn parse_grok_line(line: &str, prompt_id: Option<u64>) -> ParsedLine {
         };
     }
 
-    if method == Some("session/update") {
+    if matches!(
+        method,
+        Some("session/update") | Some("_x.ai/session/update") | Some("x.ai/session/update")
+    ) {
         return parse_grok_update(trimmed, &value);
     }
     if matches!(
         method,
-        Some("session/request_permission") | Some("permission/request")
+        Some("session/request_permission")
+            | Some("permission/request")
+            | Some("x.ai/ask_user_question")
+            | Some("_x.ai/ask_user_question")
+            | Some("AskUserQuestion")
+            | Some("x.ai/exit_plan_mode")
+            | Some("_x.ai/exit_plan_mode")
     ) {
         return ParsedLine {
             conversation_id: session_id_of(&value),
             events: vec![TransportEvent::Activity(trimmed.to_string())],
         };
+    }
+
+    if method.is_some() {
+        if let Some(id) = rpc_request_id(&value) {
+            return ParsedLine {
+                conversation_id: session_id_of(&value),
+                events: vec![TransportEvent::UnhandledRequest { id }],
+            };
+        }
     }
 
     ParsedLine {
@@ -1495,16 +1615,33 @@ fn parse_grok_update(raw: &str, value: &Value) -> ParsedLine {
         | "tool_call_update"
         | "tool_call_content_chunk"
         | "plan"
-        | "plan_update" => {
+        | "plan_update"
+        | "usage_update" => {
             vec![TransportEvent::Activity(raw.to_string())]
         }
+        "turn_completed" | "turn_complete" => {
+            let mut out = Vec::new();
+            if update.get("usage").is_some() {
+                out.push(TransportEvent::Activity(raw.to_string()));
+            }
+            out.push(TransportEvent::TurnEnded);
+            out
+        }
+        "available_commands_update"
+        | "session_info_update"
+        | "hook_execution"
+        | "config_option_update"
+        | "current_mode_update"
+        | "mode_update"
+        | "commands_update"
+        | "user_message_chunk" => Vec::new(),
         other => vec![TransportEvent::Notice(bounded_notice(&format!(
             "grok session update `{other}` is not projected (schema={})",
             frame_schema(&update)
         )))],
     };
     ParsedLine {
-        conversation_id: None,
+        conversation_id: session_id_of(value),
         events,
     }
 }
@@ -1866,6 +2003,10 @@ impl SessionTransport for GrokSession {
         }
         self.spawns += 1;
         Ok(())
+    }
+
+    fn write_frame(&mut self, frame: &str) -> Result<(), String> {
+        self.write_raw(frame.trim_end())
     }
 
     fn write_turn(&mut self, prompt: &str) -> Result<(), String> {
@@ -2528,6 +2669,28 @@ mod tests {
     }
 
     #[test]
+    fn a_question_reaches_the_pipeline_and_an_unknown_request_is_answered() {
+        let question = r#"{"jsonrpc":"2.0","id":"q-1","method":"x.ai/ask_user_question","params":{"questions":[{"id":"color","header":"Color"}]}}"#;
+        let parsed = parse_grok_line(question, None);
+        assert!(matches!(parsed.events.first(), Some(TransportEvent::Activity(raw)) if raw.contains("ask_user_question")));
+
+        let plan = r#"{"jsonrpc":"2.0","id":7,"method":"x.ai/exit_plan_mode","params":{"title":"Ship it"}}"#;
+        let parsed = parse_grok_line(plan, None);
+        assert!(matches!(parsed.events.first(), Some(TransportEvent::Activity(raw)) if raw.contains("exit_plan_mode")));
+
+        let unknown = r#"{"jsonrpc":"2.0","id":4,"method":"x.ai/fs/index","params":{"chunk":0}}"#;
+        let parsed = parse_grok_line(unknown, None);
+        assert_eq!(
+            parsed.events,
+            vec![TransportEvent::UnhandledRequest { id: "4".to_string() }]
+        );
+        let reply = unhandled_request_reply("4");
+        assert!(reply.contains("\"id\":4"));
+        assert!(reply.contains("-32601"));
+        assert!(plan_request_ack("7").contains("\"result\":{}"));
+    }
+
+    #[test]
     fn the_grok_session_does_not_set_a_referrer() {
         let overrides = grok_session_env_overrides();
         assert!(overrides.is_empty());
@@ -2539,9 +2702,48 @@ mod tests {
         let init = grok_initialize_line(1);
         assert!(!init.contains("_meta"));
         assert!(!init.contains("yoloMode"));
+        assert!(!init.contains("readTextFile"));
+        assert!(!init.contains("writeTextFile"));
+        assert!(!init.contains("\"terminal\":true"));
         let created = grok_session_new_line(2, ".");
         assert!(created.contains("session/new"));
         assert!(!created.contains("yoloMode"));
         assert!(!created.contains("_meta"));
+    }
+
+    #[test]
+    fn xai_session_update_completes_the_turn_and_filters_housekeeping() {
+        let completed = r#"{"jsonrpc":"2.0","method":"_x.ai/session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":6407,"outputTokens":20,"totalTokens":28694,"cachedReadTokens":22267}}}}"#;
+        let parsed = parse_grok_line(completed, None);
+        assert_eq!(parsed.conversation_id.as_deref(), Some("s-1"));
+        assert!(matches!(parsed.events.first(), Some(TransportEvent::Activity(_))));
+        assert_eq!(parsed.events.last(), Some(&TransportEvent::TurnEnded));
+
+        for housekeeping in [
+            "available_commands_update",
+            "session_info_update",
+            "hook_execution",
+            "config_option_update",
+            "current_mode_update",
+        ] {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s-1","update":{{"sessionUpdate":"{housekeeping}"}}}}}}"#
+            );
+            let parsed = parse_grok_line(&line, None);
+            assert!(
+                parsed.events.is_empty(),
+                "housekeeping `{housekeeping}` must not become a notice: {:?}",
+                parsed.events
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_structured_tool_frames_become_activity() {
+        let tool_line = r#"{"type":"tool_call","id":"call-1","name":"read_file","input":{"path":"README.md"}}"#;
+        assert_eq!(
+            opencode_line_event(tool_line),
+            Some(TransportEvent::Activity(tool_line.to_string()))
+        );
     }
 }

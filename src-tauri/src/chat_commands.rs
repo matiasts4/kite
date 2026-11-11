@@ -302,7 +302,9 @@ fn archived_summary(thread: &Value) -> Option<Value> {
         "title": title,
         "revision": thread.get("revision")?,
         "archivedAtUnixMs": archived_at,
-        "expiresAtUnixMs": expires_at
+        "expiresAtUnixMs": expires_at,
+        "provider": thread.get("provider").and_then(|value| value.as_str()).unwrap_or("antigravity"),
+        "model": thread.get("model").and_then(|value| value.as_str())
     }))
 }
 

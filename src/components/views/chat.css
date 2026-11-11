@@ -548,6 +548,25 @@
   flex-direction: column;
 }
 
+.chat-work-entry__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--text-tertiary);
+  transition: transform var(--duration-ink) var(--ease-ink), color var(--duration-ink) var(--ease-ink);
+}
+
+.chat-work-entry > button:hover .chat-work-entry__chevron,
+.chat-work-group__toggle:hover .chat-work-entry__chevron,
+.chat-work-entry__chevron--open {
+  color: var(--text-secondary);
+}
+
+.chat-work-entry__chevron--open {
+  transform: rotate(90deg);
+}
+
 .chat-reasoning-row__timer {
   font-family: var(--font-mono);
   font-size: 10px;

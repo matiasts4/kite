@@ -493,10 +493,19 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
     else {
         return;
     };
-    if let Some(slot) = list
-        .iter_mut()
-        .find(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+    if let Some(pos) = list
+        .iter()
+        .position(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
     {
+        let move_assistant_to_tail = item.get("kind").and_then(|v| v.as_str()) == Some("assistant")
+            && !item.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty()
+            && list[pos]
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+            && pos + 1 < list.len();
+        let slot = &mut list[pos];
         if let (Some(existing_obj), Some(new_obj)) = (slot.as_object_mut(), item.as_object()) {
             for (k, v) in new_obj {
                 if v.is_null() {
@@ -517,6 +526,10 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
             }
         } else {
             *slot = item.clone();
+        }
+        if move_assistant_to_tail {
+            let moved = list.remove(pos);
+            list.push(moved);
         }
     } else {
         list.push(item.clone());

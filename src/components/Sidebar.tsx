@@ -37,6 +37,8 @@ export type ThreadSidebarCallbacks = {
   onRegenerateTitle?: (threadId: string) => void;
   titlePending?: boolean;
   onRestoreThread?: (threadId: string) => void;
+  onArchiveThread?: (threadId: string) => void;
+  archivedCount?: number;
 };
 
 export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
@@ -83,7 +85,9 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
   agentActivity = {},
   availability,
   onOpenArchivedChats,
+  archivedCount,
   onRenameThread,
+  onArchiveThread,
   onDeleteThread,
   onMoveWorkspace,
   onMoveAgent,
@@ -403,11 +407,13 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
                   onAddWorkspace={onAddWorkspace}
                   onTogglePinThread={onTogglePinThread}
                   onRenameThread={onRenameThread}
+                  onArchiveThread={onArchiveThread}
                   onDeleteThread={onDeleteThread}
                   onRestoreThread={onRestoreThread}
                   onRegenerateTitle={onRegenerateTitle}
                   titlePending={titlePending}
                   onOpenArchivedChats={onOpenArchivedChats}
+                  archivedCount={archivedCount}
                   onOpenMenu={setContextMenu}
                   contextMenuTargetId={contextMenu?.targetId}
                 />

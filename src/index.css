@@ -399,5 +399,18 @@ select option:hover {
   color: #ffffff !important;
 }
 
+/* Sidebar Archived Threads badge */
+.chat-rail__badge {
+  margin-left: auto;
+  font-size: var(--text-badge);
+  line-height: var(--leading-badge);
+  font-weight: var(--weight-medium);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--chip-fill);
+  color: var(--text-secondary);
+}
+
+
 
 

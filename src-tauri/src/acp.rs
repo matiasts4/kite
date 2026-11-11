@@ -466,7 +466,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                 let step_index = su.get("step_index").and_then(|v| v.as_i64()).unwrap_or(0);
                 let duration = su.get("duration_seconds").and_then(|v| v.as_f64());
 
-                if step_type == "agent_response" {
+                if step_type == "agent_response" || step_type == "planner_response" {
                     let delta = su
                         .get("text_delta")
                         .or_else(|| su.get("text"))
@@ -479,11 +479,27 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                             });
                         }
                     }
+                    let thought = su
+                        .get("thinking")
+                        .or_else(|| su.get("thought"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !thought.is_empty() {
+                        return Some(AcpStreamEvent::ThoughtDelta {
+                            text: thought.to_string(),
+                            is_done: state.eq_ignore_ascii_case("DONE") || state.eq_ignore_ascii_case("COMPLETED"),
+                            duration_seconds: duration,
+                        });
+                    }
+                    return Some(AcpStreamEvent::Raw {
+                        line: trimmed.to_string(),
+                    });
                 } else if step_type == "thought" || step_type == "reasoning" {
                     let text = su
                         .get("text")
                         .or_else(|| su.get("detail"))
                         .or_else(|| su.get("thought"))
+                        .or_else(|| su.get("thinking"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     return Some(AcpStreamEvent::ThoughtDelta {
@@ -495,8 +511,12 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                     let tool_name = su.get("tool_name").and_then(|v| v.as_str()).unwrap_or("tool");
                     let tool_id = su
                         .get("tool_call_id")
+                        .or_else(|| su.get("toolCallId"))
+                        .or_else(|| su.pointer("/tool_info/id"))
+                        .or_else(|| su.pointer("/tool_info/tool_call_id"))
                         .or_else(|| su.get("id"))
                         .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
                         .map(String::from)
                         .unwrap_or_else(|| format!("t_{}_{}", run_id, step_index));
                     let params = su
@@ -507,11 +527,18 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         .unwrap_or(Value::Null);
                     let output = su
                         .pointer("/tool_info/output")
+                        .or_else(|| su.pointer("/tool_info/error"))
                         .or_else(|| su.get("output"))
                         .or_else(|| su.get("result"))
+                        .or_else(|| su.get("error"))
+                        .or_else(|| su.get("content"))
                         .and_then(|v| {
                             if let Some(s) = v.as_str() {
-                                Some(s.to_string())
+                                if s.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(s.to_string())
+                                }
                             } else if !v.is_null() {
                                 serde_json::to_string_pretty(v).ok()
                             } else {
@@ -594,6 +621,9 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         },
                     });
                 }
+                return Some(AcpStreamEvent::Raw {
+                    line: trimmed.to_string(),
+                });
             }
             "result" => {
                 let status = val.pointer("/result/status").and_then(|v| v.as_str()).unwrap_or("SUCCESS");

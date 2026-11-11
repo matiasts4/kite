@@ -199,4 +199,41 @@ describe('ThreadRoster live shelves', () => {
     expect(onPin).toHaveBeenCalledTimes(1);
   });
 
+  it('calls onArchiveThread when provided and exposes delete chat in context menu', () => {
+    const onArchive = vi.fn();
+    const onDelete = vi.fn();
+    const onOpenMenu = vi.fn();
+    render(
+      <ThreadRoster
+        threads={[thread({ id: 'th-1', title: 'Feature Alpha' })]}
+        onArchiveThread={onArchive}
+        onDeleteThread={onDelete}
+        onOpenMenu={onOpenMenu}
+        archivedCount={5}
+      />,
+    );
+
+    // Clicking archive hover button calls onArchive
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Feature Alpha' }));
+    expect(onArchive).toHaveBeenCalledWith('th-1');
+
+    // Context menu opens with both Archive and Delete actions
+    const selectBtn = screen.getByRole('button', { name: /^Feature Alpha,/ });
+    fireEvent.contextMenu(selectBtn, { clientX: 100, clientY: 200 });
+    expect(onOpenMenu).toHaveBeenCalled();
+    const menuState = onOpenMenu.mock.calls[0][0];
+    const allItems = menuState.sections.flat();
+    const archiveItem = allItems.find((i: any) => i.id === 'archive');
+    const deleteItem = allItems.find((i: any) => i.id === 'delete');
+    expect(archiveItem).toBeDefined();
+    expect(deleteItem).toBeDefined();
+    expect(deleteItem.role).toBe('destructive');
+
+    // Executing delete action calls onDeleteThread
+    deleteItem.action();
+    expect(onDelete).toHaveBeenCalledWith('th-1');
+
+    // Archived count badge is shown
+    expect(screen.getByRole('button', { name: /Archived threads, 5 archived/ })).toBeInTheDocument();
+  });
 });

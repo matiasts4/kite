@@ -1669,9 +1669,13 @@ fn apply_known_turn_pipeline(thread_id: &str, run_id: &str, assistant_id: &str, 
             .entry(run_id.to_string())
             .or_insert_with(|| (ToolCallTracker::default(), DeltaCoalescer::default()));
         let events = tools.ingest(frame);
-        // An empty ingest is not a known frame. Notices are known: they stay
-        // out of the assistant message and must not fall through to another parser.
-        if events.is_empty() {
+        if events.is_empty()
+            || (events.len() == 1
+                && matches!(
+                    events.first(),
+                    Some(ProviderTurnEvent::Notice { code, .. }) if code == "unknownFrame"
+                ))
+        {
             return false;
         }
         let mut message = None;
@@ -2281,7 +2285,7 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
 
                 return true;
             }
-            crate::acp::AcpStreamEvent::Raw { .. } => {}
+            crate::acp::AcpStreamEvent::Raw { .. } => return true,
         }
     }
 

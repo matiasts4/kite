@@ -159,11 +159,27 @@ pub struct EffectivePermission {
 #[derive(Debug, Default, Clone)]
 pub struct ToolCallTracker {
     calls: BTreeMap<String, ToolCallSnapshot>,
+    next_anon_id: usize,
+    last_anon_id: Option<String>,
 }
 
 impl ToolCallTracker {
     pub fn snapshot(&self, id: &str) -> Option<&ToolCallSnapshot> {
         self.calls.get(id)
+    }
+
+    fn resolve_tool_id(&mut self, update: &Value, is_new_call: bool) -> String {
+        if let Some(id) = explicit_tool_id(update) {
+            return id;
+        }
+        if is_new_call {
+            self.next_anon_id += 1;
+            let id = format!("tool-{}", self.next_anon_id);
+            self.last_anon_id = Some(id.clone());
+            id
+        } else {
+            self.last_anon_id.clone().unwrap_or_else(|| "tool".to_string())
+        }
     }
 
     pub fn ingest(&mut self, frame: &Value) -> Vec<ProviderTurnEvent> {
@@ -178,8 +194,12 @@ impl ToolCallTracker {
             .and_then(Value::as_str)
             .unwrap_or("");
         match kind {
-            "tool_call" | "tool_call_update" | "tool_use" => {
-                let snap = self.merge_tool(update);
+            "tool_call" | "tool_use" => {
+                let snap = self.merge_tool(update, true);
+                vec![ProviderTurnEvent::ToolCallUpdated { tool: snap }]
+            }
+            "tool_call_update" => {
+                let snap = self.merge_tool(update, false);
                 vec![ProviderTurnEvent::ToolCallUpdated { tool: snap }]
             }
             "tool_call_content_chunk" => {
@@ -209,8 +229,9 @@ impl ToolCallTracker {
         }
     }
 
-    fn merge_tool(&mut self, update: &Value) -> ToolCallSnapshot {
-        let id = tool_id(update);
+    fn merge_tool(&mut self, update: &Value, is_new_call: bool) -> ToolCallSnapshot {
+        let id = self.resolve_tool_id(update, is_new_call);
+        let src = update.get("part").unwrap_or(update);
         let entry = self.calls.entry(id.clone()).or_insert_with(|| ToolCallSnapshot {
             id: id.clone(),
             kind: "tool".into(),
@@ -223,13 +244,22 @@ impl ToolCallTracker {
             deletions: None,
             output: String::new(),
         });
-        if let Some(kind) = update.get("kind").and_then(Value::as_str) {
+        if let Some(kind) = src
+            .get("kind")
+            .or_else(|| update.get("kind"))
+            .and_then(Value::as_str)
+        {
             if !kind.is_empty() {
                 entry.kind = kind.to_string();
             }
         }
-        if let Some(title) = update
+        if let Some(title) = src
             .get("title")
+            .or_else(|| src.get("name"))
+            .or_else(|| src.get("tool"))
+            .or_else(|| src.get("tool_name"))
+            .or_else(|| src.pointer("/state/title"))
+            .or_else(|| update.get("title"))
             .or_else(|| update.get("name"))
             .and_then(Value::as_str)
         {
@@ -237,51 +267,81 @@ impl ToolCallTracker {
                 entry.title = title.to_string();
             }
         }
-        if let Some(status) = update.get("status").and_then(Value::as_str) {
+        if let Some(status) = src
+            .get("status")
+            .or_else(|| src.pointer("/state/status"))
+            .or_else(|| update.get("status"))
+            .and_then(Value::as_str)
+        {
             if !status.is_empty() {
                 entry.status = status.to_string();
             }
         }
-        let input = update
+        let input = src
             .get("rawInput")
+            .or_else(|| src.get("input"))
+            .or_else(|| src.get("arguments"))
+            .or_else(|| src.get("parameters"))
+            .or_else(|| src.pointer("/state/input"))
+            .or_else(|| update.get("rawInput"))
             .or_else(|| update.get("input"))
             .or_else(|| update.get("arguments"));
         if let Some(input) = input {
             if entry.path.is_none() {
-                entry.path = string_field(input, &["path", "file", "filePath"]);
+                entry.path = string_field(
+                    input,
+                    &["path", "file", "filePath", "file_path", "Path", "TargetFile"],
+                );
             }
             if entry.command.is_none() {
-                entry.command = string_field(input, &["command", "cmd"]);
+                entry.command = string_field(input, &["command", "cmd", "CommandLine"]);
             }
             if entry.query.is_none() {
-                entry.query = string_field(input, &["query", "pattern"]);
+                entry.query = string_field(input, &["query", "pattern", "q"]);
             }
         }
         if entry.path.is_none() {
-            entry.path = update
+            entry.path = src
                 .pointer("/locations/0/path")
+                .or_else(|| update.pointer("/locations/0/path"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        if let Some(add) = update
+        if let Some(add) = src
             .pointer("/diff/additions")
+            .or_else(|| src.get("addedLines"))
+            .or_else(|| update.pointer("/diff/additions"))
             .or_else(|| update.get("addedLines"))
             .and_then(Value::as_i64)
         {
             entry.additions = Some(add);
         }
-        if let Some(del) = update
+        if let Some(del) = src
             .pointer("/diff/deletions")
+            .or_else(|| src.get("removedLines"))
+            .or_else(|| update.pointer("/diff/deletions"))
             .or_else(|| update.get("removedLines"))
             .and_then(Value::as_i64)
         {
             entry.deletions = Some(del);
         }
+        if let Some(out) = src
+            .get("rawOutput")
+            .or_else(|| src.get("output"))
+            .or_else(|| src.pointer("/state/output"))
+            .or_else(|| update.get("rawOutput"))
+            .or_else(|| update.get("output"))
+            .and_then(Value::as_str)
+        {
+            if !out.is_empty() {
+                entry.output = out.to_string();
+            }
+        }
         entry.clone()
     }
 
     fn append_chunk(&mut self, update: &Value) -> ToolCallSnapshot {
-        let id = tool_id(update);
+        let id = self.resolve_tool_id(update, false);
         let chunk = update
             .get("content")
             .or_else(|| update.get("text"))
@@ -751,13 +811,39 @@ fn reasoning_delta(update: &Value) -> Vec<ProviderTurnEvent> {
     }
 }
 
-fn tool_id(update: &Value) -> String {
-    update
-        .get("toolCallId")
-        .or_else(|| update.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or("tool")
-        .to_string()
+fn explicit_tool_id(update: &Value) -> Option<String> {
+    let src = update
+        .get("part")
+        .or_else(|| update.get("item"))
+        .unwrap_or(update);
+    for candidate in [
+        src.get("toolCallId"),
+        src.get("tool_call_id"),
+        src.get("callID"),
+        src.get("callId"),
+        src.get("id"),
+        update.get("toolCallId"),
+        update.get("tool_call_id"),
+        update.get("callID"),
+        update.get("callId"),
+        update.get("id"),
+    ] {
+        if let Some(id) = candidate
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+    }
+    if let Some(idx) = src
+        .get("step_index")
+        .or_else(|| update.get("step_index"))
+        .and_then(Value::as_i64)
+    {
+        return Some(format!("step-{idx}"));
+    }
+    None
 }
 
 fn string_field(value: &Value, names: &[&str]) -> Option<String> {

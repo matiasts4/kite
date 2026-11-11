@@ -627,6 +627,32 @@ export async function archiveChatThread(threadId: string): Promise<{ deleted: bo
   return invokeCommand<{ deleted: boolean }>('archive_chat_thread', { threadId });
 }
 
+export interface ArchivedChatSummary {
+  schemaVersion?: number;
+  id: string;
+  profileId: string | null;
+  title: string;
+  revision: number | string;
+  archivedAtUnixMs: number;
+  expiresAtUnixMs: number;
+  provider?: string | null;
+  model?: string | null;
+}
+
+export async function listArchivedChats(profileId?: string | null): Promise<ArchivedChatSummary[]> {
+  const payload = profileId ? { profileId } : {};
+  const res = await invokeCommand<ArchivedChatSummary[]>('list_archived_chats', payload);
+  return Array.isArray(res) ? res : [];
+}
+
+export async function restoreArchivedChat(threadId: string, profileId?: string | null): Promise<void> {
+  return invokeCommand<void>('restore_archived_chat', { threadId, profileId: profileId ?? null });
+}
+
+export async function purgeArchivedChat(threadId: string, profileId?: string | null): Promise<void> {
+  return invokeCommand<void>('purge_archived_chat', { threadId, profileId: profileId ?? null });
+}
+
 export async function listChatSummaries(): Promise<ChatThreadSummary[]> {
   try {
     const res = await invokeCommand<{ summaries?: ChatThreadSummary[] }>('list_chat_summaries');

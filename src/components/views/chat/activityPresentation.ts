@@ -336,6 +336,43 @@ export function expandableToolBody(text: string | null | undefined): string {
   return raw;
 }
 
+/** Full expandable details for a tool or command work entry (command line, parameters, and output). */
+export function toolExpandedBody(item: ActivityItem): string {
+  const rawOutput = expandableToolBody(item.text);
+  const kind = activityIconKind(item);
+
+  if (kind === 'shell' || item.kind === 'command') {
+    const rawCmd = trimmed(item.command) || (trimmed(item.detail).startsWith('$') ? trimmed(item.detail) : '');
+    const cmdLine = rawCmd ? (rawCmd.startsWith('$') ? rawCmd : `$ ${rawCmd}`) : '';
+    if (cmdLine && rawOutput) {
+      return trimmed(rawOutput).startsWith(cmdLine) ? rawOutput : `${cmdLine}\n\n${rawOutput}`;
+    }
+    return rawOutput || cmdLine;
+  }
+
+  if (kind === 'read') {
+    return rawOutput;
+  }
+
+  const cleanDetail = trimmed(item.detail)
+    .replace(/\n+\d+\s+lines?,\s+\d+\s+bytes$/i, '')
+    .trim();
+  const label = activityTraceLabel(item);
+  const path = traceFilePath(item);
+  const hasUsefulDetail =
+    cleanDetail.length > 0 &&
+    cleanDetail !== label &&
+    cleanDetail !== path &&
+    !(kind === 'edit' && !rawOutput && cleanDetail.startsWith('{'));
+
+  if (hasUsefulDetail && rawOutput) {
+    return cleanDetail.includes(trimmed(rawOutput)) ? cleanDetail : `${cleanDetail}\n\n${rawOutput}`;
+  }
+  if (rawOutput) return rawOutput;
+  if (hasUsefulDetail) return cleanDetail;
+  return '';
+}
+
 /** One secondary sentence for a work row. The expanded body keeps the raw output. */
 export function activityTraceLabel(item: ActivityItem): string {
   if (item.kind === 'reasoning') {

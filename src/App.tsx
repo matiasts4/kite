@@ -42,6 +42,9 @@ import {
   listChatSummaries,
   renameChatThread,
   setChatThreadPinned,
+  archiveChatThread,
+  restoreArchivedChat,
+  listArchivedChats,
   deleteChatThread,
   isTauriEnvironment,
   getCreditsBalance,
@@ -285,6 +288,7 @@ export const App: React.FC = () => {
   const [isUsageModalOpen, setIsUsageModalOpen] = useState<boolean>(false);
   const [isWhatsNewOpen, setIsWhatsNewOpen] = useState<boolean>(false);
   const [isArchivedChatsOpen, setIsArchivedChatsOpen] = useState<boolean>(false);
+  const [archivedCount, setArchivedCount] = useState<number>(0);
   const [isSshModalOpen, setIsSshModalOpen] = useState<boolean>(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
   const appPlatform = getPlatform();
@@ -365,10 +369,16 @@ export const App: React.FC = () => {
       if (list.length > 0) {
         setSelectedThreadId((prev) => (prev && list.some((t) => t.id === prev) ? prev : list[0].id));
       }
+      try {
+        const archived = await listArchivedChats(workMode === 'agent' ? selectedAgentId : null);
+        setArchivedCount(Array.isArray(archived) ? archived.length : 0);
+      } catch {
+        setArchivedCount(0);
+      }
     } catch (err) {
       console.warn('Failed to load chat summaries:', err);
     }
-  }, []);
+  }, [workMode, selectedAgentId]);
 
   useEffect(() => {
     if (!isBrowserTestLane()) return;
@@ -1227,6 +1237,26 @@ export const App: React.FC = () => {
                   console.error(e);
                 }
               }}
+              onArchiveThread={async (id) => {
+                try {
+                  await archiveChatThread(id);
+                  await loadThreads();
+                  if (selectedThreadId === id) {
+                    setSelectedThreadId(null);
+                  }
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
+              onRestoreThread={async (id) => {
+                try {
+                  await restoreArchivedChat(id);
+                  await loadThreads();
+                  setSelectedThreadId(id);
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
               onDeleteThread={async (id) => {
                 try {
                   await deleteChatThread(id);
@@ -1238,6 +1268,7 @@ export const App: React.FC = () => {
                   console.error(e);
                 }
               }}
+              archivedCount={archivedCount}
               onNewWorkspaceSession={(id) => {
                 setSelectedWorkspaceId(id);
                 setWorkMode('code');
@@ -1464,7 +1495,13 @@ export const App: React.FC = () => {
           isOpen={isArchivedChatsOpen}
           onClose={() => setIsArchivedChatsOpen(false)}
           profileId={workMode === 'agent' ? selectedAgentId : null}
-          onRestored={() => setWorkMode('chat')}
+          onRestored={async (threadId) => {
+            setWorkMode('chat');
+            await loadThreads();
+            if (threadId) {
+              setSelectedThreadId(threadId);
+            }
+          }}
         />
         <SshWorkspaceModal
           isOpen={isSshModalOpen}

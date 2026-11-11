@@ -7,6 +7,7 @@ import {
   interruptedTurnLine,
   showThinkingPlaceholder,
   summarizeWorkBurst,
+  toolExpandedBody,
   turnStartUnixMs,
   workedForLine,
   compactingForLine,
@@ -197,5 +198,46 @@ describe('command rows and burst summaries', () => {
     expect(workedForLine(null)).toBeNull();
     expect(interruptedTurnLine(12)).toBe('You stopped after 12s');
     expect(interruptedTurnLine(null)).toBe('You stopped this response');
+  });
+
+  it('builds expandable tool details from command line, MCP parameters, and output', () => {
+    expect(
+      toolExpandedBody(
+        item({
+          kind: 'tool',
+          toolKind: 'commandExecution',
+          command: 'Get-ChildItem -Path odd/tasks, .kite/tasks | Select-Object FullName',
+          text: '',
+          status: 'completed',
+        }),
+      ),
+    ).toBe('$ Get-ChildItem -Path odd/tasks, .kite/tasks | Select-Object FullName');
+
+    expect(
+      toolExpandedBody(
+        item({
+          kind: 'tool',
+          toolKind: 'mcpToolCall',
+          serverName: 'gentle-ai-engram_engram',
+          title: 'gentle-ai-engram_engram · mem_current_project',
+          detail: '{\n  "Arguments": {},\n  "ServerName": "gentle-ai-engram_engram",\n  "ToolName": "mem_current_project"\n}',
+          text: '',
+          status: 'failed',
+        }),
+      ),
+    ).toContain('"ToolName": "mem_current_project"');
+
+    expect(
+      toolExpandedBody(
+        item({
+          kind: 'tool',
+          title: 'read file',
+          toolName: 'read_file',
+          detail: '{"Path":"src/notifications/foo.ts"}',
+          text: '1 lines, 569 bytes',
+          status: 'completed',
+        }),
+      ),
+    ).toBe('');
   });
 });

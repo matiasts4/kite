@@ -3,7 +3,7 @@ import type { ChatItem } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
 import { ExtendedChatThread } from './types';
 import { withTimeout } from './chatSessionUtils';
-import { playApprovalChime, playCompletionChime } from '../../../lib/notifications/audioCues';
+import { playApprovalChime } from '../../../lib/notifications/audioCues';
 
 export interface PollTurnOptions {
   runId: string;
@@ -102,18 +102,35 @@ export async function pollTurnUpdates({
           } else if (ev.kind === 'upsert' && ev.item) {
             const idx = items.findIndex((it) => it.id === ev.item!.id);
             if (idx >= 0) {
+              const moveToTail =
+                ev.item.kind === 'assistant' &&
+                Boolean(ev.item.text) &&
+                !items[idx].text &&
+                idx + 1 < items.length;
               items[idx] = ev.item;
+              if (moveToTail) {
+                const [moved] = items.splice(idx, 1);
+                items.push(moved);
+              }
             } else {
               items.push(ev.item);
             }
           } else if (ev.kind === 'delta' && ev.itemId && ev.text) {
             const idx = items.findIndex((it) => it.id === ev.itemId);
             if (idx >= 0) {
+              const moveToTail =
+                items[idx].kind === 'assistant' &&
+                !items[idx].text &&
+                idx + 1 < items.length;
               items[idx] = {
                 ...items[idx],
                 text: items[idx].text + ev.text,
                 streaming: true,
               };
+              if (moveToTail) {
+                const [moved] = items.splice(idx, 1);
+                items.push(moved);
+              }
             } else {
               items.push({
                 id: ev.itemId,
@@ -138,7 +155,6 @@ export async function pollTurnUpdates({
             status = 'idle';
             stoppedByBuilder = Boolean(ev.stoppedByBuilder);
             items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
-            playCompletionChime(ev.ok !== false);
           }
         }
 

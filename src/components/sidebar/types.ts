@@ -83,7 +83,9 @@ export interface SidebarProps {
   agentActivity?: Record<string, { runningCount?: number; needsYou?: boolean; atUnixMs?: number; line?: string }>;
   availability?: { hasProbed?: boolean } & Record<string, boolean>;
   onOpenArchivedChats?: () => void;
+  archivedCount?: number;
   onRenameThread?: (id: string, newTitle: string) => void;
+  onArchiveThread?: (id: string) => void;
   onDeleteThread?: (id: string) => void;
   onMoveWorkspace?: (workspaceId: string, toIndex: number) => void;
   onMoveAgent?: (agentId: string, toIndex: number) => void;

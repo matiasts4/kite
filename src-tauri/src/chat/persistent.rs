@@ -253,20 +253,32 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
         "step_update" => {
             let step = value.get("step_update").cloned().unwrap_or(Value::Null);
             let step_type = step.get("step_type").and_then(Value::as_str).unwrap_or("unknown");
-            if step_type == "agent_response" {
+            if step_type == "user_input" {
+                ParsedLine::default()
+            } else if step_type == "agent_response" {
                 let text = step
                     .get("text_delta")
                     .or_else(|| step.get("text"))
                     .or_else(|| step.get("content"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if text.is_empty() {
-                    ParsedLine::default()
-                } else {
+                let thought = step
+                    .get("thinking")
+                    .or_else(|| step.get("thought"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !text.is_empty() {
                     ParsedLine {
                         conversation_id: None,
                         events: vec![TransportEvent::Text(text.to_string())],
                     }
+                } else if !thought.is_empty() {
+                    ParsedLine {
+                        conversation_id: None,
+                        events: vec![TransportEvent::Activity(trimmed.to_string())],
+                    }
+                } else {
+                    ParsedLine::default()
                 }
             } else {
                 ParsedLine {

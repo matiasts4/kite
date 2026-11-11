@@ -14,6 +14,7 @@ import {
   CloseIcon,
   PencilIcon,
   SearchIcon,
+  TrashIcon,
 } from './sidebarIcons';
 import { BrandLogo } from '../ui/BrandLogo';
 import {
@@ -46,11 +47,13 @@ export interface ThreadRosterProps {
   onAddWorkspace?: () => void;
   onTogglePinThread?: (id: string, pinned: boolean) => void;
   onRenameThread?: (id: string, newTitle: string) => void;
+  onArchiveThread?: (id: string) => void;
   onDeleteThread?: (id: string) => void;
   onRestoreThread?: (id: string) => void;
   onRegenerateTitle?: (threadId: string) => void;
   titlePending?: boolean;
   onOpenArchivedChats?: () => void;
+  archivedCount?: number;
   onOpenMenu?: (menu: ContextMenuState) => void;
   onOpenContextMenu?: (menu: ContextMenuState) => void;
   contextMenuTargetId?: string | null;
@@ -128,11 +131,13 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   onAddWorkspace,
   onTogglePinThread,
   onRenameThread,
+  onArchiveThread,
   onDeleteThread,
   onRestoreThread,
   onRegenerateTitle,
   titlePending = false,
   onOpenArchivedChats,
+  archivedCount,
   onOpenMenu,
   onOpenContextMenu,
   contextMenuTargetId,
@@ -266,9 +271,13 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   };
 
   const archiveThread = (thread: RosterThread) => {
-    if (!onDeleteThread) return;
+    if (!onArchiveThread && !onDeleteThread) return;
     rememberUndo('Archive', thread);
-    onDeleteThread(thread.id);
+    if (onArchiveThread) {
+      onArchiveThread(thread.id);
+    } else {
+      onDeleteThread?.(thread.id);
+    }
   };
 
   const handleCommitRename = (e: React.FormEvent) => {
@@ -321,13 +330,21 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           : null,
       ].filter(Boolean) as MenuItem[],
       [
-        onDeleteThread
+        onArchiveThread || onDeleteThread
           ? {
               id: 'archive',
               title: 'Archive',
-              role: 'destructive',
               icon: <ArchiveIcon size={12} />,
               action: () => archiveThread(thread),
+            }
+          : null,
+        onDeleteThread
+          ? {
+              id: 'delete',
+              title: 'Delete chat',
+              role: 'destructive',
+              icon: <TrashIcon size={12} />,
+              action: () => onDeleteThread(thread.id),
             }
           : null,
       ].filter(Boolean) as MenuItem[],
@@ -451,7 +468,7 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           >
             <PinIcon size={12} filled={isPinned} />
           </button>
-          {onDeleteThread ? (
+          {onArchiveThread || onDeleteThread ? (
             <button
               type="button"
               aria-label={`Archive ${thread.title}`}
@@ -728,12 +745,21 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       {/* 6. Archived threads button */}
       <button
         type="button"
-        aria-label="Archived threads"
+        aria-label={
+          typeof archivedCount === 'number' && archivedCount > 0
+            ? `Archived threads, ${archivedCount} archived`
+            : 'Archived threads'
+        }
         className="chat-rail__more"
         onClick={onOpenArchivedChats}
       >
         <ArchiveIcon size={12} />
         <span>Archived threads</span>
+        {typeof archivedCount === 'number' && archivedCount > 0 && (
+          <span className="chat-rail__badge" aria-hidden="true">
+            {archivedCount}
+          </span>
+        )}
       </button>
     </nav>
   );

@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { tweens } from '../../../motion/standard/tokens';
 import {
   AlertCircleIcon,
+  ChevronRightIcon,
   CloseIcon,
   FileCodeIcon,
   CheckIcon,
@@ -15,10 +16,10 @@ import {
   activityTraceLabel,
   burstDurationSeconds,
   commandStatusWord,
-  expandableToolBody,
   opensInFilesSidebar,
   outputStatLabel,
   summarizeWorkBurst,
+  toolExpandedBody,
   traceFilePath,
   interruptedTurnLine,
   workedForLine,
@@ -199,7 +200,7 @@ export const ChatWorkEntry: React.FC<{
   const isRunning = Boolean(running || item.streaming || item.status === 'running' || item.status === 'inProgress');
   const traceLabel = activityTraceLabel(item);
   const statLabel = outputStatLabel(item.text);
-  const bodyText = expandableToolBody(item.text);
+  const bodyText = toolExpandedBody(item);
   const openPath = traceFilePath(item);
   const sidebarFile = opensInFilesSidebar(item);
   const hasText = !sidebarFile && bodyText.length > 0;
@@ -280,6 +281,15 @@ export const ChatWorkEntry: React.FC<{
             <span className="sr-only">{failedMark}</span>
           </span>
         ) : null}
+
+        {hasText ? (
+          <span
+            aria-hidden="true"
+            className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
+          >
+            <ChevronRightIcon size={12} />
+          </span>
+        ) : null}
       </button>
 
       {hasText && expanded && (
@@ -337,6 +347,12 @@ export const ChatWorkGroup: React.FC<{
           {settled && durationLine && !expanded ? (
             <span className="chat-work-group__duration">{durationLine}</span>
           ) : null}
+          <span
+            aria-hidden="true"
+            className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
+          >
+            <ChevronRightIcon size={12} />
+          </span>
         </button>
       )}
       <div className="chat-work-group__items">

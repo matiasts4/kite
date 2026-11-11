@@ -33,6 +33,34 @@ export interface RawReleaseNote {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.52',
+    tag: 'v0.1.52',
+    date: 'Nov 11, 2026',
+    title: 'Thread Voice Mode, Operator Traces and Archiving Overhaul',
+    items: [
+      {
+        kind: 'added',
+        description: 'live thread voice mode with trace timeline and locked assistant footer',
+      },
+      {
+        kind: 'added',
+        description: 'cross-cli chat index and thread dispatch reach',
+      },
+      {
+        kind: 'fixed',
+        description: 'route thread archiving correctly and overhaul archived chats modal',
+      },
+      {
+        kind: 'fixed',
+        description: 'permit tool execution in persistent plan mode',
+      },
+      {
+        kind: 'fixed',
+        description: 'pure CSS styling and background Zed engine wiring for voice mode',
+      },
+    ],
+  },
+  {
     version: '0.1.51',
     tag: 'v0.1.51',
     date: 'Nov 7, 2026',

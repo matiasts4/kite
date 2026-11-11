@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.52] - 2026-11-11
+
+> Thread Voice Mode, Operator Traces and Archiving Overhaul
+
+### Added
+- live thread voice mode with trace timeline and locked assistant footer
+- cross-cli chat index and thread dispatch reach
+
+### Fixed
+- route thread archiving correctly and overhaul archived chats modal
+- permit tool execution in persistent plan mode
+- pure CSS styling and background Zed engine wiring for voice mode
+
+---
+
 ## [0.1.51] - 2026-11-07
 
 > Delegation paste stability and canonical codename assignment

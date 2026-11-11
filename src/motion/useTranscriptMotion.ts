@@ -34,12 +34,25 @@ export function useTranscriptLiveEdge(
   threadId: string | null,
   atLiveEdgeRef: MutableRefObject<boolean>,
 ) {
+  const observedRef = useRef<{
+    threadId: string | null;
+    column: HTMLElement;
+    observer: ResizeObserver;
+  } | null>(null);
+
+  // Runs after every commit on purpose: the transcript only mounts once the first
+  // message exists, so a thread-id dependency alone never attached to a new chat.
   useLayoutEffect(() => {
-    atLiveEdgeRef.current = true;
     const scroller = transcriptRef.current;
-    if (!scroller) return;
-    const column = scroller.querySelector('.chat-transcript__column');
-    if (!(column instanceof HTMLElement)) return;
+    const found = scroller?.querySelector('.chat-transcript__column') ?? null;
+    const column = found instanceof HTMLElement ? found : null;
+    const current = observedRef.current;
+    if (current && current.column === column && current.threadId === threadId) return;
+
+    current?.observer.disconnect();
+    observedRef.current = null;
+    atLiveEdgeRef.current = true;
+    if (!scroller || !column) return;
     scroller.scrollTop = scroller.scrollHeight;
     if (typeof ResizeObserver === 'undefined') return;
     let prev = column.getBoundingClientRect().height;
@@ -50,6 +63,14 @@ export function useTranscriptLiveEdge(
       scroller.scrollTop = followLiveEdge(scroller.scrollTop, delta, atLiveEdgeRef.current);
     });
     observer.observe(column);
-    return () => observer.disconnect();
-  }, [threadId, transcriptRef, atLiveEdgeRef]);
+    observedRef.current = { threadId, column, observer };
+  });
+
+  useLayoutEffect(
+    () => () => {
+      observedRef.current?.observer.disconnect();
+      observedRef.current = null;
+    },
+    [],
+  );
 }

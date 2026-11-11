@@ -14,6 +14,7 @@ import { loadOperatorConfig, syncNativeCredentialsWithVault } from '../operatorC
 import { isTauriEnvironment, proxyOperatorHttp } from '../../ipc';
 import { startAudioDucking, stopAudioDucking } from './audioDucking';
 import { emitTrace } from '../trace/trace';
+import { joinSpeechPartial } from './speechPartial';
 
 export interface VoiceEngineStatus {
   available: boolean;
@@ -921,13 +922,13 @@ export async function startOperatorListening(
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             const item = event.results[i];
             if (item.isFinal) {
-              currentSpeechTranscript += (currentSpeechTranscript ? ' ' : '') + item[0].transcript;
+              currentSpeechTranscript = joinSpeechPartial(currentSpeechTranscript, item[0].transcript);
             } else {
               interim += item[0].transcript;
             }
           }
           lastInterimTranscript = interim;
-          const currentText = (interim || currentSpeechTranscript).trim();
+          const currentText = joinSpeechPartial(currentSpeechTranscript, interim);
           if (currentText.length > 1) {
             hasDetectedSpeech = true;
             resetSilenceTimer();
@@ -944,6 +945,12 @@ export async function startOperatorListening(
         };
 
         recognition.onend = () => {
+          // A restart drops the unstable tail. Keep it, or the next chunk replaces the line.
+          currentSpeechTranscript = joinSpeechPartial(currentSpeechTranscript, lastInterimTranscript);
+          lastInterimTranscript = '';
+          if (currentSpeechTranscript && options.onInterim) {
+            options.onInterim(currentSpeechTranscript);
+          }
           if (isSessionActive && activeRecognition === recognition) {
             try {
               recognition.start();

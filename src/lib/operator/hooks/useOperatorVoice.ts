@@ -138,7 +138,9 @@ export function useOperatorVoice({
       if (epoch !== listenEpochRef.current) return;
 
       setTranscript(finalResult);
-      setInterimTranscript('');
+      // Keep the finished line visible until the next listen cycle. Clearing it here
+      // blanks the box for the whole cloud wait and until the turn bubble arrives.
+      setInterimTranscript(finalResult?.trim() || '');
       setIsListening(false);
       isListeningRef.current = false;
       setIsTranscribing(false);

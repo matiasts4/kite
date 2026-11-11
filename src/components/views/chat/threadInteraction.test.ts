@@ -618,4 +618,45 @@ describe('file restore on the thread row', () => {
     }));
     expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeEnabled();
   });
+
+  it('invokes onNewThread without passing click event arguments', () => {
+    const onNewThread = vi.fn();
+    const thread = railThread({
+      id: 'thread-1',
+      title: 'Thread',
+      items: [userItem()],
+    });
+    const props = {
+      workspaceId: null,
+      isFocused: true,
+      isMulti: false,
+      running: false,
+      prompt: '',
+      attachments: [],
+      liveRunsCount: 0,
+      dynamicModels: [],
+      editingTitleId: null,
+      titleInput: '',
+      onFocus: () => undefined,
+      onClosePane: () => undefined,
+      onNewThread,
+      onStartRename: () => undefined,
+      onSaveRename: () => undefined,
+      onChangeTitleInput: () => undefined,
+      onCancelRename: () => undefined,
+      onChangePrompt: () => undefined,
+      onSend: () => undefined,
+      onStop: () => undefined,
+      onPickAttachments: () => undefined,
+      onStageFiles: () => undefined,
+      onStagePaths: () => undefined,
+      onRemoveAttachment: () => undefined,
+      onUpdateConfig: () => undefined,
+      onApprovalDecision: () => undefined,
+    };
+    render(createElement(SingleThreadPane, { thread, ...props }));
+    fireEvent.click(screen.getByRole('button', { name: 'New thread' }));
+    expect(onNewThread).toHaveBeenCalledTimes(1);
+    expect(onNewThread).toHaveBeenCalledWith();
+  });
 });

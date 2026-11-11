@@ -64,6 +64,7 @@ import { EffortSliderPopover } from './composer/EffortSliderPopover';
 import { resolvePrimaryAction } from './composerPrimaryAction';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { useVoiceSession } from '../../../lib/operator/voice/voiceSessionStore';
+import { composerTextWithLiveSpeech, typedDraftFromComposer } from './liveTranscriptDraft';
 import { VoiceModeFooterBar } from './composer/VoiceModeFooterBar';
 import {
   composerGoalStop,
@@ -421,6 +422,18 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const isVoiceModeActive =
     (voice.phase === 'active' || voice.phase === 'starting') &&
     (voice.boundThreadId === threadId || (voice.activeSurface === 'thread' && !voice.boundThreadId));
+  const liveInterim = isVoiceModeActive ? (voice.interimTranscript ?? '').trim() : '';
+  const [holdLiveSpeech, setHoldLiveSpeech] = useState(false);
+  useEffect(() => {
+    if (!liveInterim) setHoldLiveSpeech(false);
+  }, [liveInterim]);
+  const showLiveSpeech = isVoiceModeActive && !voice.isPausedForDictation && !holdLiveSpeech && liveInterim.length > 0;
+  const composerValue = composerTextWithLiveSpeech(prompt, liveInterim, showLiveSpeech);
+  const commitComposerValue = (display: string) => {
+    const next = typedDraftFromComposer(display, prompt, liveInterim, showLiveSpeech);
+    if (next.holdLive) setHoldLiveSpeech(true);
+    if (next.typed !== prompt) onChangePrompt(next.typed);
+  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const caretRef = useRef({ start: 0, end: 0 });
   const [pendingCaret, setPendingCaret] = useState<number | null>(null);
@@ -548,7 +561,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       el.style.height = '52px';
       el.style.height = `${Math.min(240, Math.max(52, el.scrollHeight))}px`;
     }
-  }, [prompt]);
+  }, [prompt, composerValue]);
 
   // Load dictation availability on mount
   useEffect(() => {
@@ -966,7 +979,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     }
     if (handleHistoryKey(event)) return;
 
-    if (event.key === 'Backspace' && !prompt && attachments.length > 0 && isPlainKey(event)) {
+    if (event.key === 'Backspace' && !prompt && !composerValue && attachments.length > 0 && isPlainKey(event)) {
       event.preventDefault();
       onRemoveAttachment(attachments[attachments.length - 1].resourceId);
       return;
@@ -1129,20 +1142,24 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             ref={textareaRef}
             data-testid={agentName ? 'agent-chat-input' : undefined}
             data-drop-targeted={dropKind !== null ? true : undefined}
-            value={prompt}
+            value={composerValue}
             onPaste={onComposerPaste}
             onCopy={onComposerCopy}
             onChange={(event) => {
-              const start = event.target.selectionStart ?? event.target.value.length;
-              const end = event.target.selectionEnd ?? start;
+              const rawStart = event.target.selectionStart ?? event.target.value.length;
+              const rawEnd = event.target.selectionEnd ?? rawStart;
+              const start = showLiveSpeech ? Math.min(rawStart, prompt.length) : rawStart;
+              const end = showLiveSpeech ? Math.min(rawEnd, prompt.length) : rawEnd;
               caretRef.current = { start, end };
               setDraftCaret(start);
-              onChangePrompt(event.target.value);
+              commitComposerValue(event.target.value);
             }}
             onKeyDown={onComposerKeyDown}
             onSelect={(event) => {
-              const start = event.currentTarget.selectionStart ?? 0;
-              const end = event.currentTarget.selectionEnd ?? start;
+              const rawStart = event.currentTarget.selectionStart ?? 0;
+              const rawEnd = event.currentTarget.selectionEnd ?? rawStart;
+              const start = showLiveSpeech ? Math.min(rawStart, prompt.length) : rawStart;
+              const end = showLiveSpeech ? Math.min(rawEnd, prompt.length) : rawEnd;
               caretRef.current = { start, end };
               setDraftCaret(start);
             }}

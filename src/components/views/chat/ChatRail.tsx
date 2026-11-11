@@ -276,7 +276,10 @@ export const ChatRail: React.FC<ChatRailProps> = ({
           <i aria-hidden="true" className={dotClass} />
           <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title || 'Untitled'}</span>
-          <span aria-hidden="true" className={trailingClass}>
+          <span
+            aria-hidden="true"
+            className={`${trailingClass}${thread.status === 'running' ? ' chat-working-live' : ''}`}
+          >
             {trailingLabel}
           </span>
         </button>
@@ -359,7 +362,7 @@ export const ChatRail: React.FC<ChatRailProps> = ({
             <button
               type="button"
               className="primary-button"
-              onClick={onNewThread}
+              onClick={() => void onNewThread()}
               disabled={disabled}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >

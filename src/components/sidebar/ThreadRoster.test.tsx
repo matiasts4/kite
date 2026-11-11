@@ -56,6 +56,23 @@ describe('ThreadRoster live shelves', () => {
     expect(screen.getByRole('button', { name: 'New thread in Kite' })).toBeInTheDocument();
   });
 
+  it('asks for a new thread in that workspace from the workspace plus button', () => {
+    const onNewChatInWorkspace = vi.fn();
+    render(
+      <ThreadRoster
+        threads={[thread({ id: 'main', title: 'Main', workspaceId: 'ws' })]}
+        workspaces={[workspace]}
+        selectedThreadId="main"
+        onNewChatInWorkspace={onNewChatInWorkspace}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'New thread in Kite' }));
+
+    expect(onNewChatInWorkspace).toHaveBeenCalledTimes(1);
+    expect(onNewChatInWorkspace).toHaveBeenCalledWith('ws');
+  });
+
   it('folds a running thread into Working and returns it when the turn finishes', () => {
     const running = thread({ id: 'busy', title: 'Busy', status: 'running', workspaceId: 'ws' });
     const pinned = thread({ id: 'pin', title: 'Pinned busy', status: 'running', pinned: true, workspaceId: 'ws' });

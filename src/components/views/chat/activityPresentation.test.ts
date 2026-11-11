@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activityIconKind,
   activityTraceLabel,
   approvalWaitLabel,
   opensInFilesSidebar,
   commandStatusLabel,
   interruptedTurnLine,
-  showThinkingPlaceholder,
+  liveStageLabel,
+  splitTraceLabel,
   summarizeWorkBurst,
   toolExpandedBody,
   turnStartUnixMs,
@@ -47,33 +49,35 @@ describe('working line', () => {
   });
 });
 
-describe('thinking placeholder', () => {
-  it('shows Thinking until the first tool, command, or reasoning row', () => {
-    expect(showThinkingPlaceholder([], false)).toBe(true);
-    expect(showThinkingPlaceholder([item({ kind: 'user', text: 'go' })], false)).toBe(true);
-  });
-
-  it('hides Thinking once an action row exists', () => {
-    expect(showThinkingPlaceholder([item({ kind: 'tool', title: 'Read src/main.ts', status: 'running' })], false)).toBe(
-      false,
-    );
+describe('live stage', () => {
+  it('claims nothing until the provider has sent something this turn', () => {
+    expect(liveStageLabel([])).toBeNull();
+    expect(liveStageLabel([item({ kind: 'user', text: 'go' })])).toBeNull();
     expect(
-      showThinkingPlaceholder([item({ kind: 'reasoning', text: 'Looking at the tests.', streaming: true })], false),
-    ).toBe(false);
+      liveStageLabel([item({ kind: 'user', text: 'go' }), item({ kind: 'reasoning', text: '  ', streaming: true })]),
+    ).toBeNull();
   });
 
-  it('hides Thinking while an answer is already on screen', () => {
-    expect(showThinkingPlaceholder([item({ kind: 'assistant', text: 'Here is the patch.' })], false)).toBe(false);
+  it('reads Thinking only once thought text exists', () => {
+    expect(
+      liveStageLabel([item({ kind: 'user', text: 'go' }), item({ kind: 'reasoning', text: 'Looking at tests.', streaming: true })]),
+    ).toBe('Thinking');
   });
 
-  it('keeps Thinking beside a failed latest tool', () => {
-    expect(showThinkingPlaceholder([item({ kind: 'tool', title: 'Read src/main.ts', status: 'failed' })], false)).toBe(
-      true,
-    );
+  it('names the latest tool and then the reply being written', () => {
+    expect(
+      liveStageLabel([item({ kind: 'user', text: 'go' }), item({ kind: 'tool', title: 'Read src/main.ts', status: 'running' })]),
+    ).toMatch(/main\.ts/);
+    expect(
+      liveStageLabel([
+        item({ kind: 'user', text: 'go' }),
+        item({ kind: 'tool', title: 'Read src/main.ts', status: 'completed' }),
+        item({ kind: 'assistant', text: 'Here is', streaming: true }),
+      ]),
+    ).toBe('Writing');
   });
 
-  it('stays hidden while approval is waiting', () => {
-    expect(showThinkingPlaceholder([], true)).toBe(false);
+  it('keeps approval wait wording', () => {
     expect(approvalWaitLabel('Bash', 'bash')).toBe('Waiting for approval · Bash');
   });
 });
@@ -239,5 +243,44 @@ describe('command rows and burst summaries', () => {
         }),
       ),
     ).toBe('');
+  });
+});
+
+describe('tool labels', () => {
+  it('reads an MCP tool as server · tool', () => {
+    expect(activityTraceLabel(item({ kind: 'tool', title: 'codegraph__codegraph_explore' }))).toBe('codegraph · explore');
+    expect(activityTraceLabel(item({ kind: 'tool', title: 'mcp__engram__mem_search' }))).toBe('engram · mem search');
+  });
+
+  it('reads a regex where a name should be as a search', () => {
+    expect(activityTraceLabel(item({ kind: 'tool', title: 'Status:|pending|open' }))).toBe('Searched Status:|pending|open');
+    expect(activityTraceLabel(item({ kind: 'command', title: 'mention|regenerateTitle', status: 'completed', exitCode: 0 }))).toBe(
+      'Searched mention|regenerateTitle',
+    );
+  });
+
+  it('keeps real commands as Ran <program>', () => {
+    expect(activityTraceLabel(item({ kind: 'command', title: 'git status -sb', status: 'completed', exitCode: 0 }))).toBe('Ran git');
+  });
+
+  it('splits a verb from its target', () => {
+    expect(splitTraceLabel('Read src/main.ts')).toEqual({ verb: 'Read', target: 'src/main.ts' });
+    expect(splitTraceLabel('Execute git branch')).toEqual({ verb: 'Execute', target: 'git branch' });
+    expect(splitTraceLabel('codegraph · explore')).toEqual({ verb: 'codegraph', target: 'explore' });
+    expect(splitTraceLabel('Changed files')).toEqual({ verb: null, target: 'Changed files' });
+  });
+
+  it('maps ACP toolKind values and MCP names to their semantic icons', () => {
+    expect(activityIconKind(item({ kind: 'tool', toolKind: 'read', title: 'src/main.ts' }))).toBe('read');
+    expect(activityIconKind(item({ kind: 'tool', toolKind: 'edit', title: 'src/main.ts' }))).toBe('edit');
+    expect(activityIconKind(item({ kind: 'tool', toolKind: 'execute', title: 'Execute `git status`' }))).toBe('shell');
+    expect(activityIconKind(item({ kind: 'tool', toolKind: 'search', title: 'set_chat_thread_pinned' }))).toBe(
+      'code-search',
+    );
+    expect(activityIconKind(item({ kind: 'tool', toolKind: 'fetch', title: 'https://example.com' }))).toBe('web');
+    expect(activityIconKind(item({ kind: 'tool', title: 'engram · mem save' }))).toBe('mcp');
+    expect(activityTraceLabel(item({ kind: 'tool', toolKind: 'execute', title: 'Execute `git status`', status: 'completed' }))).toBe(
+      'Ran git',
+    );
   });
 });

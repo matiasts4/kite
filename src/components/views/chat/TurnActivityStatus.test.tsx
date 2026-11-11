@@ -41,11 +41,16 @@ function thread(partial: Partial<ExtendedChatThread> = {}): ExtendedChatThread {
 }
 
 describe('TurnActivityStatus', () => {
-  it('shows Working... and Thinking until an action exists, with no bouncing dots', () => {
+  it('shows Working... with no brain and no bouncing dots until the provider sends something', () => {
     const { container, rerender } = render(<TurnActivityStatus running items={[]} />);
     expect(screen.getByText('Working…')).toBeInTheDocument();
-    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+    expect(container.querySelector('.chat-turn-activity__thinking')).toBeNull();
+    expect(container.querySelector('.chat-working-caption__stage')).toBeNull();
     expect(container.querySelector('.chat-working-row__dots')).toBeNull();
+    expect(container.querySelector('.chat-working-pulse')).not.toBeNull();
+    expect(container.querySelector('.chat-working-live')?.textContent).toBe('Working…');
+    expect(container.querySelector('.chat-working-caption__clock')).toBeNull();
 
     const tool: ChatItem = {
       id: 'tool-1',
@@ -62,6 +67,21 @@ describe('TurnActivityStatus', () => {
     rerender(<TurnActivityStatus running items={[tool]} />);
     expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
     expect(screen.getByText('Working…')).toBeInTheDocument();
+    expect(container.querySelector('.chat-working-caption__stage')?.textContent).toMatch(/main\.ts/);
+  });
+
+
+  it('sweeps the word Working and leaves the clock still', () => {
+    const started = Date.now() - 125_000;
+    const { container } = render(
+      <TurnActivityStatus
+        running
+        items={[{ kind: 'user', createdAtUnixMs: started }]}
+      />,
+    );
+    expect(container.querySelector('.chat-working-live')?.textContent).toBe('Working');
+    expect(container.querySelector('.chat-working-caption__clock')?.textContent ?? '').toMatch(/^ · \d+m \d+s$/);
+    expect(container.querySelector('.chat-working-caption__clock.chat-working-live')).toBeNull();
   });
 
   it('keeps approval waiting distinct from Thinking and Working', () => {
@@ -136,7 +156,8 @@ describe('both transcript surfaces', () => {
       />,
     );
     expect(document.querySelector('.chat-turn-activity__working')?.textContent ?? '').toMatch(/Working ·/);
-    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(document.querySelector('.chat-thread-header__clock')).toBeNull();
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
     expect(screen.queryByText('Thinking…')).not.toBeInTheDocument();
   });
 
@@ -170,7 +191,7 @@ describe('both transcript surfaces', () => {
       />,
     );
     expect(document.querySelector('.chat-turn-activity__working')?.textContent ?? '').toMatch(/Working ·/);
-    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
     expect(screen.queryByText('Thinking…')).not.toBeInTheDocument();
   });
 });

@@ -437,7 +437,9 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           {thread.unread && <i aria-hidden="true" className="chat-thread-row__unread" />}
           <span
             aria-hidden="true"
-            className={`chat-thread-row__trailing${trailingMod}`}
+            className={`chat-thread-row__trailing${trailingMod}${
+              thread.status === 'running' ? ' chat-working-live' : ''
+            }`}
           >
             {trailingText}
           </span>

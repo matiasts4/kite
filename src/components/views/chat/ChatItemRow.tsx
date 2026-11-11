@@ -17,6 +17,7 @@ import {
   burstDurationSeconds,
   commandStatusWord,
   opensInFilesSidebar,
+  splitTraceLabel,
   outputStatLabel,
   summarizeWorkBurst,
   toolExpandedBody,
@@ -45,6 +46,14 @@ import {
 
 export function userMessageFolds(text: string): boolean {
   return text.length > 500 || text.split('\n').length > 12;
+}
+
+/** Preview after the headline, so a streaming row does not repeat the same sentence. */
+export function reasoningPreviewRemainder(text: string, summary: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (!summary || flat === summary) return '';
+  if (flat.startsWith(summary)) return flat.slice(summary.length).trim();
+  return flat;
 }
 
 export function liveThoughtLine(markdown?: string | null): string {
@@ -199,6 +208,7 @@ export const ChatWorkEntry: React.FC<{
   const isCompleted = item.status === 'completed';
   const isRunning = Boolean(running || item.streaming || item.status === 'running' || item.status === 'inProgress');
   const traceLabel = activityTraceLabel(item);
+  const traceParts = splitTraceLabel(traceLabel);
   const statLabel = outputStatLabel(item.text);
   const bodyText = toolExpandedBody(item);
   const openPath = traceFilePath(item);
@@ -270,7 +280,19 @@ export const ChatWorkEntry: React.FC<{
           <ActivityGlyph item={item} size={16} />
         </span>
 
-        <strong className={isRunning ? 'live-tool-shine chat-activity-shine' : undefined}>{traceLabel}</strong>
+        <strong
+          className={isRunning ? 'live-tool-shine chat-activity-shine' : undefined}
+          title={traceLabel}
+        >
+          {traceParts.verb ? (
+            <>
+              <span className="chat-work-entry__verb">{traceParts.verb}</span>{' '}
+              <span className="chat-work-entry__target">{traceParts.target}</span>
+            </>
+          ) : (
+            traceLabel
+          )}
+        </strong>
         {statLabel ? <span className="chat-work-entry__meta">{statLabel}</span> : null}
 
         <i className="chat-work-entry__spacer" />
@@ -519,6 +541,8 @@ export const ChatItemRow: React.FC<{
     return (
       <motion.article
         className={`chat-turn chat-turn--user chat-user-row chat-user-row--bubble ${folded ? 'chat-user-row--folded' : ''}`}
+        data-message-id={item.id}
+        data-turn-user-id={item.id}
         initial={enter ? { opacity: 0, y: 4 } : false}
         animate={{ opacity: 1, y: 0 }}
         transition={tweens.reveal}
@@ -734,7 +758,10 @@ export const ChatItemRow: React.FC<{
 
   // Reasoning Row
   if (item.kind === 'reasoning') {
+    // A thought with no text yet is not rendered: the brain appears once the provider sends it.
+    if (item.text.trim().length === 0) return null;
     const thoughtSummary = liveThoughtLine(item.text);
+    const thoughtRemainder = reasoningPreviewRemainder(item.text, thoughtSummary);
     return (
       <motion.div
         className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}`}
@@ -755,8 +782,8 @@ export const ChatItemRow: React.FC<{
           <strong className={`chat-reasoning-row__label${item.streaming && !thoughtSummary ? ' chat-activity-shine' : ''}`}>
             {item.streaming ? (thoughtSummary || 'Thinking') : 'Thought'}
           </strong>
-          {item.streaming && !expandedReasoning && item.text.trim().length > 0 && (
-            <span className="chat-reasoning-row__preview">{item.text}</span>
+          {item.streaming && !expandedReasoning && thoughtRemainder.length > 0 && (
+            <span className="chat-reasoning-row__preview">{thoughtRemainder}</span>
           )}
           {!item.streaming && thoughtSummary && !expandedReasoning && (
             <span className="chat-reasoning-row__headline">{thoughtSummary}</span>

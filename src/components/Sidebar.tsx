@@ -271,27 +271,16 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
   const handleAddClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     if (mode === 'agent') {
       openNewAgent();
-    } else if (mode === 'code' || mode === 'chat') {
-      // Toggle menu for New Thread (if chat), Local Folder, SSH
+    } else if (mode === 'chat') {
+      onNewChat();
+    } else if (mode === 'code') {
+      // Toggle menu for Local Folder, SSH
       const rect = e.currentTarget.getBoundingClientRect();
       setContextMenu({
         x: rect.left,
         y: rect.bottom + 4,
         sections: [
           [
-            mode === 'chat'
-              ? {
-                  id: 'chat',
-                  title: 'New Thread',
-                  shortcut: 'Ctrl+N',
-                  icon: <PlusIcon size={14} />,
-                  action: () => {
-                    setContextMenu(null);
-                    setAddMenuOpen(false);
-                    onNewChat();
-                  },
-                }
-              : null,
             {
               id: 'local',
               title: 'Local Folder…',

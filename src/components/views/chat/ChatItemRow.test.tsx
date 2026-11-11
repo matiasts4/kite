@@ -161,12 +161,15 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     const streaming = mockItem({
       id: 'r1',
       kind: 'reasoning',
-      text: 'Checking the failing test.',
+      text: 'Checking the failing test. The fixture is stale.',
       streaming: true,
       durationSeconds: 4,
     });
     const { rerender } = render(<ChatItemRow item={streaming} />);
-    expect(screen.getByRole('button', { name: /Checking the failing test/ })).toBeInTheDocument();
+    const liveThought = screen.getByRole('button', { name: /Checking the failing test/ });
+    expect(liveThought).toBeInTheDocument();
+    expect(liveThought.textContent?.match(/Checking the failing test/g)?.length).toBe(1);
+    expect(liveThought).toHaveTextContent('The fixture is stale.');
     expect(screen.queryByRole('button', { name: /Thinking/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/Thought for/)).not.toBeInTheDocument();
 
@@ -185,13 +188,21 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     expect(screen.queryByText(/Thought for/)).not.toBeInTheDocument();
   });
 
-  it('uses Thinking only when a streaming thought has no line yet', () => {
-    render(
+  it('renders no brain row until the thought has text', () => {
+    const { container, rerender } = render(
       <ChatItemRow
         item={mockItem({ id: 'r2', kind: 'reasoning', text: '', streaming: true })}
       />,
     );
-    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(container.querySelector('.chat-reasoning-row')).toBeNull();
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+
+    rerender(
+      <ChatItemRow
+        item={mockItem({ id: 'r2', kind: 'reasoning', text: 'Checking the fixture.', streaming: true })}
+      />,
+    );
+    expect(container.querySelector('.chat-reasoning-row')).not.toBeNull();
   });
 
   it('keeps every action visible while the turn is running', () => {
@@ -220,8 +231,8 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
         ]}
       />,
     );
-    expect(screen.getByText('Running git')).toBeInTheDocument();
-    expect(screen.getByText('Running cargo')).toBeInTheDocument();
+    expect(screen.getByTitle('Running git')).toBeInTheDocument();
+    expect(screen.getByTitle('Running cargo')).toBeInTheDocument();
     expect(screen.queryByText(/\bearlier\b/)).not.toBeInTheDocument();
   });
 
@@ -240,7 +251,7 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
         ]}
       />,
     );
-    expect(screen.getByText('Read src/main.ts')).toBeInTheDocument();
+    expect(screen.getByTitle('Read src/main.ts')).toBeInTheDocument();
     expect(screen.queryByText('Tool execution')).not.toBeInTheDocument();
   });
 
@@ -260,7 +271,7 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
         ]}
       />,
     );
-    expect(screen.getByText('Read src/notifications/foo.ts')).toBeInTheDocument();
+    expect(screen.getByTitle('Read src/notifications/foo.ts')).toBeInTheDocument();
     expect(screen.getByText('1 line · 569 B')).toBeInTheDocument();
     expect(screen.queryByText('1 lines, 569 bytes')).not.toBeInTheDocument();
   });
@@ -392,7 +403,7 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     expect(screen.queryByText(/completadas/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /Ran 2 commands/ }));
-    expect(screen.getByText('Ran git')).toBeInTheDocument();
-    expect(screen.getByText('Ran cargo')).toBeInTheDocument();
+    expect(screen.getByTitle('Ran git')).toBeInTheDocument();
+    expect(screen.getByTitle('Ran cargo')).toBeInTheDocument();
   });
 });

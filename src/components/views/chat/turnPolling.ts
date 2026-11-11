@@ -102,11 +102,13 @@ export async function pollTurnUpdates({
           } else if (ev.kind === 'upsert' && ev.item) {
             const idx = items.findIndex((it) => it.id === ev.item!.id);
             if (idx >= 0) {
+              const prevTextLen = (items[idx].text ?? '').length;
+              const nextTextLen = (ev.item.text ?? '').length;
               const moveToTail =
                 ev.item.kind === 'assistant' &&
-                Boolean(ev.item.text) &&
-                !items[idx].text &&
-                idx + 1 < items.length;
+                nextTextLen > prevTextLen &&
+                idx + 1 < items.length &&
+                !items.slice(idx + 1).some((later) => later.kind === 'user');
               items[idx] = ev.item;
               if (moveToTail) {
                 const [moved] = items.splice(idx, 1);
@@ -120,8 +122,8 @@ export async function pollTurnUpdates({
             if (idx >= 0) {
               const moveToTail =
                 items[idx].kind === 'assistant' &&
-                !items[idx].text &&
-                idx + 1 < items.length;
+                idx + 1 < items.length &&
+                !items.slice(idx + 1).some((later) => later.kind === 'user');
               items[idx] = {
                 ...items[idx],
                 text: items[idx].text + ev.text,

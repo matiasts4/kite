@@ -66,6 +66,8 @@ export interface ChatViewProps {
   workspaces?: any[];
   workspaceName?: string;
   embedded?: boolean;
+  /** The primary thread pane owns sidebar New thread requests. Embedded panes do not. */
+  ownsNewThreadRequests?: boolean;
   onThreadsChanged?: () => void;
   /** Session projections supplied by the parent, keyed by thread id. */
   sessionProjections?: Record<string, SessionProjection> | null;
@@ -218,7 +220,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
           <button
             type="button"
             className="secondary-button"
-            onClick={session.handleCreateNewThread}
+            onClick={() => void session.handleCreateNewThread()}
             style={{
               padding: '8px 16px',
               fontSize: '13px',

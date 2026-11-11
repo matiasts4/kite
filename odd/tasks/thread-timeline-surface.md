@@ -68,14 +68,12 @@ User words: "por ejemplo, la parte que nosotros mostramos donde, mostramos que d
 Current fact:
 - `SingleThreadPane.tsx` and `AgentChatShell.tsx` still mount legacy status rows or keep the placeholder visible after activity rows arrive.
 Acceptance:
-- While a turn is running, a quiet header row sits at the top of the active work block with a subtle bottom border (`border-b border-border/60 pb-2 pt-1`), `24px` height (`h-6`), `tabular-nums`, and muted text reading `Working · 12s`. Past 60 seconds the timer reads minutes, as in `Working · 2m 5s`. When there is no start time it reads `Working…`. When compacting context, it reads `Compacting · <timer>` with a minimize icon. The same caption is used in the thread and in the agent chat shell.
+- While a turn is running, a quiet header row sits at the bottom of the active work block (`TurnActivityStatus` above the composer) with a subtle bottom border (`border-b border-border/60 pb-2 pt-1`), `24px` height (`h-6`), `tabular-nums`, and muted text reading `Working · 12s`. Past 60 seconds the timer reads minutes, as in `Working · 2m 5s`. When there is no start time it reads `Working…`. When compacting context, it reads `Compacting · <timer>` with a minimize icon. The same caption is used in the thread and in the agent chat shell.
+- Only one elapsed timer counter is displayed per thread (the bottom `TurnActivityStatus` row). The top thread header (`SingleThreadPane`) displays only the status dot without a duplicate elapsed timer so two counters never drift out of sync.
+- The running mark is a 6px status dot with a soft ripple ring that breathes out smoothly over 1.8 seconds (no stepping), in the thread header, the transcript caption, and the thread-list row. The word `Working` stays readable and sweeps a highlight over that color. The clock text stays still and tabular. In the transcript caption a live stage follows the clock (`Working · 1m 6s · Read src/main.ts`, `Thinking`, `Writing`), fades in each time it changes, and is absent until the provider has sent something for the turn. `prefers-reduced-motion` stops both motions and leaves the caption readable.
 - It never renders three bouncing dots.
-- Immediately below that header, a placeholder brain row reading `Thinking` with a text shimmer (`ActivityShimmerOverlay`) appears **only** when:
-  1. The turn is actively running,
-  2. No tool call, command, or reasoning text item has arrived yet for this turn, and
-  3. No tool approval or interactive question is waiting (`pendingApprovals === 0`).
-- The instant the first tool call, command, or reasoning item arrives, the placeholder `Thinking` row disappears and the live work rows take its place.
-Checks: `TurnActivityStatus.test.tsx` verifying the `Working for` timer format, absence of bouncing dots, and immediate removal of the `Thinking` placeholder when a tool row arrives.
+- There is no placeholder brain row. The brain icon and `Thinking` appear only on a reasoning row that already holds thought text; a streaming thought with no text yet renders nothing, and the row shows up the moment the provider sends the first text.
+Checks: `TurnActivityStatus.test.tsx` verifying the `Working for` timer format, absence of bouncing dots, no `Thinking` at turn start, and the live stage once a tool row arrives; `ChatItemRow.test.tsx` verifying an empty streaming thought renders nothing.
 
 ### S3. 24px Work-Log Row Anatomy, Icons, and `live-tool-shine`
 User words: "Me gusta bastante cómo manejan como los íconos. Cómo van mostrando las acciones que va haciendo... El cómo se ve, el cómo tiene las animaciones."
@@ -83,13 +81,13 @@ Current fact:
 - Tool rows in `ChatItemRow.tsx` vary in height and padding, and failed tool rows recolor the entire line or dump raw JSON metadata beneath closed rows.
 Acceptance:
 - Every work-log row (`ChatWorkEntry`) uses a strict `24px` minimum height (`min-h-6`), `6px` horizontal gap (`gap-1.5`), `14px` font size (`text-sm leading-relaxed`), `var(--control-radius)` (`rounded-md`, `8px`) hover target, and non-selectable label chrome (`select-none`).
-- **Icon Slot**: `24px × 24px` (`size-6 shrink-0`) centering a `16px` (`size-4 stroke-2`) muted Lucide glyph (`text-icon-muted`):
-  - `Eye` for file read (`Read <relative-path>`)
-  - `SquarePen` for file edit/write (`<relative-path>` or `Changed <path>`)
-  - `Terminal` for shell command (`Running <program>` while active; `Ran <program>`, `Failed <program>`, `Declined <program>`, or `Stopped <program>` when finished)
-  - `Search` for file/code search (`Searched <query>` or `Searched files`)
-  - `Globe` for web search/fetch (`Searched the web` or `Fetched <domain>`)
-  - `Hammer` for MCP or dynamic tools (`<server>: <tool> <short-arg>`)
+- **Icon Slot**: `24px × 24px` (`size-6 shrink-0`) centering a `16px` (`size-4 stroke-2`) muted Lucide glyph (`text-icon-muted`). Both normalized internal tool kinds and ACP `toolKind` values (`read`, `edit`, `delete`, `move`, `search`, `execute`, `fetch`) map to their semantic icons:
+  - `Eye` for file read (`Read <relative-path>`, `toolKind: "read"`)
+  - `SquarePen` for file edit/write/move/delete (`<relative-path>` or `Changed <path>`, `toolKind: "edit" | "delete" | "move"`)
+  - `Terminal` for shell command (`Running <program>` while active; `Ran <program>`, `Failed <program>`, `Declined <program>`, or `Stopped <program>` when finished; `toolKind: "execute"`)
+  - `Search` for file/code search (`Searched <query>` or `Searched files`, `toolKind: "search"` or regex-pattern titles)
+  - `Globe` for web search/fetch (`Searched the web` or `Fetched <domain>`, `toolKind: "fetch"`)
+  - `Hammer` for MCP or dynamic tools (`<server> · <tool> <short-arg>`)
   - `Wrench` for generic tools
   - `Bot` for subagent launches/updates
   - `ListTodo` for plan updates
@@ -107,7 +105,7 @@ Current fact:
 - Work groups collapse mid-turn (`+N earlier`), hiding actions while the agent is still working.
 Acceptance:
 - **Reasoning Row**:
-  - While reasoning text is streaming and the row is collapsed, it shows the `Brain` icon and the latest thought line, truncated to one line. The status word is `Thinking` only when that line is the whole row. Clicking expands the full markdown reasoning trace (`ReasoningTraceContent`).
+  - While reasoning text is streaming and the row is collapsed, it shows the `Brain` icon and the latest thought line, truncated to one line. The preview does not repeat that headline. The status word is `Thinking` only when that line is the whole row. Clicking expands the full markdown reasoning trace (`ReasoningTraceContent`).
   - When a thought item has no text body yet, its label is `Thinking` while active and `Thought` once finished. Individual reasoning rows never say `Thought for Ns`—duration belongs exclusively to the turn summary header.
 - **Live Burst vs Settled Fold**:
   - While a turn is running, **every** action in the current burst remains visible as its own `24px` row in chronological order. New rows enter with a subtle `4px` upward reveal (`tweens.reveal`, dropped under `prefers-reduced-motion`).
@@ -151,17 +149,33 @@ Acceptance:
   - For `AuthRequired`: offers a direct action to open Provider Connections / Sign in.
 Checks: component tests for `ThreadErrorBanner` and `UsageLimitRecoveryBanner` covering error dismissal, reset countdown display, and `Resume at reset` scheduling.
 
+### S8. Lateral Turn Navigator Rail (`ThreadTurnRail`)
+User words: "Cuando se manda un mensaje se va como archivando la zona lateral. Adjunto una imagen. Se va archivando. Y se muestran como distintas pelotitas, cada una de esas es un mensaje que salió, entonces es mucho más fácil volver. A ese mensaje como tal. O a esa parte de la conversación. Por ende debemos, eh, implementar ese componente. Para el chat. Y poder volver a una conversación, a un mensaje rápidamente en una conversación."
+Current fact:
+- Long conversations require manual scrolling to locate earlier user prompts or assistant replies; there is no lateral turn index or quick jump rail.
+Acceptance:
+- When a thread has one or more user messages (`kind === 'user'`), a compact vertical dot navigation rail (`ThreadTurnRail`) renders along the left margin of the transcript area (`SingleThreadPane`):
+  - Each user turn is represented by a circular indicator dot (`rounded-full` / `var(--pill-radius)`).
+  - The dot corresponding to the currently visible turn in the transcript viewport is highlighted (`is-active`), while other turns remain muted until hovered or focused.
+  - Hovering or focusing a dot displays a floating preview card (`var(--card-radius)`, `12px`) anchored to the right of the rail:
+    - **Title**: The user's prompt text for that turn (`font-weight: 600`, clamped to 2 lines).
+    - **Preview body**: The assistant's response excerpt for that turn (clamped to 3 lines, plain text without raw markdown markers; falls back to the latest tool/activity summary or `Working…` when no assistant text exists yet).
+    - **Footer**: Turn index `"{index} of {total}"` on the left (e.g. `3 of 4`) and formatted message time (e.g. `7:08 p.m.`) on the right in `tabular-nums`.
+  - Clicking a dot smoothly scrolls the transcript to that turn's user message (`[data-turn-user-id="<id>"]`) and marks that turn active.
+Checks: component tests in `ThreadTurnRail.test.tsx` verifying dot rendering per user turn, hover preview card content (`N of M`, prompt title, assistant excerpt, formatted time), and click-to-scroll behavior.
+
 ---
 
 ## Tasks
 
 - **T1 — Update user message bubble geometry (`max-w-[80%]`, `fit-content`, folding, hover actions) in `ChatItemRow.tsx` and `chat.css`.** S1.
-- **T2 — Implement `WorkingTimelineRow` (`Working for <timer>`) and conditional `Thinking` shimmer placeholder in `TurnActivityStatus.tsx`, `SingleThreadPane.tsx`, and `AgentChatShell.tsx`.** S2.
-- **T3 — Standardize `24px` `WorkLogRow` anatomy, 10 Lucide kind icons (`stroke-2`), inline quiet meta, `.live-tool-shine`, and muted failure marks in `ChatItemRow.tsx`.** S3.
+- **T2 — Implement `WorkingTimelineRow` (`Working for <timer>`), single bottom counter, and conditional `Thinking` shimmer placeholder in `TurnActivityStatus.tsx`, `SingleThreadPane.tsx`, and `AgentChatShell.tsx`.** S2. Reopened 2026-11-11: running dot pulses and the word `Working` sweeps; the clock stays still (L8). Reopened for the ripple dot, live stage, and no empty brain (L10). Reopened to remove the duplicate top header counter and keep only the bottom transcript counter (L12).
+- **T3 — Standardize `24px` `WorkLogRow` anatomy, 10 Lucide kind icons (`stroke-2`) including ACP `toolKind` mapping, inline quiet meta, `.live-tool-shine`, and muted failure marks in `ChatItemRow.tsx` and `activityPresentation.ts`.** S3.
 - **T4 — Implement `line-clamp-4` streaming reasoning preview, live uncollapsed burst rendering, and `Worked for <duration>` / `You stopped after <duration>` post-turn folding (`groupTranscriptRows`).** S4.
 - **T5 — Build `ChangedFilesCard` and `DiffStatLabel` at the bottom of file-modifying turns and wire to the diff/files inspector.** S5.
 - **T6 — Build `HtmlRenderFrame` / `HtmlRenderDialog` for sandboxed visual replies and verify `.md`/HTML/PDF/image sidebar preview routing.** S6.
 - **T7 — Build `ThreadErrorBanner` and `UsageLimitRecoveryBanner` (`Resume` / `Resume at reset`) above the composer.** S7.
+- **T8 — Build `ThreadTurnRail` lateral dot navigation rail with hover preview card (`{index} of {total}`, timestamp, prompt title, assistant preview) and click-to-jump scrolling in `SingleThreadPane.tsx`.** S8. Route: inline.
 
 ---
 
@@ -181,3 +195,10 @@ Checks: component tests for `ThreadErrorBanner` and `UsageLimitRecoveryBanner` c
 - **L4. 2026-11-10.** User words: "la idea es qeu revisemos detalaldamente los 3, corregir e implementar en su totalidad cada uno". The live caption is `Working · 2m 5s`, or `Working…` when there is no start. Reasoning preview is one truncated line, not four. The failure banner sits above the transcript.
 - **L1. 2026-11-09.** Created `odd/tasks/thread-timeline-surface.md` (ODD 2 of 3) to specify the complete visual anatomy, `24px` work-log rows, `live-tool-shine` and reveal animations, reasoning preview, post-turn group collapsing, `ChangedFilesCard`, sandboxed `HtmlRenderFrame`, and `ThreadErrorBanner` / `UsageLimitRecoveryBanner`.
 - **L6. 2026-11-10.** Fixed `assistantRef` mutable ref in `ChatItemRow.tsx`. Verified timeline surface suite across `ChatItemRow`, `TurnActivityStatus`, `ChangedFilesCard`, `ThreadErrorBanner`, and `activityPresentation`. `npx vitest run src/components/views/chat` (213 passed). `npx tsc --noEmit` clean. T1–T7 verified complete.
+- **L7. 2026-11-11.** User words: "Es como la barra de, o sea no, la parte de. Eh, working. Y de los minutos. Bueno, básicamente no me gusta para nada, porque se ve bastante raro, y poco trabajado, quiero decir es muy fijo. Podemos basarnos en otros como como por ejemplo Tetris Code o Codex, que, también animan. Esa parte. O antigravity incluso".
+- **L8. 2026-11-11.** User words: "si corrige todo". The caption stays `Working · 2m 5s`. The running dot pulses and the word `Working` sweeps, in the header, the transcript, and the thread list. Reduced motion keeps the caption still. Sidebar `Working` keeps `--running-text`. `npx vitest run` on `TurnActivityStatus.test.tsx` and `ThreadRoster.test.tsx`: 15 passed.
+- **L9. 2026-11-11.** User words: "como tal el diseno sigue siendo bastante feo" and "lance el mismo prompt y como a los 15 segundos dejo de actualizar". The header caption was a transparent word inside a 96px clipped clock, so the surface read `· 1m 6s`. The word now keeps its color. A streaming thought does not repeat its headline.
+- **L10. 2026-11-11.** User words: "Un poco más interactivo y no tan fijo como estaba antes. Además el logo de que está pensando, o de thinking. Debe aparecer cuando realmente esté la respuesta porque creo que está apareciendo antes y aparece como vacío." The Thinking placeholder is removed; the brain shows only once thought text arrives. The dot ripples smoothly and the transcript caption shows the live stage after the clock.
+- **L11. 2026-11-11.** User words: "hay algunas partes que no se ven como correctamente formateadas" and "que vaya bajando automáticamente... las nuevas vayan apareciendo en la parte más inferior. Porque ahora mismo tengo que ir haciendo scroll". The follow-the-newest observer attached only when the thread id changed, so a new chat (transcript mounts after the first message) never followed; it now attaches whenever the transcript column mounts. Work rows split into a verb and a quiet monospace target, MCP names read `server · tool`, and regex patterns read `Searched <pattern>`.
+- **L12. 2026-11-11.** User words: "los contadores. No están correctamente relacionados o no leen lo mismo. Inclusive dos contadores creo que son muchos así que deja solamente uno que puede ser el de la parte inferior y no el de la parte superior." Removed the top header elapsed counter in `SingleThreadPane.tsx` (leaving only the status dot) and kept the single `Working · <clock>` counter at the bottom of the transcript (`TurnActivityStatus.tsx`). Connected ACP `toolKind` icon mapping in `activityPresentation.ts` and chronological post-tool assistant response placement in `turnPolling.ts` with `odd/tasks/thread-provider-runtime.md`.
+- **L13. 2026-11-11.** User words: "Cuando se manda un mensaje se va como archivando la zona lateral. Adjunto una imagen. Se va archivando. Y se muestran como distintas pelotitas, cada una de esas es un mensaje que salió, entonces es mucho más fácil volver. A ese mensaje como tal. O a esa parte de la conversación. Por ende debemos, eh, implementar ese componente. Para el chat. Y poder volver a una conversación, a un mensaje rápidamente en una conversación." Added `S8` and `T8` (`ThreadTurnRail`): lateral vertical dot navigator rail with hover preview card (`{index} of {total}`, timestamp, prompt title, assistant excerpt) and smooth scroll jump to any user turn.

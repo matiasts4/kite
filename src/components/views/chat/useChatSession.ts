@@ -25,6 +25,7 @@ import {
 import { getSavedSelectedProvider } from './modelPersistence';
 import { pollTurnUpdates } from './turnPolling';
 import { expandCitations } from './citationChip';
+import { holdThreadSelection, registerNewThreadHandler } from '../../../lib/newThreadRequest';
 import {
   bindingForConnection,
   resolveConnectionBinding,
@@ -89,6 +90,7 @@ export interface UseChatSessionProps {
   engineLabel?: string;
   threadId?: string | null;
   agents?: any[];
+  ownsNewThreadRequests?: boolean;
   onThreadsChanged?: () => void;
 }
 
@@ -98,6 +100,7 @@ export function useChatSession({
   agentEngine,
   threadId: initialThreadId,
   agents,
+  ownsNewThreadRequests,
   onThreadsChanged,
 }: UseChatSessionProps) {
   // Grid and Threads State
@@ -258,8 +261,10 @@ export function useChatSession({
     };
   }, [stageDroppedAttachments]);
 
-  // Initial Load
+  // Initial Load. When the pane is already showing this thread, a later selection
+  // update must not reload it and replace the thread the session just opened.
   useEffect(() => {
+    if (initialThreadId && focusedThreadIdRef.current === initialThreadId) return;
     void initChatView();
   }, [workspaceId, agentId, initialThreadId]);
 
@@ -547,27 +552,50 @@ export function useChatSession({
     onThreadsChanged?.();
   };
 
-  const handleCreateNewThread = async (): Promise<string | undefined> => {
+  const handleCreateNewThread = async (targetWorkspaceId?: string | null | unknown): Promise<string | undefined> => {
+    const scopeWorkspaceId =
+      typeof targetWorkspaceId === 'string'
+        ? targetWorkspaceId
+        : targetWorkspaceId === null
+        ? null
+        : workspaceId;
     const latest = createDraftConfig(draftConfig.provider, null, draftConfig.agent ?? null);
-    // Deduplicate empty draft threads in the same scope. A thread that already holds voice turns
-    // is a real conversation (its turns live outside the provider transcript), never a blank draft.
-    const existingDraft = knownThreadsList.find(
-      (t) =>
-        (agentId ? t.profileId === agentId : (t.workspaceId ?? null) === (workspaceId ?? null)) &&
-        (!t.items || t.items.length === 0 || (t as any).status === 'draft' || !t.title || t.title.toLowerCase().includes('draft') || t.title === 'New Chat') &&
-        voiceSessionStore.getThreadVoiceTurns(t.id).length === 0
+
+    // Reuse the open draft ONLY if the currently focused thread in this pane is already
+    // a blank conversation (zero messages, zero voice turns) in the requested scope.
+    const currentThread = focusedThreadId ? threadsMap[focusedThreadId] : null;
+    const currentScopeMatches = currentThread
+      ? (agentId
+          ? currentThread.profileId === agentId
+          : (currentThread.workspaceId ?? null) === (scopeWorkspaceId ?? null))
+      : false;
+    const isCurrentEmptyDraft = Boolean(
+      currentThread &&
+        currentScopeMatches &&
+        (!currentThread.items || currentThread.items.length === 0) &&
+        currentThread.hasContent !== true &&
+        voiceSessionStore.getThreadVoiceTurns(currentThread.id).length === 0
     );
-    if (existingDraft) {
+
+    if (isCurrentEmptyDraft && currentThread) {
       await invokeCommand('update_chat_configuration', {
-        threadId: existingDraft.id,
+        threadId: currentThread.id,
         provider: latest.provider,
         model: latest.model,
         effort: latest.effort,
         mode: latest.mode,
         ...(latest.agent ? { agent: latest.agent } : {}),
       });
-      void handleLoadThread(existingDraft.id);
-      return existingDraft.id;
+      holdThreadSelection(currentThread.id);
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', { detail: { threadId: currentThread.id, mode: 'chat' } })
+      );
+      if (scopeWorkspaceId) {
+        window.dispatchEvent(
+          new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
+        );
+      }
+      return currentThread.id;
     }
 
     try {
@@ -576,11 +604,12 @@ export function useChatSession({
         ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
             ...request,
-            workspaceId: workspaceId ?? null,
+            workspaceId: scopeWorkspaceId ?? null,
           });
       if (!isMountedRef.current) return;
       const tid = thread.id;
       const boundThread = threadWithResolvedBinding(thread);
+      holdThreadSelection(tid);
       setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
       setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
 
@@ -589,6 +618,14 @@ export function useChatSession({
       setFocusedThreadId(tid);
       void persistGrid(nextGrid, tid);
       setShowHistoryPopover(false);
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
+      );
+      if (scopeWorkspaceId) {
+        window.dispatchEvent(
+          new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
+        );
+      }
       notifyThreadsChanged();
       return tid;
     } catch (err) {
@@ -596,6 +633,16 @@ export function useChatSession({
       return undefined;
     }
   };
+
+  const createNewThreadRef = useRef(handleCreateNewThread);
+  createNewThreadRef.current = handleCreateNewThread;
+
+  useEffect(() => {
+    if (!ownsNewThreadRequests) return;
+    return registerNewThreadHandler((requestedWorkspaceId) => {
+      void createNewThreadRef.current(requestedWorkspaceId);
+    });
+  }, [ownsNewThreadRequests]);
 
   const handleLoadThread = async (threadId: string) => {
     try {

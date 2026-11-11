@@ -33,7 +33,7 @@ import {
   restoreThreadCheckpoint,
   renameChatThread,
 } from '../../../lib/ipc';
-import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
+import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
 import { filterTranscriptForVisibility, readToolVisibility, TOOL_VISIBILITY_EVENT, type ToolVisibilityMode } from './toolVisibility';
 import { QueuedRunsControl } from './QueuedRunsControl';
 import { SideChatPane } from './SideChatPane';
@@ -55,7 +55,7 @@ import { bringBackAllowed, childApprovals, childStopIds, directMessageNotice } f
 import { compactSendText, fileRestoreAllowed } from './threadInteraction';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
-import { formatWorkingClock } from './activityPresentation';
+import { ThreadTurnRail } from './ThreadTurnRail';
 
 function composeRewoundPrompt(draft: string, rewound: string): string {
   if (!draft.trim()) return rewound;
@@ -205,7 +205,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const [hiddenFromId, setHiddenFromId] = useState<string | null>(null);
   const [isRepo, setIsRepo] = useState(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
-  const [elapsedSecs, setElapsedSecs] = useState<number>(0);
   const [visibleLimit, setVisibleLimit] = useState<number>(200);
 
   // Workspace dropdown state
@@ -292,21 +291,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     return branches.filter((b) => b.toLowerCase().includes(q));
   }, [branches, branchSearch]);
 
-  // Live timer every 1s when running or waiting
-  useEffect(() => {
-    const isWorking = running || thread.status === 'running' || thread.status === 'waiting';
-    if (!isWorking) {
-      setElapsedSecs(0);
-      return;
-    }
-    const startMs = Date.now();
-    setElapsedSecs(0);
-    const timer = setInterval(() => {
-      setElapsedSecs(Math.floor((Date.now() - startMs) / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [running, thread.status]);
-
   const atLiveEdgeRef = useRef(true);
   const transcriptItems = React.useMemo(() => {
     if (!hiddenFromId) return thread.items;
@@ -355,13 +339,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const [dismissedPlanIds, setDismissedPlanIds] = useState<Set<string>>(new Set());
   const [failureDismissed, setFailureDismissed] = useState(false);
   const isPlanDismissed = activePlan ? dismissedPlanIds.has(activePlan.id) : false;
-
-  const formatElapsed = (secs: number): string => {
-    if (secs < 60) return `${secs}s`;
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m}m ${s < 10 ? '0' : ''}${s}s`;
-  };
 
   useEffect(() => {
     const wsId = thread.workspaceId || workspaceId;
@@ -850,7 +827,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
             {renderUsageCard()}
 
-            {/* Status indicator */}
+            {/* Status indicator (single counter lives at the bottom of the transcript) */}
             <span
               className={`chat-thread-header__status chat-thread-header__status--${
                 running
@@ -864,15 +841,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               role="status"
             >
               <i />
-              {running ? (
-                <span className="chat-thread-header__clock">
-                  Working · {formatWorkingClock(elapsedSecs)}
-                </span>
-              ) : thread.status === 'waiting' ? (
-                <span className="chat-thread-header__clock">
-                  Waiting · {formatElapsed(elapsedSecs)}
-                </span>
-              ) : null}
             </span>
 
             {/* New Thread */}
@@ -881,7 +849,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               className="chrome-button"
               aria-label="New thread"
               title="New thread"
-              onClick={onNewThread}
+              onClick={() => void onNewThread()}
             >
               <PlusIcon size={13} />
             </button>
@@ -910,105 +878,101 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             <div className="chat-thread-layout__body">
               {failureBanner}
               {isDraft ? null : (
-                <div
-                  className="chat-transcript"
-                  ref={transcriptRef}
-                  onScroll={(e) => {
-                    const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
-                    atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
-                  }}
-                >
-                  <div className="chat-transcript__column">
-                    {displayedRows.length < transcriptRows.length && (
-                      <div
-                        className="chat-transcript__earlier"
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'center',
-                          padding: '12px 0',
-                        }}
-                      >
-                        <button
-                          type="button"
-                          className="secondary-button chat-transcript__earlier-btn"
-                          onClick={() => {
-                            if (!transcriptRef.current) {
-                              setVisibleLimit((prev) => prev + 200);
-                              return;
-                            }
-                            const prevScrollHeight = transcriptRef.current.scrollHeight;
-                            setVisibleLimit((prev) => prev + 200);
-                            requestAnimationFrame(() => {
-                              if (transcriptRef.current) {
-                                const diff = transcriptRef.current.scrollHeight - prevScrollHeight;
-                                transcriptRef.current.scrollTop += diff;
-                              }
-                            });
-                          }}
+                <>
+                  <ThreadTurnRail
+                    items={timelineItems}
+                    running={running}
+                    transcriptRef={transcriptRef}
+                    onEnsureAllVisible={() => setVisibleLimit(totalRows + 200)}
+                  />
+                  <div
+                    className="chat-transcript"
+                    ref={transcriptRef}
+                    onScroll={(e) => {
+                      const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
+                      atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
+                    }}
+                  >
+                    <div className="chat-transcript__column">
+                      {displayedRows.length < transcriptRows.length && (
+                        <div
+                          className="chat-transcript__earlier"
                           style={{
-                            fontSize: '12px',
-                            padding: '6px 14px',
-                            borderRadius: '6px',
+                            display: 'flex',
+                            justifyContent: 'center',
+                            padding: '12px 0',
                           }}
                         >
-                          Show earlier messages ({displayedRows.length} of {transcriptRows.length} shown)
-                        </button>
-                      </div>
-                    )}
-
-                    {displayedRows.map((row, index) => {
-                      const rowKey = row.kind === 'work' ? row.id : row.item.id;
-                      const liveAt = running ? liveActivityRowIndex(displayedRows) : -1;
-                      return (
-                        <React.Fragment key={rowKey}>
-                          {index === liveAt ? (
-                            <TurnActivityStatus
-                              running={running}
-                              pendingApproval={thread.pendingApproval}
-                              items={transcriptItems}
-                              interrupted={false}
-                              durationSeconds={thread.usage?.durationSeconds}
-                            />
-                          ) : null}
-                          {row.kind !== 'work' && row.item.kind === 'assistant' && /<html[\s\S]*<\/html>/i.test(row.item.text) ? (
-                            <HtmlRenderFrame html={row.item.text.match(/<html[\s\S]*<\/html>/i)?.[0] ?? row.item.text} />
-                          ) : null}
-                          {row.kind === 'work' ? (
-                            <ChatWorkGroup
-                              items={row.items}
-                              running={running}
-                              enterFor={enterFor}
-                              interrupted={Boolean(thread.stoppedByBuilder)}
-                            />
-                          ) : (
-                            <ChatItemRow
-                              item={row.item}
-                              threadId={thread.id}
-                              enter={enterFor(row.item.id)}
-                              fileRestoreEnabled={fileRestoreAllowed(
-                                Boolean(thread.providerCanRewind),
-                                Boolean(thread.isolatedCheckout),
-                              )}
-                              onRewindTranscript={(messageId) => rewindFromMessage(messageId)}
-                              onRestoreFiles={async (messageId) => {
-                                const result = await restoreThreadCheckpoint(thread.id);
-                                if (!result?.restored || result.error) {
-                                  throw new Error(result?.error || 'File restore did not run.');
+                          <button
+                            type="button"
+                            className="secondary-button chat-transcript__earlier-btn"
+                            onClick={() => {
+                              if (!transcriptRef.current) {
+                                setVisibleLimit((prev) => prev + 200);
+                                return;
+                              }
+                              const prevScrollHeight = transcriptRef.current.scrollHeight;
+                              setVisibleLimit((prev) => prev + 200);
+                              requestAnimationFrame(() => {
+                                if (transcriptRef.current) {
+                                  const diff = transcriptRef.current.scrollHeight - prevScrollHeight;
+                                  transcriptRef.current.scrollTop += diff;
                                 }
-                                await rewindFromMessage(messageId);
-                              }}
-                              onEditUserMessage={(text) => {
-                                onChangePrompt(composeRewoundPrompt(prompt, text));
-                                const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
-                                el?.focus();
-                              }}
-                            />
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
+                              });
+                            }}
+                            style={{
+                              fontSize: '12px',
+                              padding: '6px 14px',
+                              borderRadius: '6px',
+                            }}
+                          >
+                            Show earlier messages ({displayedRows.length} of {transcriptRows.length} shown)
+                          </button>
+                        </div>
+                      )}
 
-                    {liveActivityRowIndex(displayedRows) < 0 || !running ? (
+                      {displayedRows.map((row) => {
+                        const rowKey = row.kind === 'work' ? row.id : row.item.id;
+                        return (
+                          <React.Fragment key={rowKey}>
+                            {row.kind !== 'work' && row.item.kind === 'assistant' && /<html[\s\S]*<\/html>/i.test(row.item.text) ? (
+                              <HtmlRenderFrame html={row.item.text.match(/<html[\s\S]*<\/html>/i)?.[0] ?? row.item.text} />
+                            ) : null}
+                            {row.kind === 'work' ? (
+                              <ChatWorkGroup
+                                items={row.items}
+                                running={running}
+                                enterFor={enterFor}
+                                interrupted={Boolean(thread.stoppedByBuilder)}
+                              />
+                            ) : (
+                              <ChatItemRow
+                                item={row.item}
+                                threadId={thread.id}
+                                enter={enterFor(row.item.id)}
+                                fileRestoreEnabled={fileRestoreAllowed(
+                                  Boolean(thread.providerCanRewind),
+                                  Boolean(thread.isolatedCheckout),
+                                )}
+                                onRewindTranscript={(messageId) => rewindFromMessage(messageId)}
+                                onRestoreFiles={async (messageId) => {
+                                  const result = await restoreThreadCheckpoint(thread.id);
+                                  if (!result?.restored || result.error) {
+                                    throw new Error(result?.error || 'File restore did not run.');
+                                  }
+                                  await rewindFromMessage(messageId);
+                                }}
+                                onEditUserMessage={(text) => {
+                                  onChangePrompt(composeRewoundPrompt(prompt, text));
+                                  const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+                                  el?.focus();
+                                }}
+                              />
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+
                       <TurnActivityStatus
                         running={running}
                         pendingApproval={thread.pendingApproval}
@@ -1016,17 +980,17 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                         interrupted={Boolean(thread.stoppedByBuilder) && !running}
                         durationSeconds={thread.usage?.durationSeconds}
                       />
-                    ) : null}
 
-                    {/* Quota Handoff Banner */}
-                    {thread.quotaHandoffOffer && (
-                      <QuotaHandoffBanner
-                        offer={thread.quotaHandoffOffer}
-                        threadId={thread.id}
-                      />
-                    )}
+                      {/* Quota Handoff Banner */}
+                      {thread.quotaHandoffOffer && (
+                        <QuotaHandoffBanner
+                          offer={thread.quotaHandoffOffer}
+                          threadId={thread.id}
+                        />
+                      )}
+                    </div>
                   </div>
-                </div>
+                </>
               )}
             </div>
 
@@ -1035,9 +999,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               <div className={agentName ? 'chat-draft-hero agent-chat-hero scroll-quiet' : 'chat-draft-hero scroll-quiet'}>
                 <h1>
                   {isVoiceActiveHere ? (
-                    voice.interimTranscript ? (
-                      `«${voice.interimTranscript}»`
-                    ) : voice.micMuted ? (
+                    voice.micMuted ? (
                       'Micrófono en silencio'
                     ) : (
                       'Te escucho'

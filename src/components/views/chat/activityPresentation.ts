@@ -13,6 +13,7 @@ export interface ActivityItem {
   serverName?: string | null;
   command?: string | null;
   filePath?: string | null;
+  query?: string | null;
   createdAtUnixMs?: number;
   durationSeconds?: number | null;
 }
@@ -105,26 +106,47 @@ function trimmed(value: string | null | undefined): string {
 
 export function activityIconKind(item: ActivityItem): ActivityIconKind {
   if (item.kind === 'reasoning') return 'reasoning';
-  if (item.kind === 'command' || item.toolKind === 'commandExecution') return 'shell';
-  if (item.serverName || item.toolKind === 'mcpToolCall') return 'mcp';
+  if (
+    item.kind === 'command' ||
+    item.toolKind === 'commandExecution' ||
+    item.toolKind === 'execute'
+  ) {
+    return 'shell';
+  }
+  if (
+    item.serverName ||
+    item.toolKind === 'mcpToolCall' ||
+    mcpToolLabel(item.serverName, trimmed(item.title) || trimmed(item.toolName)) !== null
+  ) {
+    return 'mcp';
+  }
   if (item.toolKind === 'planUpdate') return 'plan';
   const blob = `${item.title ?? ''} ${item.toolName ?? ''} ${item.detail ?? ''}`.toLowerCase();
   if (/(subagent|delegate)/.test(blob)) return 'subagent';
-  if (item.toolKind === 'webSearch') return 'web';
+  if (item.toolKind === 'webSearch' || item.toolKind === 'fetch') return 'web';
   if (/(browser|screenshot|navigate)/.test(blob)) return 'browser';
-  if (/(grep|ripgrep|code search|search_code|codesearch)/.test(blob)) return 'code-search';
+  if (
+    item.toolKind === 'search' ||
+    searchPatternLike(trimmed(item.title)) ||
+    /(^|\b)(grep|ripgrep|code search|search_code|codesearch|searched|search|find)(\b|$)/.test(blob)
+  ) {
+    return 'code-search';
+  }
   if (/(web search|web_search|\bweb\b|\bfetch\b|\burl\b)/.test(blob)) return 'web';
-  if (item.toolKind === 'fileChange' || /(edit|write|replace|patch|strreplace|apply_patch)/.test(blob)) {
+  if (
+    item.toolKind === 'fileChange' ||
+    item.toolKind === 'edit' ||
+    item.toolKind === 'delete' ||
+    item.toolKind === 'move' ||
+    /(edit|write|replace|patch|strreplace|apply_patch)/.test(blob)
+  ) {
     return 'edit';
   }
-  if (/(^|\b)(read|cat|view|inspect)(\b|$)/.test(blob)) return 'read';
-  if (/(bash|shell|terminal|\brun\b)/.test(blob)) return 'shell';
+  if (item.toolKind === 'read' || /(^|\b)(read|cat|view|inspect|list_dir)(\b|$)/.test(blob)) {
+    return 'read';
+  }
+  if (/(^|\b)(bash|shell|terminal|execute|executed|\brun\b)(\b|$)/.test(blob)) return 'shell';
   return 'tool';
-}
-
-function isActivity(item: ActivityItem): boolean {
-  if (item.kind === 'tool' || item.kind === 'command') return true;
-  return item.kind === 'reasoning' && trimmed(item.text).length > 0;
 }
 
 function isFailed(item: ActivityItem): boolean {
@@ -132,31 +154,35 @@ function isFailed(item: ActivityItem): boolean {
   return item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0;
 }
 
-/** Brain row only while the turn has no action yet, or beside a failed latest tool. */
-export function showThinkingPlaceholder(items: ActivityItem[], pendingApproval: boolean): boolean {
-  if (pendingApproval) return false;
-  const assistantVisible = items.some(
-    (item) => item.kind === 'assistant' && trimmed(item.text).length > 0,
-  );
-  if (assistantVisible) return false;
-  let latest: ActivityItem | undefined;
+/**
+ * What the running turn is doing right now, for the live caption. Null until the
+ * provider has actually sent something this turn, so nothing is claimed early.
+ */
+export function liveStageLabel(items: ActivityItem[]): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (item && isActivity(item)) {
-      latest = item;
-      break;
+    if (!item || item.kind === 'user') return null;
+    if (item.kind === 'assistant') {
+      if (item.streaming && trimmed(item.text).length > 0) return 'Writing';
+      continue;
     }
+    if (item.kind === 'reasoning') {
+      if (trimmed(item.text).length > 0) return 'Thinking';
+      continue;
+    }
+    if (item.kind === 'tool' || item.kind === 'command') return activityTraceLabel(item);
   }
-  if (!latest) return true;
-  if (latest.kind === 'reasoning') return false;
-  return isFailed(latest);
+  return null;
 }
 
 export function commandProgram(item: ActivityItem): string {
-  const raw = trimmed(item.command) || trimmed(item.title) || trimmed(item.text);
+  const raw = (trimmed(item.command) || trimmed(item.title) || trimmed(item.text))
+    .replace(/^(?:execute|executed|ran|running)\s+/i, '')
+    .replace(/^`+|`+$/g, '')
+    .trim();
   const first = raw.split(/\s+/)[0] ?? '';
   const base = first.split(/[/\\]/).pop() ?? first;
-  return base || 'command';
+  return base.replace(/^`+|`+$/g, '') || 'command';
 }
 
 export function commandStatusWord(item: ActivityItem): CommandStatusWord {
@@ -182,6 +208,41 @@ function oneLine(value: string | null | undefined): string {
 }
 
 const OUTPUT_STAT = /^(\d+)\s+lines?,\s+(\d+)\s+bytes$/i;
+
+/** Regex alternation or anchors where a tool name should be: a search pattern, not a name. */
+function searchPatternLike(value: string): boolean {
+  return value.includes('|') || value.startsWith('^');
+}
+
+/** `codegraph__codegraph_explore` reads `codegraph · explore`; null when it is not an MCP name. */
+function mcpToolLabel(serverName: string | null | undefined, title: string): string | null {
+  const match = /^(?:mcp__)?([a-z0-9-]+)__([a-z0-9_.-]+)$/i.exec(title);
+  if (!match && title.includes(' · ')) return title;
+  const server = trimmed(serverName) || match?.[1] || '';
+  if (!server) return null;
+  const rawTool = match ? match[2] : title;
+  if (!rawTool) return null;
+  const tool = rawTool
+    .replace(new RegExp(`^${server.replace(/[^a-z0-9]/gi, '_')}_`, 'i'), '')
+    .replace(/_/g, ' ')
+    .trim();
+  return tool ? `${server} · ${tool}` : null;
+}
+
+const LABEL_VERBS = /^(Read|Ran|Running|Failed|Declined|Stopped|Searched|Execute|Browser)\s+(.+)$/;
+
+/**
+ * Splits a trace label into a leading verb and its target so rows can show the
+ * target in a quieter monospace style. Labels without a known verb stay whole.
+ */
+export function splitTraceLabel(label: string): { verb: string | null; target: string } {
+  const server = /^([a-z0-9-]+) · (.+)$/i.exec(label);
+  if (server) return { verb: server[1], target: server[2] };
+  const match = LABEL_VERBS.exec(label);
+  if (!match) return { verb: null, target: label };
+  const target = match[2].replace(/^`(.*)`$/, '$1');
+  return { verb: match[1], target };
+}
 
 function genericAction(value: string): boolean {
   const text = value.trim().toLowerCase().replace(/_/g, ' ');
@@ -384,7 +445,14 @@ export function activityTraceLabel(item: ActivityItem): string {
   }
 
   const kind = activityIconKind(item);
-  if (kind === 'shell' || item.kind === 'command') return commandStatusLabel(item);
+  if (kind === 'shell' || item.kind === 'command') {
+    const program = commandProgram(item);
+    // A "program" made of regex syntax is a search pattern, not something that was run.
+    if (searchPatternLike(program)) {
+      return `Searched ${oneLine(item.command) || oneLine(item.title) || oneLine(item.text)}`;
+    }
+    return commandStatusLabel(item);
+  }
 
   const storedPath = traceFilePath(item);
   const plain = plainTarget(item.detail);
@@ -398,15 +466,26 @@ export function activityTraceLabel(item: ActivityItem): string {
     return path ? `Read ${displayPath(path)}` : 'Read file';
   }
   if (kind === 'edit') {
-    const path = storedPath || plain;
+    const fromTitle = oneLine(item.title).replace(/^(?:changed|edit|edited|write|wrote)\s+/i, '');
+    const path = storedPath || plain || (fromTitle && !genericAction(fromTitle) ? fromTitle : '');
     return path ? displayPath(path) : 'Changed files';
   }
   if (kind === 'web') {
-    const query = hint || plain || (genericAction(oneLine(item.title)) ? '' : oneLine(item.title));
+    const query = (
+      trimmed(item.query) ||
+      hint ||
+      plain ||
+      (genericAction(oneLine(item.title)) ? '' : oneLine(item.title))
+    ).replace(/^searched\s+/i, '');
     return query ? `Searched ${query}` : 'Searched the web';
   }
   if (kind === 'code-search') {
-    const query = hint || plain || (genericAction(oneLine(item.title)) ? '' : oneLine(item.title));
+    const query = (
+      trimmed(item.query) ||
+      hint ||
+      plain ||
+      (genericAction(oneLine(item.title)) ? '' : oneLine(item.title))
+    ).replace(/^searched\s+/i, '');
     return query ? `Searched ${query}` : 'Searched files';
   }
   if (kind === 'browser') {
@@ -415,6 +494,9 @@ export function activityTraceLabel(item: ActivityItem): string {
   }
 
   const title = oneLine(item.title) || oneLine(item.toolName);
+  const mcp = mcpToolLabel(item.serverName, title);
+  if (mcp) return hint && !mcp.includes(hint) ? `${mcp} ${hint}` : mcp;
+  if (searchPatternLike(title)) return `Searched ${title}`;
   if (title && hint && !title.includes(hint)) return `${title} ${hint}`;
   if (title && storedPath && !title.includes(displayPath(storedPath))) {
     return `${title} ${displayPath(storedPath)}`;

@@ -64,6 +64,7 @@ export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
 ];
 
 export interface ExtendedChatThread extends ChatThread {
+  hasContent?: boolean;
   pendingApproval?: ApprovalRequest | null;
   effort?: string | null;
   agent?: string | null;

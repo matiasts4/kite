@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
-import { ActivityGlyph } from './activityGlyph';
 import {
   approvalWaitLabel,
   interruptedTurnLine,
-  showThinkingPlaceholder,
+  liveStageLabel,
   turnStartUnixMs,
   workingLine,
   type ActivityItem,
@@ -12,6 +11,24 @@ import {
 export interface TurnApproval {
   title?: string | null;
   toolName?: string | null;
+}
+
+export function WorkingStatus({ line, stage = null }: { line: string; stage?: string | null }) {
+  const splitAt = line.indexOf(' · ');
+  const word = splitAt === -1 ? line : line.slice(0, splitAt);
+  const clock = splitAt === -1 ? null : line.slice(splitAt + 3);
+  return (
+    <span className="chat-working-caption">
+      <i className="chat-working-pulse" aria-hidden="true" />
+      <span className="chat-working-live">{word}</span>
+      {clock ? <span className="chat-working-caption__clock"> · {clock}</span> : null}
+      {stage ? (
+        <span key={stage} className="chat-working-caption__stage" title={stage}>
+          {stage}
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 export function TurnActivityStatus({
@@ -54,18 +71,11 @@ export function TurnActivityStatus({
 
   if (!running) return null;
 
-  const showBrain = showThinkingPlaceholder(items, false);
   return (
     <div className="chat-turn-activity" role="status">
-      <p className="chat-turn-activity__working">{workingLine(turnStartUnixMs(items), now)}</p>
-      {showBrain ? (
-        <div className="chat-turn-activity__thinking">
-          <span aria-hidden="true" className="chat-work-entry__glyph">
-            <ActivityGlyph item={{ kind: 'reasoning' }} size={16} />
-          </span>
-          <span className="chat-activity-shine">Thinking</span>
-        </div>
-      ) : null}
+      <p className="chat-turn-activity__working">
+        <WorkingStatus line={workingLine(turnStartUnixMs(items), now)} stage={liveStageLabel(items)} />
+      </p>
     </div>
   );
 }

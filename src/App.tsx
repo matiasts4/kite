@@ -24,6 +24,7 @@ import { Toaster, registerToastNavigator } from './lib/toast';
 import { ResumeHost } from './components/modals/ResumeHost';
 import { PromptProjectileOverlay } from './components/code/PromptProjectileOverlay';
 import { useGlobalShortcuts } from './lib/shortcuts/useGlobalShortcuts';
+import { requestNewThread, resolveHeldThreadSelection } from './lib/newThreadRequest';
 import { getPlatform } from './lib/shortcuts/shortcutsRegistry';
 import { CommandPaletteModal } from './components/modals/CommandPaletteModal';
 import type { Workspace, AgentProfile, BootstrapResponse } from './types';
@@ -38,7 +39,6 @@ import {
   setAgentPinned,
   moveAgent,
   deleteAgentProfile,
-  createGeneralChat,
   listChatSummaries,
   renameChatThread,
   setChatThreadPinned,
@@ -367,7 +367,7 @@ export const App: React.FC = () => {
       const list = await listChatSummaries();
       setThreads(list);
       if (list.length > 0) {
-        setSelectedThreadId((prev) => (prev && list.some((t) => t.id === prev) ? prev : list[0].id));
+        setSelectedThreadId((prev) => resolveHeldThreadSelection(prev, list.map((t) => t.id)));
       }
       try {
         const archived = await listArchivedChats(workMode === 'agent' ? selectedAgentId : null);
@@ -811,42 +811,13 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('kite:threads-changed', handleThreadsChanged);
   }, [loadThreads]);
 
-  const handleNewChatInWorkspace = useCallback(
-    async (targetWorkspaceId: string | null) => {
-      // Find existing draft thread with no content for this workspace
-      const existingDraft = threads.find(
-        (t) =>
-          (t.workspaceId ?? null) === (targetWorkspaceId ?? null) &&
-          (!t.hasContent &&
-            (t.status === 'idle' ||
-              (t as any).status === 'draft' ||
-              !t.title ||
-              t.title.toLowerCase().includes('draft') ||
-              t.title === 'New Chat'))
-      );
-      if (existingDraft) {
-        setSelectedThreadId(existingDraft.id);
-        setSelectedWorkspaceId(targetWorkspaceId);
-        setWorkMode('chat');
-        setSettingsOpen(false);
-        setRoutinesOpen(false);
-        return;
-      }
-
-      try {
-        const created = await createGeneralChat('claude', targetWorkspaceId);
-        if (created?.id) {
-          await loadThreads();
-          setSelectedThreadId(created.id);
-          setSelectedWorkspaceId(targetWorkspaceId);
-        }
-      } catch (_) {}
-      setWorkMode('chat');
-      setSettingsOpen(false);
-      setRoutinesOpen(false);
-    },
-    [threads, loadThreads]
-  );
+  const handleNewChatInWorkspace = useCallback((targetWorkspaceId: string | null) => {
+    setHasOpenedChat(true);
+    setWorkMode('chat');
+    setSettingsOpen(false);
+    setRoutinesOpen(false);
+    requestNewThread(targetWorkspaceId);
+  }, []);
 
   const handleToggleAppearance = () => {
     const next = appearance === 'dark' ? 'light' : 'dark';
@@ -1011,6 +982,7 @@ export const App: React.FC = () => {
       case 'chat':
         return (
           <ChatView
+            ownsNewThreadRequests
             workspaceId={selectedWorkspaceId}
             threadId={selectedThreadId}
             agents={agents}
@@ -1362,6 +1334,7 @@ export const App: React.FC = () => {
                 <div className={`mode-layer${workMode === 'chat' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
                   {hasOpenedChat && (
                     <ChatView
+                      ownsNewThreadRequests
                       workspaceId={selectedWorkspaceId}
                       threadId={selectedThreadId}
                       agents={agents}

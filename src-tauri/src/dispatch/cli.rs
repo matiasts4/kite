@@ -33,16 +33,18 @@ Commands:
   kite dispatch ls
   kite dispatch programs
   kite dispatch run <program> \"<task>\"
+  kite dispatch run --via thread --provider <provider> [--model <model>] [--effort <level>] [--role \"<title>\"] [--workspace inherit|share|branch] [--wait] [--timeout-ms <ms>] \"<task>\"
   kite dispatch run --via terminal --engine <engine> --name <alias> [--parent <address>] [--file <path>] [--pane] [--hidden]
   kite dispatch run --role <name> --name <alias> [--file <path>]
   kite dispatch send <address> \"<text>\" [--file <path>] [--if ready] [--force]
-  kite dispatch wait <address> [--until idle,done,blocked] [--timeout <ms>] [--children all|any]
-  kite dispatch read <address> [--lines 80]
+  kite dispatch wait [<address>] [--until idle,done,blocked] [--timeout <ms>] [--children all|any]
+  kite dispatch read <address> [--lines 80] [--last]
   kite dispatch report --to <address> --body \"<text>\"
   kite dispatch kill <address>
   kite dispatch interrupt <address>
   kite dispatch keys <address> <key...>
   kite dispatch attach <address>
+  kite dispatch swarm <title|add|post|read|wait|status|model|kill|channel> ...
   kite dispatch skill
 
 Inside a Kite terminal the command is `kite` on PATH.
@@ -50,13 +52,35 @@ Inside a Kite terminal the command is `kite` on PATH.
 An agent does not get a pane unless --pane. A person gets a pane unless --hidden. --hidden wins.
 `ls` lines are `address`, then `alias:<name>` when set, then the engine when the run recorded one, then the state.
 When `--parent` is omitted and KITE_ADDRESS is `session:`, `thread:`, or `alias:`, that address is the parent. The words human and agent are not parents.
-`read` returns the screen text. It does not type.
-`wait` blocks until the destination matches or the timeout elapses. The default timeout is 30000 ms. A timeout exits 1 with error timeout.
+`read` returns the screen text or child thread output (`--last` extracts the final assistant response). It does not type.
+`wait` blocks until the destination (or `--children all|any`) matches or the timeout elapses. The default timeout is 30000 ms. A timeout exits 1 with error timeout.
 `interrupt` writes Ctrl+C and does not press Enter.
 `keys` writes the named keys and presses Enter only when the key is enter.
 `kill` ends that session and the children that do not outlive it.
 `attach` asks the desktop to show that session.
 `kill`, `interrupt`, `keys`, and `attach` work while the destination is working or blocked.
+
+Cross-provider subagents (`--via thread`):
+- Inside Thread Mode (`KITE_ADDRESS=thread:<id>`), `--via` defaults to `thread` (or pass `--via thread` explicitly). Keep the main orchestrator on a heavy reasoning model and delegate focused tasks to lightweight fast workers across providers (`--provider`, `--model`, optional `--effort minimal|low|medium|high|xhigh|max|ultra`).
+- Single blocking call (`--wait` prints the child's final reply and `[subagent_id: thread:<id>]`):
+  kite dispatch run --via thread --provider grok --model grok-3-mini --role \"Fast Executor\" --workspace share --wait \"<task>\"
+- Parallel fan-out: launch multiple child threads without `--wait` (use `--workspace share` or `branch` for isolated git worktrees when editing files concurrently; `inherit` shares the workspace), then wait and inspect:
+  kite dispatch wait thread:<id>   # or: kite dispatch wait --children all
+  kite dispatch read thread:<id> --last
+
+Cross-provider swarm (`kite dispatch swarm`):
+- Coordinate multi-agent teams across providers/models on a monotonic `#seq` board:
+  kite dispatch swarm title \"<title>\"
+  kite dispatch swarm add --name <role> [--provider <provider>] [--model <model>] [--effort <level>] [--workspace inherit|share|branch] [--channels <ch1,ch2>] [--fork <member|coordinator>] [--role \"<title>\"] --brief \"<assignment>\"
+  kite dispatch swarm post [--channel <channel>] \"<message>\"
+  kite dispatch swarm read [--since <seq>] [--channel <channel|*>]
+  kite dispatch swarm wait [--since <seq>] [--mentions-only] [--timeout-ms <ms>]
+  kite dispatch swarm status
+  kite dispatch swarm model --name <role> [--provider <provider>] --model <new_model> [--effort <level>]
+  kite dispatch swarm kill <role>
+  kite dispatch swarm channel <create|subscribe|unsubscribe|archive|list> [--channel <name>] [--topic \"<text>\"] [--name <role>]
+- Reactive `@mention` wakeup: `waiting` workers sleep at zero token cost and wake only when a post mentions `@<role>`, `@<prefix>`, `@#<channel>`, or `@all` (e.g. `kite dispatch swarm post \"@verifier check #2\"`). Park without polling using `kite dispatch swarm wait --since <seq>`.
+- Quota failover: swap a stalled or rate-limited worker's provider/model while keeping its conversation history intact via `kite dispatch swarm model --name <role> --provider <provider> --model <new_model>`.
 
 Envelope:
 [kite from=\"<alias-or-address>\"]
@@ -80,7 +104,7 @@ fn compose_skill() -> String {
         "\
 ---
 name: kite-dispatch
-description: \"Trigger: kite dispatch, spawn agent, KITE_DISPATCH. Use the Kite Dispatch CLI to start, send, wait, and read other agents.\"
+description: \"Trigger: kite dispatch, spawn agent, subagent, swarm, KITE_DISPATCH. Use the Kite Dispatch CLI to run cross-provider subagents (--via thread) and multi-agent swarms (kite dispatch swarm), send, wait, and read other agents.\"
 ---
 
 {manual}"

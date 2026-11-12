@@ -869,3 +869,48 @@ fn parse_and_execute_swarm_commands_covers_all_subcommands() {
     }
     assert_eq!(service.port_mut().swarm_cmds.len(), 9);
 }
+
+#[test]
+fn manual_and_skill_document_cross_provider_subagents_and_swarm() {
+    let manual = manual_text();
+    let skill = skill_text();
+
+    assert!(skill.contains("cross-provider subagent"));
+    assert!(skill.contains("swarm"));
+    assert_eq!(strip_skill_frontmatter(skill), manual);
+
+    for required in [
+        "--via thread",
+        "--provider",
+        "--model",
+        "--effort",
+        "--role",
+        "--workspace",
+        "inherit|share|branch",
+        "--wait",
+        "--last",
+        "--children all",
+        "kite dispatch run --via thread --provider",
+        "kite dispatch read",
+        "kite dispatch swarm title",
+        "kite dispatch swarm add",
+        "kite dispatch swarm post",
+        "kite dispatch swarm read",
+        "kite dispatch swarm wait",
+        "kite dispatch swarm status",
+        "kite dispatch swarm model",
+        "kite dispatch swarm kill",
+        "kite dispatch swarm channel",
+        "@mention",
+        "zero token cost",
+    ] {
+        assert!(
+            manual.contains(required),
+            "manual missing `{required}`"
+        );
+        assert!(
+            skill.contains(required),
+            "skill missing `{required}`"
+        );
+    }
+}

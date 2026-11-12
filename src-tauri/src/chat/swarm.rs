@@ -818,6 +818,7 @@ pub fn execute_swarm_action(
                     }
                 }
                 let prev_provider = state.members[idx].provider.clone();
+                let prev_state = state.members[idx].state.clone();
                 if let Some(ref p) = provider {
                     state.members[idx].provider = Some(p.clone());
                 }
@@ -847,11 +848,45 @@ pub fn execute_swarm_action(
                             touch(child);
                         }
                     }
+                    crate::chat::subagents::sync_child_thread_to_parent(cid);
+                    if prev_state == "stopped" {
+                        let unread: Vec<SwarmBoardPost> = state
+                            .posts
+                            .iter()
+                            .filter(|p| {
+                                p.seq > state.members[idx].last_read_seq
+                                    && member_matches_post(&state.members[idx], p)
+                            })
+                            .cloned()
+                            .collect();
+                        if let Some(max_seq) = unread.iter().map(|p| p.seq).max() {
+                            state.members[idx].last_read_seq = max_seq;
+                        }
+                        state.members[idx].pending_wake = false;
+                        state.members[idx].state = "working".to_string();
+                        let provider_label = new_provider.as_deref().unwrap_or("inherit");
+                        let unread_block = if unread.is_empty() {
+                            String::new()
+                        } else {
+                            let refs: Vec<&SwarmBoardPost> = unread.iter().collect();
+                            format!("\n\nUnread Board Posts:\n{}", format_posts(&refs))
+                        };
+                        let resume_prompt = format!(
+                            "[Swarm Failover Resume] Your model was switched to {model} ({provider_label}). Keep your existing conversation context, resume any incomplete work on Swarm `{}`, and post updates via `kite dispatch swarm post \"@coordinator ...\"`.{unread_block}",
+                            state.swarm_id
+                        );
+                        pending_launches.push((
+                            state.members[idx].name.clone(),
+                            cid.clone(),
+                            resume_prompt,
+                        ));
+                    }
                 }
                 save_and_broadcast_swarm(&coord_tid, &path, &state);
                 Ok(format!(
-                    "switched @{name} -> provider={} model={model}",
-                    new_provider.as_deref().unwrap_or("inherit")
+                    "switched @{name} -> provider={} model={model}{}",
+                    new_provider.as_deref().unwrap_or("inherit"),
+                    if prev_state == "stopped" { " (resumed)" } else { "" }
                 ))
             }
             SwarmCommand::Kill { name } => {
@@ -869,8 +904,9 @@ pub fn execute_swarm_action(
                 save_and_broadcast_swarm(&coord_tid, &path, &state);
 
                 if let Some(ref cid) = child_tid {
-                    crate::chat::cancel_turn(cid);
                     crate::dispatch_wire::protocol::mark_thread_killed(cid);
+                    crate::chat::cancel_turn(cid);
+                    crate::chat::subagents::sync_child_thread_to_parent(cid);
                     try_remove_clean_worktree(cid);
                 }
                 Ok(format!("killed @{name}"))
@@ -1545,5 +1581,92 @@ mod tests {
         let output = wait_task.await.unwrap().unwrap();
         assert!(output.contains("[done] finished audit"), "output={output}");
         crate::chat::threads::remove_thread(&worker_tid);
+    }
+
+    #[test]
+    fn stopped_worker_model_switch_resumes_working_and_keeps_history() {
+        let coord_id = format!("swarm-failover-{}", uuid::Uuid::new_v4().simple());
+        let scratch = std::env::temp_dir().join(format!(
+            "kite-swarm-failover-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&scratch).unwrap();
+        let _guard = CleanupSwarmThread(coord_id.clone(), scratch.clone());
+
+        let mut coord = blank_thread(&coord_id, None, "Coordinator", "antigravity", None);
+        coord["workingDirectory"] = json!(scratch.to_string_lossy().to_string());
+        threads().lock().unwrap().push(coord);
+
+        let coord_addr = format!("thread:{coord_id}");
+        let cwd_str = scratch.to_string_lossy().to_string();
+        let launches = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let launches_ref = Arc::clone(&launches);
+        let launcher_fn = move |cid: &str, prompt: &str| -> Result<(), String> {
+            launches_ref
+                .lock()
+                .unwrap()
+                .push((cid.to_string(), prompt.to_string()));
+            Ok(())
+        };
+
+        execute_swarm_action(
+            &SwarmCommand::Add {
+                name: "quota-worker".into(),
+                provider: Some("grok".into()),
+                model: Some("grok-3-mini".into()),
+                effort: None,
+                workspace: Some("inherit".into()),
+                channels: vec!["main".into()],
+                fork: None,
+                role: Some("Quota Worker".into()),
+                brief: "Audit auth".into(),
+            },
+            &coord_addr,
+            Some(&cwd_str),
+            Some(&launcher_fn),
+        )
+        .unwrap();
+
+        let worker_cid = {
+            let (state, _) = load_swarm_state(&coord_id, None);
+            state.members[0].child_thread_id.clone().unwrap()
+        };
+        {
+            let mut all = threads().lock().unwrap();
+            let w = all.iter_mut().find(|t| t["id"] == worker_cid).unwrap();
+            w["items"] = json!([
+                { "id": "u1", "kind": "user", "text": "Audit auth" },
+                { "id": "a1", "kind": "assistant", "text": "Hit rate limit halfway" }
+            ]);
+        }
+        // Settle with ok=false -> stopped
+        on_worker_turn_settled_with_launcher(&worker_cid, false, Some(&launcher_fn));
+
+        let res = execute_swarm_action(
+            &SwarmCommand::Model {
+                name: "quota-worker".into(),
+                provider: Some("gemini".into()),
+                model: "gemini-2.5-flash".into(),
+                effort: Some("medium".into()),
+            },
+            &coord_addr,
+            Some(&cwd_str),
+            Some(&launcher_fn),
+        )
+        .unwrap();
+        assert!(res.contains("(resumed)"), "res={res}");
+
+        let (state, _) = load_swarm_state(&coord_id, Some(&cwd_str));
+        assert_eq!(state.members[0].state, "working");
+        assert_eq!(state.members[0].provider.as_deref(), Some("gemini"));
+        assert_eq!(state.members[0].model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(launches.lock().unwrap().len(), 2);
+        assert!(launches.lock().unwrap()[1].1.contains("Swarm Failover Resume"));
+
+        let all = threads().lock().unwrap();
+        let w = all.iter().find(|t| t["id"] == worker_cid).unwrap();
+        assert_eq!(w["items"].as_array().unwrap().len(), 2);
+        drop(all);
+        crate::chat::threads::remove_thread(&worker_cid);
     }
 }

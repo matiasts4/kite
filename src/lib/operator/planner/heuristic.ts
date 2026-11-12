@@ -5,12 +5,7 @@
 import type {
   OperatorPlan,
   Engine,
-  LaunchThreadAction,
-  HandoffToAgentAction,
-  ManagePaneLayoutAction,
-  PaneLayoutOperation,
   SwitchWorkspaceAction,
-  WorkspaceViewMode,
 } from '../contract';
 import { AGENT_CODENAMES } from '../../agentNames';
 
@@ -35,240 +30,33 @@ export interface LegacyOperatorIntent {
   cli?: string;
 }
 
-export function detectEngineFromText(text: string): Engine | undefined {
-  const lower = text.toLowerCase();
+import {
+  detectEngineFromText,
+  OPEN_VERB_SOURCE,
+  CLOSE_TARGET_RE,
+  OPEN_VERB_RE,
+  referencesNonTerminalUiObject,
+  isNegatedTerminalImperative,
+  hasSubordinateCloseClause,
+  detectEngineForOpenClause,
+  SHELL_COMMAND_HEAD_RE,
+  splitCompoundPrompts,
+  parseNumberWord,
+  extractTerminalIndices,
+  normalizeInputForIntent,
+} from './heuristicPatterns';
 
-  // Antigravity (Anti-Gravity, Anti Gravity, The Gravity, De Gravity, Antigravedad, agy)
-  if (/\b(?:(?:anti|the|de|te)[- ]?gravit(?:y|i|ad)|anti[- ]?gravedad|antigravity|antigravedad|agy)\b/i.test(lower)) {
-    return 'antigravity';
-  }
-  // Claude (Claude Code, Anthropic)
-  if (/\b(?:claude(?:[- ]code)?|clod|anthropic|antropic)\b/i.test(lower)) {
-    return 'claude';
-  }
-  // Codex (OpenAI Codex, Code-X)
-  if (/\b(?:codex|code[- ]x|openai(?:\s+codex)?)\b/i.test(lower)) {
-    return 'codex';
-  }
-  // OpenCode (Open-Code)
-  if (/\b(?:open[- ]code|opencode)\b/i.test(lower)) {
-    return 'opencode';
-  }
-  // Grok (xAI, Groc)
-  if (/\b(?:grok|groc|xai|x\.ai)\b/i.test(lower)) {
-    return 'grok';
-  }
-  // PowerShell / Shell / Terminal
-  if (/\b(?:powershell|power[- ]shell|bash|cmd)\b/i.test(lower)) {
-    return 'powershell';
-  }
-
-  return undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Shared verb sources & safety guards (S3 / S4)
-// ---------------------------------------------------------------------------
-
-const CLOSE_VERB_SOURCE =
-  'cierra|cerrar|cierre|cierres|cierren|ci[eé]rral[ao]s?|ci[eé]rrenl[ao]s?|ci[eé]rrel[ao]s?|ci[eé]rrame|cerr[aá]l[ao]s?|sierra|serrar|sierre|sierres|sierren|close|kill|mata|matar|mates|maten|m[aá]tal[ao]s?|m[aá]tenl[ao]s?|termina|terminar|termines|terminen|term[ií]nal[ao]s?|elimina|eliminar|elimines|eliminen|elim[ií]nal[ao]s?|apaga|apagar|apagues|apaguen|ap[aá]gal[ao]s?|borra|borrar|borres|borren';
-
-const OPEN_VERB_SOURCE =
-  'abre|abrir|abriera|abrieras|abriese|abriesen|abrir[ií]a|abrime|ábreme|abrí|abran|abras|crea|crear|crees|creas|levanta|levantar|levantes|inicia|iniciar|inicies|pon|poner|pongas|open|spawn|lanza|lanzar|lances|lanzame|lánzame';
-
-const CLOSE_VERB_RE = new RegExp(`(?<![a-záéíóúñ])(?:${CLOSE_VERB_SOURCE})(?![a-záéíóúñ])`, 'i');
-
-const CLOSE_TARGET_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${CLOSE_VERB_SOURCE})(?![a-záéíóúñ])(?:\\s+(?:a|al|el|la|los|las|the))?(?:\\s+(.+))?$`,
-  'i'
-);
-
-const OPEN_VERB_RE = new RegExp(`(?<![a-záéíóúñ])(?:${OPEN_VERB_SOURCE})(?![a-záéíóúñ])`, 'i');
-
-const AGENT_CODENAME_WORD_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${AGENT_CODENAMES.join('|')})(?![a-záéíóúñ])`,
-  'i'
-);
-
-// Nouns that address a different UI surface than an agent terminal.
-const NON_TERMINAL_UI_NOUN_RE =
-  /(?<![a-záéíóúñ])(?:pesta[ñn]as?|tabs?|panel(?:es)?|sidebar|barra\s+lateral|men[uú]s?|archivos?|editores?|navegador|chats?|hilos?|threads?|notas?|documentos?)(?![a-záéíóúñ])/i;
-
-// Nouns that unambiguously address a terminal pane.
-const COMPATIBLE_TERMINAL_OBJECT_RE =
-  /(?<![a-záéíóúñ])(?:terminal|terminales|agente|agentes|consola|consolas|sesi[oó]n|sesiones|pane|panes)(?![a-záéíóúñ])/i;
-
-/**
- * True when a phrase names an object (tab, panel, sidebar…) that is not an agent
- * terminal, so a trailing number must never be resolved to terminal #N.
- */
-export function referencesNonTerminalUiObject(phrase: string): boolean {
-  if (!phrase) return false;
-  if (COMPATIBLE_TERMINAL_OBJECT_RE.test(phrase)) return false;
-  if (detectEngineFromText(phrase)) return false;
-  if (AGENT_CODENAME_WORD_RE.test(phrase)) return false;
-  return NON_TERMINAL_UI_NOUN_RE.test(phrase);
-}
-
-/**
- * True when the utterance forbids the action instead of requesting it
- * ("no cierres las terminales", "nunca abras dos terminales", "ninguna terminal").
- */
-export function isNegatedTerminalImperative(text: string): boolean {
-  if (!text) return false;
-  const lower = text.toLowerCase();
-  if (
-    /(?<![a-záéíóúñ])(?:no|nunca|jam[aá]s)(?:\s+(?:me|te|se|nos|le|les|lo|la|los|las))?\s+(?:cierr\w*|cerr\w*|sierr\w*|abras?|abris?|abr[aá]s?|lances?|lanc[eé]s?|crees?|cre[eé]s?|mates?|mat[eé]s?|detengas?|termines?|apagues?|elimines?|borres?|pares?|dejes?)(?![a-záéíóúñ])/i.test(
-      lower
-    )
-  ) {
-    return true;
-  }
-  return /\bning[uú]n[ao]s?\s+(?:terminal|terminales|consola|consolas|agente|agentes|pane|panes)\b/i.test(
-    lower
-  );
-}
-
-// Clause introducers that turn a following verb into a purpose/relative clause
-// ("abre una terminal para cerrar los issues").
-const SUBORDINATE_INTRO_RE =
-  /(?:\bpara|\bque|\bde|\bal|\ba\b|\bencargad[oa]\s+de|\by\s+arreglar\s+el\s+[\wáéíóúñ]+\s+de)\s*(?:(?:el|la|los|las|un|una)\s+)?(?:[\wáéíóúñ]+\s+){0,1}$/i;
-
-/**
- * True when a close verb only appears inside a subordinate purpose clause that
- * follows the main open/create verb.
- */
-export function hasSubordinateCloseClause(text: string): boolean {
-  if (!text) return false;
-  const lower = text.toLowerCase();
-  const openMatch = OPEN_VERB_RE.exec(lower);
-  const closeMatch = CLOSE_VERB_RE.exec(lower);
-  if (!openMatch || openMatch.index === undefined) return false;
-  if (!closeMatch || closeMatch.index === undefined) return false;
-  if (closeMatch.index <= openMatch.index) return false;
-  return SUBORDINATE_INTRO_RE.test(lower.slice(0, closeMatch.index));
-}
-
-// Clause boundaries where the open/target phrase ends and the task body begins.
-const OPEN_CLAUSE_BOUNDARY_RE = /(?:\bpara\b|\bque\b|\by\s+ejecuta\b|\by\s+ejecutar\b|\by\s+corre\b|\by\s+correr\b|\by\s+lanza\b|:|,)/;
-
-/**
- * Detects the engine from the open/agent clause only (S3), so words inside a task
- * prompt ("para revisar el bug de claude") can never hijack the engine choice.
- */
-export function detectEngineForOpenClause(text: string): Engine | undefined {
-  if (!text) return undefined;
-  const lower = text.toLowerCase();
-  const openMatch = OPEN_VERB_RE.exec(lower);
-  const start = openMatch && openMatch.index !== undefined ? openMatch.index : 0;
-  const rest = lower.slice(start);
-  const boundary = rest.search(OPEN_CLAUSE_BOUNDARY_RE);
-  const openClause = boundary > 0 ? rest.slice(0, boundary) : rest;
-
-  const direct = detectEngineFromText(openClause);
-  if (direct) return direct;
-
-  // Agent-application clauses: "en ellas abrirá Grok", "en cada una corre claude".
-  const agentClause = lower.match(
-    /(?:\ben\s+ellas|\ben\s+ellos|\ben\s+cada\s+una|\ben\s+ambas|\ben\s+todos|\ben\s+las\s+dos)\b(.+?)(?:\by\b|\bque\b|,|$)/i
-  );
-  if (agentClause) {
-    return detectEngineFromText(agentClause[1]);
-  }
-
-  return undefined;
-}
-
-// Command heads that make a "y ejecuta X" tail a shell command rather than prose.
-const SHELL_COMMAND_HEAD_RE =
-  /^(?:git|npm|pnpm|yarn|npx|node|bun|deno|python|py|pip|cargo|rustc|go|dotnet|mvn|gradle|make|tsc|ls|dir|cd|cat|type|echo|curl|wget|mkdir|rm|cp|mv|docker|kubectl|pwsh|powershell|bash|sh|gh|code|vi|vim|nvim)\b/i;
-
-export function splitCompoundPrompts(text: string): string[] {
-  if (!text) return [];
-
-  // Match: "[prefix] uno para [Task 1] ... [y] el otro agente [enfocado en] [Task 2]"
-  const pattern1 = /(?:uno|el primero|el primer agente|la primera terminal)\s*(?:para|que|enfocado en)?\s*(.+?)\s*(?:[.,;]+|\by\b)\s*(?:el otro agente|el segundo agente|el otro|la otra terminal|la segunda terminal|el segundo)\s*(?:tiene que estar enfocado en|enfocado en|para|que|se encargue de|haga|sea)?\s*(.+)$/i;
-  const match1 = text.match(pattern1);
-  if (match1 && match1[1] && match1[2]) {
-    const t1 = match1[1].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    const t2 = match1[2].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    if (t1 && t2) return [t1, t2];
-  }
-
-  // Match: "[Task 1] ... [.,;] [y] el otro agente [enfocado en] [Task 2]"
-  const pattern2 = /(.+?)\s*(?:[.,;]+|\by\b)\s*(?:el otro agente|el segundo agente|el otro|la otra terminal|la segunda terminal)\s*(?:tiene que estar enfocado en|enfocado en|para|que|se encargue de|haga|sea)?\s*(.+)$/i;
-  const match2 = text.match(pattern2);
-  if (match2 && match2[1] && match2[2]) {
-    const t1 = match2[1].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    const t2 = match2[2].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    if (t1 && t2) return [t1, t2];
-  }
-
-  return [text.trim()];
-}
-
-export function parseNumberWord(word: string): number {
-  const map: Record<string, number> = {
-    un: 1,
-    una: 1,
-    uno: 1,
-    dos: 2,
-    tres: 3,
-    cuatro: 4,
-    cinco: 5,
-    seis: 6,
-    siete: 7,
-    ocho: 8,
-    nueve: 9,
-    diez: 10,
-    one: 1,
-    two: 2,
-    three: 3,
-    four: 4,
-    five: 5,
-    six: 6,
-    seven: 7,
-    eight: 8,
-    nine: 9,
-    ten: 10,
-  };
-  const parsed = parseInt(word, 10);
-  if (!Number.isNaN(parsed)) return parsed;
-  return map[word.toLowerCase()] || 1;
-}
-
-export function extractTerminalIndices(text: string): number[] {
-  if (!text) return [];
-  // S4: a trailing number only addresses a terminal pane when the phrase is not
-  // about another UI object ("cierra la pestaña 2" is not agent terminal #2).
-  if (referencesNonTerminalUiObject(text)) return [];
-  // Matches tokens like: "terminal 1", "terminales 1 y 2", "la terminal uno y dos", "la 1 y la 2", "1 y 2"
-  const regex = /(?<![a-záéíóúñ])(?:terminal(?:es)?\s*)?(?:(?:la|el)\s*)?(\d+|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|one|two|three|four|five|six|seven|eight|nine|ten)(?![a-záéíóúñ])/gi;
-  const matches = Array.from(text.matchAll(regex));
-  if (matches.length === 0) return [];
-
-  const indices: number[] = [];
-  for (const m of matches) {
-    const val = parseNumberWord(m[1]);
-    if (val > 0 && !indices.includes(val)) {
-      indices.push(val);
-    }
-  }
-  return indices;
-}
-
-export function normalizeInputForIntent(raw: string): string {
-  if (!raw) return '';
-  let clean = raw.trim();
-
-  // Normalize STT pauses e.g. "dos. Terminales" or "1. Terminal"
-  clean = clean.replace(
-    /\b(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|\d+)\s*\.\s*(terminal|terminales|agente|agentes|consola|consolas|ventana|ventanas)\b/gi,
-    '$1 $2'
-  );
-
-  return clean;
-}
+export {
+  detectEngineFromText,
+  referencesNonTerminalUiObject,
+  isNegatedTerminalImperative,
+  hasSubordinateCloseClause,
+  detectEngineForOpenClause,
+  splitCompoundPrompts,
+  parseNumberWord,
+  extractTerminalIndices,
+  normalizeInputForIntent,
+};
 
 export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   const text = normalizeInputForIntent(rawText);
@@ -736,393 +524,29 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   return { kind: 'UNKNOWN' };
 }
 
-// ---------------------------------------------------------------------------
-// S7 — Multi-agent ODD handoff & terminal-to-terminal piping
-// ---------------------------------------------------------------------------
+import {
+  parseHandoffIntent,
+  describeHandoff,
+} from './handoffIntent';
+import {
+  parsePaneLayoutIntent,
+  describePaneLayout,
+} from './paneLayoutIntent';
+import {
+  type WorkspaceSwitchIntent,
+  parseWorkspaceSwitchIntent,
+  parseLaunchThreadIntent,
+} from './workspaceThreadIntent';
 
-const HANDOFF_VERB_SOURCE =
-  'p[aá]sa(?:le|les|lo|la|r|s|n)?|pases?|pasen?|entrega(?:le|les|lo|la|r|s|n)?|entregu?es?|entregu?en?|delega(?:le|les|lo|la|r|s|n)?|delegu?es?|delegu?en?|env[ií]a(?:le|les|lo|la|r|s|n)?|manda(?:le|les|lo|la|r|s|n)?|traspasa(?:le|les|r|s|n)?|comparte(?:le|les|r|s|n)?|deriva(?:le|les|r|s|n)?|handoff';
-
-const HANDOFF_ARTIFACT_SOURCE =
-  'odd|o\\.d\\.d\\.|tarea|plan|planeaci[oó]n|salida|output|respuesta|resumen|contexto|conversaci[oó]n|buffer|trabajo';
-
-const HANDOFF_SOURCE_CONNECTOR =
-  '(?:de|del|del?\\s+agente|que\\s+(?:hizo|cre[oó]|gener[oó]|arm[oó]|dej[oó]))';
-
-const HANDOFF_WITH_SOURCE_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})\\s+(?:${HANDOFF_SOURCE_CONNECTOR})\\s+(.+?)\\s+(?:hacia|para|al|a)\\s+(.+)$`,
-  'i'
-);
-
-const HANDOFF_DIRECT_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})\\s+(?:hacia|para|al|a)\\s+(.+)$`,
-  'i'
-);
-
-const HANDOFF_INVERTED_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${HANDOFF_VERB_SOURCE})\\s+(?:hacia|para|al|a)\\s+(.+?)\\s+(?:el|la|los|las)?\\s*(?:${HANDOFF_ARTIFACT_SOURCE})(?:\\s+(?:${HANDOFF_SOURCE_CONNECTOR})\\s+(.+))?$`,
-  'i'
-);
-
-const NEW_TARGET_RE =
-  /(?<![a-záéíóúñ])(?:nuev[oa]s?|otr[oa]s?|que\s+abrir[aá]s|que\s+abras|que\s+crear[aá]s|que\s+crees|que\s+lanzar[aá]s|que\s+lances|abrir[aá]s|crear[aá]s|sesi[oó]n)(?![a-záéíóúñ])/i;
-
-function parseExplicitSessionRef(phrase: string): string | number | undefined {
-  const clean = phrase.trim().replace(/[.,;!?]+$/, '').trim();
-  if (!clean) return undefined;
-
-  const numbered = clean.match(
-    /(?:terminal|terminales|agente|agentes|consola|consolas|pane|panes)\s*(?:n[uú]mero\s*)?(\d+|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)/i
-  );
-  if (numbered) return parseNumberWord(numbered[1]);
-
-  const named = clean.match(
-    /(?:llamad[ao]s?|de\s+nombre|denominad[ao]s?)\s+([a-záéíóúñ][a-záéíóúñ0-9_-]*)/i
-  );
-  if (named) return named[1].toLowerCase();
-
-  return undefined;
-}
-
-function parseHandoffSource(phrase: string): string | number | undefined {
-  if (!phrase) return 'active';
-  const clean = phrase.trim().replace(/[.,;!?]+$/, '').trim();
-  if (!clean) return 'active';
-
-  const lower = clean.toLowerCase();
-  if (
-    /^(?:este|esta|actual|activo|activa)(?:\s+(?:agente|terminal|consola|pane|sesi[oó]n))?$/i.test(lower) ||
-    /^(?:el\s+agente\s+actual|la\s+terminal\s+actual)$/i.test(lower)
-  ) {
-    return 'active';
-  }
-
-  const explicit = parseExplicitSessionRef(clean);
-  if (explicit !== undefined) return explicit;
-
-  const engine = detectEngineFromText(clean);
-  if (engine) return engine;
-
-  const stripped = clean
-    .replace(/^(?:la|el|los|las)\s+/i, '')
-    .replace(/^(?:que\s+(?:hizo|cre[oó]|gener[oó]|arm[oó]|dej[oó]))\s+/i, '')
-    .replace(/^(?:terminal|terminales|agente|agentes|consola|consolas|sesi[oó]n)(?:\s+(?:de|del))?\s*/i, '')
-    .trim();
-  if (!stripped) return 'active';
-  if (/^\d+$/.test(stripped)) return Number(stripped);
-  return stripped.toLowerCase();
-}
-
-/**
- * Parses a Spanish multi-agent handoff request, e.g.
- * "pásale el ODD de la terminal 1 a un nuevo agente de claude",
- * "entrega el ODD que hizo el agente Orion a una nueva sesión de Grok", or
- * "pásale el ODD a un nuevo agente de grok".
- */
-export function parseHandoffIntent(text: string): HandoffToAgentAction | null {
-  if (!text) return null;
-  const normalized = normalizeInputForIntent(text);
-
-  let sourcePhrase = '';
-  let targetPhrase = '';
-  let fullMatchText = '';
-
-  const withSourceMatch = normalized.match(HANDOFF_WITH_SOURCE_RE);
-  if (withSourceMatch) {
-    sourcePhrase = (withSourceMatch[1] || '').trim();
-    targetPhrase = (withSourceMatch[2] || '').trim();
-    fullMatchText = withSourceMatch[0];
-  } else {
-    const directMatch = normalized.match(HANDOFF_DIRECT_RE);
-    if (directMatch) {
-      sourcePhrase = 'active';
-      targetPhrase = (directMatch[1] || '').trim();
-      fullMatchText = directMatch[0];
-    } else {
-      const invertedMatch = normalized.match(HANDOFF_INVERTED_RE);
-      if (invertedMatch) {
-        targetPhrase = (invertedMatch[1] || '').trim();
-        sourcePhrase = (invertedMatch[2] || 'active').trim();
-        fullMatchText = invertedMatch[0];
-      }
-    }
-  }
-
-  if (!targetPhrase) return null;
-
-  const sourceTarget = parseHandoffSource(sourcePhrase) ?? 'active';
-  const targetEngine = detectEngineFromText(targetPhrase);
-  const targetSession = parseExplicitSessionRef(targetPhrase);
-  const spawnNew = NEW_TARGET_RE.test(targetPhrase) || targetSession === undefined;
-  const artifactKind: HandoffToAgentAction['artifactKind'] =
-    /(?<![a-záéíóúñ])(?:odd|plan|planeaci[oó]n|tarea)(?![a-záéíóúñ])/i.test(fullMatchText)
-      ? 'odd'
-      : 'output';
-
-  return {
-    type: 'handoff_to_agent',
-    sourceTarget,
-    ...(targetEngine ? { targetEngine } : {}),
-    ...(targetSession !== undefined ? { targetSession } : {}),
-    spawnNew,
-    artifactKind,
-  };
-}
-
-function describeHandoff(action: HandoffToAgentAction): string {
-  const artifact = action.artifactKind === 'odd' ? 'el ODD' : 'la salida';
-  const source =
-    action.sourceTarget === 'active'
-      ? 'la terminal activa'
-      : typeof action.sourceTarget === 'number'
-        ? `la terminal ${action.sourceTarget}`
-        : `el agente "${action.sourceTarget}"`;
-  let target: string;
-  if (action.spawnNew) {
-    target = `un nuevo agente${action.targetEngine ? ` de ${action.targetEngine}` : ''}`;
-  } else if (typeof action.targetSession === 'number') {
-    target = `la terminal ${action.targetSession}`;
-  } else {
-    target = `la terminal "${action.targetSession}"`;
-  }
-  return `Entregando ${artifact} de ${source} a ${target}.`;
-}
-
-// ---------------------------------------------------------------------------
-// S8 — Spatial pane control (equalize / split / focus / zoom)
-// ---------------------------------------------------------------------------
-
-const EQUALIZE_INTENT_RE =
-  /(?<![a-záéíóúñ])(?:auto[- ]?ajust\w*|autoajust\w*|iguala(?:r|n|mos|d)?|igual[aá](?:r|mos|n)?|equilibra(?:r|n)?|nivela(?:r|n)?|empareja(?:r|n)?|redistribu\w*|repart(?:e|ir)\s+el\s+espacio)(?![a-záéíóúñ])/i;
-
-const EQUALIZE_SIZE_RE =
-  /(?<![a-záéíóúñ])ajust\w*\s+(?:el\s+|la\s+|los\s+|las\s+)?(?:tama[ñn]os?|dimensiones|ancho|alto|paneles|terminales|rejilla|distribuci[oó]n)(?![a-záéíóúñ])/i;
-
-const EQUALIZE_DIMENSIONS_RE =
-  /(?:mismas?\s+dimensiones|dimensiones\s+(?:iguales|similares|parejas)|mismo\s+tama[ñn]o|que\s+queden\s+(?:todas?\s+)?(?:iguales|parejas|de\s+las\s+mismas))/i;
-
-const SPLIT_VERB_RE =
-  /(?<![a-záéíóúñ])(?:divide|dividir|divid[ae]s?|separa|separar|separe?s?|parte|partir|split)(?![a-záéíóúñ])/i;
-
-const FOCUS_INTENT_RE =
-  /(?:haz(?:le)?\s+foco|hacer\s+foco|pon(?:er|le)?\s+(?:el\s+)?foco)|(?<![a-záéíóúñ])(?:enfoca(?:r)?|enf[oó]cate|focaliza(?:r)?|focus)(?![a-záéíóúñ])/i;
-
-const ZOOM_INTENT_RE =
-  /(?<![a-záéíóúñ])(?:maximiza(?:r)?|agranda(?:r)?|expande|expandir|ampl[ií]a(?:r)?|zoom|pantalla\s+completa|fullscreen)(?![a-záéíóúñ])/i;
-
-function parseLayoutTarget(text: string): string | number | undefined {
-  const numbered = text.match(
-    /(?:terminal|terminales|agente|agentes|consola|consolas|panel|paneles|pane|panes)\s*(?:n[uú]mero\s*)?(\d+|uno|dos|tres|cuatro|cinco|seis|siete|ocho)/i
-  );
-  if (numbered) return parseNumberWord(numbered[1]);
-
-  const named = text.match(
-    /(?:llamad[ao]s?|de\s+nombre)\s+([a-záéíóúñ][a-záéíóúñ0-9_-]*)/i
-  );
-  if (named) return named[1].toLowerCase();
-
-  return detectEngineFromText(text);
-}
-
-/** Parses an auto-adjust / split / focus / zoom request on the pane grid. */
-export function parsePaneLayoutIntent(text: string): ManagePaneLayoutAction | null {
-  if (!text) return null;
-  const normalized = normalizeInputForIntent(text);
-  const lower = normalized.toLowerCase();
-  const target = parseLayoutTarget(lower);
-  const withTarget = target !== undefined ? { target } : {};
-
-  if (
-    EQUALIZE_INTENT_RE.test(lower) ||
-    EQUALIZE_SIZE_RE.test(lower) ||
-    EQUALIZE_DIMENSIONS_RE.test(lower)
-  ) {
-    return { type: 'manage_pane_layout', operation: 'equalize' };
-  }
-
-  if (SPLIT_VERB_RE.test(lower)) {
-    if (/\bhorizontal(?:mente)?\b|\blado\s+a\s+lado\b/i.test(lower)) {
-      return { type: 'manage_pane_layout', operation: 'split-horizontal', ...withTarget };
-    }
-    if (/\bvertical(?:mente)?\b|\buno\s+sobre\s+otro\b/i.test(lower)) {
-      return { type: 'manage_pane_layout', operation: 'split-vertical', ...withTarget };
-    }
-  }
-
-  if (FOCUS_INTENT_RE.test(lower)) {
-    return { type: 'manage_pane_layout', operation: 'focus', ...withTarget };
-  }
-
-  if (ZOOM_INTENT_RE.test(lower)) {
-    return { type: 'manage_pane_layout', operation: 'zoom', ...withTarget };
-  }
-
-  return null;
-}
-
-const PANE_LAYOUT_REPLIES: Record<PaneLayoutOperation, string> = {
-  equalize: 'Ajustando todos los paneles a las mismas dimensiones.',
-  'split-horizontal': 'Dividiendo el panel horizontalmente.',
-  'split-vertical': 'Dividiendo el panel verticalmente.',
-  focus: 'Enfocando el panel solicitado.',
-  zoom: 'Maximizando el panel solicitado.',
+export {
+  parseHandoffIntent,
+  describeHandoff,
+  parsePaneLayoutIntent,
+  describePaneLayout,
+  type WorkspaceSwitchIntent,
+  parseWorkspaceSwitchIntent,
+  parseLaunchThreadIntent,
 };
-
-function describePaneLayout(action: ManagePaneLayoutAction): string {
-  return PANE_LAYOUT_REPLIES[action.operation] || PANE_LAYOUT_REPLIES.equalize;
-}
-
-// ---------------------------------------------------------------------------
-// S9 — Workspace switching & view-mode navigation
-// ---------------------------------------------------------------------------
-
-export interface WorkspaceSwitchIntent {
-  workspaceQuery: string;
-  viewMode?: WorkspaceViewMode;
-  /** Remaining clause of the same sentence, re-planned as follow-up actions. */
-  tail?: string;
-}
-
-const WS_SWITCH_VERB_SOURCE =
-  'cambia(?:te|r|mos|ndo)?|c[aá]mbiate|mu[eé]ve(?:te|r|mos)?|ll[eé]vame|lleva(?:r|me)?|vete|ve(?:te)?|ir(?:me|te)?|pasa(?:te|r)?|salta(?:r)?';
-
-const WS_NOUN_SOURCE =
-  '(?:proyecto|proyectos|workspace|workspaces|espacio\\s+de\\s+trabajo|repositorio|repo)';
-
-const WS_SWITCH_RE = new RegExp(
-  `(?<![a-záéíóúñ])(?:${WS_SWITCH_VERB_SOURCE})\\s+(?:(?:al|a\\s+la|a|hacia\\s+el|hacia|para\\s+el|en\\s+el|el|la)\\s+)?${WS_NOUN_SOURCE}\\b\\s*(?:llamad[oa]\\s+|denominad[oa]\\s+|de\\s+nombre\\s+)?(.+)$`,
-  'i'
-);
-
-const VIEW_MODE_ONLY_TAIL_RE =
-  /^(?:abre(?:me)?|abrir|muestra(?:me)?|mostrar|pon(?:me)?|poner|cambia(?:r)?|ve|ir|pasa(?:r)?|lleva(?:me)?)\s+(?:(?:el|la|al)\s+)?(?:(?:modo|vista|visualizaci[oó]n|pantalla)\s+(?:de\s+)?)?(?:c[oó]digo|code|agentes|agents|hilos|threads)$/i;
-
-function detectViewMode(lower: string): WorkspaceViewMode | undefined {
-  if (
-    /(?:modo|vista|visualizaci[oó]n|pantalla)\s+(?:de\s+)?(?:c[oó]digo|code)\b|\babre\s+(?:el\s+)?(?:modo\s+)?c[oó]digo\b/i.test(
-      lower
-    )
-  ) {
-    return 'code';
-  }
-  if (
-    /(?:modo|vista|visualizaci[oó]n|pantalla)\s+(?:de\s+)?(?:agentes|agents)\b|\babre\s+(?:el\s+)?(?:modo\s+)?(?:de\s+)?agentes\b/i.test(
-      lower
-    )
-  ) {
-    return 'agents';
-  }
-  if (
-    /(?:modo|vista|visualizaci[oó]n|pantalla)\s+(?:de\s+)?(?:hilos|threads)\b|\babre\s+(?:el\s+)?(?:modo\s+)?(?:hilos|threads)\b/i.test(
-      lower
-    )
-  ) {
-    return 'threads';
-  }
-  return undefined;
-}
-
-/** Parses a "cambia al proyecto X" / "muévete al workspace X" request. */
-export function parseWorkspaceSwitchIntent(rawText: string): WorkspaceSwitchIntent | null {
-  if (!rawText) return null;
-  const text = normalizeInputForIntent(rawText);
-  const match = text.match(WS_SWITCH_RE);
-  if (!match) return null;
-
-  const rest = (match[1] || '').trim();
-  if (!rest) return null;
-
-  const connector = rest.search(/\s+(?:y|e)\s+|[,;.]/i);
-  const queryRaw = connector >= 0 ? rest.slice(0, connector) : rest;
-  const tailRaw = connector >= 0 ? rest.slice(connector) : '';
-
-  const workspaceQuery = queryRaw
-    .replace(/^[\s,;.]+/, '')
-    .replace(/[\s,;.]+$/, '')
-    .replace(/^(?:el|la|los|las)\s+/i, '')
-    .trim();
-  if (!workspaceQuery) return null;
-
-  let tail = tailRaw
-    .replace(/^[\s,;.]+/, '')
-    .replace(/^(?:y|e)\s+/i, '')
-    .trim();
-
-  // "…y abre código" only changes the view mode, it must not open a terminal.
-  if (tail && (VIEW_MODE_ONLY_TAIL_RE.test(tail) || detectViewMode(tail.toLowerCase()))) {
-    tail = '';
-  }
-
-  const viewMode = detectViewMode(text.toLowerCase());
-
-  return {
-    workspaceQuery,
-    ...(viewMode ? { viewMode } : {}),
-    ...(tail ? { tail } : {}),
-  };
-}
-
-export function parseLaunchThreadIntent(text: string): LaunchThreadAction | null {
-  const lower = text.toLowerCase().trim();
-
-  // If the command explicitly requests opening a terminal or console, terminal wins!
-  if (OPEN_VERB_RE.test(lower) && COMPATIBLE_TERMINAL_OBJECT_RE.test(lower)) {
-    return null;
-  }
-
-  // 1. "abre/crea/lanza/inicia un [nuevo] thread/hilo [de/con <provider>] [para/con/: <body...>]"
-  const openMatch = text.match(
-    new RegExp(
-      `^(?:${OPEN_VERB_SOURCE})\\s+(?:un\\s+)?(?:nuevo\\s+)?(?:thread|hilo)(?:\\s+(?:de|con)\\s+([a-zA-Z0-9_\\-]+))?(?:\\s+(?:para|:)\\s+(.+)|\\s+(.+))?$`,
-      'i'
-    )
-  );
-
-  if (openMatch) {
-    const rawEngine = openMatch[1];
-    let provider: Engine | undefined = undefined;
-    if (rawEngine) {
-      provider = detectEngineFromText(rawEngine);
-    }
-    const body = (openMatch[2] || openMatch[3] || '').trim() || undefined;
-
-    return {
-      type: 'launch_thread',
-      ...(provider ? { provider } : {}),
-      ...(body ? { body } : {}),
-    };
-  }
-
-  // 2. "en el thread/hilo [<threadId>] [<body...>]"
-  const enThreadMatch = text.match(
-    /^en\s+el\s+(?:thread|hilo)(?:\s+([a-zA-Z0-9_\\-]+))?(?:\s+(.+))?$/i
-  );
-
-  if (enThreadMatch) {
-    const rawId = enThreadMatch[1]?.trim();
-    const rawBody = enThreadMatch[2]?.trim();
-
-    let threadId = 'active';
-    let body = rawBody;
-
-    if (rawId) {
-      if (/^(?:revisa|escribe|manda|ejecuta|pregunta|dile|consulta|para)/i.test(rawId)) {
-        threadId = 'active';
-        body = [rawId, rawBody].filter(Boolean).join(' ');
-      } else {
-        threadId = rawId;
-      }
-    }
-
-    return {
-      type: 'launch_thread',
-      threadId,
-      ...(body ? { body } : {}),
-    };
-  }
-
-  return null;
-}
 
 /**
  * Plans a turn deterministically using the heuristic engine.

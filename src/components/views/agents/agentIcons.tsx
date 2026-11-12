@@ -210,3 +210,162 @@ export const TerminalIcon: React.FC<{ size?: number; className?: string }> = ({ 
     <line x1="12" x2="20" y1="19" y2="19" />
   </svg>
 );
+
+export const PuzzleIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M19.439 7.85c0-1.57.802-2.5 1.561-2.5s1.561.93 1.561 2.5h1.439v-3.85a2 2 0 0 0-2-2h-3.85c0 .759-.93 1.561-2.5 1.561s-2.5-.802-2.5-1.561h-3.65a2 2 0 0 0-2 2v3.85c.759 0 1.561.93 1.561 2.5s-.802 2.5-1.561 2.5v3.65a2 2 0 0 0 2 2h3.85c0-.759.93-1.561 2.5-1.561s2.5.802 2.5 1.561h3.65a2 2 0 0 0 2-2v-3.85c-.759 0-1.561-.93-1.561-2.5z" />
+  </svg>
+);
+
+export const ClockIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </svg>
+);
+
+export const TrashIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M3 6h18" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <line x1="10" y1="11" x2="10" y2="17" />
+    <line x1="14" y1="11" x2="14" y2="17" />
+  </svg>
+);
+
+export const SparklesIcon: React.FC<{ size?: number; strokeWidth?: number; className?: string }> = ({
+  size = 14,
+  strokeWidth = 2,
+  className = '',
+}) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={strokeWidth}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+    <path d="M5 3v4" />
+    <path d="M19 17v4" />
+    <path d="M3 5h4" />
+    <path d="M17 19h4" />
+  </svg>
+);
+
+export const UserRoundPlusIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M2 21a8 8 0 0 1 13.292-6" />
+    <circle cx="10" cy="8" r="5" />
+    <path d="M19 16v6" />
+    <path d="M22 19h-6" />
+  </svg>
+);
+
+export const AudioLinesIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M2 10v3" />
+    <path d="M6 6v11" />
+    <path d="M10 3v18" />
+    <path d="M14 8v7" />
+    <path d="M18 5v13" />
+    <path d="M22 10v3" />
+  </svg>
+);
+
+export const RotateCcwIcon: React.FC<{ size?: number; className?: string }> = ({ size = 13, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </svg>
+);
+
+export const ArrowLeftIcon: React.FC<{ size?: number; className?: string }> = ({ size = 13, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="m12 19-7-7 7-7" />
+    <path d="M19 12H5" />
+  </svg>
+);

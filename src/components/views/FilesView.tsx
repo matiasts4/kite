@@ -9,7 +9,6 @@ import type {
 } from '../../types';
 import { invokeCommand, revealFile, openFileDefault } from '../../lib/ipc';
 import { toHex64String, isValidRevision64 } from './files/syntax';
-import { FolderIcon } from './files/FileIcons';
 import { CodeEditorPane, OpenFileTab } from './files/CodeEditorPane';
 import { ChangesView } from './files/ChangesView';
 import { FilesToolbar } from './files/FilesToolbar';
@@ -21,6 +20,10 @@ import {
   consumePendingFilePreview,
   FilePreviewRequest,
 } from '../../lib/filePreviewNav';
+import { externalUrlFromToken, pathCandidateFromToken } from './files/filesLinkUtils';
+import { FilesBreadcrumbs } from './files/FilesBreadcrumbs';
+import { useFilesTabsPersistence } from './files/useFilesTabsPersistence';
+import { FilesEmptyState } from './files/FilesEmptyState';
 import './files.css';
 
 interface ResolvedFileLink {
@@ -33,35 +36,12 @@ interface ResolvedFileLink {
   column?: number | null;
 }
 
-function externalUrlFromToken(text: string): string | null {
-  const trimmed = text.trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
-  if (!trimmed || /[\s<>]/.test(trimmed)) return null;
-  if (/^https?:\/\//i.test(trimmed) || /^mailto:/i.test(trimmed)) return trimmed;
-  return null;
-}
-
-function pathCandidateFromToken(text: string): string | null {
-  const trimmed = text.trim().replace(/^['"`(<\[]+|['"`)>\].,;]+$/g, '');
-  if (!trimmed || trimmed.length > 4096 || /[\r\n]/.test(trimmed)) return null;
-  if (externalUrlFromToken(trimmed)) return null;
-  if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('./')) return trimmed;
-  return null;
-}
-
 export interface FilesViewProps {
   workspaceId: string | null;
   workspaceName?: string;
   workspaces?: Array<{ id: string; name?: string; displayName?: string }>;
   onSelectWorkspace?: (workspaceId: string) => void;
   initialMode?: 'files' | 'changes';
-}
-
-interface BreadcrumbSegment {
-  name: string;
-  path: string;
-  entryId?: string;
-  isFolder: boolean;
-  isFile: boolean;
 }
 
 export const FilesView: React.FC<FilesViewProps> = ({
@@ -553,64 +533,18 @@ export const FilesView: React.FC<FilesViewProps> = ({
     };
   }, [openCandidate]);
 
-  // Files view state persistence (active file and open tabs)
-  const isRestoringTabsRef = useRef(false);
-  const restoredWorkspaceRef = useRef<string | null>(null);
-
-  // 1. Restore tabs when workspace resource is ready
-  useEffect(() => {
-    if (!currentWsId || !resourceId || restoredWorkspaceRef.current === currentWsId) return;
-    restoredWorkspaceRef.current = currentWsId;
-
-    try {
-      const raw = localStorage.getItem(`kite.files.viewState.${currentWsId}`);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!parsed || !Array.isArray(parsed.openRelativePaths) || parsed.openRelativePaths.length === 0) return;
-
-      if (parsed.isEditMode !== undefined) {
-        setIsEditMode(parsed.isEditMode);
-      }
-
-      isRestoringTabsRef.current = true;
-      void (async () => {
-        try {
-          for (const candidate of parsed.openRelativePaths) {
-            await openCandidate({
-              candidate,
-              workspaceId: currentWsId,
-              collapseTree: false,
-            });
-          }
-          if (parsed.activeRelativePath) {
-            setOpenFiles((currentTabs) => {
-              const match = currentTabs.find((t) => t.relativePath === parsed.activeRelativePath);
-              if (match) {
-                setActiveFileId(match.entryId);
-              }
-              return currentTabs;
-            });
-          }
-        } finally {
-          isRestoringTabsRef.current = false;
-        }
-      })();
-    } catch {}
-  }, [currentWsId, resourceId, openCandidate]);
-
-  // 2. Persist tabs & active file whenever they change
-  useEffect(() => {
-    if (!currentWsId || isRestoringTabsRef.current) return;
-    try {
-      const active = openFiles.find((f) => f.entryId === activeFileId);
-      const stateToStore = {
-        activeRelativePath: active?.relativePath || null,
-        openRelativePaths: openFiles.map((f) => f.relativePath),
-        isEditMode,
-      };
-      localStorage.setItem(`kite.files.viewState.${currentWsId}`, JSON.stringify(stateToStore));
-    } catch {}
-  }, [currentWsId, openFiles, activeFileId, isEditMode]);
+  // Hook for restoring & persisting tabs & active file across sessions
+  useFilesTabsPersistence({
+    currentWsId,
+    resourceId,
+    openFiles,
+    activeFileId,
+    isEditMode,
+    setIsEditMode,
+    setOpenFiles,
+    setActiveFileId,
+    openCandidate,
+  });
 
   const handleCloseTab = (entryIdToClose: string) => {
     setOpenFiles((prev) => {
@@ -724,93 +658,13 @@ export const FilesView: React.FC<FilesViewProps> = ({
     window.addEventListener('pointerup', handlePointerUp);
   };
 
-  // Breadcrumbs
-  const breadcrumbSegments: BreadcrumbSegment[] = useMemo(() => {
-    const rootName = activeWorkspace?.name || (rootEntry ? rootEntry.displayName : 'Workspace');
-    const rootSeg: BreadcrumbSegment = {
-      name: rootName,
-      path: '',
-      entryId: rootEntry?.entryId,
-      isFolder: true,
-      isFile: false,
-    };
-
-    const targetPath = activeTab ? activeTab.relativePath : activeFolderPath;
-    if (!targetPath) return [rootSeg];
-
-    const parts = targetPath.split('/').filter(Boolean);
-    const segs: BreadcrumbSegment[] = [rootSeg];
-
-    let accumulated = '';
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      accumulated = accumulated ? `${accumulated}/${part}` : part;
-      const isLast = i === parts.length - 1;
-      const isFile = isLast && activeTab !== null && activeTab.relativePath === targetPath;
-      const segEntryId = pathToEntryId.get(accumulated);
-
-      segs.push({
-        name: part,
-        path: accumulated,
-        entryId: segEntryId,
-        isFolder: !isFile,
-        isFile,
-      });
-    }
-
-    return segs;
-  }, [activeWorkspace, rootEntry, activeTab, activeFolderPath, pathToEntryId]);
-
-  const handleBreadcrumbClick = (seg: BreadcrumbSegment) => {
-    if (seg.isFile && activeTab) {
-      setActiveFileId(activeTab.entryId);
-      return;
-    }
-    if (seg.path === '') {
-      setActiveFolderPath('');
-      if (rootEntry && !expandedFolders.has(rootEntry.entryId)) {
-        setExpandedFolders((prev) => new Set(prev).add(rootEntry.entryId));
-      }
-      return;
-    }
-    const folderEntryId = seg.entryId || pathToEntryId.get(seg.path);
-    if (folderEntryId) {
-      void handleToggleFolder(folderEntryId, seg.path);
-    }
-  };
-
   if (!currentWsId) {
     return (
-      <div className="files-pane files-empty-state">
-        <FolderIcon size={36} className="files-empty-icon" />
-        <span style={{ fontWeight: 600, fontSize: '13px' }}>Select a workspace to view files</span>
-        {workspacesList.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '12px', width: '100%', maxWidth: '240px' }}>
-            {workspacesList.map((ws) => (
-              <button
-                key={ws.id}
-                type="button"
-                className="diffs-filter-pill active"
-                style={{ justifyContent: 'flex-start', padding: '6px 12px', height: 'auto' }}
-                onClick={() => {
-                  try {
-                    localStorage.setItem('kite.selectedWorkspaceId', ws.id);
-                  } catch {}
-                  setCurrentWsId(ws.id);
-                  onSelectWorkspace?.(ws.id);
-                }}
-              >
-                <FolderIcon size={13} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ws.name}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <span style={{ fontSize: '11px', color: 'var(--text-secondary, #8b949e)', marginTop: '4px' }}>
-            Add a folder in Code mode to start browsing files
-          </span>
-        )}
-      </div>
+      <FilesEmptyState
+        workspacesList={workspacesList}
+        onSelectWorkspace={onSelectWorkspace}
+        onSetCurrentWsId={setCurrentWsId}
+      />
     );
   }
 
@@ -935,27 +789,19 @@ export const FilesView: React.FC<FilesViewProps> = ({
           <div className="files-main">
             {/* Hierarchical Breadcrumbs (visible when tree navigation is active) */}
             {showTree && (
-              <nav
-                aria-label="Breadcrumbs"
-                className="files-breadcrumbs"
-              >
-                {breadcrumbSegments.map((seg, idx) => {
-                  const isLast = idx === breadcrumbSegments.length - 1;
-                  return (
-                    <React.Fragment key={seg.path || 'root'}>
-                      {idx > 0 && <span className="files-breadcrumb-sep">/</span>}
-                      <button
-                        type="button"
-                        className={`files-breadcrumb-btn${isLast ? ' active' : ''}`}
-                        onClick={() => handleBreadcrumbClick(seg)}
-                        title={seg.path || seg.name}
-                      >
-                        {seg.name}
-                      </button>
-                    </React.Fragment>
-                  );
-                })}
-              </nav>
+              <FilesBreadcrumbs
+                workspaceName={activeWorkspace?.name}
+                rootEntry={rootEntry}
+                activeTab={activeTab}
+                activeFolderPath={activeFolderPath}
+                pathToEntryId={pathToEntryId}
+                expandedFolders={expandedFolders}
+                onSelectActiveFile={(entryId) => setActiveFileId(entryId)}
+                onSetActiveFolderPath={setActiveFolderPath}
+                onToggleFolder={(folderId, folderPath) => {
+                  void handleToggleFolder(folderId, folderPath);
+                }}
+              />
             )}
 
             <CodeEditorPane

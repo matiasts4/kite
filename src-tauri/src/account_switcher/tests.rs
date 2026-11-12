@@ -16,6 +16,8 @@ fn test_saved_account_profile_serialization() {
         primary_remaining_percent: Some(85.5),
         primary_reset_at: Some("18:00".to_string()),
         time_until_reset_ms: Some(3600000),
+        credential_status: None,
+        has_refresh_token: false,
     };
 
     let json_val = serde_json::to_value(&profile).expect("serialize profile");
@@ -85,6 +87,8 @@ fn test_save_current_account_profile_antigravity() {
         primary_remaining_percent: Some(90.0),
         primary_reset_at: None,
         time_until_reset_ms: None,
+        credential_status: None,
+        has_refresh_token: false,
     };
     reg.profiles.push(p1);
 
@@ -138,6 +142,8 @@ fn test_reconcile_agy_profile_integrity_repairs_drift() {
         primary_remaining_percent: None,
         primary_reset_at: None,
         time_until_reset_ms: None,
+        credential_status: None,
+        has_refresh_token: false,
     });
 
     save_registry_to(&dir, &reg).unwrap();
@@ -147,6 +153,226 @@ fn test_reconcile_agy_profile_integrity_repairs_drift() {
     assert_eq!(loaded.profiles[0].email.as_deref(), Some("reconciled@example.com"));
     // Legacy contaminated file should be removed
     assert!(!agy_prof_dir.join("oauth_creds.json").exists());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+struct MockAgyCredStore {
+    read_value: std::cell::RefCell<Option<String>>,
+    forced_readback: std::cell::RefCell<Option<String>>,
+    write_error: Option<String>,
+}
+
+impl AntigravityCredStore for MockAgyCredStore {
+    fn read_raw(&self) -> Option<String> {
+        self.forced_readback
+            .borrow()
+            .clone()
+            .or_else(|| self.read_value.borrow().clone())
+    }
+
+    fn write_checked(&self, blob_json: &str) -> Result<(), String> {
+        if let Some(ref err) = self.write_error {
+            return Err(err.clone());
+        }
+        *self.read_value.borrow_mut() = Some(blob_json.to_string());
+        Ok(())
+    }
+}
+
+#[test]
+fn test_load_registry_persists_email_deduplication_and_health_status() {
+    let dir = std::env::temp_dir().join(format!("kite-dedup-test-{}", Uuid::new_v4()));
+    let valid_dir = dir.join("agy").join("valid-prof");
+    let tokenless_dir = dir.join("agy").join("tokenless-prof");
+    fs::create_dir_all(&valid_dir).unwrap();
+    fs::create_dir_all(&tokenless_dir).unwrap();
+
+    fs::write(
+        valid_dir.join("gemini_antigravity_cred.json"),
+        r#"{"token":{"access_token":"ya29.ok","refresh_token":"1//ok"},"id_token_email":"dup@example.com"}"#,
+    )
+    .unwrap();
+    fs::write(
+        tokenless_dir.join("gemini_antigravity_cred.json"),
+        r#"{"token":{"access_token":"","refresh_token":""},"id_token_email":"tokenless@example.com"}"#,
+    )
+    .unwrap();
+
+    let profiles_json = json!({
+        "profiles": [
+            {
+                "id": "dup-old",
+                "provider": "agy",
+                "label": "Old",
+                "email": "dup@example.com",
+                "planName": null,
+                "isActive": false,
+                "lastUsedUnixMs": 100
+            },
+            {
+                "id": "valid-prof",
+                "provider": "agy",
+                "label": "New Valid",
+                "email": "DUP@example.com",
+                "planName": null,
+                "isActive": true,
+                "lastUsedUnixMs": 200
+            },
+            {
+                "id": "tokenless-prof",
+                "provider": "agy",
+                "label": "Broken",
+                "email": "tokenless@example.com",
+                "planName": null,
+                "isActive": false,
+                "lastUsedUnixMs": 150
+            },
+            {
+                "id": "missing-prof",
+                "provider": "agy",
+                "label": "Missing",
+                "email": "missing@example.com",
+                "planName": null,
+                "isActive": false,
+                "lastUsedUnixMs": 50
+            }
+        ]
+    });
+    fs::write(
+        dir.join("profiles.json"),
+        serde_json::to_vec_pretty(&profiles_json).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = load_registry_from(&dir);
+    assert_eq!(loaded.profiles.len(), 3, "duplicate email should be pruned");
+
+    let persisted_raw = fs::read_to_string(dir.join("profiles.json")).unwrap();
+    let persisted_val: Value = serde_json::from_str(&persisted_raw).unwrap();
+    assert_eq!(
+        persisted_val["profiles"].as_array().unwrap().len(),
+        3,
+        "deduplicated list must be persisted to profiles.json immediately"
+    );
+
+    let valid = loaded.profiles.iter().find(|p| p.id == "valid-prof").unwrap();
+    assert_eq!(valid.credential_status.as_deref(), Some("valid"));
+    assert!(valid.has_refresh_token);
+
+    let tokenless = loaded.profiles.iter().find(|p| p.id == "tokenless-prof").unwrap();
+    assert_eq!(tokenless.credential_status.as_deref(), Some("missing_tokens"));
+    assert!(!tokenless.has_refresh_token);
+
+    let missing = loaded.profiles.iter().find(|p| p.id == "missing-prof").unwrap();
+    assert_eq!(missing.credential_status.as_deref(), Some("missing_file"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_snapshot_active_to_profile_fails_closed_when_agy_cred_missing_or_tokenless() {
+    let dir = std::env::temp_dir().join(format!("kite-snap-failclosed-{}", Uuid::new_v4()));
+    let live_dir = dir.join("live");
+    let root = dir.join("vault");
+    fs::create_dir_all(&live_dir).unwrap();
+    fs::write(live_dir.join("antigravity_state.pbtxt"), "pbtxt-data").unwrap();
+
+    let mappings = vec![FileMapping {
+        source: live_dir.join("antigravity_state.pbtxt"),
+        rel_dest: "antigravity_state.pbtxt",
+    }];
+
+    let empty_store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(None),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+    let err_missing =
+        snapshot_active_to_profile_with(&root, "agy", "p-missing", &mappings, None, &empty_store)
+            .expect_err("missing credential must fail closed even if pbtxt exists");
+    assert!(!err_missing.is_empty());
+
+    let tokenless_store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(Some(r#"{"id_token_email":"u@example.com"}"#.to_string())),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+    let err_tokenless =
+        snapshot_active_to_profile_with(&root, "agy", "p-tokenless", &mappings, None, &tokenless_store)
+            .expect_err("tokenless credential must fail closed");
+    assert!(!err_tokenless.is_empty());
+    assert!(
+        !root.join("agy").join("p-tokenless").join("gemini_antigravity_cred.json").exists(),
+        "failed snapshot must not leave broken credential artifact"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_apply_profile_rolls_back_on_post_write_verification_failure() {
+    let dir = std::env::temp_dir().join(format!("kite-rollback-test-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let live_dir = dir.join("live");
+    let target_dir = root.join("agy").join("target-prof");
+    fs::create_dir_all(&live_dir).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+
+    let prev_cred = r#"{"token":{"access_token":"ya29.prev","refresh_token":"1//prev"},"id_token_email":"prev@example.com"}"#;
+    let next_cred = r#"{"token":{"access_token":"ya29.next","refresh_token":"1//next"},"id_token_email":"next@example.com"}"#;
+
+    let live_pbtxt = live_dir.join("antigravity_state.pbtxt");
+    fs::write(&live_pbtxt, "prev-pbtxt").unwrap();
+    fs::write(target_dir.join("antigravity_state.pbtxt"), "next-pbtxt").unwrap();
+    fs::write(target_dir.join("gemini_antigravity_cred.json"), next_cred).unwrap();
+
+    let db_path = dir.join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "antigravityAuthStatus",
+                r#"{"email":"prev@example.com","name":"Prev"}"#
+            ],
+        )
+        .unwrap();
+    }
+
+    let mappings = vec![FileMapping {
+        source: live_pbtxt.clone(),
+        rel_dest: "antigravity_state.pbtxt",
+    }];
+
+    // Simulate OS credential store returning stale previous value on verification readback
+    let store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(Some(prev_cred.to_string())),
+        forced_readback: std::cell::RefCell::new(Some(prev_cred.to_string())),
+        write_error: None,
+    };
+
+    let err = apply_profile_to_active_with(&root, "agy", "target-prof", &mappings, Some(&db_path), &store)
+        .expect_err("verification mismatch must fail switch");
+    assert!(!err.is_empty());
+
+    // Live pbtxt, credential, and state.vscdb must all be rolled back cleanly
+    assert_eq!(fs::read_to_string(&live_pbtxt).unwrap(), "prev-pbtxt");
+    assert_eq!(store.read_value.borrow().as_deref(), Some(prev_cred));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let auth_raw: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(auth_raw.contains("prev@example.com"));
 
     let _ = fs::remove_dir_all(&dir);
 }

@@ -229,3 +229,186 @@ fn parse_antigravity_credential_blob_extracts_jwt_claims() {
     assert_eq!(parsed.name.as_deref(), Some("Test User"));
     assert!(parsed.has_refresh_token);
 }
+
+#[test]
+fn parse_antigravity_credential_with_tokens_rejects_tokenless_json_and_accepts_valid_oauth() {
+    let tokenless = r#"{
+        "token": {
+            "access_token": "   ",
+            "refresh_token": ""
+        },
+        "id_token_email": "empty@example.com",
+        "auth_method": "consumer"
+    }"#;
+    assert_eq!(
+        parse_antigravity_credential_with_tokens(tokenless),
+        Err("missing_tokens")
+    );
+    assert!(!has_valid_antigravity_oauth_tokens(tokenless));
+
+    let email_only = r#"{ "email": "only@example.com" }"#;
+    assert_eq!(
+        parse_antigravity_credential_with_tokens(email_only),
+        Err("missing_tokens")
+    );
+
+    let corrupt = "{ not-json";
+    assert_eq!(
+        parse_antigravity_credential_with_tokens(corrupt),
+        Err("corrupt")
+    );
+
+    let valid_access_only = r#"{
+        "token": {
+            "access_token": "ya29.only-access"
+        },
+        "id_token_email": "access@example.com"
+    }"#;
+    let parsed_access = parse_antigravity_credential_with_tokens(valid_access_only)
+        .expect("access_token should satisfy valid token check");
+    assert_eq!(parsed_access.email, "access@example.com");
+    assert!(parsed_access.has_valid_tokens());
+    assert!(has_valid_antigravity_oauth_tokens(valid_access_only));
+}
+
+#[test]
+fn write_antigravity_credential_checked_rejects_oversized_blob_with_diagnostic() {
+    let oversized_token = "x".repeat(2700);
+    let blob = format!(
+        r#"{{"token":{{"access_token":"{oversized_token}","refresh_token":"1//r"}},"id_token_email":"big@example.com"}}"#
+    );
+    let err = write_antigravity_credential_checked(&blob)
+        .expect_err("blobs exceeding Win32 2560-byte limit must return diagnostic error");
+    assert!(
+        err.contains("2560"),
+        "expected Win32 2560-byte limit diagnostic, got: {err}"
+    );
+}
+
+#[test]
+fn ide_auth_state_sqlite_roundtrip_restore_and_stale_key_cleanup() {
+    let temp = TempAppData::new();
+    let db_a = temp.path().join("state_a.vscdb");
+    let db_b = temp.path().join("state_b.vscdb");
+
+    {
+        let conn = rusqlite::Connection::open(&db_a).expect("open db_a");
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "antigravityAuthStatus",
+                r#"{"email":"user-a@example.com","name":"User A"}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["antigravityUnifiedStateSync.oauthToken", "oauth-a"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["antigravity.profileUrl", "https://example.com/a"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["workbench.colorTheme", "Default Dark+"],
+        )
+        .unwrap();
+    }
+
+    let snap = extract_ide_auth_state_from_db(&db_a)
+        .expect("extract db_a")
+        .expect("snapshot must exist");
+    assert_eq!(snap.email.as_deref(), Some("user-a@example.com"));
+    assert_eq!(snap.keys.len(), 3);
+    assert!(!snap.keys.contains_key("workbench.colorTheme"));
+
+    {
+        let conn = rusqlite::Connection::open(&db_b).expect("open db_b");
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "antigravityAuthStatus",
+                r#"{"email":"old@example.com","name":"Old"}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["antigravityUnifiedStateSync.userStatus", "stale-status"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["workbench.colorTheme", "KeepMe"],
+        )
+        .unwrap();
+    }
+
+    apply_ide_auth_state_to_db(&db_b, "user-a@example.com", Some(&snap))
+        .expect("restore snap to db_b");
+
+    {
+        let conn = rusqlite::Connection::open(&db_b).expect("reopen db_b");
+        let auth_raw: String = conn
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(auth_raw.contains("user-a@example.com"));
+        let theme: String = conn
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = 'workbench.colorTheme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(theme, "KeepMe");
+        let stale_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.userStatus'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_count, 0, "stale key not in restored snapshot must be cleared");
+    }
+
+    // Switching to another account without ide_auth_state.json clears mismatched auth keys
+    // while keeping unrelated workbench keys intact.
+    apply_ide_auth_state_to_db(&db_b, "user-c@example.com", None)
+        .expect("clear mismatched IDE auth");
+    {
+        let conn = rusqlite::Connection::open(&db_b).expect("reopen db_b after clear");
+        let auth_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ItemTable WHERE key = 'antigravityAuthStatus'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(auth_count, 0);
+        let theme: String = conn
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = 'workbench.colorTheme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(theme, "KeepMe");
+    }
+}

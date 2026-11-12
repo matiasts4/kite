@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use super::quota::{fetch_live_quota, get_cached_live_quota};
 use super::registry::{
-    appdata_dir, canon_provider, load_registry, now_ms, profile_storage_dir, profiles_root,
-    same_provider, save_registry, user_home_dir, SavedAccountProfile, REGISTRY_LOCK,
+    appdata_dir, canon_provider, hydrate_profile_credential_health, load_registry, now_ms,
+    profile_storage_dir, profiles_root, same_provider, save_registry, user_home_dir,
+    SavedAccountProfile, REGISTRY_LOCK,
 };
 use super::storage::{
     apply_profile_to_active, copy_atomic, decode_jwt_payload, ensure_provider_idle,
@@ -189,15 +190,27 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
         Uuid::new_v4().to_string()
     };
 
-    // 1. Snapshot files to account storage; refuse to create an empty profile.
-    if !snapshot_active_to_profile(&provider, &account_id) {
-        if existing_idx.is_none() {
-            let _ = fs::remove_dir_all(profile_storage_dir(&provider, &account_id));
+    // 1. Snapshot files to account storage; refuse to create an empty or tokenless profile.
+    match snapshot_active_to_profile(&provider, &account_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            if existing_idx.is_none() {
+                let _ = fs::remove_dir_all(profile_storage_dir(&provider, &account_id));
+            }
+            return json!({
+                "success": false,
+                "error": "No se encontraron archivos de sesión para guardar. ¿Iniciaste sesión en este proveedor?"
+            });
         }
-        return json!({
-            "success": false,
-            "error": "No se encontraron archivos de sesión para guardar. ¿Iniciaste sesión en este proveedor?"
-        });
+        Err(err) => {
+            if existing_idx.is_none() {
+                let _ = fs::remove_dir_all(profile_storage_dir(&provider, &account_id));
+            }
+            return json!({
+                "success": false,
+                "error": err
+            });
+        }
     }
 
     // Other accounts for this provider are no longer active.
@@ -223,9 +236,10 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
         p.primary_remaining_percent = primary_remaining_percent;
         p.primary_reset_at = primary_reset_at;
         p.time_until_reset_ms = time_until_reset_ms;
+        hydrate_profile_credential_health(&profiles_root(), std::slice::from_mut(p));
         p.clone()
     } else {
-        let new_prof = SavedAccountProfile {
+        let mut new_prof = SavedAccountProfile {
             id: account_id.clone(),
             provider: provider.clone(),
             label: if label.trim().is_empty() {
@@ -240,7 +254,10 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
             primary_remaining_percent,
             primary_reset_at,
             time_until_reset_ms,
+            credential_status: None,
+            has_refresh_token: false,
         };
+        hydrate_profile_credential_health(&profiles_root(), std::slice::from_mut(&mut new_prof));
         reg.profiles.push(new_prof.clone());
         new_prof
     };
@@ -315,7 +332,12 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         if let Some(l_idx) = matching_live_idx {
             let live_prof_id = reg.profiles[l_idx].id.clone();
             if live_prof_id != account_id {
-                snapshot_active_to_profile(&provider, &live_prof_id);
+                if let Err(err) = snapshot_active_to_profile(&provider, &live_prof_id) {
+                    log_trace(&format!(
+                        "account_switcher: could not snapshot outgoing profile {}: {}",
+                        live_prof_id, err
+                    ));
+                }
             }
         } else {
             // Live session is unregistered: back up into _backups without overwriting any vault profile!
@@ -338,7 +360,12 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         }
     } else if let Some(active_prof) = reg.profiles.iter().find(|p| same_provider(&p.provider, &provider) && p.is_active) {
         if active_prof.id != account_id {
-            snapshot_active_to_profile(&provider, &active_prof.id);
+            if let Err(err) = snapshot_active_to_profile(&provider, &active_prof.id) {
+                log_trace(&format!(
+                    "account_switcher: could not snapshot active outgoing profile {}: {}",
+                    active_prof.id, err
+                ));
+            }
         }
     }
 
@@ -365,6 +392,7 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         }
     }
 
+    hydrate_profile_credential_health(&profiles_root(), std::slice::from_mut(&mut reg.profiles[idx]));
     let activated_profile = reg.profiles[idx].clone();
     // sibling sync decoupled
     save_registry(&reg);

@@ -268,6 +268,9 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     }
 
     live_cv().notify_all();
+    if !thread_id.is_empty() {
+        crate::chat::subagents::sync_child_thread_to_parent(&thread_id);
+    }
     persist();
     if !thread_id.is_empty() {
         crate::dispatch_wire::on_thread_settled(&thread_id);

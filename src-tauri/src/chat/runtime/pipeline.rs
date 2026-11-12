@@ -460,6 +460,7 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
     if item.get("swarmMeta").is_some() {
         crate::chat::subagents::record_swarm_tool_call(thread_id, &item);
     }
+    crate::chat::subagents::sync_child_thread_to_parent(thread_id);
     if !streaming {
         persist();
     }

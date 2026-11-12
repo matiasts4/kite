@@ -557,6 +557,7 @@ pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str
             upsert_item(thread, &item);
         }
     }
+    crate::chat::subagents::sync_child_thread_to_parent(thread_id);
 }
 
 pub fn chars_chunks(text: &str, size: usize) -> Vec<String> {

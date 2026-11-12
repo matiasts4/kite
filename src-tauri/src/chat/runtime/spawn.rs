@@ -112,6 +112,11 @@ pub fn launch_provider(
         .and_then(|opt| opt.get("value").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
     let workspace_id = thread.get("workspaceId").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let custom_cwd = thread
+        .get("worktreePath")
+        .or_else(|| thread.get("workingDirectory"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let profile_id = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
     let agent = thread
         .get("agent")
@@ -145,11 +150,17 @@ pub fn launch_provider(
             verified_endpoints: &verified_endpoints,
             agent: agent.as_deref(),
         };
-        let cwd = workspace_id
+        let cwd = custom_cwd
             .as_deref()
-            .and_then(workspace_path)
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
+            .or_else(|| {
+                workspace_id
+                    .as_deref()
+                    .and_then(workspace_path)
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_dir())
+            })
             .unwrap_or_else(|| {
                 if let Some(ref aid) = profile_id {
                     let home = crate::agent_mind::get_agent_home_dir(aid);

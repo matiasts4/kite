@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -12,10 +12,11 @@ use crate::acp::{
     build_acp_tool_call, extract_mentions, merge_subagent_meta, AcpStreamEvent, SubagentMeta,
     SwarmMeta,
 };
+use crate::chat::models::default_mode;
 use crate::chat::runtime::{live_cv, live_turns, push_event};
-use crate::chat::threads::{chat_item, touch, upsert_item};
+use crate::chat::threads::{blank_thread, chat_item, touch, upsert_item};
 use crate::chat::utils::now_ms;
-use crate::persist::threads;
+use crate::persist::{persist, threads, workspace_path};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,6 +132,8 @@ pub fn emit_subagent_event(payload: Value) {
     if let Some(app) = crate::get_app_handle() {
         use tauri::Emitter;
         let _ = app.emit("chat-subagent-event", payload);
+    } else {
+        crate::core_daemon::broadcast_daemon_ui_event("chat-subagent-event", payload);
     }
 }
 
@@ -1134,6 +1137,457 @@ pub fn build_swarm_state(thread_id: &str) -> Value {
     }
 
     serde_json::to_value(state).unwrap_or(json!({}))
+}
+
+#[derive(Debug, Clone)]
+pub struct ChildSubagentSpawnParams {
+    pub parent_thread_id: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub role: Option<String>,
+    pub workspace_mode: String,
+    pub fallback_cwd: Option<String>,
+    pub task: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChildSubagentSpawnResult {
+    pub child_thread_id: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub working_directory: Option<String>,
+}
+
+fn resolve_git_repo_root(dir: &Path) -> Option<PathBuf> {
+    let out = crate::git::run_git(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(raw))
+    }
+}
+
+pub fn provision_subagent_worktree(
+    repo_root: &Path,
+    mode: &str,
+    short_id: &str,
+) -> Result<PathBuf, String> {
+    let worktrees_dir = repo_root.join(".kite").join("worktrees");
+    fs::create_dir_all(&worktrees_dir).map_err(|err| err.to_string())?;
+    let wt_path = worktrees_dir.join(format!("subagent-{short_id}"));
+    let wt_str = wt_path.to_string_lossy().to_string();
+    let out = match mode {
+        "share" => crate::git::run_git(repo_root, &["worktree", "add", "--detach", &wt_str])
+            .map_err(|err| err.message)?,
+        "branch" => {
+            let branch_name = format!("kite/subagent-{short_id}");
+            crate::git::run_git(repo_root, &["worktree", "add", "-b", &branch_name, &wt_str])
+                .map_err(|err| err.message)?
+        }
+        other => return Err(format!("unsupported worktree mode: {other}")),
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("git worktree add ({mode}) failed")
+        } else {
+            stderr
+        });
+    }
+    Ok(wt_path)
+}
+
+fn set_thread_effort_option(thread: &mut Value, effort: &str) {
+    thread["effort"] = json!(effort);
+    if thread.get("providerOptions").and_then(Value::as_array).is_none() {
+        thread["providerOptions"] = json!([]);
+    }
+    if let Some(opts) = thread.get_mut("providerOptions").and_then(Value::as_array_mut) {
+        if let Some(existing) = opts
+            .iter_mut()
+            .find(|opt| opt.get("id").and_then(Value::as_str) == Some("effort"))
+        {
+            existing["value"] = json!(effort);
+        } else {
+            opts.push(json!({ "id": "effort", "value": effort }));
+        }
+    }
+}
+
+pub fn spawn_child_subagent_thread(
+    params: ChildSubagentSpawnParams,
+) -> Result<ChildSubagentSpawnResult, String> {
+    let parent_meta = params.parent_thread_id.as_deref().and_then(|pid| {
+        let all = threads().lock().ok()?;
+        let parent = all
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))?;
+        let p_provider = parent
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let p_model = parent
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let p_ws_id = parent
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let p_cwd = parent
+            .get("worktreePath")
+            .or_else(|| parent.get("workingDirectory"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| p_ws_id.as_deref().and_then(workspace_path));
+        Some((p_provider, p_model, p_ws_id, p_cwd))
+    });
+
+    let (parent_provider, parent_model, parent_workspace_id, parent_cwd) =
+        parent_meta.unwrap_or((None, None, None, None));
+
+    let provider = params
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or(parent_provider)
+        .unwrap_or_else(|| "antigravity".to_string());
+
+    let child_id = uuid::Uuid::new_v4().to_string();
+    let short_id: String = child_id.chars().filter(|c| *c != '-').take(8).collect();
+
+    let requested_model = params
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            if params.provider.is_none() {
+                parent_model
+            } else {
+                None
+            }
+        });
+
+    let title = params
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Subagent ({provider})"));
+
+    let mut child = blank_thread(
+        &child_id,
+        parent_workspace_id.as_deref(),
+        &title,
+        &provider,
+        requested_model.as_deref(),
+    );
+    if let Some(ref model) = requested_model {
+        child["model"] = json!(model);
+    }
+    child["mode"] = json!(default_mode(&provider));
+    child["startedByAgent"] = json!(true);
+    child["sideChat"] = json!(true);
+    if let Some(ref pid) = params.parent_thread_id {
+        child["parentThreadId"] = json!(pid);
+    }
+    if let Some(ref role) = params.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        child["subagentRole"] = json!(role);
+    }
+    let workspace_mode = match params.workspace_mode.trim().to_ascii_lowercase().as_str() {
+        "share" => "share".to_string(),
+        "branch" => "branch".to_string(),
+        _ => "inherit".to_string(),
+    };
+    child["workspaceMode"] = json!(workspace_mode);
+    if let Some(eff) = params
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        set_thread_effort_option(&mut child, eff);
+    }
+
+    let base_cwd = parent_cwd
+        .or(params.fallback_cwd)
+        .filter(|s| !s.trim().is_empty());
+    let mut final_cwd = base_cwd.clone();
+    if workspace_mode == "share" || workspace_mode == "branch" {
+        let base_str = base_cwd.ok_or_else(|| {
+            format!("cannot provision {workspace_mode} worktree without a repository path")
+        })?;
+        let base_path = PathBuf::from(&base_str);
+        let repo_root = resolve_git_repo_root(&base_path).unwrap_or(base_path);
+        let wt_path = provision_subagent_worktree(&repo_root, &workspace_mode, &short_id)?;
+        let wt_str = wt_path.to_string_lossy().to_string();
+        child["worktreePath"] = json!(wt_str);
+        child["workingDirectory"] = json!(wt_str);
+        final_cwd = Some(wt_str);
+    } else if let Some(ref cwd_str) = final_cwd {
+        child["workingDirectory"] = json!(cwd_str);
+    }
+
+    let final_model = child
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    {
+        let mut all_threads = threads().lock().unwrap();
+        all_threads.push(child);
+    }
+
+    let tool_call_id = format!("dispatch-subagent-{child_id}");
+    let tool_item = json!({
+        "id": tool_call_id,
+        "kind": "tool",
+        "toolName": "dispatch_subagent",
+        "toolKind": "subagent",
+        "title": title,
+        "detail": params.task,
+        "status": "running",
+        "subagentMeta": {
+            "subagentId": child_id,
+            "role": params.role.unwrap_or_else(|| format!("Subagent ({provider})")),
+            "typeName": provider,
+            "provider": provider,
+            "model": final_model,
+            "workspaceMode": workspace_mode,
+            "prompt": params.task,
+            "status": "running",
+            "childThreadId": child_id,
+            "stepCount": 0
+        }
+    });
+
+    if let Some(pid) = params.parent_thread_id.as_deref() {
+        {
+            let mut all_threads = threads().lock().unwrap();
+            if let Some(parent) = all_threads
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))
+            {
+                upsert_item(parent, &tool_item);
+                touch(parent);
+            }
+        }
+        if let Ok(mut live) = live_turns().lock() {
+            if let Some(run_id) = live.by_thread.get(pid).cloned() {
+                if let Some(run) = live.runs.get_mut(&run_id) {
+                    push_event(run, json!({ "kind": "upsert", "item": tool_item.clone() }));
+                }
+            }
+        }
+        live_cv().notify_all();
+        record_subagent_tool_call(pid, &tool_item);
+    }
+
+    persist();
+    Ok(ChildSubagentSpawnResult {
+        child_thread_id: child_id,
+        provider,
+        model: final_model,
+        working_directory: final_cwd,
+    })
+}
+
+pub fn sync_child_thread_to_parent(child_thread_id: &str) {
+    let snapshot = {
+        let Ok(all_threads) = threads().lock() else {
+            return;
+        };
+        let Some(child) = all_threads
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_thread_id))
+        else {
+            return;
+        };
+        let Some(parent_tid) = child
+            .get("parentThreadId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let child_status = child
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("idle")
+            .to_string();
+        let child_items = child
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let child_model = child.get("model").and_then(Value::as_str).map(str::to_string);
+        let child_provider = child
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        (
+            parent_tid,
+            child_status,
+            child_items,
+            child_model,
+            child_provider,
+        )
+    };
+
+    let (parent_tid, child_status, child_items, child_model, child_provider) = snapshot;
+    let (step_count, latest_activity) = summarize_run_progress(&child_items);
+    let run_status = match child_status.as_str() {
+        "running" => "running",
+        "waiting" => "waiting",
+        "error" => "failed",
+        _ => "completed",
+    };
+    let tool_status = match run_status {
+        "running" | "waiting" => "running",
+        "failed" => "error",
+        _ => "completed",
+    };
+    let is_terminal = matches!(run_status, "completed" | "failed" | "killed");
+    let now = now_ms();
+
+    let mut emitted_run: Option<Value> = None;
+    let mut updated_tool_item: Option<Value> = None;
+
+    {
+        let Ok(mut all_threads) = threads().lock() else {
+            return;
+        };
+        if let Some(parent) = all_threads
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_tid.as_str()))
+        {
+            let mut matched_sub_id: Option<String> = None;
+            if let Some(runs) = parent.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+                if let Some(run) = runs.iter_mut().find(|r| {
+                    r.get("childThreadId").and_then(Value::as_str) == Some(child_thread_id)
+                        || r.get("subagentId").and_then(Value::as_str) == Some(child_thread_id)
+                }) {
+                    matched_sub_id = run
+                        .get("subagentId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    run["status"] = json!(run_status);
+                    run["stepCount"] = json!(step_count);
+                    if let Some(ref latest) = latest_activity {
+                        run["latestActivity"] = json!(latest);
+                    }
+                    if let Some(ref m) = child_model {
+                        run["model"] = json!(m);
+                    }
+                    if let Some(ref p) = child_provider {
+                        run["provider"] = json!(p);
+                    }
+                    run["updatedAtUnixMs"] = json!(now);
+                    if is_terminal && run.get("completedAtUnixMs").is_none_or(Value::is_null) {
+                        run["completedAtUnixMs"] = json!(now);
+                    }
+                    emitted_run = Some(run.clone());
+                }
+            }
+            if let Some(items) = parent.get_mut("items").and_then(Value::as_array_mut) {
+                if let Some(target) = items.iter_mut().find(|it| {
+                    it.pointer("/subagentMeta/childThreadId").and_then(Value::as_str)
+                        == Some(child_thread_id)
+                        || it.pointer("/subagentMeta/subagentId").and_then(Value::as_str)
+                            == Some(matched_sub_id.as_deref().unwrap_or(child_thread_id))
+                }) {
+                    target["status"] = json!(tool_status);
+                    if let Some(meta) = target
+                        .get_mut("subagentMeta")
+                        .and_then(Value::as_object_mut)
+                    {
+                        meta.insert("status".to_string(), json!(run_status));
+                        meta.insert("stepCount".to_string(), json!(step_count));
+                        if let Some(ref latest) = latest_activity {
+                            meta.insert("latestActivity".to_string(), json!(latest));
+                        }
+                        if let Some(ref m) = child_model {
+                            meta.insert("model".to_string(), json!(m));
+                        }
+                        if let Some(ref p) = child_provider {
+                            meta.insert("provider".to_string(), json!(p));
+                        }
+                    }
+                    updated_tool_item = Some(target.clone());
+                }
+            }
+            touch(parent);
+        }
+    }
+
+    if let Some(tool_item) = updated_tool_item {
+        if let Ok(mut live) = live_turns().lock() {
+            if let Some(run_id) = live.by_thread.get(&parent_tid).cloned() {
+                if let Some(run) = live.runs.get_mut(&run_id) {
+                    push_event(run, json!({ "kind": "upsert", "item": tool_item }));
+                }
+            }
+        }
+        live_cv().notify_all();
+    }
+
+    if let Some(run) = emitted_run {
+        emit_subagent_event(json!({
+            "kind": "subagentRunUpdated",
+            "threadId": parent_tid,
+            "subagentId": run.get("subagentId"),
+            "run": run,
+        }));
+    }
+}
+
+pub fn extract_final_assistant_text(thread_id: &str) -> String {
+    let Ok(all_threads) = threads().lock() else {
+        return String::new();
+    };
+    let Some(thread) = all_threads
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+    else {
+        return String::new();
+    };
+    let Some(items) = thread.get("items").and_then(Value::as_array) else {
+        return String::new();
+    };
+    items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.get("kind").and_then(Value::as_str) == Some("assistant")
+                && !item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+        })
+        .and_then(|item| item.get("text").and_then(Value::as_str))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+pub fn format_subagent_wait_output(response_text: &str, child_thread_id: &str) -> String {
+    let trimmed = response_text.trim();
+    if trimmed.is_empty() {
+        format!("[subagent_id: thread:{child_thread_id}]")
+    } else {
+        format!("{trimmed}\n\n[subagent_id: thread:{child_thread_id}]")
+    }
 }
 
 #[cfg(test)]

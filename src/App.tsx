@@ -4,60 +4,36 @@ import { Sidebar, WorkMode } from './components/Sidebar';
 import type { WorkspaceSessionTab, ChatThreadSummary } from './components/sidebar/types';
 import { RightDock } from './components/RightDock';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
-import { ChatView } from './components/views/ChatView';
-import { CodeWorkspace } from './components/code/CodeWorkspace';
-import { AgentsView } from './components/views/AgentsView';
 import { SettingsView } from './components/views/SettingsView';
-import { OPEN_SETTINGS_EVENT, openSettingsTab } from './lib/settingsNav';
-import { readKitePref, writeKitePref } from './lib/kitePrefs';
-import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from './lib/terminalLinkNav';
+import { openSettingsTab } from './lib/settingsNav';
+import { readKitePref } from './lib/kitePrefs';
 import { ZedStripHost, type ZedCallState } from './components/ZedStrip';
 import { releaseOperatorCapture } from './lib/operator/voice/zedVoice';
-import { RoutinesView } from './components/views/RoutinesView';
-import { UsageDashboardModal } from './components/views/modals/UsageDashboardModal';
-import { WhatsNewModal } from './components/views/modals/WhatsNewModal';
-import { ArchivedChatsModal } from './components/views/modals/ArchivedChatsModal';
-import { SshWorkspaceModal } from './components/views/modals/SshWorkspaceModal';
-import { NotificationsView } from './components/views/NotificationsView';
 import { useNotifications } from './lib/notifications/useNotifications';
-import { Toaster, registerToastNavigator } from './lib/toast';
-import { ResumeHost } from './components/modals/ResumeHost';
-import { PromptProjectileOverlay } from './components/code/PromptProjectileOverlay';
-import { useGlobalShortcuts } from './lib/shortcuts/useGlobalShortcuts';
+import { Toaster } from './lib/toast';
 import { requestNewThread, resolveHeldThreadSelection } from './lib/newThreadRequest';
 import { getPlatform } from './lib/shortcuts/shortcutsRegistry';
-import { CommandPaletteModal } from './components/modals/CommandPaletteModal';
 import type { Workspace, AgentProfile, BootstrapResponse } from './types';
 import {
   getBootstrap,
-  addWorkspace,
-  copyWorkspacePath,
-  setWorkspacePinned,
-  renameWorkspace,
-  removeWorkspace,
-  moveWorkspace,
-  setAgentPinned,
-  moveAgent,
-  deleteAgentProfile,
   listChatSummaries,
-  renameChatThread,
-  setChatThreadPinned,
-  archiveChatThread,
-  restoreArchivedChat,
   listArchivedChats,
-  deleteChatThread,
   isTauriEnvironment,
   getCreditsBalance,
   getAuthBootstrap,
 } from './lib/ipc';
 import { isBrowserTestLane } from './lib/browserTestLane';
 import { loadOperatorConfig, saveOperatorConfig } from './lib/operator/operatorConfig';
-// import { startProactiveAgentWatcher } from './lib/operator/proactiveWatcher';
-import { sendUiAck, type UiBusRequestPayload } from './lib/operator/executor/ui-bus';
 import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
 import { AppIntro, releaseBootCover } from './motion/AppIntro';
-import { AnimatePresence, motion } from 'motion/react';
-import { surfaceMotion } from './motion/standard/surfaces';
+
+import { useAppTheme } from './components/app/useAppTheme';
+import { useAppShortcuts } from './components/app/useAppShortcuts';
+import { useAppGlobalEvents } from './components/app/useAppGlobalEvents';
+import { useAppSidebarHandlers } from './components/app/useAppSidebarHandlers';
+import { AppModals } from './components/app/AppModals';
+import { AppNotificationsPopover } from './components/app/AppNotificationsPopover';
+import { AppMainStage } from './components/app/AppMainStage';
 
 export type ShellRoute =
   | { kind: 'agent' }
@@ -117,72 +93,17 @@ export const App: React.FC = () => {
       localStorage.setItem('kite-code.side-panel.visible.v1', String(rightDockVisible));
     } catch {}
   }, [rightDockVisible]);
+
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
-  const [appearance, setAppearance] = useState<'dark' | 'light'>(() => {
-    try {
-      const saved = readKitePref('theme');
-      if (saved === 'light' || saved === 'dark') return saved;
-    } catch {}
-    return 'dark';
-  });
-  const [palette, setPalette] = useState<string>(() => {
-    try {
-      const saved = readKitePref('palette');
-      if (saved) return saved;
-    } catch {}
-    return 'kite-dark';
-  });
 
-  const applyTheme = useCallback((nextTheme: 'dark' | 'light', nextPalette?: string) => {
-    const effectivePalette =
-      nextPalette ?? (nextTheme === 'light' ? 'kite-light' : 'kite-dark');
-    setAppearance(nextTheme);
-    setPalette(effectivePalette);
-
-    try {
-      writeKitePref('theme', nextTheme);
-      writeKitePref('palette', effectivePalette);
-    } catch {}
-
-    document.documentElement.setAttribute('data-theme', nextTheme);
-    document.documentElement.setAttribute('data-palette', effectivePalette);
-    document.documentElement.classList.toggle('dark', nextTheme === 'dark');
-    document.documentElement.classList.toggle('light', nextTheme === 'light');
-
-    const appFrame = document.querySelector('.app-frame');
-    if (appFrame) {
-      appFrame.setAttribute('data-theme', nextTheme);
-      appFrame.setAttribute('data-palette', effectivePalette);
-    }
-
-    const zoomViewport = document.querySelector('.zoom-viewport');
-    if (zoomViewport) {
-      zoomViewport.setAttribute('data-theme', nextTheme);
-      zoomViewport.setAttribute('data-palette', effectivePalette);
-    }
-
-    window.dispatchEvent(
-      new CustomEvent('kite:theme-changed', {
-        detail: { theme: nextTheme, palette: effectivePalette },
-      })
-    );
-  }, []);
-
-  useEffect(() => {
-    applyTheme(appearance, palette);
-  }, []);
-
-  useEffect(() => {
-    const handleThemeEvent = (e: Event) => {
-      const detail = (e as CustomEvent<{ theme?: 'dark' | 'light'; palette?: string }>).detail;
-      if (detail?.theme && (detail.theme === 'dark' || detail.theme === 'light')) {
-        setAppearance(detail.theme);
-        if (detail.palette) setPalette(detail.palette);
-      }
-    };
-    window.addEventListener('kite:theme-changed', handleThemeEvent);
-    return () => window.removeEventListener('kite:theme-changed', handleThemeEvent);
-  }, []);
+  const {
+    appearance,
+    palette,
+    applyTheme,
+    handleToggleAppearance,
+    handleToggleMode,
+    handleSelectTheme,
+  } = useAppTheme();
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>(() => {
     try {
@@ -214,6 +135,7 @@ export const App: React.FC = () => {
       } catch {}
     }
   }, [selectedWorkspaceId]);
+
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [agentEditorOpen, setAgentEditorOpen] = useState<boolean>(false);
@@ -224,27 +146,6 @@ export const App: React.FC = () => {
   const [notificationsAnchor, setNotificationsAnchor] = useState<DOMRect | null>(null);
   const [workspaceSessions, setWorkspaceSessions] = useState<Record<string, WorkspaceSessionTab[]>>({});
   const [requestedCodeTabId, setRequestedCodeTabId] = useState<string | null>(null);
-
-  useEffect(() => {
-    return registerToastNavigator({
-      onNavigateAgent: (id) => {
-        setSelectedAgentId(id);
-        setWorkMode('agent');
-      },
-      onNavigateThread: (threadId, agentId) => {
-        if (agentId) {
-          setSelectedAgentId(agentId);
-          setWorkMode('agent');
-        } else {
-          setWorkMode('code');
-        }
-        setSelectedThreadId(threadId);
-      },
-      onNavigateMode: (m) => {
-        setWorkMode(m);
-      },
-    });
-  }, []);
 
   const handleCodeSessions = useCallback((workspaceId: string, sessions: WorkspaceSessionTab[]) => {
     setWorkspaceSessions((prev) => {
@@ -355,9 +256,6 @@ export const App: React.FC = () => {
   const toggleOperator = useCallback(() => {
     setOperatorOpen((prev) => !prev);
   }, []);
-
-  // Global keyboard shortcuts: (managed by useGlobalShortcuts)
-// Operator shortcuts are registered in useGlobalShortcuts
 
   const bootstrappedRef = useRef(false);
 
@@ -498,318 +396,65 @@ export const App: React.FC = () => {
     loadBootstrap();
   }, [loadBootstrap]);
 
-  // Configurable global keyboard shortcuts
-  useGlobalShortcuts({
-    platform: appPlatform,
-    handlers: {
-      'toggle-sidebar': () => {
-        setSidebarVisible((v) => !v);
-      },
-      'open-settings': () => {
-        setSettingsOpen((v) => !v);
-      },
-      'command-palette': () => {
-        setIsCommandPaletteOpen((v) => !v);
-      },
-      'quick-switcher': () => {
-        setIsCommandPaletteOpen((v) => !v);
-      },
-      'back-esc': () => {
-        if (isCommandPaletteOpen) {
-          setIsCommandPaletteOpen(false);
-        } else if (isNotificationsOpen) {
-          setIsNotificationsOpen(false);
-        } else if (isUsageModalOpen) {
-          setIsUsageModalOpen(false);
-        } else if (isWhatsNewOpen) {
-          setIsWhatsNewOpen(false);
-        } else if (isArchivedChatsOpen) {
-          setIsArchivedChatsOpen(false);
-        } else if (isSshModalOpen) {
-          setIsSshModalOpen(false);
-        } else if (routinesOpen) {
-          setRoutinesOpen(false);
-        } else if (settingsOpen) {
-          setSettingsOpen(false);
-        } else if (operatorOpen) {
-          setOperatorOpen(false);
-        } else {
-          return false;
-        }
-        return true;
-      },
-      'mode-agent': () => {
-        setWorkMode('agent');
-        setSettingsOpen(false);
-        setRoutinesOpen(false);
-      },
-      'mode-code': () => {
-        setWorkMode('code');
-        setSettingsOpen(false);
-        setRoutinesOpen(false);
-      },
-      'mode-chat': () => {
-        setWorkMode('chat');
-        setSettingsOpen(false);
-        setRoutinesOpen(false);
-      },
-      'toggle-dock': () => {
-        setRightDockVisible((v) => !v);
-      },
-      'toggle-diffs': () => {
-        setRightDockVisible(true);
-        window.dispatchEvent(new CustomEvent('kite:open-diffs'));
-      },
-      'toggle-operator': () => {
-        setOperatorOpen((prev) => !prev);
-      },
-      'dictation-toggle': () => {
-        if (!operatorOpen) {
-          setOperatorOpen(true);
-        }
-        window.dispatchEvent(new CustomEvent('kite:toggle-voice'));
-      },
-      'new-terminal': () => {
-        if (workMode !== 'code') {
-          setWorkMode('code');
-          setSettingsOpen(false);
-        }
-        window.dispatchEvent(
-          new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
-        );
-      },
-      'split-vertical': () => {
-        if (workMode !== 'code') {
-          setWorkMode('code');
-          setSettingsOpen(false);
-        }
-        window.dispatchEvent(
-          new CustomEvent('kite:shortcut-pane-action', {
-            detail: { action: 'split-pane', axis: 'vertical' },
-          })
-        );
-      },
-      'split-horizontal': () => {
-        if (workMode !== 'code') {
-          setWorkMode('code');
-          setSettingsOpen(false);
-        }
-        window.dispatchEvent(
-          new CustomEvent('kite:shortcut-pane-action', {
-            detail: { action: 'split-pane', axis: 'horizontal' },
-          })
-        );
-      },
-      'close-pane': () => {
-        window.dispatchEvent(
-          new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'close-pane' } })
-        );
-      },
-      'save-file': () => {
-        window.dispatchEvent(new CustomEvent('kite:save-file'));
-      },
-    },
+  const sidebarHandlers = useAppSidebarHandlers({
+    setWorkspaces,
+    agents,
+    setAgents,
+    loadBootstrap,
+    loadThreads,
+    selectedWorkspaceId,
+    setSelectedWorkspaceId,
+    selectedAgentId,
+    setSelectedAgentId,
+    selectedThreadId,
+    setSelectedThreadId,
+    workMode,
+    setWorkMode,
+    setSettingsOpen,
+    setNewSessionRequest,
   });
 
-  useEffect(() => {
-    const openSettings = () => setSettingsOpen(true);
-    window.addEventListener(OPEN_SETTINGS_EVENT, openSettings);
-    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
-  }, []);
+  useAppShortcuts({
+    platform: appPlatform,
+    workMode,
+    setWorkMode,
+    setSidebarVisible,
+    setRightDockVisible,
+    settingsOpen,
+    setSettingsOpen,
+    isCommandPaletteOpen,
+    setIsCommandPaletteOpen,
+    isNotificationsOpen,
+    setIsNotificationsOpen,
+    isUsageModalOpen,
+    setIsUsageModalOpen,
+    isWhatsNewOpen,
+    setIsWhatsNewOpen,
+    isArchivedChatsOpen,
+    setIsArchivedChatsOpen,
+    isSshModalOpen,
+    setIsSshModalOpen,
+    routinesOpen,
+    setRoutinesOpen,
+    operatorOpen,
+    setOperatorOpen,
+  });
 
-  // S6: Proactive agent watcher silenced per user instruction to prevent toast and voice loop on resize
-  // useEffect(() => startProactiveAgentWatcher(), []);
-
-  useEffect(() => {
-    const handleNavigate = (e: Event) => {
-      const custom = e as CustomEvent<WorkMode | { mode?: string }>;
-      const raw =
-        typeof custom.detail === 'string' ? custom.detail : custom.detail?.mode;
-      // Operator view modes use surface names (agents/threads); the app uses its own.
-      const modeAlias: Record<string, WorkMode> = {
-        agents: 'agent',
-        agent: 'agent',
-        threads: 'chat',
-        chat: 'chat',
-        code: 'code',
-      };
-      const nextMode = raw ? modeAlias[raw] : undefined;
-      if (nextMode) {
-        setWorkMode(nextMode);
-        setSettingsOpen(false);
-      }
-    };
-    const handleSelectWorkspace = (e: Event) => {
-      const custom = e as CustomEvent<string | { workspaceId?: string }>;
-      const workspaceId =
-        typeof custom.detail === 'string' ? custom.detail : custom.detail?.workspaceId;
-      if (workspaceId) {
-        setSelectedWorkspaceId(workspaceId);
-      }
-    };
-    window.addEventListener('kite:navigate-mode', handleNavigate);
-    window.addEventListener('kite:select-workspace', handleSelectWorkspace);
-
-    const handleSelectThread = (e: Event) => {
-      const custom = e as CustomEvent<string | { threadId?: string; mode?: WorkMode }>;
-      const threadId =
-        typeof custom.detail === 'string' ? custom.detail : custom.detail?.threadId;
-      if (threadId) {
-        setSelectedThreadId(threadId);
-        const targetMode =
-          typeof custom.detail === 'object' && custom.detail?.mode ? custom.detail.mode : 'chat';
-        setWorkMode(targetMode);
-        setSettingsOpen(false);
-        setRoutinesOpen(false);
-      }
-    };
-    window.addEventListener('kite:select-thread', handleSelectThread);
-
-    const handleOpenFilePreview = (e: Event) => {
-      const custom = e as CustomEvent<{ workspaceId?: string | null }>;
-      setRightDockVisible(true);
-      if (custom.detail?.workspaceId) {
-        setSelectedWorkspaceId(custom.detail.workspaceId);
-      }
-    };
-    window.addEventListener('kite:open-right-dock-file', handleOpenFilePreview);
-
-    const handleOpenBrowserInDock = (e: Event) => {
-      const custom = e as CustomEvent<{ workspaceId?: string | null; url?: string }>;
-      setRightDockVisible(true);
-      if (custom.detail?.workspaceId) {
-        setSelectedWorkspaceId(custom.detail.workspaceId);
-      }
-    };
-    window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
-
-    const handleSpawnAgentTerminal = (e: Event) => {
-      const custom = e as CustomEvent<{ workspaceId?: string | null }>;
-      setWorkMode('code');
-      setSettingsOpen(false);
-      setRoutinesOpen(false);
-      if (custom.detail?.workspaceId) {
-        setSelectedWorkspaceId(custom.detail.workspaceId);
-      }
-    };
-    window.addEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
-
-    const handleOpRequest = (e: Event) => {
-      const custom = e as CustomEvent<UiBusRequestPayload>;
-      if (!custom.detail) return;
-      if (custom.detail.kind === 'navigate') {
-        const targetMode = custom.detail.payload?.mode as WorkMode;
-        if (targetMode && ['agent', 'code', 'chat'].includes(targetMode)) {
-          setWorkMode(targetMode);
-          setSettingsOpen(false);
-          sendUiAck({
-            reqId: custom.detail.reqId,
-            ok: true,
-            data: { mode: targetMode },
-          });
-        } else {
-          sendUiAck({
-            reqId: custom.detail.reqId,
-            ok: false,
-            reason: `Modo inválido: ${targetMode}`,
-          });
-        }
-      }
-    };
-    window.addEventListener('kite:op-request', handleOpRequest);
-
-    return () => {
-      window.removeEventListener('kite:navigate-mode', handleNavigate);
-      window.removeEventListener('kite:select-thread', handleSelectThread);
-      window.removeEventListener('kite:select-workspace', handleSelectWorkspace);
-      window.removeEventListener('kite:open-right-dock-file', handleOpenFilePreview);
-      window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
-      window.removeEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
-      window.removeEventListener('kite:op-request', handleOpRequest);
-    };
-  }, []);
-
-  useEffect(() => {
-    const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
-    if (!host.__TAURI_INTERNALS__ && !host.__TAURI__) return;
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    const timers = new Set<number>();
-    void import('@tauri-apps/api/event')
-      .then(({ listen }) =>
-        listen<{ sessionId?: string; engine?: string; alias?: string | null }>(
-          'dispatch-open-pane',
-          (event) => {
-            const sessionId = event.payload?.sessionId;
-            if (!sessionId) return;
-            setWorkMode('code');
-            setSettingsOpen(false);
-            setRoutinesOpen(false);
-            const timer = window.setTimeout(() => {
-              timers.delete(timer);
-              const alias = event.payload?.alias || undefined;
-              window.dispatchEvent(
-                new CustomEvent('kite:spawn-agent-terminal', {
-                  detail: {
-                    sessionId,
-                    engine: event.payload?.engine || undefined,
-                    title: alias,
-                    agentName: alias,
-                    attachOnly: true,
-                  },
-                })
-              );
-            }, 200);
-            timers.add(timer);
-          }
-        )
-      )
-      .then((stop) => {
-        if (cancelled) stop();
-        else unlisten = stop;
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-      unlisten?.();
-      for (const timer of timers) window.clearTimeout(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    const handleAgentsChanged = () => {
-      void loadBootstrap();
-    };
-    const handleAgentDeleted = (e: Event) => {
-      const custom = e as CustomEvent<{ agentId: string }>;
-      const deletedId = custom.detail?.agentId;
-      if (deletedId) {
-        setAgents((prev) => {
-          const remaining = prev.filter((a) => a.id !== deletedId);
-          if (selectedAgentId === deletedId) {
-            setSelectedAgentId(remaining[0]?.id ?? null);
-          }
-          return remaining;
-        });
-      } else {
-        void loadBootstrap();
-      }
-    };
-    window.addEventListener('kite:agents-changed', handleAgentsChanged);
-    window.addEventListener('kite:agent-deleted', handleAgentDeleted);
-    return () => {
-      window.removeEventListener('kite:agents-changed', handleAgentsChanged);
-      window.removeEventListener('kite:agent-deleted', handleAgentDeleted);
-    };
-  }, [loadBootstrap, selectedAgentId]);
-
-  useEffect(() => {
-    const handleThreadsChanged = () => {
-      void loadThreads();
-    };
-    window.addEventListener('kite:threads-changed', handleThreadsChanged);
-    return () => window.removeEventListener('kite:threads-changed', handleThreadsChanged);
-  }, [loadThreads]);
+  useAppGlobalEvents({
+    setWorkMode,
+    setSettingsOpen,
+    setRoutinesOpen,
+    setSelectedWorkspaceId,
+    setSelectedAgentId,
+    setSelectedThreadId,
+    setRightDockVisible,
+    setIsCommandPaletteOpen,
+    onAddWorkspace: sidebarHandlers.handleAddWorkspace,
+    loadBootstrap,
+    loadThreads,
+    setAgents,
+    selectedAgentId,
+  });
 
   const handleNewChatInWorkspace = useCallback((targetWorkspaceId: string | null) => {
     setHasOpenedChat(true);
@@ -818,215 +463,6 @@ export const App: React.FC = () => {
     setRoutinesOpen(false);
     requestNewThread(targetWorkspaceId);
   }, []);
-
-  const handleToggleAppearance = () => {
-    const next = appearance === 'dark' ? 'light' : 'dark';
-    const nextPalette = next === 'dark' ? 'kite-dark' : 'kite-light';
-    applyTheme(next, nextPalette);
-  };
-
-  const handleToggleMode = (newMode: 'dark' | 'light') => {
-    const nextPalette = newMode === 'dark' ? 'kite-dark' : 'kite-light';
-    applyTheme(newMode, nextPalette);
-  };
-
-  const handleSelectTheme = (paletteId: string, themeMode?: 'dark' | 'light') => {
-    const nextMode = themeMode ?? appearance;
-    applyTheme(nextMode, paletteId);
-  };
-
-  const handleAddWorkspace = async () => {
-    try {
-      const created = await addWorkspace();
-      if (created) {
-        await loadBootstrap();
-        setSelectedWorkspaceId(created.id);
-        if (workMode !== 'chat') {
-          setWorkMode('code');
-        }
-        setSettingsOpen(false);
-        setNewSessionRequest((n) => n + 1);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleCopyPath = async (id: string) => {
-    try {
-      const path = await copyWorkspacePath(id);
-      if (path) {
-        await navigator.clipboard.writeText(path);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleTogglePinWorkspace = async (id: string, pinned: boolean) => {
-    try {
-      await setWorkspacePinned(id, pinned);
-      await loadBootstrap();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const renderActiveView = () => {
-    if (!isTauriEnvironment()) {
-      return (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--pane)', padding: '32px', height: '100%' }}>
-          <div style={{ maxWidth: '440px', width: '100%', background: 'var(--block-fill)', border: '1px solid var(--block-stroke)', borderRadius: 'var(--radius-card)', padding: '24px', boxShadow: 'var(--shadow-sheet)', textAlign: 'center' }}>
-            <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'var(--accent-tint)', border: '1px solid var(--accent-tint-strong)', color: 'var(--accent)', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect width="20" height="14" x="2" y="3" rx="2" />
-                <line x1="8" x2="16" y1="21" y2="21" />
-                <line x1="12" x2="12" y1="17" y2="21" />
-              </svg>
-            </div>
-            <h3 style={{ fontSize: 'var(--text-body)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', marginBottom: '8px' }}>
-              Kite Code Runs in Tauri Window
-            </h3>
-            <p style={{ fontSize: 'var(--text-caption)', color: 'var(--text-secondary)', lineHeight: 'var(--leading-body)', marginBottom: '16px' }}>
-              This page is running in a standard web browser at http://localhost:1420. Native desktop capabilities (frameless window cromo, child WebView2, ConPTY terminal, and local SQLite IPC) require launching the desktop application.
-            </p>
-            <div style={{ background: 'var(--terminal-canvas, #0d1117)', border: '1px solid var(--separator)', borderRadius: 'var(--radius-chip)', padding: '12px', fontSize: 'var(--text-mono)', fontFamily: 'var(--font-mono)', color: 'var(--accent)', userSelect: 'all', marginBottom: '16px', textAlign: 'left' }}>
-              npm run tauri dev
-            </div>
-            <p style={{ fontSize: 'var(--text-meta)', color: 'var(--text-faint)', margin: 0 }}>
-              Studio runs in the frameless desktop window. Close any lingering background instances first.
-            </p>
-          </div>
-        </div>
-      );
-    }
-
-    if (loading && workspaces.length === 0 && agents.length === 0) {
-      return (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--pane)', height: '100%' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
-            <div className="loading-spinner" style={{ width: '24px', height: '24px', borderWidth: '2px' }} />
-            <span style={{ fontSize: 'var(--text-caption)', color: 'var(--text-secondary)' }}>Connecting to Kite Code...</span>
-          </div>
-        </div>
-      );
-    }
-
-    if (error && workspaces.length === 0 && agents.length === 0) {
-      return (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--pane)', padding: '24px', height: '100%' }}>
-          <div className="ui-status-notice ui-status-notice--warning">
-            <h3 className="ui-status-notice__title">Backend Connection Issue</h3>
-            <p className="ui-status-notice__message">{error}</p>
-            <button onClick={loadBootstrap} className="primary-button" style={{ marginTop: '16px' }}>
-              Retry Connection
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    switch (workMode) {
-      case 'agent':
-        return (
-          <AgentsView
-            agents={agents}
-            workspaceId={selectedWorkspaceId}
-            selectedAgentId={selectedAgentId}
-            onSelectAgent={(id) => {
-              setSelectedAgentId(id);
-              setAgentEditorOpen(false);
-            }}
-            agentEditorOpen={agentEditorOpen}
-            onCloseAgentEditor={() => setAgentEditorOpen(false)}
-            onAgentCreated={(agent) => {
-              setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
-              setSelectedAgentId(agent.id);
-              setAgentEditorOpen(false);
-            }}
-            onAgentUpdated={(updated) => {
-              setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-            }}
-            onAgentDeleted={(agentId) => {
-              setAgents((prev) => {
-                const remaining = prev.filter((a) => a.id !== agentId);
-                if (selectedAgentId === agentId) {
-                  setSelectedAgentId(remaining[0]?.id ?? null);
-                }
-                return remaining;
-              });
-            }}
-            viewMode={agentViewMode}
-            onViewModeChange={setAgentViewMode}
-            onOpenRoutines={() => {
-              setWorkMode('agent');
-              setAgentViewMode('settings');
-            }}
-          />
-        );
-      case 'code':
-        return (
-          <CodeWorkspace
-            workspaces={workspaces}
-            selectedWorkspaceId={selectedWorkspaceId}
-            onSelectWorkspace={setSelectedWorkspaceId}
-            onRefresh={loadBootstrap}
-            onAddWorkspace={handleAddWorkspace}
-            agents={agents}
-            selectedAgentId={selectedAgentId}
-            onSessionsChange={handleCodeSessions}
-            requestedTabId={requestedCodeTabId}
-            onTabRequestedHandled={() => setRequestedCodeTabId(null)}
-          />
-        );
-      case 'chat':
-        return (
-          <ChatView
-            ownsNewThreadRequests
-            workspaceId={selectedWorkspaceId}
-            threadId={selectedThreadId}
-            agents={agents}
-          />
-        );
-      default:
-        return (
-          <AgentsView
-            agents={agents}
-            workspaceId={selectedWorkspaceId}
-            selectedAgentId={selectedAgentId}
-            onSelectAgent={(id) => {
-              setSelectedAgentId(id);
-              setAgentEditorOpen(false);
-            }}
-            agentEditorOpen={agentEditorOpen}
-            onCloseAgentEditor={() => setAgentEditorOpen(false)}
-            onAgentCreated={(agent) => {
-              setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
-              setSelectedAgentId(agent.id);
-              setAgentEditorOpen(false);
-            }}
-            onAgentUpdated={(updated) => {
-              setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-            }}
-            onAgentDeleted={(agentId) => {
-              setAgents((prev) => {
-                const remaining = prev.filter((a) => a.id !== agentId);
-                if (selectedAgentId === agentId) {
-                  setSelectedAgentId(remaining[0]?.id ?? null);
-                }
-                return remaining;
-              });
-            }}
-            viewMode={agentViewMode}
-            onViewModeChange={setAgentViewMode}
-            onOpenRoutines={() => {
-              setWorkMode('agent');
-              setAgentViewMode('settings');
-            }}
-          />
-        );
-    }
-  };
 
   return (
     <div
@@ -1088,283 +524,119 @@ export const App: React.FC = () => {
           {/* Authentic Left Rail Sidebar */}
           <Sidebar
             hidden={!sidebarVisible}
-              onRailPresenceChange={setSidebarRailMounted}
-              mode={workMode}
-              workspaces={workspaces}
-              agents={agents}
-              threads={threads}
-              selectedWorkspaceId={selectedWorkspaceId}
-              onSelectWorkspace={(id) => {
-                setSelectedWorkspaceId(id);
-                setWorkMode('code');
-              }}
-              selectedAgentId={selectedAgentId}
-              onSelectAgent={(id) => {
-                setSelectedAgentId(id);
-                setAgentEditorOpen(false);
-                setWorkMode('agent');
-              }}
-              selectedThreadId={selectedThreadId}
-              onSelectThread={(id) => {
-                setSelectedThreadId(id);
-                setWorkMode('chat');
-              }}
-              accountName={accountName}
-              accountTier={accountTier}
-              accountTierPaid={accountTierPaid}
-              creditsLabel={creditsLabel}
-              onNewAgent={() => {
-                setWorkMode('agent');
-                setAgentEditorOpen(true);
-                setSettingsOpen(false);
-              }}
-              onAddWorkspace={handleAddWorkspace}
-              onNewChat={() => void handleNewChatInWorkspace(selectedWorkspaceId)}
-              onNewChatInWorkspace={(wsId) => void handleNewChatInWorkspace(wsId)}
-              onNewAgentChat={(agentId) => {
-                setSelectedAgentId(agentId);
-                setWorkMode('agent');
-                setAgentEditorOpen(false);
-                setAgentViewMode('chats');
-                setSettingsOpen(false);
-                window.dispatchEvent(new CustomEvent('studio-new-agent-chat', { detail: { agentId } }));
-              }}
-              onCopyWorkspacePath={handleCopyPath}
-              onTogglePinWorkspace={handleTogglePinWorkspace}
-              onTogglePinAgent={async (id, pinned) => {
-                try {
-                  const updated = await setAgentPinned(id, pinned);
-                  setAgents(updated);
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onMoveAgent={async (id, toIndex) => {
-                try {
-                  const updated = await moveAgent(id, toIndex);
-                  setAgents(updated);
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onDeleteAgent={async (id) => {
-                try {
-                  await deleteAgentProfile(id);
-                  const remaining = agents.filter((a) => a.id !== id);
-                  setAgents(remaining);
-                  if (selectedAgentId === id) {
-                    setSelectedAgentId(remaining[0]?.id ?? null);
-                  }
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onOpenAgentSettings={(id) => {
-                setSelectedAgentId(id);
-                setWorkMode('agent');
-                setAgentEditorOpen(false);
-                setAgentViewMode('settings');
-                setSettingsOpen(false);
-              }}
-              onRenameWorkspace={async (id, newName) => {
-                try {
-                  const updated = await renameWorkspace(id, newName);
-                  setWorkspaces(updated);
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onRemoveWorkspaceFromList={async (id) => {
-                try {
-                  const updated = await removeWorkspace(id);
-                  setWorkspaces(updated);
-                  if (selectedWorkspaceId === id) {
-                    setSelectedWorkspaceId(updated[0]?.id ?? null);
-                  }
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onMoveWorkspace={async (id, toIndex) => {
-                try {
-                  const updated = await moveWorkspace(id, toIndex);
-                  setWorkspaces(updated);
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onTogglePinThread={async (id, pinned) => {
-                try {
-                  await setChatThreadPinned(id, pinned);
-                  await loadThreads();
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onRenameThread={async (id, newTitle) => {
-                try {
-                  await renameChatThread(id, newTitle);
-                  await loadThreads();
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onArchiveThread={async (id) => {
-                try {
-                  await archiveChatThread(id);
-                  await loadThreads();
-                  if (selectedThreadId === id) {
-                    setSelectedThreadId(null);
-                  }
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onRestoreThread={async (id) => {
-                try {
-                  await restoreArchivedChat(id);
-                  await loadThreads();
-                  setSelectedThreadId(id);
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              onDeleteThread={async (id) => {
-                try {
-                  await deleteChatThread(id);
-                  await loadThreads();
-                  if (selectedThreadId === id) {
-                    setSelectedThreadId(null);
-                  }
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              archivedCount={archivedCount}
-              onNewWorkspaceSession={(id) => {
-                setSelectedWorkspaceId(id);
-                setWorkMode('code');
-                setSettingsOpen(false);
-                setNewSessionRequest((n) => n + 1);
-              }}
-              workspaceSessions={workspaceSessions}
-              onSelectWorkspaceTab={(workspaceId, tabId) => {
-                setSelectedWorkspaceId(workspaceId);
-                setRequestedCodeTabId(tabId);
-                setWorkMode('code');
-              }}
-              onCloseWorkspaceTab={(workspaceId, tabId) => {
-                window.dispatchEvent(
-                  new CustomEvent('kite:close-workspace-tab', {
-                    detail: { workspaceId, tabId },
-                  })
-                );
-              }}
-              onRenameWorkspaceTab={(workspaceId, tabId, newTitle) => {
-                window.dispatchEvent(
-                  new CustomEvent('kite:rename-workspace-tab', {
-                    detail: { workspaceId, tabId, newTitle },
-                  })
-                );
-              }}
-              onOpenSettings={() => setSettingsOpen(true)}
-              onOpenArchivedChats={() => setIsArchivedChatsOpen(true)}
-              onConnectSsh={() => setIsSshModalOpen(true)}
-              appearance={appearance}
-              onToggleAppearance={handleToggleAppearance}
-            />
+            onRailPresenceChange={setSidebarRailMounted}
+            mode={workMode}
+            workspaces={workspaces}
+            agents={agents}
+            threads={threads}
+            selectedWorkspaceId={selectedWorkspaceId}
+            onSelectWorkspace={(id) => {
+              setSelectedWorkspaceId(id);
+              setWorkMode('code');
+            }}
+            selectedAgentId={selectedAgentId}
+            onSelectAgent={(id) => {
+              setSelectedAgentId(id);
+              setAgentEditorOpen(false);
+              setWorkMode('agent');
+            }}
+            selectedThreadId={selectedThreadId}
+            onSelectThread={(id) => {
+              setSelectedThreadId(id);
+              setWorkMode('chat');
+            }}
+            accountName={accountName}
+            accountTier={accountTier}
+            accountTierPaid={accountTierPaid}
+            creditsLabel={creditsLabel}
+            onNewAgent={() => {
+              setWorkMode('agent');
+              setAgentEditorOpen(true);
+              setSettingsOpen(false);
+            }}
+            onAddWorkspace={sidebarHandlers.handleAddWorkspace}
+            onNewChat={() => void handleNewChatInWorkspace(selectedWorkspaceId)}
+            onNewChatInWorkspace={(wsId) => void handleNewChatInWorkspace(wsId)}
+            onNewAgentChat={(agentId) => {
+              setSelectedAgentId(agentId);
+              setWorkMode('agent');
+              setAgentEditorOpen(false);
+              setAgentViewMode('chats');
+              setSettingsOpen(false);
+              window.dispatchEvent(new CustomEvent('studio-new-agent-chat', { detail: { agentId } }));
+            }}
+            onCopyWorkspacePath={sidebarHandlers.handleCopyPath}
+            onTogglePinWorkspace={sidebarHandlers.handleTogglePinWorkspace}
+            onTogglePinAgent={sidebarHandlers.handleTogglePinAgent}
+            onMoveAgent={sidebarHandlers.handleMoveAgent}
+            onDeleteAgent={sidebarHandlers.handleDeleteAgent}
+            onOpenAgentSettings={(id) => {
+              setSelectedAgentId(id);
+              setWorkMode('agent');
+              setAgentEditorOpen(false);
+              setAgentViewMode('settings');
+              setSettingsOpen(false);
+            }}
+            onRenameWorkspace={sidebarHandlers.handleRenameWorkspace}
+            onRemoveWorkspaceFromList={sidebarHandlers.handleRemoveWorkspaceFromList}
+            onMoveWorkspace={sidebarHandlers.handleMoveWorkspace}
+            onTogglePinThread={sidebarHandlers.handleTogglePinThread}
+            onRenameThread={sidebarHandlers.handleRenameThread}
+            onArchiveThread={sidebarHandlers.handleArchiveThread}
+            onRestoreThread={sidebarHandlers.handleRestoreThread}
+            onDeleteThread={sidebarHandlers.handleDeleteThread}
+            archivedCount={archivedCount}
+            onNewWorkspaceSession={(id) => {
+              setSelectedWorkspaceId(id);
+              setWorkMode('code');
+              setSettingsOpen(false);
+              setNewSessionRequest((n) => n + 1);
+            }}
+            workspaceSessions={workspaceSessions}
+            onSelectWorkspaceTab={(workspaceId, tabId) => {
+              setSelectedWorkspaceId(workspaceId);
+              setRequestedCodeTabId(tabId);
+              setWorkMode('code');
+            }}
+            onCloseWorkspaceTab={sidebarHandlers.handleCloseWorkspaceTab}
+            onRenameWorkspaceTab={sidebarHandlers.handleRenameWorkspaceTab}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenArchivedChats={() => setIsArchivedChatsOpen(true)}
+            onConnectSsh={() => setIsSshModalOpen(true)}
+            appearance={appearance}
+            onToggleAppearance={handleToggleAppearance}
+          />
 
           {/* Center stage. Agent, Code, and Thread stay mounted so a terminal is hidden, not killed, when the mode changes. */}
-          <main className="main-pane main-pane--stacked">
-            {isTauriEnvironment() &&
-            !(loading && workspaces.length === 0 && agents.length === 0) &&
-            !(error && workspaces.length === 0 && agents.length === 0) ? (
-              <>
-                <div className={`mode-layer${workMode === 'agent' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
-                  <AgentsView
-                    agents={agents}
-                    workspaceId={selectedWorkspaceId}
-                    selectedAgentId={selectedAgentId}
-                    onSelectAgent={(id) => {
-                      setSelectedAgentId(id);
-                      setAgentEditorOpen(false);
-                    }}
-                    agentEditorOpen={agentEditorOpen}
-                    onCloseAgentEditor={() => setAgentEditorOpen(false)}
-                    onAgentCreated={(agent) => {
-                      setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
-                      setSelectedAgentId(agent.id);
-                      setAgentEditorOpen(false);
-                    }}
-                    onAgentUpdated={(updated) => {
-                      setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-                    }}
-                    onAgentDeleted={(agentId) => {
-                      setAgents((prev) => {
-                        const remaining = prev.filter((a) => a.id !== agentId);
-                        if (selectedAgentId === agentId) {
-                          setSelectedAgentId(remaining[0]?.id ?? null);
-                        }
-                        return remaining;
-                      });
-                    }}
-                    viewMode={agentViewMode}
-                    onViewModeChange={setAgentViewMode}
-                    onOpenRoutines={() => {
-                      setRoutinesOpen(true);
-                      setSettingsOpen(false);
-                    }}
-                  />
-                </div>
-                <div className={`mode-layer${workMode === 'code' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
-                  <CodeWorkspace
-                    workspaces={workspaces}
-                    selectedWorkspaceId={selectedWorkspaceId}
-                    onSelectWorkspace={setSelectedWorkspaceId}
-                    onRefresh={loadBootstrap}
-                    onAddWorkspace={handleAddWorkspace}
-                    agents={agents}
-                    selectedAgentId={selectedAgentId}
-                    onSessionsChange={handleCodeSessions}
-                    requestedTabId={requestedCodeTabId}
-                    onTabRequestedHandled={() => setRequestedCodeTabId(null)}
-                    newSessionRequest={newSessionRequest}
-                  />
-                </div>
-                <div className={`mode-layer${workMode === 'chat' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
-                  {hasOpenedChat && (
-                    <ChatView
-                      ownsNewThreadRequests
-                      workspaceId={selectedWorkspaceId}
-                      threadId={selectedThreadId}
-                      agents={agents}
-                      workspaces={workspaces}
-                      onThreadsChanged={loadThreads}
-                    />
-                  )}
-                </div>
-                {routinesOpen && (
-                  <div className="mode-layer mode-layer--visible">
-                    <div className="main-pane__surface">
-                      <RoutinesView
-                        workspaceId={selectedWorkspaceId}
-                        onOpenThread={(agentId, _threadId) => {
-                          setRoutinesOpen(false);
-                          setSelectedAgentId(agentId);
-                          setWorkMode('agent');
-                          setAgentViewMode('chats');
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="mode-layer mode-layer--visible">
-                <div className="main-pane__surface">{renderActiveView()}</div>
-              </div>
-            )}
-          </main>
+          <AppMainStage
+            workMode={workMode}
+            setWorkMode={setWorkMode}
+            loading={loading}
+            error={error}
+            workspaces={workspaces}
+            agents={agents}
+            setAgents={setAgents}
+            selectedWorkspaceId={selectedWorkspaceId}
+            setSelectedWorkspaceId={setSelectedWorkspaceId}
+            selectedAgentId={selectedAgentId}
+            setSelectedAgentId={setSelectedAgentId}
+            selectedThreadId={selectedThreadId}
+            agentEditorOpen={agentEditorOpen}
+            setAgentEditorOpen={setAgentEditorOpen}
+            agentViewMode={agentViewMode}
+            setAgentViewMode={setAgentViewMode}
+            routinesOpen={routinesOpen}
+            setRoutinesOpen={setRoutinesOpen}
+            setSettingsOpen={setSettingsOpen}
+            hasOpenedChat={hasOpenedChat}
+            loadBootstrap={loadBootstrap}
+            loadThreads={loadThreads}
+            handleAddWorkspace={sidebarHandlers.handleAddWorkspace}
+            handleCodeSessions={handleCodeSessions}
+            requestedCodeTabId={requestedCodeTabId}
+            setRequestedCodeTabId={setRequestedCodeTabId}
+            newSessionRequest={newSessionRequest}
+          />
 
           {/* Authentic Right Tools & Browser Dock */}
           <ErrorBoundary name="RightDock">
@@ -1394,92 +666,38 @@ export const App: React.FC = () => {
           </ErrorBoundary>
         </div>
 
-        {/* Auxiliary Dialogs */}
-        <CommandPaletteModal
-          isOpen={isCommandPaletteOpen}
-          onClose={() => setIsCommandPaletteOpen(false)}
+        {/* Auxiliary Dialogs & Modals */}
+        <AppModals
+          isCommandPaletteOpen={isCommandPaletteOpen}
+          onCloseCommandPalette={() => setIsCommandPaletteOpen(false)}
           agents={agents}
-          onLaunchAgent={(engineId, displayName) => {
-            if (workMode !== 'code') {
-              setWorkMode('code');
-              setSettingsOpen(false);
-            }
-            window.dispatchEvent(
-              new CustomEvent('kite:shortcut-pane-action', {
-                detail: { action: 'launch-agent', engineId, engineName: displayName },
-              })
-            );
-          }}
-          onSelectAgent={(agentId) => {
-            setSelectedAgentId(agentId);
-            setWorkMode('agent');
-            setSettingsOpen(false);
-          }}
-          onSelectMode={(mode) => {
-            setWorkMode(mode);
-            setSettingsOpen(false);
-            setRoutinesOpen(false);
-          }}
-          onToggleSidebar={() => setSidebarVisible((v) => !v)}
-          onToggleDock={() => setRightDockVisible((v) => !v)}
-          onToggleOperator={() => setOperatorOpen((prev) => !prev)}
-          onToggleVoice={() => {
-            if (!operatorOpen) setOperatorOpen(true);
-            window.dispatchEvent(new CustomEvent('kite:toggle-voice'));
-          }}
-          onOpenSettings={(tab) => {
-            setSettingsOpen(true);
-            if (tab) openSettingsTab(tab);
-          }}
-          onNewTerminal={() => {
-            if (workMode !== 'code') setWorkMode('code');
-            window.dispatchEvent(
-              new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
-            );
-          }}
-          onSplitPane={(axis) => {
-            if (workMode !== 'code') setWorkMode('code');
-            window.dispatchEvent(
-              new CustomEvent('kite:shortcut-pane-action', {
-                detail: { action: 'split-pane', axis },
-              })
-            );
-          }}
-          onClosePane={() => {
-            window.dispatchEvent(
-              new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'close-pane' } })
-            );
-          }}
-          onSaveFile={() => {
-            window.dispatchEvent(new CustomEvent('kite:save-file'));
-          }}
+          workMode={workMode}
+          setWorkMode={setWorkMode}
+          setSettingsOpen={setSettingsOpen}
+          setRoutinesOpen={setRoutinesOpen}
+          setSelectedAgentId={setSelectedAgentId}
+          selectedAgentId={selectedAgentId}
+          setSidebarVisible={setSidebarVisible}
+          setRightDockVisible={setRightDockVisible}
+          operatorOpen={operatorOpen}
+          setOperatorOpen={setOperatorOpen}
           platform={appPlatform}
-        />
-
-        <UsageDashboardModal
-          isOpen={isUsageModalOpen}
-          onClose={() => setIsUsageModalOpen(false)}
-        />
-        <WhatsNewModal
-          isOpen={isWhatsNewOpen}
-          onClose={() => setIsWhatsNewOpen(false)}
-        />
-        <ArchivedChatsModal
-          isOpen={isArchivedChatsOpen}
-          onClose={() => setIsArchivedChatsOpen(false)}
-          profileId={workMode === 'agent' ? selectedAgentId : null}
-          onRestored={async (threadId) => {
+          isUsageModalOpen={isUsageModalOpen}
+          onCloseUsageModal={() => setIsUsageModalOpen(false)}
+          isWhatsNewOpen={isWhatsNewOpen}
+          onCloseWhatsNew={() => setIsWhatsNewOpen(false)}
+          isArchivedChatsOpen={isArchivedChatsOpen}
+          onCloseArchivedChats={() => setIsArchivedChatsOpen(false)}
+          onRestoredArchivedChat={async (threadId) => {
             setWorkMode('chat');
             await loadThreads();
             if (threadId) {
               setSelectedThreadId(threadId);
             }
           }}
-        />
-        <SshWorkspaceModal
-          isOpen={isSshModalOpen}
-          onClose={() => setIsSshModalOpen(false)}
-          onConnect={(ws) => {
+          isSshModalOpen={isSshModalOpen}
+          onCloseSshModal={() => setIsSshModalOpen(false)}
+          onConnectSsh={(ws) => {
             setIsSshModalOpen(false);
             void loadBootstrap();
             setSelectedWorkspaceId(ws.id);
@@ -1503,95 +721,20 @@ export const App: React.FC = () => {
           onSelectTheme={handleSelectTheme}
         />
 
-        {/* Notifications Popover. Render only while open */}
-        <AnimatePresence>
-          {isNotificationsOpen && (
-            <motion.div
-              className="notification-popover-overlay"
-              {...surfaceMotion('scrim')}
-              onClick={() => {
-              setIsNotificationsOpen(false);
-              setNotificationsAnchor(null);
-            }}
-          >
-            {(() => {
-              const popoverWidth = 320;
-              const margin = 10;
-              let top = '38px';
-              let right = '12px';
-              let arrowRight = 24;
-
-              if (notificationsAnchor) {
-                // Snug 2px offset under the bell button: caret tip sits directly against button bottom
-                top = `${Math.round(notificationsAnchor.bottom + 2)}px`;
-                const bellCenter = notificationsAnchor.left + notificationsAnchor.width / 2;
-                // Target arrow at ~24px from popover right edge (half-width of 10px arrow = 5px, so center is at 29px)
-                const targetPopoverRight = window.innerWidth - bellCenter - 29;
-                const clampedPopoverRight = Math.max(
-                  margin,
-                  Math.min(window.innerWidth - popoverWidth - margin, targetPopoverRight)
-                );
-                right = `${Math.round(clampedPopoverRight)}px`;
-
-                const cardRightEdge = window.innerWidth - clampedPopoverRight;
-                const calculatedArrowRight = cardRightEdge - bellCenter - 5;
-                arrowRight = Math.max(16, Math.min(popoverWidth - 26, Math.round(calculatedArrowRight)));
-              }
-
-              return (
-                <motion.div
-                  {...surfaceMotion('popover')}
-                  className="notification-popover-anchor"
-                  style={{
-                    top,
-                    right,
-                    ['--arrow-right' as any]: `${arrowRight}px`,
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <NotificationsView
-                    externalSnapshot={notifSnapshot}
-                    onClose={() => {
-                      setIsNotificationsOpen(false);
-                      setNotificationsAnchor(null);
-                    }}
-                    onNavigateAgent={(id) => {
-                      setSelectedAgentId(id);
-                      setWorkMode('agent');
-                      setIsNotificationsOpen(false);
-                      setNotificationsAnchor(null);
-                    }}
-                    onNavigateThread={(threadId, agentId) => {
-                      if (agentId) {
-                        setSelectedAgentId(agentId);
-                        setWorkMode('agent');
-                      } else {
-                        setWorkMode('code');
-                      }
-                      setSelectedThreadId(threadId);
-                      setIsNotificationsOpen(false);
-                      setNotificationsAnchor(null);
-                    }}
-                    onNavigateMode={(m) => {
-                      setWorkMode(m);
-                      setIsNotificationsOpen(false);
-                      setNotificationsAnchor(null);
-                    }}
-                    onOpenSettings={() => {
-                      setIsNotificationsOpen(false);
-                      setNotificationsAnchor(null);
-                      setSettingsOpen(true);
-                      try {
-                        writeKitePref('settingsTab', 'notifications');
-                      } catch (_) {}
-                    }}
-                  />
-                </motion.div>
-              );
-            })()}
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Notifications Popover */}
+        <AppNotificationsPopover
+          isOpen={isNotificationsOpen}
+          anchor={notificationsAnchor}
+          notifSnapshot={notifSnapshot}
+          onClose={() => {
+            setIsNotificationsOpen(false);
+            setNotificationsAnchor(null);
+          }}
+          setSelectedAgentId={setSelectedAgentId}
+          setSelectedThreadId={setSelectedThreadId}
+          setWorkMode={setWorkMode}
+          setSettingsOpen={setSettingsOpen}
+        />
 
         {/* Floating Zed Voice & Operations Orb */}
         <ZedStripHost
@@ -1612,12 +755,6 @@ export const App: React.FC = () => {
             openSettingsTab('zed');
           }}
         />
-
-        {/* Visual Spark Projectile Overlay for Dispatched Prompts */}
-        <PromptProjectileOverlay />
-
-        {/* Startup Agent Recovery Sheet */}
-        <ResumeHost />
 
         <AppIntro open={!introDismissed} />
 

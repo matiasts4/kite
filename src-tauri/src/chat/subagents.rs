@@ -26,6 +26,8 @@ pub struct SubagentRun {
     pub parent_tool_call_id: String,
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_member_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -586,6 +588,7 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
                     parent_thread_id: thread_id.to_string(),
                     parent_tool_call_id: tool_call_id,
                     role: meta.role.clone(),
+                    swarm_member_name: None,
                     type_name: meta.type_name.clone(),
                     provider: meta.provider.clone().or(parent_provider),
                     model: meta.model.clone(),
@@ -969,6 +972,7 @@ pub fn ingest_nested_subagent_frame(
                     parent_thread_id: thread_id.to_string(),
                     parent_tool_call_id: parent_tool_use_id.to_string(),
                     role: "Subagent".to_string(),
+                    swarm_member_name: None,
                     type_name: None,
                     provider: fallback_provider,
                     model: None,
@@ -1148,11 +1152,21 @@ pub fn build_swarm_state(thread_id: &str) -> Value {
             member.child_thread_id = child.get("id").and_then(Value::as_str).map(str::to_string);
             if member.state != "killed" {
                 let st = child.get("status").and_then(Value::as_str).unwrap_or("idle");
-                member.state = match st {
-                    "running" => "working".to_string(),
-                    "waiting" | "idle" => "waiting".to_string(),
-                    _ => "stopped".to_string(),
-                };
+                match st {
+                    "running" => member.state = "working".to_string(),
+                    "error" => member.state = "stopped".to_string(),
+                    "waiting" if member.state.is_empty() => member.state = "waiting".to_string(),
+                    "idle" if member.state.is_empty() => member.state = "waiting".to_string(),
+                    _ => {}
+                }
+            }
+            if member.current_activity.is_none() {
+                if let Some(child_items) = child.get("items").and_then(Value::as_array) {
+                    let (_, latest) = summarize_run_progress(child_items);
+                    if latest.is_some() {
+                        member.current_activity = latest;
+                    }
+                }
             }
             if let Some(m) = child.get("model").and_then(Value::as_str) {
                 member.model = Some(m.to_string());
@@ -1164,6 +1178,73 @@ pub fn build_swarm_state(thread_id: &str) -> Value {
     }
 
     serde_json::to_value(state).unwrap_or(json!({}))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn register_swarm_worker_subagent_run(
+    parent_thread_id: &str,
+    child_thread_id: &str,
+    member_name: &str,
+    role: &str,
+    provider: &str,
+    model: Option<&str>,
+    workspace_mode: Option<&str>,
+    brief: &str,
+) {
+    let now = now_ms();
+    let created = SubagentRun {
+        subagent_id: child_thread_id.to_string(),
+        parent_thread_id: parent_thread_id.to_string(),
+        parent_tool_call_id: format!("swarm-member-{member_name}-{child_thread_id}"),
+        role: role.to_string(),
+        swarm_member_name: Some(member_name.to_string()),
+        type_name: Some(provider.to_string()),
+        provider: Some(provider.to_string()),
+        model: model.map(str::to_string),
+        workspace_mode: workspace_mode.map(str::to_string),
+        prompt: Some(brief.to_string()),
+        status: "running".to_string(),
+        transcript_uri: None,
+        child_thread_id: Some(child_thread_id.to_string()),
+        latest_activity: None,
+        step_count: 0,
+        items: Vec::new(),
+        started_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        completed_at_unix_ms: None,
+    };
+    let Ok(val) = serde_json::to_value(created) else {
+        return;
+    };
+    let mut emitted = None;
+    if let Ok(mut all_threads) = threads().lock() {
+        if let Some(parent) = all_threads
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_thread_id))
+        {
+            if parent.get("subagentRuns").and_then(Value::as_array).is_none() {
+                parent["subagentRuns"] = Value::Array(Vec::new());
+            }
+            if let Some(runs) = parent.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+                if !runs.iter().any(|r| {
+                    r.get("childThreadId").and_then(Value::as_str) == Some(child_thread_id)
+                        || r.get("subagentId").and_then(Value::as_str) == Some(child_thread_id)
+                }) {
+                    runs.push(val.clone());
+                    emitted = Some(val);
+                    touch(parent);
+                }
+            }
+        }
+    }
+    if let Some(run) = emitted {
+        emit_subagent_event(json!({
+            "kind": "subagentRunUpdated",
+            "threadId": parent_thread_id,
+            "subagentId": run.get("subagentId"),
+            "run": run,
+        }));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1246,7 +1327,7 @@ pub(crate) fn set_thread_effort_option(thread: &mut Value, effort: &str) {
     }
 }
 
-fn remembered_provider_defaults(provider: &str) -> (Option<String>, Option<String>) {
+pub(crate) fn remembered_provider_defaults(provider: &str) -> (Option<String>, Option<String>) {
     let Ok(all) = threads().lock() else {
         return (None, None);
     };

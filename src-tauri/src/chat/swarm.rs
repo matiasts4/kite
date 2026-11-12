@@ -10,7 +10,8 @@ use tokio::sync::Notify;
 use crate::acp::extract_mentions;
 use crate::chat::models::{default_mode, provider_ok};
 use crate::chat::subagents::{
-    emit_swarm_event, provision_subagent_worktree, resolve_git_repo_root, set_thread_effort_option,
+    emit_swarm_event, provision_subagent_worktree, register_swarm_worker_subagent_run,
+    remembered_provider_defaults, resolve_git_repo_root, set_thread_effort_option,
     SwarmBoardPost, SwarmChannel, SwarmMember, SwarmState,
 };
 use crate::chat::threads::blank_thread;
@@ -411,11 +412,27 @@ fn spawn_swarm_member_thread(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase)
-        .or(coord_provider)
+        .or_else(|| coord_provider.clone())
         .unwrap_or_else(|| "antigravity".to_string());
     if !provider_ok(&provider) {
         return Err(DispatchError::BadArgs);
     }
+
+    let same_provider_as_parent = coord_provider
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case(&provider));
+    let (remembered_model, remembered_effort) = remembered_provider_defaults(&provider);
+    let requested_model = model_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            if provider_override.is_none() || same_provider_as_parent {
+                coord_model.clone().or(remembered_model.clone())
+            } else {
+                remembered_model.clone()
+            }
+        });
 
     let child_id = uuid::Uuid::new_v4().to_string();
     let short_id: String = child_id.chars().filter(|c| *c != '-').take(8).collect();
@@ -427,16 +444,15 @@ fn spawn_swarm_member_thread(
 
     let mut child = blank_thread(
         &child_id,
-        coord_ws_id.as_deref(),
+        None,
         &title,
         &provider,
-        model_override,
+        coord_ws_id.as_deref(),
     );
-    if let Some(m) = model_override {
-        child["model"] = json!(m);
-    } else if provider_override.is_none() && coord_model.is_some() {
-        child["model"] = json!(coord_model);
-    }
+    child["model"] = requested_model
+        .as_ref()
+        .map(|m| json!(m))
+        .unwrap_or(Value::Null);
     child["mode"] = json!(default_mode(&provider));
     child["startedByAgent"] = json!(true);
     child["sideChat"] = json!(true);
@@ -450,6 +466,13 @@ fn spawn_swarm_member_thread(
     }
     if let Some(eff) = effort_override {
         set_thread_effort_option(&mut child, eff);
+    } else if !same_provider_as_parent {
+        if let Some(eff) = remembered_effort {
+            set_thread_effort_option(&mut child, &eff);
+        } else {
+            child["effort"] = Value::Null;
+            child["providerOptions"] = json!([]);
+        }
     }
 
     if let Some(src_tid) = fork_source_thread_id.or_else(|| {
@@ -556,6 +579,7 @@ pub fn execute_swarm_action(
     }
 
     let mut pending_launches: Vec<(String, String, String)> = Vec::new();
+    let mut pending_kills: Vec<String> = Vec::new();
     let result_text = {
         let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (mut state, path) = load_swarm_state(&coord_tid, cwd);
@@ -597,7 +621,7 @@ pub fn execute_swarm_action(
                 }
                 if !member_channels.iter().any(|c| c == "main") {
                     ensure_channel(&mut state, "main")?;
-                    member_channels.insert(0, "main".to_string());
+                    member_channels.push("main".to_string());
                 }
                 let primary_channel = member_channels[0].clone();
 
@@ -646,7 +670,7 @@ pub fn execute_swarm_action(
                     .unwrap_or_else(|| format!("{resolved_provider} worker"));
                 let member = SwarmMember {
                     name: name.clone(),
-                    role: member_role,
+                    role: member_role.clone(),
                     provider: Some(resolved_provider.clone()),
                     model: resolved_model.clone(),
                     effort: effort.clone(),
@@ -662,6 +686,16 @@ pub fn execute_swarm_action(
                 };
                 let prompt = build_worker_initial_prompt(&state, &member, &post);
                 state.members.push(member);
+                register_swarm_worker_subagent_run(
+                    &coord_tid,
+                    &child_id,
+                    name,
+                    &member_role,
+                    &resolved_provider,
+                    resolved_model.as_deref(),
+                    Some(ws_mode),
+                    brief,
+                );
                 save_and_broadcast_swarm(&coord_tid, &path, &state);
                 pending_launches.push((name.clone(), child_id.clone(), prompt));
 
@@ -741,20 +775,22 @@ pub fn execute_swarm_action(
                                 .is_none_or(|ch| p.channel.eq_ignore_ascii_case(ch))
                     })
                     .collect();
-                if caller_name != "coordinator" {
-                    let head = matching
+                if caller_name != "coordinator" && ch_filter.is_none() {
+                    if let Some(head) = matching
                         .iter()
                         .map(|p| p.seq)
                         .max()
-                        .unwrap_or_else(|| state.posts.iter().map(|p| p.seq).max().unwrap_or(0));
-                    if let Some(member) = state
-                        .members
-                        .iter_mut()
-                        .find(|m| m.name.eq_ignore_ascii_case(&caller_name))
+                        .or_else(|| state.posts.iter().map(|p| p.seq).max())
                     {
-                        if head > member.last_read_seq {
-                            member.last_read_seq = head;
-                            save_and_broadcast_swarm(&coord_tid, &path, &state);
+                        if let Some(member) = state
+                            .members
+                            .iter_mut()
+                            .find(|m| m.name.eq_ignore_ascii_case(&caller_name))
+                        {
+                            if head > member.last_read_seq {
+                                member.last_read_seq = head;
+                                save_and_broadcast_swarm(&coord_tid, &path, &state);
+                            }
                         }
                     }
                 }
@@ -903,11 +939,9 @@ pub fn execute_swarm_action(
                 state.members[idx].pending_wake = false;
                 save_and_broadcast_swarm(&coord_tid, &path, &state);
 
-                if let Some(ref cid) = child_tid {
-                    crate::dispatch_wire::protocol::mark_thread_killed(cid);
-                    crate::chat::cancel_turn(cid);
-                    crate::chat::subagents::sync_child_thread_to_parent(cid);
-                    try_remove_clean_worktree(cid);
+                if let Some(cid) = child_tid {
+                    crate::dispatch_wire::protocol::mark_thread_killed(&cid);
+                    pending_kills.push(cid);
                 }
                 Ok(format!("killed @{name}"))
             }
@@ -1027,7 +1061,14 @@ pub fn execute_swarm_action(
         }
     }?;
 
-    // Launch woken/added worker turns outside all locks so start_turn/tests cannot deadlock.
+    // Cancel killed worker turns and launch woken/added worker turns outside all locks
+    // so finish_run / start_turn / tests cannot deadlock on swarm_state_lock.
+    for cid in pending_kills {
+        crate::chat::cancel_turn(&cid);
+        crate::chat::subagents::sync_child_thread_to_parent(&cid);
+        try_remove_clean_worktree(&cid);
+    }
+
     for (member_name, child_id, prompt) in pending_launches {
         if let Err(err) = invoke_launcher(launcher, &child_id, &prompt) {
             let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1094,9 +1135,12 @@ pub fn execute_swarm_wait(
 ) -> Result<String, DispatchError> {
     let channel = wait_channel_for(coord_tid);
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut gen_guard = channel.condvar.0.lock().unwrap_or_else(|e| e.into_inner());
 
     loop {
+        let observed_gen = {
+            let gen_guard = channel.condvar.0.lock().unwrap_or_else(|e| e.into_inner());
+            *gen_guard
+        };
         {
             let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
             let (state, _) = load_swarm_state(coord_tid, None);
@@ -1115,12 +1159,14 @@ pub fn execute_swarm_wait(
             ));
         }
         let remaining = deadline.saturating_duration_since(now);
-        let (next_guard, _) = channel
-            .condvar
-            .1
-            .wait_timeout(gen_guard, remaining)
-            .unwrap_or_else(|e| e.into_inner());
-        gen_guard = next_guard;
+        let gen_guard = channel.condvar.0.lock().unwrap_or_else(|e| e.into_inner());
+        if *gen_guard == observed_gen {
+            let _ = channel
+                .condvar
+                .1
+                .wait_timeout(gen_guard, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+        }
     }
 }
 
@@ -1299,7 +1345,8 @@ mod tests {
         init_git_repo(&repo_dir);
         let _guard = CleanupSwarmThread(coord_id.clone(), repo_dir.clone());
 
-        let mut coord = blank_thread(&coord_id, None, "Main Coordinator", "antigravity", Some("claude-opus-4-6"));
+        let mut coord = blank_thread(&coord_id, None, "Main Coordinator", "antigravity", None);
+        coord["model"] = json!("claude-opus-4-6");
         coord["workingDirectory"] = json!(repo_dir.to_string_lossy().to_string());
         coord["items"] = json!([{ "id": "u0", "kind": "user", "text": "Coordinate swarm" }]);
         threads().lock().unwrap().push(coord);
@@ -1667,6 +1714,121 @@ mod tests {
         let w = all.iter().find(|t| t["id"] == worker_cid).unwrap();
         assert_eq!(w["items"].as_array().unwrap().len(), 2);
         drop(all);
+        crate::chat::threads::remove_thread(&worker_cid);
+    }
+
+    #[test]
+    fn swarm_worker_metadata_channel_priority_subagent_linkage_and_sync_wait() {
+        let coord_id = format!("swarm-t3-audit-{}", uuid::Uuid::new_v4().simple());
+        let scratch = std::env::temp_dir().join(format!(
+            "kite-swarm-t3-audit-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&scratch).unwrap();
+        let _guard = CleanupSwarmThread(coord_id.clone(), scratch.clone());
+
+        let mut coord = blank_thread(&coord_id, None, "Main", "antigravity", Some("ws-1"));
+        coord["model"] = json!("claude-opus-4-6");
+        set_thread_effort_option(&mut coord, "high");
+        coord["workingDirectory"] = json!(scratch.to_string_lossy().to_string());
+        threads().lock().unwrap().push(coord);
+
+        let coord_addr = format!("thread:{coord_id}");
+        let cwd_str = scratch.to_string_lossy().to_string();
+        let noop_launcher = |_cid: &str, _prompt: &str| -> Result<(), String> { Ok(()) };
+
+        execute_swarm_action(
+            &SwarmCommand::Add {
+                name: "parser".into(),
+                provider: Some("grok".into()),
+                model: None,
+                effort: None,
+                workspace: Some("inherit".into()),
+                channels: vec!["parser".into()],
+                fork: None,
+                role: Some("Parser Specialist".into()),
+                brief: "Inspect lexer".into(),
+            },
+            &coord_addr,
+            Some(&cwd_str),
+            Some(&noop_launcher),
+        )
+        .unwrap();
+
+        let (state, _) = load_swarm_state(&coord_id, Some(&cwd_str));
+        assert_eq!(state.posts[0].channel, "parser");
+        assert_eq!(state.members[0].channels, vec!["parser".to_string(), "main".to_string()]);
+        let worker_cid = state.members[0].child_thread_id.clone().unwrap();
+
+        {
+            let all = threads().lock().unwrap();
+            let child = all.iter().find(|t| t["id"] == worker_cid).unwrap();
+            assert!(child["profileId"].is_null(), "profileId={:?}", child["profileId"]);
+            assert_eq!(child["workspaceId"].as_str(), Some("ws-1"));
+            assert_ne!(child["model"].as_str(), Some("claude-opus-4-6"));
+            assert_ne!(child["effort"].as_str(), Some("high"));
+
+            let parent = all.iter().find(|t| t["id"] == coord_id).unwrap();
+            let runs = parent["subagentRuns"].as_array().unwrap();
+            assert!(
+                runs.iter().any(|r| {
+                    r.get("childThreadId").and_then(Value::as_str) == Some(worker_cid.as_str())
+                        && r.get("swarmMemberName").and_then(Value::as_str) == Some("parser")
+                }),
+                "runs={runs:?}"
+            );
+        }
+        assert!(crate::chat::subagents::build_subagent_detail(&coord_id, &worker_cid).is_some());
+
+        // Stopped worker stays stopped in build_swarm_state even if child["status"] == "idle".
+        on_worker_turn_settled_with_launcher(&worker_cid, false, Some(&noop_launcher));
+        let built = crate::chat::subagents::build_swarm_state(&coord_id);
+        assert_eq!(built["members"][0]["state"], "stopped");
+
+        // Filtered channel read must not advance last_read_seq past unread #main posts.
+        execute_swarm_action(
+            &SwarmCommand::Post {
+                channel: Some("main".into()),
+                text: "@all check main".into(),
+            },
+            &coord_addr,
+            Some(&cwd_str),
+            Some(&noop_launcher),
+        )
+        .unwrap();
+        let before_read_seq = load_swarm_state(&coord_id, Some(&cwd_str)).0.members[0].last_read_seq;
+        execute_swarm_action(
+            &SwarmCommand::Read {
+                since: 0,
+                channel: Some("empty-ch".into()),
+            },
+            &format!("thread:{worker_cid}"),
+            Some(&cwd_str),
+            Some(&noop_launcher),
+        )
+        .unwrap();
+        let after_read_seq = load_swarm_state(&coord_id, Some(&cwd_str)).0.members[0].last_read_seq;
+        assert_eq!(after_read_seq, before_read_seq);
+
+        // Concurrent blocking execute_swarm_wait wakes on worker post without AB-BA deadlock.
+        let coord_id_wait = coord_id.clone();
+        let handle = std::thread::spawn(move || {
+            execute_swarm_wait(&coord_id_wait, "coordinator", 2, true, 5_000)
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        execute_swarm_action(
+            &SwarmCommand::Post {
+                channel: None,
+                text: "@coordinator [done] checked".into(),
+            },
+            &format!("thread:{worker_cid}"),
+            Some(&cwd_str),
+            None,
+        )
+        .unwrap();
+        let wait_out = handle.join().unwrap().unwrap();
+        assert!(wait_out.contains("[done] checked"), "wait_out={wait_out}");
+
         crate::chat::threads::remove_thread(&worker_cid);
     }
 }

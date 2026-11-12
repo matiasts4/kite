@@ -806,7 +806,10 @@ fn parse_swarm<'a>(
                 }
             }
             SwarmCommand::Model {
-                name: name.filter(|s| !s.trim().is_empty()).ok_or(DispatchError::BadArgs)?,
+                name: name
+                    .map(|s| s.trim().trim_start_matches('@').to_string())
+                    .filter(|s| !s.is_empty())
+                    .ok_or(DispatchError::BadArgs)?,
                 provider,
                 model: model.filter(|s| !s.trim().is_empty()).ok_or(DispatchError::BadArgs)?,
                 effort,
@@ -824,7 +827,7 @@ fn parse_swarm<'a>(
             }
             let target = name
                 .or_else(|| positionals.into_iter().next())
-                .map(|s| s.trim().to_string())
+                .map(|s| s.trim().trim_start_matches('@').to_string())
                 .filter(|s| !s.is_empty())
                 .ok_or(DispatchError::BadArgs)?;
             SwarmCommand::Kill { name: target }
@@ -853,7 +856,9 @@ fn parse_swarm<'a>(
                         );
                     }
                     "--topic" => topic = Some(need(items)?),
-                    "--name" => member = Some(need(items)?),
+                    "--name" => {
+                        member = Some(need(items)?.trim().trim_start_matches('@').to_string())
+                    }
                     other if other.starts_with('-') => return Err(DispatchError::BadArgs),
                     other => positionals.push(other.to_string()),
                 }

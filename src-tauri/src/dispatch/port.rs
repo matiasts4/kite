@@ -1,5 +1,6 @@
 //! Port trait. Policy decides whether a write is allowed. The port only moves text.
 
+use super::cli::SwarmCommand;
 use super::types::{DispatchError, Family, PaneVisibility};
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,15 @@ pub trait Port {
 
     /// Ask the desktop to show a session that already exists.
     fn reveal(&mut self, id: &str, engine: &str, name: Option<&str>) -> Result<(), DispatchError>;
+
+    fn swarm(
+        &mut self,
+        _from: &str,
+        _cwd: Option<&str>,
+        _command: &SwarmCommand,
+    ) -> Result<String, DispatchError> {
+        Err(DispatchError::TransportUnsupported)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +114,7 @@ pub struct FakePort {
     pub thread_starts: Vec<StartThreadRequest>,
     pub reveals: Vec<(String, String, Option<String>)>,
     pub buffers: Vec<((Family, String), String)>,
+    pub swarm_cmds: Vec<(String, SwarmCommand)>,
     next_id: u32,
 }
 
@@ -190,5 +201,15 @@ impl Port for FakePort {
         self.reveals
             .push((id.to_string(), engine.to_string(), name.map(|s| s.to_string())));
         Ok(())
+    }
+
+    fn swarm(
+        &mut self,
+        from: &str,
+        _cwd: Option<&str>,
+        command: &SwarmCommand,
+    ) -> Result<String, DispatchError> {
+        self.swarm_cmds.push((from.to_string(), command.clone()));
+        Ok("swarm ok".to_string())
     }
 }

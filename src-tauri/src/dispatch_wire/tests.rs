@@ -630,7 +630,8 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
             "id": parent_id,
             "provider": "antigravity",
             "model": "claude-opus-4-6",
-            "workspaceId": Value::Null,
+            "effort": "high",
+            "workspaceId": "ws-parent-1",
             "workingDirectory": repo_dir.to_string_lossy().to_string(),
             "status": "running",
             "items": [],
@@ -657,6 +658,8 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
             .iter()
             .find(|t| t.get("id").and_then(Value::as_str) == Some(child_id.as_str()))
             .expect("child thread must be persisted");
+        assert!(child.get("profileId").is_none_or(Value::is_null));
+        assert_eq!(child.get("workspaceId").and_then(Value::as_str), Some("ws-parent-1"));
         assert_eq!(child.get("parentThreadId").and_then(Value::as_str), Some(parent_id));
         assert_eq!(child.get("startedByAgent").and_then(Value::as_bool), Some(true));
         assert_eq!(child.get("sideChat").and_then(Value::as_bool), Some(true));
@@ -715,6 +718,50 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
         format!("Auth token validation is clean.\n\n[subagent_id: thread:{child_id}]")
     );
 
+    // Cross-provider spawn omitting --model must NOT leak global last_model from another provider.
+    *crate::persist::last_model().lock().unwrap() = Some("claude-opus-4-6".to_string());
+    *crate::persist::last_effort().lock().unwrap() = Some("max".to_string());
+    let cross_codex = spawn_child_subagent_thread(ChildSubagentSpawnParams {
+        parent_thread_id: Some(parent_id.to_string()),
+        provider: Some("codex".to_string()),
+        model: None,
+        effort: None,
+        role: Some("Codex Checker".to_string()),
+        workspace_mode: "inherit".to_string(),
+        fallback_cwd: Some(repo_dir.to_string_lossy().to_string()),
+        task: "Verify edge case".to_string(),
+    })
+    .expect("codex spawn must succeed");
+    let codex_id = cross_codex.child_thread_id.clone();
+    {
+        let list = threads().lock().unwrap();
+        let codex_child = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(codex_id.as_str()))
+            .unwrap();
+        assert!(codex_child.get("model").is_none_or(Value::is_null));
+        assert!(codex_child.get("effort").is_none_or(Value::is_null));
+    }
+
+    // Killing a child thread syncs parent run status to "killed" instead of "completed".
+    crate::dispatch_wire::protocol::mark_thread_killed(&codex_id);
+    sync_child_thread_to_parent(&codex_id);
+    crate::dispatch_wire::protocol::clear_thread_killed(&codex_id);
+    {
+        let list = threads().lock().unwrap();
+        let parent = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id))
+            .unwrap();
+        let killed_run = parent["subagentRuns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r.get("childThreadId").and_then(Value::as_str) == Some(codex_id.as_str()))
+            .unwrap();
+        assert_eq!(killed_run.get("status").and_then(Value::as_str), Some("killed"));
+    }
+
     // Cleanup worktrees and test threads
     let _ = git(&["worktree", "remove", "--force", &wt_share.to_string_lossy()]);
     let _ = git(&["worktree", "remove", "--force", &wt_branch.to_string_lossy()]);
@@ -722,6 +769,6 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
     let mut list = threads().lock().unwrap();
     list.retain(|t| {
         let id = t.get("id").and_then(Value::as_str).unwrap_or("");
-        id != parent_id && id != child_id.as_str()
+        id != parent_id && id != child_id.as_str() && id != codex_id.as_str()
     });
 }

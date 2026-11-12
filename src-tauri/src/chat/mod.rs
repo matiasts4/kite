@@ -13,6 +13,7 @@ pub mod recovery;
 pub mod runtime;
 pub mod session;
 pub mod subagents;
+pub mod swarm;
 pub mod threads;
 pub mod utils;
 

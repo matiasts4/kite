@@ -88,6 +88,62 @@ description: \"Trigger: kite dispatch, spawn agent, KITE_DISPATCH. Use the Kite 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmChannelAction {
+    Create,
+    Subscribe,
+    Unsubscribe,
+    Archive,
+    List,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmCommand {
+    Title {
+        title: String,
+    },
+    Add {
+        name: String,
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        workspace: Option<String>,
+        channels: Vec<String>,
+        fork: Option<String>,
+        role: Option<String>,
+        brief: String,
+    },
+    Post {
+        channel: Option<String>,
+        text: String,
+    },
+    Read {
+        since: u64,
+        channel: Option<String>,
+    },
+    Wait {
+        since: u64,
+        mentions_only: bool,
+        timeout_ms: u64,
+    },
+    Status,
+    Model {
+        name: String,
+        provider: Option<String>,
+        model: String,
+        effort: Option<String>,
+    },
+    Kill {
+        name: String,
+    },
+    Channel {
+        action: SwarmChannelAction,
+        channel: Option<String>,
+        topic: Option<String>,
+        member: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Ls,
     Programs,
@@ -155,6 +211,7 @@ pub enum Command {
         body: Option<String>,
         file: Option<String>,
     },
+    Swarm(SwarmCommand),
 }
 
 pub fn parse_args(args: &[String]) -> Result<Command, DispatchError> {
@@ -175,6 +232,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, DispatchError> {
         "wait" => parse_wait(&mut items),
         "read" => parse_read(&mut items),
         "report" => parse_report(&mut items),
+        "swarm" => parse_swarm(&mut items),
         "kill" => parse_address_command(&mut items, |address| Command::Kill { address }),
         "interrupt" => parse_address_command(&mut items, |address| Command::Interrupt { address }),
         "attach" => parse_address_command(&mut items, |address| Command::Attach { address }),
@@ -197,6 +255,13 @@ pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
             timeout_ms,
             ..
         }) => Some(timeout_ms.unwrap_or(300_000)),
+        _ => None,
+    }
+}
+
+pub fn blocking_swarm_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Swarm(SwarmCommand::Wait { timeout_ms, .. })) => Some(timeout_ms),
         _ => None,
     }
 }
@@ -225,11 +290,13 @@ pub fn normalize_workspace_mode(raw: &str) -> Option<String> {
 
 pub fn normalize_effort(raw: &str) -> Option<String> {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some("minimal".to_string()),
         "low" => Some("low".to_string()),
         "medium" => Some("medium".to_string()),
         "high" => Some("high".to_string()),
         "xhigh" => Some("xhigh".to_string()),
         "max" => Some("max".to_string()),
+        "ultra" => Some("ultra".to_string()),
         _ => None,
     }
 }
@@ -500,6 +567,292 @@ fn parse_report<'a>(
     Ok(Command::Report { to, from, body, file })
 }
 
+fn parse_bool_flag(raw: &str) -> Result<bool, DispatchError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(DispatchError::BadArgs),
+    }
+}
+
+fn parse_swarm<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let sub = items.next().ok_or(DispatchError::BadArgs)?;
+    let cmd = match sub {
+        "title" => {
+            let mut title = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--title" => title = Some(need(items)?),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let text = title
+                .unwrap_or_else(|| positionals.join(" "))
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return Err(DispatchError::BadArgs);
+            }
+            SwarmCommand::Title { title: text }
+        }
+        "add" => {
+            let mut name = None;
+            let mut provider = None;
+            let mut model = None;
+            let mut effort = None;
+            let mut workspace = None;
+            let mut channels: Vec<String> = Vec::new();
+            let mut fork = None;
+            let mut role = None;
+            let mut brief = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--name" => name = Some(need(items)?),
+                    "--provider" => {
+                        let raw = need(items)?;
+                        provider = Some(
+                            canonical_thread_provider(&raw)
+                                .ok_or(DispatchError::BadArgs)?
+                                .to_string(),
+                        );
+                    }
+                    "--model" => model = Some(need(items)?),
+                    "--effort" => {
+                        let raw = need(items)?;
+                        effort = Some(normalize_effort(&raw).ok_or(DispatchError::BadArgs)?);
+                    }
+                    "--workspace" => {
+                        let raw = need(items)?;
+                        workspace =
+                            Some(normalize_workspace_mode(&raw).ok_or(DispatchError::BadArgs)?);
+                    }
+                    "--channels" | "--channel" => {
+                        let csv = need(items)?;
+                        for part in csv.split(',') {
+                            let ch = part.trim().trim_start_matches('#').to_ascii_lowercase();
+                            if !ch.is_empty() && !channels.contains(&ch) {
+                                channels.push(ch);
+                            }
+                        }
+                    }
+                    "--fork" => fork = Some(need(items)?),
+                    "--role" => role = Some(need(items)?),
+                    "--brief" => brief = Some(need(items)?),
+                    "--" => positionals.extend(items.by_ref().map(|p| p.to_string())),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let name = name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or(DispatchError::BadArgs)?;
+            let brief_text = brief
+                .unwrap_or_else(|| positionals.join(" "))
+                .trim()
+                .to_string();
+            if brief_text.is_empty() {
+                return Err(DispatchError::BadArgs);
+            }
+            SwarmCommand::Add {
+                name,
+                provider,
+                model,
+                effort,
+                workspace,
+                channels,
+                fork,
+                role,
+                brief: brief_text,
+            }
+        }
+        "post" => {
+            let mut channel = None;
+            let mut text = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--channel" => {
+                        channel = Some(
+                            need(items)?
+                                .trim()
+                                .trim_start_matches('#')
+                                .to_ascii_lowercase(),
+                        )
+                    }
+                    "--message" | "--body" => text = Some(need(items)?),
+                    "--" => positionals.extend(items.by_ref().map(|p| p.to_string())),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let body = text
+                .unwrap_or_else(|| positionals.join(" "))
+                .trim()
+                .to_string();
+            if body.is_empty() {
+                return Err(DispatchError::BadArgs);
+            }
+            SwarmCommand::Post {
+                channel: channel.filter(|c| !c.is_empty()),
+                text: body,
+            }
+        }
+        "read" => {
+            let mut since = 0u64;
+            let mut channel = None;
+            while let Some(next) = items.next() {
+                match next {
+                    "--since" => {
+                        since = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                    }
+                    "--channel" => {
+                        channel = Some(need(items)?.trim().trim_start_matches('#').to_string());
+                    }
+                    _ => return Err(DispatchError::BadArgs),
+                }
+            }
+            SwarmCommand::Read { since, channel }
+        }
+        "wait" => {
+            let mut since = 0u64;
+            let mut mentions_only = false;
+            let mut timeout_ms = 60_000u64;
+            while let Some(next) = items.next() {
+                match next {
+                    "--since" => {
+                        since = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                    }
+                    "--mentions-only" => {
+                        if let Some(&peek) = items.peek() {
+                            if !peek.starts_with('-') {
+                                mentions_only = parse_bool_flag(items.next().unwrap())?;
+                            } else {
+                                mentions_only = true;
+                            }
+                        } else {
+                            mentions_only = true;
+                        }
+                    }
+                    "--timeout-ms" | "--timeout" => {
+                        timeout_ms = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                    }
+                    _ => return Err(DispatchError::BadArgs),
+                }
+            }
+            SwarmCommand::Wait {
+                since,
+                mentions_only,
+                timeout_ms,
+            }
+        }
+        "status" => {
+            if items.next().is_some() {
+                return Err(DispatchError::BadArgs);
+            }
+            SwarmCommand::Status
+        }
+        "model" => {
+            let mut name = None;
+            let mut provider = None;
+            let mut model = None;
+            let mut effort = None;
+            while let Some(next) = items.next() {
+                match next {
+                    "--name" => name = Some(need(items)?),
+                    "--provider" => {
+                        let raw = need(items)?;
+                        provider = Some(
+                            canonical_thread_provider(&raw)
+                                .ok_or(DispatchError::BadArgs)?
+                                .to_string(),
+                        );
+                    }
+                    "--model" => model = Some(need(items)?),
+                    "--effort" => {
+                        let raw = need(items)?;
+                        effort = Some(normalize_effort(&raw).ok_or(DispatchError::BadArgs)?);
+                    }
+                    _ => return Err(DispatchError::BadArgs),
+                }
+            }
+            SwarmCommand::Model {
+                name: name.filter(|s| !s.trim().is_empty()).ok_or(DispatchError::BadArgs)?,
+                provider,
+                model: model.filter(|s| !s.trim().is_empty()).ok_or(DispatchError::BadArgs)?,
+                effort,
+            }
+        }
+        "kill" => {
+            let mut name = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--name" => name = Some(need(items)?),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let target = name
+                .or_else(|| positionals.into_iter().next())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or(DispatchError::BadArgs)?;
+            SwarmCommand::Kill { name: target }
+        }
+        "channel" => {
+            let sub_action = match items.next() {
+                Some("create") => SwarmChannelAction::Create,
+                Some("subscribe") => SwarmChannelAction::Subscribe,
+                Some("unsubscribe") => SwarmChannelAction::Unsubscribe,
+                Some("archive") => SwarmChannelAction::Archive,
+                Some("list") => SwarmChannelAction::List,
+                _ => return Err(DispatchError::BadArgs),
+            };
+            let mut channel = None;
+            let mut topic = None;
+            let mut member = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--channel" => {
+                        channel = Some(
+                            need(items)?
+                                .trim()
+                                .trim_start_matches('#')
+                                .to_ascii_lowercase(),
+                        );
+                    }
+                    "--topic" => topic = Some(need(items)?),
+                    "--name" => member = Some(need(items)?),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            if channel.is_none() {
+                channel = positionals
+                    .into_iter()
+                    .next()
+                    .map(|s| s.trim().trim_start_matches('#').to_ascii_lowercase())
+                    .filter(|s| !s.is_empty());
+            }
+            SwarmCommand::Channel {
+                action: sub_action,
+                channel,
+                topic,
+                member,
+            }
+        }
+        _ => return Err(DispatchError::BadArgs),
+    };
+    Ok(Command::Swarm(cmd))
+}
+
 fn need<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<String, DispatchError> {
@@ -728,7 +1081,7 @@ pub fn execute<P: Port>(
             explicit_role,
             file,
             task,
-            wait: _,
+            wait,
             timeout_ms: _,
             hidden,
             pane,
@@ -749,6 +1102,9 @@ pub fn execute<P: Port>(
             } else {
                 *via
             };
+            if effective_via == Family::Terminal && (provider.is_some() || workspace.is_some()) {
+                return Err(DispatchError::BadArgs);
+            }
             let parent = inherited_parent(parent.as_ref(), ctx.from);
             let cwd = ctx.workspace.map(|p| p.display().to_string());
             let hide_pane = !show_pane(*hidden, *pane, ctx.caller);
@@ -772,6 +1128,9 @@ pub fn execute<P: Port>(
                     Some(words_vec.join(" "))
                 };
                 let task = combine_task(file_text, raw_words.or_else(|| task.clone()));
+                if *wait && task.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(DispatchError::BadArgs);
+                }
                 let explicit_thread_name = if *explicit_name { name.clone() } else { None };
                 return Ok(service.run(RunInput {
                     id: ctx.id.to_string(),
@@ -995,6 +1354,10 @@ pub fn execute<P: Port>(
         Command::Interrupt { address } => Ok(service.interrupt(ctx.id, address)),
         Command::Keys { address, keys } => Ok(service.keys(ctx.id, address, keys)),
         Command::Attach { address } => Ok(service.show(ctx.id, address)),
+        Command::Swarm(swarm_cmd) => {
+            let cwd = ctx.workspace.map(|p| p.display().to_string());
+            Ok(service.swarm(ctx.id, ctx.from, cwd.as_deref(), swarm_cmd))
+        }
     }
 }
 

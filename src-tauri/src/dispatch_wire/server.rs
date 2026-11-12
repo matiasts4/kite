@@ -109,7 +109,12 @@ fn handle_client(stream: TcpStream, token: &str) {
                 return;
             }
             Ok(command) => {
-                let response = execute_command(&request, &command, &id);
+                let response = match command {
+                    cli::Command::Swarm(ref swarm_cmd) => {
+                        execute_swarm_command(&request, &id, swarm_cmd)
+                    }
+                    _ => execute_command(&request, &command, &id),
+                };
                 if response.op == "programs" {
                     let text = response.text.clone().unwrap_or_default();
                     let _ = write_response(&mut reader, &json!({ "programs": text, "exit": 0 }));
@@ -182,6 +187,53 @@ pub fn direct_op(request: &Value, op: &str, id: &str) -> Receipt {
             false,
             None,
             Some(DispatchError::BadArgs.code().into()),
+        ),
+    }
+}
+
+pub fn execute_swarm_command(
+    request: &Value,
+    id: &str,
+    swarm_cmd: &cli::SwarmCommand,
+) -> Receipt {
+    {
+        let guard = match service().lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        if !online_flag(&guard) {
+            return offline_receipt(id, "swarm");
+        }
+    }
+    let caller = caller_of(request);
+    let from = request
+        .get("from")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(if caller == Caller::Human { "human" } else { "agent" });
+    let cwd = request.get("workspace").and_then(Value::as_str);
+    match crate::chat::swarm::execute_swarm_action(swarm_cmd, from, cwd, None) {
+        Ok(text) => {
+            let mut receipt = Receipt::new(
+                id,
+                "swarm",
+                crate::dispatch::ReceiptStatus::Settled,
+                from,
+                false,
+                None,
+                None,
+            );
+            receipt.text = Some(text);
+            receipt
+        }
+        Err(err) => Receipt::new(
+            id,
+            "swarm",
+            crate::dispatch::ReceiptStatus::Rejected,
+            from,
+            false,
+            None,
+            Some(err.code().into()),
         ),
     }
 }
@@ -476,7 +528,12 @@ pub fn execute_argv_envelope(request: &Value) -> Value {
     match cli::parse_args(&argv) {
         Ok(cli::Command::Skill) => json!({ "exit": 0, "skill": skill_text() }),
         Ok(command) => {
-            let response = execute_command(request, &command, &id);
+            let response = match command {
+                cli::Command::Swarm(ref swarm_cmd) => {
+                    execute_swarm_command(request, &id, swarm_cmd)
+                }
+                _ => execute_command(request, &command, &id),
+            };
             if response.op == "programs" {
                 return json!({
                     "exit": 0,
@@ -573,10 +630,11 @@ fn run_blocking_subagent_dispatch(args: &[String], wait_timeout_ms: u64) -> i32 
         "wait".to_string(),
         child_address.clone(),
         "--until".to_string(),
-        "done,error,gone".to_string(),
+        "done,error,gone,blocked".to_string(),
         "--timeout".to_string(),
         wait_timeout_ms.to_string(),
     ];
+    let settled_presence;
     loop {
         let Some(wait_val) =
             loopback_cli_response(&wait_args).or_else(|| dispatch_over_core_pipe(&wait_args))
@@ -601,6 +659,12 @@ fn run_blocking_subagent_dispatch(args: &[String], wait_timeout_ms: u64) -> i32 
             emit_receipt_or_value(&wait_val);
             return wait_exit;
         }
+        settled_presence = wait_val
+            .get("receipt")
+            .and_then(|r| r.get("presenceAtSubmit"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         break;
     }
 
@@ -619,6 +683,21 @@ fn run_blocking_subagent_dispatch(args: &[String], wait_timeout_ms: u64) -> i32 
         .and_then(|r| r.get("text"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    if matches!(settled_presence.as_str(), "error" | "gone" | "blocked") {
+        let failure = json!({
+            "schemaVersion": 1,
+            "id": "run",
+            "op": "run",
+            "status": "failed",
+            "address": child_address,
+            "submitted": true,
+            "presenceAtSubmit": settled_presence,
+            "error": format!("subagent_{settled_presence}"),
+            "text": final_text,
+        });
+        emit_cli_line(&failure.to_string());
+        return 1;
+    }
     let child_id = child_address.strip_prefix("thread:").unwrap_or(&child_address);
     let formatted = crate::chat::subagents::format_subagent_wait_output(final_text, child_id);
     emit_cli_line(&formatted);

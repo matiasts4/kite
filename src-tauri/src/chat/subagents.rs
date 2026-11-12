@@ -62,8 +62,12 @@ pub struct SwarmMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_mode: Option<String>,
     pub state: String, // "waiting" | "working" | "stopped" | "killed"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_activity: Option<String>,
     #[serde(default)]
     pub channels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +76,10 @@ pub struct SwarmMember {
     pub child_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
+    #[serde(default)]
+    pub last_read_seq: u64,
+    #[serde(default)]
+    pub pending_wake: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +143,21 @@ pub fn emit_subagent_event(payload: Value) {
     } else {
         crate::core_daemon::broadcast_daemon_ui_event("chat-subagent-event", payload);
     }
+}
+
+pub fn emit_swarm_event(thread_id: &str, state: &SwarmState) {
+    let payload = json!({
+        "kind": "swarmStateUpdated",
+        "threadId": thread_id,
+        "swarmState": state,
+    });
+    if let Some(app) = crate::get_app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("chat-swarm-event", payload.clone());
+    } else {
+        crate::core_daemon::broadcast_daemon_ui_event("chat-swarm-event", payload.clone());
+    }
+    emit_subagent_event(payload);
 }
 
 pub fn resolve_local_transcript_path(uri: &str) -> Option<PathBuf> {
@@ -694,12 +717,16 @@ pub fn record_swarm_tool_call(thread_id: &str, tool_item: &Value) -> Option<Valu
                                     .and_then(Value::as_str)
                                     .map(str::to_string),
                                 model: meta.model.clone(),
+                                effort: None,
                                 workspace_mode: meta.workspace_mode.clone(),
                                 state: "waiting".to_string(),
+                                current_activity: None,
                                 channels: vec![target_channel.clone()],
                                 subagent_id: None,
                                 child_thread_id: None,
                                 brief: meta.brief.clone(),
+                                last_read_seq: 0,
+                                pending_wake: false,
                             });
                         }
                     }
@@ -1159,7 +1186,7 @@ pub struct ChildSubagentSpawnResult {
     pub working_directory: Option<String>,
 }
 
-fn resolve_git_repo_root(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_git_repo_root(dir: &Path) -> Option<PathBuf> {
     let out = crate::git::run_git(dir, &["rev-parse", "--show-toplevel"]).ok()?;
     if !out.status.success() {
         return None;
@@ -1202,7 +1229,7 @@ pub fn provision_subagent_worktree(
     Ok(wt_path)
 }
 
-fn set_thread_effort_option(thread: &mut Value, effort: &str) {
+pub(crate) fn set_thread_effort_option(thread: &mut Value, effort: &str) {
     thread["effort"] = json!(effort);
     if thread.get("providerOptions").and_then(Value::as_array).is_none() {
         thread["providerOptions"] = json!([]);
@@ -1217,6 +1244,49 @@ fn set_thread_effort_option(thread: &mut Value, effort: &str) {
             opts.push(json!({ "id": "effort", "value": effort }));
         }
     }
+}
+
+fn remembered_provider_defaults(provider: &str) -> (Option<String>, Option<String>) {
+    let Ok(all) = threads().lock() else {
+        return (None, None);
+    };
+    let mut best_ts: i64 = -1;
+    let mut best_model: Option<String> = None;
+    let mut best_effort: Option<String> = None;
+    for t in all.iter() {
+        let Some(p) = t.get("provider").and_then(Value::as_str) else {
+            continue;
+        };
+        if !p.eq_ignore_ascii_case(provider) {
+            continue;
+        }
+        let ts = t
+            .get("updatedAtUnixMs")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let model = t
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let effort = t
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if ts >= best_ts && (model.is_some() || effort.is_some()) {
+            best_ts = ts;
+            if model.is_some() {
+                best_model = model;
+            }
+            if effort.is_some() {
+                best_effort = effort;
+            }
+        }
+    }
+    (best_model, best_effort)
 }
 
 pub fn spawn_child_subagent_thread(
@@ -1257,8 +1327,13 @@ pub fn spawn_child_subagent_thread(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase)
-        .or(parent_provider)
+        .or_else(|| parent_provider.clone())
         .unwrap_or_else(|| "antigravity".to_string());
+
+    let same_provider_as_parent = parent_provider
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case(&provider));
+    let (remembered_model, remembered_effort) = remembered_provider_defaults(&provider);
 
     let child_id = uuid::Uuid::new_v4().to_string();
     let short_id: String = child_id.chars().filter(|c| *c != '-').take(8).collect();
@@ -1270,10 +1345,10 @@ pub fn spawn_child_subagent_thread(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            if params.provider.is_none() {
-                parent_model
+            if params.provider.is_none() || same_provider_as_parent {
+                parent_model.clone().or(remembered_model.clone())
             } else {
-                None
+                remembered_model.clone()
             }
         });
 
@@ -1287,14 +1362,15 @@ pub fn spawn_child_subagent_thread(
 
     let mut child = blank_thread(
         &child_id,
-        parent_workspace_id.as_deref(),
+        None,
         &title,
         &provider,
-        requested_model.as_deref(),
+        parent_workspace_id.as_deref(),
     );
-    if let Some(ref model) = requested_model {
-        child["model"] = json!(model);
-    }
+    child["model"] = requested_model
+        .as_ref()
+        .map(|model| json!(model))
+        .unwrap_or(Value::Null);
     child["mode"] = json!(default_mode(&provider));
     child["startedByAgent"] = json!(true);
     child["sideChat"] = json!(true);
@@ -1317,6 +1393,13 @@ pub fn spawn_child_subagent_thread(
         .filter(|s| !s.is_empty())
     {
         set_thread_effort_option(&mut child, eff);
+    } else if !same_provider_as_parent {
+        if let Some(eff) = remembered_effort {
+            set_thread_effort_option(&mut child, &eff);
+        } else {
+            child["effort"] = Value::Null;
+            child["providerOptions"] = json!([]);
+        }
     }
 
     let base_cwd = parent_cwd
@@ -1446,15 +1529,19 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
 
     let (parent_tid, child_status, child_items, child_model, child_provider) = snapshot;
     let (step_count, latest_activity) = summarize_run_progress(&child_items);
-    let run_status = match child_status.as_str() {
-        "running" => "running",
-        "waiting" => "waiting",
-        "error" => "failed",
-        _ => "completed",
+    let run_status = if crate::dispatch_wire::protocol::is_thread_killed(child_thread_id) {
+        "killed"
+    } else {
+        match child_status.as_str() {
+            "running" => "running",
+            "waiting" => "waiting",
+            "error" => "failed",
+            _ => "completed",
+        }
     };
     let tool_status = match run_status {
         "running" | "waiting" => "running",
-        "failed" => "error",
+        "failed" | "killed" => "error",
         _ => "completed",
     };
     let is_terminal = matches!(run_status, "completed" | "failed" | "killed");

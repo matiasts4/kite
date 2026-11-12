@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::dispatch::cli::{self, skill_text};
 use crate::dispatch::presence::PresenceState;
-use crate::dispatch::types::Family;
+use crate::dispatch::types::{DispatchError, Family};
 
 use super::protocol::mark_pane_shown;
 use super::server::{direct_op, execute_command};
@@ -86,28 +86,85 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
     }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("run").to_string();
-    let explicit_via = request.get("via").and_then(Value::as_str).is_some();
+    let raw_via = request.get("via").and_then(Value::as_str);
+    let from_str = request.get("from").and_then(Value::as_str).unwrap_or("");
+    let explicit_via = raw_via.is_some();
     let explicit_name = request.get("name").and_then(Value::as_str).is_some();
-    let via = match request.get("via").and_then(Value::as_str) {
+    let via = match raw_via {
         Some("thread") => Family::Thread,
-        _ => Family::Terminal,
+        Some("terminal") => Family::Terminal,
+        Some(_) => {
+            return serde_json::to_value(&crate::dispatch::types::Receipt::new(
+                &id,
+                "run",
+                crate::dispatch::types::ReceiptStatus::Rejected,
+                "",
+                false,
+                None,
+                Some(DispatchError::BadArgs.code().into()),
+            ))
+            .unwrap_or(Value::Null);
+        }
+        None if from_str.starts_with("thread:") => Family::Thread,
+        None => Family::Terminal,
     };
     let role = request.get("role").and_then(Value::as_str).map(|s| s.to_string());
     let explicit_role = role.is_some();
-    let provider = request
-        .get("provider")
-        .and_then(Value::as_str)
-        .and_then(cli::canonical_thread_provider)
-        .map(str::to_string);
+    let provider = match request.get("provider").and_then(Value::as_str) {
+        Some(raw) if !raw.trim().is_empty() => match cli::canonical_thread_provider(raw) {
+            Some(canon) => Some(canon.to_string()),
+            None => {
+                return serde_json::to_value(&crate::dispatch::types::Receipt::new(
+                    &id,
+                    "run",
+                    crate::dispatch::types::ReceiptStatus::Rejected,
+                    "",
+                    false,
+                    None,
+                    Some(DispatchError::BadArgs.code().into()),
+                ))
+                .unwrap_or(Value::Null);
+            }
+        },
+        _ => None,
+    };
     let model = request.get("model").and_then(Value::as_str).map(str::to_string);
-    let effort = request
-        .get("effort")
-        .and_then(Value::as_str)
-        .and_then(cli::normalize_effort);
-    let workspace = request
-        .get("workspace")
-        .and_then(Value::as_str)
-        .and_then(cli::normalize_workspace_mode);
+    let effort = match request.get("effort").and_then(Value::as_str) {
+        Some(raw) if !raw.trim().is_empty() => match cli::normalize_effort(raw) {
+            Some(norm) => Some(norm),
+            None => {
+                return serde_json::to_value(&crate::dispatch::types::Receipt::new(
+                    &id,
+                    "run",
+                    crate::dispatch::types::ReceiptStatus::Rejected,
+                    "",
+                    false,
+                    None,
+                    Some(DispatchError::BadArgs.code().into()),
+                ))
+                .unwrap_or(Value::Null);
+            }
+        },
+        _ => None,
+    };
+    let workspace = match request.get("workspace").and_then(Value::as_str) {
+        Some(raw) if !raw.trim().is_empty() => match cli::normalize_workspace_mode(raw) {
+            Some(norm) => Some(norm),
+            None => {
+                return serde_json::to_value(&crate::dispatch::types::Receipt::new(
+                    &id,
+                    "run",
+                    crate::dispatch::types::ReceiptStatus::Rejected,
+                    "",
+                    false,
+                    None,
+                    Some(DispatchError::BadArgs.code().into()),
+                ))
+                .unwrap_or(Value::Null);
+            }
+        },
+        _ => None,
+    };
     let command = cli::Command::Run {
         via,
         explicit_via,

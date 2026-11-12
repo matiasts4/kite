@@ -741,3 +741,131 @@ fn pane_policy_is_pending_or_hidden_without_a_wait() {
     );
     assert_eq!(script.pane, Some(PaneVisibility::Hidden));
 }
+
+#[test]
+fn parse_and_execute_swarm_commands_covers_all_subcommands() {
+    let cases: Vec<(&[&str], &str)> = vec![
+        (&["dispatch", "swarm", "title", "Auth Refactor Swarm"], "title"),
+        (
+            &[
+                "dispatch",
+                "swarm",
+                "add",
+                "--name",
+                "grok-exec",
+                "--provider",
+                "grok",
+                "--model",
+                "grok-3-mini",
+                "--effort",
+                "low",
+                "--workspace",
+                "share",
+                "--channels",
+                "parser,tests",
+                "--fork",
+                "coordinator",
+                "--role",
+                "Grok Executor",
+                "--brief",
+                "Fix token parser",
+            ],
+            "add",
+        ),
+        (
+            &[
+                "dispatch",
+                "swarm",
+                "post",
+                "--channel",
+                "parser",
+                "@grok-exec check edge case #1",
+            ],
+            "post",
+        ),
+        (
+            &["dispatch", "swarm", "read", "--since", "2", "--channel", "*"],
+            "read",
+        ),
+        (
+            &[
+                "dispatch",
+                "swarm",
+                "wait",
+                "--since",
+                "3",
+                "--mentions-only",
+                "true",
+                "--timeout-ms",
+                "12000",
+            ],
+            "wait",
+        ),
+        (&["dispatch", "swarm", "status"], "status"),
+        (
+            &[
+                "dispatch",
+                "swarm",
+                "model",
+                "--name",
+                "grok-exec",
+                "--provider",
+                "gemini",
+                "--model",
+                "gemini-2.5-flash",
+                "--effort",
+                "medium",
+            ],
+            "model",
+        ),
+        (&["dispatch", "swarm", "kill", "--name", "grok-exec"], "kill"),
+        (
+            &[
+                "dispatch",
+                "swarm",
+                "channel",
+                "create",
+                "--channel",
+                "parser",
+                "--topic",
+                "Parser workers",
+            ],
+            "channel",
+        ),
+    ];
+
+    assert_eq!(
+        blocking_swarm_wait_ms(&owned(&[
+            "dispatch",
+            "swarm",
+            "wait",
+            "--since",
+            "3",
+            "--timeout-ms",
+            "12000",
+        ])),
+        Some(12_000)
+    );
+
+    let mut service = Service::new(FakePort::default());
+    for (idx, (argv, label)) in cases.iter().enumerate() {
+        let cmd = parse_args(&owned(argv)).unwrap_or_else(|e| panic!("failed {label}: {e:?}"));
+        let id = format!("swarm-{idx}-{label}");
+        let receipt = execute(
+            &mut service,
+            &cmd,
+            &ExecContext {
+                id: &id,
+                caller: Caller::Agent,
+                from: "thread:coord-1",
+                now_ms: 1_000 + idx as u64,
+                config_dir: None,
+                workspace: None,
+                mounted: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.status, ReceiptStatus::Settled, "case={label}");
+    }
+    assert_eq!(service.port_mut().swarm_cmds.len(), 9);
+}

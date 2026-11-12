@@ -165,13 +165,20 @@ impl<P: Port> Service<P> {
             }
         };
         if resolved {
+            let settled_presence = if input.children.is_none() && !address.is_empty() {
+                self.resolve(&address)
+                    .ok()
+                    .map(|k| self.effective(&k).state.as_str().to_string())
+            } else {
+                None
+            };
             return self.finish(Receipt::new(
                 &input.id,
                 "wait",
                 ReceiptStatus::Settled,
                 &address,
                 false,
-                None,
+                settled_presence,
                 None,
             ));
         }
@@ -297,6 +304,32 @@ impl<P: Port> Service<P> {
         let mut receipt = Receipt::new(id, "read", ReceiptStatus::Settled, address, false, None, None);
         receipt.text = Some(text);
         self.finish(receipt)
+    }
+
+    pub fn swarm(
+        &mut self,
+        id: &str,
+        from: &str,
+        cwd: Option<&str>,
+        command: &crate::dispatch::cli::SwarmCommand,
+    ) -> Receipt {
+        if let Some(existing) = self.receipts.get(id) {
+            let mut replay = existing.clone();
+            replay.replayed = true;
+            return replay;
+        }
+        if !self.online {
+            return self.finish(rejected(id, "swarm", from, DispatchError::RuntimeOffline));
+        }
+        match self.port.swarm(from, cwd, command) {
+            Ok(text) => {
+                let mut receipt =
+                    Receipt::new(id, "swarm", ReceiptStatus::Settled, from, false, None, None);
+                receipt.text = Some(text);
+                self.finish(receipt)
+            }
+            Err(err) => self.finish(rejected(id, "swarm", from, err)),
+        }
     }
 
     pub fn report(
@@ -455,7 +488,19 @@ impl<P: Port> Service<P> {
             if let Some(ep) = self.endpoints.get_mut(&key) {
                 ep.engine = provider.clone();
             }
-            let _ = self.publish_pane(&key, "working", 1, input.now_ms.max(1), None, None);
+            let initial_presence = if opening.trim().is_empty() {
+                PresenceState::Idle
+            } else {
+                PresenceState::Working
+            };
+            let _ = self.publish_pane(
+                &key,
+                initial_presence.as_str(),
+                1,
+                input.now_ms.max(1),
+                None,
+                None,
+            );
             let thread_address = format!("thread:{session_id}");
             let mut receipt = Receipt::new(
                 &input.id,
@@ -463,7 +508,7 @@ impl<P: Port> Service<P> {
                 ReceiptStatus::Submitted,
                 &thread_address,
                 true,
-                Some(PresenceState::Working.as_str().into()),
+                Some(initial_presence.as_str().into()),
                 None,
             );
             receipt.pane = Some(pane);

@@ -50,7 +50,7 @@ pub fn clear_thread_killed(thread_id: &str) {
     }
 }
 
-fn is_thread_killed(thread_id: &str) -> bool {
+pub(crate) fn is_thread_killed(thread_id: &str) -> bool {
     killed_threads()
         .lock()
         .ok()
@@ -139,6 +139,7 @@ impl Port for LivePort {
                         let _ = manager.stop(id);
                     }
                 }
+                crate::chat::subagents::sync_child_thread_to_parent(id);
             }
         }
         Ok(())
@@ -304,6 +305,15 @@ impl Port for LivePort {
     fn reveal(&mut self, id: &str, engine: &str, name: Option<&str>) -> Result<(), DispatchError> {
         emit_open_pane(id, engine, name);
         Ok(())
+    }
+
+    fn swarm(
+        &mut self,
+        from: &str,
+        cwd: Option<&str>,
+        command: &cli::SwarmCommand,
+    ) -> Result<String, DispatchError> {
+        crate::chat::swarm::execute_swarm_action(command, from, cwd, None)
     }
 }
 

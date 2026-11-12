@@ -1,4 +1,9 @@
 use super::*;
+use uuid::Uuid;
+use crate::session_resolver::{
+    read_persisted_terminal_sessions, upsert_persisted_terminal_session,
+    write_persisted_terminal_sessions, PersistedTerminalSession,
+};
 
 #[test]
 fn parse_reg_path_output_reads_reg_sz() {

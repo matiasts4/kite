@@ -2,18 +2,62 @@ use uuid::Uuid;
 use crate::logger::log_trace;
 use crate::session_resolver::{
     canonical_agent_engine, choose_restore_provider_id, claude_session_file_exists,
-    is_generic_shell_engine, read_persisted_terminal_sessions,
+    get_persisted_terminal_session, is_generic_shell_engine, read_persisted_terminal_sessions,
     remove_persisted_terminal_session, resolve_provider_session_id_with_context,
-    restore_grok_provider_id, PersistedTerminalSession,
+    restore_grok_provider_id, upsert_persisted_terminal_session_clearing_provider,
+    PersistedTerminalSession,
 };
-use crate::terminal::*;
+use crate::terminal::{
+    capture_terminal_lifecycle, delete_scrollback_file, extract_pane_id, extract_workspace_id,
+    get_globally_claimed_provider_ids, get_session_resolve_lock, get_terminals,
+    is_agent_cli_engine, log_dec2026_timeouts, now_unix_ms, raw_argv_from_request,
+    read_scrollback_file, should_proxy_to_core_daemon, snapshot_scrollback_for_attach,
+    spawn_session_with_options, to_base64, try_bind_provider_session_id, workspace_cwd,
+    write_scrollback_file, SHUTTING_DOWN, SpawnMode, SpawnOptions, TerminalInstance,
+};
 use portable_pty::PtySize;
 use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-pub async fn start_terminal(request: serde_json::Value) -> serde_json::Value {
-    start_terminal_sync(request)
+fn update_instance_geometry_and_metadata(
+    inst: &TerminalInstance,
+    workspace_id: Option<&str>,
+    pane_id: Option<&str>,
+    cols: u16,
+    rows: u16,
+) {
+    if let Some(ws_id) = workspace_id {
+        if let Ok(mut w) = inst.workspace_id.lock() {
+            if w.is_none() {
+                *w = Some(ws_id.to_string());
+            }
+        }
+    }
+    if let Some(p_id) = pane_id {
+        if let Ok(mut p) = inst.pane_id.lock() {
+            if p.is_none() {
+                *p = Some(p_id.to_string());
+            }
+        }
+    }
+    if cols > 0 && rows > 0 {
+        let prev_cols = inst.cols.swap(cols, Ordering::Relaxed);
+        let prev_rows = inst.rows.swap(rows, Ordering::Relaxed);
+        if prev_cols != cols || prev_rows != rows {
+            if let Ok(master) = inst.master.lock() {
+                let _ = master.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+            if let Ok(mut vt) = inst.vt_engine.lock() {
+                vt.resize(cols, rows);
+            }
+        }
+    }
 }
 
 pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
@@ -97,37 +141,13 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
     let existing_scrollback = {
         let map = get_terminals().lock().unwrap();
         if let Some(inst) = map.get(&session_id) {
-            if let Some(ref ws_id) = workspace_id {
-                if let Ok(mut w) = inst.workspace_id.lock() {
-                    if w.is_none() {
-                        *w = Some(ws_id.clone());
-                    }
-                }
-            }
-            if let Some(ref p_id) = pane_id {
-                if let Ok(mut p) = inst.pane_id.lock() {
-                    if p.is_none() {
-                        *p = Some(p_id.clone());
-                    }
-                }
-            }
-            if cols > 0 && rows > 0 {
-                let prev_cols = inst.cols.swap(cols, Ordering::Relaxed);
-                let prev_rows = inst.rows.swap(rows, Ordering::Relaxed);
-                if prev_cols != cols || prev_rows != rows {
-                    if let Ok(master) = inst.master.lock() {
-                        let _ = master.resize(PtySize {
-                            rows,
-                            cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        });
-                    }
-                    if let Ok(mut vt) = inst.vt_engine.lock() {
-                        vt.resize(cols, rows);
-                    }
-                }
-            }
+            update_instance_geometry_and_metadata(
+                inst,
+                workspace_id.as_deref(),
+                pane_id.as_deref(),
+                cols,
+                rows,
+            );
             let sb = snapshot_scrollback_for_attach(&session_id, inst, preserve_unread_buffer);
             Some((sb, inst.root_pid, inst.spawned_at_unix_ms))
         } else {
@@ -224,10 +244,6 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
     })
 }
 
-pub async fn attach_terminal(request: serde_json::Value) -> serde_json::Value {
-    attach_terminal_sync(request)
-}
-
 pub fn attach_terminal_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req
@@ -317,37 +333,13 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
             };
 
             if is_alive {
-                if let Some(ref ws_id) = workspace_id {
-                    if let Ok(mut w) = inst.workspace_id.lock() {
-                        if w.is_none() {
-                            *w = Some(ws_id.clone());
-                        }
-                    }
-                }
-                if let Some(ref p_id) = pane_id {
-                    if let Ok(mut p) = inst.pane_id.lock() {
-                        if p.is_none() {
-                            *p = Some(p_id.clone());
-                        }
-                    }
-                }
-                if req_cols > 0 && req_rows > 0 {
-                    let prev_cols = inst.cols.swap(req_cols, Ordering::Relaxed);
-                    let prev_rows = inst.rows.swap(req_rows, Ordering::Relaxed);
-                    if prev_cols != req_cols || prev_rows != req_rows {
-                        if let Ok(master) = inst.master.lock() {
-                            let _ = master.resize(PtySize {
-                                rows: req_rows,
-                                cols: req_cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
-                        }
-                        if let Ok(mut vt) = inst.vt_engine.lock() {
-                            vt.resize(req_cols, req_rows);
-                        }
-                    }
-                }
+                update_instance_geometry_and_metadata(
+                    inst,
+                    workspace_id.as_deref(),
+                    pane_id.as_deref(),
+                    req_cols,
+                    req_rows,
+                );
                 let sb = snapshot_scrollback_for_attach(&session_id, inst, preserve_unread_buffer);
                 // A fresh attach or renderer switch must not replay the raw byte tail
                 // into the other engine when the session is on the alternate screen:
@@ -563,10 +555,6 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
     })
 }
 
-pub async fn read_terminal_output(request: serde_json::Value) -> serde_json::Value {
-    read_terminal_output_sync(request)
-}
-
 pub fn read_terminal_output_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
@@ -633,10 +621,6 @@ pub fn read_terminal_output_local_sync(request: serde_json::Value) -> serde_json
         "turnStartedAtUnixMs": 0,
         "waitingForInput": true
     })
-}
-
-pub async fn write_terminal(request: serde_json::Value) -> serde_json::Value {
-    write_terminal_sync(request)
 }
 
 pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {
@@ -750,10 +734,6 @@ pub fn write_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
     } else {
         serde_json::json!({ "ok": false, "error": "Terminal writer unavailable" })
     }
-}
-
-pub async fn resize_terminal(request: serde_json::Value) -> serde_json::Value {
-    resize_terminal_sync(request)
 }
 
 pub fn resize_terminal_sync(request: serde_json::Value) -> serde_json::Value {

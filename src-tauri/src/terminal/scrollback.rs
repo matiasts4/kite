@@ -62,6 +62,36 @@ pub fn delete_scrollback_file(session_id: &str) {
     let _ = std::fs::remove_file(path);
 }
 
+pub fn snapshot_scrollback_for_attach(
+    session_id: &str,
+    inst: &crate::terminal::TerminalInstance,
+    preserve_unread_buffer: bool,
+) -> Option<Vec<u8>> {
+    let mut had_pending = false;
+    let buf_guard = inst.buffer.lock().ok();
+    let sb_guard = inst.scrollback.lock().ok();
+    if let Some(mut buf) = buf_guard {
+        if !buf.is_empty() {
+            had_pending = true;
+            if !preserve_unread_buffer {
+                buf.clear();
+            }
+        }
+    }
+    if let Some(sb) = sb_guard {
+        if had_pending && !sb.is_empty() {
+            write_scrollback_file(session_id, &sb);
+        }
+        if sb.is_empty() {
+            None
+        } else {
+            Some(sb.clone())
+        }
+    } else {
+        None
+    }
+}
+
 pub fn plain_terminal_text(bytes: &[u8]) -> String {
     let mut kept = Vec::with_capacity(bytes.len());
     let mut i = 0;

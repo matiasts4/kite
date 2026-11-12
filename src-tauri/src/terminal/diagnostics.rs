@@ -22,10 +22,6 @@ pub fn terminal_log_dir() -> std::path::PathBuf {
     dir
 }
 
-pub async fn find_terminal_text(request: serde_json::Value) -> Result<serde_json::Value, String> {
-    find_terminal_text_sync(request)
-}
-
 pub fn find_terminal_text_sync(request: serde_json::Value) -> Result<serde_json::Value, String> {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
@@ -59,12 +55,6 @@ pub fn find_terminal_text_local_sync(
     let vt = inst.vt_engine.lock().map_err(|e| e.to_string())?;
     let hits = vt.find_text(query, limit);
     Ok(serde_json::json!({ "hits": hits }))
-}
-
-pub async fn get_terminal_selection_text(
-    request: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    get_terminal_selection_text_sync(request)
 }
 
 pub fn get_terminal_selection_text_sync(

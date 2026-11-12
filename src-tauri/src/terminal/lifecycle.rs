@@ -8,9 +8,9 @@ use crate::session_resolver::{
 };
 use crate::terminal::{
     bench_record_activity_event, bench_record_pty_bytes, bench_record_vt_feed,
-    capture_terminal_lifecycle, capture_terminal_output, extract_osc_cwd, get_terminals,
-    now_unix_ms, snapshot_scrollback_for_attach, try_bind_provider_session_id,
-    write_scrollback_file, MAX_SCROLLBACK_BYTES, TerminalInstance,
+    capture_terminal_lifecycle, capture_terminal_output, extract_osc_cwd, get_session_resolve_lock,
+    get_terminals, now_unix_ms, snapshot_scrollback_for_attach, write_scrollback_file,
+    MAX_SCROLLBACK_BYTES, TerminalInstance,
 };
 use portable_pty::Child as PtyChild;
 use std::collections::{HashMap, HashSet};
@@ -74,6 +74,177 @@ pub fn try_child_exit(inst: &TerminalInstance) -> Option<i64> {
         Ok(Some(status)) => Some(status.exit_code() as i64),
         _ => None,
     }
+}
+
+pub fn get_globally_claimed_provider_ids(current_session_id: &str) -> HashSet<String> {
+    let mut claimed = HashSet::new();
+    if let Ok(map) = get_terminals().lock() {
+        for (sid, inst) in map.iter() {
+            if sid != current_session_id {
+                if let Ok(p) = inst.provider_session_id.lock() {
+                    if let Some(ref pid) = *p {
+                        if !pid.is_empty() {
+                            claimed.insert(pid.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let persisted_map = read_persisted_terminal_sessions();
+    for (sid, session) in persisted_map {
+        if sid != current_session_id {
+            if let Some(ref pid) = session.provider_session_id {
+                if !pid.is_empty() {
+                    claimed.insert(pid.clone());
+                }
+            }
+        }
+    }
+
+    claimed
+}
+
+pub fn try_bind_provider_session_id(session_id: &str, inst: &TerminalInstance) -> Option<String> {
+    let _resolve_guard = get_session_resolve_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    inst.last_bind_attempt_ms
+        .store(now_unix_ms() as u64, Ordering::Relaxed);
+
+    let root_pid = inst.child.lock().ok().and_then(|c| c.process_id());
+    let detected_child = if is_generic_shell_engine(&inst.engine) {
+        let child = root_pid.and_then(detect_child_agent_in_shell);
+        if let Some(ref c) = child {
+            inst.had_user_activity.store(true, Ordering::Relaxed);
+            if let Ok(mut det) = inst.detected_agent_engine.lock() {
+                *det = Some(c.clone());
+            }
+        } else {
+            // For a generic shell, if no child agent is running, don't allow a stale or
+            // false-positive text detection to persist as an active agent engine.
+            let has_bound_prov = inst
+                .provider_session_id
+                .lock()
+                .ok()
+                .and_then(|p| p.clone())
+                .is_some();
+            if !has_bound_prov {
+                if let Ok(mut det) = inst.detected_agent_engine.lock() {
+                    *det = None;
+                }
+            }
+        }
+        child
+    } else {
+        None
+    };
+
+    let engine = if is_generic_shell_engine(&inst.engine) {
+        detected_child
+            .or_else(|| {
+                let has_bound = inst
+                    .provider_session_id
+                    .lock()
+                    .ok()
+                    .and_then(|p| p.clone())
+                    .is_some();
+                if has_bound {
+                    inst.detected_agent_engine.lock().ok().and_then(|d| d.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| canonical_agent_engine(&inst.engine))
+    } else {
+        inst.detected_agent_engine
+            .lock()
+            .ok()
+            .and_then(|d| d.clone())
+            .unwrap_or_else(|| canonical_agent_engine(&inst.engine))
+    };
+
+    let cwd = inst
+        .live_cwd
+        .lock()
+        .ok()
+        .map(|c| c.clone())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| inst.cwd.clone());
+
+    let last_input = inst.last_user_input.lock().ok().and_then(|l| l.clone());
+    let ws_id = inst.workspace_id.lock().ok().and_then(|w| w.clone());
+    let p_id = inst.pane_id.lock().ok().and_then(|p| p.clone());
+    let had_activity = inst.had_user_activity.load(Ordering::Relaxed);
+
+    if is_generic_shell_engine(&engine) {
+        if had_activity {
+            upsert_persisted_terminal_session(PersistedTerminalSession {
+                session_id: session_id.to_string(),
+                workspace_id: ws_id,
+                pane_id: p_id,
+                base_engine: inst.engine.clone(),
+                active_engine: engine,
+                provider_session_id: None,
+                cwd,
+                had_user_activity: true,
+                last_user_input: last_input,
+                spawned_at_unix_ms: inst.spawned_at_unix_ms,
+                saved_at_unix_ms: now_unix_ms(),
+            });
+        }
+        return None;
+    }
+
+    // Flush any unread output into scrollback so transcript/scrollback matching has the latest bytes
+    let _ = snapshot_scrollback_for_attach(session_id, inst, false);
+
+    let existing_prov = inst.provider_session_id.lock().ok().and_then(|p| p.clone());
+    if let Some(ref pid) = existing_prov {
+        return Some(pid.clone());
+    }
+
+    let claimed_ids = get_globally_claimed_provider_ids(session_id);
+    let resolved = resolve_provider_session_id_with_context(
+        &engine,
+        &cwd,
+        session_id,
+        existing_prov.as_deref(),
+        inst.spawned_at_unix_ms,
+        &claimed_ids,
+        root_pid,
+        last_input.as_deref(),
+    );
+
+    if let Some(ref pid) = resolved {
+        if let Ok(mut p) = inst.provider_session_id.lock() {
+            *p = Some(pid.clone());
+        }
+        log_trace(&format!(
+            "try_bind_provider_session_id: bound session {} to provider id {}",
+            session_id, pid
+        ));
+    }
+
+    let final_prov = resolved.clone().or(existing_prov);
+    if had_activity || final_prov.is_some() {
+        upsert_persisted_terminal_session(PersistedTerminalSession {
+            session_id: session_id.to_string(),
+            workspace_id: ws_id,
+            pane_id: p_id,
+            base_engine: inst.engine.clone(),
+            active_engine: engine,
+            provider_session_id: final_prov.clone(),
+            cwd,
+            had_user_activity: had_activity || final_prov.is_some(),
+            last_user_input: last_input,
+            spawned_at_unix_ms: inst.spawned_at_unix_ms,
+            saved_at_unix_ms: now_unix_ms(),
+        });
+    }
+
+    final_prov
 }
 
 pub fn maybe_bind_provider_session(session_id: &str, inst: &Arc<TerminalInstance>) {

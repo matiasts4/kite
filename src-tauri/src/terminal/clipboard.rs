@@ -8,41 +8,7 @@ pub fn quote_path(path: &str) -> Option<String> {
     Some(format!("'{}' ", trimmed.replace('\'', "''")))
 }
 
-pub fn decode_base64(input: &str) -> Option<Vec<u8>> {
-    fn value(byte: u8) -> Option<u8> {
-        match byte {
-            b'A'..=b'Z' => Some(byte - b'A'),
-            b'a'..=b'z' => Some(byte - b'a' + 26),
-            b'0'..=b'9' => Some(byte - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes = input.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
-        let pad = chunk.iter().filter(|byte| **byte == b'=').count();
-        if pad > 2 {
-            return None;
-        }
-        let a = value(chunk[0])?;
-        let b = value(chunk[1])?;
-        let c = if chunk[2] == b'=' { 0 } else { value(chunk[2])? };
-        let d = if chunk[3] == b'=' { 0 } else { value(chunk[3])? };
-        out.push((a << 2) | (b >> 4));
-        if pad < 2 {
-            out.push((b << 4) | (c >> 2));
-        }
-        if pad < 1 {
-            out.push((c << 6) | d);
-        }
-    }
-    Some(out)
-}
+pub use super::codec::decode_base64;
 
 pub fn stage_clipboard_file(
     _owner: Option<&serde_json::Value>,

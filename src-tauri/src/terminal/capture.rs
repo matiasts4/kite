@@ -5,36 +5,7 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
-pub fn to_base64(data: &[u8]) -> String {
-    const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARSET[(triple >> 18) & 63] as char);
-        out.push(CHARSET[(triple >> 12) & 63] as char);
-        if chunk.len() > 1 {
-            out.push(CHARSET[(triple >> 6) & 63] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(CHARSET[triple & 63] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-pub fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
+pub use super::codec::{now_unix_ms, to_base64};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct TerminalAnsiMarkerCounts {

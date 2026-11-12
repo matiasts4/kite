@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   getTicketSnapshot,
   getTaskExecutionSnapshot,
@@ -19,212 +18,51 @@ import {
   TicketLabel,
   TicketProject,
   TicketConnection,
-  COLUMNS,
-  getLabelColor,
 } from './tickets/types';
-import { TicketCard, StateGlyph, PriorityGlyph, TicketAvatar } from './tickets/TicketCard';
 import { TicketDetailView } from './tickets/TicketDetailView';
 import { CreateTicketModal } from './tickets/CreateTicketModal';
 import { ConnectMcpModal } from './tickets/ConnectMcpModal';
 import { LabelsProjectsModal } from './tickets/LabelsProjectsModal';
 import { DispatchTaskModal } from './tickets/DispatchTaskModal';
-import { SelectMenu } from '../ui/SelectMenu';
+import { TicketsHeaderBar } from './tickets/TicketsHeaderBar';
+import { TicketsBoardView } from './tickets/TicketsBoardView';
+import { TicketsListView } from './tickets/TicketsListView';
+import { TicketContextMenu, TicketContextMenuState } from './tickets/TicketContextMenu';
 import {
-  ChevronRightGlyph,
-  SearchGlyph,
-  MoreHorizontalGlyph,
-  PlusGlyph,
-  CloseGlyph,
-  ListGlyph,
-  KanbanGlyph,
-} from '../dockIcons';
+  readStoredView,
+  persistStoredView,
+  readStoredIssues,
+  persistIssuesWithBackup,
+  readStoredBackup,
+  readStoredLabels,
+  persistLabels,
+  readStoredProjects,
+  persistProjects,
+  readStoredConnections,
+  persistConnections,
+  PRIMARY_STORAGE_KEY,
+  LEGACY_STORAGE_KEY,
+  LEGACY_STORAGE_KEY_V1,
+  BACKUP_STORAGE_KEY,
+  LABELS_STORAGE_KEY,
+  PROJECTS_STORAGE_KEY,
+  CONNECTIONS_STORAGE_KEY,
+  VIEW_STORAGE_KEY,
+} from './tickets/ticketStorage';
 import type { AgentProfile, Workspace } from '../../types';
 
 export type { TicketIssue, TicketState, TicketPriority, TaskExecutionRun };
-
-const PRIMARY_STORAGE_KEY = 'KITE_STORAGE_TICKETS_ISSUES';
-const LEGACY_STORAGE_KEY = 'BM_STORAGE_TICKETS_ISSUES';
-const LEGACY_STORAGE_KEY_V1 = 'kite_tickets_issues_v1';
-const BACKUP_STORAGE_KEY = 'KITE_STORAGE_TICKETS_BACKUP';
-const LABELS_STORAGE_KEY = 'KITE_STORAGE_TICKETS_LABELS';
-const PROJECTS_STORAGE_KEY = 'KITE_STORAGE_TICKETS_PROJECTS';
-const CONNECTIONS_STORAGE_KEY = 'KITE_STORAGE_TICKETS_CONNECTIONS';
-const VIEW_STORAGE_KEY = 'kite-code.tasks-view.v1';
-
-// Ticket icons
-const ArchiveGlyph: React.FC<{ size?: number }> = ({ size = 14 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <rect width="20" height="5" x="2" y="3" rx="1" />
-    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
-    <path d="M10 12h4" />
-  </svg>
-);
-
-const TagGlyph: React.FC<{ size?: number }> = ({ size = 14 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" />
-    <circle cx="7.5" cy="7.5" r=".5" fill="currentColor" />
-  </svg>
-);
-
-const PlugGlyph: React.FC<{ size?: number }> = ({ size = 14 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M12 22v-5" />
-    <path d="M15 8V2" />
-    <path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z" />
-    <path d="M9 8V2" />
-  </svg>
-);
-
-const RotateCcwClockGlyph: React.FC<{ size?: number }> = ({ size = 14 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-    <path d="M3 3v5h5" />
-    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-    <path d="M12 7v5l3 2" />
-  </svg>
-);
-
-const ListFilterGlyph: React.FC<{ size?: number }> = ({ size = 13 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M2 5h20" />
-    <path d="M6 12h12" />
-    <path d="M9 19h6" />
-  </svg>
-);
-
-const BotGlyph: React.FC<{ size?: number }> = ({ size = 13 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M12 8V4H8" />
-    <rect width="16" height="12" x="4" y="8" rx="2" />
-    <path d="M2 14h2" />
-    <path d="M20 14h2" />
-    <path d="M15 13v2" />
-    <path d="M9 13v2" />
-  </svg>
-);
-
-const ExternalOpenGlyph: React.FC<{ size?: number }> = ({ size = 13 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M21 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6" />
-    <path d="m21 3-9 9" />
-    <path d="M15 3h6v6" />
-  </svg>
-);
-
-const SendGlyph: React.FC<{ size?: number }> = ({ size = 13 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.8}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />
-    <path d="m21.854 2.147-10.94 10.939" />
-  </svg>
-);
-
-const ChevronDownMini: React.FC<{ size?: number }> = ({ size = 10 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2.5}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="m6 9 6 6 6-6" />
-  </svg>
-);
-
-function readStoredView(): 'board' | 'list' {
-  try {
-    const raw = localStorage.getItem(VIEW_STORAGE_KEY);
-    if (!raw) return 'board';
-    const parsed = JSON.parse(raw);
-    return parsed === 'list' ? 'list' : 'board';
-  } catch {
-    return 'board';
-  }
-}
+export {
+  PRIMARY_STORAGE_KEY,
+  LEGACY_STORAGE_KEY,
+  LEGACY_STORAGE_KEY_V1,
+  BACKUP_STORAGE_KEY,
+  LABELS_STORAGE_KEY,
+  PROJECTS_STORAGE_KEY,
+  CONNECTIONS_STORAGE_KEY,
+  VIEW_STORAGE_KEY,
+  readStoredView,
+};
 
 export interface TicketsViewProps {
   workspaces?: Workspace[];
@@ -236,72 +74,17 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
   selectedWorkspaceId = null,
 }) => {
   // State for issues: loaded from local storage cache, synchronized with ticket_snapshot
-  const [issues, setIssues] = useState<TicketIssue[]>(() => {
-    try {
-      const stored =
-        localStorage.getItem(PRIMARY_STORAGE_KEY) ||
-        localStorage.getItem(LEGACY_STORAGE_KEY) ||
-        localStorage.getItem(LEGACY_STORAGE_KEY_V1);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {
-      // fallback
-    }
-    return [];
-  });
-
-  const [labels, setLabels] = useState<TicketLabel[]>(() => {
-    try {
-      const stored = localStorage.getItem(LABELS_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [
-      { id: 'lbl-frontend', name: 'Frontend' },
-      { id: 'lbl-backend', name: 'Backend' },
-      { id: 'lbl-bug', name: 'Bug' },
-      { id: 'lbl-feature', name: 'Feature' },
-    ];
-  });
-
-  const [projects, setProjects] = useState<TicketProject[]>(() => {
-    try {
-      const stored = localStorage.getItem(PROJECTS_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [
-      { id: 'proj-kite', name: 'Kite Code' },
-      { id: 'proj-agents', name: 'Agents & MCP' },
-    ];
-  });
-
-  const [connections, setConnections] = useState<TicketConnection[]>(() => {
-    try {
-      const stored = localStorage.getItem(CONNECTIONS_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [];
-  });
+  const [issues, setIssues] = useState<TicketIssue[]>(() => readStoredIssues());
+  const [labels, setLabels] = useState<TicketLabel[]>(() => readStoredLabels());
+  const [projects, setProjects] = useState<TicketProject[]>(() => readStoredProjects());
+  const [connections, setConnections] = useState<TicketConnection[]>(() => readStoredConnections());
 
   const [snapshot, setSnapshot] = useState<TicketSnapshot | null>(null);
   const [taskRuns, setTaskRuns] = useState<TaskExecutionRun[]>([]);
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [activeView, setActiveView] = useState<'board' | 'list'>(() => readStoredView());
   const [statusFilter, setStatusFilter] = useState<'all' | TicketState>('all');
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<TicketState>>(() => new Set());
   const [searchQuery, setSearchQuery] = useState('');
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [activeSheet, setActiveSheet] = useState<'composer' | 'metadata' | 'mcp' | null>(null);
@@ -310,17 +93,7 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [newIssueState, setNewIssueState] = useState<TicketState>('To Do');
-  const [dragTargetStatus, setDragTargetStatus] = useState<TicketState | null>(null);
-  const [draggedIssueId, setDraggedIssueId] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{
-    issue: TicketIssue;
-    x: number;
-    y: number;
-  } | null>(null);
-
-  const scrollerRef = useRef<HTMLDivElement>(null);
-  const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [contextMenu, setContextMenu] = useState<TicketContextMenuState | null>(null);
 
   // Clear notice after 6s
   useEffect(() => {
@@ -332,9 +105,7 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
   // Persist view mode
   const handleViewChange = (mode: 'board' | 'list') => {
     setActiveView(mode);
-    try {
-      localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(mode));
-    } catch {}
+    persistStoredView(mode);
   };
 
   // Map of active runs
@@ -446,48 +217,20 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
 
   // Persist to local storage & maintain rolling backup
   useEffect(() => {
-    try {
-      const prev = localStorage.getItem(PRIMARY_STORAGE_KEY);
-      const serial = JSON.stringify(issues);
-      if (prev && prev !== serial) {
-        localStorage.setItem(BACKUP_STORAGE_KEY, prev);
-      }
-      localStorage.setItem(PRIMARY_STORAGE_KEY, serial);
-      localStorage.setItem(LEGACY_STORAGE_KEY, serial);
-      localStorage.setItem(LEGACY_STORAGE_KEY_V1, serial);
-    } catch {}
+    persistIssuesWithBackup(issues);
   }, [issues]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(LABELS_STORAGE_KEY, JSON.stringify(labels));
-    } catch {}
+    persistLabels(labels);
   }, [labels]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
-    } catch {}
+    persistProjects(projects);
   }, [projects]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(CONNECTIONS_STORAGE_KEY, JSON.stringify(connections));
-    } catch {}
+    persistConnections(connections);
   }, [connections]);
-
-  // Close menus on Escape
-  useEffect(() => {
-    if (!isMenuOpen && !contextMenu) return;
-    const handleDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setIsMenuOpen(false);
-        setContextMenu(null);
-      }
-    };
-    window.addEventListener('keydown', handleDown);
-    return () => window.removeEventListener('keydown', handleDown);
-  }, [isMenuOpen, contextMenu]);
 
   const handleMoveIssue = (id: string, newState: TicketState) => {
     setIssues((prev) =>
@@ -680,12 +423,9 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
     setBusy(true);
     try {
       await ticketRecover();
-      const backupRaw = localStorage.getItem(BACKUP_STORAGE_KEY);
-      if (backupRaw) {
-        const parsed = JSON.parse(backupRaw);
-        if (Array.isArray(parsed)) {
-          setIssues(parsed);
-        }
+      const restored = readStoredBackup();
+      if (restored) {
+        setIssues(restored);
       }
       setConnections((prev) =>
         prev.map((c) => ({ ...c, revokedAt: new Date().toISOString() }))
@@ -696,19 +436,6 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
       setConfirmRestoreBackup(false);
     } finally {
       setBusy(false);
-    }
-  };
-
-  const scrollToColumn = (status: TicketState) => {
-    if (!scrollerRef.current) return;
-    const colEl = scrollerRef.current.querySelector(
-      `.ticket-board__column[data-board-status="${status}"]`
-    ) as HTMLElement | null;
-    if (colEl) {
-      scrollerRef.current.scrollTo({
-        left: colEl.offsetLeft - scrollerRef.current.offsetLeft,
-        behavior: 'smooth',
-      });
     }
   };
 
@@ -731,280 +458,30 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
     [issues, selectedIssueId]
   );
 
-  const totalCount = filteredIssues.length;
-
-  const statusFilterRows = useMemo(() => {
-    const allCount = filteredIssues.length;
-    return [
-      {
-        id: 'all',
-        title: 'All statuses',
-        badge: String(allCount),
-      },
-      ...COLUMNS.map((col, idx) => ({
-        id: col,
-        title: col,
-        badge: String(filteredIssues.filter((i) => i.state === col).length),
-        icon: <StateGlyph state={col} />,
-        ruleBefore: idx === 0,
-      })),
-    ];
-  }, [filteredIssues]);
-
-  const toggleGroupCollapse = (col: TicketState) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(col)) next.delete(col);
-      else next.add(col);
-      return next;
-    });
-  };
-
   return (
     <section aria-label="Tasks" className="pane tickets-pane">
       {/* Header */}
-      <header className="tickets-header">
-        <nav aria-label="Breadcrumb" className="tickets-crumb">
-          <span className="tickets-crumb__root">Kite</span>
-          <ChevronRightGlyph className="tickets-crumb__chevron" size={12} strokeWidth={2} />
-          <span className="tickets-crumb__current">Tasks</span>
-        </nav>
-
-        {activeView === 'list' && !currentSelectedIssue ? (
-          <div className="tickets-status">
-            <SelectMenu
-              help="Filter tasks by status"
-              label="Status filter"
-              panelDetail="Filter tasks by workflow status"
-              panelTitle="Status"
-              rows={statusFilterRows}
-              triggerIcon={
-                statusFilter === 'all' ? (
-                  <ListFilterGlyph size={13} />
-                ) : (
-                  <StateGlyph state={statusFilter} />
-                )
-              }
-              triggerBadge={
-                statusFilter === 'all'
-                  ? String(filteredIssues.length)
-                  : String(filteredIssues.filter((i) => i.state === statusFilter).length)
-              }
-              triggerLabel={`Status: ${
-                statusFilter === 'all' ? 'All statuses' : statusFilter
-              }`}
-              value={statusFilter}
-              variant="toolbar"
-              onSelect={(id) =>
-                setStatusFilter(
-                  COLUMNS.includes(id as TicketState) ? (id as TicketState) : 'all'
-                )
-              }
-            />
-          </div>
-        ) : null}
-
-        <div className="tickets-header__trailing">
-          {/* Search Toggle / Field */}
-          {isSearchOpen ? (
-            <span className="tickets-search">
-              <SearchGlyph size={13} strokeWidth={1.8} />
-              <input
-                ref={searchInputRef}
-                aria-label="Search tasks"
-                placeholder="Search tasks"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') {
-                    setSearchQuery('');
-                    setIsSearchOpen(false);
-                  }
-                }}
-                autoFocus
-              />
-              <button
-                type="button"
-                className="chrome-button"
-                onClick={() => {
-                  setSearchQuery('');
-                  setIsSearchOpen(false);
-                }}
-                title="Close search"
-                aria-label="Close search"
-              >
-                <CloseGlyph size={12} />
-              </button>
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="chrome-button"
-              onClick={() => setIsSearchOpen(true)}
-              title="Search tasks"
-              aria-label="Search"
-            >
-              <SearchGlyph size={14} />
-            </button>
-          )}
-
-          {/* More Menu (...) */}
-          <button
-            ref={menuButtonRef}
-            type="button"
-            className={`chrome-button${isMenuOpen ? ' chrome-button--selected' : ''}`}
-            aria-expanded={isMenuOpen}
-            aria-haspopup="menu"
-            onClick={() => setIsMenuOpen((v) => !v)}
-            title="More"
-            aria-label="More"
-          >
-            <MoreHorizontalGlyph size={14} />
-          </button>
-
-          {isMenuOpen &&
-            typeof document !== 'undefined' &&
-            createPortal(
-              <>
-                <div
-                  style={{ position: 'fixed', inset: 0, zIndex: 59 }}
-                  onClick={() => setIsMenuOpen(false)}
-                />
-                <div
-                  role="menu"
-                  aria-label="More"
-                  className="ui-menu scroll-quiet"
-                  style={(() => {
-                    const rect = menuButtonRef.current?.getBoundingClientRect();
-                    return {
-                      left: rect ? `${Math.max(8, rect.right - 200)}px` : '0px',
-                      top: rect ? `${rect.bottom + 4}px` : '0px',
-                      '--menu-origin': 'top right',
-                    } as React.CSSProperties;
-                  })()}
-                >
-                  {/* Section 1: View & Archive */}
-                  <div
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      handleViewChange(activeView === 'board' ? 'list' : 'board');
-                      setIsMenuOpen(false);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      {activeView === 'board' ? (
-                        <ListGlyph size={14} />
-                      ) : (
-                        <KanbanGlyph size={14} />
-                      )}
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">
-                        {activeView === 'board' ? 'View as list' : 'View as board'}
-                      </span>
-                    </span>
-                  </div>
-
-                  <div
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      setShowArchived((v) => !v);
-                      setIsMenuOpen(false);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <ArchiveGlyph size={14} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">
-                        {showArchived ? 'Hide archived' : 'Show archived'}
-                      </span>
-                    </span>
-                  </div>
-
-                  <div aria-hidden="true" className="ui-menu__rule" />
-
-                  {/* Section 2: Metadata & Connect MCP */}
-                  <div
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      setIsMenuOpen(false);
-                      setActiveSheet('metadata');
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <TagGlyph size={14} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Labels & projects…</span>
-                    </span>
-                  </div>
-
-                  <div
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      setIsMenuOpen(false);
-                      setActiveSheet('mcp');
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <PlugGlyph size={14} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Connect MCP…</span>
-                    </span>
-                  </div>
-
-                  <div aria-hidden="true" className="ui-menu__rule" />
-
-                  {/* Section 3: Restore backup */}
-                  <div
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      setIsMenuOpen(false);
-                      setConfirmRestoreBackup(true);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <RotateCcwClockGlyph size={14} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Restore backup…</span>
-                    </span>
-                  </div>
-                </div>
-              </>,
-              document.querySelector('.app-frame--scaled') ?? document.body
-            )}
-
-          {/* New Task Button */}
-          <button
-            type="button"
-            className="primary-button action-button--row tickets-new"
-            onClick={() => {
-              setNewIssueState(
-                activeView === 'list' && statusFilter !== 'all' ? statusFilter : 'To Do'
-              );
-              setActiveSheet('composer');
-            }}
-          >
-            <span className="action-button__icon">
-              <PlusGlyph size={14} />
-            </span>
-            <span>New task</span>
-          </button>
-        </div>
-      </header>
+      <TicketsHeaderBar
+        activeView={activeView}
+        hasSelectedIssue={Boolean(currentSelectedIssue)}
+        statusFilter={statusFilter}
+        filteredIssues={filteredIssues}
+        onSelectStatusFilter={setStatusFilter}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        showArchived={showArchived}
+        onToggleShowArchived={() => setShowArchived((v) => !v)}
+        onViewChange={handleViewChange}
+        onOpenMetadata={() => setActiveSheet('metadata')}
+        onOpenMcp={() => setActiveSheet('mcp')}
+        onRestoreBackup={() => setConfirmRestoreBackup(true)}
+        onNewTask={() => {
+          setNewIssueState(
+            activeView === 'list' && statusFilter !== 'all' ? statusFilter : 'To Do'
+          );
+          setActiveSheet('composer');
+        }}
+      />
 
       {/* Notices */}
       {noticeMessage ? (
@@ -1059,427 +536,57 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
             onDispatch={(iss) => setDispatchIssue(iss)}
           />
         ) : activeView === 'board' ? (
-          <div
-            className="ticket-board"
-            data-dragging={draggedIssueId ? 'true' : undefined}
-          >
-            {/* Status Filter Strip */}
-            <div className="ticket-board__strip">
-              {COLUMNS.map((col) => {
-                const count = filteredIssues.filter((i) => i.state === col).length;
-                const isArmed = dragTargetStatus === col;
-
-                return (
-                  <button
-                    key={col}
-                    type="button"
-                    className="ticket-board__chip"
-                    data-board-status={col}
-                    data-armed={isArmed ? 'true' : undefined}
-                    onClick={() => scrollToColumn(col)}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDragTargetStatus(col);
-                    }}
-                    onDragLeave={() => {
-                      if (dragTargetStatus === col) setDragTargetStatus(null);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const id = e.dataTransfer.getData('text/plain') || draggedIssueId;
-                      if (id) {
-                        handleMoveIssue(id, col);
-                      }
-                      setDragTargetStatus(null);
-                      setDraggedIssueId(null);
-                    }}
-                    title={`Show ${col}`}
-                    aria-label={`${col}, ${count}`}
-                  >
-                    <StateGlyph state={col} size={13} />
-                    <span className="ticket-board__chip-name">{col}</span>
-                    <span className="ticket-board__chip-count">{count}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Hint message when empty */}
-            {totalCount === 0 && (
-              <p className="ticket-board__hint">
-                {searchQuery.trim().length > 0
-                  ? 'No matching tasks. Clear search to see every task.'
-                  : 'Create a task here or ask Kite by voice.'}
-              </p>
-            )}
-
-            {/* Scroller Columns */}
-            <div className="ticket-board__scroller" ref={scrollerRef}>
-              {COLUMNS.map((col) => {
-                const colIssues = filteredIssues.filter((i) => i.state === col);
-                const isArmed = dragTargetStatus === col;
-
-                return (
-                  <section
-                    key={col}
-                    aria-label={col}
-                    className="ticket-board__column"
-                    data-board-status={col}
-                    data-armed={isArmed ? 'true' : undefined}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDragTargetStatus(col);
-                    }}
-                    onDragLeave={() => {
-                      if (dragTargetStatus === col) setDragTargetStatus(null);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const id = e.dataTransfer.getData('text/plain') || draggedIssueId;
-                      if (id) {
-                        handleMoveIssue(id, col);
-                      }
-                      setDragTargetStatus(null);
-                      setDraggedIssueId(null);
-                    }}
-                  >
-                    <header className="ticket-board__column-header">
-                      <StateGlyph state={col} size={13} />
-                      <span className="ticket-board__column-name">{col}</span>
-                      <span className="ticket-board__column-count">{colIssues.length}</span>
-                      <button
-                        type="button"
-                        className="chrome-button ticket-board__add"
-                        onClick={() => {
-                          setNewIssueState(col);
-                          setActiveSheet('composer');
-                        }}
-                        title={`New task in ${col}`}
-                        aria-label={`New task in ${col}`}
-                      >
-                        <PlusGlyph size={13} />
-                      </button>
-                    </header>
-
-                    {colIssues.length > 0 ? (
-                      <ul className="ticket-board__cards">
-                        {colIssues.map((issue) => (
-                          <li key={issue.id}>
-                            <TicketCard
-                              issue={issue}
-                              run={
-                                runsMap.get(issue.id) || runsMap.get(issue.uuid) || null
-                              }
-                              onSelect={() => setSelectedIssueId(issue.id)}
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                setContextMenu({
-                                  issue,
-                                  x: e.clientX,
-                                  y: e.clientY,
-                                });
-                              }}
-                              onDragStart={() => setDraggedIssueId(issue.id)}
-                              carried={draggedIssueId === issue.id}
-                            />
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="ticket-board__empty">
-                        {isArmed ? 'Drop here' : 'No tasks'}
-                      </p>
-                    )}
-                  </section>
-                );
-              })}
-            </div>
-          </div>
+          <TicketsBoardView
+            filteredIssues={filteredIssues}
+            runsMap={runsMap}
+            searchQuery={searchQuery}
+            onSelectIssue={(id) => setSelectedIssueId(id)}
+            onMoveIssue={handleMoveIssue}
+            onNewTaskInColumn={(col) => {
+              setNewIssueState(col);
+              setActiveSheet('composer');
+            }}
+            onContextMenu={(e, issue) => {
+              e.preventDefault();
+              setContextMenu({
+                issue,
+                x: e.clientX,
+                y: e.clientY,
+              });
+            }}
+          />
         ) : (
-          /* List View */
-          <div className="ticket-list">
-            {filteredIssues.filter((i) =>
-              statusFilter === 'all' ? true : i.state === statusFilter
-            ).length === 0 ? (
-              <p
-                className="ticket-board__hint"
-                style={{ padding: '24px 16px', textAlign: 'center' }}
-              >
-                {searchQuery.trim().length > 0
-                  ? 'No matching tasks. Clear search or choose another status.'
-                  : statusFilter === 'all'
-                    ? 'Create a task here or ask Kite by voice.'
-                    : `No ${statusFilter} tasks. Choose another status or create a task.`}
-              </p>
-            ) : (
-              COLUMNS.filter((col) =>
-                statusFilter === 'all' ? true : col === statusFilter
-              ).map((col) => {
-                const colIssues = filteredIssues.filter((i) => i.state === col);
-                if (colIssues.length === 0) return null;
-                const isExpanded = !collapsedGroups.has(col);
-
-                return (
-                  <section key={col} aria-label={col} className="ticket-group">
-                    <header className="ticket-group__header">
-                      <button
-                        type="button"
-                        aria-expanded={isExpanded}
-                        className="ticket-group__toggle"
-                        onClick={() => toggleGroupCollapse(col)}
-                      >
-                        <span aria-hidden="true" className="ticket-group__chevron">
-                          {isExpanded ? (
-                            <ChevronDownMini size={10} />
-                          ) : (
-                            <ChevronRightGlyph size={10} strokeWidth={2.5} />
-                          )}
-                        </span>
-                        <StateGlyph state={col} size={13} />
-                        <span className="ticket-group__name">{col}</span>
-                        <span className="ticket-group__count">{colIssues.length}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="chrome-button ticket-group__add"
-                        onClick={() => {
-                          setNewIssueState(col);
-                          setActiveSheet('composer');
-                        }}
-                        title={`New task in ${col}`}
-                        aria-label={`New task in ${col}`}
-                      >
-                        <PlusGlyph size={13} />
-                      </button>
-                    </header>
-
-                    {isExpanded ? (
-                      <ul className="ticket-group__rows">
-                        {colIssues.map((issue) => {
-                          const proj = projects.find((p) => p.id === issue.projectId);
-                          return (
-                            <li key={issue.id}>
-                              <button
-                                type="button"
-                                className={`ticket-row${
-                                  issue.archivedAt || issue.state === 'Done'
-                                    ? ' ticket-row--archived'
-                                    : ''
-                                }`}
-                                onClick={() => setSelectedIssueId(issue.id)}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  setContextMenu({
-                                    issue,
-                                    x: e.clientX,
-                                    y: e.clientY,
-                                  });
-                                }}
-                              >
-                                <PriorityGlyph priority={issue.priority} />
-                                <span className="ticket-row__id">{issue.id}</span>
-                                <StateGlyph state={issue.state} />
-                                <span className="ticket-row__title">{issue.title}</span>
-                                <span className="ticket-row__spacer" />
-                                <span className="ticket-row__tags">
-                                  {(issue.labels ?? []).slice(0, 3).map((lbl) => (
-                                    <span key={lbl} className="ticket-pill" title={lbl}>
-                                      <span
-                                        aria-hidden="true"
-                                        className="ticket-pill__dot"
-                                        style={{ background: getLabelColor(lbl) }}
-                                      />
-                                      <span className="ticket-pill__name">{lbl}</span>
-                                    </span>
-                                  ))}
-                                  {(issue.labels ?? []).length > 3 ? (
-                                    <span className="ticket-pill ticket-pill--more">
-                                      +{(issue.labels ?? []).length - 3}
-                                    </span>
-                                  ) : null}
-                                  {proj ? (
-                                    <span
-                                      className="ticket-pill ticket-pill--project"
-                                      title={`Project · ${proj.name}`}
-                                    >
-                                      <span className="ticket-pill__name">{proj.name}</span>
-                                    </span>
-                                  ) : null}
-                                </span>
-                                <span className="ticket-row__people">
-                                  {issue.delegate ? (
-                                    <TicketAvatar
-                                      name={issue.delegate}
-                                      kind="Delegate"
-                                      size={18}
-                                    />
-                                  ) : null}
-                                  <TicketAvatar
-                                    name={issue.assignee}
-                                    kind="Assignee"
-                                    size={24}
-                                  />
-                                </span>
-                                {issue.dueDate && (
-                                  <time className="ticket-row__date">{issue.dueDate}</time>
-                                )}
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    ) : null}
-                  </section>
-                );
-              })
-            )}
-          </div>
+          <TicketsListView
+            filteredIssues={filteredIssues}
+            projects={projects}
+            statusFilter={statusFilter}
+            searchQuery={searchQuery}
+            onSelectIssue={(id) => setSelectedIssueId(id)}
+            onNewTaskInColumn={(col) => {
+              setNewIssueState(col);
+              setActiveSheet('composer');
+            }}
+            onContextMenu={(e, issue) => {
+              e.preventDefault();
+              setContextMenu({
+                issue,
+                x: e.clientX,
+                y: e.clientY,
+              });
+            }}
+          />
         )}
       </div>
 
       {/* Task Card Context Menu */}
-      {contextMenu &&
-        typeof document !== 'undefined' &&
-        createPortal(
-          <>
-            <div
-              style={{ position: 'fixed', inset: 0, zIndex: 59 }}
-              onClick={() => setContextMenu(null)}
-            />
-            <div
-              role="menu"
-              aria-label="Task actions"
-              className="ui-menu scroll-quiet"
-              style={{
-                left: `${Math.min(contextMenu.x, window.innerWidth - 220)}px`,
-                top: `${Math.min(contextMenu.y, window.innerHeight - 280)}px`,
-                '--menu-origin': 'top left',
-              } as React.CSSProperties}
-            >
-              <div
-                role="menuitem"
-                tabIndex={-1}
-                className="ui-menu__row"
-                onClick={() => {
-                  const id = contextMenu.issue.id;
-                  setContextMenu(null);
-                  setSelectedIssueId(id);
-                }}
-              >
-                <span aria-hidden="true" className="ui-menu__icon">
-                  <ExternalOpenGlyph size={13} />
-                </span>
-                <span className="ui-menu__label">
-                  <span className="ui-menu__row-title">Open</span>
-                </span>
-              </div>
-
-              <div aria-hidden="true" className="ui-menu__rule" />
-
-              <div
-                role="menuitem"
-                tabIndex={-1}
-                className="ui-menu__row"
-                onClick={() => {
-                  const iss = contextMenu.issue;
-                  setContextMenu(null);
-                  window.dispatchEvent(
-                    new CustomEvent('kite:navigate-mode', { detail: 'chat' })
-                  );
-                  window.dispatchEvent(
-                    new CustomEvent('kite:open-task-in-chat', {
-                      detail: {
-                        taskId: iss.id,
-                        title: iss.title,
-                        description: iss.description || '',
-                      },
-                    })
-                  );
-                }}
-              >
-                <span aria-hidden="true" className="ui-menu__icon">
-                  <SendGlyph size={13} />
-                </span>
-                <span className="ui-menu__label">
-                  <span className="ui-menu__row-title">Send to Thread composer</span>
-                </span>
-              </div>
-
-              <div
-                role="menuitem"
-                tabIndex={-1}
-                className="ui-menu__row"
-                onClick={() => {
-                  const iss = contextMenu.issue;
-                  setContextMenu(null);
-                  setDispatchIssue(iss);
-                }}
-              >
-                <span aria-hidden="true" className="ui-menu__icon">
-                  <BotGlyph size={13} />
-                </span>
-                <span className="ui-menu__label">
-                  <span className="ui-menu__row-title">Dispatch to agent…</span>
-                </span>
-              </div>
-
-              <div aria-hidden="true" className="ui-menu__rule" />
-
-              <div className="ui-menu__heading" role="presentation">
-                Move to
-              </div>
-              {COLUMNS.map((col) => {
-                const disabled = contextMenu.issue.state === col;
-                return (
-                  <div
-                    key={col}
-                    role="menuitem"
-                    tabIndex={-1}
-                    aria-disabled={disabled ? true : undefined}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      if (disabled) return;
-                      const id = contextMenu.issue.id;
-                      setContextMenu(null);
-                      handleMoveIssue(id, col);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <StateGlyph state={col} size={13} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">{col}</span>
-                    </span>
-                  </div>
-                );
-              })}
-
-              {!contextMenu.issue.archivedAt ? (
-                <>
-                  <div aria-hidden="true" className="ui-menu__rule" />
-                  <div
-                    role="menuitem"
-                    tabIndex={-1}
-                    className="ui-menu__row"
-                    onClick={() => {
-                      const iss = contextMenu.issue;
-                      setContextMenu(null);
-                      handleArchiveIssue(iss);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <ArchiveGlyph size={13} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Archive task</span>
-                    </span>
-                  </div>
-                </>
-              ) : null}
-            </div>
-          </>,
-          document.querySelector('.app-frame--scaled') ?? document.body
-        )}
+      <TicketContextMenu
+        contextMenu={contextMenu}
+        onClose={() => setContextMenu(null)}
+        onSelectIssue={(id) => setSelectedIssueId(id)}
+        onDispatch={(iss) => setDispatchIssue(iss)}
+        onMoveIssue={handleMoveIssue}
+        onArchiveIssue={handleArchiveIssue}
+      />
 
       {/* Sheets & Modals */}
       {activeSheet === 'composer' && (

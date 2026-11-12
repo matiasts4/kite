@@ -197,14 +197,22 @@ fn run_inherits_a_session_parent_and_ignores_the_word_human() {
         &mut service,
         &Command::Run {
             via: Family::Terminal,
+            explicit_via: true,
             engine: Some("codex".into()),
+            provider: None,
+            model: None,
+            effort: None,
+            workspace: None,
             name: Some("helper".into()),
+            explicit_name: true,
             parent: None,
             outlive: false,
             role: None,
             explicit_role: false,
             file: None,
             task: None,
+            wait: false,
+            timeout_ms: None,
             hidden: false,
             pane: false,
             program: None,
@@ -234,14 +242,22 @@ fn run_inherits_a_session_parent_and_ignores_the_word_human() {
         &mut plain,
         &Command::Run {
             via: Family::Terminal,
+            explicit_via: true,
             engine: Some("codex".into()),
+            provider: None,
+            model: None,
+            effort: None,
+            workspace: None,
             name: Some("solo".into()),
+            explicit_name: true,
             parent: None,
             outlive: false,
             role: None,
             explicit_role: false,
             file: None,
             task: None,
+            wait: false,
+            timeout_ms: None,
             hidden: false,
             pane: false,
             program: None,
@@ -447,6 +463,151 @@ fn explicit_missing_role_stays_role_not_found() {
     assert_eq!(started.error.as_deref(), Some("role_not_found"));
     assert!(service.port_mut().starts.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn parse_and_execute_thread_subagent_run_supports_provider_model_effort_workspace_and_wait() {
+    let args = owned(&[
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "--provider",
+        "grok",
+        "--model",
+        "grok-3-mini",
+        "--effort",
+        "low",
+        "--role",
+        "Fast Executor",
+        "--workspace",
+        "share",
+        "--wait",
+        "--timeout-ms",
+        "45000",
+        "Refactor parser",
+    ]);
+    assert_eq!(blocking_run_wait_ms(&args), Some(45_000));
+    let cmd = parse_args(&args).expect("thread subagent args must parse");
+    match &cmd {
+        Command::Run {
+            via,
+            explicit_via,
+            provider,
+            model,
+            effort,
+            role,
+            workspace,
+            wait,
+            timeout_ms,
+            task,
+            ..
+        } => {
+            assert_eq!(*via, Family::Thread);
+            assert!(*explicit_via);
+            assert_eq!(provider.as_deref(), Some("grok"));
+            assert_eq!(model.as_deref(), Some("grok-3-mini"));
+            assert_eq!(effort.as_deref(), Some("low"));
+            assert_eq!(role.as_deref(), Some("Fast Executor"));
+            assert_eq!(workspace.as_deref(), Some("share"));
+            assert!(*wait);
+            assert_eq!(*timeout_ms, Some(45_000));
+            assert_eq!(task.as_deref(), Some("Refactor parser"));
+        }
+        _ => panic!("expected Command::Run"),
+    }
+
+    // Positional provider + default via from thread caller + custom --role without role .md file
+    let implicit_cmd = parse_args(&owned(&[
+        "dispatch",
+        "run",
+        "--role",
+        "Database Researcher",
+        "Inspect schema",
+    ]))
+    .unwrap();
+    let mut service = Service::new(FakePort::default());
+    let receipt = execute(
+        &mut service,
+        &implicit_cmd,
+        &ExecContext {
+            id: "run-implicit-thread",
+            caller: Caller::Agent,
+            from: "thread:parent-1",
+            workspace: None,
+            now_ms: 5_000,
+            config_dir: None,
+            mounted: false,
+        },
+    )
+    .expect("thread caller defaults to Family::Thread without needing role .md dir");
+    assert_eq!(receipt.status, ReceiptStatus::Submitted);
+    assert_eq!(receipt.address, "thread:th-1");
+    assert!(receipt
+        .text
+        .as_deref()
+        .unwrap_or("")
+        .contains("[subagent_id: thread:th-1]"));
+    assert_eq!(service.port_mut().thread_starts.len(), 1);
+    assert_eq!(
+        service.port_mut().thread_starts[0].parent.as_deref(),
+        Some("thread:parent-1")
+    );
+    assert_eq!(
+        service.port_mut().thread_starts[0].role.as_deref(),
+        Some("Database Researcher")
+    );
+    assert_eq!(service.port_mut().thread_starts[0].task, "Inspect schema");
+
+    // Positional provider on explicit --via thread
+    let pos_prov = parse_args(&owned(&[
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "gemini",
+        "Summarize module",
+    ]))
+    .unwrap();
+    match pos_prov {
+        Command::Run {
+            provider,
+            task,
+            name,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("gemini"));
+            assert_eq!(task.as_deref(), Some("Summarize module"));
+            assert!(name.is_none());
+        }
+        _ => panic!("expected Command::Run"),
+    }
+
+    // Inherit provider when positionals are task words
+    let inherit_cmd = parse_args(&owned(&[
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "Analyze login bug",
+    ]))
+    .unwrap();
+    match inherit_cmd {
+        Command::Run {
+            provider,
+            task,
+            program,
+            ..
+        } => {
+            assert!(provider.is_none());
+            assert!(program.is_none());
+            assert_eq!(task.as_deref(), Some("Analyze login bug"));
+        }
+        _ => panic!("expected Command::Run"),
+    }
+
+    assert!(parse_args(&owned(&["dispatch", "run", "--via", "thread", "--workspace", "invalid", "x"])).is_err());
+    assert!(parse_args(&owned(&["dispatch", "run", "--via", "thread", "--effort", "turbo", "x"])).is_err());
 }
 
 #[test]

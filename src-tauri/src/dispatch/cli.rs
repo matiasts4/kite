@@ -94,8 +94,14 @@ pub enum Command {
     Skill,
     Run {
         via: Family,
+        explicit_via: bool,
         engine: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        workspace: Option<String>,
         name: Option<String>,
+        explicit_name: bool,
         parent: Option<String>,
         outlive: bool,
         /// Set only by `--role`. A positional word is `program`, not a role.
@@ -103,6 +109,8 @@ pub enum Command {
         explicit_role: bool,
         file: Option<String>,
         task: Option<String>,
+        wait: bool,
+        timeout_ms: Option<u64>,
         hidden: bool,
         pane: bool,
         program: Option<String>,
@@ -139,6 +147,7 @@ pub enum Command {
     Read {
         address: String,
         lines: usize,
+        last_assistant: bool,
     },
     Report {
         to: Option<String>,
@@ -181,17 +190,69 @@ pub fn blocking_wait_ms(args: &[String]) -> Option<u64> {
     }
 }
 
+pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Run {
+            wait: true,
+            timeout_ms,
+            ..
+        }) => Some(timeout_ms.unwrap_or(300_000)),
+        _ => None,
+    }
+}
+
+pub fn canonical_thread_provider(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "antigravity" | "agy" => Some("antigravity"),
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "cursor" => Some("cursor"),
+        "gemini" => Some("gemini"),
+        "grok" => Some("grok"),
+        "opencode" => Some("opencode"),
+        _ => None,
+    }
+}
+
+pub fn normalize_workspace_mode(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "inherit" => Some("inherit".to_string()),
+        "share" => Some("share".to_string()),
+        "branch" => Some("branch".to_string()),
+        _ => None,
+    }
+}
+
+pub fn normalize_effort(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "low" => Some("low".to_string()),
+        "medium" => Some("medium".to_string()),
+        "high" => Some("high".to_string()),
+        "xhigh" => Some("xhigh".to_string()),
+        "max" => Some("max".to_string()),
+        _ => None,
+    }
+}
+
 fn parse_run<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<Command, DispatchError> {
     let mut via = Family::Terminal;
+    let mut explicit_via = false;
     let mut engine = None;
+    let mut provider = None;
+    let mut model = None;
+    let mut effort = None;
+    let mut workspace = None;
     let mut name = None;
+    let mut explicit_name = false;
     let mut parent = None;
     let mut outlive = false;
     let mut role = None;
     let mut explicit_role = false;
     let mut file = None;
+    let mut wait = false;
+    let mut timeout_ms = None;
     let mut hidden = false;
     let mut pane = false;
     let mut program = None;
@@ -203,16 +264,41 @@ fn parse_run<'a>(
                     Some("terminal") => Family::Terminal,
                     Some("thread") => Family::Thread,
                     _ => return Err(DispatchError::BadArgs),
-                }
+                };
+                explicit_via = true;
             }
             "--engine" => engine = Some(need(items)?),
-            "--name" => name = Some(need(items)?),
+            "--provider" => {
+                let raw = need(items)?;
+                provider = Some(
+                    canonical_thread_provider(&raw)
+                        .ok_or(DispatchError::BadArgs)?
+                        .to_string(),
+                );
+            }
+            "--model" => model = Some(need(items)?),
+            "--effort" => {
+                let raw = need(items)?;
+                effort = Some(normalize_effort(&raw).ok_or(DispatchError::BadArgs)?);
+            }
+            "--workspace" => {
+                let raw = need(items)?;
+                workspace = Some(normalize_workspace_mode(&raw).ok_or(DispatchError::BadArgs)?);
+            }
+            "--name" => {
+                name = Some(need(items)?);
+                explicit_name = true;
+            }
             "--parent" => parent = Some(need(items)?),
             "--role" => {
                 role = Some(need(items)?);
                 explicit_role = true;
             }
             "--file" => file = Some(need(items)?),
+            "--wait" => wait = true,
+            "--timeout-ms" | "--timeout" => {
+                timeout_ms = Some(need(items)?.parse().map_err(|_| DispatchError::BadArgs)?);
+            }
             "--outlive" => outlive = true,
             "--hidden" => hidden = true,
             "--pane" => pane = true,
@@ -221,8 +307,18 @@ fn parse_run<'a>(
             other => positionals.push(other.to_string()),
         }
     }
-    // A program word is consumed only when neither --role nor --engine is set.
-    if !explicit_role && engine.is_none() && !positionals.is_empty() {
+    if explicit_via && via == Family::Terminal && (provider.is_some() || workspace.is_some()) {
+        return Err(DispatchError::BadArgs);
+    }
+    if explicit_via && via == Family::Thread {
+        if !explicit_role && provider.is_none() && engine.is_none() && !positionals.is_empty() {
+            if let Some(canon) = canonical_thread_provider(&positionals[0]) {
+                positionals.remove(0);
+                provider = Some(canon.to_string());
+            }
+        }
+    } else if !explicit_role && engine.is_none() && !positionals.is_empty() {
+        // A program word is consumed only when neither --role nor --engine is set.
         let word = positionals.remove(0);
         if name.is_none() {
             name = Some(word.clone());
@@ -237,14 +333,22 @@ fn parse_run<'a>(
     };
     Ok(Command::Run {
         via,
+        explicit_via,
         engine,
+        provider,
+        model,
+        effort,
+        workspace,
         name,
+        explicit_name,
         parent,
         outlive,
         role,
         explicit_role,
         file,
         task,
+        wait,
+        timeout_ms,
         hidden,
         pane,
         program,
@@ -359,13 +463,19 @@ fn parse_read<'a>(
 ) -> Result<Command, DispatchError> {
     let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
     let mut lines = 80;
+    let mut last_assistant = false;
     while let Some(next) = items.next() {
         match next {
             "--lines" => lines = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?,
+            "--last" => last_assistant = true,
             _ => return Err(DispatchError::BadArgs),
         }
     }
-    Ok(Command::Read { address, lines })
+    Ok(Command::Read {
+        address,
+        lines,
+        last_assistant,
+    })
 }
 
 fn parse_report<'a>(
@@ -604,14 +714,22 @@ pub fn execute<P: Port>(
         }
         Command::Run {
             via,
+            explicit_via,
             engine,
+            provider,
+            model,
+            effort,
+            workspace,
             name,
+            explicit_name,
             parent,
             outlive,
             role,
             explicit_role,
             file,
             task,
+            wait: _,
+            timeout_ms: _,
             hidden,
             pane,
             program,
@@ -624,10 +742,61 @@ pub fn execute<P: Port>(
                 (Some(_), None) => return Err(DispatchError::PathRejected),
                 _ => None,
             };
-            let task = combine_task(file_text, task.clone());
+            let effective_via = if *explicit_via {
+                *via
+            } else if ctx.from.starts_with("thread:") {
+                Family::Thread
+            } else {
+                *via
+            };
             let parent = inherited_parent(parent.as_ref(), ctx.from);
             let cwd = ctx.workspace.map(|p| p.display().to_string());
             let hide_pane = !show_pane(*hidden, *pane, ctx.caller);
+            if effective_via == Family::Thread {
+                let mut resolved_provider = provider.clone().or_else(|| engine.clone());
+                let mut words_vec = words.clone();
+                if let Some(word) = program {
+                    if !*explicit_role && resolved_provider.is_none() {
+                        if let Some(canon) = canonical_thread_provider(word) {
+                            resolved_provider = Some(canon.to_string());
+                        } else {
+                            words_vec.insert(0, word.clone());
+                        }
+                    } else {
+                        words_vec.insert(0, word.clone());
+                    }
+                }
+                let raw_words = if words_vec.is_empty() {
+                    None
+                } else {
+                    Some(words_vec.join(" "))
+                };
+                let task = combine_task(file_text, raw_words.or_else(|| task.clone()));
+                let explicit_thread_name = if *explicit_name { name.clone() } else { None };
+                return Ok(service.run(RunInput {
+                    id: ctx.id.to_string(),
+                    via: Family::Thread,
+                    engine: resolved_provider.clone(),
+                    provider: resolved_provider,
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    workspace: workspace.clone(),
+                    command: None,
+                    name: explicit_thread_name,
+                    parent,
+                    outlive: *outlive,
+                    role: None,
+                    subagent_role: role.clone(),
+                    role_missing: false,
+                    task,
+                    caller: ctx.caller,
+                    cwd,
+                    now_ms: ctx.now_ms,
+                    hidden: hide_pane,
+                    argv: Vec::new(),
+                }));
+            }
+            let task = combine_task(file_text, task.clone());
             if *explicit_role {
                 let role_name = role.as_deref().ok_or(DispatchError::BadArgs)?;
                 let dir = ctx.config_dir.ok_or(DispatchError::RoleNotFound)?;
@@ -678,11 +847,16 @@ pub fn execute<P: Port>(
                         id: ctx.id.to_string(),
                         via: *via,
                         engine: Some(word.clone()),
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        workspace: None,
                         command: Some(word.clone()),
                         name: alias,
                         parent,
                         outlive: *outlive,
                         role: None,
+                        subagent_role: None,
                         role_missing: false,
                         task: None,
                         caller: ctx.caller,
@@ -696,11 +870,16 @@ pub fn execute<P: Port>(
                     id: ctx.id.to_string(),
                     via: *via,
                     engine: Some(engine_name.to_string()),
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    workspace: None,
                     command: None,
                     name: name.clone(),
                     parent,
                     outlive: *outlive,
                     role: None,
+                    subagent_role: None,
                     role_missing: false,
                     task,
                     caller: ctx.caller,
@@ -714,11 +893,16 @@ pub fn execute<P: Port>(
                 id: ctx.id.to_string(),
                 via: *via,
                 engine: engine.clone(),
+                provider: None,
+                model: None,
+                effort: None,
+                workspace: None,
                 command: None,
                 name: name.clone(),
                 parent,
                 outlive: *outlive,
                 role: None,
+                subagent_role: None,
                 role_missing: false,
                 task,
                 caller: ctx.caller,
@@ -781,7 +965,11 @@ pub fn execute<P: Port>(
             started_ms: ctx.now_ms,
             now_ms: ctx.now_ms,
         })),
-        Command::Read { address, lines } => Ok(service.read(ctx.id, address, *lines)),
+        Command::Read {
+            address,
+            lines,
+            last_assistant,
+        } => Ok(service.read_with_mode(ctx.id, address, *lines, *last_assistant)),
         Command::Report {
             to,
             from,

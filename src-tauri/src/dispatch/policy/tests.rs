@@ -267,11 +267,16 @@ fn engine_run_queues_one_task_and_lists_the_engine() {
         id: "run-task".into(),
         via: Family::Terminal,
         engine: Some("codex".into()),
+        provider: None,
+        model: None,
+        effort: None,
+        workspace: None,
         command: None,
         name: Some("helper".into()),
         parent: None,
         outlive: false,
         role: None,
+        subagent_role: None,
         role_missing: false,
         task: Some("Look at the tests".into()),
         caller: Caller::Agent,
@@ -301,11 +306,16 @@ fn engine_run_queues_one_task_and_lists_the_engine() {
         id: "run-grok".into(),
         via: Family::Terminal,
         engine: Some("grok".into()),
+        provider: None,
+        model: None,
+        effort: None,
+        workspace: None,
         command: None,
         name: Some("grok".into()),
         parent: None,
         outlive: false,
         role: None,
+        subagent_role: None,
         role_missing: false,
         task: Some("Look at the login bug".into()),
         caller: Caller::Agent,
@@ -544,11 +554,16 @@ fn attach_reveals_the_session_and_raw_argv_is_not_a_prompt() {
         id: "raw-1".into(),
         via: Family::Terminal,
         engine: Some("cargo".into()),
+        provider: None,
+        model: None,
+        effort: None,
+        workspace: None,
         command: Some("cargo".into()),
         name: None,
         parent: None,
         outlive: false,
         role: None,
+        subagent_role: None,
         role_missing: false,
         task: Some("do not type this".into()),
         caller: Caller::Agent,
@@ -576,11 +591,16 @@ fn default_engine_runs_receive_canonical_codenames_and_clean_notice_tails() {
         id: "del-1".into(),
         via: Family::Terminal,
         engine: Some("antigravity".into()),
+        provider: None,
+        model: None,
+        effort: None,
+        workspace: None,
         command: None,
         name: Some("antigravity".into()),
         parent: Some("alias:Orion".into()),
         outlive: false,
         role: None,
+        subagent_role: None,
         role_missing: false,
         task: Some("Audit repo".into()),
         caller: Caller::Agent,
@@ -596,11 +616,16 @@ fn default_engine_runs_receive_canonical_codenames_and_clean_notice_tails() {
         id: "del-2".into(),
         via: Family::Terminal,
         engine: Some("antigravity".into()),
+        provider: None,
+        model: None,
+        effort: None,
+        workspace: None,
         command: None,
         name: Some("antigravity".into()),
         parent: Some("Orion".into()),
         outlive: false,
         role: None,
+        subagent_role: None,
         role_missing: false,
         task: Some("Audit tests".into()),
         caller: Caller::Agent,
@@ -621,4 +646,51 @@ fn default_engine_runs_receive_canonical_codenames_and_clean_notice_tails() {
     assert_eq!(pasted, "\u{1b}[200~line 1\nline 2\u{1b}[201~");
     let tail = clean_notice_tail("⢿  Running...\n⣻  Running...\nSummary complete\n\n", 20);
     assert_eq!(tail, "Summary complete");
+}
+
+#[test]
+fn thread_run_spawns_child_thread_attaches_and_returns_subagent_id() {
+    let mut svc = service();
+    svc.attach(Family::Thread, "parent-1", None, None, false)
+        .unwrap();
+    let receipt = svc.run(RunInput {
+        id: "run-child-1".into(),
+        via: Family::Thread,
+        engine: None,
+        provider: Some("grok".into()),
+        model: Some("grok-3-mini".into()),
+        effort: Some("low".into()),
+        workspace: Some("branch".into()),
+        command: None,
+        name: None,
+        parent: Some("thread:parent-1".into()),
+        outlive: false,
+        role: None,
+        subagent_role: Some("Fast Executor".into()),
+        role_missing: false,
+        task: Some("Fix parser".into()),
+        caller: Caller::Agent,
+        cwd: Some("/repo".into()),
+        now_ms: 2_000,
+        hidden: true,
+        argv: Vec::new(),
+    });
+    assert_eq!(receipt.status, ReceiptStatus::Submitted);
+    assert_eq!(receipt.address, "thread:th-1");
+    let text = receipt.text.as_deref().unwrap_or("");
+    assert!(text.contains("started thread:th-1"), "text={text}");
+    assert!(text.contains("[subagent_id: thread:th-1]"), "text={text}");
+    assert_eq!(svc.port_mut().thread_starts.len(), 1);
+    let started_req = &svc.port_mut().thread_starts[0];
+    assert_eq!(started_req.provider.as_deref(), Some("grok"));
+    assert_eq!(started_req.model.as_deref(), Some("grok-3-mini"));
+    assert_eq!(started_req.effort.as_deref(), Some("low"));
+    assert_eq!(started_req.workspace_mode.as_deref(), Some("branch"));
+    assert_eq!(started_req.role.as_deref(), Some("Fast Executor"));
+    let row = svc
+        .ls()
+        .into_iter()
+        .find(|line| line.starts_with("thread:th-1"))
+        .unwrap_or_default();
+    assert!(row.contains("working"), "row={row}");
 }

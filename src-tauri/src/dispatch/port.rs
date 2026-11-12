@@ -18,6 +18,21 @@ pub struct StartRequest {
     pub argv: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StartThreadRequest {
+    pub parent: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub role: Option<String>,
+    pub workspace_mode: Option<String>,
+    pub name: Option<String>,
+    pub task: String,
+    pub cwd: Option<String>,
+    pub caller: super::types::Caller,
+    pub hidden: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
     pub session_id: String,
@@ -62,6 +77,18 @@ pub trait Port {
 
     fn start_terminal(&mut self, request: &StartRequest) -> Result<Started, DispatchError>;
 
+    fn start_thread(&mut self, _request: &StartThreadRequest) -> Result<Started, DispatchError> {
+        Err(DispatchError::TransportUnsupported)
+    }
+
+    fn read_final_response(
+        &mut self,
+        family: Family,
+        id: &str,
+    ) -> Result<String, DispatchError> {
+        self.read(family, id, 200)
+    }
+
     /// Write bytes exactly. Do not append Enter and do not play a flight.
     fn type_bytes(&mut self, family: Family, id: &str, text: &str) -> Result<(), DispatchError>;
 
@@ -74,6 +101,7 @@ pub struct FakePort {
     pub writes: Vec<WriteRecord>,
     pub stops: Vec<(Family, String)>,
     pub starts: Vec<StartRequest>,
+    pub thread_starts: Vec<StartThreadRequest>,
     pub reveals: Vec<(String, String, Option<String>)>,
     pub buffers: Vec<((Family, String), String)>,
     next_id: u32,
@@ -129,6 +157,20 @@ impl Port for FakePort {
         self.starts.push(request.clone());
         Ok(Started {
             session_id: format!("term-{}", self.next_id),
+            pane,
+        })
+    }
+
+    fn start_thread(&mut self, request: &StartThreadRequest) -> Result<Started, DispatchError> {
+        self.next_id += 1;
+        let pane = if request.hidden {
+            PaneVisibility::Hidden
+        } else {
+            PaneVisibility::Pending
+        };
+        self.thread_starts.push(request.clone());
+        Ok(Started {
+            session_id: format!("th-{}", self.next_id),
             pane,
         })
     }

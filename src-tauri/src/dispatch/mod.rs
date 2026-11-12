@@ -17,6 +17,6 @@ pub mod trace;
 pub mod types;
 
 pub use policy::{ChildrenMode, RunInput, SendInput, Service, WaitInput};
-pub use port::{FakePort, Port, StartRequest, SubmitMeta};
+pub use port::{FakePort, Port, StartRequest, StartThreadRequest, SubmitMeta};
 pub use presence::{BlockKind, PresenceState};
 pub use types::{Caller, DispatchError, Family, Receipt, ReceiptStatus};

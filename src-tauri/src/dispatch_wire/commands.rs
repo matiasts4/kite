@@ -86,22 +86,46 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
     }
     let request = req_value(request);
     let id = request.get("id").and_then(Value::as_str).unwrap_or("run").to_string();
+    let explicit_via = request.get("via").and_then(Value::as_str).is_some();
+    let explicit_name = request.get("name").and_then(Value::as_str).is_some();
     let via = match request.get("via").and_then(Value::as_str) {
         Some("thread") => Family::Thread,
         _ => Family::Terminal,
     };
     let role = request.get("role").and_then(Value::as_str).map(|s| s.to_string());
     let explicit_role = role.is_some();
+    let provider = request
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(cli::canonical_thread_provider)
+        .map(str::to_string);
+    let model = request.get("model").and_then(Value::as_str).map(str::to_string);
+    let effort = request
+        .get("effort")
+        .and_then(Value::as_str)
+        .and_then(cli::normalize_effort);
+    let workspace = request
+        .get("workspace")
+        .and_then(Value::as_str)
+        .and_then(cli::normalize_workspace_mode);
     let command = cli::Command::Run {
         via,
+        explicit_via,
         engine: request.get("engine").and_then(Value::as_str).map(|s| s.to_string()),
+        provider,
+        model,
+        effort,
+        workspace,
         name: request.get("name").and_then(Value::as_str).map(|s| s.to_string()),
+        explicit_name,
         parent: request.get("parent").and_then(Value::as_str).map(|s| s.to_string()),
         outlive: request.get("outlive").and_then(Value::as_bool).unwrap_or(false),
         role,
         explicit_role,
         file: request.get("file").and_then(Value::as_str).map(|s| s.to_string()),
         task: request.get("task").and_then(Value::as_str).map(|s| s.to_string()),
+        wait: request.get("wait").and_then(Value::as_bool).unwrap_or(false),
+        timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
         hidden: request.get("hidden").and_then(Value::as_bool).unwrap_or(false),
         pane: request.get("pane").and_then(Value::as_bool).unwrap_or(false),
         program: request.get("program").and_then(Value::as_str).map(|s| s.to_string()),
@@ -160,6 +184,10 @@ pub fn dispatch_read(request: Option<Value>) -> Value {
     let command = cli::Command::Read {
         address: request.get("address").and_then(Value::as_str).unwrap_or("").to_string(),
         lines: request.get("lines").and_then(Value::as_u64).unwrap_or(80) as usize,
+        last_assistant: request
+            .get("last")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     };
     serde_json::to_value(execute_command(&request, &command, &id)).unwrap_or(Value::Null)
 }

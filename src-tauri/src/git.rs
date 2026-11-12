@@ -105,7 +105,7 @@ fn resolve_workspace_dir(req: &Value) -> Result<PathBuf, GitError> {
     ))
 }
 
-fn run_git(dir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
+pub(crate) fn run_git(dir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
     let mut cmd = std::process::Command::new("git");
     cmd.current_dir(dir);
     cmd.args(args);

@@ -6,7 +6,7 @@ use crate::dispatch::address::is_alias_name;
 use crate::dispatch::envelope::{last_lines, wrap_envelope};
 use crate::dispatch::files::read_workspace_file;
 use crate::dispatch::keys::encode_key;
-use crate::dispatch::port::{Port, StartRequest, SubmitMeta};
+use crate::dispatch::port::{Port, StartRequest, StartThreadRequest, SubmitMeta};
 use crate::dispatch::presence::{choose_effective, is_ready, BlockKind, Presence, PresenceState};
 use crate::dispatch::programs;
 use crate::dispatch::role::load_role;
@@ -240,6 +240,16 @@ impl<P: Port> Service<P> {
     }
 
     pub fn read(&mut self, id: &str, address: &str, lines: usize) -> Receipt {
+        self.read_with_mode(id, address, lines, false)
+    }
+
+    pub fn read_with_mode(
+        &mut self,
+        id: &str,
+        address: &str,
+        lines: usize,
+        last_assistant: bool,
+    ) -> Receipt {
         if let Some(existing) = self.receipts.get(id) {
             return existing.clone();
         }
@@ -262,6 +272,18 @@ impl<P: Port> Service<P> {
                 self.effective(&key).state,
             )
         };
+        if last_assistant && family == Family::Thread {
+            let text = self
+                .port
+                .read_final_response(family, &raw)
+                .unwrap_or_default();
+            let after = self.effective(&key).state;
+            debug_assert_eq!(before, after);
+            let mut receipt =
+                Receipt::new(id, "read", ReceiptStatus::Settled, address, false, None, None);
+            receipt.text = Some(text);
+            return self.finish(receipt);
+        }
         let loaded = self.port.read(family, &raw, lines).unwrap_or_default();
         let source = if !loaded.is_empty() { loaded } else { stored };
         let text = last_lines(&source, lines);
@@ -355,12 +377,114 @@ impl<P: Port> Service<P> {
             return self.finish(rejected(&input.id, "run", "", DispatchError::RoleNotFound));
         }
         if input.via == Family::Thread {
-            return self.finish(rejected(
+            let requested_name = input
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let effective_name = if let Some(name) = requested_name {
+                let normalized = if programs::is_codename(name) {
+                    name.to_ascii_lowercase()
+                } else {
+                    name.to_string()
+                };
+                if !is_alias_name(&normalized) {
+                    return self.finish(rejected(&input.id, "run", name, DispatchError::BadArgs));
+                }
+                if self.aliases.contains_key(&normalized) {
+                    return self.finish(rejected(&input.id, "run", name, DispatchError::NameTaken));
+                }
+                Some(normalized)
+            } else {
+                None
+            };
+            if let Some(parent) = input.parent.as_deref() {
+                if self.resolve(parent).is_err() {
+                    if let Some(raw_thread_id) = parent
+                        .strip_prefix("thread:")
+                        .filter(|s| !s.is_empty())
+                    {
+                        let _ = self.attach(Family::Thread, raw_thread_id, None, None, false);
+                    } else {
+                        return self.finish(rejected(
+                            &input.id,
+                            "run",
+                            parent,
+                            DispatchError::ParentMissing,
+                        ));
+                    }
+                }
+            }
+            let opening = input.task.clone().unwrap_or_default();
+            if opening.chars().count() > BODY_LIMIT {
+                return self.finish(rejected(&input.id, "run", "", DispatchError::BodyTooLarge));
+            }
+            let provider = input
+                .provider
+                .clone()
+                .or_else(|| input.engine.clone());
+            let started = self.port.start_thread(&StartThreadRequest {
+                parent: input.parent.clone(),
+                provider: provider.clone(),
+                model: input.model.clone(),
+                effort: input.effort.clone(),
+                role: input.subagent_role.clone(),
+                workspace_mode: input.workspace.clone(),
+                name: effective_name.clone(),
+                task: opening.clone(),
+                cwd: input.cwd.clone(),
+                caller: input.caller,
+                hidden: input.hidden,
+            });
+            let started = match started {
+                Ok(started) => started,
+                Err(err) => return self.finish(rejected(&input.id, "run", "", err)),
+            };
+            let session_id = started.session_id.clone();
+            let pane = started.pane;
+            let key = match self.attach(
+                Family::Thread,
+                &session_id,
+                effective_name.as_deref(),
+                input.parent.as_deref(),
+                input.outlive,
+            ) {
+                Ok(key) => key,
+                Err(err) => return self.finish(rejected(&input.id, "run", &session_id, err)),
+            };
+            if let Some(ep) = self.endpoints.get_mut(&key) {
+                ep.engine = provider.clone();
+            }
+            let _ = self.publish_pane(&key, "working", 1, input.now_ms.max(1), None, None);
+            let thread_address = format!("thread:{session_id}");
+            let mut receipt = Receipt::new(
                 &input.id,
                 "run",
-                "",
-                DispatchError::TransportUnsupported,
+                ReceiptStatus::Submitted,
+                &thread_address,
+                true,
+                Some(PresenceState::Working.as_str().into()),
+                None,
+            );
+            receipt.pane = Some(pane);
+            receipt.text = Some(format!(
+                "started {thread_address}\n[subagent_id: {thread_address}]"
             ));
+            record(&handoff_event(
+                "thread",
+                &opening,
+                Fields {
+                    op: "run",
+                    session: &session_id,
+                    engine: provider.as_deref().unwrap_or("inherit"),
+                    status: receipt_status_label(receipt.status),
+                    pane: pane_label(pane),
+                    writes: 1,
+                    launcher: "",
+                    manual: crate::dispatch::trace::manual_label(false, &opening),
+                },
+            ));
+            return self.finish(receipt);
         }
         let raw = !input.argv.is_empty();
         let requested_name = input
@@ -519,11 +643,16 @@ impl<P: Port> Service<P> {
                 id: id.to_string(),
                 via: Family::Terminal,
                 engine: None,
+                provider: None,
+                model: None,
+                effort: None,
+                workspace: None,
                 command: None,
                 name: Some(alias.clone()),
                 parent: parent.map(|s| s.to_string()),
                 outlive,
                 role: Some(role),
+                subagent_role: None,
                 role_missing: false,
                 task,
                 caller,
@@ -536,11 +665,16 @@ impl<P: Port> Service<P> {
                 id: id.to_string(),
                 via: Family::Terminal,
                 engine: None,
+                provider: None,
+                model: None,
+                effort: None,
+                workspace: None,
                 command: None,
                 name: Some(alias),
                 parent: parent.map(|s| s.to_string()),
                 outlive,
                 role: None,
+                subagent_role: None,
                 role_missing: true,
                 task: None,
                 caller,

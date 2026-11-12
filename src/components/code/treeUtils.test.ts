@@ -9,6 +9,9 @@ import {
   equalizeSplits,
   updateSplitRatios,
   swapAdjacent,
+  copySplitRatiosIfSameChildren,
+  swapLeaves,
+  moveLeafToEdge,
 } from './treeUtils';
 import type { PaneSplit } from './types';
 
@@ -133,5 +136,139 @@ describe('treeUtils - Code Workspace Split Tree Operations', () => {
     expect(root3.axis).toBe('vertical');
     expect(root3.children).toHaveLength(3);
     expect(root3.ratios).toEqual([1 / 3, 1 / 3, 1 / 3]);
+  });
+
+  it('copies divider ratios when the child order is unchanged', () => {
+    const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'left');
+    const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'right');
+    const current = createSplit('vertical', [l1, l2], [0.5, 0.5], 'split');
+    const resized = createSplit('vertical', [l1, l2], [0.7, 0.3], 'split');
+
+    const merged = copySplitRatiosIfSameChildren(current, resized) as PaneSplit;
+    expect(merged.children.map((child) => child.id)).toEqual(['left', 'right']);
+    expect(merged.ratios[0]).toBeCloseTo(0.7, 2);
+    expect(merged.ratios[1]).toBeCloseTo(0.3, 2);
+  });
+
+  it('keeps a swapped child order when copying ratios from an older tree', () => {
+    const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'left');
+    const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'right');
+    const swapped = createSplit('vertical', [l2, l1], [0.4, 0.6], 'split');
+    const older = createSplit('vertical', [l1, l2], [0.8, 0.2], 'split');
+
+    const merged = copySplitRatiosIfSameChildren(swapped, older) as PaneSplit;
+    expect(merged.children.map((child) => child.id)).toEqual(['right', 'left']);
+    expect(merged.ratios).toEqual([0.4, 0.6]);
+  });
+
+  describe('swapLeaves - Drag and Drop Pane Swapping', () => {
+    it('swaps two leaves directly in a single split', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'leaf-1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'leaf-2');
+      const root = createSplit('vertical', [l1, l2], [0.5, 0.5]);
+
+      const swapped = swapLeaves(root, 'leaf-1', 'leaf-2') as PaneSplit;
+      expect(swapped.children[0].id).toBe('leaf-2');
+      expect(swapped.children[1].id).toBe('leaf-1');
+      expect(swapped.ratios).toEqual([0.5, 0.5]);
+    });
+
+    it('swaps two distant leaves across different nested split containers', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'leaf-1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'leaf-2');
+      const l3 = createLeaf({ kind: 'terminal', sessionId: 's-3' }, 'leaf-3');
+
+      const inner = createSplit('horizontal', [l2, l3], [0.5, 0.5]);
+      const root = createSplit('vertical', [l1, inner], [0.4, 0.6]);
+
+      const swapped = swapLeaves(root, 'leaf-1', 'leaf-3') as PaneSplit;
+      expect(swapped.children[0].id).toBe('leaf-3');
+      const updatedInner = swapped.children[1] as PaneSplit;
+      expect(updatedInner.children[0].id).toBe('leaf-2');
+      expect(updatedInner.children[1].id).toBe('leaf-1');
+    });
+
+    it('returns root unchanged if source equals target or either id is missing', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'leaf-1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'leaf-2');
+      const root = createSplit('vertical', [l1, l2]);
+
+      expect(swapLeaves(root, 'leaf-1', 'leaf-1')).toBe(root);
+      expect(swapLeaves(root, 'leaf-1', 'unknown')).toBe(root);
+    });
+  });
+
+  describe('moveLeafToEdge - Drag and Drop Edge Splitting', () => {
+    it('moves a leaf to the left of another leaf in the same vertical split', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'l1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'l2');
+      const l3 = createLeaf({ kind: 'terminal', sessionId: 's-3' }, 'l3');
+      const root = createSplit('vertical', [l1, l2, l3], [0.33, 0.33, 0.34]);
+
+      // Move l3 to the left of l1
+      const result = moveLeafToEdge(root, 'l3', 'l1', 'left') as PaneSplit;
+      expect(result.axis).toBe('vertical');
+      expect(result.children.map((c) => c.id)).toEqual(['l3', 'l1', 'l2']);
+    });
+
+    it('moves a leaf to the right of another leaf', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'l1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'l2');
+      const root = createSplit('vertical', [l1, l2], [0.5, 0.5]);
+
+      // Move l1 to the right of l2
+      const result = moveLeafToEdge(root, 'l1', 'l2', 'right') as PaneSplit;
+      expect(result.axis).toBe('vertical');
+      expect(result.children.map((c) => c.id)).toEqual(['l2', 'l1']);
+      expect(result.ratios).toEqual([0.5, 0.5]);
+    });
+
+    it('moves a leaf to the top of another leaf creating a horizontal split', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'l1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'l2');
+      const root = createSplit('vertical', [l1, l2], [0.5, 0.5]);
+
+      // Move l1 to the top of l2
+      const result = moveLeafToEdge(root, 'l1', 'l2', 'top');
+      // Old vertical split collapsed because l1 was removed leaving only l2,
+      // then l2 was split horizontally with l1 before l2!
+      expect(result.type).toBe('split');
+      const split = result as PaneSplit;
+      expect(split.axis).toBe('horizontal');
+      expect(split.children.map((c) => c.id)).toEqual(['l1', 'l2']);
+      expect(split.ratios).toEqual([0.5, 0.5]);
+    });
+
+    it('moves a leaf to the bottom of another leaf in a complex tree', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'l1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'l2');
+      const l3 = createLeaf({ kind: 'terminal', sessionId: 's-3' }, 'l3');
+      const root = createSplit('vertical', [l1, l2, l3], [0.33, 0.33, 0.34]);
+
+      // Move l1 to the bottom of l2
+      const result = moveLeafToEdge(root, 'l1', 'l2', 'bottom') as PaneSplit;
+      expect(result.axis).toBe('vertical');
+      expect(result.children).toHaveLength(2); // column with (l2+l1) and column with l3
+
+      const col1 = result.children[0] as PaneSplit;
+      expect(col1.type).toBe('split');
+      expect(col1.axis).toBe('horizontal');
+      expect(col1.children.map((c) => c.id)).toEqual(['l2', 'l1']);
+      expect(col1.ratios).toEqual([0.5, 0.5]);
+
+      expect(result.children[1].id).toBe('l3');
+    });
+
+    it('preserves ratio balance and total sum = 1 when moving into existing split axis', () => {
+      const l1 = createLeaf({ kind: 'terminal', sessionId: 's-1' }, 'l1');
+      const l2 = createLeaf({ kind: 'terminal', sessionId: 's-2' }, 'l2');
+      const l3 = createLeaf({ kind: 'terminal', sessionId: 's-3' }, 'l3');
+      const root = createSplit('vertical', [l1, l2, l3], [0.2, 0.5, 0.3]);
+
+      // Move l1 to the left of l2
+      const result = moveLeafToEdge(root, 'l1', 'l2', 'left') as PaneSplit;
+      const sum = result.ratios.reduce((a, b) => a + b, 0);
+      expect(sum).toBeCloseTo(1.0, 4);
+    });
   });
 });

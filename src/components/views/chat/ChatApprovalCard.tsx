@@ -1,4 +1,6 @@
 import React from 'react';
+import { motion } from 'motion/react';
+import { tweens } from '../../../motion/standard/tokens';
 import { ShieldIcon } from './ChatIcons';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import type { ApprovalRequest } from './types';
@@ -15,6 +17,8 @@ interface ChatApprovalCardProps {
   approval: ApprovalRequest;
   busy?: boolean;
   disabled?: boolean;
+  allowLabel?: string;
+  denyLabel?: string;
   onDecision: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
     requestId: string
@@ -25,6 +29,8 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
   approval,
   busy = false,
   disabled = false,
+  allowLabel,
+  denyLabel,
   onDecision,
 }) => {
   const isLocked = busy || disabled;
@@ -38,12 +44,15 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
   );
 
   return (
-    <section
-      className="chat-approval-card motion-row-in"
+    <motion.section
+      className="chat-approval-card"
       role="alert"
       aria-busy={busy || undefined}
       aria-label={`Approval needed for ${approval.title || approval.toolName}`}
       data-testid="chat-approval-card"
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={tweens.reveal}
     >
       <header className="chat-approval-card__band">
         <ShieldIcon size={12} strokeWidth={2.4} style={{ color: 'var(--warning-text, #fbbf24)' }} />
@@ -77,7 +86,7 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
           onClick={() => onDecision('allowOnce', approval.id)}
           className="chat-approval-card__button primary-button"
         >
-          Allow
+          {allowLabel || 'Allow'}
         </button>
         <button
           type="button"
@@ -92,9 +101,9 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
           type="button"
           disabled={isLocked}
           onClick={() => onDecision('deny', approval.id)}
-          className="chat-approval-card__button ghost-button"
+          className="chat-approval-card__button secondary-button ghost-button"
         >
-          Deny
+          {denyLabel || 'Deny'}
         </button>
         <button
           type="button"
@@ -105,6 +114,6 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
           Deny and stop
         </button>
       </footer>
-    </section>
+    </motion.section>
   );
 };

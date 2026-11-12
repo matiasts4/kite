@@ -491,14 +491,14 @@
 
 /* Tickets New Button */
 .tickets-new {
-  height: 26px;
-  padding: 0 10px;
-  border-radius: var(--radius-chip, 6px);
+  height: var(--vl-control-md, 32px);
+  padding: 0 12px;
+  border-radius: var(--control-radius, 8px);
   background: var(--accent, #1f6feb);
   border: 0;
   color: #ffffff;
-  font-size: var(--text-caption, 12px);
-  font-weight: 600;
+  font-size: var(--text-row, 12px);
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -542,6 +542,44 @@
 .code-pane-header {
   position: relative;
   z-index: 40;
+}
+
+.code-pane-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 18px;
+  border-radius: var(--vl-radius-xs, 4px);
+  background: color-mix(in srgb, var(--background, #0d1117) 85%, transparent);
+  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.08));
+  color: var(--text-secondary, #9da2b4);
+  cursor: grab;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+  user-select: none;
+  margin: 0 auto;
+}
+
+.code-pane-header:hover .code-pane-grip,
+.code-pane-header:focus-within .code-pane-grip,
+.code-pane-grip:focus-visible,
+.code-pane-grip:active {
+  opacity: 0.75;
+  pointer-events: auto;
+}
+
+.code-pane-grip:hover {
+  opacity: 1;
+  background: var(--hover-fill, rgba(255, 255, 255, 0.12));
+  color: var(--text-primary, #ffffff);
+}
+
+.code-pane-grip:active {
+  cursor: grabbing;
+  opacity: 1;
+  color: var(--accent, #6366f1);
 }
 
 .code-pane-actions {

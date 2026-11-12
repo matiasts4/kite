@@ -1,0 +1,1 @@
+{"event":"step_update","step_update":{"step_type":"tool","state":"WAITING_FOR_CONFIRMATION","step_index":3,"request_id":"perm-agy-1","tool_call_id":"call_permission_1","tool_name":"ask_permission","tool_info":{"parameters":{"CommandLine":"cargo publish --dry-run","description":"Publish the crate to the registry"}}}}

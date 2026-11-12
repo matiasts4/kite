@@ -1,6 +1,8 @@
 # Dependencies & Build Outputs
 node_modules/
 src-tauri/target/
+crates/**/target/
+target/
 dist/
 feed/
 releases/
@@ -26,6 +28,7 @@ Thumbs.db
 .idea/
 .cargo/
 src-tauri/.cargo/
+.cursorrules
 
 # Environment & Secrets
 .env
@@ -34,7 +37,11 @@ src-tauri/.cargo/
 *.key
 *.pem
 
+# Benchmark Output Artifacts
+bench-results/
+
 # Local Agent & Indexing Artifacts (DO NOT COMMIT)
+.kite/
 .codegraph/
 .atl/
 scratch/

@@ -1,8 +1,9 @@
 use crate::chat::{
     apply_launch_choices, archived_at_ms, cancel_turn, configure_thread, create_thread, history, live_turns,
-    load_thread, parse_attachments, provider_models, read_turn_updates, release_staged_attachment,
-    remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned, stage_blob_attachment,
-    stage_dropped_path, stage_dropped_paths, start_turn, touch,
+    load_thread, parse_attachments, provider_models_for, provider_ok, read_turn_updates, recover_thread,
+    release_staged_attachment, remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned,
+    stage_blob_attachment, stage_dropped_path, stage_dropped_paths, start_turn_with_binding, touch,
+    SendBinding, ThreadEventLog,
 };
 use crate::persist::{body, load_grid, persist, save_grid, threads};
 use serde_json::{json, Value};
@@ -27,6 +28,28 @@ pub fn create_general_chat(request: Option<Value>) -> Value {
     thread
 }
 
+fn agent_engine_provider(engine: Option<&str>) -> &'static str {
+    match engine {
+        Some("claude") | Some("claude-code") => "claude",
+        Some("codex") => "codex",
+        Some("cursor") => "cursor",
+        Some("gemini") => "gemini",
+        Some("grok") => "grok",
+        Some("opencode") | Some("open-code") => "opencode",
+        Some("antigravity") | Some("agy") => "antigravity",
+        _ => "antigravity",
+    }
+}
+
+/// A provider explicitly chosen in the agent draft wins over the agent engine.
+/// An invalid or absent choice keeps the engine mapping, then antigravity.
+fn resolve_initial_provider(requested: Option<&str>, engine: Option<&str>) -> String {
+    match requested {
+        Some(provider) if provider_ok(provider) => provider.to_string(),
+        _ => agent_engine_provider(engine).to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn create_agent_chat(request: Option<Value>) -> Value {
     let req = body(&request);
@@ -40,22 +63,11 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
         items.iter().find(|a| a.id == agent_id).cloned()
     };
 
-    let initial_provider = if let Some(ref agent) = agent_opt {
-        match agent.engine.as_str() {
-            "claude" | "claude-code" => "claude",
-            "codex" => "codex",
-            "cursor" => "cursor",
-            "gemini" => "gemini",
-            "grok" => "grok",
-            "opencode" | "open-code" => "opencode",
-            "antigravity" | "agy" => "antigravity",
-            _ => "antigravity",
-        }
-    } else {
-        "antigravity"
-    };
+    let requested_provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str());
+    let engine = agent_opt.as_ref().map(|agent| agent.engine.as_str());
+    let initial_provider = resolve_initial_provider(requested_provider, engine);
 
-    let mut thread = create_thread(Some(agent_id), "New Agent Chat", initial_provider, None);
+    let mut thread = create_thread(Some(agent_id), "New Agent Chat", &initial_provider, None);
 
     if let Some(agent) = agent_opt {
         if let Some(mode) = agent.default_mode {
@@ -71,6 +83,21 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
             thread["providerOptions"] = json!(agent.default_provider_options);
         }
         crate::chat::replace_thread(&thread);
+    }
+
+    let requested_mode = req.and_then(|r| r.get("mode")).and_then(|v| v.as_str());
+    let requested_model = req.and_then(|r| r.get("model"));
+    if requested_mode.is_some() || requested_model.is_some() {
+        let mut patch = serde_json::Map::new();
+        patch.insert("provider".into(), json!(initial_provider));
+        if let Some(mode) = requested_mode {
+            patch.insert("mode".into(), json!(mode));
+        }
+        if let Some(model) = requested_model {
+            patch.insert("model".into(), model.clone());
+        }
+        let thread_id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        return configure_thread(thread_id, &Value::Object(patch));
     }
 
     thread
@@ -91,6 +118,41 @@ pub fn load_agent_chat_thread(request: Option<Value>) -> Value {
     let agent_id = req.and_then(|r| r.get("agentId")).and_then(|v| v.as_str()).unwrap_or("c3333333-3333-4333-8333-333333333333");
     let thread_id = req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()).unwrap_or("11111111-1111-4111-8111-111111111111");
     load_thread(thread_id, Some(agent_id), "Agent Chat Thread")
+}
+
+/// Reopens a thread from its durable event log without starting a provider.
+///
+/// The recovered thread falls back to the stored compatibility snapshot when
+/// the log is absent or unreadable. The response separates "a provider handle
+/// exists" from "the renderer may resume": a session is offered only when the
+/// recovered thread carries a provider-issued handle.
+#[tauri::command]
+pub fn recover_chat_thread(request: Option<Value>) -> Value {
+    let Some(thread_id) = request_thread_id(&request) else {
+        return json!({
+            "threadId": Value::Null,
+            "thread": Value::Null,
+            "events": [],
+            "source": "snapshot",
+            "resumeAvailable": false,
+            "resumeHandle": Value::Null,
+            "diagnostic": "a thread id is required",
+            "readOnly": true
+        });
+    };
+    let path = ThreadEventLog::default_path(&thread_id);
+    let recovered = recover_thread(&thread_id, &path);
+    let resume_available = recovered.resume_available();
+    json!({
+        "threadId": recovered.thread_id,
+        "thread": recovered.thread,
+        "events": recovered.events,
+        "source": recovered.source.as_str(),
+        "resumeAvailable": resume_available,
+        "resumeHandle": recovered.resume_handle,
+        "diagnostic": recovered.diagnostic,
+        "readOnly": true
+    })
 }
 
 #[tauri::command]
@@ -240,7 +302,9 @@ fn archived_summary(thread: &Value) -> Option<Value> {
         "title": title,
         "revision": thread.get("revision")?,
         "archivedAtUnixMs": archived_at,
-        "expiresAtUnixMs": expires_at
+        "expiresAtUnixMs": expires_at,
+        "provider": thread.get("provider").and_then(|value| value.as_str()).unwrap_or("antigravity"),
+        "model": thread.get("model").and_then(|value| value.as_str())
     }))
 }
 
@@ -322,7 +386,20 @@ pub fn list_chat_provider_models(request: Option<Value>) -> Value {
     let req = body(&request);
     let provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
     let force_refresh = req.and_then(|r| r.get("forceRefresh")).and_then(|v| v.as_bool()).unwrap_or(false);
-    provider_models(provider, force_refresh)
+    let connection_id = req
+        .and_then(|r| r.get("connectionId").or_else(|| r.get("connection_id")))
+        .and_then(|v| v.as_str());
+    provider_models_for(provider, connection_id, force_refresh)
+}
+
+#[tauri::command]
+pub fn list_provider_agents(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "provider": provider,
+        "agents": crate::chat::models::provider_agents(provider),
+    })
 }
 
 #[tauri::command]
@@ -390,6 +467,64 @@ pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
     active
 }
 
+#[tauri::command]
+pub fn get_chat_session_status(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = match req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim(),
+        _ => return json!({ "error": "threadId is required" }),
+    };
+
+    let session_status = crate::chat::runtime::session_manager()
+        .lock()
+        .unwrap()
+        .status(thread_id);
+
+    if let Some(record) = session_status {
+        json!({
+            "threadId": thread_id,
+            "state": record.state.as_str(),
+            "mode": record.mode.as_str(),
+            "isWarm": record.is_warm(),
+            "isIdle": record.is_idle(),
+            "hasResumeHandle": record.resume_handle.is_some(),
+            "resumeHandle": record.resume_handle,
+            "lastActiveAtMs": record.last_active_at_ms,
+        })
+    } else {
+        let provider_session_id = {
+            let list = threads().lock().unwrap();
+            list.iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                .and_then(|t| t.get("providerSessionId").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        };
+
+        if let Some(handle) = provider_session_id {
+            json!({
+                "threadId": thread_id,
+                "state": "reaped",
+                "mode": "chat",
+                "isWarm": false,
+                "isIdle": false,
+                "hasResumeHandle": true,
+                "resumeHandle": handle,
+                "lastActiveAtMs": 0,
+            })
+        } else {
+            json!({
+                "threadId": thread_id,
+                "state": "closed",
+                "mode": "chat",
+                "isWarm": false,
+                "isIdle": false,
+                "hasResumeHandle": false,
+                "resumeHandle": Value::Null,
+                "lastActiveAtMs": 0,
+            })
+        }
+    }
+}
+
 fn handle_plan_action(thread_id: &str, plan_action: Option<&Value>) {
     let Some(action) = plan_action else { return };
     let kind = action.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -425,6 +560,24 @@ fn handle_plan_action(thread_id: &str, plan_action: Option<&Value>) {
     }
 }
 
+fn read_send_text(request: Option<&Value>, key: &str) -> Option<String> {
+    request
+        .and_then(|req| req.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// A send names the connection and the endpoint it wants only when the UI has
+/// them. Absent values keep the local CLI's own account and defaults.
+fn send_binding(request: Option<&Value>) -> SendBinding {
+    SendBinding {
+        connection_id: read_send_text(request, "connectionId"),
+        supported_endpoint: read_send_text(request, "supportedEndpoint"),
+    }
+}
+
 #[tauri::command]
 pub fn start_chat_turn(request: Option<Value>) -> Value {
     let req = body(&request);
@@ -433,7 +586,8 @@ pub fn start_chat_turn(request: Option<Value>) -> Value {
     apply_launch_choices(thread_id, req);
     handle_plan_action(thread_id, req.and_then(|r| r.get("planAction")));
     let attachments = parse_attachments(req);
-    start_turn(thread_id, None, prompt, attachments, None)
+    let binding = send_binding(req);
+    start_turn_with_binding(thread_id, None, prompt, attachments, None, Some(&binding))
 }
 
 #[tauri::command]
@@ -445,7 +599,8 @@ pub fn start_agent_chat_turn(request: Option<Value>) -> Value {
     apply_launch_choices(thread_id, req);
     handle_plan_action(thread_id, req.and_then(|r| r.get("planAction")));
     let attachments = parse_attachments(req);
-    start_turn(thread_id, Some(agent_id), prompt, attachments, None)
+    let binding = send_binding(req);
+    start_turn_with_binding(thread_id, Some(agent_id), prompt, attachments, None, Some(&binding))
 }
 
 #[tauri::command]
@@ -516,6 +671,35 @@ pub fn respond_chat_approval(request: Option<Value>) -> Value {
         return updated;
     }
     drop(items);
+    load_thread(thread_id, None, "Chat")
+}
+
+#[tauri::command]
+pub fn respond_chat_user_input(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req
+        .and_then(|item| item.get("threadId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let answers = req
+        .and_then(|item| item.get("answers"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if thread_id.is_empty() {
+        return Value::Null;
+    }
+    let request_id = {
+        let items = threads().lock().unwrap();
+        items
+            .iter()
+            .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id))
+            .and_then(|thread| thread.get("pendingUserInput"))
+            .and_then(|pending| pending.get("requestId").or_else(|| pending.get("request_id")))
+            .and_then(|value| value.as_str())
+            .unwrap_or("user-input")
+            .to_string()
+    };
+    crate::chat::runtime::write_user_input_to_run(thread_id, &request_id, &answers);
     load_thread(thread_id, None, "Chat")
 }
 
@@ -616,6 +800,63 @@ pub fn stage_dropped_chat_attachments(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub fn rewind_thread_transcript(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req.and_then(|item| item.get("threadId")).and_then(|value| value.as_str()).unwrap_or("");
+    let message_id = req
+        .and_then(|item| item.get("messageId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match crate::chat::threads::rewind_thread_transcript(thread_id, message_id) {
+        Ok(text) => {
+            let thread = threads()
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id))
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({ "text": text, "thread": thread, "error": Value::Null })
+        }
+        Err(error) => json!({ "text": Value::Null, "thread": Value::Null, "error": error }),
+    }
+}
+
+/// Restores workspace files from the thread's stored checkpoint.
+///
+/// The folder comes from `workspaceId` via `persist::workspace_path`. A path in
+/// the request is ignored. Refusal runs before any git write.
+#[tauri::command]
+pub fn restore_thread_checkpoint(request: Option<Value>) -> Value {
+    let Some(thread_id) = request_thread_id(&request).filter(|id| !id.is_empty()) else {
+        return json!({ "restored": false, "error": "threadId is required" });
+    };
+    let thread = {
+        let stored = threads().lock().unwrap();
+        stored
+            .iter()
+            .find(|thread| thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str()))
+            .cloned()
+    };
+    let Some(thread) = thread else {
+        return json!({
+            "restored": false,
+            "error": crate::chat::threads::REWIND_THREAD_MISSING
+        });
+    };
+    if let Some(reason) = crate::chat::checkpoints::file_restore_refusal(&thread) {
+        return json!({ "restored": false, "error": reason });
+    }
+    let Some(worktree) = crate::chat::checkpoints::workspace_dir(&thread) else {
+        return json!({ "restored": false, "error": "The workspace folder is unavailable." });
+    };
+    match crate::chat::checkpoints::restore_workspace_files(&thread, &worktree) {
+        Ok(()) => json!({ "restored": true, "error": Value::Null }),
+        Err(error) => json!({ "restored": false, "error": error }),
+    }
+}
+
+#[tauri::command]
 pub fn release_chat_attachment(request: Option<Value>) -> Value {
     let req = body(&request);
     let thread_id = req.and_then(|item| item.get("threadId")).and_then(|value| value.as_str()).unwrap_or("");
@@ -656,122 +897,230 @@ pub fn reorder_agent_chat_tabs(request: Option<Value>) -> Value {
     Value::Null
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::chat::TurnRun;
+#[tauri::command]
+pub fn get_thread_subagent_detail(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let subagent_id = req
+        .and_then(|r| r.get("subagentId").or_else(|| r.get("subagent_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (Some(tid), Some(sid)) = (thread_id, subagent_id) else {
+        return json!({ "error": "threadId and subagentId are required" });
+    };
+    crate::chat::subagents::build_subagent_detail(tid, sid).unwrap_or(Value::Null)
+}
 
-    #[test]
-    fn test_live_chat_runs_and_approval() {
-        let thread_id = "test-thread-uuid-1111-2222-333344445555";
-        let run_id = "test-run-uuid-1111-2222-333344445555";
-        let run = TurnRun {
-            revision: "rev1".into(),
-            events: Vec::new(),
-            next_sequence: 1,
-            assistant_id: "ast1".into(),
-            assistant_text: "Thinking about the task...".into(),
-            child: None,
-            stdin: None,
-            closing: false,
-            finished: false,
-            started_at_ms: 1234567890,
-            routine_id: None,
-        };
-        {
-            let mut live = live_turns().lock().unwrap();
-            live.runs.insert(run_id.into(), run);
-            live.by_thread.insert(thread_id.into(), run_id.into());
-        }
+#[tauri::command]
+pub fn get_thread_swarm_state(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let Some(tid) = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return json!({ "error": "threadId is required" });
+    };
+    crate::chat::subagents::build_swarm_state(tid)
+}
 
-        let runs = list_live_chat_runs(None);
-        assert!(!runs.is_empty());
-        let found = runs.iter().find(|r| r["threadId"] == thread_id).expect("run found");
-        assert_eq!(found["line"], "Thinking about the task...");
-        assert_eq!(found["startedAtUnixMs"], 1234567890);
-        assert_eq!(found["needsYou"], false);
-
-        // Test responding to approval
-        let resp = respond_chat_approval(Some(json!({
-            "request": {
-                "threadId": thread_id,
-                "runId": run_id,
-                "requestId": "req1",
-                "decision": "approve"
-            }
-        })));
-        assert_eq!(resp["pendingApproval"], Value::Null);
-
-        // Clean up
-        {
-            let mut live = live_turns().lock().unwrap();
-            live.runs.remove(run_id);
-            live.by_thread.remove(thread_id);
-        }
-        crate::chat::remove_thread(thread_id);
-    }
-
-    struct RemoveThread(String);
-
-    impl Drop for RemoveThread {
-        fn drop(&mut self) {
-            remove_thread(&self.0);
-        }
-    }
-
-    #[test]
-    fn archived_chat_is_hidden_then_restored_and_purged() {
-        let created = create_thread(None, "Archive Probe", "claude", None);
-        let thread_id = created.get("id").and_then(|value| value.as_str()).unwrap().to_string();
-        let _cleanup = RemoveThread(thread_id.clone());
-
-        let archived = archive_chat_thread(Some(json!({ "threadId": thread_id })));
-        assert_eq!(archived["deleted"], json!(true));
-        let live = archived["history"]["summaries"].as_array().unwrap();
-        assert!(live.iter().all(|row| row["id"] != thread_id));
-        assert!(history(None)["summaries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["id"] != thread_id));
-
-        let listed = list_archived_chats(Some(json!({ "profileId": Value::Null })));
-        let row = listed.iter().find(|row| row["id"] == thread_id).expect("archived summary");
-        assert_eq!(row["schemaVersion"], 1);
-        assert_eq!(row["title"], "Archive Probe");
-        assert_eq!(row["profileId"], Value::Null);
-        let archived_at = row["archivedAtUnixMs"].as_i64().expect("archivedAtUnixMs");
-        assert_eq!(row["expiresAtUnixMs"].as_i64().unwrap() - archived_at, ARCHIVE_RETENTION_MS);
-        assert_eq!(row["revision"].as_str().map(|text| text.len()), Some(64));
-        let stored = threads().lock().unwrap().iter().any(|thread| {
-            thread.get("id").and_then(|value| value.as_str()) == Some(thread_id.as_str())
-                && archived_at_ms(thread) == Some(archived_at)
-        });
-        assert!(stored, "archived thread stays stored");
-
-        let restored = restore_archived_chat(Some(json!({ "threadId": thread_id })));
-        assert!(restored.is_null());
-        assert!(history(None)["summaries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == thread_id));
-        assert!(list_archived_chats(Some(json!({ "profileId": Value::Null })))
-            .iter()
-            .all(|row| row["id"] != thread_id));
-
-        archive_chat_thread(Some(json!({ "threadId": thread_id })));
-        let purged = purge_archived_chat(Some(json!({ "threadId": thread_id })));
-        assert!(purged.is_null());
-        assert!(list_archived_chats(Some(json!({ "profileId": Value::Null })))
-            .iter()
-            .all(|row| row["id"] != thread_id));
-        let gone = threads()
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|thread| thread.get("id").and_then(|value| value.as_str()) != Some(thread_id.as_str()));
-        assert!(gone);
+#[tauri::command]
+pub fn send_subagent_message(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let tid = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let sid = req
+        .and_then(|r| r.get("subagentId").or_else(|| r.get("subagent_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let message = req
+        .and_then(|r| r.get("message"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (Some(tid), Some(sid), Some(msg)) = (tid, sid, message) else {
+        return json!({ "error": "threadId, subagentId, and non-empty message are required" });
+    };
+    match crate::chat::subagents::steer_subagent_thread(tid, sid, msg) {
+        Ok(run) => json!({ "ok": true, "run": run }),
+        Err(error) => json!({ "error": error }),
     }
 }
+
+#[tauri::command]
+pub fn stop_subagent_run(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let tid = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let sid = req
+        .and_then(|r| r.get("subagentId").or_else(|| r.get("subagent_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (Some(tid), Some(sid)) = (tid, sid) else {
+        return json!({ "error": "threadId and subagentId are required" });
+    };
+    match crate::chat::subagents::cancel_subagent_thread(tid, sid) {
+        Ok(run) => json!({ "ok": true, "run": run }),
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+#[tauri::command]
+pub fn swarm_post_from_ui(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let tid = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let message = req
+        .and_then(|r| r.get("message"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let channel = req
+        .and_then(|r| r.get("channel"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let (Some(tid), Some(msg)) = (tid, message) else {
+        return json!({ "error": "threadId and non-empty message are required" });
+    };
+    let from = format!("thread:{tid}");
+    match crate::chat::swarm::execute_swarm_action(
+        &crate::dispatch::cli::SwarmCommand::Post {
+            channel,
+            text: msg.to_string(),
+        },
+        &from,
+        None,
+        None,
+    ) {
+        Ok(result) => json!({
+            "ok": true,
+            "result": result,
+            "swarmState": crate::chat::subagents::build_swarm_state(tid),
+        }),
+        Err(err) => json!({ "error": err.code() }),
+    }
+}
+
+#[tauri::command]
+pub fn swarm_switch_worker_model(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let tid = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let name = req
+        .and_then(|r| r.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let model = req
+        .and_then(|r| r.get("model"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let raw_provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let provider = match raw_provider {
+        Some(raw) => match crate::dispatch::cli::canonical_thread_provider(raw) {
+            Some(canon) => Some(canon.to_string()),
+            None => return json!({ "error": "invalid provider" }),
+        },
+        None => None,
+    };
+    let raw_effort = req
+        .and_then(|r| r.get("effort"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let effort = match raw_effort {
+        Some(raw) => match crate::dispatch::cli::normalize_effort(raw) {
+            Some(norm) => Some(norm),
+            None => return json!({ "error": "invalid effort" }),
+        },
+        None => None,
+    };
+    let (Some(tid), Some(name), Some(model)) = (tid, name, model) else {
+        return json!({ "error": "threadId, name, and model are required" });
+    };
+    let from = format!("thread:{tid}");
+    match crate::chat::swarm::execute_swarm_action(
+        &crate::dispatch::cli::SwarmCommand::Model {
+            name: name.to_string(),
+            provider,
+            model: model.to_string(),
+            effort,
+        },
+        &from,
+        None,
+        None,
+    ) {
+        Ok(result) => json!({
+            "ok": true,
+            "result": result,
+            "swarmState": crate::chat::subagents::build_swarm_state(tid),
+        }),
+        Err(err) => json!({ "error": err.code() }),
+    }
+}
+
+#[tauri::command]
+pub fn swarm_kill_worker_from_ui(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let tid = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let name = req
+        .and_then(|r| r.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (Some(tid), Some(name)) = (tid, name) else {
+        return json!({ "error": "threadId and name are required" });
+    };
+    let from = format!("thread:{tid}");
+    match crate::chat::swarm::execute_swarm_action(
+        &crate::dispatch::cli::SwarmCommand::Kill {
+            name: name.to_string(),
+        },
+        &from,
+        None,
+        None,
+    ) {
+        Ok(result) => json!({
+            "ok": true,
+            "result": result,
+            "swarmState": crate::chat::subagents::build_swarm_state(tid),
+        }),
+        Err(err) => json!({ "error": err.code() }),
+    }
+}
+
+#[cfg(test)]
+#[path = "chat_commands_tests.rs"]
+mod tests;
 

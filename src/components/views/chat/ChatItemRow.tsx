@@ -1,25 +1,62 @@
-import React, { useState, useId, useEffect, useRef } from 'react';
+import React, { useState, useId, useRef } from 'react';
+import { motion } from 'motion/react';
+import { tweens } from '../../../motion/standard/tokens';
 import {
-  ChevronRightIcon,
-  TerminalIcon,
-  WrenchIcon,
   AlertCircleIcon,
+  ChevronRightIcon,
+  CloseIcon,
   FileCodeIcon,
   CheckIcon,
-  EyeIcon,
-  PencilIcon,
-  GlobeIcon,
-  BrainIcon,
-  CpuIcon,
   CopyIcon,
-  CompassIcon,
+  PencilIcon,
 } from './ChatIcons';
-import type { ChatItem } from '../../../types';
+import type { ChatItem, SubagentRun, SwarmState } from '../../../types';
+import { SubagentActivityCard } from './SubagentActivityCard';
+import { SwarmActivityCard } from './SwarmActivityCard';
+import { ActivityGlyph } from './activityGlyph';
+import {
+  activityTraceLabel,
+  burstDurationSeconds,
+  commandStatusWord,
+  opensInFilesSidebar,
+  splitTraceLabel,
+  outputStatLabel,
+  summarizeWorkBurst,
+  toolExpandedBody,
+  traceFilePath,
+  interruptedTurnLine,
+  workedForLine,
+} from './activityPresentation';
+import { prefersReducedMotion } from '../../../motion/contract';
 import { formatBytes } from './types';
 import { MarkdownMessage } from './MarkdownMessage';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
+import {
+  citationChipLabel,
+  citationTextFromNodes,
+  draftHasCitation,
+  expandCitations,
+  locateCitationSource,
+  readableQuoteWithoutSource,
+  revealCitationSource,
+  splitDraft,
+  writeCitationClipboard,
+  type CitationPayload,
+} from './citationChip';
+
+export function userMessageFolds(text: string): boolean {
+  return text.length > 500 || text.split('\n').length > 12;
+}
+
+/** Preview after the headline, so a streaming row does not repeat the same sentence. */
+export function reasoningPreviewRemainder(text: string, summary: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (!summary || flat === summary) return '';
+  if (flat.startsWith(summary)) return flat.slice(summary.length).trim();
+  return flat;
+}
 
 export function liveThoughtLine(markdown?: string | null): string {
   if (!markdown) return '';
@@ -38,11 +75,33 @@ export function liveThoughtLine(markdown?: string | null): string {
 
 export type TranscriptRow =
   | { kind: 'work'; id: string; items: ChatItem[] }
+  | { kind: 'subagentGroup'; id: string; items: ChatItem[] }
   | { kind: 'item'; item: ChatItem };
+
+function isSubagentItem(item: ChatItem): boolean {
+  return (
+    (item.kind === 'tool' || item.kind === 'command') &&
+    (item.toolKind === 'subagent' || Boolean(item.subagentMeta)) &&
+    item.toolKind !== 'swarm' &&
+    !item.swarmMeta
+  );
+}
+
+function isSwarmItem(item: ChatItem): boolean {
+  return (
+    (item.kind === 'tool' || item.kind === 'command') &&
+    (item.toolKind === 'swarm' || Boolean(item.swarmMeta))
+  );
+}
+
+function isUngroupedSubagentOrSwarm(item: ChatItem): boolean {
+  return isSubagentItem(item) || isSwarmItem(item);
+}
 
 export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   const result: TranscriptRow[] = [];
   let currentWork: ChatItem[] = [];
+  let currentSubagents: ChatItem[] = [];
 
   const flushWork = () => {
     if (currentWork.length > 0) {
@@ -55,8 +114,32 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
     }
   };
 
+  const flushSubagents = () => {
+    if (currentSubagents.length >= 2) {
+      result.push({
+        kind: 'subagentGroup',
+        id: `subagents-${currentSubagents[0]?.id ?? result.length}`,
+        items: currentSubagents,
+      });
+    } else if (currentSubagents.length === 1) {
+      result.push({ kind: 'item', item: currentSubagents[0] });
+    }
+    currentSubagents = [];
+  };
+
   for (const item of items) {
+    if (isSubagentItem(item)) {
+      flushWork();
+      currentSubagents.push(item);
+      continue;
+    }
+    flushSubagents();
     if (item.kind === 'tool' || item.kind === 'command') {
+      if (isSwarmItem(item)) {
+        flushWork();
+        result.push({ kind: 'item', item });
+        continue;
+      }
       currentWork.push(item);
       continue;
     }
@@ -65,37 +148,23 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
       result.push({ kind: 'item', item });
     }
   }
+  flushSubagents();
   flushWork();
   return result;
 }
 
-function useLiveDuration(active: boolean, createdAtUnixMs?: number, explicitSeconds?: number | null): string | null {
-  const startRef = useRef<number>(
-    createdAtUnixMs && createdAtUnixMs > 1_000_000_000_000 ? createdAtUnixMs : Date.now()
-  );
-  const [elapsedSec, setElapsedSec] = useState<number>(() => {
-    if (typeof explicitSeconds === 'number' && explicitSeconds > 0) return explicitSeconds;
-    if (!active) return 0;
-    return Math.max(0.1, (Date.now() - startRef.current) / 1000);
-  });
-
-  useEffect(() => {
-    if (typeof explicitSeconds === 'number' && explicitSeconds > 0) {
-      setElapsedSec(explicitSeconds);
-      return;
-    }
-    if (!active) return;
-    const timer = window.setInterval(() => {
-      setElapsedSec(Math.max(0.1, (Date.now() - startRef.current) / 1000));
-    }, 150);
-    return () => window.clearInterval(timer);
-  }, [active, explicitSeconds]);
-
-  if (typeof explicitSeconds === 'number' && explicitSeconds > 0) {
-    return explicitSeconds < 10 ? `${explicitSeconds.toFixed(1)}s` : `${Math.round(explicitSeconds)}s`;
+/** Index of the trailing action group, so the working caption sits above it. */
+export function liveActivityRowIndex(rows: TranscriptRow[]): number {
+  const last = rows[rows.length - 1];
+  if (!last) return -1;
+  if (last.kind === 'work' || last.kind === 'subagentGroup') return rows.length - 1;
+  if (
+    last.kind === 'item' &&
+    (last.item.kind === 'reasoning' || isUngroupedSubagentOrSwarm(last.item))
+  ) {
+    return rows.length - 1;
   }
-  if (elapsedSec <= 0.05) return null;
-  return elapsedSec < 10 ? `${elapsedSec.toFixed(1)}s` : `${Math.round(elapsedSec)}s`;
+  return -1;
 }
 
 interface ParsedToolMeta {
@@ -174,60 +243,39 @@ function parseToolDisplayMeta(item: ChatItem): ParsedToolMeta {
   };
 }
 
-function getToolIcon(title: string | null, toolKind?: string | null, serverName?: string | null) {
-  if (serverName || toolKind === 'mcpToolCall') {
-    return <CpuIcon size={12} />;
-  }
-  if (toolKind === 'planUpdate') {
-    return <CompassIcon size={12} />;
-  }
-  if (toolKind === 'commandExecution') {
-    return <TerminalIcon size={12} />;
-  }
-  if (toolKind === 'fileChange') {
-    return <PencilIcon size={12} />;
-  }
-  if (toolKind === 'webSearch') {
-    return <GlobeIcon size={12} />;
-  }
-  const lower = (title || '').toLowerCase();
-  if (lower.includes('read') || lower.includes('cat') || lower.includes('view') || lower.includes('inspect')) {
-    return <EyeIcon size={12} />;
-  }
-  if (lower.includes('edit') || lower.includes('write') || lower.includes('replace') || lower.includes('patch')) {
-    return <PencilIcon size={12} />;
-  }
-  if (lower.includes('web') || lower.includes('fetch') || lower.includes('browser') || lower.includes('url') || lower.includes('search')) {
-    return <GlobeIcon size={12} />;
-  }
-  if (lower.includes('bash') || lower.includes('cmd') || lower.includes('shell') || lower.includes('terminal') || lower.includes('run')) {
-    return <TerminalIcon size={12} />;
-  }
-  return <WrenchIcon size={12} />;
-}
-
 export const ChatWorkEntry: React.FC<{
   item: ChatItem;
   running?: boolean;
   stepIndex?: number;
-  motionClass?: string;
+  /** True when this row is new and should animate in. */
+  enter?: boolean;
 }> = ({
   item,
   running,
-  motionClass,
+  enter = false,
 }) => {
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
   const id = useId();
   const isCommand = item.kind === 'command';
-  const hasText = Boolean(item.text && item.text.length > 0);
   const isFailed =
     item.status === 'failed' || (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0);
   const isCompleted = item.status === 'completed';
   const isRunning = Boolean(running || item.streaming || item.status === 'running' || item.status === 'inProgress');
-
-  const durationBadge = useLiveDuration(isRunning, item.createdAtUnixMs, item.durationSeconds);
+  const traceLabel = activityTraceLabel(item);
+  const traceParts = splitTraceLabel(traceLabel);
+  const statLabel = outputStatLabel(item.text);
+  const bodyText = toolExpandedBody(item);
+  const openPath = traceFilePath(item);
+  const sidebarFile = opensInFilesSidebar(item);
+  const hasText = !sidebarFile && bodyText.length > 0;
   const meta = parseToolDisplayMeta(item);
+  const commandWord = isCommand || meta.toolKind === 'commandExecution' ? commandStatusWord(item) : null;
+  const failedMark =
+    commandWord === 'Failed' || commandWord === 'Declined' || commandWord === 'Stopped'
+      ? commandWord
+      : isFailed
+        ? 'Failed'
+        : null;
 
   const hasDiff = Boolean(
     item.text && (
@@ -237,15 +285,6 @@ export const ChatWorkEntry: React.FC<{
     )
   );
 
-  const livePreviewLines =
-    isRunning && !expanded && hasText && !hasDiff
-      ? item.text
-          .trim()
-          .split(/\r?\n/)
-          .filter((l) => l.trim().length > 0)
-          .slice(-2)
-      : [];
-
   const className = [
     'chat-work-entry',
     isCommand || meta.toolKind === 'commandExecution' ? 'chat-work-entry--command' : '',
@@ -253,220 +292,142 @@ export const ChatWorkEntry: React.FC<{
     isRunning ? 'chat-work-entry--running' : '',
     isCompleted ? 'chat-work-entry--completed' : '',
     isFailed ? 'chat-work-entry--failed' : '',
-    motionClass,
   ]
     .filter(Boolean)
     .join(' ');
 
   return (
-    <div className={className}>
+    <motion.div
+      className={className}
+      initial={enter && !prefersReducedMotion() ? { opacity: 0, y: 4 } : false}
+      animate={{ opacity: 1, y: 0 }}
+      transition={tweens.reveal}
+    >
       <button
         type="button"
         aria-expanded={hasText ? expanded : undefined}
         aria-controls={hasText ? id : undefined}
-        disabled={!hasText}
-        onClick={() => setExpanded((v) => !v)}
+        disabled={!hasText && !openPath}
+        title={openPath ? openPath : undefined}
+        onClick={(e) => {
+          if (e.button !== 0 || !openPath) {
+            if (!hasText) return;
+            setExpanded((v) => !v);
+            return;
+          }
+          const openInSidebar = sidebarFile || e.ctrlKey || e.metaKey;
+          if (openInSidebar) {
+            e.preventDefault();
+            openFileInRightDock({
+              candidate: openPath,
+              workspaceId: (item as { workspaceId?: string | null }).workspaceId || null,
+              collapseTree: true,
+              preferRendered: true,
+            });
+            return;
+          }
+          if (!hasText) return;
+          setExpanded((v) => !v);
+        }}
       >
-        <span aria-hidden="true" className={`chat-work-entry__glyph ${isRunning ? 'chat-work-entry__glyph--active' : ''}`}>
-          {isCommand ? <TerminalIcon size={12} /> : getToolIcon(item.title, meta.toolKind, meta.serverName)}
+        <span aria-hidden="true" className="chat-work-entry__glyph">
+          <ActivityGlyph item={item} size={16} />
         </span>
 
-        {meta.serverName && (
-          <span className="chat-work-entry__mcp-badge" title={`MCP Server: ${meta.serverName}`}>
-            {meta.serverName}
-          </span>
-        )}
-
-        <strong>{meta.titleText}</strong>
-
-        {meta.detailText && (
-          <span
-            className="chat-work-entry__detail"
-            title="Ctrl + Click para previsualizar archivo"
-            onClick={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.button === 0) {
-                e.stopPropagation();
-                e.preventDefault();
-                openFileInRightDock({
-                  candidate: meta.detailText!,
-                  workspaceId: (item as any).workspaceId || null,
-                  collapseTree: true,
-                });
-              }
-            }}
-          >
-            {meta.detailText}
-          </span>
-        )}
-
-        {(meta.addedLines !== null || meta.removedLines !== null) && (
-          <span className="chat-work-entry__diff-stats" aria-label="Diff line changes">
-            {meta.addedLines !== null && meta.addedLines > 0 && (
-              <span className="chat-work-entry__diff-add">+{meta.addedLines}</span>
-            )}
-            {meta.removedLines !== null && meta.removedLines > 0 && (
-              <span className="chat-work-entry__diff-del">-{meta.removedLines}</span>
-            )}
-          </span>
-        )}
+        <strong
+          className={isRunning ? 'live-tool-shine chat-activity-shine' : undefined}
+          title={traceLabel}
+        >
+          {traceParts.verb ? (
+            <>
+              <span className="chat-work-entry__verb">{traceParts.verb}</span>{' '}
+              <span className="chat-work-entry__target">{traceParts.target}</span>
+            </>
+          ) : (
+            traceLabel
+          )}
+        </strong>
+        {statLabel ? <span className="chat-work-entry__meta">{statLabel}</span> : null}
 
         <i className="chat-work-entry__spacer" />
 
-        {meta.copyTarget && (
+        {failedMark ? (
+          <span className="chat-work-entry__status chat-work-entry__status--failed">
+            <CloseIcon aria-hidden="true" size={12} />
+            <span className="sr-only">{failedMark}</span>
+          </span>
+        ) : null}
+
+        {hasText ? (
           <span
-            role="button"
-            tabIndex={-1}
-            className="chat-work-entry__copy"
-            title={copied ? 'Copied!' : 'Copy'}
-            onClick={(e) => {
-              e.stopPropagation();
-              e.preventDefault();
-              navigator.clipboard?.writeText(meta.copyTarget || '');
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1400);
-            }}
-          >
-            {copied ? <CheckIcon size={10} /> : <CopyIcon size={10} />}
-          </span>
-        )}
-
-        {durationBadge && (
-          <span className={`chat-work-entry__duration ${isRunning ? 'chat-work-entry__duration--live' : ''}`}>
-            {durationBadge}
-          </span>
-        )}
-
-        {hasText && (
-          <ChevronRightIcon
             aria-hidden="true"
-            size={8}
-            strokeWidth={2.5}
-            className={`chat-work-entry__chevron chat-chevron chat-chevron--flip ${
-              expanded ? 'chat-chevron--open' : ''
-            }`}
-          />
-        )}
-
-        <span
-          className={`chat-work-entry__status ${
-            isFailed
-              ? 'chat-work-entry__status--failed'
-              : isCompleted
-                ? 'chat-work-entry__status--completed'
-                : isRunning
-                  ? 'chat-work-entry__status--running'
-                  : ''
-          }`}
-        >
-          {isFailed ? (
-            <>
-              <AlertCircleIcon aria-hidden="true" size={9} strokeWidth={3} />
-              <span className="sr-only">Failed</span>
-            </>
-          ) : isCompleted ? (
-            <>
-              <CheckIcon aria-hidden="true" size={9} strokeWidth={3} />
-              <span className="sr-only">Completed</span>
-            </>
-          ) : isRunning ? (
-            <>
-              <i aria-hidden="true" className="chat-work-entry__running" />
-              <span className="sr-only">Running</span>
-            </>
-          ) : null}
-        </span>
+            className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
+          >
+            <ChevronRightIcon size={12} />
+          </span>
+        ) : null}
       </button>
 
-      {livePreviewLines.length > 0 && (
-        <div className="chat-work-entry__live-preview" onClick={() => setExpanded(true)}>
-          {livePreviewLines.map((line, idx) => (
-            <div key={idx} className="chat-work-entry__live-line">
-              {line}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {hasText && (
-        <div
-          className={`chat-collapsible ${expanded ? 'chat-collapsible--open' : ''}`}
-          aria-hidden={!expanded}
-        >
+      {hasText && expanded && (
+        <div className="chat-collapsible chat-collapsible--open">
           <div className="chat-collapsible__inner">
             <section aria-label="Operation details" id={id}>
               {hasDiff ? (
                 <div className="chat-work-entry__diff">
-                  <UnifiedDiffView diff={item.text} />
+                  <UnifiedDiffView diff={bodyText} />
                 </div>
               ) : (
-                <pre>{item.text}</pre>
+                <pre>{bodyText}</pre>
               )}
             </section>
           </div>
         </div>
       )}
-    </div>
+    </motion.div>
   );
 };
 
 export const ChatWorkGroup: React.FC<{
   items: ChatItem[];
   running?: boolean;
-  motionClassFor?: (id: string) => string;
-}> = ({ items, running, motionClassFor }) => {
+  enterFor?: (id: string) => boolean;
+  interrupted?: boolean;
+  durationSeconds?: number | null;
+}> = ({ items, running, enterFor, interrupted = false, durationSeconds = null }) => {
   const [expanded, setExpanded] = useState(false);
-  const hiddenCount = Math.max(0, items.length - 1);
-  const visibleItems = expanded ? items : items.slice(-1);
-
-  const completedCount = items.filter((i) => i.status === 'completed').length;
-  const failedCount = items.filter(
-    (i) => i.status === 'failed' || (i.exitCode !== null && i.exitCode !== undefined && i.exitCode !== 0)
-  ).length;
-  const runningCount = items.filter((i) => i.streaming || i.status === 'running' || i.status === 'inProgress').length;
+  const groupLive = items.some(
+    (item) => item.streaming || item.status === 'running' || item.status === 'inProgress',
+  );
+  const settled = !groupLive && !running;
+  const summary = summarizeWorkBurst(items);
+  const durationLine = interrupted
+    ? interruptedTurnLine(durationSeconds ?? burstDurationSeconds(items))
+    : workedForLine(durationSeconds ?? burstDurationSeconds(items));
+  const showSummary = settled && items.length > 1;
+  const visibleItems = showSummary && !expanded ? [] : items;
+  const headerLabel = summary || `${items.length} actions`;
 
   return (
     <div className={`chat-work-group ${expanded && items.length > 1 ? 'chat-work-group--expanded' : ''}`}>
-      {hiddenCount > 0 && (
+      {showSummary && (
         <button
           type="button"
           aria-expanded={expanded}
           className="chat-work-group__toggle"
           onClick={() => setExpanded((v) => !v)}
         >
-          <ChevronRightIcon
-            size={9}
-            strokeWidth={2.5}
-            className={`chat-chevron chat-chevron--flip ${expanded ? 'chat-chevron--open' : ''}`}
-          />
-          <span>
-            {expanded
-              ? 'Collapse tool pipeline'
-              : `+${hiddenCount} previous ${hiddenCount === 1 ? 'action' : 'actions'}`}
+          <span aria-hidden="true" className="chat-work-entry__glyph">
+            <ActivityGlyph item={items[0]} size={16} />
           </span>
-          <span className="chat-work-group__dots" aria-hidden="true">
-            {items.slice(0, 8).map((it) => {
-              const failed = it.status === 'failed' || (it.exitCode !== null && it.exitCode !== undefined && it.exitCode !== 0);
-              const active = it.streaming || it.status === 'running';
-              return (
-                <i
-                  key={it.id}
-                  className={`chat-work-group__dot ${
-                    failed
-                      ? 'chat-work-group__dot--failed'
-                      : active
-                        ? 'chat-work-group__dot--running'
-                        : 'chat-work-group__dot--completed'
-                  }`}
-                />
-              );
-            })}
-          </span>
-          <span className="chat-work-group__summary">
-            {runningCount > 0
-              ? `${completedCount}/${items.length} done`
-              : failedCount > 0
-                ? `${failedCount} failed`
-                : `${items.length} completed`}
+          <span className="chat-work-group__label">{headerLabel}</span>
+          {settled && durationLine && !expanded ? (
+            <span className="chat-work-group__duration">{durationLine}</span>
+          ) : null}
+          <span
+            aria-hidden="true"
+            className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
+          >
+            <ChevronRightIcon size={12} />
           </span>
         </button>
       )}
@@ -477,7 +438,7 @@ export const ChatWorkGroup: React.FC<{
             item={item}
             running={(running && item.streaming) || item.streaming}
             stepIndex={idx}
-            motionClass={motionClassFor?.(item.id)}
+            enter={enterFor?.(item.id) ?? false}
           />
         ))}
       </div>
@@ -485,28 +446,237 @@ export const ChatWorkGroup: React.FC<{
   );
 };
 
-export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionClass?: string }> = ({
+export function AssistantCitationChip({
+  citation,
+  token,
+  onEditComment,
+  onRemove,
+}: {
+  citation: CitationPayload;
+  token: string;
+  onEditComment?: (comment: string) => void;
+  onRemove?: () => void;
+}) {
+  const [quoteOpen, setQuoteOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draftComment, setDraftComment] = useState(citation.comment);
+  const label = citationChipLabel(citation);
+
+  const activate = () => {
+    const sourcePresent = Boolean(citation.messageId) && locateCitationSource(citation.messageId) !== null;
+    if (sourcePresent && revealCitationSource(citation.messageId)) {
+      setQuoteOpen(false);
+      return;
+    }
+    setQuoteOpen(true);
+  };
+
+  return (
+    <span
+      className="citation-chip rounded-sm"
+      contentEditable={false}
+      data-citation-token={token}
+      onCopy={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        writeCitationClipboard(event.clipboardData, token);
+      }}
+      onKeyDown={(event) => {
+        if ((event.key === 'Backspace' || event.key === 'Delete') && onRemove) {
+          event.preventDefault();
+          onRemove();
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="citation-chip__jump"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={activate}
+      >
+        {label}
+      </button>
+      {onEditComment ? (
+        <button
+          type="button"
+          className="citation-chip__edit"
+          aria-label="Edit comment"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            setDraftComment(citation.comment);
+            setEditing((open) => !open);
+          }}
+        >
+          <PencilIcon size={11} />
+        </button>
+      ) : null}
+      {quoteOpen ? (
+        <span className="citation-chip__quote" role="dialog" aria-label="Saved quote">
+          {readableQuoteWithoutSource(citation)}
+        </span>
+      ) : null}
+      {editing && onEditComment ? (
+        <span className="citation-chip__note" role="dialog" aria-label="Edit comment">
+          <input
+            aria-label="Comment"
+            value={draftComment}
+            onChange={(event) => setDraftComment(event.target.value)}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              onEditComment(draftComment);
+              setEditing(false);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              onEditComment(draftComment);
+              setEditing(false);
+            }}
+          >
+            Save
+          </button>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function restoreErrorText(error: unknown): string {
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return 'File restore did not run.';
+}
+
+function restoreCommandMissing(text: string): boolean {
+  return /not found|unavailable/i.test(text);
+}
+
+export const ChatItemRow: React.FC<{
+  item: ChatItem;
+  threadId?: string;
+  workspaceId?: string | null;
+  subagentRuns?: SubagentRun[] | null;
+  swarmState?: SwarmState | null;
+  /** True when this row is new and should animate in. */
+  enter?: boolean;
+  onEditUserMessage?: (text: string) => void;
+  onRewindTranscript?: (messageId: string) => void | Promise<void>;
+  onRestoreFiles?: (messageId: string) => void | Promise<void>;
+  fileRestoreEnabled?: boolean;
+  /** False when the restore command cannot be invoked. Defaults to available. */
+  restoreCommandAvailable?: boolean;
+}> = ({
   item,
   threadId,
-  motionClass = '',
+  workspaceId = null,
+  subagentRuns = null,
+  swarmState = null,
+  enter = false,
+  onEditUserMessage,
+  onRewindTranscript,
+  onRestoreFiles,
+  fileRestoreEnabled = false,
+  restoreCommandAvailable = true,
 }) => {
-  const [folded, setFolded] = useState(false);
+  const [folded, setFolded] = useState(() => item.kind === 'user' && userMessageFolds(item.text));
   const [expandedReasoning, setExpandedReasoning] = useState(false);
-  const reasoningDuration = useLiveDuration(
-    item.kind === 'reasoning' && item.streaming,
-    item.createdAtUnixMs,
-    item.durationSeconds
-  );
+  const [copiedUser, setCopiedUser] = useState(false);
+  const [rewindOpen, setRewindOpen] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreUnavailable, setRestoreUnavailable] = useState(false);
+  const [copiedAssistant, setCopiedAssistant] = useState(false);
+  const [citation, setCitation] = useState<string | null>(null);
+  const assistantRef = useRef<HTMLDivElement | null>(null);
 
   // User row: no "You" or timestamp header
   if (item.kind === 'user') {
-    const isLong = item.text.length > 500;
+    const isLong = userMessageFolds(item.text);
     return (
-      <article
-        className={`chat-turn chat-turn--user chat-user-row ${folded ? 'chat-user-row--folded' : ''}${
-          motionClass ? ` ${motionClass}` : ''
-        }`}
+      <motion.article
+        className={`chat-turn chat-turn--user chat-user-row chat-user-row--bubble ${folded ? 'chat-user-row--folded' : ''}`}
+        data-message-id={item.id}
+        data-turn-user-id={item.id}
+        initial={enter ? { opacity: 0, y: 4 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
       >
+        <div className="chat-turn__actions">
+          <button
+            type="button"
+            className="chat-turn__action-btn"
+            title={copiedUser ? 'Copiado!' : 'Copiar mensaje'}
+            onClick={() => {
+              navigator.clipboard?.writeText(expandCitations(item.text));
+              setCopiedUser(true);
+              setTimeout(() => setCopiedUser(false), 1500);
+            }}
+          >
+            {copiedUser ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+            <span>Copiar</span>
+          </button>
+          {onEditUserMessage && (
+            <button
+              type="button"
+              className="chat-turn__action-btn"
+              title="Editar desde aquí"
+              onClick={() => setRewindOpen((open) => !open)}
+            >
+              <PencilIcon size={12} />
+              <span>Editar desde aquí</span>
+            </button>
+          )}
+          {rewindOpen && onEditUserMessage ? (
+            <div className="chat-rewind" role="dialog" aria-label="Editar desde aquí">
+              <button
+                type="button"
+                onClick={() => {
+                  onEditUserMessage(item.text);
+                  if (!onRewindTranscript) return;
+                  void Promise.resolve(onRewindTranscript(item.id)).catch((error: unknown) => {
+                    setRestoreError(restoreErrorText(error));
+                  });
+                }}
+              >
+                Revertir y mantener cambios en archivos
+              </button>
+              <button
+                type="button"
+                disabled={!fileRestoreEnabled || !restoreCommandAvailable || restoreUnavailable}
+                title={
+                  !restoreCommandAvailable || restoreUnavailable
+                    ? 'File restore is unavailable.'
+                    : fileRestoreEnabled
+                      ? undefined
+                      : 'File restore stays off unless this thread has its own isolated checkout.'
+                }
+                onClick={() => {
+                  if (!fileRestoreEnabled || !restoreCommandAvailable || restoreUnavailable || !onRestoreFiles) return;
+                  void Promise.resolve(onRestoreFiles(item.id))
+                    .then(() => {
+                      setRestoreError(null);
+                      onEditUserMessage(item.text);
+                    })
+                    .catch((error: unknown) => {
+                      const text = restoreErrorText(error);
+                      setRestoreError(text);
+                      if (restoreCommandMissing(text)) setRestoreUnavailable(true);
+                    });
+                }}
+              >
+                Revertir archivos también
+              </button>
+              {restoreError ? <p role="alert">{restoreError}</p> : null}
+            </div>
+          ) : null}
+        </div>
+
         {/* User Attachments */}
         {item.attachments && item.attachments.length > 0 && (
           <ul className="chat-attachments">
@@ -520,47 +690,144 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
           </ul>
         )}
 
-        <p>{item.text}</p>
+        <p
+          className={folded ? 'chat-user-row__text chat-user-row__text--folded' : 'chat-user-row__text'}
+          onCopy={(event) => {
+            if (!draftHasCitation(item.text)) return;
+            const selection = window.getSelection();
+            if (!selection || selection.rangeCount === 0) return;
+            const holder = document.createElement('div');
+            holder.appendChild(selection.getRangeAt(0).cloneContents());
+            const selected = citationTextFromNodes(holder);
+            if (!draftHasCitation(selected)) return;
+            event.preventDefault();
+            writeCitationClipboard(event.clipboardData, selected);
+          }}
+        >
+          {draftHasCitation(item.text)
+            ? splitDraft(item.text).map((part, index) =>
+                part.kind === 'text' ? (
+                  <span key={`text-${index}`}>{part.text}</span>
+                ) : (
+                  <AssistantCitationChip key={`cite-${index}`} citation={part.citation} token={part.token} />
+                ),
+              )
+            : item.text}
+        </p>
         {isLong && (
           <button
             type="button"
             className="chat-user-row__toggle"
             onClick={() => setFolded((v) => !v)}
           >
-            {folded ? 'Show more' : 'Show less'}
+            {folded ? 'Mostrar más' : 'Mostrar menos'}
           </button>
         )}
-      </article>
+      </motion.article>
     );
   }
 
   // Assistant row: no assistant label or timestamp header
   if (item.kind === 'assistant') {
-    const cleanText = item.text.includes('<proposed_plan>') && item.text.includes('</proposed_plan>')
+    const rawText = item.text.includes('<proposed_plan>') && item.text.includes('</proposed_plan>')
       ? item.text.replace('<proposed_plan>', '\n').replace('</proposed_plan>', '\n')
       : item.text;
+
+    // Filter out any leaked protocol JSON blobs (e.g. {"type":"step-finish",...})
+    const cleanText = rawText
+      .split('\n')
+      .filter((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          if (
+            trimmed.includes('"type"') &&
+            (trimmed.includes('"step-finish"') ||
+              trimmed.includes('"step_finish"') ||
+              trimmed.includes('"tool-call"') ||
+              trimmed.includes('"tokens"') ||
+              trimmed.includes('"sessionID"'))
+          ) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .join('\n');
+
     return (
-      <div
-        className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}${
-          motionClass ? ` ${motionClass}` : ''
-        }`}
+      <motion.div
+        ref={(node) => {
+          assistantRef.current = node;
+          if (node) node.dataset.messageId = item.id;
+        }}
+        className={`chat-turn chat-turn--assistant chat-assistant-row ${item.streaming ? 'chat-turn--streaming' : ''}`}
+        initial={enter ? { opacity: 0, y: 4 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
+        onMouseUp={() => {
+          const selection = window.getSelection();
+          const root = assistantRef.current;
+          const anchor = selection?.anchorNode;
+          if (!selection || selection.isCollapsed || !root || !anchor || !root.contains(anchor)) {
+            setCitation(null);
+            return;
+          }
+          const passage = selection.toString().trim();
+          setCitation(passage || null);
+        }}
       >
-        <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
-        {item.streaming && (
-          <span className="chat-turn__streaming-cursor" title="Streaming response…" />
+        <div id={item.id} data-message-id={item.id}>
+        {!item.streaming && cleanText.trim().length > 0 && (
+          <div className="chat-turn__actions">
+            {citation && (
+              <button
+                type="button"
+                className="chat-turn__action-btn"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  window.dispatchEvent(
+                    new CustomEvent('kite:cite', { detail: { messageId: item.id, quote: citation } }),
+                  );
+                  window.getSelection()?.removeAllRanges();
+                  setCitation(null);
+                }}
+              >
+                Citar en el compositor
+              </button>
+            )}
+            <button
+              type="button"
+              className="chat-turn__action-btn"
+              title={copiedAssistant ? 'Copiado!' : 'Copiar respuesta'}
+              onClick={() => {
+                navigator.clipboard?.writeText(cleanText);
+                setCopiedAssistant(true);
+                setTimeout(() => setCopiedAssistant(false), 1500);
+              }}
+            >
+              {copiedAssistant ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+              <span>{copiedAssistant ? 'Copiado' : 'Copiar'}</span>
+            </button>
+          </div>
         )}
-      </div>
+        <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
+        </div>
+      </motion.div>
     );
   }
 
   // Reasoning Row
   if (item.kind === 'reasoning') {
+    // A thought with no text yet is not rendered: the brain appears once the provider sends it.
+    if (item.text.trim().length === 0) return null;
     const thoughtSummary = liveThoughtLine(item.text);
+    const thoughtRemainder = reasoningPreviewRemainder(item.text, thoughtSummary);
     return (
-      <div
-        className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}${
-          motionClass ? ` ${motionClass}` : ''
-        }`}
+      <motion.div
+        className={`chat-turn chat-turn--reasoning chat-reasoning-row ${item.streaming ? 'chat-reasoning-row--streaming' : ''}`}
+        initial={enter ? { opacity: 0, y: 4 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={tweens.reveal}
       >
         <button
           type="button"
@@ -570,20 +837,15 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
           title={expandedReasoning ? 'Collapse reasoning details' : 'Expand full reasoning'}
         >
           <span className="chat-reasoning-row__icon-wrap">
-            <BrainIcon size={13} className={item.streaming ? 'chat-reasoning-icon--pulse' : ''} />
+            <ActivityGlyph item={item} size={16} />
           </span>
-          <ChevronRightIcon
-            size={8}
-            strokeWidth={2.5}
-            className={`chat-chevron ${expandedReasoning ? 'chat-chevron--open' : ''}`}
-          />
-          <strong className="chat-reasoning-row__label">
-            {item.streaming ? 'Thinking…' : reasoningDuration ? `Thought for ${reasoningDuration}` : 'Thought'}
+          <strong className={`chat-reasoning-row__label${item.streaming && !thoughtSummary ? ' chat-activity-shine' : ''}`}>
+            {item.streaming ? (thoughtSummary || 'Thinking') : 'Thought'}
           </strong>
-          {item.streaming && reasoningDuration && (
-            <span className="chat-reasoning-row__timer">{reasoningDuration}</span>
+          {item.streaming && !expandedReasoning && thoughtRemainder.length > 0 && (
+            <span className="chat-reasoning-row__preview">{thoughtRemainder}</span>
           )}
-          {thoughtSummary && !expandedReasoning && (
+          {!item.streaming && thoughtSummary && !expandedReasoning && (
             <span className="chat-reasoning-row__headline">{thoughtSummary}</span>
           )}
         </button>
@@ -597,13 +859,41 @@ export const ChatItemRow: React.FC<{ item: ChatItem; threadId?: string; motionCl
             </div>
           </div>
         </div>
-      </div>
+      </motion.div>
     );
   }
 
   // Tool / Command Work Row (rendered individually if not grouped)
   if (item.kind === 'tool' || item.kind === 'command') {
-    return <ChatWorkEntry item={item} running={item.streaming} />;
+    if (item.toolKind === 'subagent' || item.subagentMeta) {
+      const matchedRun =
+        subagentRuns?.find(
+          (r) =>
+            (item.subagentMeta?.subagentId && r.subagentId === item.subagentMeta.subagentId) ||
+            r.parentToolCallId === item.id
+        ) ?? null;
+      return (
+        <SubagentActivityCard
+          item={item}
+          threadId={threadId}
+          workspaceId={workspaceId}
+          run={matchedRun}
+          enter={enter}
+        />
+      );
+    }
+    if (item.toolKind === 'swarm' || item.swarmMeta) {
+      return (
+        <SwarmActivityCard
+          item={item}
+          threadId={threadId}
+          workspaceId={workspaceId}
+          swarmState={swarmState}
+          enter={enter}
+        />
+      );
+    }
+    return <ChatWorkEntry item={item} running={item.streaming} enter={enter} />;
   }
 
   // Error Row

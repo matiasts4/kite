@@ -20,6 +20,14 @@ export interface OpenAiCompatOptions {
   model: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * Native proxy credential source. When set, the Tauri proxy can inject the
+   * provider token server-side if apiKey is empty (OpenCode Go reads the key
+   * from the local OpenCode CLI store).
+   */
+  credentialProvider?: 'opencode';
+  /** Stable OpenCode Go session id, sent as x-opencode-session. */
+  sessionId?: string;
 }
 
 export class OpenAiCompatPlannerProvider implements PlannerProvider {
@@ -29,6 +37,8 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
   private model: string;
   private temperature: number;
   private maxTokens: number;
+  private credentialProvider?: 'opencode';
+  private sessionId?: string;
 
   constructor(options: OpenAiCompatOptions) {
     this.id = options.id || 'opencode';
@@ -37,6 +47,24 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
     this.model = options.model;
     this.temperature = options.temperature ?? 0.0;
     this.maxTokens = options.maxTokens ?? 500;
+    this.credentialProvider = options.credentialProvider;
+    this.sessionId = options.sessionId;
+  }
+
+  private requestHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Connection: 'keep-alive',
+    };
+    const key = this.apiKey.trim();
+    if (key) {
+      headers.Authorization = `Bearer ${key}`;
+    }
+    const sessionId = this.sessionId?.trim();
+    if (sessionId) {
+      headers['x-opencode-session'] = sessionId;
+    }
+    return headers;
   }
 
   public async plan(
@@ -122,11 +150,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
     const response = await (typeof fetch === 'function' && !((window as any)?.__TAURI_INTERNALS__)
       ? fetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.apiKey}`,
-            Connection: 'keep-alive',
-          },
+          headers: this.requestHeaders(),
           body: JSON.stringify({
             model: this.model,
             temperature: this.temperature,
@@ -140,11 +164,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
         })
       : operatorHttpFetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.apiKey}`,
-            Connection: 'keep-alive',
-          },
+          headers: this.requestHeaders(),
           body: JSON.stringify({
             model: this.model,
             temperature: this.temperature,
@@ -155,7 +175,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
             messages,
           }),
           signal,
-        }));
+        }, { credentialProvider: this.credentialProvider }));
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
@@ -295,11 +315,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
     const response = await (typeof fetch === 'function' && !((window as any)?.__TAURI_INTERNALS__)
       ? fetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.apiKey}`,
-            Connection: 'keep-alive',
-          },
+          headers: this.requestHeaders(),
           body: JSON.stringify({
             model: this.model,
             temperature: this.temperature,
@@ -311,11 +327,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
         })
       : operatorHttpFetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.apiKey}`,
-            Connection: 'keep-alive',
-          },
+          headers: this.requestHeaders(),
           body: JSON.stringify({
             model: this.model,
             temperature: this.temperature,
@@ -324,7 +336,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
             messages,
           }),
           signal,
-        }));
+        }, { credentialProvider: this.credentialProvider }));
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '');

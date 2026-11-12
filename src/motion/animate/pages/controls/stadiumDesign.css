@@ -1,0 +1,728 @@
+/* Stadium & Obsidian Glass Redesign System (Inspired by Libraries.dev) */
+
+.stadium-showcase {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: 100%;
+}
+
+/* Curvature Mode Variable Injection */
+.stadium-root {
+  --stadium-radius: 9999px;
+  --stadium-card-radius: 20px;
+  --stadium-chip-radius: 9999px;
+}
+
+.stadium-root[data-radius='squircle'] {
+  --stadium-radius: 12px;
+  --stadium-card-radius: 16px;
+  --stadium-chip-radius: 8px;
+}
+
+.stadium-root[data-radius='technical'] {
+  --stadium-radius: 8px;
+  --stadium-card-radius: 12px;
+  --stadium-chip-radius: 6px;
+}
+
+/* Curvature Switcher Bar */
+.stadium-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 18px;
+  border-radius: var(--stadium-card-radius);
+  background: linear-gradient(180deg, #161b24, #101319);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  flex-wrap: wrap;
+}
+
+.stadium-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.stadium-header-title span.badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(56, 189, 248, 0.16);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+}
+
+.stadium-curvature-group {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 2px;
+}
+
+.stadium-curvature-btn {
+  position: relative;
+  padding: 5px 12px;
+  border-radius: 9999px;
+  border: none;
+  background: transparent;
+  color: #8b949e;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 140ms ease;
+  user-select: none;
+}
+
+.stadium-curvature-btn:hover {
+  color: #e2e8f0;
+}
+
+.stadium-curvature-btn.active {
+  color: #ffffff;
+}
+
+.stadium-sliding-thumb {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #26282d;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.stadium-label-z {
+  position: relative;
+  z-index: 2;
+}
+
+/* Interactive Modal & Control Panel (Direct replica of Libraries.dev / Beam) */
+.stadium-modal-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--stadium-card-radius);
+  background: #12151c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 24px 48px -18px rgba(0, 0, 0, 0.75),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.stadium-modal-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.stadium-segmented-capsule {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: var(--stadium-radius);
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 2px;
+}
+
+.stadium-segmented-item {
+  position: relative;
+  padding: 6px 14px;
+  border-radius: var(--stadium-radius);
+  border: none;
+  background: transparent;
+  color: #8b949e;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: color 150ms ease;
+  user-select: none;
+}
+
+.stadium-segmented-item.active {
+  color: #ffffff;
+}
+
+.stadium-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Stadium Button Types */
+.stadium-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 18px;
+  border-radius: var(--stadium-radius);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease,
+    transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stadium-btn:hover {
+  transform: translateY(-1px);
+}
+
+.stadium-btn:active {
+  transform: scale(0.975);
+}
+
+.stadium-btn--primary {
+  background: #1a1f29;
+  border: 1px solid #28303e;
+  color: #f8fafc;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28);
+}
+
+.stadium-btn--primary:hover {
+  background: #222936;
+  border-color: #333d4e;
+  color: #ffffff;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.38);
+}
+
+.stadium-btn--primary:active {
+  background: #161b23;
+  border-color: #242b38;
+}
+
+.stadium-btn--secondary {
+  background: #141720;
+  border: 1px solid #202530;
+  color: #cbd5e1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.stadium-btn--secondary:hover {
+  background: #1b202a;
+  border-color: #2a3242;
+  color: #f1f5f9;
+}
+
+/* Floating Stone / Pebble Pill Button */
+.stadium-btn--stone {
+  background: #13171f;
+  border: 1px solid #222834;
+  color: #e2e8f0;
+  padding: 8px 20px;
+  box-shadow: 0 8px 16px -6px rgba(0, 0, 0, 0.5);
+}
+
+.stadium-btn--stone:hover {
+  background: #191f2a;
+  border-color: #2d3546;
+  color: #ffffff;
+  box-shadow: 0 12px 22px -6px rgba(0, 0, 0, 0.65);
+}
+
+.stadium-btn--ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #94a3b8;
+}
+
+.stadium-btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+
+.stadium-btn--beam-wrap {
+  position: relative;
+  border-radius: var(--stadium-radius);
+  display: inline-block;
+  padding: 1px;
+}
+
+/* 36px Circular Icon Buttons */
+.stadium-circle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #191e27;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.stadium-circle-btn:hover {
+  background: #222834;
+  border-color: rgba(255, 255, 255, 0.24);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.stadium-circle-btn:active {
+  transform: scale(0.95);
+}
+
+/* Modal Content Grid */
+.stadium-modal-body {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  min-height: 320px;
+}
+
+@media (max-width: 900px) {
+  .stadium-modal-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Center Stage Preview Canvas */
+.stadium-canvas {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse at 50% 50%, rgba(56, 189, 248, 0.04) 0%, transparent 60%),
+    #0c0e13;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  min-height: 280px;
+}
+
+.stadium-canvas-card {
+  position: relative;
+  width: 260px;
+  padding: 20px;
+  border-radius: 16px;
+  background: #14171e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 16px 32px -12px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stadium-skeleton-line {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stadium-skeleton-line.short {
+  width: 55%;
+}
+
+.stadium-skeleton-line.mid {
+  width: 80%;
+}
+
+.stadium-canvas-footer {
+  margin-top: 20px;
+}
+
+/* Right Control Panel */
+.stadium-controls-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px;
+  background: #12151c;
+  overflow-y: auto;
+}
+
+.stadium-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stadium-group-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #8b949e;
+  letter-spacing: -0.01em;
+}
+
+/* Chips Grid */
+.stadium-chips-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.stadium-chip {
+  padding: 6px 13px;
+  border-radius: var(--stadium-chip-radius);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: all 130ms ease;
+  border: 1px solid transparent;
+}
+
+.stadium-chip.inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #8b949e;
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.stadium-chip.inactive:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.stadium-chip.active {
+  background: #28303d;
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+/* Floating AI State Pills (from Image 4) */
+.stadium-ai-pills-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+
+.stadium-floating-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 22px;
+  border-radius: var(--stadium-radius);
+  background: #13171f;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 12px 24px -8px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  user-select: none;
+  transition: all 150ms ease;
+}
+
+.stadium-floating-pill:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+  box-shadow:
+    0 16px 28px -8px rgba(0, 0, 0, 0.75),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+/* Onboarding Feature Cards (from Image 2) */
+.stadium-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.stadium-feature-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px;
+  border-radius: var(--stadium-card-radius);
+  background: #13161d;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 16px 32px -12px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.stadium-badge-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #0284c7;
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.stadium-feature-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.stadium-feature-desc {
+  margin: 0;
+  font-size: 12.5px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.stadium-feature-snippet {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Top Mode Switcher (Agent · Code · Thread) Stadium Redesign */
+.stadium-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  border-radius: var(--stadium-card-radius);
+  background: #12151c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 20px 40px -15px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.stadium-mode-track {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border-radius: 9999px;
+  background: #090a0d;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 1.5px 4px rgba(0, 0, 0, 0.85);
+  gap: 3px;
+  width: fit-content;
+}
+
+.stadium-mode-item-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stadium-mode-item-wrap.is-active {
+  background: #181d28;
+  border-radius: 9999px;
+  animation: stadiumModePulse 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes stadiumModePulse {
+  0% {
+    transform: scale(0.96);
+    filter: brightness(1.25);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+/* Ambient colored illumination according to mode */
+.stadium-mode-item-wrap.is-active[data-mode='agent'] {
+  box-shadow:
+    0 0 18px -2px rgba(56, 189, 248, 0.38),
+    0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.stadium-mode-item-wrap.is-active[data-mode='code'] {
+  box-shadow:
+    0 0 18px -2px rgba(45, 212, 191, 0.38),
+    0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.stadium-mode-item-wrap.is-active[data-mode='chat'] {
+  box-shadow:
+    0 0 18px -2px rgba(244, 63, 94, 0.38),
+    0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.stadium-mode-item-wrap.is-active[data-color='colorful'] {
+  box-shadow:
+    0 0 18px -2px rgba(168, 85, 247, 0.35),
+    0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.stadium-mode-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 22px;
+  min-width: 82px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #8b949e;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: color 150ms ease;
+  user-select: none;
+  text-align: center;
+}
+
+.stadium-mode-btn:hover {
+  color: #f1f5f9;
+}
+
+.stadium-mode-btn.active {
+  color: #ffffff;
+}
+
+.stadium-mode-btn-text {
+  position: relative;
+  z-index: 2;
+}
+
+.stadium-mode-indicator-layer {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.stadium-mode-pill-backdrop {
+  width: 100%;
+  height: 100%;
+  min-height: 32px;
+  border-radius: 9999px;
+  background: #26282d;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.stadium-mode-indicator-layer[data-mode='agent'] {
+  box-shadow: 0 0 18px -2px rgba(56, 189, 248, 0.4);
+}
+
+.stadium-mode-indicator-layer[data-mode='code'] {
+  box-shadow: 0 0 18px -2px rgba(45, 212, 191, 0.4);
+}
+
+.stadium-mode-indicator-layer[data-mode='chat'] {
+  box-shadow: 0 0 18px -2px rgba(244, 63, 94, 0.4);
+}
+
+.stadium-mode-indicator-layer[data-color='colorful'] {
+  box-shadow: 0 0 18px -2px rgba(168, 85, 247, 0.4);
+}
+
+.stadium-mode-desc-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stadium-mode-desc-text {
+  font-size: 12.5px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.stadium-mode-desc-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  white-space: nowrap;
+}
+
+/* Integrated TitleBar Header Mockup */
+.stadium-header-mockup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-radius: var(--stadium-card-radius);
+  background: #0d1017;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 16px 32px -12px rgba(0, 0, 0, 0.7);
+  flex-wrap: wrap;
+}
+
+.stadium-mockup-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.stadium-mockup-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.stadium-mockup-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stadium-pill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 9999px;
+  background: #141720;
+  border: 1px solid #222834;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #cbd5e1;
+}
+
+.stadium-pill-badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+
+.stadium-pill-badge.quota .dot {
+  background: #38bdf8;
+}

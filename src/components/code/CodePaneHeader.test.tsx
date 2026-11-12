@@ -400,4 +400,124 @@ describe('CodePaneHeader - Behavioral Tests', () => {
     expect(screen.getByText('Terminal')).toBeInTheDocument();
     expect(screen.getByText('New Tab')).toBeInTheDocument();
   });
+
+  it('renders drag grip when canSwap is true and triggers onDragGripPointerDown', () => {
+    const onDragGrip = vi.fn();
+    render(
+      <CodePaneHeader
+        nodeId="leaf-1"
+        occupant={terminalOccupant}
+        displayName="Terminal 1"
+        workspaceName="Core App"
+        canSwap={true}
+        isFullscreen={false}
+        isMenuOpen={false}
+        paneMenuKind={null}
+        renamingLeafId={null}
+        renameValue=""
+        availableEngines={[]}
+        onOpenMenu={vi.fn()}
+        onCloseMenu={vi.fn()}
+        onToggleFullscreen={vi.fn()}
+        onClosePane={vi.fn()}
+        onSplit={vi.fn()}
+        onSwap={vi.fn()}
+        onExtractToTab={vi.fn()}
+        onEqualize={vi.fn()}
+        onStartRename={vi.fn()}
+        onChangeRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        onLaunchTerminal={vi.fn()}
+        onLaunchAgent={vi.fn()}
+        onNewTab={vi.fn()}
+        onNewSession={vi.fn()}
+        onPointerDownHeader={vi.fn()}
+        onTerminalCommand={vi.fn()}
+        onDragGripPointerDown={onDragGrip}
+      />
+    );
+
+    const grip = screen.getByTestId('pane-drag-grip');
+    expect(grip).toBeInTheDocument();
+
+    // Pointer down on grip
+    const pointerDownEvent = new MouseEvent('pointerdown', { bubbles: true, cancelable: true });
+    grip.dispatchEvent(pointerDownEvent);
+    expect(onDragGrip).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides drag grip when canSwap is false or pane is fullscreen', () => {
+    const { rerender } = render(
+      <CodePaneHeader
+        nodeId="leaf-1"
+        occupant={terminalOccupant}
+        displayName="Terminal 1"
+        workspaceName="Core App"
+        canSwap={false}
+        isFullscreen={false}
+        isMenuOpen={false}
+        paneMenuKind={null}
+        renamingLeafId={null}
+        renameValue=""
+        availableEngines={[]}
+        onOpenMenu={vi.fn()}
+        onCloseMenu={vi.fn()}
+        onToggleFullscreen={vi.fn()}
+        onClosePane={vi.fn()}
+        onSplit={vi.fn()}
+        onSwap={vi.fn()}
+        onExtractToTab={vi.fn()}
+        onEqualize={vi.fn()}
+        onStartRename={vi.fn()}
+        onChangeRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        onLaunchTerminal={vi.fn()}
+        onLaunchAgent={vi.fn()}
+        onNewTab={vi.fn()}
+        onNewSession={vi.fn()}
+        onPointerDownHeader={vi.fn()}
+        onTerminalCommand={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByTestId('pane-drag-grip')).toBeNull();
+
+    rerender(
+      <CodePaneHeader
+        nodeId="leaf-1"
+        occupant={terminalOccupant}
+        displayName="Terminal 1"
+        workspaceName="Core App"
+        canSwap={true}
+        isFullscreen={true}
+        isMenuOpen={false}
+        paneMenuKind={null}
+        renamingLeafId={null}
+        renameValue=""
+        availableEngines={[]}
+        onOpenMenu={vi.fn()}
+        onCloseMenu={vi.fn()}
+        onToggleFullscreen={vi.fn()}
+        onClosePane={vi.fn()}
+        onSplit={vi.fn()}
+        onSwap={vi.fn()}
+        onExtractToTab={vi.fn()}
+        onEqualize={vi.fn()}
+        onStartRename={vi.fn()}
+        onChangeRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        onLaunchTerminal={vi.fn()}
+        onLaunchAgent={vi.fn()}
+        onNewTab={vi.fn()}
+        onNewSession={vi.fn()}
+        onPointerDownHeader={vi.fn()}
+        onTerminalCommand={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByTestId('pane-drag-grip')).toBeNull();
+  });
 });

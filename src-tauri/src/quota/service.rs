@@ -13,10 +13,58 @@ use std::time::{Duration, Instant};
 
 struct QuotaCache {
     entries: HashMap<String, (Instant, ProviderQuotaStatus)>,
+    epochs: HashMap<String, u64>,
+}
+
+impl QuotaCache {
+    fn open() -> Self {
+        Self {
+            entries: load_persisted_cache(),
+            epochs: HashMap::new(),
+        }
+    }
+}
+
+fn bump_epoch_in_cache(cache: &mut QuotaCache, provider: &str) -> u64 {
+    let next = cache
+        .epochs
+        .get(provider)
+        .copied()
+        .unwrap_or(0)
+        .wrapping_add(1)
+        .max(1);
+    cache.epochs.insert(provider.to_string(), next);
+    next
+}
+
+fn commit_swr_results_if_epoch_matches(
+    cache: &mut QuotaCache,
+    results: Vec<(String, u64, ProviderQuotaStatus)>,
+) -> Vec<String> {
+    let mut updated = Vec::new();
+    for (p, captured_epoch, status) in results {
+        let current_epoch = cache.epochs.get(&p).copied().unwrap_or(0);
+        if current_epoch != captured_epoch {
+            continue;
+        }
+        cache.entries.insert(p.clone(), (Instant::now(), status));
+        updated.push(p);
+    }
+    updated
 }
 
 static CACHE: Mutex<Option<QuotaCache>> = Mutex::new(None);
 const CACHE_TTL_SECS: u64 = 180;
+// OpenCode Go exposes short-lived 5-hour windows; refresh it more aggressively.
+const OPENCODE_CACHE_TTL_SECS: u64 = 60;
+
+fn cache_ttl_secs(provider: &str) -> u64 {
+    if provider == "opencode" {
+        OPENCODE_CACHE_TTL_SECS
+    } else {
+        CACHE_TTL_SECS
+    }
+}
 static IS_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn quota_cache_path() -> PathBuf {
@@ -33,10 +81,27 @@ fn quota_cache_path() -> PathBuf {
 fn load_persisted_cache() -> HashMap<String, (Instant, ProviderQuotaStatus)> {
     let p = quota_cache_path();
     let mut map = HashMap::new();
+    let now = now_ms();
     if let Ok(data) = std::fs::read(&p) {
         if let Ok(saved) = serde_json::from_slice::<HashMap<String, ProviderQuotaStatus>>(&data) {
             for (k, v) in saved {
-                map.insert(k, (Instant::now(), v));
+                // Drop pre-v2 OpenCode entries: they reported a fake 0% without calling the API.
+                if k == "opencode"
+                    && v.metadata
+                        .get("quotaSchema")
+                        .and_then(|value| value.as_i64())
+                        != Some(2)
+                {
+                    continue;
+                }
+                let ttl_ms = (cache_ttl_secs(&k) * 1000) as i64;
+                let age_ms = now.saturating_sub(v.last_updated_ms);
+                if age_ms >= 0 && age_ms < ttl_ms {
+                    let instant = Instant::now()
+                        .checked_sub(Duration::from_millis(age_ms as u64))
+                        .unwrap_or_else(Instant::now);
+                    map.insert(k, (instant, v));
+                }
             }
         }
     }
@@ -57,12 +122,27 @@ fn save_persisted_cache(cache: &QuotaCache) {
 pub fn get_cached_provider_status(provider: &str) -> Option<ProviderQuotaStatus> {
     let mut cache_guard = CACHE.lock().ok()?;
     if cache_guard.is_none() {
-        *cache_guard = Some(QuotaCache {
-            entries: load_persisted_cache(),
-        });
+        *cache_guard = Some(QuotaCache::open());
     }
     let cache = cache_guard.as_ref()?;
-    cache.entries.get(provider).map(|(_, s)| s.clone())
+    let (cached_instant, s) = cache.entries.get(provider)?;
+    if cached_instant.elapsed() > Duration::from_secs(cache_ttl_secs(provider)) {
+        return None;
+    }
+    Some(s.clone())
+}
+
+pub fn invalidate_provider_cache(provider: &str) {
+    if let Ok(mut cache_guard) = CACHE.lock() {
+        if cache_guard.is_none() {
+            *cache_guard = Some(QuotaCache::open());
+        }
+        if let Some(ref mut cache) = *cache_guard {
+            cache.entries.remove(provider);
+            bump_epoch_in_cache(cache, provider);
+            save_persisted_cache(cache);
+        }
+    }
 }
 
 
@@ -90,7 +170,7 @@ fn provider_name(p: &str) -> &str {
         "qoder" => "Qoder",
         "claude" => "Claude",
         "codex" => "Codex",
-        "opencode" => "OpenCode",
+        "opencode" => "OpenCode Go",
         "grok" => "Grok",
         "gemini" => "Gemini",
         "cursor" => "Cursor",
@@ -140,7 +220,15 @@ fn build_cache_result(providers: &[&str]) -> Value {
 }
 
 #[tauri::command]
-pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
+pub async fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
+    tokio::task::spawn_blocking(move || {
+        get_subscription_quotas_direct(request, force)
+    })
+    .await
+    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+}
+
+pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool>) -> Value {
     let is_force = force.unwrap_or(false)
         || request
             .as_ref()
@@ -186,59 +274,66 @@ pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> V
     {
         let mut cache_guard = CACHE.lock().unwrap();
         if cache_guard.is_none() {
-            *cache_guard = Some(QuotaCache {
-                entries: load_persisted_cache(),
-            });
+            *cache_guard = Some(QuotaCache::open());
         }
     }
 
     let mut to_fetch: Vec<String> = Vec::new();
+    let mut to_fetch_epochs: Vec<(String, u64)> = Vec::new();
     {
-        let cache_guard = CACHE.lock().unwrap();
-        let cache = cache_guard.as_ref().unwrap();
+        let mut cache_guard = CACHE.lock().unwrap();
+        let cache = cache_guard.as_mut().unwrap();
 
         for &p in &target_providers {
             let needs_fetch = if is_force {
                 true
             } else if let Some((fetched_at, _)) = cache.entries.get(p) {
-                fetched_at.elapsed() > Duration::from_secs(CACHE_TTL_SECS)
+                fetched_at.elapsed() > Duration::from_secs(cache_ttl_secs(p))
             } else {
                 true
             };
 
             if needs_fetch {
                 to_fetch.push(p.to_string());
+                let epoch = if is_force {
+                    bump_epoch_in_cache(cache, p)
+                } else {
+                    cache.epochs.get(p).copied().unwrap_or(0)
+                };
+                to_fetch_epochs.push((p.to_string(), epoch));
             }
         }
     }
 
     // Stale-While-Revalidate: ALWAYS return immediately if not forced, refresh in background
     if !is_force {
-        if !to_fetch.is_empty() {
+        if !to_fetch_epochs.is_empty() {
             if !IS_REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                let _target_list: Vec<String> = target_providers.iter().map(|&s| s.to_string()).collect();
                 std::thread::spawn(move || {
                     let mut fresh_entries = Vec::new();
-                    for p in to_fetch {
+                    for (p, epoch) in to_fetch_epochs {
                         let status = fetch_single_provider(&p);
-                        fresh_entries.push((p, status));
+                        fresh_entries.push((p, epoch, status));
                     }
+                    let mut updated_providers: Vec<String> = Vec::new();
                     if let Ok(mut guard) = CACHE.lock() {
                         if let Some(cache) = guard.as_mut() {
-                            for (p, status) in fresh_entries {
-                                cache.entries.insert(p, (Instant::now(), status));
+                            updated_providers =
+                                commit_swr_results_if_epoch_matches(cache, fresh_entries);
+                            if !updated_providers.is_empty() {
+                                save_persisted_cache(cache);
                             }
-                            save_persisted_cache(cache);
                         }
                     }
                     IS_REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
 
-                    // Push live updated quotas to frontend WebView asynchronously
+                    // Push live updated quotas ONLY for providers whose cache epoch stayed valid
                     #[cfg(not(test))]
-                    {
+                    if !updated_providers.is_empty() {
                         use tauri::Emitter;
                         if let Some(app) = crate::get_app_handle() {
-                            let targets: Vec<&str> = _target_list.iter().map(|s| s.as_str()).collect();
+                            let targets: Vec<&str> =
+                                updated_providers.iter().map(|s| s.as_str()).collect();
                             let updated_payload = build_cache_result(&targets);
                             let _ = app.emit("kite://subscription-quotas-updated", updated_payload);
                         }
@@ -279,5 +374,34 @@ pub fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> V
     }
 
     build_cache_result(&target_providers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_swr_stale_epoch_writer_skips_insert_after_invalidation() {
+        let mut cache = QuotaCache {
+            entries: HashMap::new(),
+            epochs: HashMap::new(),
+        };
+        cache.epochs.insert("antigravity".to_string(), 1);
+
+        let captured_epoch = cache.epochs.get("antigravity").copied().unwrap_or(0);
+        // Simulate account switch bumping the provider epoch while SWR was fetching
+        bump_epoch_in_cache(&mut cache, "antigravity");
+
+        let mut stale_status = default_provider_status("antigravity");
+        stale_status.is_auth = true;
+        stale_status.metadata.insert("email".to_string(), serde_json::json!("old@example.com"));
+
+        let inserted = commit_swr_results_if_epoch_matches(
+            &mut cache,
+            vec![("antigravity".to_string(), captured_epoch, stale_status)],
+        );
+        assert!(inserted.is_empty(), "stale SWR fetch must be discarded after invalidation");
+        assert!(!cache.entries.contains_key("antigravity"));
+    }
 }
 

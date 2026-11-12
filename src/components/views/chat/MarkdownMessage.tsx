@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CheckIcon, CopyIcon } from './ChatIcons';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
+import { MermaidDiagram } from '../../ui/MermaidDiagram';
+import { toast } from '../../../lib/toast';
 
 function isFilePathCandidate(text: string): boolean {
   let trimmed = text.trim();
@@ -66,7 +68,7 @@ const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => 
           type="button"
           className="md-codeblock__copy"
           onClick={() => {
-            void navigator.clipboard.writeText(code);
+            void toast.copy(code, `Copiado bloque ${lang || 'código'}`);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
           }}
@@ -138,8 +140,12 @@ export const MarkdownMessage: React.FC<{ text: string; workspaceId?: string | nu
           code: ({ className, children }) => {
             const raw = String(children ?? '');
             const match = /language-([\w-]+)/.exec(className || '');
+            const lang = (match?.[1] ?? '').toLowerCase();
             const isBlock = Boolean(match) || raw.includes('\n');
             if (isBlock) {
+              if (lang === 'mermaid') {
+                return <MermaidDiagram code={raw.replace(/\n$/, '')} />;
+              }
               return <CodeBlock lang={match?.[1] ?? ''} code={raw.replace(/\n$/, '')} />;
             }
             const isPath = isFilePathCandidate(raw);

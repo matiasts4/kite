@@ -1,16 +1,22 @@
 #!/usr/bin/env node
 /**
- * Kite agent handoff CLI — writes inbox requests; Kite desktop delivers full task file body.
+ * Kite agent handoff CLI.
+ * Writes one inbox request as a trace. Delivery goes through `kite dispatch`.
  * Does not invoke model CLIs.
  */
 
 import fs from 'node:fs';
+import net from 'node:net';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const WAIT_MS = 8000;
-const POLL_MS = 100;
+const CONNECT_MS = 400;
+const CORE_PIPE_CONNECT_MS = 500;
+const CORE_PIPE_RESPONSE_MS = 8000;
+const CORE_FRAME_HEADER_LEN = 9;
+const CORE_MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
 
 function usage() {
   console.error(`Uso:
@@ -68,23 +74,285 @@ function writeRequest(cwd, payload) {
   return id;
 }
 
-function sleepSync(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    // busy wait — short polls for inbox result
+function offlineReceipt(id) {
+  return {
+    schemaVersion: 1,
+    id,
+    op: 'dispatch',
+    status: 'rejected',
+    address: '',
+    submitted: false,
+    error: 'runtime_offline',
+  };
+}
+
+function endpointFile() {
+  const roaming = process.env.APPDATA;
+  if (!roaming) return null;
+  for (const name of ['Kite Code Dev', 'Kite Code']) {
+    const file = path.join(roaming, name, 'dispatch-endpoint.json');
+    if (fs.existsSync(file)) return file;
+  }
+  return null;
+}
+
+export function dispatchArgv(request, parent) {
+  if (request.op === 'spawn') {
+    const argv = ['dispatch', 'run', '--via', 'terminal', '--engine', request.engine, '--file', request.taskPath];
+    if (typeof parent === 'string' && /^(session:|thread:|alias:)/.test(parent)) {
+      argv.push('--parent', parent);
+    }
+    return argv;
+  }
+  if (request.op === 'inject') {
+    return ['dispatch', 'send', request.target, '--file', request.taskPath];
+  }
+  return ['dispatch', 'ls'];
+}
+
+function askLoopback(id, request) {
+  const file = endpointFile();
+  if (!file) return null;
+  const argv = dispatchArgv(request, process.env.KITE_ADDRESS);
+  const waitMs = request.op === 'agents' ? CONNECT_MS : 8000;
+  const code = `
+    const fs = require('fs');
+    const net = require('net');
+    let endpoint;
+    try { endpoint = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); }
+    catch { process.exit(1); }
+    if (!endpoint || !endpoint.port || !endpoint.token) process.exit(1);
+    const socket = net.connect({ host: '127.0.0.1', port: Number(endpoint.port) });
+    socket.setTimeout(${waitMs});
+    const fail = () => { socket.destroy(); process.exit(1); };
+    socket.on('timeout', fail);
+    socket.on('error', fail);
+    socket.on('connect', () => {
+      socket.write(JSON.stringify({
+        token: endpoint.token,
+        id: process.argv[2],
+        argv: JSON.parse(process.argv[6]),
+        caller: process.argv[3] || 'human',
+        from: process.argv[4] || '',
+        workspace: process.argv[5] || '',
+      }) + '\\n');
+    });
+    let buf = '';
+    socket.on('data', (chunk) => {
+      buf += String(chunk);
+      if (!buf.includes('\\n')) return;
+      process.stdout.write(buf.split('\\n')[0]);
+      socket.end();
+      process.exit(0);
+    });
+  `;
+  const child = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      code,
+      file,
+      id,
+      process.env.KITE_DISPATCH === '1' ? 'agent' : 'human',
+      process.env.KITE_ADDRESS || '',
+      request.cwd || '',
+      JSON.stringify(argv),
+    ],
+    { timeout: waitMs + 200, encoding: 'utf8' }
+  );
+  if (child.status !== 0 || !child.stdout) return null;
+  try {
+    return JSON.parse(child.stdout);
+  } catch {
+    return null;
   }
 }
 
-function waitForResultSync(cwd, id) {
-  const resultPath = path.join(cwd, '.kite', 'inbox', `${id}.result.json`);
-  const deadline = Date.now() + WAIT_MS;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(resultPath)) {
-      return JSON.parse(fs.readFileSync(resultPath, 'utf8'));
-    }
-    sleepSync(POLL_MS);
+/**
+ * Resolves the `kite-core` daemon endpoint for this platform.
+ * Installed builds use `kite-core-v1`. Development builds set
+ * `KITE_CORE_CHANNEL=dev` and use `kite-core-v1-dev`.
+ * Windows: `\\.\pipe\<stem>-<username>`; Unix: the XDG runtime socket.
+ */
+export function corePipePath(env = process.env, platform = process.platform) {
+  if (env.KITE_CORE_PIPE) return env.KITE_CORE_PIPE;
+  const stem = env.KITE_CORE_CHANNEL === 'dev' ? 'kite-core-v1-dev' : 'kite-core-v1';
+  if (platform === 'win32') {
+    const user = env.USERNAME || env.USER || 'default';
+    return `\\\\.\\pipe\\${stem}-${user}`;
   }
-  return null;
+  if (env.XDG_RUNTIME_DIR) return `${env.XDG_RUNTIME_DIR}/${stem}.sock`;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'default';
+  return `/tmp/${stem}-${uid}.sock`;
+}
+
+/** Candidate `core-session.token` locations, dev build first. */
+export function coreTokenPaths(env = process.env) {
+  const roaming = env.APPDATA;
+  if (!roaming) return [];
+  return ['Kite Code Dev', 'Kite Code'].map((name) =>
+    path.join(roaming, name, 'core-session.token')
+  );
+}
+
+export function readCoreToken(options = {}) {
+  const candidates = options.coreTokenPath
+    ? [options.coreTokenPath]
+    : coreTokenPaths(options.env || process.env);
+  for (const file of candidates) {
+    try {
+      const token = fs.readFileSync(file, 'utf8').trim();
+      if (token) return token;
+    } catch {
+      // Try the next candidate location.
+    }
+  }
+  return '';
+}
+
+function encodeCoreFrame(channelId, kind, payload) {
+  const header = Buffer.alloc(CORE_FRAME_HEADER_LEN);
+  header.writeUInt32LE(channelId >>> 0, 0);
+  header.writeUInt8(kind & 0xff, 4);
+  header.writeUInt32LE(payload.length, 5);
+  return Buffer.concat([header, payload]);
+}
+
+/**
+ * Dispatches one agent action straight through the `kite-core` daemon pipe:
+ * JSON-line handshake, then a 9-byte framed Channel 0 `agent.dispatch` RPC.
+ *
+ * Resolves the RPC `result` object, or `null` when no daemon answers.
+ */
+export function sendCorePipeDispatch(action, payload = {}, options = {}) {
+  return new Promise((resolve) => {
+    const pipePath = options.pipePath || corePipePath();
+    const authToken = options.authToken ?? readCoreToken(options);
+    const connectMs = options.connectTimeoutMs ?? CORE_PIPE_CONNECT_MS;
+    const responseMs = options.responseTimeoutMs ?? CORE_PIPE_RESPONSE_MS;
+
+    let socket = null;
+    let buffer = Buffer.alloc(0);
+    let framed = false;
+    let settled = false;
+    let timer = null;
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      try {
+        socket?.destroy();
+      } catch {
+        // The socket may already be gone.
+      }
+      resolve(value);
+    };
+    const fail = () => finish(null);
+    const armTimer = (ms) => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(fail, ms);
+    };
+
+    armTimer(connectMs);
+    try {
+      socket = net.createConnection(pipePath);
+    } catch {
+      fail();
+      return;
+    }
+
+    socket.on('error', fail);
+    socket.on('close', fail);
+    socket.on('connect', () => {
+      socket.write(
+        JSON.stringify({
+          protocol: 'kite-core/v1',
+          framed: true,
+          client: 'kite-agent-cli',
+          pid: process.pid,
+          authToken,
+        }) + '\n'
+      );
+    });
+
+    socket.on('data', (chunk) => {
+      if (settled) return;
+      buffer = Buffer.concat([buffer, chunk]);
+
+      if (!framed) {
+        const newline = buffer.indexOf(0x0a);
+        if (newline < 0) return;
+        const line = buffer.subarray(0, newline).toString('utf8');
+        buffer = buffer.subarray(newline + 1);
+        let handshake = null;
+        try {
+          handshake = JSON.parse(line);
+        } catch {
+          return fail();
+        }
+        if (!handshake || handshake.protocol !== 'kite-core/v1') return fail();
+        framed = true;
+        armTimer(responseMs);
+        const request = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'agent.dispatch',
+          params: { action, ...payload },
+        };
+        socket.write(
+          encodeCoreFrame(0, 0x00, Buffer.from(JSON.stringify(request), 'utf8'))
+        );
+      }
+
+      while (buffer.length >= CORE_FRAME_HEADER_LEN) {
+        const channelId = buffer.readUInt32LE(0);
+        const kind = buffer.readUInt8(4);
+        const payloadLen = buffer.readUInt32LE(5);
+        if (payloadLen > CORE_MAX_FRAME_PAYLOAD) return fail();
+        if (buffer.length < CORE_FRAME_HEADER_LEN + payloadLen) return;
+        const framePayload = buffer.subarray(
+          CORE_FRAME_HEADER_LEN,
+          CORE_FRAME_HEADER_LEN + payloadLen
+        );
+        buffer = buffer.subarray(CORE_FRAME_HEADER_LEN + payloadLen);
+        // Terminal frames may arrive first; only a Channel 0 RPC reply answers us.
+        if (channelId !== 0 || kind !== 0x00) continue;
+        let reply = null;
+        try {
+          reply = JSON.parse(framePayload.toString('utf8'));
+        } catch {
+          return fail();
+        }
+        if (reply && reply.error) return fail();
+        return finish(reply && reply.result !== undefined ? reply.result : null);
+      }
+    });
+  });
+}
+
+/** Maps a workspace inbox request onto the daemon `agent.dispatch` action. */
+export function coreDispatchParams(request, id) {
+  const caller = process.env.KITE_DISPATCH === '1' ? 'agent' : 'human';
+  const from = process.env.KITE_ADDRESS || '';
+  const base = { id, caller, from, workspace: request.cwd || '' };
+
+  if (request.op === 'spawn') {
+    return {
+      action: 'run',
+      payload: { ...base, via: 'terminal', engine: request.engine, file: request.taskPath },
+    };
+  }
+  if (request.op === 'inject') {
+    return {
+      action: 'send',
+      payload: { ...base, address: request.target, file: request.taskPath },
+    };
+  }
+  return { action: 'ls', payload: base };
 }
 
 export function buildInboxRequest({ op, cwd, flags }) {
@@ -140,6 +408,17 @@ export function buildInboxRequest({ op, cwd, flags }) {
   throw new Error(`Operación desconocida: ${op}`);
 }
 
+function emitDispatchResult(id, result) {
+  if (!result) {
+    console.log(JSON.stringify(offlineReceipt(id)));
+    return 1;
+  }
+  const receipt = result.receipt || result;
+  console.log(JSON.stringify(receipt));
+  if (typeof result.exit === 'number') return result.exit;
+  return receipt.error || receipt.ok === false ? 1 : 0;
+}
+
 export function runCli(argv, options = {}) {
   const cwd = options.cwd || process.cwd();
   const { positional, flags } = parseArgs(argv);
@@ -157,27 +436,29 @@ export function runCli(argv, options = {}) {
     return 1;
   }
 
-  const id = writeRequest(cwd, request);
+  const id = writeRequest(cwd, { ...request, id: request.id || undefined });
 
   if (flags.noWait || options.noWait) {
-    console.log(JSON.stringify({ id, written: true }, null, 2));
+    console.log(JSON.stringify({ id, written: true, status: 'queued', submitted: false }));
     return 0;
   }
 
-  const result = options.waitFn ? options.waitFn(cwd, id) : waitForResultSync(cwd, id);
-  if (!result) {
-    console.error(
-      'La app Kite no recogió la orden a tiempo. Abrí el workspace en Kite Code e intentá de nuevo.'
-    );
-    return 1;
-  }
+  // Prefer the GUI loopback endpoint while a desktop window is mounted.
+  const result = options.waitFn ? options.waitFn(cwd, id) : askLoopback(id, request);
+  if (result || options.waitFn) return emitDispatchResult(id, result);
 
-  console.log(JSON.stringify(result, null, 2));
-  return result.ok === false ? 1 : 0;
+  // The GUI is closed or its endpoint is stale: dispatch straight through the
+  // `kite-core` daemon pipe so agents keep running headless.
+  const pipeFn = options.pipeFn || sendCorePipeDispatch;
+  const { action, payload } = coreDispatchParams(request, id);
+  return pipeFn(action, payload).then(
+    (pipeResult) => emitDispatchResult(id, pipeResult),
+    () => emitDispatchResult(id, null)
+  );
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 
 if (isMain) {
-  process.exit(runCli(process.argv.slice(2)));
+  void Promise.resolve(runCli(process.argv.slice(2))).then((code) => process.exit(code));
 }

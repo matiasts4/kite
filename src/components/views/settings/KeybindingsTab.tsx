@@ -1,63 +1,107 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  getShortcuts,
+  saveShortcut,
+  resetShortcut,
+  resetAllShortcuts,
+  formatKeyCombination,
+  getPlatform,
+  SHORTCUTS_CHANGED_EVENT,
+} from '../../../lib/shortcuts/shortcutsRegistry';
+import { ShortcutCategory, ShortcutItem, SupportedPlatform } from '../../../lib/shortcuts/types';
+import { ShortcutRecordModal } from '../../modals/ShortcutRecordModal';
 
-interface KeybindingItem {
-  id: string;
-  category: 'Navigation' | 'Modes' | 'Terminal & Code' | 'Voice';
-  action: string;
-  keys: string[];
+export interface KeybindingsTabProps {
+  platform?: SupportedPlatform;
 }
 
-const KEYBINDINGS: KeybindingItem[] = [
-  { id: 'toggle-sidebar', category: 'Navigation', action: 'Toggle lateral sidebar', keys: ['Ctrl', 'B'] },
-  { id: 'open-settings', category: 'Navigation', action: 'Open application settings', keys: ['Ctrl', ','] },
-  { id: 'command-palette', category: 'Navigation', action: 'Open command palette', keys: ['Ctrl', 'P'] },
-  { id: 'quick-switcher', category: 'Navigation', action: 'Quick switcher', keys: ['Ctrl', 'K'] },
-  { id: 'back-esc', category: 'Navigation', action: 'Dismiss modal / Return', keys: ['Esc'] },
-
-  { id: 'mode-agent', category: 'Modes', action: 'Switch to Agent mode', keys: ['Ctrl', '1'] },
-  { id: 'mode-code', category: 'Modes', action: 'Switch to Code Workspace mode', keys: ['Ctrl', '2'] },
-  { id: 'mode-chat', category: 'Modes', action: 'Switch to Chat mode', keys: ['Ctrl', '3'] },
-  { id: 'toggle-dock', category: 'Modes', action: 'Toggle right dock / browser', keys: ['Ctrl', 'Shift', 'B'] },
-
-  { id: 'new-terminal', category: 'Terminal & Code', action: 'Open new terminal', keys: ['Ctrl', 'Shift', '`'] },
-  { id: 'split-vertical', category: 'Terminal & Code', action: 'Split pane vertically', keys: ['Ctrl', '\\'] },
-  { id: 'split-horizontal', category: 'Terminal & Code', action: 'Split pane horizontally', keys: ['Ctrl', 'Shift', '\\'] },
-  { id: 'close-pane', category: 'Terminal & Code', action: 'Close focused pane', keys: ['Ctrl', 'W'] },
-  { id: 'save-file', category: 'Terminal & Code', action: 'Save active file', keys: ['Ctrl', 'S'] },
-
-  { id: 'dictation-toggle', category: 'Voice', action: 'Start / Stop voice dictation', keys: ['Ctrl', 'Shift', 'D'] },
-];
-
-export const KeybindingsTab: React.FC = () => {
+export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPlatform }) => {
+  const platform = propPlatform || getPlatform();
   const [query, setQuery] = useState('');
+  const [shortcuts, setShortcuts] = useState<ShortcutItem[]>(() => getShortcuts(platform));
+  const [editingShortcut, setEditingShortcut] = useState<ShortcutItem | null>(null);
+
+  // Sync state whenever shortcuts change
+  const reloadShortcuts = useCallback(() => {
+    setShortcuts(getShortcuts(platform));
+  }, [platform]);
+
+  useEffect(() => {
+    reloadShortcuts();
+    window.addEventListener(SHORTCUTS_CHANGED_EVENT, reloadShortcuts);
+    return () => window.removeEventListener(SHORTCUTS_CHANGED_EVENT, reloadShortcuts);
+  }, [reloadShortcuts]);
+
+  const customCount = useMemo(() => {
+    return shortcuts.filter((s) => s.customKeys && s.customKeys.length > 0).length;
+  }, [shortcuts]);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return KEYBINDINGS;
+    if (!query.trim()) return shortcuts;
     const q = query.toLowerCase();
-    return KEYBINDINGS.filter(
-      (k) => k.action.toLowerCase().includes(q) || k.keys.join('+').toLowerCase().includes(q)
-    );
-  }, [query]);
+    return shortcuts.filter((k) => {
+      const activeKeys = k.customKeys || k.defaultKeys;
+      const formatted = formatKeyCombination(activeKeys, platform).toLowerCase();
+      const keysText = activeKeys.join('+').toLowerCase();
+      return (
+        k.action.toLowerCase().includes(q) ||
+        k.description.toLowerCase().includes(q) ||
+        keysText.includes(q) ||
+        formatted.includes(q)
+      );
+    });
+  }, [shortcuts, query, platform]);
 
-  const categories: KeybindingItem['category'][] = ['Navigation', 'Modes', 'Terminal & Code', 'Voice'];
+  const categories: ShortcutCategory[] = ['Navigation', 'Modes', 'Terminal & Code', 'Voice'];
+
+  const handleSave = (id: string, keys: string[]) => {
+    saveShortcut(id, keys, platform);
+    reloadShortcuts();
+  };
+
+  const handleReset = (id: string) => {
+    resetShortcut(id);
+    reloadShortcuts();
+  };
+
+  const handleResetAll = () => {
+    resetAllShortcuts();
+    reloadShortcuts();
+  };
 
   return (
     <>
       <section className="settings-group">
-        <h2 className="settings-group__title">Keyboard Shortcuts</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <h2 className="settings-group__title" style={{ margin: 0 }}>
+            Keyboard Shortcuts
+          </h2>
+          {customCount > 0 && (
+            <button
+              type="button"
+              className="ghost-button action-button--row"
+              onClick={handleResetAll}
+              style={{ fontSize: 'var(--text-caption)' }}
+              title="Restablecer todas las combinaciones personalizadas a los valores por defecto"
+            >
+              Restablecer todos ({customCount} personalizados)
+            </button>
+          )}
+        </div>
+
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Find keybindings</h3>
-              <p>Type to filter shortcuts across application modes and terminal panes.</p>
+              <h3 className="settings-row__title">Buscar atajos</h3>
+              <p>Filtra comandos o presiona en cualquier atajo para editarlo y reasignar teclas.</p>
             </div>
             <div className="settings-row__control settings-row__control--menu">
               <input
                 aria-label="Filter keybindings"
                 className="settings-control ui-button"
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search shortcuts…"
-                style={{ textAlign: 'left', minWidth: '180px' }}
+                placeholder="Buscar atajos por nombre o tecla…"
+                style={{ textAlign: 'left', minWidth: '220px' }}
                 type="text"
                 value={query}
               />
@@ -73,26 +117,115 @@ export const KeybindingsTab: React.FC = () => {
           <section key={cat} className="settings-group">
             <h2 className="settings-group__title">{cat}</h2>
             <div className="ui-card">
-              {items.map((item) => (
-                <div key={item.id} className="ui-card__row settings-row">
-                  <div className="settings-row__copy">
-                    <h3 className="settings-row__title">{item.action}</h3>
-                  </div>
-                  <div className="settings-row__control">
-                    <div className="dictation-shortcut__recorder" style={{ display: 'inline-flex', gap: '4px' }}>
-                      {item.keys.map((k, i) => (
-                        <kbd key={i} style={{ padding: '2px 6px', borderRadius: '4px', background: 'var(--chip-fill)' }}>
-                          {k}
-                        </kbd>
-                      ))}
+              {items.map((item) => {
+                const activeKeys = item.customKeys || item.defaultKeys;
+                const isCustom = Boolean(item.customKeys && item.customKeys.length > 0);
+
+                return (
+                  <div
+                    key={item.id}
+                    className="ui-card__row settings-row"
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => setEditingShortcut(item)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setEditingShortcut(item);
+                      }
+                    }}
+                    aria-label={`Editar atajo ${item.action}`}
+                  >
+                    <div className="settings-row__copy">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <h3 className="settings-row__title">{item.action}</h3>
+                        {isCustom && (
+                          <span
+                            style={{
+                              fontSize: 'var(--text-badge, 10px)',
+                              padding: '1px 6px',
+                              borderRadius: 'var(--vl-radius-xs, 4px)',
+                              background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
+                              color: 'var(--accent)',
+                              fontWeight: 'var(--weight-semibold, 600)',
+                            }}
+                          >
+                            Personalizado
+                          </span>
+                        )}
+                      </div>
+                      <p style={{ margin: '2px 0 0', fontSize: 'var(--text-caption)', color: 'var(--text-secondary)' }}>
+                        {item.description}
+                      </p>
+                    </div>
+
+                    <div
+                      className="settings-row__control"
+                      style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div
+                        className="dictation-shortcut__recorder"
+                        style={{ display: 'inline-flex', gap: '4px', alignItems: 'center' }}
+                      >
+                        {activeKeys.map((k, i) => (
+                          <kbd
+                            key={i}
+                            style={{
+                              padding: '2px 8px',
+                              borderRadius: 'var(--vl-radius-xs, 4px)',
+                              background: 'var(--chip-fill)',
+                              border: '1px solid var(--block-stroke)',
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: 'var(--text-caption, 11px)',
+                              fontWeight: 'var(--weight-semibold)',
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            {k}
+                          </kbd>
+                        ))}
+                      </div>
+
+                      {isCustom && (
+                        <button
+                          type="button"
+                          className="ghost-button action-button--row"
+                          onClick={() => handleReset(item.id)}
+                          title="Restablecer este atajo al valor predeterminado"
+                          style={{ padding: '0 8px', height: '26px', fontSize: '11px' }}
+                        >
+                          Restablecer
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className="secondary-button action-button--row"
+                        onClick={() => setEditingShortcut(item)}
+                        style={{ height: '28px', padding: '0 10px', fontSize: '12px' }}
+                        title="Cambiar combinación de teclas"
+                      >
+                        Editar
+                      </button>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         );
       })}
+
+      <ShortcutRecordModal
+        isOpen={editingShortcut !== null}
+        shortcut={editingShortcut}
+        onClose={() => setEditingShortcut(null)}
+        onSave={handleSave}
+        onReset={handleReset}
+        platform={platform}
+      />
     </>
   );
 };

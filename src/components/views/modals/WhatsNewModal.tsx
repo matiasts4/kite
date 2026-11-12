@@ -110,7 +110,7 @@ const CATEGORY_META: Record<
   },
 };
 
-const ACK_KEY = 'bmone.releaseNotes.acknowledgedVersion';
+const ACK_KEY = 'kite.releaseNotes.acknowledgedVersion';
 
 function getUiScale(el: HTMLElement | null): number {
   const scaled = el?.closest('.app-frame--scaled') ?? document.querySelector('.app-frame--scaled');
@@ -207,6 +207,9 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ isOpen, onClose })
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isOpen) return;
       if (e.key === 'Escape' || e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
         try {
           localStorage.setItem(ACK_KEY, currentRelease.version);
         } catch {
@@ -215,8 +218,8 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ isOpen, onClose })
         onClose();
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [isOpen, onClose, currentRelease.version]);
 
   const handleDismiss = () => {

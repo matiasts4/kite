@@ -697,4 +697,30 @@ export const CheckGlyph: React.FC<{ size?: number; className?: string }> = ({
   </svg>
 );
 
+export const SubagentsGlyph: React.FC<{ size?: number; className?: string }> = ({
+  size = 12,
+  className,
+}) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.65}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    focusable="false"
+    className={className}
+    style={{ flexShrink: 0 }}
+  >
+    <circle cx="6" cy="6" r="3" />
+    <circle cx="18" cy="7" r="3" />
+    <circle cx="18" cy="17" r="3" />
+    <path d="M6 9v6a3 3 0 0 0 3 3h6" />
+    <path d="M9 6h6" />
+  </svg>
+);
+
 

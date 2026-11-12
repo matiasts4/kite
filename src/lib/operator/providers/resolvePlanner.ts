@@ -1,4 +1,5 @@
 import {
+  getOrCreateOpenCodeSessionId,
   shouldUseGrokCli,
   shouldUseGrokHttpApi,
   type OperatorProviderConfig,
@@ -11,8 +12,23 @@ import { CliPlannerProvider } from './cli';
 export const VERIFIED_PROVIDER_MODELS: Record<string, { fast: string; diagnosis: string; verified: string[] }> = {
   opencode: {
     fast: 'deepseek-v4.1-flash',
-    diagnosis: 'deepseek-v4.1-coder',
-    verified: ['deepseek-v4.1-flash', 'deepseek-v4.1-coder', 'claude-3-5-sonnet', 'gpt-4o-mini', 'gpt-4o'],
+    diagnosis: 'deepseek-v4-pro',
+    verified: [
+      'deepseek-v4.1-flash',
+      'deepseek-v4-pro',
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'minimax-m3',
+      'minimax-m3.1-flash',
+      'glm-5.3',
+      'glm-5.3-flash',
+      'qwen3.8-flash',
+      'qwen3.8-max',
+      'mimo-v2.6-flash',
+      'mimo-v2.6-pro',
+      'hy3',
+      'step-5-preview',
+    ],
   },
   vercel: {
     fast: 'deepseek/deepseek-chat',
@@ -49,15 +65,11 @@ export function resolveVerifiedModel(
   const catalog = VERIFIED_PROVIDER_MODELS[provider];
   if (!catalog) return (requestedModel && requestedModel.trim()) || 'unknown';
 
-  if (requestedModel && requestedModel.trim()) {
-    const trimmed = requestedModel.trim();
-    if (catalog.verified.includes(trimmed)) {
-      return trimmed;
-    }
-    console.warn(
-      `[ModelResolver] Quarantined unverified model ID "${trimmed}" for provider "${provider}". Using verified ${tier} model "${catalog[tier]}".`
-    );
-    return catalog[tier];
+  const requested = requestedModel?.trim();
+  if (requested) {
+    // The settings catalog is the source of truth. Replacing an explicit id
+    // with the fast default sent a different model than the one the user picked.
+    return requested;
   }
 
   return catalog[tier];
@@ -74,9 +86,11 @@ export function resolvePlannerProvider(
     const model = resolveVerifiedModel('opencode', config.opencodeModel, tier);
     return new OpenAiCompatPlannerProvider({
       id: 'opencode',
-      baseUrl: config.opencodeBaseUrl || 'https://opencode.ai/inference/v1',
+      baseUrl: config.opencodeBaseUrl || 'https://opencode.ai/inference/go/openai/v1',
       apiKey: config.opencodeApiKey || '',
       model,
+      credentialProvider: 'opencode',
+      sessionId: getOrCreateOpenCodeSessionId(config),
     });
   }
   if (config.activeProvider === 'vercel') {

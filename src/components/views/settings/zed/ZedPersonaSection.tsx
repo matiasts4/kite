@@ -1,8 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ZedPersonaConfig,
   OperatorConfig,
+  ELEVENLABS_TTS_MODELS,
+  ELEVENLABS_CURATED_VOICES,
 } from '../../../../lib/operator/operatorConfig';
+import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
+import { SelectMenu, type SelectMenuRow } from '../../../ui/SelectMenu';
+import { toast } from '../../../../lib/toast';
 
 export const VOICE_OPTIONS = [
   { id: 'Ara', label: 'Ara — Clara, ágil (recomendada)' },
@@ -17,6 +22,15 @@ export const LANGUAGE_OPTIONS = [
   { id: 'en-US', label: 'English (en-US)' },
   { id: 'pt-BR', label: 'Português (pt-BR)' },
 ];
+
+const SPEED_ROWS: SelectMenuRow[] = Array.from({ length: 11 }, (_, index) => {
+  const id = (0.8 + index * 0.05).toFixed(2);
+  return { id, title: `${id}x` };
+});
+
+function menuTitle(rows: SelectMenuRow[], value: string, fallback: string): string {
+  return rows.find((row) => row.id === value)?.title ?? fallback;
+}
 
 export interface ZedPersonaSectionProps {
   config: OperatorConfig;
@@ -45,16 +59,46 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
   onTestVoice,
   openingPreview,
 }) => {
+  const [showElevenKey, setShowElevenKey] = useState(false);
+  const [savedElevenKey, setSavedElevenKey] = useState(false);
+  const isEleven = config.ttsEngine === 'elevenlabs';
+  const isCuratedVoice = ELEVENLABS_CURATED_VOICES.some((v) => v.id === config.elevenlabsVoiceId);
+  const [customVoiceActive, setCustomVoiceActive] = useState(!isCuratedVoice && Boolean(config.elevenlabsVoiceId));
+  const systemVoiceRows: SelectMenuRow[] = [
+    ...VOICE_OPTIONS.map((voice, index) => ({
+      id: voice.id,
+      title: voice.label,
+      sectionTitle: index === 0 ? 'Perfiles de Voz Zed' : undefined,
+    })),
+    ...systemVoices.map((voice, index) => ({
+      id: voice.name,
+      title: `${voice.name} (${voice.lang})`,
+      sectionTitle: index === 0 ? 'Voces del Sistema' : undefined,
+      ruleBefore: index === 0,
+    })),
+  ];
+  if (
+    persona.voice &&
+    !systemVoiceRows.some((row) => row.id === persona.voice)
+  ) {
+    systemVoiceRows.push({ id: persona.voice, title: `${persona.voice} (actual)` });
+  }
+  const speedId = (config.ttsRate || 1).toFixed(2);
+  const speedRows = SPEED_ROWS.some((row) => row.id === speedId)
+    ? SPEED_ROWS
+    : [...SPEED_ROWS, { id: speedId, title: `${speedId}x` }];
+
   return (
     <section className="settings-group">
       <h2 className="settings-group__title">Identidad y Comportamiento de Zed</h2>
       <div className="ui-card">
+        {/* Nombre del asistente */}
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
-            <h3 className="settings-row__title">Nombre y Voz</h3>
-            <p>Nombre con el que responde el asistente, perfil de voz o voz instalada del sistema.</p>
+            <h3 className="settings-row__title">Nombre del Asistente</h3>
+            <p>Nombre con el que responde el asistente en los saludos e interfaces.</p>
           </div>
-          <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="settings-row__control">
             <input
               type="text"
               className="zed-settings__input"
@@ -62,116 +106,263 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
               maxLength={32}
               onChange={(e) => onPersonaChange('name', e.target.value)}
               placeholder="Zed"
-              style={{ width: 110 }}
+              style={{ width: 140 }}
               aria-label="Nombre del asistente"
             />
-            <select
-              className="settings-control ui-button zed-settings__select"
-              value={persona.voice}
-              onChange={(e) => onPersonaChange('voice', e.target.value)}
-              style={{
-                height: '32px',
-                padding: '0 10px',
-                fontSize: '12px',
-                borderRadius: 'var(--radius-chip, 6px)',
-                background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                color: '#f4f4f6',
-                colorScheme: 'dark',
-                maxWidth: '240px',
-              }}
-              aria-label="Voz del asistente"
-            >
-              <optgroup label="Perfiles de Voz Zed" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                {VOICE_OPTIONS.map((v) => (
-                  <option
-                    key={v.id}
-                    value={v.id}
-                    style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                  >
-                    {v.label}
-                  </option>
-                ))}
-              </optgroup>
-              {systemVoices.length > 0 && (
-                <optgroup label="Voces del Sistema" style={{ backgroundColor: '#18181d', color: '#a1a1aa' }}>
-                  {systemVoices.map((v) => (
-                    <option
-                      key={v.name}
-                      value={v.name}
-                      style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                    >
-                      {v.name} ({v.lang})
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {!VOICE_OPTIONS.some((o) => o.id === persona.voice) &&
-                !systemVoices.some((v) => v.name === persona.voice) &&
-                persona.voice && (
-                  <option
-                    value={persona.voice}
-                    style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                  >
-                    {persona.voice} (actual)
-                  </option>
-                )}
-            </select>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={onTestVoice}
-              style={{
-                height: '32px',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '0 12px',
-                fontSize: '12px',
-                whiteSpace: 'nowrap',
-              }}
-              title="Probar cómo suena la voz seleccionada"
-            >
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                {testingVoice ? (
-                  <rect x="6" y="6" width="12" height="12" />
-                ) : (
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                )}
-              </svg>
-              <span>{testingVoice ? 'Detener' : 'Probar voz'}</span>
-            </button>
           </div>
         </div>
+
+        {/* Motor de Síntesis (TTS Engine) */}
+        <div className="ui-card__row settings-row">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Motor de Síntesis de Voz (TTS)</h3>
+            <p>Elige entre la síntesis local del navegador o el streaming neuronal de ElevenLabs.</p>
+          </div>
+          <div className="settings-row__control">
+            <fieldset aria-label="Motor de Síntesis de Voz" className="ui-segmented">
+              <button
+                type="button"
+                aria-pressed={!isEleven}
+                className="ui-segmented__item"
+                onClick={() => onFieldChange('ttsEngine', 'browser')}
+              >
+                {!isEleven && <SegmentedIndicator group="settings-zed-tts-engine" />}
+                <span>Nativo (Sistema)</span>
+              </button>
+              <button
+                type="button"
+                aria-pressed={isEleven}
+                className="ui-segmented__item"
+                onClick={() => onFieldChange('ttsEngine', 'elevenlabs')}
+              >
+                {isEleven && <SegmentedIndicator group="settings-zed-tts-engine" />}
+                <span>ElevenLabs Neural (v4 Turbo)</span>
+              </button>
+            </fieldset>
+          </div>
+        </div>
+
+        {/* Configuración de ElevenLabs */}
+        {isEleven ? (
+          <>
+            <div className="ui-card__row settings-row settings-row--stacked">
+              <div className="settings-row__copy">
+                <h3 className="settings-row__title">Clave de API ElevenLabs (Texto a Voz · TTS)</h3>
+                <p>Requerida para streaming de audio de alta fidelidad (~100ms de latencia). Se sincroniza con la Bóveda Local SQLite.</p>
+                {config.elevenlabsApiKey?.trim() ? (
+                  <p style={{ marginTop: 4, color: 'var(--text-success, #4ade80)' }}>
+                    Protegida en Bóveda Local SQLite
+                  </p>
+                ) : null}
+              </div>
+              <div className="settings-row__control">
+                <div className="settings-credential">
+                  <input
+                    type={showElevenKey ? 'text' : 'password'}
+                    className="ui-field"
+                    value={config.elevenlabsApiKey || ''}
+                    onChange={(e) => onFieldChange('elevenlabsApiKey', e.target.value)}
+                    placeholder="xi_..."
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-label="Clave de API ElevenLabs"
+                  />
+                  <button
+                    type="button"
+                    className="settings-control ui-button"
+                    onClick={() => setShowElevenKey(!showElevenKey)}
+                    title={showElevenKey ? 'Ocultar clave' : 'Mostrar clave'}
+                  >
+                    {showElevenKey ? 'Ocultar' : 'Ver'}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-control ui-button ui-button--primary"
+                    onClick={() => {
+                      onFieldChange('elevenlabsApiKey', (config.elevenlabsApiKey || '').trim());
+                      setSavedElevenKey(true);
+                      window.setTimeout(() => setSavedElevenKey(false), 1800);
+                      toast.success('API Key de ElevenLabs guardada en Bóveda SQLite');
+                    }}
+                  >
+                    {savedElevenKey ? 'Guardado ✓' : 'Guardar'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="ui-card__row settings-row">
+              <div className="settings-row__copy">
+                <h3 className="settings-row__title">Modelo y Voz ElevenLabs</h3>
+                <p>Selecciona el modelo optimizado de baja latencia y el timbre de voz deseado.</p>
+              </div>
+              <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <SelectMenu
+                  label="Modelo de ElevenLabs"
+                  variant="field"
+                  className="settings-select"
+                  value={config.elevenlabsModel || 'eleven_v4_turbo'}
+                  rows={ELEVENLABS_TTS_MODELS.map((model) => ({ id: model.id, title: model.label }))}
+                  triggerLabel={menuTitle(
+                    ELEVENLABS_TTS_MODELS.map((model) => ({ id: model.id, title: model.label })),
+                    config.elevenlabsModel || 'eleven_v4_turbo',
+                    config.elevenlabsModel || 'eleven_v4_turbo'
+                  )}
+                  onSelect={(id) => onFieldChange('elevenlabsModel', id)}
+                />
+                <SelectMenu
+                  label="Voz de ElevenLabs"
+                  variant="field"
+                  className="settings-select"
+                  value={customVoiceActive ? 'custom' : (config.elevenlabsVoiceId || '21m00Tcm4TlvDq8ikWAM')}
+                  rows={[
+                    ...ELEVENLABS_CURATED_VOICES.map((voice, index) => ({
+                      id: voice.id,
+                      title: voice.label,
+                      sectionTitle: index === 0 ? 'Voces Curadas' : undefined,
+                    })),
+                    {
+                      id: 'custom',
+                      title: 'ID Personalizado...',
+                      sectionTitle: 'Personalizada',
+                      ruleBefore: true,
+                    },
+                  ]}
+                  triggerLabel={
+                    customVoiceActive
+                      ? 'ID Personalizado...'
+                      : ELEVENLABS_CURATED_VOICES.find((voice) => voice.id === config.elevenlabsVoiceId)?.label
+                        || config.elevenlabsVoiceId
+                        || 'Voz'
+                  }
+                  onSelect={(id) => {
+                    if (id === 'custom') {
+                      setCustomVoiceActive(true);
+                      return;
+                    }
+                    setCustomVoiceActive(false);
+                    onFieldChange('elevenlabsVoiceId', id);
+                  }}
+                />
+
+                {customVoiceActive && (
+                  <input
+                    type="text"
+                    className="zed-settings__input"
+                    value={config.elevenlabsVoiceId || ''}
+                    onChange={(e) => onFieldChange('elevenlabsVoiceId', e.target.value)}
+                    placeholder="Voice ID (ej. 21m00T...)"
+                    style={{ width: 150, fontSize: 12, fontFamily: 'monospace' }}
+                    aria-label="Voice ID personalizado"
+                  />
+                )}
+
+                {/* Botón de prueba */}
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={onTestVoice}
+                  style={{
+                    height: '32px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '0 12px',
+                    fontSize: '12px',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title="Probar streaming de voz con ElevenLabs"
+                >
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    {testingVoice ? (
+                      <rect x="6" y="6" width="12" height="12" />
+                    ) : (
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    )}
+                  </svg>
+                  <span>{testingVoice ? 'Detener' : 'Probar voz'}</span>
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          /* Configuración Nativa del Sistema */
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Voz del Asistente (Sistema)</h3>
+              <p>Perfil de voz emulada o voz instalada en el sistema operativo.</p>
+            </div>
+            <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <SelectMenu
+                label="Voz del asistente"
+                variant="field"
+                className="settings-select"
+                value={persona.voice}
+                rows={systemVoiceRows}
+                triggerLabel={menuTitle(systemVoiceRows, persona.voice, persona.voice)}
+                onSelect={(id) => onPersonaChange('voice', id)}
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onTestVoice}
+                style={{
+                  height: '32px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '0 12px',
+                  fontSize: '12px',
+                  whiteSpace: 'nowrap',
+                }}
+                title="Probar cómo suena la voz seleccionada"
+              >
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  {testingVoice ? (
+                    <rect x="6" y="6" width="12" height="12" />
+                  ) : (
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  )}
+                </svg>
+                <span>{testingVoice ? 'Detener' : 'Probar voz'}</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
             <h3 className="settings-row__title">Velocidad de Voz</h3>
             <p>Ritmo de lectura y cadencia de la síntesis ({((config.ttsRate || 1.0)).toFixed(2)}x).</p>
           </div>
-          <div className="settings-row__control" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <input
-              type="range"
-              min="0.80"
-              max="1.30"
-              step="0.05"
-              value={config.ttsRate || 1.0}
-              onChange={(e) => onFieldChange('ttsRate', parseFloat(e.target.value))}
-              style={{ width: 140, accentColor: 'var(--accent-color, #7c3aed)' }}
-              aria-label="Velocidad de voz"
+          <div className="settings-row__control settings-row__control--menu">
+            <SelectMenu
+              label="Velocidad de voz"
+              variant="field"
+              className="settings-select"
+              value={speedId}
+              rows={speedRows}
+              triggerLabel={menuTitle(speedRows, speedId, `${speedId}x`)}
+              onSelect={(id) => onFieldChange('ttsRate', Number(id))}
             />
-            <span style={{ fontSize: '12px', minWidth: '40px', color: 'var(--text-secondary, #a1a1aa)' }}>
-              {((config.ttsRate || 1.0)).toFixed(2)}x
-            </span>
           </div>
         </div>
 
@@ -188,17 +379,21 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
                   { id: 'warm', label: 'Warm' },
                   { id: 'chill', label: 'Chill' },
                 ] as const
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  aria-pressed={persona.tone === t.id}
-                  className="ui-segmented__item"
-                  onClick={() => onPersonaChange('tone', t.id)}
-                >
-                  <span>{t.label}</span>
-                </button>
-              ))}
+              ).map((t) => {
+                const isSelected = persona.tone === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className="ui-segmented__item"
+                    onClick={() => onPersonaChange('tone', t.id)}
+                  >
+                    {isSelected && <SegmentedIndicator group="settings-zed-tone" />}
+                    <span>{t.label}</span>
+                  </button>
+                );
+              })}
             </fieldset>
           </div>
         </div>
@@ -216,17 +411,21 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
                   { id: 'normal', label: 'Normal' },
                   { id: 'detailed', label: 'Detailed' },
                 ] as const
-              ).map((b) => (
-                <button
-                  key={b.id}
-                  type="button"
-                  aria-pressed={persona.brevity === b.id}
-                  className="ui-segmented__item"
-                  onClick={() => onPersonaChange('brevity', b.id)}
-                >
-                  <span>{b.label}</span>
-                </button>
-              ))}
+              ).map((b) => {
+                const isSelected = persona.brevity === b.id;
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className="ui-segmented__item"
+                    onClick={() => onPersonaChange('brevity', b.id)}
+                  >
+                    {isSelected && <SegmentedIndicator group="settings-zed-brevity" />}
+                    <span>{b.label}</span>
+                  </button>
+                );
+              })}
             </fieldset>
           </div>
         </div>
@@ -246,34 +445,22 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
               placeholder="ej. Alex"
               style={{ width: 150 }}
             />
-            <select
-              className="settings-control ui-button zed-settings__select"
+            <SelectMenu
+              label="Idioma"
+              variant="field"
+              className="settings-select"
               value={persona.language}
-              onChange={(e) => {
-                onPersonaChange('language', e.target.value);
-                onFieldChange('ttsLanguage', e.target.value);
+              rows={LANGUAGE_OPTIONS.map((lang) => ({ id: lang.id, title: lang.label }))}
+              triggerLabel={menuTitle(
+                LANGUAGE_OPTIONS.map((lang) => ({ id: lang.id, title: lang.label })),
+                persona.language,
+                persona.language
+              )}
+              onSelect={(id) => {
+                onPersonaChange('language', id);
+                onFieldChange('ttsLanguage', id);
               }}
-              style={{
-                height: '32px',
-                padding: '0 10px',
-                fontSize: '12px',
-                borderRadius: 'var(--radius-chip, 6px)',
-                background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                color: '#f4f4f6',
-                colorScheme: 'dark',
-              }}
-            >
-              {LANGUAGE_OPTIONS.map((lang) => (
-                <option
-                  key={lang.id}
-                  value={lang.id}
-                  style={{ backgroundColor: '#18181d', color: '#f4f4f6' }}
-                >
-                  {lang.label}
-                </option>
-              ))}
-            </select>
+            />
           </div>
         </div>
 

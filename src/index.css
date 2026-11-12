@@ -3,12 +3,26 @@
 @import "./chunks.css";
 @import "./motion/motion.css";
 @import "./motion/appIntro.css";
+@import "./motion/standard/standard.css";
+@import "./visual-language.css";
 
 
 /* Root theme presets */
 :root {
   --sidebar-width: 232px;
   color-scheme: dark;
+}
+
+/* Maintain sidebar toggle button in static position beside brand lockup regardless of sidebar state */
+.titlebar__leading,
+.titlebar__leading--band {
+  width: auto !important;
+  padding-right: 0 !important;
+}
+
+.titlebar__leading .brand-lockup,
+.titlebar__leading--band .brand-lockup {
+  margin-right: 0 !important;
 }
 
 .main-pane--stacked {
@@ -384,6 +398,19 @@ select option:hover {
   background-color: #27272a !important;
   color: #ffffff !important;
 }
+
+/* Sidebar Archived Threads badge */
+.chat-rail__badge {
+  margin-left: auto;
+  font-size: var(--text-badge);
+  line-height: var(--leading-badge);
+  font-weight: var(--weight-medium);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--chip-fill);
+  color: var(--text-secondary);
+}
+
 
 
 

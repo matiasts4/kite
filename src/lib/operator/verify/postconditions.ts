@@ -78,6 +78,15 @@ export async function verifyCloseTerminals(
   targetSessionIds: string[],
   timeoutMs: number = 2000
 ): Promise<ActionVerification> {
+  if (!targetSessionIds || targetSessionIds.length === 0) {
+    return {
+      expected: { closedCount: 1 },
+      observed: { stillActiveCount: 0, targetSessionIds: [] },
+      ok: false,
+      error: 'No se especificaron terminales válidas para cerrar o verificar.',
+    };
+  }
+
   const startTime = Date.now();
   const pollIntervalMs = 150;
 

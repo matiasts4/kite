@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   type SystemMetricsSnapshot,
   type SystemMetricsHistoryPoint,
@@ -10,6 +11,14 @@ import {
   getPressureColors,
   saveSystemMetricsPreferences,
 } from '../../lib/systemMetrics';
+import { MOTION_EXIT_MS } from '../../motion/contract';
+import { surfaceMotion } from '../../motion/standard/surfaces';
+import { CircularGauge, Sparkline } from './TelemetryGauges';
+import { MemoryProcessTab } from './tabs/MemoryProcessTab';
+import { OverviewTab } from './tabs/OverviewTab';
+import { CpuTab } from './tabs/CpuTab';
+import { DiskTab } from './tabs/DiskTab';
+import { HeadroomTab } from './tabs/HeadroomTab';
 
 export interface SystemResourcePopoverProps {
   snapshot: SystemMetricsSnapshot;
@@ -22,128 +31,7 @@ export interface SystemResourcePopoverProps {
   phase?: 'in' | 'out';
 }
 
-type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk';
-
-const Sparkline: React.FC<{
-  values: number[];
-  maxVal?: number;
-  color: string;
-  height?: number;
-  width?: number;
-}> = ({ values, maxVal, color, height = 34, width = 140 }) => {
-  const safeValues = values.length > 1 ? values : [values[0] || 0, values[0] || 0];
-  const computedMax = Math.max(maxVal ?? 0, ...safeValues, 1);
-  const minVal = 0;
-  const range = Math.max(1, computedMax - minVal);
-
-  const pts = safeValues.map((v, i) => {
-    const x = (i / Math.max(1, safeValues.length - 1)) * width;
-    const clamped = Math.max(minVal, Math.min(computedMax, v));
-    const y = height - 3 - ((clamped - minVal) / range) * (height - 6);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-
-  const polylinePoints = pts.join(' ');
-  const areaPoints = `0,${height} ${polylinePoints} ${width},${height}`;
-  const gradId = `spark-grad-${color.replace(/[^a-zA-Z0-9]/g, '')}`;
-
-  return (
-    <svg
-      width={width}
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
-      style={{ display: 'block', overflow: 'visible', flexShrink: 0 }}
-      aria-hidden="true"
-    >
-      <defs>
-        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.28" />
-          <stop offset="100%" stopColor={color} stopOpacity="0.0" />
-        </linearGradient>
-      </defs>
-      <polygon points={areaPoints} fill={`url(#${gradId})`} />
-      <polyline
-        fill="none"
-        stroke={color}
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        points={polylinePoints}
-      />
-    </svg>
-  );
-};
-
-const CircularGauge: React.FC<{
-  percentage: number;
-  size?: number;
-  strokeWidth?: number;
-  color: string;
-  label?: string;
-}> = ({ percentage, size = 42, strokeWidth = 3.5, color, label }) => {
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const clamped = Math.max(0, Math.min(100, percentage));
-  const strokeDashoffset = circumference - (clamped / 100) * circumference;
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: size,
-        height: size,
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-      }}
-    >
-      <svg
-        width={size}
-        height={size}
-        style={{ transform: 'rotate(-90deg)', display: 'block', overflow: 'visible' }}
-        aria-hidden="true"
-      >
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke="color-mix(in srgb, var(--text-secondary) 22%, transparent)"
-          strokeWidth={strokeWidth}
-          fill="transparent"
-        />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-          strokeLinecap="round"
-          fill="transparent"
-          style={{
-            transition: 'stroke-dashoffset 380ms cubic-bezier(0.16, 1, 0.3, 1), stroke 250ms ease',
-          }}
-        />
-      </svg>
-      {label && (
-        <span
-          style={{
-            position: 'absolute',
-            fontSize: '10px',
-            fontWeight: 700,
-            fontVariantNumeric: 'tabular-nums',
-            color: 'var(--text-primary)',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          {label}
-        </span>
-      )}
-    </div>
-  );
-};
+type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk' | 'headroom';
 
 export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   snapshot,
@@ -158,6 +46,11 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   const popoverRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<ResourceTab>('overview');
   const [uiFps, setUiFps] = useState<number>(60);
+  const [procCategoryFilter, setProcCategoryFilter] = useState<'all' | 'agents' | 'mcp' | 'terminals' | 'webview' | 'core' | 'build'>('all');
+  const [procSearchQuery, setProcSearchQuery] = useState<string>('');
+  const hasWorkspaces = Boolean(snapshot?.runtime.workspaces && snapshot.runtime.workspaces.length > 0);
+  const [procViewMode, setProcViewMode] = useState<'projects' | 'terminals' | 'flat'>(hasWorkspaces ? 'projects' : 'flat');
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
 
   // Measure live UI frame rate while popover is open
   useEffect(() => {
@@ -238,15 +131,18 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   ];
 
   const popoverNode = (
-    <div
+    <motion.div
+      {...surfaceMotion('popover', { exitMs: MOTION_EXIT_MS })}
       ref={popoverRef}
       role="dialog"
       aria-label="Monitor de recursos del sistema y de la aplicación"
-      className={`system-resource-popover ${phase === 'out' ? 'motion-popover-out' : 'motion-popover-in'}`}
+      className="system-resource-popover"
       style={{
         position: 'fixed',
         top: `${position.top}px`,
         right: `${position.right}px`,
+        // The panel's right edge sits under the badge, so it grows from that corner.
+        transformOrigin: 'top right',
         width: '416px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
@@ -425,7 +321,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
         aria-label="Categorías de consumo"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
+          gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
           gap: '4px',
           padding: '3px',
           backgroundColor: 'var(--block-fill)',
@@ -440,6 +336,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
             { id: 'memory', label: 'RAM' },
             { id: 'cpu', label: 'CPU' },
             { id: 'disk', label: 'Disco' },
+            { id: 'headroom', label: 'Headroom' },
           ] as const
         ).map((tab) => {
           const isSelected = activeTab === tab.id;
@@ -451,9 +348,10 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
               aria-selected={isSelected}
               onClick={() => setActiveTab(tab.id)}
               style={{
-                padding: '5px 8px',
+                padding: '5px 4px',
                 borderRadius: '6px',
-                fontSize: '11px',
+                fontSize: '10px',
+                whiteSpace: 'nowrap',
                 fontWeight: isSelected ? 600 : 500,
                 border: isSelected
                   ? '1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.35))'
@@ -483,7 +381,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           paddingRight: '2px',
         }}
       >
-        {/* HERO CARD: App Total RAM (Always visible in Overview & Memory) */}
+        {/* HERO CARD: App Total RAM (Visible in Overview & Memory) */}
         {(activeTab === 'overview' || activeTab === 'memory') && (
           <div
             style={{
@@ -544,6 +442,29 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                   >
                     {snapshot.memory.appShareOfSystemPercent}% de{' '}
                     {formatBytes(snapshot.memory.systemTotalBytes, 0)} del sistema
+                    {snapshot.memory.appPrivateBytes != null && (
+                      <span style={{ color: 'var(--accent, #5c8fff)', marginLeft: '6px' }}>
+                        · {formatBytes(snapshot.memory.appPrivateBytes)} priv.
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '10px',
+                      color: 'var(--text-secondary)',
+                      fontVariantNumeric: 'tabular-nums',
+                      marginTop: '2px',
+                    }}
+                  >
+                    UI + Core: <strong style={{ color: 'var(--text-primary)' }}>{formatBytes(snapshot.memory.appCoreBytes)}</strong>
+                    {' · '}
+                    Agentes: <strong style={{ color: 'var(--text-primary)' }}>{formatBytes(snapshot.memory.appAgentsBytes ?? snapshot.memory.appTerminalsBytes)}</strong>
+                    {snapshot.memory.appMcpsBytes != null && snapshot.memory.appMcpsBytes > 0 && (
+                      <>
+                        {' · '}
+                        MCPs: <strong style={{ color: '#c084fc' }}>{formatBytes(snapshot.memory.appMcpsBytes)}</strong>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -561,6 +482,26 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
               </div>
             </div>
 
+            {/* Explanatory note in Memory Tab */}
+            {activeTab === 'memory' && (
+              <div
+                style={{
+                  fontSize: '10px',
+                  lineHeight: 1.45,
+                  color: 'var(--text-secondary)',
+                  padding: '7px 9px',
+                  borderRadius: 'var(--control-radius, 8px)',
+                  backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.03))',
+                  border: '1px solid var(--block-stroke)',
+                }}
+              >
+                <strong style={{ color: 'var(--text-primary)' }}>¿Por qué varía el consumo?</strong> La{' '}
+                <em>Memoria Privada</em> es la RAM exclusiva reservada por Kite y los agentes. El{' '}
+                <em>Working Set</em> incluye páginas compartidas de Windows y Chromium multi-contadas por
+                proceso, y varía bruscamente al nacer o morir subprocesos de compilación o tests.
+              </div>
+            )}
+
             {/* Process Tree Breakdown */}
             <div
               style={{
@@ -576,56 +517,55 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                   snapshot.memory.appTotalBytes > 0
                     ? Math.round((group.memoryBytes / snapshot.memory.appTotalBytes) * 100)
                     : 0;
+
+                const color =
+                  group.id === 'mcps'
+                    ? '#c084fc'
+                    : group.id === 'agents'
+                    ? 'var(--accent, #5c8fff)'
+                    : group.id === 'terminals'
+                    ? '#f59e0b'
+                    : group.id === 'webview'
+                    ? 'var(--status-running, #34c759)'
+                    : 'var(--accent, #5c8fff)';
+
                 return (
-                  <div
-                    key={group.id}
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '3px',
-                    }}
-                  >
+                  <div key={group.id} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                     <div
                       style={{
                         display: 'flex',
-                        justifyContent: 'space-between',
                         alignItems: 'center',
+                        justifyContent: 'space-between',
                         fontSize: '11px',
                       }}
                     >
-                      <span style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                        <span>{group.label}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <span
                           style={{
-                            fontSize: '9px',
-                            padding: '0 4px',
-                            borderRadius: '3px',
-                            backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.05))',
-                            border: '1px solid var(--block-stroke)',
-                            fontVariantNumeric: 'tabular-nums',
+                            width: '7px',
+                            height: '7px',
+                            borderRadius: '50%',
+                            backgroundColor: color,
+                            display: 'inline-block',
                           }}
-                        >
-                          {group.processCount} proc
+                        />
+                        <span style={{ fontWeight: 500 }}>{group.label}</span>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
+                          ({group.processCount} proc.)
                         </span>
-                      </span>
-                      <span
-                        style={{
-                          fontWeight: 600,
-                          color: 'var(--text-primary)',
-                          fontVariantNumeric: 'tabular-nums',
-                        }}
-                      >
+                      </div>
+                      <div style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                         {formatBytes(group.memoryBytes)}{' '}
                         <span style={{ color: 'var(--text-secondary)', fontWeight: 400, fontSize: '10px' }}>
                           ({pctOfApp}%)
                         </span>
-                      </span>
+                      </div>
                     </div>
                     <div
                       style={{
-                        height: '4px',
+                        height: '3px',
                         borderRadius: '999px',
-                        backgroundColor: 'color-mix(in srgb, var(--text-secondary) 16%, transparent)',
+                        backgroundColor: 'color-mix(in srgb, var(--text-secondary) 14%, transparent)',
                         overflow: 'hidden',
                       }}
                     >
@@ -633,20 +573,41 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                         style={{
                           height: '100%',
                           width: `${Math.max(2, Math.min(100, pctOfApp))}%`,
-                          backgroundColor:
-                            group.id === 'core'
-                              ? 'var(--accent, #5c8fff)'
-                              : group.id === 'webview'
-                              ? 'var(--status-running, #34c759)'
-                              : '#f59e0b',
+                          backgroundColor: color,
                           borderRadius: '999px',
-                          transition: 'width 300ms ease',
+                          transition: 'width 250ms ease',
                         }}
                       />
                     </div>
                   </div>
                 );
               })}
+
+              {/* Jump to Memory Details button in overview */}
+              {activeTab === 'overview' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('memory')}
+                  style={{
+                    marginTop: '4px',
+                    padding: '6px 9px',
+                    borderRadius: 'var(--control-radius, 8px)',
+                    border: '1px solid var(--block-stroke)',
+                    backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.02))',
+                    color: 'var(--accent, #5c8fff)',
+                    fontSize: '11px',
+                    fontWeight: 500,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    transition: 'all 120ms ease',
+                  }}
+                >
+                  <span>Ver desglose de subprocesos ({snapshot.runtime.processes?.length || snapshot.runtime.processCount} activos)</span>
+                  <span style={{ fontSize: '12px' }}>→</span>
+                </button>
+              )}
 
               {/* System Host RAM bar */}
               <div
@@ -695,428 +656,53 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           </div>
         )}
 
-        {/* OVERVIEW GRID: CPU, Disk, & Runtime Health Cards */}
-        {activeTab === 'overview' && (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, 1fr)',
-              gap: '8px',
-            }}
-          >
-            {/* CPU Card */}
-            <button
-              type="button"
-              onClick={() => setActiveTab('cpu')}
-              style={{
-                textAlign: 'left',
-                backgroundColor: 'var(--block-fill)',
-                border: '1px solid var(--block-stroke)',
-                borderRadius: '9px',
-                padding: '10px',
-                cursor: 'pointer',
-                color: 'inherit',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '6px',
-                transition: 'border-color 120ms ease',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span
-                  style={{
-                    fontSize: '10px',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  Procesador (CPU)
-                </span>
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke={cpuColor}
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-                </svg>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-                <div>
-                  <div
-                    style={{
-                      fontSize: '16px',
-                      fontWeight: 700,
-                      fontVariantNumeric: 'tabular-nums',
-                      color: 'var(--text-primary)',
-                    }}
-                  >
-                    {snapshot.cpu.appUsagePercent.toFixed(1)}%
-                  </div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
-                    App · Sistema {snapshot.cpu.systemUsagePercent.toFixed(1)}%
-                  </div>
-                </div>
-                <Sparkline values={appCpuHistory} maxVal={100} color={cpuColor} width={68} height={24} />
-              </div>
-              <div
-                style={{
-                  height: '4px',
-                  borderRadius: '999px',
-                  backgroundColor: 'color-mix(in srgb, var(--text-secondary) 16%, transparent)',
-                  overflow: 'hidden',
-                }}
-              >
-                <div
-                  style={{
-                    height: '100%',
-                    width: `${Math.max(3, Math.min(100, snapshot.cpu.systemUsagePercent))}%`,
-                    backgroundColor: cpuColor,
-                    borderRadius: '999px',
-                    transition: 'width 300ms ease',
-                  }}
-                />
-              </div>
-            </button>
-
-            {/* Disk Card */}
-            <button
-              type="button"
-              onClick={() => setActiveTab('disk')}
-              style={{
-                textAlign: 'left',
-                backgroundColor: 'var(--block-fill)',
-                border: '1px solid var(--block-stroke)',
-                borderRadius: '9px',
-                padding: '10px',
-                cursor: 'pointer',
-                color: 'inherit',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '6px',
-                transition: 'border-color 120ms ease',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span
-                  style={{
-                    fontSize: '10px',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  Disco ({snapshot.disk.mountPoint})
-                </span>
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke={diskColor}
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <ellipse cx="12" cy="5" rx="9" ry="3" />
-                  <path d="M3 5V19A9 3 0 0 0 21 19V5" />
-                  <path d="M3 12A9 3 0 0 0 21 12" />
-                </svg>
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontSize: '16px',
-                    fontWeight: 700,
-                    fontVariantNumeric: 'tabular-nums',
-                    color: 'var(--text-primary)',
-                  }}
-                >
-                  {formatBytes(snapshot.disk.availableBytes, 0)} libres
-                </div>
-                <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
-                  {snapshot.disk.usagePercent}% usado de {formatBytes(snapshot.disk.totalBytes, 0)}
-                </div>
-              </div>
-              <div
-                style={{
-                  height: '4px',
-                  borderRadius: '999px',
-                  backgroundColor: 'color-mix(in srgb, var(--text-secondary) 16%, transparent)',
-                  overflow: 'hidden',
-                }}
-              >
-                <div
-                  style={{
-                    height: '100%',
-                    width: `${Math.max(3, Math.min(100, snapshot.disk.usagePercent))}%`,
-                    backgroundColor: diskColor,
-                    borderRadius: '999px',
-                    transition: 'width 300ms ease',
-                  }}
-                />
-              </div>
-            </button>
-          </div>
+        {/* DETAILED PROCESS BREAKDOWN (Exclusively in Memory Tab) */}
+        {activeTab === 'memory' && (
+          <MemoryProcessTab
+            snapshot={snapshot}
+            onRefresh={onRefresh}
+            procCategoryFilter={procCategoryFilter}
+            setProcCategoryFilter={setProcCategoryFilter}
+            procSearchQuery={procSearchQuery}
+            setProcSearchQuery={setProcSearchQuery}
+            procViewMode={procViewMode}
+            setProcViewMode={setProcViewMode}
+            expandedSections={expandedSections}
+            setExpandedSections={setExpandedSections}
+          />
         )}
 
-        {/* RUNTIME & UI DIAGNOSTICS BAR (Overview) */}
+        {/* OVERVIEW GRID: CPU, Disk, & Runtime Health Cards */}
         {activeTab === 'overview' && (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(3, 1fr)',
-              gap: '6px',
-              backgroundColor: 'var(--block-fill)',
-              border: '1px solid var(--block-stroke)',
-              borderRadius: '9px',
-              padding: '8px 10px',
-            }}
-          >
-            <div>
-              <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                Terminales PTY
-              </div>
-              <div
-                style={{
-                  fontSize: '13px',
-                  fontWeight: 700,
-                  fontVariantNumeric: 'tabular-nums',
-                  marginTop: '1px',
-                }}
-              >
-                {snapshot.runtime.activeTerminals} activas
-              </div>
-            </div>
-            <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
-              <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                Fluidez UI
-              </div>
-              <div
-                style={{
-                  fontSize: '13px',
-                  fontWeight: 700,
-                  fontVariantNumeric: 'tabular-nums',
-                  color: 'var(--status-running, #34c759)',
-                  marginTop: '1px',
-                }}
-              >
-                {uiFps} FPS
-              </div>
-            </div>
-            <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
-              <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                Subprocesos
-              </div>
-              <div
-                style={{
-                  fontSize: '13px',
-                  fontWeight: 700,
-                  fontVariantNumeric: 'tabular-nums',
-                  marginTop: '1px',
-                }}
-              >
-                {snapshot.runtime.processCount} activos
-              </div>
-            </div>
-          </div>
+          <OverviewTab
+            snapshot={snapshot}
+            appCpuHistory={appCpuHistory}
+            cpuColor={cpuColor}
+            diskColor={diskColor}
+            uiFps={uiFps}
+            onSelectTab={setActiveTab}
+          />
         )}
 
         {/* DETAILED CPU TAB */}
         {activeTab === 'cpu' && (
-          <div
-            style={{
-              backgroundColor: 'var(--block-fill)',
-              border: '1px solid var(--block-stroke)',
-              borderRadius: '10px',
-              padding: '12px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '10px',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <CircularGauge
-                  percentage={snapshot.cpu.systemUsagePercent}
-                  color={cpuColor}
-                  label={`${Math.round(snapshot.cpu.systemUsagePercent)}%`}
-                />
-                <div>
-                  <div
-                    style={{
-                      fontSize: '10px',
-                      fontWeight: 600,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.04em',
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
-                    Carga de Procesador (CPU)
-                  </div>
-                  <div
-                    style={{
-                      fontSize: '19px',
-                      fontWeight: 700,
-                      fontVariantNumeric: 'tabular-nums',
-                      marginTop: '2px',
-                    }}
-                  >
-                    App: {snapshot.cpu.appUsagePercent.toFixed(1)}%
-                  </div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                    Total del Sistema: {snapshot.cpu.systemUsagePercent.toFixed(1)}% ·{' '}
-                    {snapshot.cpu.logicalCores} hilos lógicos
-                  </div>
-                </div>
-              </div>
-              <Sparkline values={sysCpuHistory} maxVal={100} color={cpuColor} width={115} height={36} />
-            </div>
-
-            <div
-              style={{
-                borderTop: '1px solid var(--block-stroke)',
-                paddingTop: '8px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '6px',
-                fontSize: '11px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Arquitectura / Modelo:</span>
-                <span
-                  style={{
-                    fontWeight: 500,
-                    maxWidth: '220px',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                  title={snapshot.cpu.model}
-                >
-                  {snapshot.cpu.model}
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Árbol de Procesos de Kite:</span>
-                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                  {snapshot.runtime.processCount} procesos (PID {snapshot.pid})
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Sesiones ConPTY / Agentes:</span>
-                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                  {snapshot.runtime.activeTerminals} activas
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Rendimiento Render UI / IPC:</span>
-                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                  {uiFps} FPS · {snapshot.ipcLatencyMs} ms
-                </span>
-              </div>
-            </div>
-          </div>
+          <CpuTab
+            snapshot={snapshot}
+            sysCpuHistory={sysCpuHistory}
+            cpuColor={cpuColor}
+            uiFps={uiFps}
+          />
         )}
 
         {/* DETAILED DISK TAB */}
         {activeTab === 'disk' && (
-          <div
-            style={{
-              backgroundColor: 'var(--block-fill)',
-              border: '1px solid var(--block-stroke)',
-              borderRadius: '10px',
-              padding: '12px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '10px',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <CircularGauge
-                percentage={snapshot.disk.usagePercent}
-                color={diskColor}
-                label={`${Math.round(snapshot.disk.usagePercent)}%`}
-              />
-              <div>
-                <div
-                  style={{
-                    fontSize: '10px',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  Almacenamiento Local ({snapshot.disk.mountPoint})
-                </div>
-                <div
-                  style={{
-                    fontSize: '19px',
-                    fontWeight: 700,
-                    fontVariantNumeric: 'tabular-nums',
-                    marginTop: '2px',
-                  }}
-                >
-                  {formatBytes(snapshot.disk.availableBytes, 1)} disponibles
-                </div>
-                <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                  {formatBytes(snapshot.disk.usedBytes, 1)} usados de{' '}
-                  {formatBytes(snapshot.disk.totalBytes, 1)}
-                </div>
-              </div>
-            </div>
-
-            <div
-              style={{
-                height: '6px',
-                borderRadius: '999px',
-                backgroundColor: 'color-mix(in srgb, var(--text-secondary) 16%, transparent)',
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                style={{
-                  height: '100%',
-                  width: `${Math.max(2, Math.min(100, snapshot.disk.usagePercent))}%`,
-                  backgroundColor: diskColor,
-                  borderRadius: '999px',
-                  transition: 'width 300ms ease',
-                }}
-              />
-            </div>
-
-            <div
-              style={{
-                borderTop: '1px solid var(--block-stroke)',
-                paddingTop: '8px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '6px',
-                fontSize: '11px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Unidad del Workspace:</span>
-                <span style={{ fontWeight: 600 }}>{snapshot.disk.mountPoint}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Base de datos & Scrollback PTY:</span>
-                <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                  {formatBytes(snapshot.disk.appCacheBytes)}
-                </span>
-              </div>
-            </div>
-          </div>
+          <DiskTab
+            snapshot={snapshot}
+            diskColor={diskColor}
+          />
         )}
+
+        {activeTab === 'headroom' && <HeadroomTab />}
       </div>
 
       {/* Footer Controls: Update Frequency & Badge Display Mode */}
@@ -1213,8 +799,11 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 
-  return createPortal(popoverNode, document.body);
+  return createPortal(
+    <AnimatePresence>{phase === 'in' && popoverNode}</AnimatePresence>,
+    document.body
+  );
 };

@@ -109,30 +109,67 @@ pub fn auth_sign_out(_request: Option<serde_json::Value>) -> serde_json::Value {
     serde_json::json!({ "ok": true })
 }
 
-#[tauri::command]
-pub fn bootstrap() -> BootstrapResponse {
+fn bootstrap_preferences() -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "workMode": "code",
+        "route": { "kind": "code" },
+        "selectedWorkspaceId": "a1111111-1111-4111-8111-111111111111",
+        "selectedAgentId": "c3333333-3333-4333-8333-333333333333",
+        "sidebarVisible": true,
+        "appearance": "dark",
+        "zoomPercent": 100,
+        "terminalPreference": { "kind": "default" },
+        "usageMeter": { "showPlanUsage": true, "showPaneContext": true },
+        "darkTheme": "kite-dark",
+        "lightTheme": "kite-light",
+        "quitBehavior": "keepSessionsRunning"
+    })
+}
+
+pub fn bootstrap_sync() -> BootstrapResponse {
     log_trace("Invoked: bootstrap()");
     BootstrapResponse {
         browser_document_token: Uuid::new_v4().to_string(),
         schema_version: 1,
         persistence_read_only: false,
         recovery_notices: vec![],
-        preferences: serde_json::json!({
-            "schemaVersion": 1,
-            "workMode": "code",
-            "route": { "kind": "code" },
-            "selectedWorkspaceId": "a1111111-1111-4111-8111-111111111111",
-            "selectedAgentId": "c3333333-3333-4333-8333-333333333333",
-            "sidebarVisible": true,
-            "appearance": "dark",
-            "zoomPercent": 100,
-            "terminalPreference": { "kind": "default" },
-            "usageMeter": { "showPlanUsage": true, "showPaneContext": true },
-            "darkTheme": "kite-dark",
-            "lightTheme": "kite-light",
-            "quitBehavior": "keepSessionsRunning"
-        }),
+        preferences: bootstrap_preferences(),
         workspaces: workspaces().lock().unwrap().clone(),
         agents: agents().lock().unwrap().clone(),
+    }
+}
+
+#[tauri::command]
+pub async fn bootstrap() -> BootstrapResponse {
+    tokio::task::spawn_blocking(bootstrap_sync)
+        .await
+        .unwrap_or_else(|_| {
+            log_trace("bootstrap worker failed");
+            BootstrapResponse {
+                browser_document_token: Uuid::new_v4().to_string(),
+                schema_version: 1,
+                persistence_read_only: true,
+                recovery_notices: vec!["bootstrap worker failed".to_string()],
+                preferences: bootstrap_preferences(),
+                workspaces: vec![],
+                agents: vec![],
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_sync_returns_workspaces_without_blocking_the_caller_thread_contract() {
+        let first = bootstrap_sync();
+        assert_eq!(first.schema_version, 1);
+        assert!(!first.persistence_read_only);
+        assert!(first.preferences.get("workMode").is_some());
+        let second = bootstrap_sync();
+        assert_eq!(second.workspaces.len(), first.workspaces.len());
+        assert_eq!(second.agents.len(), first.agents.len());
     }
 }

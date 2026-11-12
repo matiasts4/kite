@@ -7,11 +7,21 @@ import {
   CheckIcon,
   CalendarIcon,
 } from '../chat/ChatIcons';
-import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from '../chat/ChatItemRow';
+import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from '../chat/ChatItemRow';
+import { SubagentGroupRow } from '../chat/SubagentActivityCard';
+import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import { ChatComposer } from '../chat/ChatComposer';
+import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
+import { declarationFromCatalog } from '../chat/driverDeclaration';
+import {
+  getSavedSelectedModel,
+  getSavedSelectedProvider,
+  getSavedSelectedAgent,
+} from '../chat/modelPersistence';
+import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
-import { invokeCommand } from '../../../lib/ipc';
+import { invokeCommand, listWorkspaceBranches, switchWorkspaceBranch, createWorkspaceBranch } from '../../../lib/ipc';
 import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 import type {
   ExtendedChatThread,
@@ -42,7 +52,16 @@ export interface AgentChatSurfaceProps {
   agentId: string;
   agentName: string;
   engineLabel: string;
+  workspaceId?: string | null;
+  workspaces?: any[];
+  workspaceName?: string;
   defaultProvider?: ChatProvider;
+  /** Draft config used by the composer only while no thread exists yet. */
+  draftProvider?: ChatProvider;
+  draftMode?: ChatMode;
+  draftModel?: string | null;
+  draftEffort?: string | null;
+  draftAgent?: string | null;
   activeThread: ExtendedChatThread | null;
   tabs: AgentChatTab[];
   selectedId: string | null;
@@ -52,6 +71,12 @@ export interface AgentChatSurfaceProps {
   attachments: ChatAttachment[];
   totalTokens: number;
   dynamicModels: ModelOption[];
+  dynamicAgents?: any[];
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
+  /** Declaration supplied by the session layer for the active thread. */
+  driverDeclaration?: DriverDeclaration | null;
+  /** Projection supplied by the session layer for the active thread. */
+  session?: SessionProjection | null;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   onNew: () => void;
@@ -68,7 +93,16 @@ export interface AgentChatSurfaceProps {
   onStageFiles: (files: File[]) => void;
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null }) => void;
+  onUpdateConfig: (patch: {
+    provider?: ChatProvider;
+    mode?: ChatMode;
+    model?: string | null;
+    effort?: string | null;
+    plan?: boolean;
+    agent?: string | null;
+    connectionId?: string | null;
+    workspaceId?: string | null;
+  }) => void;
   onApprovalDecision?: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
 }
 
@@ -88,7 +122,15 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   agentId,
   agentName,
   engineLabel,
+  workspaceId,
+  workspaces,
+  workspaceName,
   defaultProvider,
+  draftProvider,
+  draftMode,
+  draftModel,
+  draftEffort,
+  draftAgent,
   activeThread,
   tabs,
   selectedId,
@@ -98,6 +140,10 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   attachments,
   totalTokens,
   dynamicModels,
+  dynamicAgents = [],
+  ensureDynamicAgents,
+  driverDeclaration,
+  session,
   isRefreshingModels,
   onRefreshModels,
   onNew,
@@ -117,6 +163,98 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   onUpdateConfig,
   onApprovalDecision,
 }) => {
+  const effectiveWsId = activeThread?.workspaceId || workspaceId;
+  const currentWorkspace = workspaces?.find((w) => w.id === effectiveWsId);
+  const effectiveWorkspaceName =
+    currentWorkspace?.displayName ||
+    currentWorkspace?.name ||
+    workspaceName ||
+    (effectiveWsId ? 'Workspace' : null);
+
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
+  const [branches, setBranches] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!effectiveWsId) {
+      setGitBranch(null);
+      setBranches([]);
+      return;
+    }
+    let active = true;
+    void invokeCommand<{ isRepo: boolean; branch?: string }>(
+      'read_workspace_changes',
+      { workspaceId: effectiveWsId }
+    )
+      .then((res) => {
+        if (!active || !res) return;
+        if (res.branch) setGitBranch(res.branch);
+      })
+      .catch(() => {});
+
+    void listWorkspaceBranches(effectiveWsId)
+      .then((res) => {
+        if (!active || !res) return;
+        if (res.branches) setBranches(res.branches);
+        if (res.current) setGitBranch(res.current);
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [effectiveWsId]);
+
+  const handleSwitchBranch = async (b: string) => {
+    if (!effectiveWsId) return;
+    try {
+      const res = await switchWorkspaceBranch(effectiveWsId, b);
+      if (res?.current) setGitBranch(res.current);
+      if (res?.branches) setBranches(res.branches);
+    } catch (err) {
+      console.error('[AgentChatShell] failed to switch branch:', err);
+    }
+  };
+
+  const handleCreateBranch = async (name: string) => {
+    if (!effectiveWsId || !name.trim()) return;
+    try {
+      const res = await createWorkspaceBranch(effectiveWsId, name.trim());
+      if (res?.current) setGitBranch(res.current);
+      if (res?.branches) setBranches(res.branches);
+    } catch (err) {
+      console.error('[AgentChatShell] failed to create branch:', err);
+    }
+  };
+
+  const handleSelectWorkspace = (wsId: string) => {
+    onUpdateConfig({ workspaceId: wsId });
+  };
+  const savedProvider = getSavedSelectedProvider();
+  const effectiveProvider: ChatProvider =
+    activeThread?.provider ??
+    draftProvider ??
+    defaultProvider ??
+    (savedProvider && ['claude', 'codex', 'cursor', 'grok', 'opencode', 'antigravity'].includes(savedProvider)
+      ? (savedProvider as ChatProvider)
+      : 'antigravity');
+  const effectiveModel =
+    (activeThread ? activeThread.model ?? null : draftModel ?? null) || getSavedSelectedModel(effectiveProvider);
+  const effectiveAgent =
+    (activeThread ? (activeThread as any).agent || (activeThread as any).workMode || null : draftAgent ?? null) ||
+    getSavedSelectedAgent(effectiveProvider);
+
+  const declaration = React.useMemo(
+    () =>
+      driverDeclaration ??
+      declarationFromCatalog({
+        provider: effectiveProvider,
+        selectedModel: effectiveModel,
+        dynamicModels,
+        dynamicAgents,
+      }),
+    [driverDeclaration, effectiveProvider, effectiveModel, dynamicModels, dynamicAgents]
+  );
+
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>('');
@@ -196,7 +334,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
 
   const atLiveEdgeRef = useRef(true);
   const threadId = activeThread?.id ?? null;
-  const motionClassFor = useTranscriptMotion(
+  const enterFor = useTranscriptMotion(
     threadId,
     (activeThread?.items ?? []).map((item) => item.id),
   );
@@ -487,49 +625,69 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                 }}
               >
                 <div className="chat-transcript__column">
-                  {groupTranscriptRows(activeThread.items).map((row) =>
-                    row.kind === 'work' ? (
-                      <ChatWorkGroup
-                        key={row.id}
-                        items={row.items}
-                        running={running}
-                        motionClassFor={motionClassFor}
-                      />
-                    ) : (
-                      <ChatItemRow
-                        key={row.item.id}
-                        item={row.item}
-                        threadId={activeThread.id}
-                        motionClass={motionClassFor(row.item.id)}
-                      />
-                    )
-                  )}
-
-                  {(running || activeThread.status === 'waiting') && (() => {
-                    const activeTool = [...activeThread.items]
-                      .reverse()
-                      .find((it) => (it.kind === 'tool' || it.kind === 'command') && (it.streaming || it.status === 'running'));
-                    const isStreamingAssistant = activeThread.items.some(
-                      (it) => it.kind === 'assistant' && it.streaming && it.text.trim().length > 0
-                    );
-                    const stageLabel = activeThread.pendingApproval
-                      ? `Waiting for approval · ${activeThread.pendingApproval.title || activeThread.pendingApproval.toolName}`
-                      : activeTool
-                        ? `Executing ${activeTool.title || activeTool.toolName || 'tool'}…`
-                        : isStreamingAssistant
-                          ? 'Generating response…'
-                          : 'Thinking…';
+                  {groupTranscriptRows(activeThread.items).map((row, index, rows) => {
+                    const rowKey =
+                      row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
+                    const liveAt = running ? liveActivityRowIndex(rows) : -1;
                     return (
-                      <div className={`chat-working-row motion-row-in ${activeThread.pendingApproval ? 'chat-working-row--waiting' : ''}`}>
-                        <span className="chat-working-row__dots">
-                          <i />
-                          <i />
-                          <i />
-                        </span>
-                        <span className="chat-working-row__stage">{stageLabel}</span>
-                      </div>
+                      <React.Fragment key={rowKey}>
+                        {index === liveAt ? (
+                          <TurnActivityStatus
+                            running={running}
+                            pendingApproval={activeThread.pendingApproval}
+                            items={activeThread.items}
+                            swarmState={activeThread.swarmState}
+                            interrupted={false}
+                            durationSeconds={activeThread.usage?.durationSeconds}
+                          />
+                        ) : null}
+                        {row.kind === 'work' ? (
+                          <ChatWorkGroup
+                            items={row.items}
+                            running={running}
+                            enterFor={enterFor}
+                            interrupted={Boolean(activeThread.stoppedByBuilder)}
+                          />
+                        ) : row.kind === 'subagentGroup' ? (
+                          <SubagentGroupRow
+                            items={row.items}
+                            threadId={activeThread.id}
+                            workspaceId={effectiveWsId}
+                            subagentRuns={activeThread.subagentRuns}
+                            enterFor={enterFor}
+                          />
+                        ) : (
+                          <ChatItemRow
+                            item={row.item}
+                            threadId={activeThread.id}
+                            workspaceId={effectiveWsId}
+                            subagentRuns={activeThread.subagentRuns}
+                            swarmState={activeThread.swarmState}
+                            enter={enterFor(row.item.id)}
+                            onEditUserMessage={(text) => {
+                              onChangePrompt(text);
+                              const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+                              if (el) {
+                                el.focus();
+                                el.setSelectionRange(text.length, text.length);
+                              }
+                            }}
+                          />
+                        )}
+                      </React.Fragment>
                     );
-                  })()}
+                  })}
+
+                  {liveActivityRowIndex(groupTranscriptRows(activeThread.items)) < 0 || !running ? (
+                    <TurnActivityStatus
+                      running={running}
+                      pendingApproval={activeThread.pendingApproval}
+                      items={activeThread.items}
+                      swarmState={activeThread.swarmState}
+                      interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
+                      durationSeconds={activeThread.usage?.durationSeconds}
+                    />
+                  ) : null}
 
                   {/* Quota Handoff Banner */}
                   {activeThread.quotaHandoffOffer && (
@@ -549,19 +707,31 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             </div>
           ) : null}
 
+          {session && <SessionLifecycleBar projection={session} />}
+
           <ChatComposer
             threadId={activeThread?.id || 'draft'}
             agentName={agentName}
             engineLabel={engineLabel}
-            threadMode={activeThread?.mode || 'acceptEdits'}
-            threadProvider={activeThread?.provider || defaultProvider || 'antigravity'}
-            threadModel={activeThread?.model || null}
-            threadEffort={activeThread?.effort || null}
+            threadMode={activeThread ? activeThread.mode : draftMode ?? 'acceptEdits'}
+            threadProvider={effectiveProvider}
+            threadModel={effectiveModel}
+            threadEffort={activeThread ? activeThread.effort || null : draftEffort ?? null}
+            threadPlan={activeThread ? Boolean((activeThread as any).plan) : false}
+            threadAgent={effectiveAgent}
+            threadBranch={gitBranch}
+            branches={branches}
+            threadWorkspaceName={effectiveWorkspaceName || 'Local'}
+            workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
+            onSwitchBranch={handleSwitchBranch}
+            onCreateBranch={handleCreateBranch}
+            onSelectWorkspace={handleSelectWorkspace}
             running={running}
             prompt={prompt}
             attachments={attachments}
             totalTokens={totalTokens}
-            dynamicModels={dynamicModels}
+            declaration={declaration}
+            ensureDynamicAgents={ensureDynamicAgents}
             isRefreshingModels={isRefreshingModels}
             onRefreshModels={onRefreshModels}
             onChangePrompt={onChangePrompt}
@@ -578,7 +748,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             onStagePaths={onStagePaths}
             onRemoveAttachment={onRemoveAttachment}
             onUpdateConfig={onUpdateConfig}
-            pendingApproval={activeThread?.pendingApproval}
+            pendingApproval={session?.pendingApprovals[0] ?? activeThread?.pendingApproval}
             onApprovalDecision={onApprovalDecision}
           />
 

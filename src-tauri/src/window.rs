@@ -19,7 +19,8 @@ pub fn app_window_toggle_maximize(window: tauri::Window) {
 #[tauri::command]
 pub fn app_window_close(window: tauri::Window) {
     log_trace("Invoked: app_window_close()");
-    crate::terminal::snapshot_and_shutdown_all_terminals("app_window_close");
+    // Detach the GUI from the persistent core instead of killing live PTYs.
+    crate::core_daemon::on_client_window_close();
     let _ = window.close();
 }
 

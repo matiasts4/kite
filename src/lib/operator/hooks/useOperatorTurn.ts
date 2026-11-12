@@ -3,6 +3,7 @@
 // and trace timeline inspection.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { toast } from '../../toast';
 import {
   runOperatorTurn,
   type OperatorTurnResult,
@@ -13,14 +14,14 @@ import {
   getTurnTrace,
   clearTurnTraces,
   subscribeTrace,
-  getOperatorTraceDiskPath,
+  revealOperatorTraceDiskFolder,
 } from '../trace/trace';
 import type { OperatorTurnTrace, TraceEvent } from '../trace/types';
-import { invokeCommand } from '../../ipc';
 import {
   enqueueTurn,
   takeQueuedTurn,
   withTurnTimeout,
+  withPriorTurnHistory,
   OperatorTurnTimeoutError,
   OPERATOR_TURN_TIMEOUT_MESSAGE,
   type QueuedTurn,
@@ -103,6 +104,15 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
         setStage('speaking');
         setStageLabel(getStageLabelEs('speaking'));
       } else if (ev.ev === 'turn.end') {
+        if (ev.turnResult) {
+          setLastTurn(ev.turnResult);
+        } else if (ev.reply) {
+          setLastTurn((prev) => ({ ...(prev || {}), turnId: ev.turnId, reply: ev.reply, overallSuccess: ev.overallSuccess } as any));
+        }
+
+        if (ev.error) {
+          toast.error('Asistente Zed', ev.error);
+        }
         if (ev.overallSuccess) {
           setStage('done');
           setStageLabel(getStageLabelEs('done'));
@@ -136,10 +146,13 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
       setStageLabel(getStageLabelEs('planning'));
 
       try {
+        const historyOptions = withPriorTurnHistory(input, opts, getTurnTraces());
         const result = await withTurnTimeout(
           runOperatorTurn(input, {
             workspaceId: defaultWorkspaceIdRef.current,
+            ttsEnabled: opts?.ttsEnabled ?? false,
             ...opts,
+            ...historyOptions,
           })
         );
 
@@ -160,6 +173,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
                 : String(err);
           setStage('error');
           setStageLabel(getStageLabelEs('error', detail));
+          toast.error('Asistente Zed', detail);
           if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
           resetTimerRef.current = window.setTimeout(() => {
             setStage('idle');
@@ -219,10 +233,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
 
   const openLogsFolder = useCallback(async (): Promise<void> => {
     try {
-      const diskPath = await getOperatorTraceDiskPath();
-      if (diskPath) {
-        await invokeCommand('show_in_folder', { path: diskPath });
-      }
+      await revealOperatorTraceDiskFolder();
     } catch (e) {
       console.warn('[useOperatorTurn] No se pudo abrir carpeta de logs:', e);
     }

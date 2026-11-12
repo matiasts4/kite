@@ -3,90 +3,15 @@ import { invokeCommand } from '../../../lib/ipc';
 import type { AgentProfile } from '../../../types';
 import type { AvatarChoice } from '../../AgentAvatar';
 import { AgentAvatarCustomizer } from './AgentAvatarCustomizer';
-import { SelectMenu } from '../../ui/SelectMenu';
-import { EffortPicker } from '../chat/EffortPicker';
 import {
   BrandLogo,
   TEAMMATE_ENGINE_IDS,
   getEngineDisplayName,
   getEngineVendor,
-  supportsAgentChat,
 } from './engineMetadata';
-import { PROVIDER_CATALOG, engineToChatProvider } from '../chat/types';
-
-// SVG Icons (Zero Lucide & Zero emojis)
-const CheckIcon: React.FC<{ size?: number; className?: string }> = ({ size = 12, className = '' }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2.5"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
-const PuzzleIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M19.439 7.85c0-1.57.802-2.5 1.561-2.5s1.561.93 1.561 2.5h1.439v-3.85a2 2 0 0 0-2-2h-3.85c0 .759-.93 1.561-2.5 1.561s-2.5-.802-2.5-1.561h-3.65a2 2 0 0 0-2 2v3.85c.759 0 1.561.93 1.561 2.5s-.802 2.5-1.561 2.5v3.65a2 2 0 0 0 2 2h3.85c0-.759.93-1.561 2.5-1.561s2.5.802 2.5 1.561h3.65a2 2 0 0 0 2-2v-3.85c-.759 0-1.561-.93-1.561-2.5z" />
-  </svg>
-);
-
-const ClockIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <circle cx="12" cy="12" r="10" />
-    <polyline points="12 6 12 12 16 14" />
-  </svg>
-);
-
-const TrashIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14, className = '' }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M3 6h18" />
-    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-    <line x1="10" y1="11" x2="10" y2="17" />
-    <line x1="14" y1="11" x2="14" y2="17" />
-  </svg>
-);
+import { CheckIcon, ClockIcon, TrashIcon } from './agentIcons';
+import { AgentMcpSection } from './sections/AgentMcpSection';
+import { AgentModelDefaultsSection } from './sections/AgentModelDefaultsSection';
 
 // Official Engine Catalog (kept exported for compatibility)
 export interface EngineMetaItem {
@@ -306,64 +231,6 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
     }
   };
 
-  const [allMcpServers, setAllMcpServers] = useState<Array<{
-    id: string;
-    name: string;
-    provider: string;
-    providerLabel: string;
-    transport?: string;
-    status?: string;
-    builtin?: boolean;
-    description?: string;
-    toolCount?: number;
-    tools?: string[];
-  }>>([]);
-  const [mcpScope, setMcpScope] = useState<'provider' | 'all'>('provider');
-  const [expandedMcpId, setExpandedMcpId] = useState<string | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    invokeCommand<{ allServers?: any[]; servers?: any[] }>('list_provider_mcp_servers', {})
-      .then((res) => {
-        if (!mounted || !res) return;
-        const list = Array.isArray(res.allServers)
-          ? res.allServers
-          : Array.isArray(res.servers)
-            ? res.servers
-            : [];
-        setAllMcpServers(list);
-      })
-      .catch(() => {});
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  const isChatCapableEngine = supportsAgentChat(settingsDraft.engine);
-  const currentChatProvider = engineToChatProvider(settingsDraft.engine);
-  const currentCatalog = PROVIDER_CATALOG[currentChatProvider] || PROVIDER_CATALOG.antigravity;
-  const modelRows = [
-    {
-      id: 'automatic',
-      title: 'Automatic',
-      detail: `${currentCatalog.models[0]?.name || currentCatalog.defaultModel} · provider default`,
-    },
-    ...currentCatalog.models.map((m) => ({
-      id: m.id,
-      title: m.name,
-      detail: m.description || currentCatalog.label,
-    })),
-  ];
-
-  const disabledPlugins: string[] = Array.isArray(settingsDraft.disabledPluginIds)
-    ? settingsDraft.disabledPluginIds
-    : [];
-
-  const visibleMcpServers = allMcpServers.filter((srv) => {
-    if (mcpScope === 'all') return true;
-    return srv.provider === settingsDraft.engine || srv.provider === currentChatProvider || srv.provider === 'kite';
-  });
-
   const toggleMcpServerForAgent = (serverId: string) => {
     if (readOnly || saving) return;
     setSettingsDraft((prev: any) => {
@@ -512,279 +379,22 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
           </section>
 
           {/* Integrations & MCP Servers (By Provider & Agent) */}
-          <section className="agent-setting-group">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-              <h2 className="agent-setting-label" style={{ margin: 0 }}>Integrations & MCP Servers</h2>
-              {allMcpServers.length > 0 && (
-                <div style={{ display: 'inline-flex', gap: '4px', background: 'var(--chip-fill)', padding: '2px', borderRadius: '6px', border: '1px solid var(--block-stroke)' }}>
-                  <button
-                    type="button"
-                    className={`secondary-button ${mcpScope === 'provider' ? 'choice-pill--selected' : ''}`}
-                    style={{ fontSize: '11px', padding: '2px 8px', height: '22px' }}
-                    onClick={() => setMcpScope('provider')}
-                  >
-                    {getEngineDisplayName(settingsDraft.engine)} ({allMcpServers.filter((s) => s.provider === settingsDraft.engine || s.provider === currentChatProvider || s.provider === 'kite').length})
-                  </button>
-                  <button
-                    type="button"
-                    className={`secondary-button ${mcpScope === 'all' ? 'choice-pill--selected' : ''}`}
-                    style={{ fontSize: '11px', padding: '2px 8px', height: '22px' }}
-                    onClick={() => setMcpScope('all')}
-                  >
-                    All Providers ({allMcpServers.length})
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {visibleMcpServers.length === 0 ? (
-              <div className="ui-card agent-settings__readonly-row agent-settings__empty-row">
-                <PuzzleIcon size={14} />
-                <span>No plugins connected</span>
-              </div>
-            ) : (
-              <div className="ui-card agent-settings__rows">
-                {visibleMcpServers.map((srv) => {
-                  const isEnabled = !disabledPlugins.includes(srv.id);
-                  const isExpanded = expandedMcpId === srv.id;
-                  const tools = Array.isArray(srv.tools) ? srv.tools : [];
-                  return (
-                    <div key={srv.id} style={{ borderBottom: '1px solid var(--block-stroke)' }}>
-                      <div className="agent-settings__row" style={{ borderBottom: 'none' }}>
-                        <span className="agent-settings__row-copy" style={{ minWidth: 0 }}>
-                          <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                            <strong>{srv.name}</strong>
-                            <span
-                              style={{
-                                fontSize: '10px',
-                                padding: '1px 6px',
-                                borderRadius: '999px',
-                                background: 'color-mix(in srgb, var(--accent) 14%, transparent)',
-                                color: 'var(--accent)',
-                                fontWeight: 600,
-                              }}
-                            >
-                              {srv.providerLabel || srv.provider}
-                            </span>
-                            {typeof srv.toolCount === 'number' && srv.toolCount > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => setExpandedMcpId(isExpanded ? null : srv.id)}
-                                style={{
-                                  fontSize: '10px',
-                                  padding: '1px 6px',
-                                  borderRadius: '999px',
-                                  background: 'var(--chip-fill)',
-                                  border: '1px solid var(--block-stroke)',
-                                  color: 'var(--text-secondary)',
-                                  cursor: 'pointer',
-                                }}
-                                title="Inspect MCP tools"
-                              >
-                                {srv.toolCount} tools {isExpanded ? '▴' : '▾'}
-                              </button>
-                            )}
-                          </span>
-                          <small>{srv.description || 'Native MCP server integration'}</small>
-                        </span>
-                        <span className="agent-settings__control">
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-label={`Enable ${srv.name} for this agent`}
-                            aria-checked={isEnabled}
-                            className="ui-switch"
-                            disabled={readOnly || saving}
-                            onClick={() => toggleMcpServerForAgent(srv.id)}
-                          >
-                            <span aria-hidden="true" className="ui-switch__knob" />
-                          </button>
-                        </span>
-                      </div>
-                      {isExpanded && tools.length > 0 && (
-                        <div
-                          style={{
-                            padding: '0 14px 10px 14px',
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            gap: '4px',
-                          }}
-                        >
-                          {tools.slice(0, 36).map((t) => (
-                            <code
-                              key={t}
-                              style={{
-                                fontSize: '10px',
-                                padding: '2px 6px',
-                                borderRadius: '4px',
-                                background: 'var(--chip-fill)',
-                                border: '1px solid var(--block-stroke)',
-                                color: 'var(--text-secondary)',
-                              }}
-                            >
-                              {t}
-                            </code>
-                          ))}
-                          {tools.length > 36 && (
-                            <small style={{ fontSize: '10px', color: 'var(--text-tertiary)', alignSelf: 'center' }}>
-                              +{tools.length - 36} more
-                            </small>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <p className="agent-setting-hint">
-              Native MCP servers are grouped by provider ({getEngineDisplayName(settingsDraft.engine)}) and can be toggled individually per agent.
-            </p>
-          </section>
+          <AgentMcpSection
+            engine={settingsDraft.engine}
+            disabledPluginIds={settingsDraft.disabledPluginIds ?? []}
+            readOnly={readOnly}
+            saving={saving}
+            onToggleServer={toggleMcpServerForAgent}
+          />
 
           {/* New chats start with */}
-          <section className="agent-setting-group">
-            <h2 className="agent-setting-label">New chats start with</h2>
-            <div className="ui-card agent-settings__rows">
-              {isChatCapableEngine ? (
-                <>
-                  <div className="agent-settings__row">
-                    <span className="agent-settings__row-copy">
-                      <strong>Access</strong>
-                      <small>How far a turn may go without asking.</small>
-                    </span>
-                    <span className="agent-settings__control">
-                      <SelectMenu
-                        variant="field"
-                        label="Access"
-                        value={settingsDraft.defaultMode || 'automatic'}
-                        triggerLabel={
-                          settingsDraft.defaultMode === 'fullAccess'
-                            ? 'Full access'
-                            : settingsDraft.defaultMode === 'readOnly'
-                            ? 'Read only'
-                            : settingsDraft.defaultMode === 'acceptEdits'
-                            ? 'Auto-accept edits'
-                            : 'Automatic'
-                        }
-                        disabled={readOnly || saving}
-                        rows={[
-                          { id: 'automatic', title: 'Automatic', detail: 'Agent picks execution mode based on task' },
-                          { id: 'acceptEdits', title: 'Auto-accept edits', detail: 'Edits are applied without prompt' },
-                          { id: 'fullAccess', title: 'Full access', detail: 'Full file and command execution permissions' },
-                          { id: 'readOnly', title: 'Read only', detail: 'Discussion and planning only, no file edits' },
-                        ]}
-                        onSelect={(id) => {
-                          setSettingsDraft((prev: any) => ({ ...prev, defaultMode: id === 'automatic' ? null : id }));
-                          setSettingsDirty(true);
-                        }}
-                      />
-                    </span>
-                  </div>
-                  {(settingsDraft.engine === 'claude-code' || settingsDraft.engine === 'antigravity') ? (
-                    <div className="agent-settings__row">
-                      <span className="agent-settings__row-copy">
-                        <strong>Plan first</strong>
-                        <small>Start in Plan — think it through before touching anything.</small>
-                      </span>
-                      <span className="agent-settings__control">
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-label="Plan first"
-                          aria-checked={Boolean(settingsDraft.defaultPlan)}
-                          className="ui-switch"
-                          disabled={readOnly || saving}
-                          onClick={() => {
-                            setSettingsDraft((prev: any) => ({
-                              ...prev,
-                              defaultPlan: !prev.defaultPlan,
-                            }));
-                            setSettingsDirty(true);
-                          }}
-                        >
-                          <span aria-hidden="true" className="ui-switch__knob" />
-                        </button>
-                      </span>
-                    </div>
-                  ) : null}
-                  <div className="agent-settings__row">
-                    <span className="agent-settings__row-copy">
-                      <strong>Model</strong>
-                      <small>Which model {getEngineDisplayName(settingsDraft.engine)} uses.</small>
-                    </span>
-                    <span className="agent-settings__control">
-                      <SelectMenu
-                        variant="field"
-                        label="Model"
-                        value={settingsDraft.defaultModel || 'automatic'}
-                        triggerLabel={
-                          modelRows.find((r) => r.id === settingsDraft.defaultModel)?.title ||
-                          settingsDraft.defaultModel ||
-                          'Automatic'
-                        }
-                        disabled={readOnly || saving}
-                        rows={modelRows}
-                        onSelect={(id) => {
-                          setSettingsDraft((prev: any) => ({ ...prev, defaultModel: id === 'automatic' ? null : id }));
-                          setSettingsDirty(true);
-                        }}
-                      />
-                    </span>
-                  </div>
-                  {(currentCatalog.supportsEffort && settingsDraft.defaultModel !== 'haiku' && settingsDraft.defaultModel !== 'gpt-oss-120b') ? (
-                    <div className="agent-settings__row">
-                      <span className="agent-settings__row-copy">
-                        <strong>Reasoning effort</strong>
-                        <small>How much reasoning this model uses before it answers.</small>
-                      </span>
-                      <span className="agent-settings__control">
-                        <EffortPicker
-                          variant="field"
-                          label="Reasoning effort"
-                          detail="How much reasoning this model uses before it answers."
-                          disabled={readOnly || saving}
-                          value={
-                            settingsDraft.defaultEffort ||
-                            settingsDraft.defaultProviderOptions?.find((o: any) => o.effort)?.effort ||
-                            'medium'
-                          }
-                          onSelect={(effortId) => {
-                            setSettingsDraft((prev: any) => {
-                              const opts = Array.isArray(prev.defaultProviderOptions) ? [...prev.defaultProviderOptions] : [];
-                              const provider = prev.engine === 'codex' ? 'openai' : prev.engine === 'claude-code' ? 'anthropic' : prev.engine;
-                              const existingIdx = opts.findIndex((o: any) => o.provider === provider || o.effort);
-                              if (existingIdx !== -1) {
-                                opts[existingIdx] = { ...opts[existingIdx], effort: effortId };
-                              } else {
-                                opts.push({ provider, effort: effortId });
-                              }
-                              return {
-                                ...prev,
-                                defaultEffort: effortId,
-                                defaultProviderOptions: opts,
-                              };
-                            });
-                            setSettingsDirty(true);
-                          }}
-                        />
-                      </span>
-                    </div>
-                  ) : null}
-                </>
-              ) : (
-                <div className="agent-settings__row">
-                  <span className="agent-settings__row-copy">
-                    <strong>Chat defaults</strong>
-                    <small>{getEngineDisplayName(settingsDraft.engine)} runs in a terminal in this release.</small>
-                  </span>
-                  <span className="agent-settings__control">
-                    <strong className="agent-settings__row-value">Not applicable</strong>
-                  </span>
-                </div>
-              )}
-            </div>
-          </section>
+          <AgentModelDefaultsSection
+            settingsDraft={settingsDraft}
+            setSettingsDraft={setSettingsDraft}
+            setSettingsDirty={setSettingsDirty}
+            readOnly={readOnly}
+            saving={saving}
+          />
 
           {/* Notes cap */}
           <fieldset className="agent-setting-group">

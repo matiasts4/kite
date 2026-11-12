@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   RefreshCwIcon,
   SparklesIcon,
@@ -33,6 +34,11 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
   onUpdateAndRestart,
 }) => {
   const releases: ReleaseNote[] = getReleases(currentVersion, updateInfo);
+  const initialVisible = 2;
+  const revealStep = 5;
+  const [visibleCount, setVisibleCount] = useState(initialVisible);
+  const visibleReleases = releases.slice(0, visibleCount);
+  const remaining = Math.max(0, releases.length - visibleReleases.length);
 
   const renderKindIcon = (kind: ReleaseItem['kind']) => {
     switch (kind) {
@@ -123,11 +129,16 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
       </section>
 
       {/* 2. Chronological Release Ledger */}
-      {releases.map((rel) => (
-        <section
+      <AnimatePresence initial={false}>
+      {visibleReleases.map((rel) => (
+        <motion.section
           key={rel.version}
           aria-label={`Kite Code ${rel.version}`}
           className="settings-changelog__release"
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          exit={{ opacity: 0, height: 0 }}
+          style={{ overflow: 'hidden' }}
         >
           <div
             className="settings-changelog__heading"
@@ -185,8 +196,33 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
               ))}
             </ul>
           </div>
-        </section>
+        </motion.section>
       ))}
+      </AnimatePresence>
+      {remaining > 0 || visibleCount > initialVisible ? (
+        <div className="settings-changelog__pager">
+          {remaining > 0 ? (
+            <button
+              type="button"
+              className="settings-control ui-button"
+              onClick={() =>
+                setVisibleCount((count) => Math.min(releases.length, count + revealStep))
+              }
+            >
+              {`Mostrar versiones anteriores (${remaining} restantes)`}
+            </button>
+          ) : null}
+          {visibleCount > initialVisible ? (
+            <button
+              type="button"
+              className="settings-control ui-button"
+              onClick={() => setVisibleCount(initialVisible)}
+            >
+              Contraer historial
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </>
   );
 };

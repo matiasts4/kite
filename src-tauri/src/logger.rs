@@ -15,6 +15,11 @@ fn log_path() -> std::path::PathBuf {
 }
 
 pub fn log_trace(msg: &str) {
+    // In release builds, disable trace logging to disk to eliminate UI thread latency and file locks
+    if !cfg!(debug_assertions) {
+        return;
+    }
+
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

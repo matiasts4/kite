@@ -200,11 +200,77 @@ pub async fn proxy_operator_http(request: Value) -> Value {
 
     let mut builder = client.request(method, url);
 
+    let mut has_authorization = false;
+    let mut sent_authorization: Option<String> = None;
+    let mut opencode_session: Option<String> = None;
     if let Some(headers) = req.get("headers").and_then(|v| v.as_object()) {
         for (k, v) in headers {
             if let Some(val_str) = v.as_str() {
+                if val_str.trim().is_empty() {
+                    continue;
+                }
+                if k.eq_ignore_ascii_case("authorization") {
+                    has_authorization = true;
+                    sent_authorization = Some(val_str.to_string());
+                }
+                if k.eq_ignore_ascii_case("x-opencode-session") {
+                    opencode_session = Some(val_str.to_string());
+                }
                 builder = builder.header(k, val_str);
             }
+        }
+    }
+
+    let is_opencode_go_endpoint = req
+        .get("credentialProvider")
+        .and_then(|v| v.as_str())
+        == Some("opencode")
+        && matches!(
+            url.trim(),
+            crate::quota::OPENCODE_GO_CHAT_ENDPOINT | crate::quota::OPENCODE_GO_MODELS_ENDPOINT
+        );
+
+    // OpenCode Go inference never receives the token from the webview. The
+    // native proxy reads it from the local OpenCode CLI credential store and
+    // injects both the Authorization and the required session header.
+    let mut opencode_go_authenticated = false;
+    if req
+        .get("credentialProvider")
+        .and_then(|v| v.as_str())
+        == Some("opencode")
+    {
+        if !has_authorization {
+            match crate::quota::resolve_opencode_go_api_key() {
+                Some((token, _source)) => {
+                    builder = builder.header("Authorization", format!("Bearer {token}"));
+                    opencode_go_authenticated = is_opencode_go_endpoint;
+                }
+                None => {
+                    let message = "No se encontró una credencial de OpenCode Go. Ejecutá `opencode auth login opencode-go` o guardá una API key en Kite.";
+                    return json!({
+                        "success": false,
+                        "status": 401,
+                        "body": json!({ "error": { "message": message } }).to_string(),
+                        "error": message,
+                        "latencyMs": 0
+                    });
+                }
+            }
+        } else if is_opencode_go_endpoint {
+            // A webview-supplied key only verifies the Go connection when it is
+            // the same key the native resolver reads; otherwise the request
+            // authenticated some other account.
+            let native = crate::quota::resolve_opencode_go_api_key();
+            if let (Some((token, _source)), Some(sent)) =
+                (native.as_ref(), sent_authorization.as_deref())
+            {
+                opencode_go_authenticated = bearer_token(sent) == Some(token.as_str());
+            }
+        }
+        if opencode_session.is_none() {
+            let session = format!("ses_kite_{}", uuid::Uuid::new_v4().simple());
+            builder = builder.header("x-opencode-session", &session);
+            opencode_session = Some(session);
         }
     }
 
@@ -229,6 +295,14 @@ pub async fn proxy_operator_http(request: Value) -> Value {
     match builder.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
+            if is_opencode_go_endpoint && opencode_go_authenticated {
+                crate::quota::record_opencode_go_probe(
+                    url.trim(),
+                    opencode_session.as_deref(),
+                    (200..300).contains(&status),
+                    Some(status),
+                );
+            }
             match resp.text().await {
                 Ok(text) => {
                     let latency_ms = start.elapsed().as_millis() as u64;
@@ -258,6 +332,20 @@ pub async fn proxy_operator_http(request: Value) -> Value {
                 "latencyMs": latency_ms
             })
         }
+    }
+}
+
+/// Extracts the token from a `Bearer <token>` header value.
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
     }
 }
 
@@ -335,8 +423,36 @@ pub fn operator_trace_path() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn operator_trace_append(line: String) -> Result<(), String> {
+pub fn operator_trace_reveal(_request: Option<Value>) -> Value {
+    let dir = crate::persist::roaming_app_dir().join("operator-traces");
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&dir).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    Value::Null
+}
+
+#[tauri::command]
+pub fn operator_trace_append(line: Option<String>, request: Option<Value>) -> Result<(), String> {
     use std::io::Write;
+    let line_str = if let Some(l) = line {
+        l
+    } else if let Some(req) = request {
+        if let Some(s) = req.as_str() {
+            s.to_string()
+        } else {
+            req.get("line")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "Missing 'line' field in request".to_string())?
+        }
+    } else {
+        return Err("Missing 'line' argument".to_string());
+    };
+
     let dir = crate::persist::roaming_app_dir().join("operator-traces");
     if !dir.exists() {
         let _ = std::fs::create_dir_all(&dir);
@@ -349,9 +465,9 @@ pub fn operator_trace_append(line: String) -> Result<(), String> {
         .open(&file_path)
         .map_err(|e| format!("Failed to open operator trace file: {e}"))?;
 
-    let final_line = match serde_json::from_str::<Value>(&line) {
-        Ok(val) => serde_json::to_string(&redact_secrets_native(val)).unwrap_or(line),
-        Err(_) => line,
+    let final_line = match serde_json::from_str::<Value>(&line_str) {
+        Ok(val) => serde_json::to_string(&redact_secrets_native(val)).unwrap_or(line_str),
+        Err(_) => line_str,
     };
 
     writeln!(file, "{}", final_line.trim_end())

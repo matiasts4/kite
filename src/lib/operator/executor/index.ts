@@ -13,6 +13,10 @@ import { executeOpenBrowserAction } from './actions/openBrowser';
 import { executeNarrateAction } from './actions/narrate';
 import { executeSpawnSubagentAction } from './actions/spawnSubagent';
 import { executeStopSpeakingAction } from './actions/stopSpeaking';
+import { executeHandoffToAgentAction } from './actions/handoffToAgent';
+import { executeManagePaneLayoutAction } from './actions/managePaneLayout';
+import { executeSwitchWorkspaceAction } from './actions/switchWorkspace';
+import { executeLaunchThreadAction } from './actions/launchThread';
 
 export function composeReplyFromReceipts(
   plan: OperatorPlan,
@@ -75,11 +79,11 @@ export async function executePlan(
           break;
 
         case 'close_terminals':
-          receipt = await executeCloseTerminalsAction(action, idx);
+          receipt = await executeCloseTerminalsAction(action, idx, context);
           break;
 
         case 'inject_prompt':
-          receipt = await executeInjectPromptAction(action, idx);
+          receipt = await executeInjectPromptAction(action, idx, context);
           break;
 
         case 'open_browser':
@@ -87,7 +91,7 @@ export async function executePlan(
           break;
 
         case 'narrate_summary':
-          receipt = await executeNarrateAction(action, idx);
+          receipt = await executeNarrateAction(action, idx, context);
           break;
 
         case 'spawn_subagent':
@@ -96,6 +100,22 @@ export async function executePlan(
 
         case 'stop_speaking':
           receipt = executeStopSpeakingAction(idx);
+          break;
+
+        case 'handoff_to_agent':
+          receipt = await executeHandoffToAgentAction(action, idx, context);
+          break;
+
+        case 'manage_pane_layout':
+          receipt = await executeManagePaneLayoutAction(action, idx, context);
+          break;
+
+        case 'switch_workspace':
+          receipt = await executeSwitchWorkspaceAction(action, idx, context);
+          break;
+
+        case 'launch_thread':
+          receipt = await executeLaunchThreadAction(action, idx, context);
           break;
 
         default:
@@ -120,17 +140,27 @@ export async function executePlan(
 
     receipt.durationMs = Date.now() - actionStartMs;
 
-    if (receipt.verification) {
-      emitTrace({
-        turnId: currentTurnId,
-        ev: 'action.verify',
-        actionIdx: idx,
-        expected: receipt.verification.expected,
-        observed: receipt.verification.observed,
-        ok: receipt.verification.ok,
-        error: receipt.verification.error,
-      });
+    // S1: every executed action is verified, even when the executor reports no
+    // postcondition probe of its own. The synthesized verification mirrors the
+    // receipt outcome so `trace.receipts` never shows an unverified action.
+    if (!receipt.verification) {
+      receipt.verification = {
+        ok: receipt.ok,
+        expected: { type: action.type },
+        observed: { ok: receipt.ok },
+        error: receipt.error,
+      };
     }
+
+    emitTrace({
+      turnId: currentTurnId,
+      ev: 'action.verify',
+      actionIdx: idx,
+      expected: receipt.verification.expected,
+      observed: receipt.verification.observed,
+      ok: receipt.verification.ok,
+      error: receipt.verification.error,
+    });
 
     emitTrace({
       turnId: currentTurnId,
@@ -145,9 +175,12 @@ export async function executePlan(
     receipts.push(receipt);
   }
 
+  // S1: a plan whose actions were stripped by a safety guard must never claim success.
   const overallSuccess =
     plan.actions.length === 0
-      ? Boolean(plan.reply || plan.answer) && !receipts.some((r) => !r.ok)
+      ? plan.fallbackReason !== 'filtered-unsafe-close' &&
+        Boolean(plan.reply || plan.answer) &&
+        !receipts.some((r) => !r.ok)
       : receipts.length > 0 && receipts.every((r) => r.ok);
 
   const reply = composeReplyFromReceipts(plan, receipts);

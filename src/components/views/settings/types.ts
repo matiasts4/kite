@@ -15,6 +15,7 @@ export type SettingsTabId =
   | 'telemetry'
   | 'terminal'
   | 'notifications'
+  | 'chat'
   | 'zed'
   | 'agents'
   | 'plugins'

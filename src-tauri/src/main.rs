@@ -18,6 +18,7 @@ pub mod window;
 pub mod session;
 pub mod session_resolver;
 pub mod terminal;
+pub mod vt_engine;
 pub mod agents;
 pub mod agent_mind;
 pub mod workspaces;
@@ -36,24 +37,35 @@ pub mod misc;
 pub mod tickets;
 pub mod quota;
 pub mod updater;
+pub mod local_feed;
 pub mod account_switcher;
 pub mod handoff;
 pub mod system_metrics;
+pub mod headroom_monitor;
 pub mod acp;
 pub mod odd_tasks;
 pub mod operator_runtime;
 pub mod audio_ducking;
 pub mod agent_inbox;
 pub mod credentials;
+pub mod connections;
+pub mod plugins;
+pub mod agent_maintenance;
+pub mod dispatch;
+pub mod dispatch_wire;
+pub mod core_wire;
+pub mod core_daemon;
 
 use logger::log_trace;
 use tauri::Manager;
 
 use acp::*;
+use agent_maintenance::*;
 use odd_tasks::*;
 use operator_runtime::*;
 use audio_ducking::*;
 use agent_inbox::*;
+use connections::*;
 use credentials::*;
 
 use account_switcher::*;
@@ -62,6 +74,7 @@ use agent_mind::*;
 use browser::*;
 use chat::*;
 use chat_commands::*;
+use chat_commands::rewind_thread_transcript;
 use dictation::*;
 use handoff::*;
 use files::*;
@@ -72,11 +85,14 @@ use quota::*;
 use routines::*;
 use session::*;
 use system_metrics::*;
+use headroom_monitor::fetch_headroom_monitor;
 use terminal::*;
+use account_switcher::inspect_provider_sessions;
 use tickets::*;
 use updater::*;
 use window::*;
 use workspaces::*;
+use core_daemon::*;
 
 #[cfg(windows)]
 fn register_windows_shutdown_handler() {
@@ -91,6 +107,10 @@ fn register_windows_shutdown_handler() {
     unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 2 || ctrl_type == 5 || ctrl_type == 6 {
             crate::terminal::snapshot_and_shutdown_all_terminals("windows_ctrl_shutdown");
+            crate::dispatch_wire::shutdown();
+            if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                manager.stop_all();
+            }
         }
         0
     }
@@ -98,6 +118,90 @@ fn register_windows_shutdown_handler() {
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), 1);
     }
+}
+
+/// Keeps a visible Kite window painting when a game or another app sits beside it.
+///
+/// Chromium's native occlusion check treats that arrangement as a covered window
+/// and drops `requestAnimationFrame` to about one frame per second.
+#[cfg(windows)]
+fn install_webview_runtime_flags() {
+    let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    for flag in [
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=CalculateNativeWinOcclusion",
+    ] {
+        if args.contains(flag) {
+            continue;
+        }
+        if !args.is_empty() && !args.ends_with(' ') {
+            args.push(' ');
+        }
+        args.push_str(flag);
+    }
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
+}
+
+/// Windows puts a background process into Efficiency Mode while a game is in front.
+/// That throttles the PTY reader in this process, and a streaming agent blocks on write.
+#[cfg(windows)]
+fn opt_out_of_efficiency_mode() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    unsafe {
+        let mut state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &mut state as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
+/// Dev WebView loads http://127.0.0.1:1420. If Vite is still coming up, Edge
+/// paints ERR_CONNECTION_REFUSED and never retries. Reload once the port opens.
+#[cfg(debug_assertions)]
+fn reload_main_when_vite_is_up(handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use std::net::TcpStream;
+        use std::time::Duration;
+        let addr = match "127.0.0.1:1420".parse() {
+            Ok(addr) => addr,
+            Err(_) => return,
+        };
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_millis(500));
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_err() {
+                continue;
+            }
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.eval(
+                    r#"(function () {
+  var t = (document.body && document.body.innerText) || '';
+  if (
+    t.indexOf('ERR_CONNECTION_REFUSED') !== -1 ||
+    t.indexOf('rechazó la conexión') !== -1 ||
+    t.indexOf("This site can't be reached") !== -1
+  ) {
+    location.reload();
+  }
+})()"#,
+                );
+            }
+            break;
+        }
+    });
 }
 
 fn main() {
@@ -119,10 +223,38 @@ fn main() {
     // eliminating `--bg-updater` and `agy.exe --version` invocations.
     std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
 
+    #[cfg(target_os = "windows")]
+    {
+        // Runs for the window and for `kite-core`, before either path returns.
+        opt_out_of_efficiency_mode();
+        install_webview_runtime_flags();
+    }
+
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && (args[1] == "daemon" || args[1] == "--daemon" || args[1] == "kite-core") {
+        crate::core_daemon::run_core_daemon_main();
+        return;
+    }
     if args.len() >= 2 && (args[1] == "mcp" || args[1] == "mcp-tasks" || args[1] == "kite-tasks") {
         crate::tickets::run_mcp_server(&args[1..]);
         return;
+    }
+    if args.len() >= 2 && args[1] == "dispatch" {
+        let code = crate::dispatch_wire::run_dispatch_cli(&args[2..]);
+        std::process::exit(code);
+    }
+
+    let mut ondemand_panel: Option<String> = None;
+    for idx in 1..args.len() {
+        if args[idx] == "--panel" {
+            if let Some(panel) = args.get(idx + 1) {
+                let normalized = panel.trim().to_ascii_lowercase();
+                if matches!(normalized.as_str(), "settings" | "browser" | "account") {
+                    std::env::set_var("KITE_ONDEMAND_PANEL", &normalized);
+                    ondemand_panel = Some(normalized);
+                }
+            }
+        }
     }
 
     std::panic::set_hook(Box::new(|info| {
@@ -160,7 +292,7 @@ fn main() {
             .join("EBWebView");
 
         // Explicitly isolate WebView2 User Data Folder so Dev and Installed never freeze or conflict
-        if std::env::var("WEBVIEW2_USER_DATA_FOLDER").is_err() {
+        if cfg!(debug_assertions) || std::env::var("WEBVIEW2_USER_DATA_FOLDER").is_err() {
             std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_dir);
         }
         log_trace(&format!(
@@ -169,18 +301,16 @@ fn main() {
             std::env::var("WEBVIEW2_USER_DATA_FOLDER").unwrap_or_default()
         ));
 
-        // Prevent aggressive Chromium background suspension, timer throttling, and occlusion sleeping
-        // which causes UI freeze (10s+) when switching back to Kite Code after 3+ minutes in background.
-        let base_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        let anti_freeze_args = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
-        if !base_args.contains("--disable-background-timer-throttling") {
-            let merged_args = if base_args.is_empty() {
-                anti_freeze_args.to_string()
-            } else {
-                format!("{base_args} {anti_freeze_args}")
-            };
-            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &merged_args);
-            log_trace(&format!("[PID {}] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = {:?}", pid, merged_args));
+        // Idempotent. The early windows block already merged these flags, including
+        // the occlusion opt-out. Log the value the WebView will actually see.
+        #[cfg(windows)]
+        {
+            install_webview_runtime_flags();
+            log_trace(&format!(
+                "[PID {}] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = {:?}",
+                pid,
+                std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default()
+            ));
         }
 
         let lock_path = webview_dir.join("Default").join("LOCK");
@@ -195,6 +325,10 @@ fn main() {
             }
         }
     }
+
+    // The installed and dev builds share one connection registry. Whichever
+    // opens first imports the per-install vaults and account profiles once.
+    crate::connections::ensure_shared_registry();
 
     persist::workspaces();
 
@@ -218,16 +352,39 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
+        .setup(move |app| {
             let _ = APP_HANDLE.set(app.handle().clone());
             log_trace("Setup hook running");
-            if cfg!(debug_assertions) {
-                if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window("main") {
+                if let Some(panel) = ondemand_panel.as_deref() {
+                    let _ = w.set_title(&format!("Kite Code — {}", panel));
+                } else if cfg!(debug_assertions) {
                     let _ = w.set_title("Kite Code (Dev)");
                 }
-            } else {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            #[cfg(debug_assertions)]
+            reload_main_when_vite_is_up(app.handle().clone());
+            if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
+            std::thread::spawn(|| {
+                let _ = crate::persist::initial_state();
+            });
+            crate::chat::persistent::start_idle_reaper();
+            crate::dispatch_wire::start_gui_background();
+            // A detached core owns terminal PTYs and background dispatch; connect eagerly
+            // so daemon-emitted events reach the WebView from startup.
+            if crate::core_daemon::ensure_core_daemon_started() {
+                std::thread::spawn(|| {
+                    let _ = crate::core_daemon::CoreConnection::get();
+                });
+            } else {
+                crate::dispatch_wire::start_background();
+            }
+            crate::system_metrics::init_benchmark_from_env();
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
             for (label, w) in &windows {
@@ -236,14 +393,12 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            log_trace(&format!("WindowEvent on {}: {:?}", window.label(), event));
             if window.label() == "main" {
                 if matches!(
                     event,
                     tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
                 ) {
-                    crate::terminal::snapshot_and_shutdown_all_terminals("main_window_close");
-                    crate::audio_ducking::restore_audio_immediate();
+                    crate::core_daemon::on_client_window_close();
                 }
             }
         })
@@ -254,8 +409,6 @@ fn main() {
             abandon_agent_draft,
             accept_agent_draft,
             add_workspace,
-            antigravity_list_google_accounts,
-            antigravity_set_active_google_account,
             agent_install_open_docs,
             agent_message_inbox,
             agent_messaging_preference,
@@ -322,9 +475,18 @@ fn main() {
             draft_agent_with_ai,
             ensure_files_resource,
             get_agent_availability,
+            get_chat_session_status,
             get_subscription_quotas,
-            save_opencode_cookie,
-            clear_opencode_cookie,
+            get_thread_subagent_detail,
+            get_thread_swarm_state,
+            send_subagent_message,
+            stop_subagent_run,
+            swarm_post_from_ui,
+            swarm_switch_worker_model,
+            swarm_kill_worker_from_ui,
+            opencode_go_credential_status,
+            save_opencode_api_key,
+            clear_opencode_api_key,
             insert_terminal_drop_paths,
             insert_terminal_files_entry,
             install_agent_starter,
@@ -335,15 +497,20 @@ fn main() {
             list_agent_profiles,
             list_agent_rail_activity,
             list_agent_starters,
+            list_workspace_branches,
+            switch_workspace_branch,
+            create_workspace_branch,
             list_archived_chats,
             list_chat_provider_models,
             list_chat_summaries,
+            list_connections,
             list_dictation_input_devices,
             list_files_directory,
             list_launch_presets,
             list_live_chat_runs,
             list_prompts,
             list_provider_mcp_servers,
+            list_provider_agents,
             list_routines,
             list_terminal_profiles,
             load_agent_chat_thread,
@@ -388,9 +555,18 @@ fn main() {
             read_files_preview,
             read_files_text,
             read_terminal_output,
+            poll_terminal_snapshot,
+            set_terminal_presentation,
+            scroll_terminal_viewport,
+            scroll_terminal_viewport_bin,
+            find_terminal_text,
+            get_terminal_selection_text,
+            dump_terminal_diagnostics,
+            clear_terminal_vt,
             read_workspace_changes,
             read_workspace_file_diff,
             reconnect_ssh_workspace,
+            recover_chat_thread,
             release_chat_attachment,
             remove_agent_skill,
             remove_workspace_from_list,
@@ -405,12 +581,17 @@ fn main() {
             report_terminal_agent_detected,
             resolve_file_link,
             respond_chat_approval,
+            respond_chat_user_input,
             restart_agent_terminal_for_autopilot,
             restore_archived_chat,
+            restore_thread_checkpoint,
+            rewind_thread_transcript,
             resume_prompt_get,
             resume_prompt_answer,
             retry_agent_draft_cleanup,
             reveal_workspace,
+            reveal_file,
+            open_file_default,
             run_routine_now,
             save_files_text,
             save_launch_preset,
@@ -455,6 +636,9 @@ fn main() {
             terminal_host_set_keep_agents_running,
             terminal_host_clear_scrollback,
             terminate_terminal,
+            shutdown_core_daemon,
+            poll_terminal_snapshot_bin,
+            replenish_terminal_credit,
             ticket_call,
             ticket_snapshot,
             ticket_connect,
@@ -485,13 +669,21 @@ fn main() {
             updater_update_and_restart,
             get_app_version,
             list_saved_accounts,
+            list_detected_cli_accounts,
             save_current_account_profile,
             switch_account_profile,
+            inspect_provider_sessions,
+            prepare_new_account_login,
             delete_account_profile,
             get_active_account_profile,
             recommend_continuation_targets,
             get_handoff_preview,
             get_system_metrics,
+            fetch_headroom_monitor,
+            start_terminal_benchmark,
+            stop_terminal_benchmark,
+            get_terminal_benchmark_sample,
+            report_terminal_frontend_metrics,
             continue_turn_with_handoff,
             create_odd_task_file,
             list_odd_task_files,
@@ -500,6 +692,7 @@ fn main() {
             query_operator_agent,
             proxy_operator_http,
             operator_trace_path,
+            operator_trace_reveal,
             operator_trace_append,
             operator_duck_audio,
             operator_restore_audio,
@@ -510,6 +703,28 @@ fn main() {
             save_provider_credential,
             delete_provider_credential,
             migrate_localstorage_credentials,
+            plugins::plugin_connections,
+            plugins::plugin_connection_action,
+            plugins::get_plugin_config,
+            plugins::save_plugin_config,
+            get_agent_updates_summary,
+            start_agent_tool_job,
+            get_active_agent_tool_jobs,
+            cancel_agent_tool_job,
+            dispatch_wire::dispatch_send,
+            dispatch_wire::dispatch_publish,
+            dispatch_wire::dispatch_osc,
+            dispatch_wire::dispatch_ls,
+            dispatch_wire::dispatch_run,
+            dispatch_wire::dispatch_wait,
+            dispatch_wire::dispatch_read,
+            dispatch_wire::dispatch_report,
+            dispatch_wire::dispatch_skill,
+            dispatch_wire::dispatch_pane_shown,
+            dispatch_wire::dispatch_kill,
+            dispatch_wire::dispatch_interrupt,
+            dispatch_wire::dispatch_keys,
+            dispatch_wire::dispatch_attach,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
@@ -531,21 +746,19 @@ fn main() {
         match event {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
-                crate::audio_ducking::restore_audio_immediate();
-                crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit_requested");
+                crate::dispatch_wire::shutdown_gui_bridge();
+                crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::Exit => {
-                log_trace("App RunEvent::Exit, ensuring all terminals are snapshotted");
-                crate::audio_ducking::restore_audio_immediate();
-                crate::terminal::snapshot_and_shutdown_all_terminals("run_event_exit");
+                log_trace("App RunEvent::Exit, detaching GUI from persistent core");
+                crate::dispatch_wire::shutdown_gui_bridge();
+                crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::MainEventsCleared => {
                 // Do NOT log MainEventsCleared. It triggers dozens of times per second,
                 // and writing synchronously to app.log on disk blocks the main UI message pump.
             }
-            other => {
-                log_trace(&format!("RunEvent: {:?}", other));
-            }
+            _other => {}
         }
     });
 }

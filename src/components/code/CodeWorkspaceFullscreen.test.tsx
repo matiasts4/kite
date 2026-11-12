@@ -68,7 +68,7 @@ describe('PaneNodeRenderer - Fullscreen / Zoom Aspect Ratio Parity', () => {
     expect(container.querySelectorAll('.code-pane-panel')).toHaveLength(2);
   });
 
-  it('bypasses .pane-tree grid container when fullscreenLeafId is active, rendering ONLY the zoomed pane', () => {
+  it('preserves all pane nodes in DOM (zero-unmount) when fullscreenLeafId is active, marking zoom and hidden classes', () => {
     const l1 = createLeaf({ kind: 'terminal', sessionId: 'term-1', label: 'Terminal 1' });
     const l2 = createLeaf({ kind: 'terminal', sessionId: 'term-2', label: 'Terminal 2' });
     const split = createSplit('vertical', [l1, l2], [0.5, 0.5]);
@@ -107,13 +107,16 @@ describe('PaneNodeRenderer - Fullscreen / Zoom Aspect Ratio Parity', () => {
       />
     );
 
-    // .pane-tree and .pane-divider must NOT exist: the zoomed pane renders directly at root!
-    expect(container.querySelector('.pane-tree')).toBeNull();
-    expect(container.querySelector('.pane-divider')).toBeNull();
-
-    // Only 1 pane panel is rendered (the zoomed one)
+    // Zero-unmount architecture: both panes remain in the DOM so terminal sessions and WebGL/DOM states are never destroyed
     const panels = container.querySelectorAll('.code-pane-panel');
-    expect(panels).toHaveLength(1);
-    expect(panels[0].getAttribute('data-leaf-id')).toBe(l1.id);
+    expect(panels).toHaveLength(2);
+
+    const fsPanel = container.querySelector('.code-pane-panel--fullscreen');
+    expect(fsPanel).toBeInTheDocument();
+    expect(fsPanel?.getAttribute('data-leaf-id')).toBe(l1.id);
+
+    const hiddenPanel = container.querySelector('.code-pane-panel--hidden-by-fullscreen');
+    expect(hiddenPanel).toBeInTheDocument();
+    expect(hiddenPanel?.getAttribute('data-leaf-id')).toBe(l2.id);
   });
 });

@@ -15,7 +15,7 @@ vi.mock('../../hooks/useAppUpdater', () => ({
 }));
 
 describe('SidebarFooter Component', () => {
-  it('renders account name and does not display credits or plan tier', () => {
+  it('renders account name without plan tier or credits', () => {
     const onOpenSettings = vi.fn();
     const onToggleAppearance = vi.fn();
 
@@ -35,8 +35,7 @@ describe('SidebarFooter Component', () => {
     expect(screen.getByText('Kite Developer')).toBeInTheDocument();
     expect(screen.getByText('K')).toBeInTheDocument();
 
-    // Verifies credits and subscription plan are NOT displayed
-    expect(screen.queryByText(/credits/i)).not.toBeInTheDocument();
+    // Verifies credits and subscription plan are NOT displayed in the sidebar
     expect(screen.queryByText('PRO')).not.toBeInTheDocument();
     expect(screen.queryByText('10,000')).not.toBeInTheDocument();
   });

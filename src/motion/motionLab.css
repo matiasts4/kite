@@ -33,6 +33,20 @@
   font-size: 13px;
 }
 
+.motion-lab__header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.motion-lab__header-actions .motion-lab__button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .motion-lab__section {
   display: flex;
   flex-direction: column;

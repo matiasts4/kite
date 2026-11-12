@@ -452,3 +452,27 @@ export const ListTreeIcon = createIcon(
   </>, { size: 12 }
 );
 
+export const ExternalLinkIcon = createIcon(
+  <>
+    <path d="M15 3h6v6" />
+    <path d="M10 14 21 3" />
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </>, { size: 12 }
+);
+
+export const CopyIcon = createIcon(
+  <>
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </>, { size: 12 }
+);
+
+export const FolderSearchIcon = createIcon(
+  <>
+    <path d="M10.5 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v2.5" />
+    <circle cx="17" cy="17" r="3" />
+    <path d="m21 21-1.9-1.9" />
+  </>, { size: 12 }
+);
+
+

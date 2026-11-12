@@ -48,11 +48,25 @@ describe('Sanitize & Contract Tests', () => {
       expect(clean).toBe('Comando procesado.');
     });
 
-    it('enforces maximum length of 280 characters', () => {
-      const longText = 'Esta es una respuesta muy larga en español. '.repeat(10);
-      const clean = sanitizeReply(longText);
-      expect(clean.length).toBeLessThanOrEqual(280);
-      expect(clean.endsWith('...')).toBe(true);
+    it('enforces maximum length with clean boundary when text exceeds maxLength', () => {
+      const veryLongText = 'Esta es una respuesta muy larga en español. '.repeat(35);
+      const clean = sanitizeReply(veryLongText);
+      expect(clean.length).toBeLessThanOrEqual(1200);
+      expect(clean.endsWith('.')).toBe(true);
+    });
+
+    it('preserves complete 400-800 character conversational explanations without 280-char truncation', () => {
+      const explanation = 'No tengo el contenido completo de esos chats pero sí veo el índice de conversaciones de este proyecto: por ejemplo títulos como revisión de notificaciones con AntiGravity y revisión de ODD con Grok. ¿Querés que revise alguno en particular?';
+      const clean = sanitizeReply(explanation);
+      expect(clean).toBe(explanation);
+      expect(clean.length).toBeGreaterThan(200);
+    });
+
+    it('allows longer summaries when custom maxLength is specified', () => {
+      const mediumText = 'Esta es una respuesta detallada con varias líneas de resumen para el usuario. '.repeat(5);
+      const clean = sanitizeReply(mediumText, undefined, 800);
+      expect(clean.length).toBeGreaterThan(280);
+      expect(clean.length).toBeLessThanOrEqual(800);
     });
   });
 

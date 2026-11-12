@@ -13,7 +13,28 @@ export interface ChatThreadSummary {
   status?: 'idle' | 'running' | 'waiting' | 'error';
   unread?: boolean;
   hasContent?: boolean;
-  provider?: 'claude' | 'codex' | 'cursor' | 'grok' | 'opencode';
+  provider?: 'claude' | 'codex' | 'cursor' | 'grok' | 'opencode' | 'antigravity' | 'gemini' | string;
+  sessionState?: string;
+  isWarm?: boolean;
+  isSettled?: boolean;
+  parentThreadId?: string | null;
+  parentToolCallId?: string | null;
+  startedByAgent?: boolean;
+  sideChat?: boolean;
+  subagentRole?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  swarmId?: string | null;
+  swarmMemberName?: string | null;
+}
+
+export interface WorkspaceSessionPaneInfo {
+  id: string;
+  kind?: 'terminal' | 'thread';
+  label?: string;
+  engine?: string;
+  agentName?: string;
+  status?: 'idle' | 'running' | 'waiting' | 'error';
+  isFocused?: boolean;
 }
 
 export interface WorkspaceSessionTab {
@@ -22,6 +43,7 @@ export interface WorkspaceSessionTab {
   paneCount?: number;
   status?: 'idle' | 'running' | 'waiting' | 'error';
   isActive?: boolean;
+  panes?: WorkspaceSessionPaneInfo[];
 }
 
 export interface SidebarProps {
@@ -69,7 +91,9 @@ export interface SidebarProps {
   agentActivity?: Record<string, { runningCount?: number; needsYou?: boolean; atUnixMs?: number; line?: string }>;
   availability?: { hasProbed?: boolean } & Record<string, boolean>;
   onOpenArchivedChats?: () => void;
+  archivedCount?: number;
   onRenameThread?: (id: string, newTitle: string) => void;
+  onArchiveThread?: (id: string) => void;
   onDeleteThread?: (id: string) => void;
   onMoveWorkspace?: (workspaceId: string, toIndex: number) => void;
   onMoveAgent?: (agentId: string, toIndex: number) => void;

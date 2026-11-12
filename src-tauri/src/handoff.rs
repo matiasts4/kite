@@ -1,6 +1,6 @@
 use crate::account_switcher::get_alternative_accounts_with_quota;
 use crate::persist::{threads, workspace_path};
-use crate::quota::get_subscription_quotas;
+use crate::quota::get_subscription_quotas_direct;
 use crate::terminal::engine_installed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -132,7 +132,7 @@ pub fn recommend_continuation_targets_direct(current_provider: String) -> Value 
     }
 
     // 2. Query live quotas for all providers
-    let quotas_val = get_subscription_quotas(None, Some(false));
+    let quotas_val = get_subscription_quotas_direct(None, Some(false));
     let provider_list = [
         ("antigravity", "Antigravity (Google Pro)"),
         ("gemini", "Gemini CLI"),

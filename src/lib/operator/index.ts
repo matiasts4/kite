@@ -7,14 +7,16 @@ import {
   type ActionReceipt,
 } from './contract';
 import { emitTrace } from './trace/trace';
-import { planTurnHeuristic } from './planner/heuristic';
+import { planTurnHeuristic, isNegatedTerminalImperative } from './planner/heuristic';
 import { planTurnLLM } from './planner/llm';
 import { executePlan, composeReplyFromReceipts } from './executor';
 import { ttsNarrator } from './ttsNarrator';
 import { loadOperatorConfig } from './operatorConfig';
+import { runLedger } from './runLedger';
 import { getActiveAgentTerminals } from '../terminalRegistry';
-import type { PlannerProvider } from './providers/types';
+import type { PlannerProvider, ProviderMessage } from './providers/types';
 import { resolvePlannerProvider } from './providers/resolvePlanner';
+import { zedAssistantFailureMessage } from './assistantFailureNotice';
 
 export { resolvePlannerProvider } from './providers/resolvePlanner';
 
@@ -41,6 +43,8 @@ export interface RunOperatorTurnOptions {
   muted?: boolean;
   turnId?: string;
   context?: TurnContext;
+  /** Prior user and assistant messages from the operator run, oldest first. */
+  history?: ProviderMessage[];
 }
 
 export interface OperatorTurnResult {
@@ -57,22 +61,66 @@ export interface OperatorTurnResult {
 }
 
 export function captureCurrentTurnContext(mode?: string, workspaceId?: string | null): TurnContext {
-  let terminals: any[] = [];
+  const legacyPrefix = ['bm', 'one'].join('');
+  let resolvedWsId = workspaceId || undefined;
+  if (!resolvedWsId && typeof window !== 'undefined') {
+    try {
+      resolvedWsId =
+        localStorage.getItem('kite.selectedWorkspaceId') ||
+        localStorage.getItem(`${legacyPrefix}.selectedWorkspaceId`) ||
+        undefined;
+    } catch {}
+  }
+
+  let workspaceName: string | undefined;
+  let workspacePath: string | undefined;
+
+  if (typeof window !== 'undefined') {
+    try {
+      const raw =
+        localStorage.getItem('kite.cached_workspaces') ||
+        localStorage.getItem(`${legacyPrefix}.cached_workspaces`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const ws = parsed.find((w: any) => w.id === resolvedWsId);
+          if (ws) {
+            workspaceName = ws.displayName || ws.name;
+            workspacePath = ws.path || ws.rootPath;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  let allTerminals: any[] = [];
   try {
-    terminals = getActiveAgentTerminals();
+    allTerminals = getActiveAgentTerminals();
   } catch {
-    terminals = [];
+    allTerminals = [];
+  }
+
+  // Filter terminals strictly to the active workspace to prevent cross-project confusion
+  const filteredTerminals = resolvedWsId
+    ? allTerminals.filter((t) => !t.workspaceId || t.workspaceId === resolvedWsId)
+    : allTerminals;
+
+  if (!workspaceName && filteredTerminals.length > 0) {
+    workspaceName = filteredTerminals[0].workspaceName;
   }
 
   return {
     mode: mode || 'code',
-    workspaceId: workspaceId || undefined,
-    activeTerminals: terminals.map((t, idx) => ({
+    workspaceId: resolvedWsId,
+    workspaceName,
+    workspacePath,
+    activeTerminals: filteredTerminals.map((t, idx) => ({
       sessionId: t.sessionId,
       engine: t.engine,
       title: t.title,
       who: t.who,
       idx: idx + 1,
+      workspaceId: t.workspaceId ?? undefined,
     })),
   };
 }
@@ -102,12 +150,16 @@ export async function runOperatorTurn(
     // If the heuristic detects deterministic action intent, execute immediately without 3-4s cloud delay
     let plan: OperatorPlan;
     let fastPlan = planTurnHeuristic(input);
+    // S4: a negated imperative ("no cierres las terminales") is already answered by the
+    // heuristic refusal plan and must never be escalated to the LLM.
+    const negatedTerminalImperative = isNegatedTerminalImperative(input);
     const hasDeterministicActions =
       fastPlan.strategy === 'heuristic' &&
       fastPlan.actions.length > 0;
 
     // Avoid LLM mis-plans (p. ej. abrir Grok) cuando claramente pidieron narrar/resumir.
     if (
+      !negatedTerminalImperative &&
       !hasDeterministicActions &&
       /resum(?:e|ir|en|o|a|i)\b|resumen\b|\bnarr(?:a|ame|ar)\b|com[eé]ntame|cu[eé]ntame|qu[eé]\s+hay|qu[eé]\s+hab[ií]a/i.test(
         input
@@ -124,7 +176,8 @@ export async function runOperatorTurn(
     }
 
     const useFastPlan =
-      fastPlan.strategy === 'heuristic' && fastPlan.actions.length > 0;
+      (fastPlan.strategy === 'heuristic' && fastPlan.actions.length > 0) ||
+      negatedTerminalImperative;
 
     if (provider.id === 'local' || useFastPlan) {
       plan = fastPlan;
@@ -135,7 +188,7 @@ export async function runOperatorTurn(
         actions: plan.actions,
       });
     } else {
-      plan = await planTurnLLM(input, provider, context, turnId);
+      plan = await planTurnLLM(input, provider, context, turnId, options.history);
     }
 
     // 2. Execute actions and collect verified receipts
@@ -164,15 +217,13 @@ export async function runOperatorTurn(
     }
 
     const durationMs = Date.now() - startTime;
-
-    emitTrace({
-      turnId,
-      ev: 'turn.end',
-      overallSuccess,
-      durationMs,
+    const providerFailure = zedAssistantFailureMessage({
+      strategy: plan.strategy,
+      fallbackReason: plan.fallbackReason,
+      actionCount: plan.actions.length,
     });
 
-    return {
+    const turnResult: OperatorTurnResult = {
       turnId,
       plan,
       receipts,
@@ -183,16 +234,40 @@ export async function runOperatorTurn(
       providerId: provider.id,
       fallbackReason: plan.fallbackReason,
     };
+
+    emitTrace({
+      turnId,
+      ev: 'turn.end',
+      overallSuccess,
+      durationMs,
+      reply,
+      turnResult,
+      ...(providerFailure ? { error: providerFailure } : {}),
+    });
+
+    // S1: a run ledger run opened while planning (e.g. `llm_plan`) is closed here.
+    runLedger.completeRun(turnId, {
+      reply,
+      outcome: overallSuccess ? 'success' : 'failure',
+    });
+
+    return turnResult;
   } catch (err: any) {
     const errorMsg = err?.message || 'Error inesperado durante la ejecución del turno';
     const durationMs = Date.now() - startTime;
+    const providerFailure =
+      zedAssistantFailureMessage({
+        strategy: 'heuristic-fallback',
+        fallbackReason: errorMsg,
+        actionCount: 1,
+      }) ?? errorMsg;
 
     const fallbackReceipt: ActionReceipt = {
       actionIdx: 0,
       type: 'unknown',
       ok: false,
       error: errorMsg,
-      summaryEs: `No se pudo completar la operación: ${errorMsg}`,
+      summaryEs: providerFailure,
     };
 
     const fallbackPlan: OperatorPlan = {
@@ -207,7 +282,13 @@ export async function runOperatorTurn(
       ev: 'turn.end',
       overallSuccess: false,
       durationMs,
-      error: errorMsg,
+      error: providerFailure,
+    });
+
+    runLedger.completeRun(turnId, {
+      reply: fallbackReceipt.summaryEs,
+      outcome: 'failure',
+      errorCategory: 'operator_turn_error',
     });
 
     return {

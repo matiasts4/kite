@@ -253,6 +253,18 @@ export const WrenchIcon = createIcon(
   "none"
 );
 
+export const HammerIcon = createIcon(
+  16,
+  <>
+    <path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9" />
+    <path d="m18 15 4-4" />
+    <path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
 export const AlertCircleIcon = createIcon(
   12,
   <>
@@ -528,12 +540,77 @@ export const GlobeIcon = createIcon(
   "none"
 );
 
+export const BrowserIcon = createIcon(
+  16,
+  <>
+    <rect width="18" height="14" x="3" y="5" rx="2" />
+    <line x1="3" x2="21" y1="9" y2="9" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
 export const MicIcon = createIcon(
   14,
   <>
-    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-    <line x1="12" x2="12" y1="19" y2="22" />
+    <path d="M12 5.5a2.25 2.25 0 0 0-2.25 2.25v4.5a2.25 2.25 0 0 0 4.5 0v-4.5A2.25 2.25 0 0 0 12 5.5Z" />
+    <path d="M17 12.25v.5a5 5 0 0 1-10 0v-.5" />
+    <line x1="12" x2="12" y1="17.75" y2="19.25" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+
+export const LockIcon = createIcon(
+  14,
+  <>
+    <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+export const PenLineIcon = createIcon(
+  14,
+  <>
+    <path d="M12 20h9" />
+    <path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+export const SparklesIcon = createIcon(
+  14,
+  <>
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+    <path d="M5 3v4" />
+    <path d="M19 17v4" />
+    <path d="M3 5h4" />
+    <path d="M17 19h4" />
+  </>,
+  "0 0 24 24",
+  2,
+  "none"
+);
+
+export const PencilRulerIcon = createIcon(
+  14,
+  <>
+    <path d="m15 5 4 4" />
+    <path d="M13 7 8.7 2.7a2.41 2.41 0 0 0-3.4 0L2.7 5.3a2.41 2.41 0 0 0 0 3.4L7 13" />
+    <path d="m8 6 2-2" />
+    <path d="m2 18 3-3" />
+    <path d="m5 15 3-3" />
+    <path d="m8 12 3-3" />
+    <path d="m11 9 3-3" />
+    <path d="M13 13 8.7 17.3a2.41 2.41 0 0 0 0 3.4l2.6 2.6a2.41 2.41 0 0 0 3.4 0L19 19" />
   </>,
   "0 0 24 24",
   2,

@@ -7,6 +7,32 @@ export interface IconProps {
   style?: React.CSSProperties;
 }
 
+export const GripDotsIcon: React.FC<IconProps> = ({
+  size = 14,
+  className,
+  style,
+}) => (
+  <svg
+    aria-hidden="true"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+    style={style}
+  >
+    <circle cx="6" cy="6" r="1.5" />
+    <circle cx="12" cy="6" r="1.5" />
+    <circle cx="18" cy="6" r="1.5" />
+    <circle cx="6" cy="12" r="1.5" />
+    <circle cx="12" cy="12" r="1.5" />
+    <circle cx="18" cy="12" r="1.5" />
+    <circle cx="6" cy="18" r="1.5" />
+    <circle cx="12" cy="18" r="1.5" />
+    <circle cx="18" cy="18" r="1.5" />
+  </svg>
+);
+
 export const SquareTerminalIcon: React.FC<IconProps> = ({
   size = 15,
   className,

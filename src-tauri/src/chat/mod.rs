@@ -1,10 +1,36 @@
+pub mod approval;
+pub mod checkpoints;
+pub mod contract;
+pub mod drivers;
+pub mod event_log;
 pub mod models;
+pub mod normalize;
+pub mod persistent;
+pub mod provider_agents;
+pub mod provider_env;
+pub mod recipe;
+pub mod recovery;
 pub mod runtime;
+pub mod session;
+pub mod subagents;
+pub mod swarm;
 pub mod threads;
 pub mod utils;
 
+pub use approval::*;
+pub use contract::*;
+pub use drivers::*;
+pub use event_log::*;
 pub use models::*;
+pub use normalize::*;
+pub use persistent::*;
+pub use provider_agents::*;
+pub use provider_env::*;
+pub use recipe::*;
+pub use recovery::*;
 pub use runtime::*;
+pub use session::*;
+pub use subagents::*;
 pub use threads::*;
 pub use utils::*;
 

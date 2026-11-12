@@ -1,5 +1,24 @@
-import type { ChatThread } from '../../../types';
+import type {
+  ChatThread,
+  SubagentMeta,
+  SwarmMeta,
+  SubagentRun,
+  SwarmMember,
+  SwarmBoardPost,
+  SwarmChannel,
+  SwarmState,
+} from '../../../types';
 import type { ProposedPlan } from './ChatPlanPanel';
+
+export type {
+  SubagentMeta,
+  SwarmMeta,
+  SubagentRun,
+  SwarmMember,
+  SwarmBoardPost,
+  SwarmChannel,
+  SwarmState,
+};
 
 export type ChatProvider = 'claude' | 'codex' | 'cursor' | 'grok' | 'opencode' | 'antigravity' | 'gemini';
 export type ChatMode = 'acceptEdits' | 'fullAccess' | 'readOnly';
@@ -31,19 +50,80 @@ export interface EffortChoice {
   detail?: string;
 }
 
+export const SPANISH_EFFORT_LABELS: Record<string, string> = {
+  none: 'Desactivado',
+  minimal: 'Mínimo',
+  low: 'Bajo',
+  medium: 'Medio',
+  high: 'Alto',
+  xhigh: 'Muy Alto',
+  'extra-high': 'Muy Alto',
+  'very-high': 'Muy Alto',
+  max: 'Máximo',
+  ultra: 'Ultra',
+};
+
+export const SPANISH_EFFORT_DETAILS: Record<string, string> = {
+  none: 'Sin razonamiento adicional',
+  minimal: 'Razonamiento ultrarrápido para respuestas directas',
+  low: 'Respuestas rápidas con razonamiento enfocado',
+  medium: 'Razonamiento balanceado para tareas cotidianas',
+  high: 'Razonamiento profundo y análisis exhaustivo',
+  xhigh: 'Razonamiento intensivo y verificación en múltiples pasos',
+  'extra-high': 'Razonamiento intensivo y verificación en múltiples pasos',
+  'very-high': 'Razonamiento intensivo y verificación en múltiples pasos',
+  max: 'Capacidad máxima de computación y verificación formal',
+  ultra: 'Razonamiento ultra para el techo del modelo',
+};
+
 export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
-  { id: 'low', label: 'Low', detail: 'Faster replies with focused thinking' },
-  { id: 'medium', label: 'Medium', detail: 'Balanced reasoning for everyday coding' },
-  { id: 'high', label: 'High', detail: 'Deep multi-step reasoning and verification' },
+  { id: 'low', label: 'Bajo', detail: 'Respuestas rápidas con razonamiento enfocado' },
+  { id: 'medium', label: 'Medio', detail: 'Razonamiento balanceado para tareas cotidianas' },
+  { id: 'high', label: 'Alto', detail: 'Razonamiento profundo y análisis exhaustivo' },
 ];
 
 export interface ExtendedChatThread extends ChatThread {
+  hasContent?: boolean;
   pendingApproval?: ApprovalRequest | null;
   effort?: string | null;
+  agent?: string | null;
+  workMode?: string | null;
   diff?: DiffData | null;
   plans?: ProposedPlan[];
   activePlanId?: string | null;
   activePlan?: ProposedPlan | null;
+  /** Connection the next send binds to, when that connection verified the
+   * provider's local spawn endpoint. Both fields are set together or not at all. */
+  connectionId?: string | null;
+  supportedEndpoint?: string | null;
+  /** Set when the user stopped the turn. Cleared when the next turn starts. */
+  stoppedByBuilder?: boolean;
+  turnFailure?: {
+    kind: 'usageLimit' | 'authRequired' | 'cliUsageError' | 'processError';
+    message: string;
+    resetAtUnixMs?: number | null;
+    provider?: string;
+  } | null;
+  snoozedUntil?: number | null;
+  isolatedCheckout?: boolean;
+  providerCanRewind?: boolean;
+  parentThreadId?: string | null;
+  startedByAgent?: boolean;
+  sideChat?: boolean;
+  usageReported?: boolean;
+  contextWindowTokens?: number;
+  queuedRuns?: Array<{ id: string; text: string }>;
+  pendingUserInput?: {
+    requestId?: string;
+    questions?: Array<{
+      id: string;
+      header: string;
+      options: string[];
+      allowCustomAnswer?: boolean;
+      allowAttachments?: boolean;
+      multiSelect?: boolean;
+    }>;
+  } | null;
 }
 
 export function getActivePlan(thread: ExtendedChatThread): ProposedPlan | null {
@@ -66,6 +146,8 @@ export interface ModelOption {
   name: string;
   description?: string;
   supportsEffort?: boolean;
+  effortLevels?: (EffortChoice | string)[];
+  defaultEffort?: string | null;
 }
 
 export interface LiveChatRun {
@@ -78,6 +160,9 @@ export interface LiveChatRun {
   startedAtUnixMs: number;
   line: string | null;
 }
+
+/** Sentinel row for "let the connected program choose". Never a CLI model id. */
+export const AUTOMATIC_MODEL_ID = 'automatic';
 
 export const PROVIDER_CATALOG: Record<
   ChatProvider,
@@ -96,91 +181,64 @@ export const PROVIDER_CATALOG: Record<
     label: 'Antigravity',
     vendor: 'Google DeepMind',
     engineId: 'antigravity',
-    defaultModel: 'gemini-4-argon',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    supportsEffort: true,
     isDynamic: true,
-    models: [
-      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', description: 'Frontier reasoning & agentic coding (Google DeepMind)', supportsEffort: true },
-      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: 'Ultra-fast, lightweight agentic execution (Google DeepMind)', supportsEffort: true },
-      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'Frontier reasoning for long-horizon agentic work (Anthropic)', supportsEffort: true },
-      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', description: 'Balanced high-speed coding & design (Anthropic)', supportsEffort: true },
-      { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', description: 'Open-weights 120B parameter model hosted on Antigravity', supportsEffort: false },
-    ],
+    models: [],
   },
   claude: {
     label: 'Claude Code',
     vendor: 'Anthropic',
     engineId: 'claude-code',
-    defaultModel: 'sonnet',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    supportsEffort: true,
-    models: [
-      { id: 'sonnet', name: 'Claude Sonnet 5', description: 'Balanced daily driver', supportsEffort: true },
-      { id: 'opus', name: 'Claude Opus (latest)', description: 'Latest Opus release', supportsEffort: true },
-      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'Long-running agentic work', supportsEffort: true },
-      { id: 'fable', name: 'Claude Fable 5.1', description: 'Hardest problems', supportsEffort: true },
-      { id: 'haiku', name: 'Claude Haiku 4.5', description: 'Fastest replies', supportsEffort: false },
-    ],
+    isDynamic: true,
+    models: [],
   },
   codex: {
     label: 'Codex',
     vendor: 'OpenAI',
     engineId: 'codex',
-    defaultModel: 'gpt-5.6-sol',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits'],
-    supportsEffort: true,
-    models: [
-      { id: 'gpt-6-astra', name: 'GPT-6 Astra', description: 'Most capable for complex work', supportsEffort: true },
-      { id: 'gpt-6-sol', name: 'GPT-6 Sol', description: 'Complex coding and agentic work', supportsEffort: true },
-      { id: 'gpt-6-luna', name: 'GPT-6 Luna', description: 'Fast, efficient work', supportsEffort: false },
-      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', description: 'Frontier agentic work', supportsEffort: true },
-      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: 'Balanced agentic work', supportsEffort: true },
-      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: 'Fast, efficient work', supportsEffort: false },
-    ],
+    isDynamic: true,
+    models: [],
   },
   grok: {
     label: 'Grok Build',
     vendor: 'xAI',
     engineId: 'grok',
-    defaultModel: 'grok-build',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [{ id: 'grok-build', name: 'Grok Build', description: 'xAI Grok Build', supportsEffort: true }],
     isDynamic: true,
-    supportsEffort: true,
+    models: [],
   },
   opencode: {
     label: 'OpenCode',
     vendor: 'OpenCode',
     engineId: 'open-code',
-    defaultModel: 'auto',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [{ id: 'auto', name: 'Auto', description: 'OpenCode default model' }],
     isDynamic: true,
+    models: [],
   },
   cursor: {
     label: 'Cursor Agent',
     vendor: 'Cursor',
     engineId: 'cursor',
-    defaultModel: 'auto',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    models: [
-      { id: 'auto', name: 'Auto', description: 'Cursor picks a model' },
-      { id: 'composer', name: 'Composer', description: 'Cursor coding model' },
-    ],
     isDynamic: true,
+    models: [],
   },
   gemini: {
     label: 'Gemini CLI',
     vendor: 'Google',
     engineId: 'gemini',
-    defaultModel: 'gemini-2.5-pro',
+    defaultModel: '',
     modes: ['readOnly', 'acceptEdits', 'fullAccess'],
-    supportsEffort: true,
-    models: [
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Deep reasoning & coding', supportsEffort: true },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast agentic execution', supportsEffort: false },
-    ],
+    isDynamic: true,
+    models: [],
   },
 };
 

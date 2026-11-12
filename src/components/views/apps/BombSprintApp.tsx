@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useId, useMemo } from 'react';
+import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
 import {
   IconVolume,
   IconVolumeX,
@@ -493,7 +494,8 @@ export const BombSprintApp: React.FC<BombSprintAppProps> = ({ embedded: _embedde
                 className={`ui-segmented__item${minutes === m ? ' ui-segmented__item--selected' : ''}`}
                 aria-pressed={minutes === m}
               >
-                {m}m
+                {minutes === m ? <SegmentedIndicator group="bomb-presets" /> : null}
+                <span>{m}m</span>
               </button>
             ))}
           </div>

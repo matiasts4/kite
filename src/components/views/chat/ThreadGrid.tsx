@@ -8,7 +8,9 @@ import type {
   ChatProvider,
   ChatMode,
 } from './types';
+import type { CatalogAvailability } from './hooks/useChatModels';
 import type { PlanActionPayload } from './ChatPlanPanel';
+import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 
 export interface ThreadGridProps {
   gridThreadIds: string[];
@@ -24,6 +26,13 @@ export interface ThreadGridProps {
   engineLabel?: string;
   liveRunsCount: number;
   dynamicModelsMap: Record<string, ModelOption[]>;
+  catalogStateMap?: Record<string, CatalogAvailability>;
+  dynamicAgentsMap?: Record<string, any[]>;
+  /** Session projections supplied by the caller, keyed by thread id. */
+  sessionProjections?: Record<string, SessionProjection> | null;
+  /** Driver declarations supplied by the caller, keyed by thread id. */
+  driverDeclarations?: Record<string, DriverDeclaration> | null;
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
   activeDropdown: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
@@ -53,7 +62,7 @@ export interface ThreadGridProps {
   onDropdownToggle: (threadId: string, type: 'provider' | 'model' | 'mode') => void;
   onUpdateConfig: (
     threadId: string,
-    patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }
+    patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; connectionId?: string | null; agent?: string | null; workspaceId?: string | null }
   ) => void;
   onApprovalDecision: (
     threadId: string,
@@ -148,6 +157,11 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   engineLabel,
   liveRunsCount,
   dynamicModelsMap,
+  catalogStateMap,
+  dynamicAgentsMap,
+  ensureDynamicAgents,
+  sessionProjections,
+  driverDeclarations,
   isRefreshingModels,
   onRefreshModels,
   activeDropdown,
@@ -359,6 +373,14 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 attachments={attachments}
                 liveRunsCount={liveRunsCount}
                 dynamicModels={dynamicModelsMap[thread.provider] || []}
+                catalogState={(() => {
+                  const state = catalogStateMap?.[thread.provider];
+                  return state && state !== 'ready' ? state : null;
+                })()}
+                dynamicAgents={dynamicAgentsMap?.[thread.provider] || []}
+                ensureDynamicAgents={ensureDynamicAgents}
+                driverDeclaration={driverDeclarations?.[tid] ?? null}
+                session={sessionProjections?.[tid] ?? null}
                 isRefreshingModels={isRefreshingModels}
                 onRefreshModels={onRefreshModels}
                 activeDropdown={activeDropdown}
@@ -381,6 +403,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 onChangePrompt={(val) => onChangePrompt(tid, val)}
                 onSend={(overridePrompt, planAction) => onSend(tid, overridePrompt, planAction)}
                 onStop={() => onStop(tid)}
+                onStopThread={onStop}
                 onPickAttachments={(kind) => onPickAttachments(tid, kind)}
                 onStageFiles={(files) => onStageFiles(tid, files)}
                 onStagePaths={(paths) => onStagePaths(tid, paths)}

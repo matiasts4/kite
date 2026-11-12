@@ -51,6 +51,8 @@ interface InternalSessionTracker {
   lastOutputAt: number;
   settleTimer: any | null;
   state: 'waitingForYou' | 'working' | 'done' | 'idle' | 'exited';
+  sawWorking?: boolean;
+  alias?: string;
   latestLine: string | null;
   engine: string;
   who: string | null;
@@ -63,10 +65,12 @@ export function resetTerminalExitStatus(sessionId: string) {
   exitedSessionIds.delete(sessionId);
 }
 
-// Strip ANSI escape codes
+// Strip ANSI escape codes (both OSC and CSI sequences)
 function cleanAnsi(str: string): string {
   // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+  return str
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
 }
 
 // Check if a line is just persistent CLI chrome/footer (e.g. Antigravity's accept-edits footer, status bar)
@@ -84,10 +88,6 @@ function isChromeFooterLine(line: string): boolean {
 
   // Status bars with model / cost / effort info (e.g. "Gemini 3.8 Flash · high", "accept-edits · Gemini 3.8 Flash · high")
   if (/(gemini|claude|gpt|codex|grok).*·\s*(high|low|medium|default)/i.test(lower)) return true;
-
-  // Prompt questions & input lines
-  if (lower === 'what should antigravity cli do instead?' || lower.includes('what should antigravity do')) return true;
-  if (lower === 'what would you like to do next?' || lower === 'what would you like to do?') return true;
 
   // Box-drawing or separators
   if (/^[─━═┄┅┈┉┌┐└┘├┤┬┴┼│║|_\-=\s]+$/.test(trimmed)) return true;
@@ -157,7 +157,16 @@ function detectEngineFromText(text: string, fallbackEngine?: string): { engine: 
   if (lower.includes('claude code') || lower.includes('claude-code')) {
     return { engine: 'claude-code', who: 'Anthropic Claude', title: 'Claude Code' };
   }
-  if (lower.includes('codex') || lower.includes('openai codex')) {
+  // Only match codex on explicit CLI brand markers, never on loose text, file paths, or package names
+  if (
+    lower.includes('openai codex') ||
+    lower.includes('codex-cli') ||
+    lower.includes('ask codex to') ||
+    lower.includes('>_ openai codex') ||
+    lower.includes('codex (v0.') ||
+    lower.includes('codex (v1.') ||
+    /\b(?:openai\s+codex|codex-cli)\b/i.test(lower)
+  ) {
     return { engine: 'codex', who: 'OpenAI Codex', title: 'Codex' };
   }
   if (lower.includes('gemini-cli') || lower.includes('google gemini')) {
@@ -183,8 +192,25 @@ function detectEngineFromText(text: string, fallbackEngine?: string): { engine: 
 }
 
 // Detect active working markers in incoming text
-function hasWorkingMarkers(text: string): boolean {
+export function hasWorkingMarkers(text: string): boolean {
   const lower = text.toLowerCase();
+
+  // Exclude startup / loading banner phrases so they do not falsely mark a booting CLI as working
+  if (
+    lower.includes('running on') ||
+    lower.includes('running v') ||
+    lower.includes('is running') ||
+    lower.includes('already running') ||
+    lower.includes('reading configuration') ||
+    lower.includes('reading config') ||
+    lower.includes('resolving plugins') ||
+    lower.includes('resolving dependencies') ||
+    lower.includes('welcome to') ||
+    lower.includes('starting opencode') ||
+    lower.includes('starting claude')
+  ) {
+    return false;
+  }
 
   // 1. Thinking / Thought markers (exclude past-tense "thought for 12s" which is a completion line)
   if (
@@ -201,13 +227,11 @@ function hasWorkingMarkers(text: string): boolean {
   if (
     lower.includes('analyzing') ||
     lower.includes('searching') ||
-    lower.includes('reading') ||
     lower.includes('writing') ||
     lower.includes('editing') ||
     lower.includes('executing') ||
     lower.includes('generating') ||
     lower.includes('installing') ||
-    lower.includes('running') ||
     lower.includes('building') ||
     lower.includes('compiling') ||
     lower.includes('inspecting') ||
@@ -221,8 +245,13 @@ function hasWorkingMarkers(text: string): boolean {
     return true;
   }
 
+  // Active command execution (exclude "running on...")
+  if ((lower.includes('running ') || lower.includes(' running')) && !lower.includes('running on')) {
+    return true;
+  }
+
   // 3. Spinner glyphs (active dynamic animation frames)
-  if (/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(text)) {
+  if (/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/.test(text)) {
     return true;
   }
 
@@ -235,20 +264,52 @@ function hasWorkingMarkers(text: string): boolean {
 }
 
 // Evaluate whether settled buffer tail indicates the agent is waiting on user input
-function isWaitingForUserInput(buffer: string): boolean {
+export function isWaitingForUserInput(buffer: string): boolean {
   const clean = cleanAnsi(buffer).trim();
   const rawLines = clean.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (rawLines.length === 0) return true;
+
+  // Direct check on raw tail lines (even if some chrome filters would drop them)
+  const lastRaw = rawLines[rawLines.length - 1];
+  const lastRawLower = lastRaw.toLowerCase();
+
+  // 1. Common CLI prompt symbols: >, ❯, $, ?, ➜, ▶, >>>
+  if (
+    lastRaw.endsWith('>') ||
+    lastRaw.endsWith('❯') ||
+    lastRaw.endsWith('➜') ||
+    lastRaw.endsWith('▶') ||
+    lastRaw.endsWith('$') ||
+    lastRaw.endsWith('?') ||
+    lastRaw.endsWith('>>>') ||
+    lastRaw.includes('❯')
+  ) {
+    return true;
+  }
+
+  // 2. Interactive questions & input placeholders on raw line or meaningful lines
+  if (
+    lastRawLower.includes('what would you like') ||
+    lastRawLower.includes('what should') ||
+    lastRawLower.includes('ask a question') ||
+    lastRawLower.includes('ask anything') ||
+    lastRawLower.includes('enter your prompt') ||
+    lastRawLower.includes('type your prompt') ||
+    lastRawLower.includes('type a message')
+  ) {
+    return true;
+  }
+
   const meaningfulLines = rawLines.filter((line) => !isChromeFooterLine(line));
   if (meaningfulLines.length === 0) return true;
 
   const lastLine = meaningfulLines[meaningfulLines.length - 1];
   const lastLineLower = lastLine.toLowerCase();
 
-  // 1. Interactive questions asking user confirmation or input
+  // 3. Interactive questions asking user confirmation or input
   if (
     lastLine.endsWith('?') ||
     lastLineLower.includes('(y/n)') ||
-    lastLineLower.includes('[y/n]') ||
     lastLineLower.includes('[y/n]') ||
     lastLineLower.includes('(yes/no)') ||
     lastLineLower.includes('confirm?') ||
@@ -264,14 +325,18 @@ function isWaitingForUserInput(buffer: string): boolean {
     return true;
   }
 
-  // 2. Active ready prompt at the end of the line (e.g. `>` or `? ` or `$ `)
+  // 4. Active ready prompt at the end of the line (e.g. `>` or `? ` or `$ ` or `❯`)
   if (
     lastLine.endsWith('>') ||
     lastLine.endsWith('> ') ||
+    lastLine.endsWith('❯') ||
+    lastLine.endsWith('❯ ') ||
+    lastLine.endsWith('➜') ||
     lastLine.endsWith('? ') ||
     lastLine.endsWith('$') ||
     lastLine.endsWith('$ ') ||
-    lastLine.endsWith('>>>')
+    lastLine.endsWith('>>>') ||
+    lastLine.includes('❯')
   ) {
     return true;
   }
@@ -362,11 +427,112 @@ function extractPathFolder(text: string): string | null {
   return null;
 }
 
+export function isBlockedOnQuestionOrApproval(buffer: string): boolean {
+  const clean = cleanAnsi(buffer).trim();
+  const rawLines = clean.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (rawLines.length === 0) return false;
+
+  const meaningfulLines = rawLines.filter((line) => !isChromeFooterLine(line));
+  if (meaningfulLines.length === 0) return false;
+
+  const lastLine = meaningfulLines[meaningfulLines.length - 1];
+  const lastLineLower = lastLine.toLowerCase();
+
+  // Explicit approval / confirmation / choice keywords
+  if (
+    lastLineLower.includes('(y/n)') ||
+    lastLineLower.includes('[y/n]') ||
+    lastLineLower.includes('(yes/no)') ||
+    lastLineLower.includes('confirm?') ||
+    lastLineLower.includes('proceed?') ||
+    lastLineLower.includes('approval required') ||
+    lastLineLower.includes('allow once') ||
+    lastLineLower.includes('select an option') ||
+    lastLineLower.includes('enter choice') ||
+    lastLineLower.includes('press enter to continue') ||
+    lastLineLower.includes('do you want to')
+  ) {
+    return true;
+  }
+
+  // Question mark at the end of a non-chrome, non-placeholder line
+  if (lastLine.endsWith('?')) {
+    if (
+      lastLineLower.includes('what would you like') ||
+      lastLineLower.includes('what should') ||
+      lastLineLower.includes('ask a question') ||
+      lastLineLower.includes('ask anything')
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+const lastPublishedPresence = new Map<string, string>();
+
+function mapPaneToPresence(sessionId: string, state: string | undefined): string | undefined {
+  switch (state) {
+    case 'idle':
+    case 'working':
+    case 'done':
+    case 'error':
+      return state;
+    case 'waitingForYou': {
+      const tracker = sessionStates.get(sessionId);
+      if (tracker && isBlockedOnQuestionOrApproval(tracker.rollingBuffer)) {
+        return 'blocked';
+      }
+      return tracker?.sawWorking ? 'done' : 'idle';
+    }
+    case 'exited':
+      return 'gone';
+    default:
+      return undefined;
+  }
+}
+
+function inNativeApp(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+  return Boolean(host.__TAURI_INTERNALS__ || host.__TAURI__);
+}
+
+function publishObservedPresence(sessionId: string, state: string | undefined): void {
+  const mapped = mapPaneToPresence(sessionId, state);
+  if (!sessionId || !mapped) return;
+  if (lastPublishedPresence.get(sessionId) === mapped) return;
+  lastPublishedPresence.set(sessionId, mapped);
+  if (!inNativeApp()) return;
+  const tracker = sessionStates.get(sessionId);
+  const tail = tracker?.rollingBuffer;
+  void invokeCommand('dispatch_publish', {
+    address: `session:${sessionId}`,
+    state: mapped,
+    tail: tail ? tail.split('\n').slice(-80).join('\n') : undefined,
+    alias: tracker?.alias || undefined,
+    engine: tracker?.engine || undefined,
+  }).catch(() => {});
+}
+
+function publishOscReport(sessionId: string, raw: string): void {
+  if (!sessionId || !raw.includes('7501')) return;
+  if (!inNativeApp()) return;
+  void invokeCommand('dispatch_osc', {
+    address: `session:${sessionId}`,
+    raw,
+  }).catch(() => {});
+}
+
 function notifyTerminalUpdate(terminal: ActiveAgentTerminal) {
   try {
     const list = Array.from(terminalsMap.values()).filter((t) => !exitedSessionIds.has(t.sessionId));
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   } catch {}
+
+  publishObservedPresence(terminal.sessionId, terminal.state);
 
   window.dispatchEvent(
     new CustomEvent('kite:terminal-agent-update', {
@@ -388,6 +554,7 @@ export function recordTerminalOutput(
   }
 ) {
   if (!sessionId || exitedSessionIds.has(sessionId)) return;
+  publishOscReport(sessionId, rawText);
   const clean = cleanAnsi(rawText);
   if (!clean.trim()) return;
 
@@ -414,13 +581,19 @@ export function recordTerminalOutput(
       rollingBuffer: '',
       lastOutputAt: now,
       settleTimer: null,
-      state: 'waitingForYou',
+      state: 'idle',
+      sawWorking: false,
+      alias: meta?.agentName || undefined,
       latestLine: null,
       engine: authoritativeEngine || engine,
       who: resolvedWho,
       title: resolvedTitle,
     };
     sessionStates.set(sessionId, tracker);
+  }
+
+  if (meta?.agentName && !tracker.alias) {
+    tracker.alias = meta.agentName;
   }
 
   // Refine engine / model metadata ONLY if engine is generic or was initialized without model info
@@ -492,10 +665,32 @@ export function recordTerminalOutput(
     const hasWork = hasWorkingMarkers(clean);
     if (tracker.state === 'working') {
       // While already working, continue in working state
+      tracker.sawWorking = true;
       tracker.state = 'working';
     } else if (hasWork && !isChromeFooterLine(clean) && !clean.trim().endsWith('>')) {
       // Transition to working only on bona-fide active work indicators
+      tracker.sawWorking = true;
       tracker.state = 'working';
+    }
+
+    // Fast-path prompt detection: if incoming output clearly contains an active prompt
+    // (e.g. `>` or `❯` or `$` or `?`), transition immediately to waitingForYou so listeners
+    // and flight animations don't have to wait for the 2s debounced settle timer!
+    const cleanTrimmed = clean.trim();
+    const isPromptMarker =
+      cleanTrimmed.endsWith('>') ||
+      cleanTrimmed.endsWith('❯') ||
+      cleanTrimmed.endsWith('$') ||
+      cleanTrimmed.endsWith('?') ||
+      isWaitingForUserInput(tracker.rollingBuffer);
+
+    if (isPromptMarker && tracker.state !== 'working') {
+      tracker.state = 'waitingForYou';
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('kite:terminal-ready', { detail: { sessionId } })
+        );
+      }
     }
 
     // State Transition Rule 2: Debounced Settle
@@ -525,6 +720,11 @@ export function recordTerminalOutput(
         };
         terminalsMap.set(sessionId, updatedTerm);
         notifyTerminalUpdate(updatedTerm);
+        if (nextState === 'waitingForYou' && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('kite:terminal-ready', { detail: { sessionId } })
+          );
+        }
       }
     }, SETTLE_DELAY_MS);
   }
@@ -559,6 +759,7 @@ export function registerSpawnedTerminal(
     engine?: string;
     title?: string;
     who?: string | null;
+    agentName?: string;
   }
 ): ActiveAgentTerminal {
   if (!sessionId) {
@@ -570,7 +771,12 @@ export function registerSpawnedTerminal(
   const authoritativeEngine = meta?.engine ? normalizeTerminalEngine(meta.engine) : 'grok';
   const folder = meta?.workspaceName || meta?.workspaceId || 'Workspace';
   const title = meta?.title || `[ODD] ${authoritativeEngine}`;
-  const who = meta?.who || authoritativeEngine;
+  const who = meta?.agentName || meta?.who || authoritativeEngine;
+
+  const existingTracker = sessionStates.get(sessionId);
+  if (existingTracker && meta?.agentName) {
+    existingTracker.alias = meta.agentName;
+  }
 
   const spawnedTerminal: ActiveAgentTerminal = {
     sessionId,
@@ -579,7 +785,7 @@ export function registerSpawnedTerminal(
     engine: authoritativeEngine,
     title,
     who,
-    state: 'working',
+    state: 'idle',
     latestLine: `Iniciando ${authoritativeEngine}…`,
     updatedAt: now,
   };
@@ -608,6 +814,7 @@ export function markTerminalExited(sessionId: string) {
     const list = Array.from(terminalsMap.values()).filter((t) => !exitedSessionIds.has(t.sessionId));
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   } catch {}
+  publishObservedPresence(sessionId, 'exited');
   window.dispatchEvent(new CustomEvent('kite:terminal-agent-update', { detail: { sessionId, state: 'exited' } }));
 }
 
@@ -637,4 +844,145 @@ export function getActiveAgentTerminals(): ActiveAgentTerminal[] {
 export function getTerminalRollingBuffer(sessionId: string): string | undefined {
   return sessionStates.get(sessionId)?.rollingBuffer;
 }
+
+/**
+ * Checks whether a terminal session is ready to receive input (prompt active or settled in waitingForYou/idle).
+ */
+export function isTerminalReadyForInput(sessionId: string): boolean {
+  if (!sessionId) return false;
+  if (exitedSessionIds.has(sessionId)) return false;
+
+  const tracker = sessionStates.get(sessionId);
+  const term = terminalsMap.get(sessionId);
+
+  // A terminal actively working is not ready for a new prompt
+  if (tracker?.state === 'working' || term?.state === 'working') {
+    return false;
+  }
+
+  // If already recognized as waiting for user input
+  if (tracker?.state === 'waitingForYou' || term?.state === 'waitingForYou') {
+    return true;
+  }
+
+  // If rolling buffer contains an active prompt symbol
+  if (tracker?.rollingBuffer && isWaitingForUserInput(tracker.rollingBuffer)) {
+    return true;
+  }
+
+  // If terminal has settled into quiet idle (not actively booting or producing output)
+  if (
+    tracker &&
+    (tracker.state === 'idle' || tracker.state === 'done') &&
+    Date.now() - tracker.lastOutputAt >= SETTLE_DELAY_MS
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Waits reactively until a terminal session is ready for input (reaches waitingForYou / active prompt),
+ * avoiding fixed sleep timers and adapting automatically to slow-starting CLIs like OpenCode.
+ */
+export function waitForTerminalReady(
+  sessionId: string,
+  options?: { timeoutMs?: number }
+): Promise<boolean> {
+  if (!sessionId) return Promise.resolve(false);
+
+  // If the session is not tracked in the registry or states (e.g. mock/test/lab session), resolve immediately
+  if (!terminalsMap.has(sessionId) && !sessionStates.has(sessionId)) {
+    return Promise.resolve(true);
+  }
+
+  if (isTerminalReadyForInput(sessionId)) {
+    return Promise.resolve(true);
+  }
+
+  const isTest =
+    typeof (globalThis as any).process !== 'undefined' &&
+    (globalThis as any).process?.env?.NODE_ENV === 'test';
+  const timeoutMs = options?.timeoutMs ?? (isTest ? 150 : 12000);
+
+  return new Promise<boolean>((resolve) => {
+    let timer: any = null;
+    let settled = false;
+
+    const cleanup = () => {
+      settled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('kite:terminal-agent-update', onUpdate);
+        window.removeEventListener('kite:terminal-ready', onReady);
+      }
+    };
+
+    const onUpdate = (e: Event) => {
+      if (settled) return;
+      const detail = (e as CustomEvent<{ sessionId?: string; state?: string }>).detail;
+      if (!detail || detail.sessionId !== sessionId) return;
+      if (detail.state === 'waitingForYou' || detail.state === 'idle' || isTerminalReadyForInput(sessionId)) {
+        cleanup();
+        resolve(true);
+      } else if (detail.state === 'exited') {
+        cleanup();
+        resolve(false);
+      }
+    };
+
+    const onReady = (e: Event) => {
+      if (settled) return;
+      const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId === sessionId) {
+        cleanup();
+        resolve(true);
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('kite:terminal-agent-update', onUpdate);
+      window.addEventListener('kite:terminal-ready', onReady);
+    }
+
+    timer = setTimeout(() => {
+      cleanup();
+      resolve(true);
+    }, timeoutMs);
+
+    // Immediate re-check in case state transitioned while attaching
+    if (isTerminalReadyForInput(sessionId)) {
+      cleanup();
+      resolve(true);
+    }
+  });
+}
+
+/**
+ * Marks that a prompt was delivered to the terminal and submitted, transitioning it
+ * to 'working' state so proactive watchers and monitors track genuine execution.
+ */
+export function markTerminalPromptInjected(sessionId: string): void {
+  if (!sessionId) return;
+  const tracker = sessionStates.get(sessionId);
+  if (tracker) {
+    tracker.sawWorking = true;
+    tracker.state = 'working';
+  }
+  const term = terminalsMap.get(sessionId);
+  if (term) {
+    const updatedTerm: ActiveAgentTerminal = {
+      ...term,
+      state: 'working',
+      updatedAt: Date.now(),
+    };
+    terminalsMap.set(sessionId, updatedTerm);
+    notifyTerminalUpdate(updatedTerm);
+  }
+}
+
 

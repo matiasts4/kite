@@ -108,7 +108,7 @@ pub fn seed_agents() -> Vec<AgentProfile> {
             reflection_mode: Some("ask".into()),
             allow_agent_scheduling: Some(true),
             allow_agent_messaging: Some(true),
-            default_mode: Some("acceptEdits".into()),
+            default_mode: Some("fullAccess".into()),
             default_plan: None,
             default_model: None,
             default_provider_options: vec![],
@@ -129,7 +129,7 @@ pub fn seed_agents() -> Vec<AgentProfile> {
             reflection_mode: Some("ask".into()),
             allow_agent_scheduling: Some(true),
             allow_agent_messaging: Some(true),
-            default_mode: Some("acceptEdits".into()),
+            default_mode: Some("fullAccess".into()),
             default_plan: None,
             default_model: None,
             default_provider_options: vec![],
@@ -192,6 +192,8 @@ pub struct DiskState {
     pub agents: Vec<AgentProfile>,
     pub threads: Vec<Value>,
     pub last_provider: String,
+    pub last_model: Option<String>,
+    pub last_effort: Option<String>,
     pub grid: Value,
     pub revision: u64,
     pub routines: Vec<Value>,
@@ -284,6 +286,8 @@ fn default_disk_state() -> DiskState {
         agents: seed_agents(),
         threads: Vec::new(),
         last_provider: "claude".into(),
+        last_model: None,
+        last_effort: None,
         grid: Value::Null,
         revision: 1,
         routines: seed_routines(),
@@ -435,6 +439,8 @@ fn load_or_migrate_sqlite() -> DiskState {
     let threads: Vec<Value> = th_rows.flatten().filter(|v| !v.is_null()).collect();
 
     let mut last_provider = "claude".to_string();
+    let mut last_model: Option<String> = None;
+    let mut last_effort: Option<String> = None;
     let mut grid = Value::Null;
     let mut revision = 1u64;
     let mut routines_seeded = false;
@@ -450,6 +456,8 @@ fn load_or_migrate_sqlite() -> DiskState {
     for (k, v) in app_rows.flatten() {
         match k.as_str() {
             "lastProvider" => last_provider = v,
+            "lastModel" => last_model = if v.trim().is_empty() { None } else { Some(v) },
+            "lastEffort" => last_effort = if v.trim().is_empty() { None } else { Some(v) },
             "grid" => grid = serde_json::from_str(&v).unwrap_or(Value::Null),
             "revision" => revision = v.parse().unwrap_or(1),
             "routinesSeeded" => routines_seeded = v == "1",
@@ -486,6 +494,8 @@ fn load_or_migrate_sqlite() -> DiskState {
         agents,
         threads,
         last_provider,
+        last_model,
+        last_effort,
         grid,
         revision,
         routines,
@@ -743,8 +753,12 @@ fn sync_notifications(tx: &Transaction<'_>, notifications: &[Value]) -> Result<(
 fn sync_app_state(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlite::Error> {
     let grid = serde_json::to_string(&state.grid).unwrap_or_default();
     let revision = state.revision.to_string();
+    let last_model_val = state.last_model.as_deref().unwrap_or("");
+    let last_effort_val = state.last_effort.as_deref().unwrap_or("");
     let rows = [
         ("lastProvider", state.last_provider.as_str()),
+        ("lastModel", last_model_val),
+        ("lastEffort", last_effort_val),
         ("grid", grid.as_str()),
         ("revision", revision.as_str()),
         ("routinesSeeded", "1"),
@@ -815,6 +829,16 @@ pub fn last_provider() -> &'static Mutex<String> {
     CELL.get_or_init(|| Mutex::new(initial_state().last_provider.clone()))
 }
 
+pub fn last_model() -> &'static Mutex<Option<String>> {
+    static CELL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(initial_state().last_model.clone()))
+}
+
+pub fn last_effort() -> &'static Mutex<Option<String>> {
+    static CELL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(initial_state().last_effort.clone()))
+}
+
 pub fn grid_slot() -> &'static Mutex<Value> {
     static CELL: std::sync::OnceLock<Mutex<Value>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| Mutex::new(initial_state().grid.clone()))
@@ -842,6 +866,8 @@ pub fn persist() {
         agents: agents().lock().unwrap().clone(),
         threads: threads().lock().unwrap().clone(),
         last_provider: last_provider().lock().unwrap().clone(),
+        last_model: last_model().lock().unwrap().clone(),
+        last_effort: last_effort().lock().unwrap().clone(),
         grid: grid_slot().lock().unwrap().clone(),
         revision: *revision_counter().lock().unwrap(),
         routines: routines().lock().unwrap().clone(),
@@ -906,157 +932,6 @@ pub fn body<'a>(request: &'a Option<Value>) -> Option<&'a Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn count_where(conn: &Connection, sql: &str, id: &str) -> i64 {
-        conn.query_row(sql, [id], |row| row.get(0)).unwrap()
-    }
-
-    fn app_value(conn: &Connection, key: &str) -> String {
-        conn.query_row(
-            "SELECT value FROM app_state WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_sqlite_round_trip() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA_SQL).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE workspace_events (kind TEXT NOT NULL);
-             CREATE TRIGGER workspace_deleted AFTER DELETE ON workspaces BEGIN
-                 INSERT INTO workspace_events (kind) VALUES ('delete');
-             END;
-             CREATE TRIGGER workspace_updated AFTER UPDATE ON workspaces BEGIN
-                 INSERT INTO workspace_events (kind) VALUES ('update');
-             END;",
-        )
-        .unwrap();
-
-        let workspace_id = "ws-round-trip";
-        let thread_id = "th-round-trip";
-        let routine_id = "rt-round-trip";
-        let notification_id = "nt-round-trip";
-        let mut state = DiskState {
-            workspaces: vec![Workspace {
-                id: workspace_id.into(),
-                display_name: "Round Trip".into(),
-                created_at_unix_ms: 11,
-                last_opened_at_unix_ms: 22,
-                pinned: true,
-                available: false,
-            }],
-            paths: HashMap::from([(workspace_id.into(), r"E:\round-trip".into())]),
-            agents: vec![AgentProfile {
-                id: "ag-round-trip".into(), name: "Round Agent".into(), engine: "claude".into(),
-                purpose: "round trip".into(), brief: "round trip".into(), avatar: None, created_at_unix_ms: 11, pinned: false, order: 0,
-                memory_budget: None, reflection_mode: None, allow_agent_scheduling: None,
-                allow_agent_messaging: None, default_mode: None, default_plan: None, default_model: None,
-                default_provider_options: vec![], place_display_names: vec![], disabled_plugin_ids: vec![],
-            }],
-            threads: vec![json!({ "id": thread_id, "createdAtUnixMs": 11, "updatedAtUnixMs": 33, "title": "kept" })],
-            last_provider: "claude".into(),
-            grid: json!({ "cols": 2 }),
-            revision: 4,
-            routines: vec![json!({ "id": routine_id, "enabled": true, "name": "once" })],
-            notifications: vec![json!({ "id": notification_id, "isRead": false, "createdAtUnixMs": 44 })],
-        };
-
-        write_disk_state(&mut conn, &state).unwrap();
-
-        let (name, folder, pinned, available): (String, String, i64, i64) = conn
-            .query_row(
-                "SELECT display_name, folder_path, pinned, available FROM workspaces WHERE id = ?1",
-                [workspace_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(name, "Round Trip");
-        assert_eq!(folder, r"E:\round-trip");
-        assert_eq!(pinned, 1);
-        assert_eq!(available, 0);
-
-        let (data, created, updated): (String, i64, i64) = conn
-            .query_row(
-                "SELECT data, created_at_unix_ms, updated_at_unix_ms FROM threads WHERE id = ?1",
-                [thread_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        let parsed: Value = serde_json::from_str(&data).unwrap();
-        assert_eq!(parsed["id"], thread_id);
-        assert_eq!(parsed["title"], "kept");
-        assert_eq!(created, 11);
-        assert_eq!(updated, 33);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "delete"), 0);
-
-        state.workspaces[0].display_name = "Still here".into();
-        state.threads[0]["title"] = json!("renamed");
-        write_disk_state(&mut conn, &state).unwrap();
-
-        let renamed: String = conn
-            .query_row(
-                "SELECT data FROM threads WHERE id = ?1",
-                [thread_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let renamed: Value = serde_json::from_str(&renamed).unwrap();
-        assert_eq!(renamed["title"], "renamed");
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM threads WHERE id = ?1", thread_id), 1);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "update"), 1);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "delete"), 0);
-
-        state.threads.clear();
-        state.routines.clear();
-        state.notifications.clear();
-        write_disk_state(&mut conn, &state).unwrap();
-
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM threads WHERE id = ?1", thread_id), 0);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM routines WHERE id = ?1", routine_id), 0);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM notifications WHERE id = ?1", notification_id), 0);
-        let routine_total: i64 = conn.query_row("SELECT COUNT(*) FROM routines", [], |row| row.get(0)).unwrap();
-        let notification_total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notifications", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(routine_total, 0);
-        assert_eq!(notification_total, 0);
-
-        let (name_after, workspace_total): (String, i64) = conn
-            .query_row(
-                "SELECT display_name, (SELECT COUNT(*) FROM workspaces) FROM workspaces WHERE id = ?1",
-                [workspace_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(name_after, "Still here");
-        assert_eq!(workspace_total, 1);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "delete"), 0);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "update"), 1);
-        let agent_name: String = conn
-            .query_row(
-                "SELECT name FROM agents WHERE id = 'ag-round-trip'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(agent_name, "Round Agent");
-
-        write_disk_state(&mut conn, &state).unwrap();
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "update"), 1);
-        assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM workspace_events WHERE kind = ?1", "delete"), 0);
-
-        assert_eq!(app_value(&conn, "lastProvider"), "claude");
-        assert_eq!(app_value(&conn, "revision"), "4");
-        assert_eq!(app_value(&conn, "routinesSeeded"), "1");
-        assert_eq!(app_value(&conn, "notificationsSeeded"), "1");
-        let grid: Value = serde_json::from_str(&app_value(&conn, "grid")).unwrap();
-        assert_eq!(grid["cols"], 2);
-    }
-}
+#[path = "persist_tests.rs"]
+mod tests;
 

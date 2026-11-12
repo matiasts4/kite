@@ -25,14 +25,23 @@ import {
   NetworkIcon,
 } from './sidebar/sidebarIcons';
 import { invokeCommand } from '../lib/ipc';
-import { usePresence } from '../motion/usePresence';
-import { motionSurfaceClass } from '../motion/surface';
+import { AnimatePresence, motion } from 'motion/react';
+import { MOTION_EXIT_MS } from '../motion/contract';
+import { surfaceMotion } from '../motion/standard/surfaces';
 
 // ---------------------------------------------------------------------------
 // Main Sidebar Component
 // ---------------------------------------------------------------------------
 
-export const Sidebar: React.FC<SidebarProps> = ({
+export type ThreadSidebarCallbacks = {
+  onRegenerateTitle?: (threadId: string) => void;
+  titlePending?: boolean;
+  onRestoreThread?: (threadId: string) => void;
+  onArchiveThread?: (threadId: string) => void;
+  archivedCount?: number;
+};
+
+export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
   hidden = false,
   onRailPresenceChange,
   mode,
@@ -76,10 +85,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   agentActivity = {},
   availability,
   onOpenArchivedChats,
+  archivedCount,
   onRenameThread,
+  onArchiveThread,
   onDeleteThread,
   onMoveWorkspace,
   onMoveAgent,
+  onRegenerateTitle,
+  titlePending = false,
+  onRestoreThread,
 }) => {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -87,11 +101,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [probedAvailability, setProbedAvailability] = useState<SidebarProps['availability']>();
   const [railActivity, setRailActivity] = useState<NonNullable<SidebarProps['agentActivity']>>({});
   const addBtnRef = useRef<HTMLButtonElement | null>(null);
-  const railPresence = usePresence(!hidden);
+  const [railMounted, setRailMounted] = useState(!hidden);
 
   useEffect(() => {
-    onRailPresenceChange?.(railPresence.mounted);
-  }, [railPresence.mounted, onRailPresenceChange]);
+    if (!hidden) setRailMounted(true);
+  }, [hidden]);
+
+  useEffect(() => {
+    onRailPresenceChange?.(railMounted);
+  }, [railMounted, onRailPresenceChange]);
 
   // Listen for agent creation events
   useEffect(() => {
@@ -253,27 +271,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const handleAddClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     if (mode === 'agent') {
       openNewAgent();
-    } else if (mode === 'code' || mode === 'chat') {
-      // Toggle menu for New Thread (if chat), Local Folder, SSH
+    } else if (mode === 'chat') {
+      onNewChat();
+    } else if (mode === 'code') {
+      // Toggle menu for Local Folder, SSH
       const rect = e.currentTarget.getBoundingClientRect();
       setContextMenu({
         x: rect.left,
         y: rect.bottom + 4,
         sections: [
           [
-            mode === 'chat'
-              ? {
-                  id: 'chat',
-                  title: 'New Thread',
-                  shortcut: 'Ctrl+N',
-                  icon: <PlusIcon size={14} />,
-                  action: () => {
-                    setContextMenu(null);
-                    setAddMenuOpen(false);
-                    onNewChat();
-                  },
-                }
-              : null,
             {
               id: 'local',
               title: 'Local Folder…',
@@ -305,118 +312,125 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  if (!railPresence.mounted) return null;
-
-  const railMotion = motionSurfaceClass(railPresence.phase, 'panel-left');
-
   return (
-    <aside
-      className={`sidebar${railMotion ? ` ${railMotion}` : ''}`}
-      data-testid="sidebar"
-      style={{ width: 'var(--sidebar-width, 232px)' }}
-    >
-      {/* Primary Rail Section */}
-      <section aria-labelledby="rail-heading" className="sidebar__primary">
-        <div className="sidebar__section-heading">
-          <button className="sidebar__heading-button" onClick={onShowModeHome} type="button">
-            <span id="rail-heading">{headingTitle}</span>
-          </button>
-          <button
-            ref={addBtnRef}
-            aria-label={addTitle}
-            className="sidebar__add"
-            onClick={handleAddClick}
-            title={addTitle}
-            type="button"
-          >
-            <PlusIcon size={13} strokeWidth={2.4} />
-          </button>
-        </div>
+    <AnimatePresence onExitComplete={() => setRailMounted(false)}>
+      {!hidden && (
+        <motion.aside
+          key="sidebar"
+          {...surfaceMotion('panel-left', { exitMs: MOTION_EXIT_MS })}
+          className="sidebar"
+          data-testid="sidebar"
+          style={{ width: 'var(--sidebar-width, 232px)' }}
+        >
+          {/* Primary Rail Section */}
+          <section aria-labelledby="rail-heading" className="sidebar__primary">
+            <div className="sidebar__section-heading">
+              <button className="sidebar__heading-button" onClick={onShowModeHome} type="button">
+                <span id="rail-heading">{headingTitle}</span>
+              </button>
+              <button
+                ref={addBtnRef}
+                aria-label={addTitle}
+                className="sidebar__add"
+                onClick={handleAddClick}
+                title={addTitle}
+                type="button"
+              >
+                <PlusIcon size={13} strokeWidth={2.4} />
+              </button>
+            </div>
 
-        <div className="sidebar__list">
-          {/* ======================= AGENT MODE ======================= */}
-          {mode === 'agent' && (
-            <AgentRoster
-              agents={agents}
-              createdAgents={createdAgents}
-              selectedAgentId={selectedAgentId}
-              onSelectAgent={onSelectAgent}
-              onNewAgent={openNewAgent}
-              onNewAgentChat={onNewAgentChat}
-              onTogglePinAgent={onTogglePinAgent}
-              onMoveAgent={onMoveAgent}
-              onDeleteAgent={onDeleteAgent}
-              onOpenAgentSettings={onOpenAgentSettings}
-              onInstallAgent={onInstallAgent}
-              availability={availability}
-              probedAvailability={probedAvailability}
-              agentActivity={agentActivity}
-              railActivity={railActivity}
-              onOpenMenu={setContextMenu}
-              contextMenuTargetId={contextMenu?.targetId}
-              onUpdateAvailability={setProbedAvailability}
-            />
-          )}
+            <div className="sidebar__list">
+              {/* ======================= AGENT MODE ======================= */}
+              {mode === 'agent' && (
+                <AgentRoster
+                  agents={agents}
+                  createdAgents={createdAgents}
+                  selectedAgentId={selectedAgentId}
+                  onSelectAgent={onSelectAgent}
+                  onNewAgent={openNewAgent}
+                  onNewAgentChat={onNewAgentChat}
+                  onTogglePinAgent={onTogglePinAgent}
+                  onMoveAgent={onMoveAgent}
+                  onDeleteAgent={onDeleteAgent}
+                  onOpenAgentSettings={onOpenAgentSettings}
+                  onInstallAgent={onInstallAgent}
+                  availability={availability}
+                  probedAvailability={probedAvailability}
+                  agentActivity={agentActivity}
+                  railActivity={railActivity}
+                  onOpenMenu={setContextMenu}
+                  contextMenuTargetId={contextMenu?.targetId}
+                  onUpdateAvailability={setProbedAvailability}
+                />
+              )}
 
-          {/* ======================= CODE MODE ======================= */}
-          {mode === 'code' && (
-            <WorkspaceRoster
-              workspaces={workspaces}
-              selectedWorkspaceId={selectedWorkspaceId}
-              onSelectWorkspace={onSelectWorkspace}
-              onCopyWorkspacePath={onCopyWorkspacePath}
-              onTogglePinWorkspace={onTogglePinWorkspace}
-              onRenameWorkspace={onRenameWorkspace}
-              onRemoveWorkspaceFromList={onRemoveWorkspaceFromList}
-              onMoveWorkspace={onMoveWorkspace}
-              onNewWorkspaceSession={onNewWorkspaceSession}
-              onSelectWorkspaceTab={onSelectWorkspaceTab}
-              onCloseWorkspaceTab={onCloseWorkspaceTab}
-              onRenameWorkspaceTab={onRenameWorkspaceTab}
-              workspaceSessions={workspaceSessions}
-            />
-          )}
+              {/* ======================= CODE MODE ======================= */}
+              {mode === 'code' && (
+                <WorkspaceRoster
+                  workspaces={workspaces}
+                  selectedWorkspaceId={selectedWorkspaceId}
+                  onSelectWorkspace={onSelectWorkspace}
+                  onCopyWorkspacePath={onCopyWorkspacePath}
+                  onTogglePinWorkspace={onTogglePinWorkspace}
+                  onRenameWorkspace={onRenameWorkspace}
+                  onRemoveWorkspaceFromList={onRemoveWorkspaceFromList}
+                  onMoveWorkspace={onMoveWorkspace}
+                  onNewWorkspaceSession={onNewWorkspaceSession}
+                  onSelectWorkspaceTab={onSelectWorkspaceTab}
+                  onCloseWorkspaceTab={onCloseWorkspaceTab}
+                  onRenameWorkspaceTab={onRenameWorkspaceTab}
+                  workspaceSessions={workspaceSessions}
+                />
+              )}
 
-          {/* ======================= CHAT MODE ======================= */}
-          {mode === 'chat' && (
-            <ThreadRoster
-              threads={threads}
-              workspaces={workspaces}
-              selectedThreadId={selectedThreadId}
-              onSelectThread={onSelectThread}
-              onNewChat={onNewChat}
-              onNewChatInWorkspace={onNewChatInWorkspace}
-              onAddWorkspace={onAddWorkspace}
-              onTogglePinThread={onTogglePinThread}
-              onRenameThread={onRenameThread}
-              onDeleteThread={onDeleteThread}
-              onOpenArchivedChats={onOpenArchivedChats}
-              onOpenMenu={setContextMenu}
-              contextMenuTargetId={contextMenu?.targetId}
-            />
-          )}
-        </div>
-      </section>
+              {/* ======================= CHAT MODE ======================= */}
+              {mode === 'chat' && (
+                <ThreadRoster
+                  threads={threads}
+                  workspaces={workspaces}
+                  selectedThreadId={selectedThreadId}
+                  onSelectThread={onSelectThread}
+                  onNewChat={onNewChat}
+                  onNewChatInWorkspace={onNewChatInWorkspace}
+                  onAddWorkspace={onAddWorkspace}
+                  onTogglePinThread={onTogglePinThread}
+                  onRenameThread={onRenameThread}
+                  onArchiveThread={onArchiveThread}
+                  onDeleteThread={onDeleteThread}
+                  onRestoreThread={onRestoreThread}
+                  onRegenerateTitle={onRegenerateTitle}
+                  titlePending={titlePending}
+                  onOpenArchivedChats={onOpenArchivedChats}
+                  archivedCount={archivedCount}
+                  onOpenMenu={setContextMenu}
+                  contextMenuTargetId={contextMenu?.targetId}
+                />
+              )}
+            </div>
+          </section>
 
-      {/* Authentic Sidebar Footer */}
-      <SidebarFooter
-        accountName={accountName}
-        accountTier={accountTier}
-        accountTierPaid={accountTierPaid}
-        creditsLabel={creditsLabel}
-        appearance={appearance}
-        onToggleAppearance={onToggleAppearance}
-        onOpenSettings={onOpenSettings}
-      />
+          {/* Authentic Sidebar Footer */}
+          <SidebarFooter
+            accountName={accountName}
+            accountTier={accountTier}
+            accountTierPaid={accountTierPaid}
+            creditsLabel={creditsLabel}
+            appearance={appearance}
+            onToggleAppearance={onToggleAppearance}
+            onOpenSettings={onOpenSettings}
+          />
 
-      {/* Context Menu / Add Popup Menu Overlay */}
-      <SidebarContextMenu
-        contextMenu={contextMenu}
-        onClose={() => {
-          setContextMenu(null);
-          setAddMenuOpen(false);
-        }}
-      />
-    </aside>
+          {/* Context Menu / Add Popup Menu Overlay */}
+          <SidebarContextMenu
+            contextMenu={contextMenu}
+            onClose={() => {
+              setContextMenu(null);
+              setAddMenuOpen(false);
+            }}
+          />
+        </motion.aside>
+      )}
+    </AnimatePresence>
   );
 };

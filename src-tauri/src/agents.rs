@@ -62,7 +62,7 @@ pub fn agent_profile_json(agent_id: &str) -> Value {
         "reflectionMode": "ask",
         "allowAgentScheduling": true,
         "allowAgentMessaging": true,
-        "defaultMode": "acceptEdits",
+        "defaultMode": "fullAccess",
         "defaultPlan": Value::Null,
         "defaultModel": Value::Null,
         "defaultProviderOptions": [],
@@ -841,10 +841,6 @@ fn messaging_pref_path() -> PathBuf {
     studio_dir().join("agent-messaging-preference.json")
 }
 
-fn messaging_store_path() -> PathBuf {
-    studio_dir().join("agent-messages.json")
-}
-
 #[tauri::command]
 pub fn agent_messaging_preference() -> Value {
     let pref_path = messaging_pref_path();
@@ -853,6 +849,7 @@ pub fn agent_messaging_preference() -> Value {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null);
     let enabled = val.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let read_only = val.get("readOnly").and_then(Value::as_bool).unwrap_or(false);
     let revision = val
         .get("revision")
         .and_then(Value::as_str)
@@ -861,7 +858,7 @@ pub fn agent_messaging_preference() -> Value {
     json!({
         "schemaVersion": 1,
         "enabled": enabled,
-        "readOnly": false,
+        "readOnly": read_only,
         "revision": revision
     })
 }
@@ -870,9 +867,11 @@ pub fn agent_messaging_preference() -> Value {
 pub fn set_agent_messaging_preference(request: Option<Value>) -> Value {
     let req = request.as_ref().and_then(|r| r.get("request")).or(request.as_ref());
     let enabled = req.and_then(|r| r.get("enabled")).and_then(Value::as_bool).unwrap_or(true);
+    let read_only = req.and_then(|r| r.get("readOnly")).and_then(Value::as_bool).unwrap_or(false);
     let next_rev = format!("rev-{}", now_ms());
     let data = json!({
         "enabled": enabled,
+        "readOnly": read_only,
         "revision": next_rev
     });
     let pref_path = messaging_pref_path();
@@ -883,7 +882,7 @@ pub fn set_agent_messaging_preference(request: Option<Value>) -> Value {
     json!({
         "schemaVersion": 1,
         "enabled": enabled,
-        "readOnly": false,
+        "readOnly": read_only,
         "revision": next_rev
     })
 }
@@ -895,57 +894,9 @@ pub fn agent_message_inbox(request: Option<Value>) -> Value {
     let before_seq: Option<u64> = req
         .and_then(|r| r.get("beforeSequence"))
         .and_then(Value::as_str)
-        .and_then(|s| s.parse().ok());
-
-    let messages_path = messaging_store_path();
-    let all_messages = read_json_array(&messages_path);
-
-    let mut matching: Vec<&Value> = all_messages
-        .iter()
-        .filter(|m| m.get("profileId").and_then(Value::as_str) == Some(profile_id))
-        .filter(|m| {
-            if let Some(before) = before_seq {
-                let seq = m.get("sequence").and_then(Value::as_u64).unwrap_or(0);
-                seq < before
-            } else {
-                true
-            }
-        })
-        .collect();
-
-    matching.sort_by(|a, b| {
-        let seq_a = a.get("sequence").and_then(Value::as_u64).unwrap_or(0);
-        let seq_b = b.get("sequence").and_then(Value::as_u64).unwrap_or(0);
-        seq_b.cmp(&seq_a)
-    });
-
-    let limit = 20;
-    let slice = if matching.len() > limit { &matching[..limit] } else { &matching[..] };
-    let has_more = matching.len() > limit;
-    let next_cursor = if has_more {
-        slice.last().and_then(|m| m.get("sequence").and_then(Value::as_u64)).map(|s| s.to_string())
-    } else {
-        None
-    };
-
-    let items: Vec<Value> = slice
-        .iter()
-        .map(|m| {
-            json!({
-                "id": m.get("id").and_then(Value::as_str).unwrap_or(""),
-                "senderName": m.get("senderName").and_then(Value::as_str).unwrap_or("Teammate"),
-                "body": m.get("body").and_then(Value::as_str).unwrap_or(""),
-                "delivered": m.get("delivered").and_then(Value::as_bool).unwrap_or(true),
-            })
-        })
-        .collect();
-
-    json!({
-        "schemaVersion": 1,
-        "profileId": profile_id,
-        "messages": items,
-        "nextCursor": next_cursor
-    })
+        .and_then(|s| s.parse().ok())
+        .or_else(|| req.and_then(|r| r.get("beforeSequence")).and_then(Value::as_u64));
+    crate::dispatch_wire::inbox(profile_id, before_seq)
 }
 
 #[tauri::command]
@@ -958,34 +909,16 @@ pub fn send_agent_message(request: Option<Value>) -> Result<Value, String> {
     let sender_id = req.and_then(|r| r.get("senderId")).and_then(Value::as_str).unwrap_or("user");
     let sender_name = req.and_then(|r| r.get("senderName")).and_then(Value::as_str).unwrap_or("Builder");
     let body = req.and_then(|r| r.get("body")).and_then(Value::as_str).ok_or_else(|| "body is required".to_string())?;
-
-    let messages_path = messaging_store_path();
-    let mut all_messages = read_json_array(&messages_path);
-    let next_seq = all_messages
-        .iter()
-        .filter_map(|m| m.get("sequence").and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0) + 1;
-
-    let msg_id = Uuid::new_v4().to_string();
-    let now = now_ms();
-    let new_msg = json!({
-        "sequence": next_seq,
-        "id": msg_id,
-        "profileId": recipient_id,
-        "senderId": sender_id,
-        "senderName": sender_name,
-        "body": plain_text(body, 8000),
-        "delivered": true,
-        "createdAtUnixMs": now,
-    });
-    all_messages.push(new_msg);
-    write_json_array(&messages_path, &all_messages);
-
-    Ok(json!({
-        "schemaVersion": 1,
-        "delivered": true,
-        "messageId": msg_id,
-        "sequence": next_seq
-    }))
+    let caller = if sender_id.is_empty() || sender_id == "user" || sender_id == "human" {
+        "human"
+    } else {
+        "agent"
+    };
+    Ok(crate::dispatch_wire::send_agent(
+        recipient_id,
+        body,
+        caller,
+        sender_name,
+        None,
+    ))
 }

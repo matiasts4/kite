@@ -105,7 +105,7 @@ fn resolve_workspace_dir(req: &Value) -> Result<PathBuf, GitError> {
     ))
 }
 
-fn run_git(dir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
+pub(crate) fn run_git(dir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
     let mut cmd = std::process::Command::new("git");
     cmd.current_dir(dir);
     cmd.args(args);
@@ -654,6 +654,84 @@ pub fn push_workspace_changes(request: Option<Value>) -> Result<WorkspaceChanges
     let dir = resolve_workspace_dir(req)?;
     run_git_checked(&dir, &["push"])?;
     read_workspace_changes_internal(&dir)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBranches {
+    pub current: Option<String>,
+    pub branches: Vec<String>,
+}
+
+pub fn list_workspace_branches_internal(dir: &Path) -> Result<WorkspaceBranches, GitError> {
+    let output = run_git_checked(dir, &["branch", "--list", "--no-color"])?;
+    let mut current = None;
+    let mut branches = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if line.starts_with('*') {
+            let name = line[1..].trim().to_string();
+            if !name.starts_with('(') {
+                current = Some(name.clone());
+                branches.push(name);
+            }
+        } else {
+            branches.push(trimmed.to_string());
+        }
+    }
+
+    if current.is_none() {
+        if let Ok(curr) = run_git_checked(dir, &["branch", "--show-current"]) {
+            let curr_trimmed = curr.trim();
+            if !curr_trimmed.is_empty() {
+                current = Some(curr_trimmed.to_string());
+                if !branches.contains(&curr_trimmed.to_string()) {
+                    branches.insert(0, curr_trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(WorkspaceBranches { current, branches })
+}
+
+#[tauri::command]
+pub fn list_workspace_branches(request: Option<Value>) -> Result<WorkspaceBranches, GitError> {
+    let req = body(&request).cloned().unwrap_or(Value::Null);
+    let dir = resolve_workspace_dir(&req)?;
+    list_workspace_branches_internal(&dir)
+}
+
+#[tauri::command]
+pub fn switch_workspace_branch(request: Option<Value>) -> Result<WorkspaceBranches, GitError> {
+    let req = body(&request).cloned().unwrap_or(Value::Null);
+    let dir = resolve_workspace_dir(&req)?;
+    let branch = req
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GitError::new("missing_branch", "Branch name is required."))?;
+
+    run_git_checked(&dir, &["checkout", branch])?;
+    list_workspace_branches_internal(&dir)
+}
+
+#[tauri::command]
+pub fn create_workspace_branch(request: Option<Value>) -> Result<WorkspaceBranches, GitError> {
+    let req = body(&request).cloned().unwrap_or(Value::Null);
+    let dir = resolve_workspace_dir(&req)?;
+    let branch = req
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| GitError::new("missing_branch", "Branch name cannot be empty."))?;
+
+    run_git_checked(&dir, &["checkout", "-b", branch])?;
+    list_workspace_branches_internal(&dir)
 }
 
 #[cfg(test)]

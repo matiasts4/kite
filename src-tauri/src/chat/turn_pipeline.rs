@@ -1,0 +1,1128 @@
+//! Canonical turn pipeline shared by every provider transport.
+//!
+//! Frames enter here. The renderer never parses a provider wire. A tool call
+//! keeps one snapshot for its whole life, text waits 50ms unless it is the
+//! first chunk or the segment is closing, and a failed process becomes a
+//! structured failure instead of assistant text.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::acp::{
+    classify_tool_metadata, extract_subagent_meta, extract_swarm_meta, merge_subagent_meta,
+    merge_swarm_meta, response_indicates_failure, SubagentMeta, SwarmMeta,
+};
+use crate::chat::session::ApprovalDecision;
+
+pub const DELTA_WINDOW: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ProviderTurnEvent {
+    SessionStarted {
+        provider_session_id: Option<String>,
+    },
+    MessageDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ToolCallUpdated {
+        tool: ToolCallSnapshot,
+    },
+    PlanUpdated {
+        title: String,
+        status: String,
+        body: String,
+    },
+    ApprovalRequested {
+        request_id: String,
+        tool_name: String,
+        title: String,
+    },
+    UserInputRequested {
+        request: UserInputRequest,
+    },
+    UsageUpdated {
+        usage: UsageReport,
+    },
+    TurnTerminal {
+        failure: Option<TurnFailure>,
+    },
+    Notice {
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallSnapshot {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub status: String,
+    pub path: Option<String>,
+    pub command: Option<String>,
+    pub query: Option<String>,
+    pub additions: Option<i64>,
+    pub deletions: Option<i64>,
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_meta: Option<SubagentMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_meta: Option<SwarmMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_use_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputRequest {
+    pub request_id: String,
+    pub questions: Vec<UserQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserQuestion {
+    pub id: String,
+    pub header: String,
+    pub options: Vec<String>,
+    pub allow_custom_answer: bool,
+    pub allow_attachments: bool,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_input_tokens: Option<i64>,
+    pub context_window_tokens: Option<i64>,
+    pub duration_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TurnFailure {
+    UsageLimit {
+        message: String,
+        reset_at_unix_ms: Option<i64>,
+    },
+    AuthRequired {
+        provider: String,
+        message: String,
+    },
+    CliUsageError {
+        command: String,
+        message: String,
+    },
+    ProcessError {
+        exit_code: Option<i32>,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode {
+    Supervised,
+    AcceptEdits,
+    Auto,
+    FullAccess,
+}
+
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PermissionMode::Supervised => "supervised",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Auto => "auto",
+            PermissionMode::FullAccess => "fullAccess",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "supervised" | "default" | "ask" => Some(PermissionMode::Supervised),
+            "acceptEdits" | "accept-edits" => Some(PermissionMode::AcceptEdits),
+            "auto" => Some(PermissionMode::Auto),
+            "fullAccess" | "bypassPermissions" | "dontAsk" => Some(PermissionMode::FullAccess),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectivePermission {
+    pub requested: String,
+    pub effective: PermissionMode,
+    pub clamped: bool,
+}
+
+/// Merges tool_call, tool_call_update, and tool_call_content_chunk by id.
+#[derive(Debug, Default, Clone)]
+pub struct ToolCallTracker {
+    calls: BTreeMap<String, ToolCallSnapshot>,
+    call_meta: BTreeMap<String, (String, Value)>,
+    next_anon_id: usize,
+    last_anon_id: Option<String>,
+}
+
+impl ToolCallTracker {
+    pub fn snapshot(&self, id: &str) -> Option<&ToolCallSnapshot> {
+        self.calls.get(id)
+    }
+
+    fn resolve_tool_id(&mut self, update: &Value, is_new_call: bool) -> String {
+        if let Some(id) = explicit_tool_id(update) {
+            return id;
+        }
+        if is_new_call {
+            self.next_anon_id += 1;
+            let id = format!("tool-{}", self.next_anon_id);
+            self.last_anon_id = Some(id.clone());
+            id
+        } else {
+            self.last_anon_id.clone().unwrap_or_else(|| "tool".to_string())
+        }
+    }
+
+    pub fn ingest(&mut self, frame: &Value) -> Vec<ProviderTurnEvent> {
+        if let Some(event) = reverse_request(frame) {
+            return vec![event];
+        }
+        let update = frame.pointer("/params/update").unwrap_or(frame);
+        let kind = update
+            .get("sessionUpdate")
+            .or_else(|| update.get("type"))
+            .or_else(|| frame.get("method"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match kind {
+            "tool_call" | "tool_use" => {
+                let snap = self.merge_tool(update, true);
+                vec![ProviderTurnEvent::ToolCallUpdated { tool: snap }]
+            }
+            "tool_call_update" => {
+                let snap = self.merge_tool(update, false);
+                vec![ProviderTurnEvent::ToolCallUpdated { tool: snap }]
+            }
+            "tool_call_content_chunk" => {
+                let snap = self.append_chunk(update);
+                vec![ProviderTurnEvent::ToolCallUpdated { tool: snap }]
+            }
+            "agent_message_chunk" | "content_delta" | "text_delta" => text_delta(update),
+            "agent_thought_chunk" | "thought_delta" | "thinking" | "reasoning" => {
+                reasoning_delta(update)
+            }
+            "plan" | "plan_update" | "x.ai/exit_plan_mode" | "_x.ai/exit_plan_mode" => {
+                vec![plan_event(update)]
+            }
+            "session/request_permission" | "permission/request" => {
+                vec![approval_event(frame)]
+            }
+            "turn_completed" | "turn_complete" | "turn.completed" | "usage_update" | "step_finish" => {
+                usage_events(update, frame)
+            }
+            "available_commands_update"
+            | "session_info_update"
+            | "hook_execution"
+            | "config_option_update"
+            | "current_mode_update"
+            | "mode_update"
+            | "commands_update"
+            | "user_message_chunk"
+            | "step_start" => Vec::new(),
+            _ if frame.get("method").is_some() || frame.get("type").is_some() => {
+                vec![ProviderTurnEvent::Notice {
+                    code: "unknownFrame".into(),
+                    message: bounded(
+                        &format!("unrecognized frame `{kind}`"),
+                        180,
+                    ),
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn merge_tool(&mut self, update: &Value, is_new_call: bool) -> ToolCallSnapshot {
+        let id = self.resolve_tool_id(update, is_new_call);
+        let src = update.get("part").unwrap_or(update);
+        let entry = self.calls.entry(id.clone()).or_insert_with(|| ToolCallSnapshot {
+            id: id.clone(),
+            kind: "tool".into(),
+            title: String::new(),
+            status: "inProgress".into(),
+            path: None,
+            command: None,
+            query: None,
+            additions: None,
+            deletions: None,
+            output: String::new(),
+            subagent_meta: None,
+            swarm_meta: None,
+            parent_tool_use_id: None,
+        });
+        let incoming_name = src
+            .get("name")
+            .or_else(|| src.get("tool"))
+            .or_else(|| src.get("tool_name"))
+            .or_else(|| src.get("toolName"))
+            .or_else(|| src.get("title"))
+            .or_else(|| update.get("name"))
+            .or_else(|| update.get("toolName"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(kind) = src
+            .get("kind")
+            .or_else(|| update.get("kind"))
+            .and_then(Value::as_str)
+        {
+            if !kind.is_empty() && entry.kind != "subagent" && entry.kind != "swarm" {
+                entry.kind = crate::acp::normalize_tool_kind_name(kind);
+            }
+        }
+        if let Some(title) = src
+            .get("title")
+            .or_else(|| src.get("name"))
+            .or_else(|| src.get("tool"))
+            .or_else(|| src.get("tool_name"))
+            .or_else(|| src.pointer("/state/title"))
+            .or_else(|| update.get("title"))
+            .or_else(|| update.get("name"))
+            .and_then(Value::as_str)
+        {
+            if !title.is_empty() {
+                entry.title = title.to_string();
+            }
+        }
+        if let Some(status) = src
+            .get("status")
+            .or_else(|| src.pointer("/state/status"))
+            .or_else(|| update.get("status"))
+            .and_then(Value::as_str)
+        {
+            if !status.is_empty() {
+                entry.status = status.to_string();
+            }
+        }
+        if let Some(parent_id) = src
+            .get("parent_tool_use_id")
+            .or_else(|| src.get("parentToolUseId"))
+            .or_else(|| update.get("parent_tool_use_id"))
+            .or_else(|| update.get("parentToolUseId"))
+            .and_then(Value::as_str)
+        {
+            if !parent_id.is_empty() {
+                entry.parent_tool_use_id = Some(parent_id.to_string());
+            }
+        }
+        let input = src
+            .get("rawInput")
+            .or_else(|| src.get("input"))
+            .or_else(|| src.get("arguments"))
+            .or_else(|| src.get("parameters"))
+            .or_else(|| src.pointer("/state/input"))
+            .or_else(|| update.get("rawInput"))
+            .or_else(|| update.get("input"))
+            .or_else(|| update.get("arguments"));
+        if let Some(input) = input {
+            if entry.path.is_none() {
+                entry.path = string_field(
+                    input,
+                    &["path", "file", "filePath", "file_path", "Path", "TargetFile"],
+                );
+            }
+            if entry.command.is_none() {
+                entry.command = string_field(input, &["command", "cmd", "CommandLine"]);
+            }
+            if entry.query.is_none() {
+                entry.query = string_field(input, &["query", "pattern", "q", "regex", "search"]);
+            }
+        }
+        if entry.path.is_none() {
+            entry.path = src
+                .pointer("/locations/0/path")
+                .or_else(|| update.pointer("/locations/0/path"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        let (content_path, content_add, content_del) = {
+            let from_src = crate::acp::extract_acp_diff_and_path(src);
+            if from_src.1.is_some() || from_src.2.is_some() || from_src.0.is_some() {
+                from_src
+            } else {
+                crate::acp::extract_acp_diff_and_path(update)
+            }
+        };
+        if entry.path.is_none() {
+            entry.path = content_path;
+        }
+        if let Some(add) = content_add {
+            entry.additions = Some(add as i64);
+        }
+        if let Some(del) = content_del {
+            entry.deletions = Some(del as i64);
+        }
+        if let Some(add) = src
+            .pointer("/diff/additions")
+            .or_else(|| src.get("addedLines"))
+            .or_else(|| update.pointer("/diff/additions"))
+            .or_else(|| update.get("addedLines"))
+            .and_then(Value::as_i64)
+        {
+            entry.additions = Some(add);
+        }
+        if let Some(del) = src
+            .pointer("/diff/deletions")
+            .or_else(|| src.get("removedLines"))
+            .or_else(|| update.pointer("/diff/deletions"))
+            .or_else(|| update.get("removedLines"))
+            .and_then(Value::as_i64)
+        {
+            entry.deletions = Some(del);
+        }
+        if let Some(out) = src
+            .get("rawOutput")
+            .or_else(|| src.get("output"))
+            .or_else(|| src.pointer("/state/output"))
+            .or_else(|| update.get("rawOutput"))
+            .or_else(|| update.get("output"))
+        {
+            let out_str = if let Some(s) = out.as_str() {
+                Some(s.to_string())
+            } else if !out.is_null() {
+                serde_json::to_string(out).ok()
+            } else {
+                None
+            };
+            if let Some(text) = out_str {
+                if !text.is_empty() {
+                    entry.output = text;
+                }
+            }
+        }
+
+        let (stored_name, stored_input) = self
+            .call_meta
+            .entry(id.clone())
+            .or_insert_with(|| (String::new(), Value::Null));
+        if let Some(name) = incoming_name {
+            if !name.is_empty() {
+                *stored_name = name;
+            }
+        }
+        if let Some(inp) = input {
+            if !inp.is_null() {
+                *stored_input = inp.clone();
+            }
+        }
+        let eval_name = if stored_name.is_empty() {
+            if entry.subagent_meta.is_some() {
+                "invoke_subagent"
+            } else if entry.swarm_meta.is_some() {
+                "swarm"
+            } else {
+                entry.title.as_str()
+            }
+        } else {
+            stored_name.as_str()
+        };
+        let (
+            classified_kind,
+            _,
+            classified_title,
+            classified_cmd,
+            classified_path,
+            classified_add,
+            classified_del,
+        ) = classify_tool_metadata(eval_name, stored_input);
+        if entry.command.is_none() {
+            entry.command = classified_cmd;
+        }
+        if entry.path.is_none() {
+            entry.path = classified_path;
+        }
+        if entry.additions.is_none() {
+            entry.additions = classified_add.map(|n| n as i64);
+        }
+        if entry.deletions.is_none() {
+            entry.deletions = classified_del.map(|n| n as i64);
+        }
+        if entry.status != "killed"
+            && (response_indicates_failure(
+                &entry.status,
+                Some(src),
+                None,
+                Some(entry.output.as_str()),
+            ) || response_indicates_failure(&entry.status, Some(update), None, None))
+        {
+            entry.status = "failed".to_string();
+        }
+        if let Some(meta) = extract_subagent_meta(
+            eval_name,
+            &entry.id,
+            stored_input,
+            Some(entry.output.as_str()),
+            &entry.status,
+        ) {
+            if meta.status == "failed" && entry.status != "killed" {
+                entry.status = "failed".to_string();
+            }
+            entry.kind = "subagent".into();
+            if entry.title.is_empty() || entry.title == eval_name {
+                entry.title = classified_title;
+            }
+            entry.subagent_meta = Some(merge_subagent_meta(entry.subagent_meta.as_ref(), meta));
+        } else if let Some(meta) =
+            extract_swarm_meta(eval_name, stored_input, Some(entry.output.as_str()))
+        {
+            entry.kind = "swarm".into();
+            if entry.title.is_empty() || entry.title == eval_name {
+                entry.title = classified_title;
+            }
+            entry.swarm_meta = Some(merge_swarm_meta(entry.swarm_meta.as_ref(), meta));
+        } else if classified_kind == "subagent"
+            || classified_kind == "swarm"
+            || (classified_kind == "fileChange"
+                && matches!(entry.kind.as_str(), "tool" | "other" | ""))
+        {
+            entry.kind = classified_kind;
+        }
+
+        entry.clone()
+    }
+
+    fn append_chunk(&mut self, update: &Value) -> ToolCallSnapshot {
+        let id = self.resolve_tool_id(update, false);
+        let chunk = update
+            .get("content")
+            .or_else(|| update.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let entry = self.calls.entry(id.clone()).or_insert_with(|| ToolCallSnapshot {
+            id,
+            kind: "tool".into(),
+            title: String::new(),
+            status: "inProgress".into(),
+            path: None,
+            command: None,
+            query: None,
+            additions: None,
+            deletions: None,
+            output: String::new(),
+            subagent_meta: None,
+            swarm_meta: None,
+            parent_tool_use_id: None,
+        });
+        entry.output.push_str(chunk);
+        if entry.status != "killed"
+            && response_indicates_failure(&entry.status, None, None, Some(entry.output.as_str()))
+        {
+            entry.status = "failed".to_string();
+            if let Some(meta) = entry.subagent_meta.as_mut() {
+                meta.status = "failed".to_string();
+            }
+        }
+        entry.clone()
+    }
+}
+
+/// Holds intermediate text until 50ms have passed. The first chunk and a
+/// segment close flush immediately.
+#[derive(Debug, Clone)]
+pub struct DeltaCoalescer {
+    pub window: Duration,
+    message: String,
+    reasoning: String,
+    message_open: bool,
+    reasoning_open: bool,
+    message_since: Option<Instant>,
+    reasoning_since: Option<Instant>,
+}
+
+impl Default for DeltaCoalescer {
+    fn default() -> Self {
+        Self::new(DELTA_WINDOW)
+    }
+}
+
+impl DeltaCoalescer {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            message: String::new(),
+            reasoning: String::new(),
+            message_open: false,
+            reasoning_open: false,
+            message_since: None,
+            reasoning_since: None,
+        }
+    }
+
+    pub fn push_message(&mut self, text: &str, segment_close: bool, now: Instant) -> Option<String> {
+        self.push(true, text, segment_close, now)
+    }
+
+    pub fn push_reasoning(&mut self, text: &str, segment_close: bool, now: Instant) -> Option<String> {
+        self.push(false, text, segment_close, now)
+    }
+
+    pub fn poll(&mut self, now: Instant) -> Vec<String> {
+        let (message, reasoning) = self.poll_split(now);
+        let mut out = Vec::new();
+        if let Some(text) = message {
+            out.push(text);
+        }
+        if let Some(text) = reasoning {
+            out.push(text);
+        }
+        out
+    }
+
+    /// Message buffer, then reasoning buffer. Empty buffers stay `None`.
+    pub fn poll_split(&mut self, now: Instant) -> (Option<String>, Option<String>) {
+        let message = if self.due(self.message_since, now) {
+            self.take(true)
+        } else {
+            None
+        };
+        let reasoning = if self.due(self.reasoning_since, now) {
+            self.take(false)
+        } else {
+            None
+        };
+        (message, reasoning)
+    }
+
+    pub fn flush_split(&mut self) -> (Option<String>, Option<String>) {
+        (self.take(true), self.take(false))
+    }
+
+    pub fn pending(&self) -> bool {
+        !self.message.is_empty() || !self.reasoning.is_empty()
+    }
+
+    fn push(&mut self, message: bool, text: &str, segment_close: bool, now: Instant) -> Option<String> {
+        if text.is_empty() && !segment_close {
+            return None;
+        }
+        let (buf, open, since) = if message {
+            (&mut self.message, &mut self.message_open, &mut self.message_since)
+        } else {
+            (
+                &mut self.reasoning,
+                &mut self.reasoning_open,
+                &mut self.reasoning_since,
+            )
+        };
+        let first = !*open && buf.is_empty();
+        buf.push_str(text);
+        if first || segment_close {
+            *open = !segment_close;
+            *since = None;
+            let flushed = std::mem::take(buf);
+            return if flushed.is_empty() { None } else { Some(flushed) };
+        }
+        *open = true;
+        if since.is_none() {
+            *since = Some(now);
+        }
+        None
+    }
+
+    fn due(&self, since: Option<Instant>, now: Instant) -> bool {
+        since.is_some_and(|start| now.duration_since(start) >= self.window)
+    }
+
+    fn take(&mut self, message: bool) -> Option<String> {
+        let buf = if message {
+            self.message_since = None;
+            std::mem::take(&mut self.message)
+        } else {
+            self.reasoning_since = None;
+            std::mem::take(&mut self.reasoning)
+        };
+        if buf.is_empty() { None } else { Some(buf) }
+    }
+}
+
+pub fn effective_permission_mode(provider: &str, requested: &str) -> EffectivePermission {
+    let provider = provider.trim().to_ascii_lowercase();
+    let parsed = PermissionMode::parse(requested);
+    let (effective, clamped) = match provider.as_str() {
+        "grok" => match parsed {
+            Some(PermissionMode::AcceptEdits) => (PermissionMode::Supervised, true),
+            Some(mode) => (mode, false),
+            None => (PermissionMode::Supervised, true),
+        },
+        "fx" => match parsed {
+            Some(PermissionMode::Supervised) => (PermissionMode::Supervised, false),
+            Some(PermissionMode::Auto) => (PermissionMode::Auto, false),
+            _ => (PermissionMode::Supervised, true),
+        },
+        "muse" | "kiro" => match parsed {
+            Some(PermissionMode::Supervised) => (PermissionMode::Supervised, false),
+            Some(PermissionMode::FullAccess) => (PermissionMode::FullAccess, false),
+            _ => (PermissionMode::Supervised, true),
+        },
+        _ => match parsed {
+            Some(mode) => (mode, false),
+            None => (PermissionMode::Supervised, true),
+        },
+    };
+    EffectivePermission {
+        requested: requested.to_string(),
+        effective,
+        clamped,
+    }
+}
+
+/// Automatic grants are one request. A session-wide grant would widen every
+/// other thread that shares the server.
+pub fn automatic_approval_decision() -> ApprovalDecision {
+    ApprovalDecision::AllowOnce
+}
+
+/// `fullAccess` grants every tool once. `acceptEdits` grants file edits once
+/// and still asks for commands. Questions are never auto-answered.
+pub fn should_auto_approve(effective_mode: &str, tool_name: &str) -> bool {
+    let name = tool_name.to_ascii_lowercase();
+    let command = name.contains("bash")
+        || name.contains("shell")
+        || name.contains("command")
+        || name.contains("terminal")
+        || name.contains("exec");
+    match effective_mode {
+        "fullAccess" => true,
+        "acceptEdits" if !command => true,
+        _ => false,
+    }
+}
+
+pub fn classify_turn_failure(exit_code: Option<i32>, stderr: &str, provider: &str) -> Option<TurnFailure> {
+    let text = stderr.trim();
+    if text.is_empty() && exit_code.unwrap_or(0) == 0 {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("rate limit") || lower.contains("usage limit") || lower.contains("quota") {
+        return Some(TurnFailure::UsageLimit {
+            message: bounded(text, 400),
+            reset_at_unix_ms: None,
+        });
+    }
+    if lower.contains("sign in")
+        || lower.contains("not logged")
+        || lower.contains("auth required")
+        || lower.contains("unauthorized")
+        || lower.contains("not authenticated")
+        || lower.contains("authentication required")
+        || lower.contains("login")
+    {
+        return Some(TurnFailure::AuthRequired {
+            provider: provider.to_string(),
+            message: bounded(text, 400),
+        });
+    }
+    if lower.contains("a value is required")
+        || lower.contains("usage:")
+        || lower.contains("unexpected argument")
+        || lower.contains("unrecognized")
+        || lower.contains("flags provided but not defined")
+        || lower.contains("invalid model selection")
+        || lower.contains("invalid flag")
+    {
+        return Some(TurnFailure::CliUsageError {
+            command: provider.to_string(),
+            message: bounded(text, 400),
+        });
+    }
+    if exit_code.unwrap_or(0) != 0 {
+        return Some(TurnFailure::ProcessError {
+            exit_code,
+            message: if text.is_empty() {
+                "the provider process exited".into()
+            } else {
+                bounded(text, 400)
+            },
+        });
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailureProjection {
+    pub assistant_items: Vec<Value>,
+    pub failure: Option<TurnFailure>,
+}
+
+/// A process failure never becomes an assistant item. Stderr stays on the banner.
+pub fn project_process_failure(
+    exit_code: Option<i32>,
+    stderr: &str,
+    provider: &str,
+    assistant_items: &[Value],
+) -> FailureProjection {
+    FailureProjection {
+        assistant_items: assistant_items.to_vec(),
+        failure: classify_turn_failure(exit_code, stderr, provider),
+    }
+}
+
+pub fn usage_from_provider(
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_input_tokens: Option<i64>,
+    context_window_tokens: Option<i64>,
+    duration_seconds: Option<f64>,
+) -> UsageReport {
+    UsageReport {
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        context_window_tokens,
+        duration_seconds,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionCue {
+    Silent,
+    Chime,
+}
+
+pub fn completion_cue(outcome: &str, thread_focused: bool) -> CompletionCue {
+    match outcome {
+        "cancelled" | "interrupted" => CompletionCue::Silent,
+        "completed" if thread_focused => CompletionCue::Chime,
+        _ => CompletionCue::Silent,
+    }
+}
+
+pub fn follow_up_uses_delta_only(provider_session_id: Option<&str>, session_warm: bool) -> bool {
+    session_warm || provider_session_id.is_some_and(|id| !id.is_empty())
+}
+
+pub fn catalog_cache_key(provider: &str, connection_id: Option<&str>) -> String {
+    let canon = match provider {
+        "agy" => "antigravity",
+        "claude-code" => "claude",
+        "open-code" => "opencode",
+        other => other,
+    };
+    format!("{canon}|{}", connection_id.unwrap_or(""))
+}
+
+pub fn grok_permission_flag(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Supervised => "default",
+        PermissionMode::AcceptEdits => "default",
+        PermissionMode::Auto => "auto",
+        PermissionMode::FullAccess => "bypassPermissions",
+    }
+}
+
+fn reverse_request(frame: &Value) -> Option<ProviderTurnEvent> {
+    let method = frame.get("method").and_then(Value::as_str)?;
+    match method {
+        "x.ai/ask_user_question" | "_x.ai/ask_user_question" | "AskUserQuestion" => {
+            Some(ProviderTurnEvent::UserInputRequested {
+                request: user_input_from(frame),
+            })
+        }
+        "x.ai/exit_plan_mode" | "_x.ai/exit_plan_mode" => Some(plan_event(
+            frame.get("params").unwrap_or(frame),
+        )),
+        "session/request_permission" | "permission/request" => Some(approval_event(frame)),
+        _ => None,
+    }
+}
+
+fn user_input_from(frame: &Value) -> UserInputRequest {
+    let params = frame.get("params").unwrap_or(frame);
+    let request_id = params
+        .get("id")
+        .or_else(|| frame.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("question")
+        .to_string();
+    let rows = params
+        .get("questions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![params.clone()]);
+    let questions = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| UserQuestion {
+            id: row
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("q{index}")),
+            header: row
+                .get("header")
+                .or_else(|| row.get("question"))
+                .and_then(Value::as_str)
+                .unwrap_or("Question")
+                .to_string(),
+            options: row
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            option
+                                .as_str()
+                                .or_else(|| option.get("label").and_then(Value::as_str))
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            allow_custom_answer: row
+                .get("allowCustomAnswer")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            allow_attachments: row
+                .get("allowAttachments")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            multi_select: row.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+        })
+        .collect();
+    UserInputRequest {
+        request_id,
+        questions,
+    }
+}
+
+fn approval_event(frame: &Value) -> ProviderTurnEvent {
+    let params = frame.get("params").unwrap_or(frame);
+    ProviderTurnEvent::ApprovalRequested {
+        request_id: params
+            .get("id")
+            .or_else(|| frame.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("approval")
+            .to_string(),
+        tool_name: params
+            .get("toolName")
+            .or_else(|| params.get("tool_name"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string(),
+        title: params
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Approval requested")
+            .to_string(),
+    }
+}
+
+fn plan_event(update: &Value) -> ProviderTurnEvent {
+    ProviderTurnEvent::PlanUpdated {
+        title: update
+            .get("title")
+            .or_else(|| update.get("step"))
+            .and_then(Value::as_str)
+            .unwrap_or("Plan")
+            .to_string(),
+        status: update
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("proposed")
+            .to_string(),
+        body: update
+            .get("plan")
+            .or_else(|| update.get("body"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+fn text_delta(update: &Value) -> Vec<ProviderTurnEvent> {
+    let text = update
+        .get("text")
+        .or_else(|| update.pointer("/content/text"))
+        .or_else(|| update.pointer("/delta/text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![ProviderTurnEvent::MessageDelta {
+            text: text.to_string(),
+        }]
+    }
+}
+
+fn reasoning_delta(update: &Value) -> Vec<ProviderTurnEvent> {
+    let text = update
+        .get("text")
+        .or_else(|| update.pointer("/content/text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![ProviderTurnEvent::ReasoningDelta {
+            text: text.to_string(),
+        }]
+    }
+}
+
+fn usage_events(update: &Value, frame: &Value) -> Vec<ProviderTurnEvent> {
+    let usage = update
+        .get("usage")
+        .or_else(|| update.pointer("/part/tokens"))
+        .or_else(|| frame.get("usage"))
+        .unwrap_or(update);
+    let input_tokens = usage
+        .get("inputTokens")
+        .or_else(|| usage.get("input_tokens"))
+        .or_else(|| usage.get("input"))
+        .and_then(Value::as_i64);
+    let output_tokens = usage
+        .get("outputTokens")
+        .or_else(|| usage.get("output_tokens"))
+        .or_else(|| usage.get("output"))
+        .and_then(Value::as_i64);
+    if input_tokens.is_none() && output_tokens.is_none() {
+        return Vec::new();
+    }
+    let cached_input_tokens = usage
+        .get("cachedReadTokens")
+        .or_else(|| usage.get("cachedInputTokens"))
+        .or_else(|| usage.get("cached_input_tokens"))
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .or_else(|| usage.pointer("/cache/read"))
+        .and_then(Value::as_i64);
+    let context_window_tokens = usage
+        .get("contextWindowTokens")
+        .or_else(|| usage.get("context_window_tokens"))
+        .and_then(Value::as_i64);
+    let duration_seconds = usage
+        .get("durationSeconds")
+        .or_else(|| usage.get("duration_seconds"))
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            usage
+                .get("elapsed_ms")
+                .or_else(|| update.get("elapsed_ms"))
+                .and_then(Value::as_f64)
+                .map(|ms| ms / 1000.0)
+        });
+    vec![ProviderTurnEvent::UsageUpdated {
+        usage: usage_from_provider(
+            input_tokens.unwrap_or(0),
+            output_tokens.unwrap_or(0),
+            cached_input_tokens,
+            context_window_tokens,
+            duration_seconds,
+        ),
+    }]
+}
+
+fn explicit_tool_id(update: &Value) -> Option<String> {
+    let src = update
+        .get("part")
+        .or_else(|| update.get("item"))
+        .unwrap_or(update);
+    for candidate in [
+        src.get("toolCallId"),
+        src.get("tool_call_id"),
+        src.get("callID"),
+        src.get("callId"),
+        src.get("id"),
+        update.get("toolCallId"),
+        update.get("tool_call_id"),
+        update.get("callID"),
+        update.get("callId"),
+        update.get("id"),
+    ] {
+        if let Some(id) = candidate
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+    }
+    if let Some(idx) = src
+        .get("step_index")
+        .or_else(|| update.get("step_index"))
+        .and_then(Value::as_i64)
+    {
+        return Some(format!("step-{idx}"));
+    }
+    None
+}
+
+fn string_field(value: &Value, names: &[&str]) -> Option<String> {
+    for name in names {
+        if let Some(text) = value.get(*name).and_then(Value::as_str) {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn bounded(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+pub fn effort_option(options: &Value, effort: Option<&str>) -> Value {
+    let mut rows: Vec<Value> = options
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.get("id").and_then(Value::as_str) != Some("effort"))
+        .collect();
+    if let Some(effort) = effort.map(str::trim).filter(|value| !value.is_empty()) {
+        rows.push(json!({ "id": "effort", "value": effort }));
+    }
+    Value::Array(rows)
+}
+
+pub fn hydrated_effort(thread: &Value) -> Option<String> {
+    thread
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            thread
+                .get("providerOptions")
+                .and_then(Value::as_array)
+                .and_then(|rows| {
+                    rows.iter().find(|row| row.get("id").and_then(Value::as_str) == Some("effort"))
+                })
+                .and_then(|row| row.get("value").and_then(Value::as_str))
+                .map(str::to_string)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+#[cfg(test)]
+#[path = "turn_pipeline_tests.rs"]
+mod tests;

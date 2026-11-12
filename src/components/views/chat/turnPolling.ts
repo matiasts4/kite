@@ -3,6 +3,7 @@ import type { ChatItem } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
 import { ExtendedChatThread } from './types';
 import { withTimeout } from './chatSessionUtils';
+import { playApprovalChime } from '../../../lib/notifications/audioCues';
 
 export interface PollTurnOptions {
   runId: string;
@@ -33,6 +34,7 @@ export async function pollTurnUpdates({
       schemaVersion: number;
       runId: string;
       nextSequence: number;
+      finished?: boolean;
       events: Array<{
         sequence: number;
         kind: 'status' | 'upsert' | 'delta' | 'finished' | 'approvalOpened' | 'approvalResolved';
@@ -68,10 +70,17 @@ export async function pollTurnUpdates({
     if (!isMountedRef.current || !activePollRunsRef.current.has(runId)) return;
 
     if (res && res.events) {
-      let isDone = false;
-      if (res.events.length > 0) {
+      const events = res.events;
+      const hasFinishedEvent = events.some(
+        (ev) =>
+          ev.kind === 'finished' ||
+          (ev.kind === 'status' && (ev.status === 'idle' || ev.status === 'error'))
+      );
+      const isDone = Boolean(res.finished || hasFinishedEvent);
+
+      if (events.length > 0) {
         console.debug(
-          `[ChatSession] Run ${runId} received ${res.events.length} events (nextSeq=${res.nextSequence})`
+          `[ChatSession] Run ${runId} received ${events.length} events (nextSeq=${res.nextSequence}, finished=${Boolean(res.finished)})`
         );
       }
 
@@ -81,25 +90,49 @@ export async function pollTurnUpdates({
         let items = [...target.items];
         let status = target.status;
         let pendingApproval = target.pendingApproval;
+        let stoppedByBuilder = Boolean(target.stoppedByBuilder);
 
-        for (const ev of res.events) {
+        for (const ev of events) {
           if (ev.kind === 'status' && ev.status) {
             status = ev.status;
+            if (ev.status === 'running') stoppedByBuilder = false;
+            if (ev.status === 'idle' || ev.status === 'error') {
+              items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
+            }
           } else if (ev.kind === 'upsert' && ev.item) {
             const idx = items.findIndex((it) => it.id === ev.item!.id);
             if (idx >= 0) {
+              const prevTextLen = (items[idx].text ?? '').length;
+              const nextTextLen = (ev.item.text ?? '').length;
+              const moveToTail =
+                ev.item.kind === 'assistant' &&
+                nextTextLen > prevTextLen &&
+                idx + 1 < items.length &&
+                !items.slice(idx + 1).some((later) => later.kind === 'user');
               items[idx] = ev.item;
+              if (moveToTail) {
+                const [moved] = items.splice(idx, 1);
+                items.push(moved);
+              }
             } else {
               items.push(ev.item);
             }
           } else if (ev.kind === 'delta' && ev.itemId && ev.text) {
             const idx = items.findIndex((it) => it.id === ev.itemId);
             if (idx >= 0) {
+              const moveToTail =
+                items[idx].kind === 'assistant' &&
+                idx + 1 < items.length &&
+                !items.slice(idx + 1).some((later) => later.kind === 'user');
               items[idx] = {
                 ...items[idx],
                 text: items[idx].text + ev.text,
                 streaming: true,
               };
+              if (moveToTail) {
+                const [moved] = items.splice(idx, 1);
+                items.push(moved);
+              }
             } else {
               items.push({
                 id: ev.itemId,
@@ -117,13 +150,21 @@ export async function pollTurnUpdates({
           } else if (ev.kind === 'approvalOpened' && ev.approval) {
             pendingApproval = ev.approval;
             status = 'waiting';
+            playApprovalChime();
           } else if (ev.kind === 'approvalResolved') {
             pendingApproval = null;
           } else if (ev.kind === 'finished') {
-            isDone = true;
             status = 'idle';
+            stoppedByBuilder = Boolean(ev.stoppedByBuilder);
             items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
           }
+        }
+
+        if (isDone) {
+          if (status === 'running') {
+            status = 'idle';
+          }
+          items = items.map((it) => (it.streaming ? { ...it, streaming: false } : it));
         }
 
         return {
@@ -133,6 +174,7 @@ export async function pollTurnUpdates({
             items,
             status,
             pendingApproval,
+            stoppedByBuilder,
           },
         };
       });
@@ -159,6 +201,23 @@ export async function pollTurnUpdates({
           }
         }, 400);
       }
+    } else if (res?.finished) {
+      console.log(`[ChatSession] Run ${runId} finished without events. Removing poller.`);
+      activePollRunsRef.current.delete(runId);
+      setIsRunning((prev) => ({ ...prev, [threadId]: false }));
+      setThreadsMap((prev) => {
+        const t = prev[threadId];
+        if (!t) return prev;
+        return {
+          ...prev,
+          [threadId]: {
+            ...t,
+            items: t.items.map((it) => (it.streaming ? { ...it, streaming: false } : it)),
+            status: t.status === 'running' ? 'idle' : t.status,
+          },
+        };
+      });
+      notifyThreadsChanged();
     } else {
       setTimeout(() => {
         if (isMountedRef.current && activePollRunsRef.current.has(runId)) {

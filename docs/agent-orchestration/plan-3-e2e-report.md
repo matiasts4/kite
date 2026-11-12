@@ -1,6 +1,6 @@
 # Reporte de Verificación E2E — Kite Operator Assistant (Plan 3)
-*Fecha de ejecución:* 2026-10-18T23:21:06.177Z  
-*Resultado global:* ✅ 100% PASS (12/12 verificaciones exitosas)
+*Fecha de ejecución:* 2026-10-30T23:01:08.220Z  
+*Resultado global:* ❌ FALLAS DETECTADAS (8/12 verificaciones exitosas)
 
 ---
 
@@ -14,18 +14,18 @@ Todas las aserciones de postcondiciones sobre el árbol de UI, el bus de eventos
 
 | ID | Caso de Prueba | Estrategia | Latencia | Estado | Resultado / Observación |
 |---|---|---|---|---|---|
-| **E1** | Abrir 2 terminales con Grok y prompt de tests desde modo chat | `heuristic` | 5 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E2** | Voz STT con punto y subjuntivo: abriera dos. Terminales... | `heuristic` | 3609 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E3** | Proveedor LLM con JSON válido | `llm` | 3598 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E4** | Cerrar terminal por índice (terminal 2) | `heuristic` | 4 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E5** | Cerrar agente por nombre fonético seseo: Sierra Orion | `heuristic` | 10 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E6** | Detección y rechazo de eco del system prompt | `heuristic-fallback` | 3570 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E7** | Detección y rechazo de salida predominantemente en inglés | `heuristic-fallback` | 3573 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E8** | Resiliencia ante timeout del proveedor LLM | `heuristic-fallback` | 7 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E9** | Pregunta conversacional sin acciones en la UI | `llm` | 4 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **E10** | Spawns concurrentes rápidos sin sobrescritura de layout | `heuristic` | 3560 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
+| **E1** | Abrir 2 terminales con Grok y prompt de tests desde modo chat | `heuristic` | 26 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
+| **E2** | Voz STT con punto y subjuntivo: abriera dos. Terminales... | `heuristic` | 3653 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
+| **E3** | Proveedor LLM con JSON válido | `heuristic` | 3590 ms | ❌ FAIL | Estrategia esperada 'llm', recibida 'heuristic' |
+| **E4** | Cerrar terminal por índice (terminal 2) | `heuristic` | 27 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
+| **E5** | Cerrar agente por nombre fonético seseo: Sierra Orion | `heuristic` | 7 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
+| **E6** | Detección y rechazo de eco del system prompt | `heuristic` | 3573 ms | ❌ FAIL | Estrategia esperada 'heuristic-fallback', recibida 'heuristic' |
+| **E7** | Detección y rechazo de salida predominantemente en inglés | `heuristic` | 3606 ms | ❌ FAIL | Estrategia esperada 'heuristic-fallback', recibida 'heuristic' |
+| **E8** | Resiliencia ante timeout del proveedor LLM | `heuristic` | 3 ms | ❌ FAIL | Estrategia esperada 'heuristic-fallback', recibida 'heuristic'; Razón de fallback no contiene 'timeout' |
+| **E9** | Pregunta conversacional sin acciones en la UI | `heuristic-fallback` | 94 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
+| **E10** | Spawns concurrentes rápidos sin sobrescritura de layout | `heuristic` | 3610 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
 | **E11** | Comando en workspace sin proyecto seleccionado genera error honesto | `heuristic` | 1 ms | ✅ PASS | Correcto: Verificación completa de trace y DOM |
-| **SABOTAGE** | Sabotaje sin receptor de spawn (debe fallar honestamente) | `heuristic` | 5013 ms | ✅ PASS | Correcto: El sabotaje fue detectado honestamente con ui.ack ok:false y overallSuccess:false |
+| **SABOTAGE** | Sabotaje sin receptor de spawn (debe fallar honestamente) | `heuristic` | 5011 ms | ✅ PASS | Correcto: El sabotaje fue detectado honestamente con ui.ack ok:false y overallSuccess:false |
 
 ---
 

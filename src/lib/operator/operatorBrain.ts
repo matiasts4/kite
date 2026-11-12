@@ -81,7 +81,7 @@ export async function executeOperatorCommand(
       const prompts = intent.prompt ? [intent.prompt] : undefined;
       const res = await appOperatorController.spawnTerminals({
         count: intent.count || 1,
-        engine: intent.engine || 'grok',
+        engine: intent.engine || 'powershell',
         prompts,
         workspaceId,
       });
@@ -226,13 +226,13 @@ export async function dispatchOperatorCommand(
     if (act.type === 'open_terminals') {
       const res = await appOperatorController.spawnTerminals({
         count: act.count || 1,
-        engine: act.engine || 'grok',
+        engine: act.engine || 'powershell',
         prompts: act.prompts,
         workspaceId,
       });
       executionResults.push({
         actionType: 'open_terminals',
-        description: `Abrir ${act.count || 1} terminales con ${act.engine || 'grok'}`,
+        description: `Abrir ${act.count || 1} terminales con ${act.engine || 'powershell'}`,
         status: res.success ? 'success' : 'failed',
         error: res.success ? undefined : res.message,
         data: res.data,

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { SelectMenu } from '../../ui/SelectMenu';
 import type { TelemetryPrefs, TelemetryIdentity } from './types';
 import {
   runLedger,
@@ -270,19 +271,23 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
             </div>
             <div>
               <label className="block text-[10px] text-neutral-400 mb-0.5">Provider</label>
-              <select
+              <SelectMenu
+                label="Provider"
+                variant="field"
+                className="settings-select"
                 value={providerFilter}
-                onChange={(e) => setProviderFilter(e.target.value)}
-                className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
-              >
-                <option value="all">All Providers</option>
-                <option value="local">local</option>
-                <option value="opencode">opencode</option>
-                <option value="vercel">vercel</option>
-                <option value="cloudflare">cloudflare</option>
-                <option value="grok">grok</option>
-                <option value="antigravity">antigravity</option>
-              </select>
+                rows={[
+                  { id: 'all', title: 'All Providers' },
+                  { id: 'local', title: 'local' },
+                  { id: 'opencode', title: 'opencode' },
+                  { id: 'vercel', title: 'vercel' },
+                  { id: 'cloudflare', title: 'cloudflare' },
+                  { id: 'grok', title: 'grok' },
+                  { id: 'antigravity', title: 'antigravity' },
+                ]}
+                triggerLabel={providerFilter === 'all' ? 'All Providers' : providerFilter}
+                onSelect={setProviderFilter}
+              />
             </div>
             <div>
               <label className="block text-[10px] text-neutral-400 mb-0.5">Model</label>
@@ -296,35 +301,47 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
             </div>
             <div>
               <label className="block text-[10px] text-neutral-400 mb-0.5">Task Type</label>
-              <select
+              <SelectMenu
+                label="Task Type"
+                variant="field"
+                className="settings-select"
                 value={taskTypeFilter}
-                onChange={(e) => setTaskTypeFilter(e.target.value)}
-                className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
-              >
-                <option value="all">All Tasks</option>
-                <option value="open_terminals">open_terminals</option>
-                <option value="close_terminals">close_terminals</option>
-                <option value="inject_prompt">inject_prompt</option>
-                <option value="open_browser">open_browser</option>
-                <option value="narrate_summary">narrate_summary</option>
-                <option value="spawn_subagent">spawn_subagent</option>
-                <option value="chat_response">chat_response</option>
-                <option value="deterministic">deterministic</option>
-              </select>
+                rows={[
+                  { id: 'all', title: 'All Tasks' },
+                  { id: 'open_terminals', title: 'open_terminals' },
+                  { id: 'close_terminals', title: 'close_terminals' },
+                  { id: 'inject_prompt', title: 'inject_prompt' },
+                  { id: 'open_browser', title: 'open_browser' },
+                  { id: 'narrate_summary', title: 'narrate_summary' },
+                  { id: 'spawn_subagent', title: 'spawn_subagent' },
+                  { id: 'chat_response', title: 'chat_response' },
+                  { id: 'deterministic', title: 'deterministic' },
+                ]}
+                triggerLabel={taskTypeFilter === 'all' ? 'All Tasks' : taskTypeFilter}
+                onSelect={setTaskTypeFilter}
+              />
             </div>
             <div>
               <label className="block text-[10px] text-neutral-400 mb-0.5">Outcome</label>
-              <select
+              <SelectMenu
+                label="Outcome"
+                variant="field"
+                className="settings-select"
                 value={outcomeFilter}
-                onChange={(e) => setOutcomeFilter(e.target.value)}
-                className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
-              >
-                <option value="all">All Outcomes</option>
-                <option value="success">Success</option>
-                <option value="failure">Failure</option>
-                <option value="timeout">Timeout</option>
-                <option value="cancelled">Cancelled</option>
-              </select>
+                rows={[
+                  { id: 'all', title: 'All Outcomes' },
+                  { id: 'success', title: 'Success' },
+                  { id: 'failure', title: 'Failure' },
+                  { id: 'timeout', title: 'Timeout' },
+                  { id: 'cancelled', title: 'Cancelled' },
+                ]}
+                triggerLabel={
+                  outcomeFilter === 'all'
+                    ? 'All Outcomes'
+                    : outcomeFilter.charAt(0).toUpperCase() + outcomeFilter.slice(1)
+                }
+                onSelect={setOutcomeFilter}
+              />
             </div>
             <div>
               <label className="block text-[10px] text-neutral-400 mb-0.5">Latency Range (ms)</label>

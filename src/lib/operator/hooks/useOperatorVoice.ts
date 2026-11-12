@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { toast } from '../../toast';
+import { ttsNarrator } from '../ttsNarrator';
 import {
   startOperatorListening,
   stopOperatorListening,
@@ -64,6 +66,7 @@ export function useOperatorVoice({
     }
     setError(msg);
     if (msg) {
+      toast.error('Asistente Zed', msg);
       errorTimerRef.current = window.setTimeout(() => {
         setError(null);
         errorTimerRef.current = null;
@@ -91,6 +94,9 @@ export function useOperatorVoice({
   }, []);
 
   const startListening = useCallback(async () => {
+    // Unconditionally stop any ongoing TTS speech immediately (barge-in / user interruption)
+    ttsNarrator.stop();
+
     if (!isVoiceRecognitionSupported()) {
       setErrorWithAutoClear('El reconocimiento de voz no está disponible en este entorno.');
       return;
@@ -132,7 +138,9 @@ export function useOperatorVoice({
       if (epoch !== listenEpochRef.current) return;
 
       setTranscript(finalResult);
-      setInterimTranscript('');
+      // Keep the finished line visible until the next listen cycle. Clearing it here
+      // blanks the box for the whole cloud wait and until the turn bubble arrives.
+      setInterimTranscript(finalResult?.trim() || '');
       setIsListening(false);
       isListeningRef.current = false;
       setIsTranscribing(false);
@@ -152,7 +160,7 @@ export function useOperatorVoice({
             err instanceof Error ? err.message : 'No se pudo ejecutar la orden de voz.';
           setErrorWithAutoClear(message);
         }
-      } else {
+      } else if (!(typeof window !== 'undefined' && (window as any).__kiteVoiceSessionActive)) {
         setErrorWithAutoClear(
           'No te entendí o el audio quedó en silencio. Habla un poco más cerca del micrófono e inténtalo de nuevo.'
         );

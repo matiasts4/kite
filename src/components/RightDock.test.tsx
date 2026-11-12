@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { RightDock } from './RightDock';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../lib/terminalLinkNav';
+import { OPEN_RIGHT_DOCK_SUBAGENT_EVENT } from '../lib/subagentNav';
 
 // Mock sub-views to avoid canvas / native / network dependencies in jsdom
 vi.mock('./views/BrowserView', () => ({
@@ -24,6 +25,21 @@ vi.mock('./views/SidePanelAppsView', () => ({
 }));
 vi.mock('./views/apps/AgentDashboardView', () => ({
   AgentDashboardView: () => <div data-testid="mock-dashboard-view">Dashboard View</div>,
+}));
+vi.mock('./views/subagents/SubagentInspectorView', () => ({
+  SubagentInspectorView: ({
+    requestedTarget,
+  }: {
+    requestedTarget?: { subagentId?: string | null; swarmId?: string | null } | null;
+  }) => (
+    <div
+      data-testid="mock-subagent-inspector-view"
+      data-subagent-id={requestedTarget?.subagentId ?? ''}
+      data-swarm-id={requestedTarget?.swarmId ?? ''}
+    >
+      Subagent Inspector View
+    </div>
+  ),
 }));
 vi.mock('../lib/terminalRegistry', () => ({
   getActiveAgentTerminals: () => [],
@@ -198,6 +214,73 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     });
 
     expect(screen.getByTestId('mock-browser-view')).toBeInTheDocument();
+  });
+
+  it('opens and renders SubagentInspectorView when triggered via Ctrl+Alt+S shortcut', () => {
+    localStorage.clear();
+    render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+      />
+    );
+
+    fireEvent.keyDown(window, { key: 's', ctrlKey: true, altKey: true });
+
+    expect(screen.getByTestId('mock-subagent-inspector-view')).toBeInTheDocument();
+  });
+
+  it('switches to subagents tab and forwards target on OPEN_RIGHT_DOCK_SUBAGENT_EVENT with running badge count', () => {
+    localStorage.clear();
+    const { container } = render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+        activeSubagentsCount={3}
+      />
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, {
+          detail: { threadId: 't-1', subagentId: 'call_sub_1', swarmId: 'swarm_1' },
+        })
+      );
+    });
+
+    const inspector = screen.getByTestId('mock-subagent-inspector-view');
+    expect(inspector).toBeInTheDocument();
+    expect(inspector.getAttribute('data-subagent-id')).toBe('call_sub_1');
+    expect(inspector.getAttribute('data-swarm-id')).toBe('swarm_1');
+
+    const subagentsTab = container.querySelector('.side-panel-tab[data-kind="subagents"]');
+    expect(subagentsTab).not.toBeNull();
+    expect(subagentsTab?.querySelector('.side-panel-tab__count')?.textContent).toBe('3');
+  });
+
+  it('updates subagents badge dynamically on kite:subagent-activity-count and lists Subagents in New tab menu', () => {
+    localStorage.clear();
+    const { container } = render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+      />
+    );
+
+    fireEvent.click(screen.getByLabelText('New tab'));
+    const subagentsMenuItem = screen.getByText('Subagents').closest('[role="menuitem"]');
+    expect(subagentsMenuItem).not.toBeNull();
+    fireEvent.click(subagentsMenuItem!);
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('kite:subagent-activity-count', { detail: { count: 4 } }));
+    });
+
+    const tabCount = container.querySelector('.side-panel-tab[data-kind="subagents"] .side-panel-tab__count');
+    expect(tabCount?.textContent).toBe('4');
   });
 });
 

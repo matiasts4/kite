@@ -1,6 +1,7 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import type {
   ActivePlugin,
+  OfficialPlugin,
   PluginCategory,
   PluginConfig,
 } from './plugins/types';
@@ -13,14 +14,74 @@ import {
   ClearIcon,
   LayersIcon,
 } from './plugins/pluginIcons';
-import { saveShellState, invokeCommand } from '../../lib/ipc';
+import { usePluginConnections } from './plugins/usePluginConnections';
+import { useAgentPluginCoverage } from './plugins/useAgentPluginCoverage';
+import type { PluginConnection, PluginConnectionState } from './plugins/types';
 
 export interface PluginsViewProps {
   embedded?: boolean;
 }
 
-const STORAGE_KEY = 'kite_connected_plugins';
-const CONFIGS_KEY = 'kite_plugin_configs';
+export function isConnectionActiveOrPending(state?: PluginConnectionState): boolean {
+  return state === 'connected' || state === 'needsReauth' || state === 'disconnectPending';
+}
+
+export function sortPlugins(
+  plugins: readonly OfficialPlugin[],
+  connectionsMap: Map<string, PluginConnection>
+): OfficialPlugin[] {
+  return [...plugins].sort((a, b) => {
+    const connA = connectionsMap.get(a.id);
+    const connB = connectionsMap.get(b.id);
+    const stateA = connA?.state ?? a.initialState;
+    const stateB = connB?.state ?? b.initialState;
+
+    const aActive = isConnectionActiveOrPending(stateA);
+    const bActive = isConnectionActiveOrPending(stateB);
+
+    if (aActive && !bActive) return -1;
+    if (!aActive && bActive) return 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+  });
+}
+
+export function filterPlugins(
+  plugins: readonly OfficialPlugin[],
+  searchQuery: string,
+  category: 'all' | PluginCategory = 'all',
+  statusFilter: 'all' | 'installed' | 'available' = 'all',
+  connectionsMap?: Map<string, PluginConnection>
+): OfficialPlugin[] {
+  let list = plugins;
+
+  // Category filter
+  if (category !== 'all') {
+    list = list.filter((p) => p.category === category);
+  }
+
+  // Status filter
+  if (statusFilter !== 'all' && connectionsMap) {
+    if (statusFilter === 'installed') {
+      list = list.filter((p) => connectionsMap.get(p.id)?.state === 'connected');
+    } else if (statusFilter === 'available') {
+      list = list.filter((p) => connectionsMap.get(p.id)?.state !== 'connected');
+    }
+  }
+
+  // Search filter across name, vendor, summary
+  const query = searchQuery.trim().toLowerCase();
+  if (!query) return [...list];
+
+  const tokens = query.split(/\s+/).filter(Boolean);
+  return list.filter((p) => {
+    const name = p.name.toLowerCase();
+    const vendor = p.vendor.toLowerCase();
+    const summary = p.summary.toLowerCase();
+    return tokens.every(
+      (token) => name.includes(token) || vendor.includes(token) || summary.includes(token)
+    );
+  });
+}
 
 export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -28,190 +89,39 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
   const [statusFilter, setStatusFilter] = useState<'all' | 'installed' | 'available'>('all');
   const [activeDrawerPlugin, setActiveDrawerPlugin] = useState<ActivePlugin | null>(null);
 
-  // Installed plugin IDs
-  const [connectedIds, setConnectedIds] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return new Set<string>(parsed);
-      }
-    } catch (_) {}
-    return new Set<string>();
-  });
+  const { connections, action } = usePluginConnections();
+  const coverage = useAgentPluginCoverage();
 
-  // Saved configs
-  const [pluginConfigs, setPluginConfigs] = useState<Record<string, PluginConfig>>(() => {
-    try {
-      const saved = localStorage.getItem(CONFIGS_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (_) {}
-    return {};
-  });
+  const connectionsMap = useMemo(() => {
+    return new Map<string, PluginConnection>(connections.map((c) => [c.id, c]));
+  }, [connections]);
 
-  // Re-read storage on mount for freshness across windows/reloads
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          setConnectedIds(new Set<string>(parsed));
-        }
-      }
-      const savedConfigs = localStorage.getItem(CONFIGS_KEY);
-      if (savedConfigs) {
-        setPluginConfigs(JSON.parse(savedConfigs));
-      }
-    } catch (_) {}
-  }, []);
+  const installedCount = useMemo(() => {
+    return connections.filter((c) => c.state === 'connected').length;
+  }, [connections]);
 
-  // Persist state to Tauri shell state and localStorage
-  const persistState = useCallback(
-    (newConnected: Set<string>, newConfigs?: Record<string, PluginConfig>) => {
-      const list = Array.from(newConnected);
-      const configs = newConfigs ?? pluginConfigs;
+  // Dynamic sorting: Active/pending connections first, then alphabetically by name
+  const sortedPlugins = useMemo(() => {
+    return sortPlugins(OFFICIAL_PLUGINS, connectionsMap);
+  }, [connectionsMap]);
 
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-        if (newConfigs) {
-          localStorage.setItem(CONFIGS_KEY, JSON.stringify(newConfigs));
-        }
-      } catch (_) {}
-
-      // Tauri shell state persistence
-      saveShellState({ plugins: list, pluginConfigs: configs }).catch(() => {});
-      invokeCommand('save_shell_state', { key: 'plugins', value: list }).catch(() => {});
-    },
-    [pluginConfigs]
-  );
-
-  // Toggle Install / Enable status
-  const handleToggleStatus = useCallback(
-    (plugin: ActivePlugin) => {
-      if (plugin.initialState === 'unavailable') return;
-
-      setConnectedIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(plugin.id)) {
-          next.delete(plugin.id);
-        } else {
-          next.add(plugin.id);
-        }
-        persistState(next);
-        return next;
-      });
-
-      // Also update currently open drawer plugin if open
-      setActiveDrawerPlugin((current) => {
-        if (!current || current.id !== plugin.id) return current;
-        const willBeInstalled = !connectedIds.has(plugin.id);
-        return {
-          ...current,
-          status: willBeInstalled ? 'installed' : 'available',
-        };
-      });
-    },
-    [connectedIds, persistState]
-  );
-
-  // Save Plugin Configuration
-  const handleSaveConfig = useCallback(
-    (pluginId: string, config: PluginConfig) => {
-      setPluginConfigs((prev) => {
-        const next = { ...prev, [pluginId]: config };
-        persistState(connectedIds, next);
-        return next;
-      });
-
-      setActiveDrawerPlugin((current) => {
-        if (!current || current.id !== pluginId) return current;
-        return {
-          ...current,
-          config,
-        };
-      });
-    },
-    [connectedIds, persistState]
-  );
-
-  // Build active plugins list
-  const activePlugins: ActivePlugin[] = useMemo(() => {
-    return OFFICIAL_PLUGINS.map((plugin) => {
-      const isConnected = connectedIds.has(plugin.id);
-      const config = pluginConfigs[plugin.id];
-      const status = isConnected
-        ? 'installed'
-        : plugin.initialState === 'unavailable'
-        ? 'disabled'
-        : 'available';
-
-      return {
-        ...plugin,
-        status,
-        config,
-      };
-    });
-  }, [connectedIds, pluginConfigs]);
-
-  // Sort and filter plugins:
-  // Installed first, then alphabetically by name. Filter tokens on name, vendor, summary.
+  // Live search filtering across name, vendor, summary
   const filteredPlugins = useMemo(() => {
-    // 1. Alphabetical sort
-    const alphabetical = [...activePlugins].sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true })
-    );
+    return filterPlugins(sortedPlugins, searchQuery, selectedCategory, statusFilter, connectionsMap);
+  }, [sortedPlugins, searchQuery, selectedCategory, statusFilter, connectionsMap]);
 
-    // 2. Installed first
-    const prioritized = [
-      ...alphabetical.filter((p) => p.status === 'installed'),
-      ...alphabetical.filter((p) => p.status !== 'installed'),
-    ];
+  const handleToggleFromDrawer = useCallback(
+    (plugin: ActivePlugin) => {
+      const conn = connectionsMap.get(plugin.id);
+      const isConnected = conn?.state === 'connected';
+      action(plugin.id, isConnected ? 'disconnect' : 'connect').catch(() => {});
+    },
+    [action, connectionsMap]
+  );
 
-    return prioritized.filter((p) => {
-      // Category filter
-      if (selectedCategory !== 'all' && p.category !== selectedCategory) {
-        return false;
-      }
-
-      // Status filter
-      if (statusFilter === 'installed' && p.status !== 'installed') {
-        return false;
-      }
-      if (statusFilter === 'available' && p.status === 'installed') {
-        return false;
-      }
-
-      // Search tokens
-      if (searchQuery.trim()) {
-        const tokens = searchQuery
-          .toLowerCase()
-          .split(/\s+/u)
-          .filter((t) => t.length > 0);
-
-        const name = p.name.toLowerCase();
-        const vendor = p.vendor.toLowerCase();
-        const summary = p.summary.toLowerCase();
-        const desc = p.description.toLowerCase();
-        const cat = p.category.toLowerCase();
-
-        return tokens.every(
-          (t) =>
-            name.includes(t) ||
-            vendor.includes(t) ||
-            summary.includes(t) ||
-            desc.includes(t) ||
-            cat.includes(t)
-        );
-      }
-
-      return true;
-    });
-  }, [activePlugins, selectedCategory, statusFilter, searchQuery]);
-
-  const installedCount = useMemo(() => connectedIds.size, [connectedIds]);
+  const handleSaveConfig = useCallback((_pluginId: string, _config: PluginConfig) => {
+    // Config persistence can be saved locally or handled by backend
+  }, []);
 
   const catalogueContent = (
     <div className="plugin-catalogue">
@@ -329,10 +239,12 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
         </div>
       </div>
 
-      {/* Grid of 29 Authentic Plugins */}
+      {/* Grid of 29 Canonical Plugins */}
       {filteredPlugins.length === 0 ? (
         <p className="plugin-grid__empty">
-          No plugins match &quot;{searchQuery.trim()}&quot; in the selected category.
+          {searchQuery.trim()
+            ? `No plugins match “${searchQuery.trim()}”.`
+            : 'No plugins match the selected filter.'}
         </p>
       ) : (
         <div className="plugin-grid" style={{ marginTop: '4px' }}>
@@ -340,17 +252,17 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
             <PluginCard
               key={plugin.id}
               plugin={plugin}
-              onToggleStatus={handleToggleStatus}
-              onOpenDetails={(p) => setActiveDrawerPlugin(p)}
-              onConnectAction={handleToggleStatus}
+              connection={connectionsMap.get(plugin.id)}
+              onAction={action}
+              onOpenDetails={(p) => setActiveDrawerPlugin(p as ActivePlugin)}
             />
           ))}
         </div>
       )}
 
-      {/* Footnote */}
+      {/* Canonical Footnote */}
       <p className="plugin-pane__footnote" style={{ marginTop: '12px' }}>
-        Connect once to Kite. Choose each agent&apos;s plugins in Agent Settings. Its access mode controls approvals; Read only keeps plugins read-only.
+        Connect once to Kite. Choose each agent’s plugins in Agent Settings. Its access mode controls approvals; Read only keeps plugins read-only.
       </p>
 
       {/* Plugin Details & Settings Drawer */}
@@ -358,8 +270,13 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
         plugin={activeDrawerPlugin}
         isOpen={Boolean(activeDrawerPlugin)}
         onClose={() => setActiveDrawerPlugin(null)}
-        onToggleStatus={handleToggleStatus}
+        onToggleStatus={handleToggleFromDrawer}
         onSaveConfig={handleSaveConfig}
+        onAction={action}
+        connection={activeDrawerPlugin ? connectionsMap.get(activeDrawerPlugin.id) : null}
+        agents={coverage.agents}
+        isPluginEnabledForAgent={coverage.isPluginEnabledForAgent}
+        onTogglePluginForAgent={coverage.togglePluginForAgent}
       />
     </div>
   );

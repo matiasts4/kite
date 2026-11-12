@@ -48,45 +48,50 @@ fn classify(err: &tauri_plugin_updater::Error) -> UpdateError {
     UpdateError { code, message: message.into(), detail }
 }
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+/// The packaged endpoint is the loopback feed. An override that points elsewhere
+/// must not open a listener on this machine.
+fn updater_endpoint_is_loopback() -> bool {
+    match std::env::var("KITE_UPDATE_URL") {
+        Ok(raw) => {
+            let url = raw.trim();
+            url.starts_with("http://127.0.0.1:9101") || url.starts_with("http://localhost:9101")
+        }
+        Err(_) => true,
+    }
+}
 
-/// Ensures local feed server is running if the configured target is localhost:9101.
+/// Ensures the in-process loopback feed is listening on 127.0.0.1:9101.
 fn ensure_local_feed_if_needed() {
+    if !updater_endpoint_is_loopback() {
+        return;
+    }
     let local_addr = "127.0.0.1:9101";
-    if let Ok(addr) = local_addr.parse::<std::net::SocketAddr>() {
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(60)).is_ok() {
+    let open = |timeout_ms: u64| {
+        local_addr
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .and_then(|addr| {
+                std::net::TcpStream::connect_timeout(
+                    &addr,
+                    std::time::Duration::from_millis(timeout_ms),
+                )
+                .ok()
+            })
+            .is_some()
+    };
+    if open(60) {
+        return;
+    }
+    log_trace("updater: starting in-process local feed on 9101");
+    crate::local_feed::ensure_local_feed();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if open(50) {
+            log_trace("updater: local feed server is now active on 9101");
             return;
         }
     }
-
-    let candidates = [
-        std::path::PathBuf::from(r"E:\kite\scripts\feed-server.mjs"),
-        std::path::PathBuf::from(r"scripts\feed-server.mjs"),
-        std::env::current_dir().unwrap_or_default().join("scripts").join("feed-server.mjs"),
-    ];
-
-    for script in &candidates {
-        if script.exists() {
-            log_trace(&format!("updater: auto-starting local feed server via {:?}", script));
-            let mut cmd = std::process::Command::new("node");
-            cmd.arg(script).arg("--serve");
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            if let Ok(_child) = cmd.spawn() {
-                for _ in 0..3 {
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    if let Ok(addr) = local_addr.parse::<std::net::SocketAddr>() {
-                        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(50)).is_ok() {
-                            log_trace("updater: local feed server is now active on 9101");
-                            break;
-                        }
-                    }
-                }
-            }
-            break;
-        }
-    }
+    log_trace("updater: local feed server did not open on 9101");
 }
 
 /// Builds the updater. `KITE_UPDATE_URL` overrides the configured feed endpoint

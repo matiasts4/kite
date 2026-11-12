@@ -1,5 +1,7 @@
 import type { PaneNode, PaneLeaf, PaneSplit, PaneAxis, PaneOccupant } from './types';
 
+export type PaneDropEdge = 'left' | 'right' | 'top' | 'bottom';
+
 export function createLeaf(occupant: PaneOccupant, id?: string): PaneLeaf {
   return {
     type: 'leaf',
@@ -189,3 +191,123 @@ export function updateSplitRatios(
     ),
   };
 }
+
+/** Copy divider ratios from `resized` onto `current` only where child ids are unchanged and in the same order. */
+export function copySplitRatiosIfSameChildren(current: PaneNode, resized: PaneNode): PaneNode {
+  if (current.type !== 'split' || resized.type !== 'split') {
+    return current;
+  }
+
+  const resizedChild = (id: string) =>
+    resized.children.find((child) => child.id === id);
+
+  const nextChildren = current.children.map((child) => {
+    const match = resizedChild(child.id);
+    return match ? copySplitRatiosIfSameChildren(child, match) : child;
+  });
+
+  const sameOrder =
+    current.id === resized.id &&
+    current.children.length === resized.children.length &&
+    current.children.every((child, index) => child.id === resized.children[index]?.id);
+
+  if (!sameOrder) {
+    return { ...current, children: nextChildren };
+  }
+
+  return {
+    ...current,
+    ratios: [...resized.ratios],
+    children: nextChildren,
+  };
+}
+
+/** Swaps the positions and occupant structures of two leaves in the layout tree. */
+export function swapLeaves(
+  root: PaneNode,
+  sourceLeafId: string,
+  targetLeafId: string
+): PaneNode {
+  if (sourceLeafId === targetLeafId) return root;
+  const leafA = findLeaf(root, sourceLeafId);
+  const leafB = findLeaf(root, targetLeafId);
+  if (!leafA || !leafB) return root;
+
+  function walk(node: PaneNode): PaneNode {
+    if (node.type === 'leaf') {
+      if (node.id === sourceLeafId) return leafB!;
+      if (node.id === targetLeafId) return leafA!;
+      return node;
+    }
+    return {
+      ...node,
+      children: node.children.map(walk),
+    };
+  }
+
+  return walk(root);
+}
+
+/** Inserts a leaf adjacent to a target leaf, respecting split axes and dividing ratios cleanly. */
+export function insertLeafAdjacent(
+  root: PaneNode,
+  targetLeafId: string,
+  newLeaf: PaneLeaf,
+  axis: PaneAxis,
+  position: 'before' | 'after'
+): PaneNode {
+  if (root.type === 'leaf') {
+    if (root.id === targetLeafId) {
+      const children = position === 'before' ? [newLeaf, root] : [root, newLeaf];
+      return createSplit(axis, children, [0.5, 0.5]);
+    }
+    return root;
+  }
+
+  const targetIndex = root.children.findIndex((c) => c.type === 'leaf' && c.id === targetLeafId);
+  if (root.axis === axis && targetIndex !== -1) {
+    const newChildren = [...root.children];
+    const newRatios = [...root.ratios];
+    const targetRatio = newRatios[targetIndex] ?? (1 / root.children.length);
+    const halfRatio = targetRatio / 2;
+
+    const insertIndex = position === 'before' ? targetIndex : targetIndex + 1;
+    newChildren.splice(insertIndex, 0, newLeaf);
+    newRatios.splice(targetIndex, 1, halfRatio, halfRatio);
+
+    return {
+      ...root,
+      children: newChildren,
+      ratios: newRatios,
+    };
+  }
+
+  return {
+    ...root,
+    children: root.children.map((child) =>
+      insertLeafAdjacent(child, targetLeafId, newLeaf, axis, position)
+    ),
+  };
+}
+
+/** Moves a source leaf to an edge of a target leaf, splitting the container along vertical or horizontal axis. */
+export function moveLeafToEdge(
+  root: PaneNode,
+  sourceLeafId: string,
+  targetLeafId: string,
+  edge: PaneDropEdge
+): PaneNode {
+  if (sourceLeafId === targetLeafId) return root;
+  const sourceLeaf = findLeaf(root, sourceLeafId);
+  const targetLeaf = findLeaf(root, targetLeafId);
+  if (!sourceLeaf || !targetLeaf) return root;
+
+  const rootWithoutSource = removeLeaf(root, sourceLeafId);
+  if (!rootWithoutSource) return root;
+
+  const axis: PaneAxis = edge === 'left' || edge === 'right' ? 'vertical' : 'horizontal';
+  const position: 'before' | 'after' = edge === 'left' || edge === 'top' ? 'before' : 'after';
+
+  return insertLeafAdjacent(rootWithoutSource, targetLeafId, sourceLeaf, axis, position);
+}
+

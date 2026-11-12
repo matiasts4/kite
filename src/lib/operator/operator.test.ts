@@ -9,12 +9,24 @@ import {
 import { cleanTextForSpeech } from './ttsNarrator';
 import { formatSummaryForSpeech, extractOutcomeFromBuffer } from './sessionContextHub';
 import { appOperatorController } from './appOperatorController';
-import { saveOperatorConfig, DEFAULT_OPERATOR_CONFIG } from './operatorConfig';
+import { runLedger } from './runLedger';
+import { planTurnLLM } from './planner/llm';
+import {
+  saveOperatorConfig,
+  loadOperatorConfig,
+  syncNativeCredentialsWithVault,
+  DEFAULT_OPERATOR_CONFIG,
+} from './operatorConfig';
 import * as operatorProvidersModule from './operatorProviders';
 import * as terminalRegistry from '../terminalRegistry';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock('./planner/llm', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./planner/llm')>()),
+  planTurnLLM: vi.fn(),
 }));
 
 describe('Operator Assistant & TTS', () => {
@@ -443,12 +455,60 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
       expect(res.data?.closedSessionIds).toEqual(['term-2']);
     });
 
+    it('closes multiple terminals atomically when compound target is passed (e.g. "1, 2" or array)', async () => {
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-1', engine: 'grok', title: 'Terminal 1', state: 'idle', updatedAt: 100, latestLine: null, who: 'Orion' },
+        { sessionId: 'term-2', engine: 'grok', title: 'Terminal 2', state: 'idle', updatedAt: 100, latestLine: null, who: 'Nova' },
+      ]);
+
+      const res = await appOperatorController.closeTerminals('1, 2');
+      expect(res.success).toBe(true);
+      expect(res.data?.closedSessionIds).toEqual(['term-1', 'term-2']);
+    });
+
+    it('scopes closing to the specified workspaceId avoiding cross-project termination', async () => {
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-ws1', engine: 'grok', title: 'T1', state: 'idle', updatedAt: 100, latestLine: null, who: 'Orion', workspaceId: 'ws-1' },
+        { sessionId: 'term-ws2', engine: 'antigravity', title: 'T2', state: 'idle', updatedAt: 100, latestLine: null, who: 'Nova', workspaceId: 'ws-2' },
+      ]);
+
+      // When scoped to ws-2, index 1 corresponds to term-ws2
+      const res = await appOperatorController.closeTerminals(1, undefined, undefined, 'ws-2');
+      expect(res.success).toBe(true);
+      expect(res.data?.closedSessionIds).toEqual(['term-ws2']);
+    });
+
     it('returns empty message if target not found', async () => {
       vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([]);
 
       const res = await appOperatorController.closeTerminals('Inexistente');
-      expect(res.success).toBe(true);
+      expect(res.success).toBe(false);
       expect(res.message).toContain('No se encontraron terminales');
+    });
+
+    it('still closes every open terminal for the generic wildcard target', async () => {
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-1', engine: 'grok', title: 'T1', state: 'idle', updatedAt: 100, latestLine: null, who: 'Orion' },
+        { sessionId: 'term-2', engine: 'antigravity', title: 'T2', state: 'working', updatedAt: 100, latestLine: null, who: 'Nova' },
+      ]);
+
+      const res = await appOperatorController.closeTerminals('todas');
+      expect(res.success).toBe(true);
+      expect(res.data?.closedSessionIds).toEqual(['term-1', 'term-2']);
+    });
+  });
+
+  describe('appOperatorController.injectPrompt', () => {
+    it('writes the prompt through dispatch_send when no terminal pane is mounted', async () => {
+      const { invokeCommand } = await import('../ipc');
+
+      const res = await appOperatorController.injectPrompt('term-1', 'corre los tests');
+
+      expect(res.success).toBe(true);
+      expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith(
+        'dispatch_send',
+        expect.objectContaining({ address: 'session:term-1', body: 'corre los tests' })
+      );
     });
   });
 
@@ -483,5 +543,192 @@ Ver archivo en [main.rs](file:///E:/kite/src/main.rs). Todo listo ✅!
       );
     });
   });
+
+  describe('captureCurrentTurnContext workspace scoping', () => {
+    it('filters active terminals strictly to the selected workspace and maps relative indices', async () => {
+      const { captureCurrentTurnContext } = await import('./index');
+      localStorage.setItem('kite.selectedWorkspaceId', 'ws-alpha');
+      localStorage.setItem(
+        'kite.cached_workspaces',
+        JSON.stringify([
+          { id: 'ws-alpha', displayName: 'Alpha Project', path: '/code/alpha' },
+          { id: 'ws-beta', displayName: 'Beta Project', path: '/code/beta' },
+        ])
+      );
+
+      vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([
+        { sessionId: 'term-b1', engine: 'claude', title: 'Beta 1', state: 'working', updatedAt: 100, latestLine: null, who: 'Echo', workspaceId: 'ws-beta' },
+        { sessionId: 'term-a1', engine: 'antigravity', title: 'Alpha 1', state: 'idle', updatedAt: 200, latestLine: null, who: 'Orion', workspaceId: 'ws-alpha' },
+        { sessionId: 'term-a2', engine: 'grok', title: 'Alpha 2', state: 'idle', updatedAt: 300, latestLine: null, who: 'Nova', workspaceId: 'ws-alpha' },
+      ]);
+
+      const ctx = captureCurrentTurnContext('code', 'ws-alpha');
+      expect(ctx.workspaceId).toBe('ws-alpha');
+      expect(ctx.workspaceName).toBe('Alpha Project');
+      expect(ctx.workspacePath).toBe('/code/alpha');
+      expect(ctx.activeTerminals).toHaveLength(2);
+      expect(ctx.activeTerminals![0].sessionId).toBe('term-a1');
+      expect(ctx.activeTerminals![0].idx).toBe(1);
+      expect(ctx.activeTerminals![1].sessionId).toBe('term-a2');
+      expect(ctx.activeTerminals![1].idx).toBe(2);
+    });
+  });
 });
+
+describe('runOperatorTurn — negation short-circuit & run ledger closure', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockReturnValue([]);
+  });
+
+  it('keeps a negated terminal imperative on the heuristic refusal plan instead of escalating to the LLM', async () => {
+    const { runOperatorTurn } = await import('./index');
+    vi.mocked(planTurnLLM).mockResolvedValue({ strategy: 'llm', actions: [], answer: 'ok' });
+
+    const res = await runOperatorTurn('no cierres las terminales', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-negation-1',
+    });
+
+    expect(planTurnLLM).not.toHaveBeenCalled();
+    expect(res.plan.actions).toEqual([]);
+    expect(res.strategy).toBe('heuristic');
+    expect(res.reply.toLowerCase()).toContain('terminal');
+    expect(res.receipts).toEqual([]);
+  });
+
+  it('closes the run ledger run opened while planning the turn', async () => {
+    const { runOperatorTurn } = await import('./index');
+    vi.mocked(planTurnLLM).mockImplementationOnce(async (input, _provider, _context, turnId) => {
+      const runId = turnId || 'llm-plan-run';
+      if (!runLedger.getRun(runId)) {
+        runLedger.startRun(input, { runId, taskType: 'llm_plan' });
+      }
+      return { strategy: 'llm', actions: [], answer: 'Todo listo.' };
+    });
+
+    const res = await runOperatorTurn('hola, ¿cómo vamos?', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-ledger-1',
+    });
+
+    const run = runLedger.getRun('turn-ledger-1');
+    expect(res.turnId).toBe('turn-ledger-1');
+    expect(run).toBeDefined();
+    expect(typeof run?.completedAt).toBe('number');
+    expect(run?.outcome).toBe('success');
+  });
+
+  it('records a quota failure on the turn when the model does not answer', async () => {
+    const { runOperatorTurn } = await import('./index');
+    const { getTurnTrace } = await import('./trace/trace');
+    vi.mocked(planTurnLLM).mockResolvedValue({
+      strategy: 'heuristic-fallback',
+      actions: [],
+      fallbackReason: 'Error HTTP 402 desde https://api.example/chat/completions: insufficient_quota',
+    });
+
+    const res = await runOperatorTurn('hola, ¿cómo vamos?', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-quota-1',
+    });
+
+    expect(res.overallSuccess).toBe(false);
+    expect(getTurnTrace('turn-quota-1')?.error).toMatch(/sin cuota/i);
+  });
+});
+
+describe('OperatorConfig SQLite Vault Sync & Protection', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    (window as any).__TAURI_INTERNALS__ = {};
+  });
+
+  it('never wipes SQLite vault credentials when saving unrelated settings while localStorage keys are empty', async () => {
+    const { invokeCommand } = await import('../ipc');
+    saveOperatorConfig({
+      ...DEFAULT_OPERATOR_CONFIG,
+      ttsRate: 1.15,
+    });
+
+    const credentialCalls = vi
+      .mocked(invokeCommand)
+      .mock.calls.filter(
+        ([cmd, args]: any) =>
+          cmd === 'save_provider_credential' && args?.provider !== 'operator_settings_json'
+      );
+    expect(credentialCalls).toHaveLength(0);
+  });
+
+  it('saves non-empty STT (grok_transcription) and TTS (elevenlabs) keys to SQLite vault and only deletes when explicitly cleared', async () => {
+    const { invokeCommand } = await import('../ipc');
+
+    saveOperatorConfig({
+      grokTranscriptionApiKey: 'xai-stt-secret-key',
+      elevenlabsApiKey: 'xi_tts_secret_key',
+    });
+
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith('save_provider_credential', {
+      provider: 'grok_transcription',
+      key: 'xai-stt-secret-key',
+    });
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith('save_provider_credential', {
+      provider: 'elevenlabs',
+      key: 'xi_tts_secret_key',
+    });
+    expect(localStorage.getItem('kite_grok_transcription_api_key')).toBe('xai-stt-secret-key');
+
+    vi.clearAllMocks();
+
+    // Explicitly clearing elevenlabsApiKey should delete it from vault, while leaving grokTranscriptionApiKey untouched
+    saveOperatorConfig({
+      elevenlabsApiKey: '',
+    });
+
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledWith('save_provider_credential', {
+      provider: 'elevenlabs',
+      key: '',
+    });
+    expect(vi.mocked(invokeCommand)).not.toHaveBeenCalledWith(
+      'save_provider_credential',
+      expect.objectContaining({ provider: 'grok_transcription' })
+    );
+  });
+
+  it('hydrates localStorage from SQLite vault after an update or WebView storage reset', async () => {
+    const { invokeCommand } = await import('../ipc');
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'get_active_provider_key') {
+        const vault: Record<string, string> = {
+          grok: 'xai-main-key',
+          grok_transcription: 'xai-voice-stt-key',
+          elevenlabs: 'xi-eleven-tts-key',
+          cloudflare: 'cf-token-123',
+          cloudflare_account_id: 'cf-acc-456',
+          operator_settings_json: JSON.stringify({ ttsEngine: 'elevenlabs' }),
+        };
+        const key = vault[args?.provider] ?? null;
+        return { success: Boolean(key), key };
+      }
+      return {};
+    });
+
+    const synced = await syncNativeCredentialsWithVault();
+
+    expect(synced.grokApiKey).toBe('xai-main-key');
+    expect(synced.grokTranscriptionApiKey).toBe('xai-voice-stt-key');
+    expect(synced.elevenlabsApiKey).toBe('xi-eleven-tts-key');
+    expect(synced.cloudflareApiToken).toBe('cf-token-123');
+    expect(synced.cloudflareAccountId).toBe('cf-acc-456');
+    expect(synced.ttsEngine).toBe('elevenlabs');
+    expect(localStorage.getItem('kite_grok_transcription_api_key')).toBe('xai-voice-stt-key');
+
+    const reloaded = loadOperatorConfig();
+    expect(reloaded.grokTranscriptionApiKey).toBe('xai-voice-stt-key');
+    expect(reloaded.elevenlabsApiKey).toBe('xi-eleven-tts-key');
+  });
+});
+
 

@@ -89,12 +89,14 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     });
   });
 
-  it('renders ZedTab inside Settings with OpenCode Multi-Model Gateway and zero emojis', () => {
+  it('renders ZedTab inside Settings with OpenCode Go and zero emojis', () => {
     const { container } = render(<ZedTab />);
 
     expect(screen.getByText(/Operador y Asistente de IA/i)).toBeInTheDocument();
     expect(screen.getByText(/Canal y Pasarela de Proveedor IA/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^OpenCode Go/ }));
     expect(screen.getAllByText(/DeepSeek.*4\.1.*Flash/i).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: /^Latencia$/ }));
     expect(screen.getByText(/Rendimiento y Latencia por Proveedor/i)).toBeInTheDocument();
 
     // Verify no emoji characters exist in rendered text
@@ -106,10 +108,11 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     const user = userEvent.setup();
     render(<ZedTab />);
 
+    await user.click(screen.getByRole('button', { name: /^OpenCode Go/ }));
     await user.click(screen.getByRole('combobox', { name: 'Modelo de OpenCode' }));
     await user.type(screen.getByRole('combobox', { name: 'Buscar modelo' }), 'kimi');
 
-    expect(screen.getByRole('option', { name: /kimi/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('option', { name: /kimi/i }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('option', { name: /deepseek/i })).not.toBeInTheDocument();
   });
 
@@ -155,6 +158,22 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     expect(onEndCall).toHaveBeenCalledTimes(1);
   });
 
+  it('does not end the call when Escape is pressed inside the terminal', () => {
+    const onEndCall = vi.fn();
+    render(<ZedStripHost call={activeCall} onEndCall={onEndCall} />);
+
+    const host = document.createElement('div');
+    host.className = 'xterm';
+    const textarea = document.createElement('textarea');
+    host.appendChild(textarea);
+    document.body.appendChild(host);
+
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(onEndCall).not.toHaveBeenCalled();
+
+    document.body.removeChild(host);
+  });
+
   it('provides click-to-speak role and affordance on the sphere handle', () => {
     render(<ZedStripHost call={activeCall} />);
 
@@ -177,4 +196,64 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
     vi.useRealTimers();
   });
 
+  it('toggles continuous voice session and keeps one-shot dictation separate (S5)', async () => {
+    render(<ZedStripHost call={activeCall} />);
+
+    // Voice mode continuous session button exists
+    const sessionBtn = screen.getByLabelText(/iniciar sesión de voz/i);
+    expect(sessionBtn).toBeInTheDocument();
+
+    // One-shot dictation button exists
+    const dictationBtn = screen.getByLabelText(/dictar por voz/i);
+    expect(dictationBtn).toBeInTheDocument();
+
+    // Click to start continuous voice session
+    fireEvent.click(sessionBtn);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/finalizar sesión de voz/i)).toBeInTheDocument();
+      expect((window as any).__kiteVoiceSessionActive).toBe(true);
+    });
+
+    // Clicking again ends continuous session
+    fireEvent.click(screen.getByLabelText(/finalizar sesión de voz/i));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/iniciar sesión de voz/i)).toBeInTheDocument();
+      expect((window as any).__kiteVoiceSessionActive).toBe(false);
+    });
+  });
+
+  it('barge-in stops TTS playback and keeps the voice session open (S5)', async () => {
+    const { ttsNarrator } = await import('../lib/operator/ttsNarrator');
+    render(<ZedStripHost call={activeCall} />);
+
+    // Start voice session
+    fireEvent.click(screen.getByLabelText(/iniciar sesión de voz/i));
+    await waitFor(() => {
+      expect((window as any).__kiteVoiceSessionActive).toBe(true);
+    });
+
+    // When TTS starts or user triggers speech while speaking, stop is called immediately
+    const dictationBtn = screen.getByLabelText(/dictar por voz/i);
+    fireEvent.click(dictationBtn);
+
+    expect(ttsNarrator.stop).toHaveBeenCalled();
+    // Session remains active
+    expect((window as any).__kiteVoiceSessionActive).toBe(true);
+  });
+
+  it('does not re-narrate the same turn on subsequent component re-renders (S6)', async () => {
+    const { ttsNarrator } = await import('../lib/operator/ttsNarrator');
+    vi.mocked(ttsNarrator.speak).mockClear();
+
+    const { rerender } = render(<ZedStripHost call={activeCall} />);
+
+    // Force re-render with unchanged call state
+    rerender(<ZedStripHost call={{ ...activeCall }} />);
+    rerender(<ZedStripHost call={{ ...activeCall, muted: false }} />);
+
+    // Should never trigger multiple speak calls for the same idle state
+    expect(ttsNarrator.speak).not.toHaveBeenCalled();
+  });
 });

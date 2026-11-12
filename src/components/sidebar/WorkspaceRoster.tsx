@@ -15,6 +15,40 @@ import {
   ArrowDownIcon,
 } from './sidebarIcons';
 import { invokeCommand } from '../../lib/ipc';
+import { BrandLogo } from '../ui/BrandLogo';
+import { AGENT_CODENAMES, cleanAgentTitle } from '../../lib/agentNames';
+
+export function getTabDisplayName(tab: WorkspaceSessionTab, tabIndex: number): string {
+  const fallback = `Ventana ${tabIndex + 1}`;
+  const rawTitle = (tab.title || '').trim();
+  const cleaned = cleanAgentTitle(rawTitle);
+
+  if (
+    !cleaned ||
+    cleaned === 'Untitled' ||
+    cleaned === 'Terminal' ||
+    cleaned === 'Multi-seat Session'
+  ) {
+    return fallback;
+  }
+
+  const isAgentCodename = AGENT_CODENAMES.some((name) => {
+    if (cleaned.toLowerCase() === name.toLowerCase()) return true;
+    return new RegExp(`^${name}(\\s+\\d+)?$`, 'i').test(cleaned);
+  });
+
+  const matchesPaneAgent = tab.panes?.some((p) => {
+    if (p.agentName && cleaned.toLowerCase() === p.agentName.toLowerCase()) return true;
+    if (p.label && cleaned.toLowerCase() === p.label.toLowerCase()) return true;
+    return false;
+  });
+
+  if (isAgentCodename || matchesPaneAgent) {
+    return fallback;
+  }
+
+  return rawTitle;
+}
 
 export interface WorkspaceRosterProps {
   workspaces: Workspace[];
@@ -62,6 +96,34 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [renameTabValue, setRenameTabValue] = useState('');
   const [workspaceOrder, setWorkspaceOrder] = useState<string[] | null>(null);
+  const [expandedTabs, setExpandedTabs] = useState<Set<string>>(() => new Set());
+
+  const toggleTabExpand = (tabId: string) => {
+    setExpandedTabs((prev) => {
+      const next = new Set(prev);
+      if (next.has(tabId)) {
+        next.delete(tabId);
+      } else {
+        next.add(tabId);
+      }
+      return next;
+    });
+  };
+
+  // Auto-expand multi-pane active tabs in selected workspace
+  useEffect(() => {
+    if (selectedWorkspaceId && workspaceSessions?.[selectedWorkspaceId]) {
+      const activeTab = workspaceSessions[selectedWorkspaceId]?.find((t) => t.isActive);
+      if (activeTab && (activeTab.paneCount ?? 1) > 1) {
+        setExpandedTabs((prev) => {
+          if (prev.has(activeTab.id)) return prev;
+          const next = new Set(prev);
+          next.add(activeTab.id);
+          return next;
+        });
+      }
+    }
+  }, [selectedWorkspaceId, workspaceSessions]);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameTabInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -381,7 +443,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
           disabled: readOnly,
           action: () => {
             setRenamingTabId(tab.id);
-            setRenameTabValue(tab.title || '');
+            setRenameTabValue(getTabDisplayName(tab, tabIndex));
           },
         },
         {
@@ -402,7 +464,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
       x: e.clientX,
       y: e.clientY,
       targetId: tab.id,
-      header: { title: tab.title || 'Untitled' },
+      header: { title: getTabDisplayName(tab, tabIndex) },
       sections,
     });
   };
@@ -436,6 +498,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
     const isExpanded = expandedWorkspaces.has(ws.id);
     const sessions = workspaceSessions?.[ws.id] ?? [];
     const sessionCount = sessions.length;
+    const hasExplicitActive = sessions.some((t) => t.isActive === true);
     const isRenaming = renamingWorkspaceId === ws.id;
     const sshInfo = (ws as Workspace & { ssh?: { host: string; folder: string } }).ssh;
 
@@ -605,7 +668,9 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
           {isExpanded && sessions.length > 0 && (
             <fieldset aria-label={`${ws.displayName} tabs`} className="workspace-tabs">
               {sessions.map((tab, tabIndex) => {
-                const isTabActive = tab.isActive ?? isSelected;
+                const isTabActive =
+                  isSelected &&
+                  (hasExplicitActive ? tab.isActive === true : tabIndex === 0);
                 const isTabRenaming = renamingTabId === tab.id;
 
                 if (isTabRenaming) {
@@ -613,7 +678,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                     <form
                       key={tab.id}
                       className="workspace-rename-form chat-rail-rename chat-rail-rename--row chat-rail-rename--session"
-                      aria-label={`Rename ${tab.title || 'Untitled'}`}
+                      aria-label={`Rename ${getTabDisplayName(tab, tabIndex)}`}
                       onSubmit={(e) => {
                         e.preventDefault();
                         commitTabRename(ws.id, tab.id);
@@ -629,7 +694,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                         maxLength={256}
                         value={renameTabValue}
                         onChange={(e) => setRenameTabValue(e.target.value)}
-                        placeholder="Session title"
+                        placeholder={`Ventana ${tabIndex + 1}`}
                         onKeyDown={(e) => {
                           if (e.key === 'Escape') {
                             e.preventDefault();
@@ -664,59 +729,158 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
                   );
                 }
 
+                const hasMultiplePanes = (tab.paneCount ?? 1) > 1;
+                const isTabExpanded = expandedTabs.has(tab.id);
+                const panes = tab.panes ?? [];
+                const panesTooltip = panes.length > 0
+                  ? panes.map((p) => `${p.label || 'Terminal'} (${p.engine || 'shell'})`).join(' · ')
+                  : undefined;
+
                 return (
-                  <div
-                    key={tab.id}
-                    className={`workspace-tab-row${isTabActive ? ' workspace-tab-row--selected' : ''}${
-                      contextMenu?.targetId === tab.id ? ' workspace-tab-row--menu-open' : ''
-                    }`}
-                  >
-                    <button
-                      aria-current={isTabActive ? 'page' : undefined}
-                      className="workspace-tab-row__select"
-                      onClick={() =>
-                        onSelectWorkspaceTab
-                          ? onSelectWorkspaceTab(ws.id, tab.id)
-                          : onSelectWorkspace(ws.id)
-                      }
-                      onContextMenu={(e) =>
-                        handleOpenTabMenu(ws, tab, tabIndex, sessions.length, e)
-                      }
-                      onDoubleClick={() => {
-                        if (!readOnly) {
-                          setRenamingTabId(tab.id);
-                          setRenameTabValue(tab.title || '');
-                        }
-                      }}
-                      type="button"
+                  <div key={tab.id} className="workspace-tab-group">
+                    <div
+                      className={`workspace-tab-row${isTabActive ? ' workspace-tab-row--selected' : ''}${
+                        contextMenu?.targetId === tab.id ? ' workspace-tab-row--menu-open' : ''
+                      }`}
                     >
-                      <i
-                        aria-hidden="true"
-                        className="workspace-tab-row__status-dot"
-                        data-status={tab.status !== 'idle' ? tab.status : undefined}
-                      />
-                      <span className="workspace-tab-row__name">{tab.title || 'Untitled'}</span>
-                      {(tab.paneCount ?? 1) > 1 && (
-                        <small>
-                          {tab.paneCount}
-                          <span className="sr-only"> panes</span>
-                        </small>
+                      {hasMultiplePanes ? (
+                        <button
+                          aria-expanded={isTabExpanded}
+                          aria-label={`${isTabExpanded ? 'Collapse' : 'Expand'} ${getTabDisplayName(tab, tabIndex)} terminals`}
+                          className={`workspace-tab-row__disclosure${
+                            isTabExpanded ? ' workspace-tab-row__disclosure--expanded' : ''
+                          }`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleTabExpand(tab.id);
+                          }}
+                          title={isTabExpanded ? 'Hide terminals' : 'Show terminals'}
+                          type="button"
+                        >
+                          <ChevronRightIcon size={9} />
+                        </button>
+                      ) : (
+                        <span aria-hidden="true" className="workspace-tab-row__disclosure-space" />
                       )}
-                    </button>
-                    {onCloseWorkspaceTab && (
+
                       <button
-                        aria-label={`Close ${tab.title || 'Untitled'} tab`}
-                        className="workspace-tab-row__close"
-                        disabled={readOnly}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onCloseWorkspaceTab(ws.id, tab.id);
+                        aria-current={isTabActive ? 'page' : undefined}
+                        className="workspace-tab-row__select"
+                        onClick={() =>
+                          onSelectWorkspaceTab
+                            ? onSelectWorkspaceTab(ws.id, tab.id)
+                            : onSelectWorkspace(ws.id)
+                        }
+                        onContextMenu={(e) =>
+                          handleOpenTabMenu(ws, tab, tabIndex, sessions.length, e)
+                        }
+                        onDoubleClick={() => {
+                          if (!readOnly) {
+                            setRenamingTabId(tab.id);
+                            setRenameTabValue(tab.title || '');
+                          }
                         }}
-                        title="Close tab (Ctrl+Shift+W)"
                         type="button"
                       >
-                        <CloseIcon size={10} />
+                        <i
+                          aria-hidden="true"
+                          className="workspace-tab-row__status-dot"
+                          data-status={tab.status !== 'idle' ? tab.status : undefined}
+                        />
+
+                        {/* Agent / Engine Brand Logos */}
+                        {panes.length > 1 ? (
+                          <span className="workspace-tab-row__logo-stack" title={panesTooltip}>
+                            {panes.slice(0, 3).map((p, pIdx) => (
+                              <BrandLogo
+                                key={p.id || pIdx}
+                                engine={p.engine || 'terminal'}
+                                size={13}
+                                className="workspace-tab-row__logo-stacked"
+                              />
+                            ))}
+                            {panes.length > 3 && (
+                              <span className="workspace-tab-row__logo-more">+{panes.length - 3}</span>
+                            )}
+                          </span>
+                        ) : (
+                          <BrandLogo
+                            engine={panes[0]?.engine || 'terminal'}
+                            size={13}
+                            className="workspace-tab-row__logo"
+                          />
+                        )}
+
+                        <span className="workspace-tab-row__name">{getTabDisplayName(tab, tabIndex)}</span>
+                        {hasMultiplePanes && (
+                          <small>
+                            {tab.paneCount}
+                            <span className="sr-only"> panes</span>
+                          </small>
+                        )}
                       </button>
+                      {onCloseWorkspaceTab && (
+                        <button
+                          aria-label={`Close ${getTabDisplayName(tab, tabIndex)} tab`}
+                          className="workspace-tab-row__close"
+                          disabled={readOnly}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onCloseWorkspaceTab(ws.id, tab.id);
+                          }}
+                          title="Close tab (Ctrl+Shift+W)"
+                          type="button"
+                        >
+                          <CloseIcon size={10} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Sub-tree of individual terminal panes */}
+                    {hasMultiplePanes && isTabExpanded && panes.length > 0 && (
+                      <div className="workspace-subpanes" role="group" aria-label={`${getTabDisplayName(tab, tabIndex)} terminals`}>
+                        {panes.map((pane, paneIdx) => {
+                          const isPaneFocused = isTabActive && pane.isFocused;
+                          return (
+                            <div
+                              key={pane.id || paneIdx}
+                              className={`workspace-pane-item${isPaneFocused ? ' workspace-pane-item--focused' : ''}`}
+                            >
+                              <button
+                                type="button"
+                                className="workspace-pane-item__select"
+                                onClick={() => {
+                                  if (onSelectWorkspaceTab) {
+                                    onSelectWorkspaceTab(ws.id, tab.id);
+                                  } else {
+                                    onSelectWorkspace(ws.id);
+                                  }
+                                  window.dispatchEvent(
+                                    new CustomEvent('kite:operator-pane-layout', {
+                                      detail: { operation: 'focus', target: pane.id, workspaceId: ws.id },
+                                    })
+                                  );
+                                }}
+                                title={`Focus ${pane.label || 'Terminal'} (${pane.engine || 'shell'})`}
+                              >
+                                <i
+                                  aria-hidden="true"
+                                  className="workspace-pane-item__dot"
+                                  data-status={pane.status || 'idle'}
+                                />
+                                <BrandLogo
+                                  engine={pane.engine || 'terminal'}
+                                  size={12}
+                                  className="workspace-pane-item__logo"
+                                />
+                                <span className="workspace-pane-item__name">
+                                  {pane.label || pane.agentName || `Terminal ${paneIdx + 1}`}
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     )}
                   </div>
                 );

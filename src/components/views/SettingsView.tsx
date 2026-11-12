@@ -1,4 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'motion/react';
+import { springs, tweens } from '../../motion/standard/tokens';
 import {
   ChevronLeftIcon,
   SettingsIcon,
@@ -7,16 +10,20 @@ import {
   BellIcon,
   MicIcon,
   AudioWaveformIcon,
-  UsersIcon,
   PuzzleIcon,
-  SmartphoneNfcIcon,
   ScrollTextIcon,
-  CircleUserRoundIcon,
   GaugeIcon,
 } from './settings/icons';
 import { invokeCommand } from '../../lib/ipc';
 import { OPEN_SETTINGS_EVENT, type OpenSettingsDetail } from '../../lib/settingsNav';
 import { normalizeLegacySettingsTabId } from '../../lib/kiteLegacyIds';
+import {
+  readDiagnosticsEnabled,
+  readKitePref,
+  readShowPaneContext,
+  writeDiagnosticsEnabled,
+  writeKitePref,
+} from '../../lib/kitePrefs';
 import {
   SettingsTabId,
   SettingsTabConfig,
@@ -29,76 +36,41 @@ import {
   DictationSettings,
 } from './settings/types';
 import { GeneralTab } from './settings/GeneralTab';
+import { ChatSettingsTab } from './settings/ChatSettingsTab';
 import { AppearanceTab } from './settings/AppearanceTab';
 import { VoiceTab } from './settings/VoiceTab';
-import { ModelsTab } from './settings/ModelsTab';
 import { KeybindingsTab } from './settings/KeybindingsTab';
 import { AboutTab } from './settings/AboutTab';
 import { TelemetryTab } from './settings/TelemetryTab';
 import { ChangelogTab } from './settings/ChangelogTab';
-import { AccountTab } from './settings/AccountTab';
 import { QuotasTab } from './settings/QuotasTab';
 import { ZedTab } from './settings/ZedTab';
+import { TerminalTab } from './settings/TerminalTab';
+import { NotificationsTab } from './settings/NotificationsTab';
 import { PluginsView } from './PluginsView';
 import { RoutinesView } from './RoutinesView';
 import { listAudioInputDevices } from '../../lib/operator/voice/zedVoice';
 import { useFilesAutoSavePreference } from '../../lib/filesAutoSavePreference';
 import { useAppUpdater } from '../../hooks/useAppUpdater';
-import {
-  getTerminalWebLinksTarget,
-  setTerminalWebLinksTarget,
-  TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT,
-  type TerminalWebLinksTarget,
-} from '../../lib/terminalLinkNav';
 import './settings.css';
 
-interface NotificationCenterSnapshot {
-  authorization?: string;
-  preferences?: {
-    schemaVersion: number;
-    osNotificationsEnabled: boolean;
-    finishSoundEnabled: boolean;
-    inputRequestsEnabled: boolean;
-  };
-}
-
-function notificationOsLabel(): string {
-  const platform = typeof navigator === 'undefined' ? '' : navigator.platform;
-  if (/win/i.test(platform)) return 'Windows notifications';
-  if (/mac/i.test(platform)) return 'macOS notifications';
-  if (/linux/i.test(platform)) return 'Linux notifications';
-  return 'System notifications';
-}
-
-function notificationAuthorizationDetail(authorization: string, osEnabled: boolean): string {
-  if (authorization === 'notDetermined') {
-    return 'Show a banner when an agent finishes or needs you outside the task you are viewing.';
-  }
-  if (authorization === 'denied') {
-    return 'Turned off in system settings. The bell and the in-app list still work.';
-  }
-  return osEnabled
-    ? "Banners show for finished work and questions you haven't seen yet."
-    : 'The bell and the in-app list still work while banners are off.';
-}
-
 const SETTINGS_TABS: SettingsTabConfig[] = [
-  { id: 'general', label: 'General', blurb: 'Apariencia, terminales y actualizaciones.', icon: SettingsIcon },
+  { id: 'general', label: 'General', blurb: 'Apariencia, autoguardado y actualizaciones de software.', icon: SettingsIcon },
   { id: 'customizations', label: 'Customizations', blurb: 'Temas, colores y aspecto visual.', icon: PaletteIcon },
-  { id: 'terminal', label: 'Terminal', blurb: 'Sesiones de fondo y comportamiento de terminal.', icon: SquareTerminalIcon },
+  { id: 'terminal', label: 'Terminal', blurb: 'Apariencia, tipografía, motor de renderizado, shell y enlaces web.', icon: SquareTerminalIcon },
   { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
-  { id: 'voice', label: 'Voice', blurb: 'Transcripción de voz a texto y dictado.', icon: MicIcon, hasDividerBefore: true },
-  { id: 'zed', label: 'Asistente Zed', blurb: 'Asistente esférico Zed, pasarela OpenCode multi-modelo, Grok Cloud, persona y latencia.', icon: AudioWaveformIcon },
-  { id: 'agents', label: 'Agents & Models', blurb: 'Modelos predeterminados y razonamiento.', icon: UsersIcon },
-  { id: 'quotas', label: 'Cuotas y cuentas', blurb: 'Suscripciones de IA, rotación de cuentas y proveedores monitoreados.', icon: GaugeIcon },
+  { id: 'chat', label: 'Chat', blurb: 'Visibilidad de las acciones del hilo.', icon: BellIcon },
+  { id: 'voice', label: 'Voice & Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
+  { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
+  { id: 'quotas', label: 'Cuentas y Proveedores', blurb: 'Bóveda de credenciales, cuentas CLI y límites de cuota.', icon: GaugeIcon },
   { id: 'plugins', label: 'Plugins', blurb: 'Herramientas y servicios para los agentes.', icon: PuzzleIcon },
   { id: 'keybindings', label: 'Shortcuts', blurb: 'Atajos de teclado y comandos rápidos.', icon: SquareTerminalIcon },
-  { id: 'remote', label: 'Remote (v0.2)', blurb: 'Sincronización móvil (en desarrollo activo).', icon: SmartphoneNfcIcon },
   { id: 'changelog', label: 'Changelog', blurb: 'Novedades y notas de cada versión.', icon: ScrollTextIcon, hasDividerBefore: true },
-  { id: 'account', label: 'Account', blurb: 'Perfil y privacidad local.', icon: CircleUserRoundIcon },
 ];
 
 export interface SettingsViewProps {
+  isOpen?: boolean;
+  onClose?: () => void;
   onBack?: () => void;
   onOpenWhatsNew?: () => void;
   accountName?: string;
@@ -110,22 +82,38 @@ export interface SettingsViewProps {
   palette?: string;
   onToggleMode?: (newMode: 'dark' | 'light') => void;
   onSelectTheme?: (paletteId: string, themeMode?: 'dark' | 'light') => void;
+  embedded?: boolean;
+  initialTab?: SettingsTabId | null;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
+  isOpen,
+  onClose,
   onBack,
   onOpenWhatsNew,
-  accountName = 'Kite User',
-  accountEmail = 'local@kite.dev',
-  accountTier = 'STUDIO EDITION',
-  accountTierPaid = true,
-  creditsLabel = 'Ilimitados',
   mode: propMode,
   palette: propPalette,
   onToggleMode: propOnToggleMode,
   onSelectTheme: propOnSelectTheme,
+  embedded = false,
+  initialTab,
 }) => {
-  const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(() => {
+    if (initialTab) return initialTab;
+    try {
+      const savedTabRaw = readKitePref('settingsTab');
+      const savedTab = normalizeLegacySettingsTabId(savedTabRaw);
+      if (savedTab && SETTINGS_TABS.some((t) => t.id === savedTab)) {
+        return savedTab as SettingsTabId;
+      }
+    } catch {
+      // Ignore
+    }
+    return 'general';
+  });
+  const [paneDirection, setPaneDirection] = useState(1);
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
   const [localMode, setLocalMode] = useState<'dark' | 'light'>('dark');
   const [localPalette, setLocalPalette] = useState<string>('kite-dark');
 
@@ -149,56 +137,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     window.addEventListener('kite:theme-changed', handleThemeEvent);
     return () => window.removeEventListener('kite:theme-changed', handleThemeEvent);
   }, []);
-  const [creditsError, setCreditsError] = useState<boolean>(false);
-  const [creditsDetail, setCreditsDetail] = useState<string>(
-    'Modo autónomo local activo con tus suscripciones de IA conectadas.'
-  );
-  const [creditsLoading, setCreditsLoading] = useState<boolean>(false);
-  const [terminalWebLinksTarget, setTerminalWebLinksTargetState] = useState<TerminalWebLinksTarget>(() =>
-    getTerminalWebLinksTarget()
-  );
-
-  useEffect(() => {
-    const handleTargetChanged = (e: Event) => {
-      const custom = e as CustomEvent<TerminalWebLinksTarget>;
-      if (custom.detail) {
-        setTerminalWebLinksTargetState(custom.detail);
-      }
-    };
-    window.addEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
-    return () =>
-      window.removeEventListener(TERMINAL_WEB_LINKS_TARGET_CHANGED_EVENT, handleTargetChanged);
-  }, []);
-
-  const handleRetryCredits = useCallback(async () => {
-    setCreditsLoading(true);
-    try {
-      const res = await invokeCommand<{ balance: number }>('credits_balance');
-      if (res && typeof res.balance === 'number') {
-        setCreditsError(false);
-        setCreditsDetail(`Balance de créditos: ${res.balance.toLocaleString()}.`);
-      } else {
-        setCreditsError(false);
-        setCreditsDetail('Edición Local Autónoma. Créditos ilimitados en modo BYOK / Cuentas locales.');
-      }
-    } catch {
-      setCreditsError(false);
-      setCreditsDetail('Edición Local Autónoma. Créditos ilimitados en modo BYOK / Cuentas locales.');
-    } finally {
-      setCreditsLoading(false);
-    }
-  }, []);
-
   // General settings state
   const [autoSaveFiles, setAutoSaveFiles] = useFilesAutoSavePreference();
   const [automaticUpdates, setAutomaticUpdates] = useState<boolean>(true);
-  const [notifInputRequests, setNotifInputRequests] = useState<boolean>(true);
-  const [notifSound, setNotifSound] = useState<boolean>(true);
-  const [notifOs, setNotifOs] = useState<boolean>(false);
-  const [notifAuthorization, setNotifAuthorization] = useState<string>('notDetermined');
 
   // Telemetry local offline state (Zero external network calls)
-  const [telemetryPrefs, setTelemetryPrefs] = useState<TelemetryPrefs>({ diagnostics: false, analytics: false });
+  const [telemetryPrefs, setTelemetryPrefs] = useState<TelemetryPrefs>(() => ({
+    diagnostics: readDiagnosticsEnabled(),
+    analytics: false,
+  }));
   const [telemetryIdentity] = useState<TelemetryIdentity | null>({
     revision: 1,
     ready: true,
@@ -256,28 +203,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   });
   const [dictationDevices, setDictationDevices] = useState<DictationInputDevice[]>([]);
 
-  const applyNotificationSnapshot = (snap: NotificationCenterSnapshot) => {
-    const preferences = snap.preferences;
-    if (!preferences) return;
-    setNotifOs(preferences.osNotificationsEnabled);
-    setNotifSound(preferences.finishSoundEnabled);
-    setNotifInputRequests(preferences.inputRequestsEnabled);
-    if (snap.authorization) setNotifAuthorization(snap.authorization);
-  };
-
   // Load preferences from localStorage and IPC on mount
   useEffect(() => {
     let isMounted = true;
 
     try {
-      const savedPalette = localStorage.getItem('bmone.palette');
+      const savedPalette = readKitePref('palette');
       if (savedPalette) setLocalPalette(savedPalette);
 
-      const savedTheme = localStorage.getItem('bmone.theme') as 'dark' | 'light' | null;
-      if (savedTheme) setLocalMode(savedTheme);
+      const savedTheme = readKitePref('theme') as 'dark' | 'light' | null;
+      if (savedTheme === 'dark' || savedTheme === 'light') setLocalMode(savedTheme);
 
-      const savedTabRaw = localStorage.getItem('bmone.settingsTab');
+      readShowPaneContext();
+      const savedTabRaw = readKitePref('settingsTab');
       const savedTab = normalizeLegacySettingsTabId(savedTabRaw);
+      if (savedTab && savedTab !== savedTabRaw) writeKitePref('settingsTab', savedTab);
       if (savedTab && SETTINGS_TABS.some((t) => t.id === savedTab)) {
         setActiveTab(savedTab as SettingsTabId);
       }
@@ -286,8 +226,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
 
     const onOpenTab = (e: Event) => {
-      const tab = (e as CustomEvent<OpenSettingsDetail>).detail?.tab as SettingsTabId | undefined;
-      if (tab) setActiveTab(tab);
+      const requested = (e as CustomEvent<OpenSettingsDetail>).detail?.tab ?? null;
+      const tab = normalizeLegacySettingsTabId(requested);
+      if (tab) setActiveTab(tab as SettingsTabId);
     };
     window.addEventListener(OPEN_SETTINGS_EVENT, onOpenTab);
 
@@ -342,17 +283,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       } catch (err) {
         console.warn('[SettingsView] Error listing dictation devices:', err);
       }
-
-      try {
-        const notifications = await invokeCommand<NotificationCenterSnapshot>(
-          'notifications_refresh_authorization'
-        );
-        if (isMounted && notifications) {
-          applyNotificationSnapshot(notifications);
-        }
-      } catch (err) {
-        console.warn('[SettingsView] Error refreshing notification authorization:', err);
-      }
     }
 
     loadIpcData();
@@ -364,33 +294,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, []);
 
   const handleSelectTab = useCallback((tabId: SettingsTabId) => {
+    const next = SETTINGS_TABS.findIndex((tab) => tab.id === tabId);
+    const prev = SETTINGS_TABS.findIndex((tab) => tab.id === activeTabRef.current);
+    setPaneDirection(next >= prev ? 1 : -1);
     setActiveTab(tabId);
     try {
-      localStorage.setItem('bmone.settingsTab', tabId);
+      writeKitePref('settingsTab', tabId);
     } catch {
       // Ignore
     }
   }, []);
 
-  const handleBack = useCallback(() => {
-    if (activeTab !== 'general') {
-      handleSelectTab('general');
+  const handleClose = useCallback(() => {
+    if (onClose) {
+      onClose();
     } else if (onBack) {
       onBack();
     } else {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     }
-  }, [activeTab, handleSelectTab, onBack]);
+  }, [onClose, onBack]);
 
   useEffect(() => {
+    if (isOpen === false) return;
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') {
-        handleBack();
+        e.stopPropagation();
+        handleClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
+  }, [handleClose, isOpen]);
+
+  const handleBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      handleClose();
+    }
+  }, [handleClose]);
 
   const handleSelectTheme = (paletteId: string, themeMode?: 'dark' | 'light') => {
     const nextMode = themeMode ?? currentMode;
@@ -401,8 +343,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       propOnSelectTheme(paletteId, themeMode);
     } else {
       try {
-        localStorage.setItem('bmone.palette', paletteId);
-        if (themeMode) localStorage.setItem('bmone.theme', nextMode);
+        writeKitePref('palette', paletteId);
+        if (themeMode) writeKitePref('theme', nextMode);
         document.documentElement.setAttribute('data-palette', paletteId);
         document.documentElement.setAttribute('data-theme', nextMode);
         document.documentElement.classList.toggle('dark', nextMode === 'dark');
@@ -433,7 +375,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleToggleTelemetry = (key: 'analytics' | 'diagnostics') => {
-    setTelemetryPrefs((prev) => ({ ...prev, [key]: !prev[key] }));
+    setTelemetryPrefs((prev) => {
+      const enabled = !prev[key];
+      if (key === 'diagnostics') writeDiagnosticsEnabled(enabled);
+      return { ...prev, [key]: enabled };
+    });
   };
 
   const handleCheckUpdate = async () => {
@@ -520,49 +466,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const saveNotificationPreferences = async (next: {
-    osNotificationsEnabled: boolean;
-    finishSoundEnabled: boolean;
-    inputRequestsEnabled: boolean;
-  }) => {
-    try {
-      const snap = await invokeCommand<NotificationCenterSnapshot>('notifications_set_preferences', {
-        schemaVersion: 1,
-        ...next,
-      });
-      if (snap) applyNotificationSnapshot(snap);
-    } catch (err) {
-      console.warn('[SettingsView] Failed to save notification settings:', err);
-    }
-  };
-
-  const handlePlayNotificationSample = async () => {
-    try {
-      await invokeCommand('notifications_play_sample');
-    } catch (err) {
-      console.warn('[SettingsView] Failed to play the notification sample:', err);
-    }
-  };
-
-  const handleRequestNotificationAuthorization = async () => {
-    try {
-      const snap = await invokeCommand<NotificationCenterSnapshot>('notifications_request_authorization');
-      if (snap) applyNotificationSnapshot(snap);
-    } catch (err) {
-      console.warn('[SettingsView] Failed to request notification permission:', err);
-    }
-  };
-
-  const handleOpenNotificationSettings = async () => {
-    try {
-      await invokeCommand('notifications_open_system_settings');
-      const snap = await invokeCommand<NotificationCenterSnapshot>('notifications_refresh_authorization');
-      if (snap) applyNotificationSnapshot(snap);
-    } catch (err) {
-      console.warn('[SettingsView] Failed to open notification settings:', err);
-    }
-  };
-
   // Determine current display tab and metadata
   const currentTab =
     SETTINGS_TABS.find((t) => t.id === activeTab) || {
@@ -574,10 +477,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const ActiveIcon = currentTab.icon;
 
-  return (
-    <div className="settings-view" data-palette={currentPalette} data-theme={currentMode}>
+  const dialogContent = (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-heading"
+      className={`settings-view${embedded ? '' : ' settings-modal-window'}`}
+      data-palette={currentPalette}
+      data-theme={currentMode}
+      onClick={(e) => e.stopPropagation()}
+    >
       {/* Settings Rail Sidebar */}
-      <aside className="SettingsSidebar sidebar sidebar--settings" data-testid="settings-sidebar">
+      <aside className="SettingsSidebar sidebar--settings" data-testid="settings-sidebar">
         <section aria-labelledby="settings-heading" className="sidebar__primary">
           <div className="sidebar__section-heading">
             <h1 className="settings-rail__title" id="settings-heading">
@@ -585,12 +496,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </h1>
             <button
               className="settings-rail__back"
-              onClick={handleBack}
-              title="Back (Esc)"
+              onClick={handleClose}
+              title="Close (Esc)"
               type="button"
+              aria-label="Close settings"
             >
               <ChevronLeftIcon aria-hidden="true" size={12} strokeWidth={2.2} />
-              Back
+              Close
             </button>
           </div>
 
@@ -606,10 +518,49 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     aria-current={isSelected ? 'page' : undefined}
                     aria-description={tab.blurb}
+                    data-settings-nav={tab.id}
                     className={`sidebar-row settings-rail__row${isSelected ? ' sidebar-row--selected' : ''}`}
                     onClick={() => handleSelectTab(tab.id)}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key !== 'ArrowDown' &&
+                        event.key !== 'ArrowUp' &&
+                        event.key !== 'Home' &&
+                        event.key !== 'End'
+                      ) {
+                        return;
+                      }
+                      event.preventDefault();
+                      const index = SETTINGS_TABS.findIndex((item) => item.id === tab.id);
+                      const nextIndex =
+                        event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? SETTINGS_TABS.length - 1
+                            : event.key === 'ArrowDown'
+                              ? Math.min(index + 1, SETTINGS_TABS.length - 1)
+                              : Math.max(index - 1, 0);
+                      const next = SETTINGS_TABS[nextIndex];
+                      if (!next || next.id === tab.id) return;
+                      handleSelectTab(next.id);
+                      const rail = event.currentTarget.closest('.settings-rail');
+                      queueMicrotask(() => {
+                        rail
+                          ?.querySelector<HTMLButtonElement>(`[data-settings-nav="${next.id}"]`)
+                          ?.focus();
+                      });
+                    }}
                     type="button"
                   >
+                    {isSelected && (
+                      <motion.span
+                        layoutId="settings-rail-indicator"
+                        className="settings-rail__indicator"
+                        transition={springs.selection}
+                        initial={false}
+                        aria-hidden="true"
+                      />
+                    )}
                     <span className="settings-rail__glyph">
                       <TabIcon aria-hidden="true" size={14} strokeWidth={1.75} />
                     </span>
@@ -619,21 +570,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               );
             })}
           </nav>
+
+          <footer className="settings-rail__footer">
+            <span className="settings-rail__version">Kite {appVersion ? `v${appVersion}` : ''}</span>
+          </footer>
         </section>
       </aside>
 
       {/* Main Settings Content Pane */}
-      <section className="pane application-settings-pane" data-settings-tab={activeTab}>
+      <section className="application-settings-pane" data-settings-tab={activeTab}>
         <div className="application-settings scroll-quiet">
-          <div
+          <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            key={activeTab}
             className={`application-settings__column${
               activeTab === 'plugins' ||
               activeTab === 'quotas' ||
+              activeTab === 'zed' ||
               activeTab === 'customizations' ||
               activeTab === 'appearance'
                 ? ' application-settings__column--wide'
                 : ''
             }`}
+            initial={{ opacity: 0, x: paneDirection * 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: paneDirection * -10 }}
+            transition={tweens.panelIn}
           >
             {/* Header */}
             <header className="application-settings__heading">
@@ -644,7 +606,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <h2>{currentTab.label}</h2>
                 <p>{currentTab.blurb}</p>
               </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={handleClose}
+                aria-label="Cerrar modal de configuración"
+                title="Cerrar (Esc)"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+                <kbd className="settings-modal-close__kbd">Esc</kbd>
+              </button>
             </header>
+
+            {activeTab === 'chat' && <ChatSettingsTab />}
 
             {activeTab === 'general' && (
               <GeneralTab
@@ -688,8 +675,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             )}
 
-            {(activeTab === 'models' || activeTab === 'agents') && <ModelsTab />}
-
             {activeTab === 'quotas' && <QuotasTab />}
 
             {activeTab === 'keybindings' && <KeybindingsTab />}
@@ -730,170 +715,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             )}
 
-            {activeTab === 'terminal' && (
-              <>
-                <section className="settings-group">
-                  <h2 className="settings-group__title">Sessions</h2>
-                  <div className="ui-card">
-                    <div className="ui-card__row settings-row">
-                      <div className="settings-row__copy">
-                        <h3 className="settings-row__title">Terminal host runtime</h3>
-                        <p>Integrated native daemon managing active shell sessions and scrollback.</p>
-                      </div>
-                      <div className="settings-row__control">
-                        <span className="settings-badge" data-tone="running">Online</span>
-                      </div>
-                    </div>
-                  </div>
-                </section>
+            {activeTab === 'terminal' && <TerminalTab />}
 
-                <section className="settings-group">
-                  <h2 className="settings-group__title">Enlaces y Navegación Web</h2>
-                  <div className="ui-card">
-                    <div className="ui-card__row settings-row">
-                      <div className="settings-row__copy">
-                        <h3 className="settings-row__title">Destino de enlaces web (URLs)</h3>
-                        <p>Elige dónde abrir los enlaces web (http/https) al hacer clic en la terminal.</p>
-                      </div>
-                      <div className="settings-row__control">
-                        <fieldset aria-label="Destino de enlaces web" className="ui-segmented">
-                          <button
-                            aria-pressed={terminalWebLinksTarget === 'internal'}
-                            className="ui-segmented__item"
-                            onClick={() => {
-                              setTerminalWebLinksTargetState('internal');
-                              setTerminalWebLinksTarget('internal');
-                            }}
-                            type="button"
-                          >
-                            <span>Navegador integrado</span>
-                          </button>
-                          <button
-                            aria-pressed={terminalWebLinksTarget === 'external'}
-                            className="ui-segmented__item"
-                            onClick={() => {
-                              setTerminalWebLinksTargetState('external');
-                              setTerminalWebLinksTarget('external');
-                            }}
-                            type="button"
-                          >
-                            <span>Navegador externo</span>
-                          </button>
-                        </fieldset>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-              </>
-            )}
-
-            {activeTab === 'notifications' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">When an agent needs you</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Questions from agents</h3>
-                      <p>Get notified when an agent stops to ask you something.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <button
-                        aria-checked={notifInputRequests}
-                        aria-label="Questions from agents"
-                        className="ui-switch"
-                        onClick={() =>
-                          saveNotificationPreferences({
-                            osNotificationsEnabled: notifOs,
-                            finishSoundEnabled: notifSound,
-                            inputRequestsEnabled: !notifInputRequests,
-                          })
-                        }
-                        role="switch"
-                        type="button"
-                      >
-                        <span aria-hidden="true" className="ui-switch__knob" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Sound cues</h3>
-                      <p>A soft bell when an agent finishes or needs you while you&apos;re looking elsewhere.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <button
-                        aria-label="Play sample sound"
-                        className="settings-control ui-button"
-                        onClick={handlePlayNotificationSample}
-                        type="button"
-                      >
-                        Play
-                      </button>
-                      <button
-                        aria-checked={notifSound}
-                        aria-label="Sound"
-                        className="ui-switch"
-                        onClick={() =>
-                          saveNotificationPreferences({
-                            osNotificationsEnabled: notifOs,
-                            finishSoundEnabled: !notifSound,
-                            inputRequestsEnabled: notifInputRequests,
-                          })
-                        }
-                        role="switch"
-                        type="button"
-                      >
-                        <span aria-hidden="true" className="ui-switch__knob" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">{notificationOsLabel()}</h3>
-                      <p>{notificationAuthorizationDetail(notifAuthorization, notifOs)}</p>
-                    </div>
-                    <div className="settings-row__control">
-                      {notifAuthorization === 'notDetermined' ? (
-                        <button
-                          className="settings-control ui-button"
-                          onClick={handleRequestNotificationAuthorization}
-                          type="button"
-                        >
-                          Enable…
-                        </button>
-                      ) : notifAuthorization === 'denied' ? (
-                        <button
-                          className="settings-control ui-button"
-                          onClick={handleOpenNotificationSettings}
-                          type="button"
-                        >
-                          Open Settings…
-                        </button>
-                      ) : (
-                        <button
-                          aria-checked={notifOs}
-                          aria-label={notificationOsLabel()}
-                          className="ui-switch"
-                          onClick={() =>
-                            saveNotificationPreferences({
-                              osNotificationsEnabled: !notifOs,
-                              finishSoundEnabled: notifSound,
-                              inputRequestsEnabled: notifInputRequests,
-                            })
-                          }
-                          role="switch"
-                          type="button"
-                        >
-                          <span aria-hidden="true" className="ui-switch__knob" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
+            {activeTab === 'notifications' && <NotificationsTab />}
 
             {activeTab === 'zed' && <ZedTab />}
 
@@ -909,67 +733,40 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </section>
             )}
 
-            {activeTab === 'remote' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">Conexión con dispositivos móviles</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Sincronización con teléfono móvil</h3>
-                      <p>Control remoto de agentes, notificaciones push y aprobaciones de código en movimiento.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <span className="settings-badge" data-tone="accent">En desarrollo para v0.2.0</span>
-                    </div>
-                  </div>
-                </div>
-                <p className="settings-note">
-                  Todas las aprobaciones y comandos se ejecutan actualmente de forma autónoma en esta ventana de escritorio.
-                </p>
-              </section>
-            )}
 
-            {activeTab === 'import' && (
-              <section className="settings-group">
-                <h2 className="settings-group__title">Migración de versiones anteriores</h2>
-                <div className="ui-card">
-                  <div className="ui-card__row settings-row">
-                    <div className="settings-row__copy">
-                      <h3 className="settings-row__title">Importar datos de Kite / Orca</h3>
-                      <p>Detecta y migra chats, bookmarks de workspace y perfiles de versiones anteriores.</p>
-                    </div>
-                    <div className="settings-row__control">
-                      <button
-                        className="settings-control ui-button"
-                        type="button"
-                        onClick={() => {
-                          alert('Comprobación completada: No se detectaron instalaciones heredadas con datos pendientes de migrar en este equipo.');
-                        }}
-                      >
-                        Comprobar e Importar
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {activeTab === 'account' && (
-              <AccountTab
-                accountName={accountName}
-                accountEmail={accountEmail}
-                accountTier={accountTier}
-                accountTierPaid={accountTierPaid}
-                creditsLabel={creditsLabel}
-                creditsDetail={creditsDetail}
-                creditsError={creditsError}
-                creditsLoading={creditsLoading}
-                onRetryCredits={handleRetryCredits}
-              />
-            )}
-          </div>
+          </motion.div>
+          </AnimatePresence>
         </div>
       </section>
     </div>
   );
+
+  if (isOpen === false) {
+    return null;
+  }
+
+  if (embedded) {
+    return dialogContent;
+  }
+
+  const modalNode = (
+    <div
+      className="settings-modal-backdrop"
+      data-palette={currentPalette}
+      data-theme={currentMode}
+      data-testid="settings-modal-backdrop"
+      onClick={handleBackdropClick}
+    >
+      {dialogContent}
+    </div>
+  );
+
+  if (typeof document !== 'undefined') {
+    const portalTarget = document.querySelector('.app-frame--scaled') ?? document.body;
+    return createPortal(modalNode, portalTarget);
+  }
+
+  return modalNode;
 };
+
+export const SettingsModal = SettingsView;

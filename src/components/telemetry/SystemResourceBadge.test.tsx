@@ -41,6 +41,13 @@ vi.mock('../../lib/ipc', () => ({
         { id: 'webview', label: 'Motor UI (WebView2 / GPU)', memoryBytes: 275 * 1024 * 1024, processCount: 1 },
         { id: 'terminals', label: 'Terminales PTY & Agentes', memoryBytes: 120 * 1024 * 1024, processCount: 3 },
       ],
+      processes: [
+        { pid: 5120, name: 'kite-code.exe', label: 'Núcleo Kite Code (Tauri Host)', category: 'core', memoryBytes: 85 * 1024 * 1024, privateBytes: 55 * 1024 * 1024 },
+        { pid: 5124, name: 'msedgewebview2.exe', label: 'Motor UI (WebView2)', category: 'webview', memoryBytes: 275 * 1024 * 1024, privateBytes: 160 * 1024 * 1024 },
+        { pid: 6100, name: 'node.exe', label: 'Antigravity CLI Agent', category: 'terminals', memoryBytes: 80 * 1024 * 1024, privateBytes: 60 * 1024 * 1024 },
+        { pid: 6105, name: 'powershell.exe', label: 'PowerShell Shell', category: 'terminals', memoryBytes: 30 * 1024 * 1024, privateBytes: 20 * 1024 * 1024 },
+        { pid: 6110, name: 'conhost.exe', label: 'Host de consola Windows (ConPTY)', category: 'terminals', memoryBytes: 10 * 1024 * 1024, privateBytes: 6 * 1024 * 1024 },
+      ],
     },
   }),
   isTauriEnvironment: vi.fn().mockReturnValue(true),
@@ -82,6 +89,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     expect(screen.getByText(/Terminales PTY & Agentes/i)).toBeInTheDocument();
     expect(screen.getByText(/Procesador \(CPU\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Disco \(E:\\\)/i)).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Headroom' })).toBeInTheDocument();
 
     // Switch to CPU tab
     await user.click(screen.getByRole('tab', { name: 'CPU' }));
@@ -95,6 +103,30 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     // Toggle badge display mode to RAM + CPU
     await user.click(screen.getByRole('button', { name: 'RAM + CPU' }));
     expect(badgeBtn).toHaveTextContent('3.4%');
+  });
+
+  it('displays detailed process breakdown and private memory in the RAM tab', async () => {
+    const user = userEvent.setup();
+    render(<SystemResourceBadge />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('system-resource-ram-value')).toHaveTextContent('480 MB');
+    });
+
+    const badgeBtn = screen.getByTestId('system-resource-badge');
+    await user.click(badgeBtn);
+
+    // Switch to RAM tab
+    await user.click(screen.getByRole('tab', { name: 'RAM' }));
+
+    // Verifies explanatory note is displayed
+    expect(screen.getByText(/¿Por qué varía el consumo\?/i)).toBeInTheDocument();
+    expect(screen.getByText(/Subprocesos Activos/i)).toBeInTheDocument();
+
+    // Verifies individual processes are listed
+    expect(screen.getByText('PID 6100')).toBeInTheDocument();
+    expect(screen.getByText(/Antigravity CLI Agent/i)).toBeInTheDocument();
+    expect(screen.getByText('PID 5120')).toBeInTheDocument();
   });
 
   it('evaluates memory state relative to the machine capacity', async () => {
@@ -139,5 +171,101 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     );
     expect(criticalState).toBe('critical');
     expect(getPressureColors(criticalState).label).toBe('Crítico');
+  });
+
+  it('supports grouping by project and by terminal with granular breakdown in RAM tab', async () => {
+    const { getSystemMetrics } = await import('../../lib/ipc');
+    (getSystemMetrics as any).mockResolvedValueOnce({
+      timestampMs: Date.now(),
+      pid: 5120,
+      uptimeSeconds: 340,
+      memory: {
+        appTotalBytes: 800 * 1024 * 1024,
+        appCoreBytes: 300 * 1024 * 1024,
+        appTerminalsBytes: 500 * 1024 * 1024,
+        systemTotalBytes: 32 * 1024 * 1024 * 1024,
+        systemUsedBytes: 14 * 1024 * 1024 * 1024,
+        systemAvailableBytes: 18 * 1024 * 1024 * 1024,
+        systemUsagePercent: 43.8,
+        appShareOfSystemPercent: 2.5,
+        pressure: 'normal',
+      },
+      cpu: {
+        appUsagePercent: 3.4,
+        systemUsagePercent: 12.8,
+        logicalCores: 16,
+        model: 'AMD Ryzen 9 16-Core Processor',
+      },
+      disk: {
+        mountPoint: 'E:\\',
+        totalBytes: 1024 * 1024 * 1024 * 1024,
+        usedBytes: 412 * 1024 * 1024 * 1024,
+        availableBytes: 612 * 1024 * 1024 * 1024,
+        usagePercent: 40.2,
+        appCacheBytes: 18 * 1024 * 1024,
+      },
+      runtime: {
+        activeTerminals: 2,
+        processCount: 4,
+        breakdown: [
+          { id: 'core', label: 'Núcleo Rust (Tauri Host)', memoryBytes: 80 * 1024 * 1024, processCount: 1 },
+          { id: 'webview', label: 'Motor UI (WebView2 / GPU)', memoryBytes: 220 * 1024 * 1024, processCount: 1 },
+          { id: 'terminals', label: 'Terminales PTY & Agentes', memoryBytes: 500 * 1024 * 1024, processCount: 2 },
+        ],
+        workspaces: [
+          {
+            workspaceId: 'kite-core',
+            displayName: 'kite-core',
+            memoryBytes: 500 * 1024 * 1024,
+            privateBytes: 350 * 1024 * 1024,
+            processCount: 2,
+            terminalCount: 1,
+          },
+        ],
+        terminals: [
+          {
+            sessionId: 'term-agent-orion',
+            title: 'Agente Antigravity',
+            engine: 'antigravity',
+            workspaceId: 'kite-core',
+            isAgent: true,
+            rootPid: 6200,
+            memoryBytes: 500 * 1024 * 1024,
+            privateBytes: 350 * 1024 * 1024,
+            processCount: 2,
+          },
+        ],
+        processes: [
+          { pid: 5120, name: 'kite-code.exe', label: 'Núcleo Kite Code', category: 'core', role: 'core', memoryBytes: 80 * 1024 * 1024 },
+          { pid: 5124, name: 'msedgewebview2.exe', label: 'Motor UI', category: 'webview', role: 'webview', memoryBytes: 220 * 1024 * 1024 },
+          { pid: 6200, name: 'node.exe', label: 'Antigravity CLI Agent', category: 'terminals', role: 'agent', sessionId: 'term-agent-orion', workspaceId: 'kite-core', memoryBytes: 200 * 1024 * 1024 },
+          { pid: 6250, name: 'rustc.exe', label: 'Compilador Rust', category: 'terminals', role: 'build', sessionId: 'term-agent-orion', workspaceId: 'kite-core', memoryBytes: 300 * 1024 * 1024 },
+        ],
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<SystemResourceBadge />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('system-resource-ram-value')).toHaveTextContent('800 MB');
+    });
+
+    await user.click(screen.getByTestId('system-resource-badge'));
+    await user.click(screen.getByRole('tab', { name: 'RAM' }));
+
+    // Verifies workspace grouping is shown by default when workspaces exist
+    expect(screen.getByText('kite-core')).toBeInTheDocument();
+    expect(screen.getByText('PID 6250')).toBeInTheDocument();
+    expect(screen.getByText('Build')).toBeInTheDocument();
+
+    // Switch to "Por Terminal" view
+    await user.click(screen.getByRole('button', { name: /Por Terminal/i }));
+    expect(screen.getByText(/Agente AI/i)).toBeInTheDocument();
+    expect(screen.getByText(/Agente Antigravity/i)).toBeInTheDocument();
+
+    // Switch to "Lista Completa" flat view
+    await user.click(screen.getByRole('button', { name: /Lista Completa/i }));
+    expect(screen.getByText('PID 6200')).toBeInTheDocument();
   });
 });

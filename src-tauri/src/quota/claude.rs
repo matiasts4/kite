@@ -56,6 +56,10 @@ pub fn fetch_claude_quota() -> ProviderQuotaStatus {
         }
     }
 
+    if token.is_none() {
+        token = crate::credentials::resolve_provider_key("claude");
+    }
+
     let claude_dir = home.join(".claude");
     let is_installed = claude_dir.exists();
     if is_installed {

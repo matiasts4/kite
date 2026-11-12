@@ -1,0 +1,1720 @@
+//! `kite dispatch` argument parsing, skill text, and loopback auth.
+//! A missing app returns `runtime_offline` and does not start a server.
+
+use super::address::is_caller_endpoint;
+use super::policy::{ChildrenMode, RunInput, SendInput, Service, WaitInput};
+use super::port::Port;
+use super::presence::PresenceState;
+use super::types::{exit_code, Caller, DispatchError, Family, Receipt, ReceiptStatus};
+
+fn compose_manual() -> String {
+    let names = super::programs::lines();
+    format!(
+        "\
+Kite Dispatch
+
+Call this CLI only when KITE_DISPATCH=1 is set in the environment.
+Outside that environment the CLI still works for a person.
+
+Start another agent in one line:
+  kite dispatch run <program> \"<task>\"
+Example: kite dispatch run grok \"Look at the login bug.\"
+The first word is the program. For a known agent, the remaining words are the task.
+A word that is neither a known agent nor a role file starts that program. The remaining words are its arguments, and they are not typed as a second prompt.
+An agent does not get a pane unless --pane. A person gets a pane unless --hidden. --hidden wins.
+This text is the complete manual. Do not search the repository for these commands. Do not open a file to learn them. The task arrives when the process starts.
+A parent hears when a child enters blocked, done, error, or gone.
+Inbox files do not open panes. Delivery is this command.
+
+Programs:
+{names}
+
+Commands:
+  kite dispatch ls
+  kite dispatch programs
+  kite dispatch providers [--refresh]
+  kite dispatch models [<provider>] [--refresh]
+  kite dispatch run <program> \"<task>\"
+  kite dispatch run --via thread --provider <provider> [--model <model>] [--effort <level>] [--role \"<title>\"] [--workspace inherit|share|branch] [--wait] [--timeout-ms <ms>] \"<task>\"
+  kite dispatch run --via terminal --engine <engine> --name <alias> [--parent <address>] [--file <path>] [--pane] [--hidden]
+  kite dispatch run --role <name> --name <alias> [--file <path>]
+  kite dispatch send <address> \"<text>\" [--file <path>] [--if ready] [--force]
+  kite dispatch wait [<address>] [--until idle,done,blocked] [--timeout <ms>] [--children all|any]
+  kite dispatch read <address> [--lines 80] [--last]
+  kite dispatch report --to <address> --body \"<text>\"
+  kite dispatch kill <address>
+  kite dispatch interrupt <address>
+  kite dispatch keys <address> <key...>
+  kite dispatch attach <address>
+  kite dispatch swarm <title|add|post|read|wait|status|model|kill|channel> ...
+  kite dispatch skill
+
+Inside a Kite terminal the command is `kite` on PATH.
+`run` returns the address when the session exists. It does not wait for a pane and it does not start a second process for that pane.
+An agent does not get a pane unless --pane. A person gets a pane unless --hidden. --hidden wins.
+`ls` lines are `address`, then `alias:<name>` when set, then the engine when the run recorded one, then the state.
+When `--parent` is omitted and KITE_ADDRESS is `session:`, `thread:`, or `alias:`, that address is the parent. The words human and agent are not parents.
+`read` returns the screen text or child thread output (`--last` extracts the final assistant response). It does not type.
+`wait` blocks until the destination (or `--children all|any`) matches or the timeout elapses. The default timeout is 30000 ms. A timeout exits 1 with error timeout.
+`interrupt` writes Ctrl+C and does not press Enter.
+`keys` writes the named keys and presses Enter only when the key is enter.
+`kill` ends that session and the children that do not outlive it.
+`attach` asks the desktop to show that session.
+`kill`, `interrupt`, `keys`, and `attach` work while the destination is working or blocked.
+
+Live Provider & Model Discovery (Run First Before Spawning):
+- Thread providers (`--via thread --provider <name>`): `antigravity`, `grok`, `codex`, `claude`, `cursor`, `opencode`, `gemini` (aliases: `agy`, `claude-code`, `open-code`, `cursor-agent`). Use `programs` only for `--via terminal` CLI tools.
+- NEVER invent, copy, or hardcode legacy or unverified model IDs. Always inspect connected providers and live models first:
+  kite dispatch providers [--refresh]
+  kite dispatch models <provider> [--refresh]
+- If a connected provider's CLI manages models dynamically (`claude`, `gemini`) or when you want the provider default, omit `--model`.
+
+Cross-provider subagents (`--via thread`):
+- Inside Thread Mode (`KITE_ADDRESS=thread:<id>`), `--via` defaults to `thread` (or pass `--via thread` explicitly). Keep the main orchestrator on a heavy reasoning model and delegate focused tasks to lightweight/fast discovered models across connected providers (`--provider`, `--model`, optional `--effort minimal|low|medium|high|xhigh|max|ultra`).
+- Always pass a crisp `--role \"<title>\"` and quote prompts cleanly (never embed shell redirections like `2>&1` or pipes as unquoted prompt words).
+- Single blocking call (`--wait` prints the child's final reply and `[subagent_id: thread:<id>]`):
+  kite dispatch run --via thread --provider <provider> [--model <fast_model_id>] --role \"Fast Executor\" --workspace share --wait \"<task>\"
+- Parallel fan-out: launch multiple child threads without `--wait` (use `--workspace share` or `branch` for isolated git worktrees when editing files concurrently; `inherit` shares the workspace), then wait and inspect:
+  kite dispatch wait thread:<id>   # or: kite dispatch wait --children all
+  kite dispatch read thread:<id> --last
+
+Cross-provider swarm (`kite dispatch swarm`):
+- Coordinate multi-agent teams across providers/models on a monotonic `#seq` board:
+  kite dispatch swarm title \"<title>\"
+  kite dispatch swarm add --name <role> [--provider <provider>] [--model <model>] [--effort <level>] [--workspace inherit|share|branch] [--channels <ch1,ch2>] [--fork <member|coordinator>] [--role \"<title>\"] --brief \"<assignment>\"
+  kite dispatch swarm post [--channel <channel>] \"<message>\"
+  kite dispatch swarm read [--since <seq>] [--channel <channel|*>]
+  kite dispatch swarm wait [--since <seq>] [--mentions-only] [--timeout-ms <ms>]
+  kite dispatch swarm status
+  kite dispatch swarm model --name <role> [--provider <provider>] --model <new_model> [--effort <level>]
+  kite dispatch swarm kill <role>
+  kite dispatch swarm channel <create|subscribe|unsubscribe|archive|list> [--channel <name>] [--topic \"<text>\"] [--name <role>]
+- Reactive `@mention` wakeup: `waiting` workers sleep at zero token cost and wake only when a post mentions `@<role>`, `@<prefix>`, `@#<channel>`, or `@all` (e.g. `kite dispatch swarm post \"@verifier check #2\"`). Park without polling using `kite dispatch swarm wait --since <seq>`.
+- Quota failover: swap a stalled or rate-limited worker's provider/model while keeping its conversation history intact via `kite dispatch swarm model --name <role> --provider <provider> --model <new_model>`.
+
+Envelope:
+[kite from=\"<alias-or-address>\"]
+This is another agent, not the person.
+To reply: kite dispatch send <from> \"<reply>\"
+Irreversible and privileged actions still wait for the person.
+BODY:
+<text>
+
+Force rule: only a human caller may set force. An agent or a script that sets force receives force_forbidden and nothing is written. Do not answer a destination blocked with kind permission. Irreversible and privileged actions still wait for the person.
+
+Ready means idle or done. working is queued. blocked is rejected. gone is destination_gone.
+A stall means the text was submitted and presence did not change. Read before sending the same body again. The service does not send a second Enter.
+"
+    )
+}
+
+fn compose_skill() -> String {
+    let manual = manual_text();
+    format!(
+        "\
+---
+name: kite-dispatch
+description: \"Trigger: kite dispatch, spawn agent, subagent, swarm, KITE_DISPATCH. Run kite dispatch providers and kite dispatch models <provider> before spawning cross-provider subagents (--via thread) or swarms (kite dispatch swarm).\"
+---
+
+{manual}"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmChannelAction {
+    Create,
+    Subscribe,
+    Unsubscribe,
+    Archive,
+    List,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmCommand {
+    Title {
+        title: String,
+    },
+    Add {
+        name: String,
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        workspace: Option<String>,
+        channels: Vec<String>,
+        fork: Option<String>,
+        role: Option<String>,
+        brief: String,
+    },
+    Post {
+        channel: Option<String>,
+        text: String,
+    },
+    Read {
+        since: u64,
+        channel: Option<String>,
+    },
+    Wait {
+        since: u64,
+        mentions_only: bool,
+        timeout_ms: u64,
+    },
+    Status,
+    Model {
+        name: String,
+        provider: Option<String>,
+        model: String,
+        effort: Option<String>,
+    },
+    Kill {
+        name: String,
+    },
+    Channel {
+        action: SwarmChannelAction,
+        channel: Option<String>,
+        topic: Option<String>,
+        member: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Ls,
+    Programs,
+    Providers {
+        refresh: bool,
+    },
+    Models {
+        provider: Option<String>,
+        refresh: bool,
+    },
+    Skill,
+    Run {
+        via: Family,
+        explicit_via: bool,
+        engine: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        workspace: Option<String>,
+        name: Option<String>,
+        explicit_name: bool,
+        parent: Option<String>,
+        outlive: bool,
+        /// Set only by `--role`. A positional word is `program`, not a role.
+        role: Option<String>,
+        explicit_role: bool,
+        file: Option<String>,
+        task: Option<String>,
+        wait: bool,
+        timeout_ms: Option<u64>,
+        hidden: bool,
+        pane: bool,
+        program: Option<String>,
+        /// Remaining words after the program. Each word is one argument.
+        words: Vec<String>,
+    },
+    Kill {
+        address: String,
+    },
+    Interrupt {
+        address: String,
+    },
+    Keys {
+        address: String,
+        keys: Vec<String>,
+    },
+    Attach {
+        address: String,
+    },
+    Send {
+        address: String,
+        body: Option<String>,
+        file: Option<String>,
+        force: bool,
+        only_ready: bool,
+        allow_queue: bool,
+    },
+    Wait {
+        address: Option<String>,
+        until: Vec<PresenceState>,
+        children: Option<ChildrenMode>,
+        timeout_ms: u64,
+    },
+    Read {
+        address: String,
+        lines: usize,
+        last_assistant: bool,
+    },
+    Report {
+        to: Option<String>,
+        from: Option<String>,
+        body: Option<String>,
+        file: Option<String>,
+    },
+    Swarm(SwarmCommand),
+}
+
+fn unknown_provider_message(raw: &str) -> String {
+    format!(
+        "Unknown thread provider `{raw}`. Allowed thread providers: antigravity, grok, codex, claude, cursor, opencode, gemini (aliases: agy, claude-code, open-code, cursor-agent). Run `kite dispatch providers` to inspect connected providers."
+    )
+}
+
+fn bad_args(detail: impl Into<String>) -> (DispatchError, String) {
+    (DispatchError::BadArgs, detail.into())
+}
+
+pub fn parse_args(args: &[String]) -> Result<Command, DispatchError> {
+    parse_args_detailed(args).map_err(|(err, _)| err)
+}
+
+pub fn parse_args_detailed(args: &[String]) -> Result<Command, (DispatchError, String)> {
+    let mut items = args.iter().map(String::as_str).peekable();
+    if items.peek() == Some(&"kite") {
+        items.next();
+    }
+    if items.peek() == Some(&"dispatch") {
+        items.next();
+    }
+    let sub = items
+        .next()
+        .ok_or_else(|| bad_args("Missing dispatch subcommand. Run `kite dispatch skill` for commands."))?;
+    match sub {
+        "ls" => Ok(Command::Ls),
+        "programs" => Ok(Command::Programs),
+        "providers" => {
+            let mut refresh = false;
+            while let Some(next) = items.next() {
+                match next {
+                    "--refresh" => refresh = true,
+                    other => {
+                        return Err(bad_args(format!(
+                            "Unknown flag `{other}` for `providers`. Supported: --refresh."
+                        )))
+                    }
+                }
+            }
+            Ok(Command::Providers { refresh })
+        }
+        "models" => {
+            let mut provider = None;
+            let mut refresh = false;
+            while let Some(next) = items.next() {
+                match next {
+                    "--refresh" => refresh = true,
+                    "--provider" => {
+                        let raw = items
+                            .next()
+                            .filter(|v| !v.starts_with("--"))
+                            .ok_or_else(|| bad_args("Missing value for `--provider`."))?;
+                        let canon = canonical_thread_provider(raw)
+                            .ok_or_else(|| bad_args(unknown_provider_message(raw)))?;
+                        provider = Some(canon.to_string());
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(bad_args(format!(
+                            "Unknown flag `{other}` for `models`. Supported: --provider <name>, --refresh."
+                        )))
+                    }
+                    other if provider.is_none() => {
+                        let canon = canonical_thread_provider(other)
+                            .ok_or_else(|| bad_args(unknown_provider_message(other)))?;
+                        provider = Some(canon.to_string());
+                    }
+                    other => {
+                        return Err(bad_args(format!(
+                            "Unexpected argument `{other}` for `models`."
+                        )))
+                    }
+                }
+            }
+            Ok(Command::Models { provider, refresh })
+        }
+        "skill" | "help" | "--help" | "-h" => Ok(Command::Skill),
+        "run" => parse_run_detailed(&mut items),
+        "send" => parse_send(&mut items).map_err(|e| (e, "Invalid `send` arguments.".into())),
+        "wait" => parse_wait(&mut items).map_err(|e| (e, "Invalid `wait` arguments.".into())),
+        "read" => parse_read(&mut items).map_err(|e| (e, "Invalid `read` arguments.".into())),
+        "report" => parse_report(&mut items).map_err(|e| (e, "Invalid `report` arguments.".into())),
+        "swarm" => parse_swarm_detailed(&mut items),
+        "kill" => parse_address_command(&mut items, |address| Command::Kill { address })
+            .map_err(|e| (e, "Invalid `kill` arguments.".into())),
+        "interrupt" => parse_address_command(&mut items, |address| Command::Interrupt { address })
+            .map_err(|e| (e, "Invalid `interrupt` arguments.".into())),
+        "attach" => parse_address_command(&mut items, |address| Command::Attach { address })
+            .map_err(|e| (e, "Invalid `attach` arguments.".into())),
+        "keys" => parse_keys(&mut items).map_err(|e| (e, "Invalid `keys` arguments.".into())),
+        other => Err(bad_args(format!(
+            "Unknown dispatch subcommand `{other}`. Allowed subcommands: ls, programs, providers, models, run, send, wait, read, report, swarm, kill, interrupt, keys, attach, skill."
+        ))),
+    }
+}
+
+pub fn blocking_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Wait { timeout_ms, .. }) => Some(timeout_ms),
+        _ => None,
+    }
+}
+
+pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Run {
+            wait: true,
+            timeout_ms,
+            ..
+        }) => Some(timeout_ms.unwrap_or(300_000)),
+        _ => None,
+    }
+}
+
+pub fn blocking_swarm_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Swarm(SwarmCommand::Wait { timeout_ms, .. })) => Some(timeout_ms),
+        _ => None,
+    }
+}
+
+pub fn canonical_thread_provider(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "antigravity" | "agy" => Some("antigravity"),
+        "claude" | "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        "cursor" | "cursor-agent" => Some("cursor"),
+        "gemini" => Some("gemini"),
+        "grok" => Some("grok"),
+        "opencode" | "open-code" => Some("opencode"),
+        _ => None,
+    }
+}
+
+pub fn normalize_workspace_mode(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "inherit" => Some("inherit".to_string()),
+        "share" => Some("share".to_string()),
+        "branch" => Some("branch".to_string()),
+        _ => None,
+    }
+}
+
+pub fn normalize_effort(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some("minimal".to_string()),
+        "low" => Some("low".to_string()),
+        "medium" => Some("medium".to_string()),
+        "high" => Some("high".to_string()),
+        "xhigh" => Some("xhigh".to_string()),
+        "max" => Some("max".to_string()),
+        "ultra" => Some("ultra".to_string()),
+        _ => None,
+    }
+}
+
+fn need_detailed<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    flag: &str,
+) -> Result<String, (DispatchError, String)> {
+    match items.next() {
+        Some(value) if !value.starts_with("--") => Ok(value.to_string()),
+        _ => Err(bad_args(format!("Missing value for flag `{flag}`."))),
+    }
+}
+
+fn parse_run_detailed<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, (DispatchError, String)> {
+    let mut via = Family::Terminal;
+    let mut explicit_via = false;
+    let mut engine = None;
+    let mut provider = None;
+    let mut model = None;
+    let mut effort = None;
+    let mut workspace = None;
+    let mut name = None;
+    let mut explicit_name = false;
+    let mut parent = None;
+    let mut outlive = false;
+    let mut role = None;
+    let mut explicit_role = false;
+    let mut file = None;
+    let mut wait = false;
+    let mut timeout_ms = None;
+    let mut hidden = false;
+    let mut pane = false;
+    let mut program = None;
+    let mut positionals: Vec<String> = Vec::new();
+    while let Some(flag) = items.next() {
+        match flag {
+            "--via" => {
+                via = match items.next() {
+                    Some("terminal") => Family::Terminal,
+                    Some("thread") => Family::Thread,
+                    other => {
+                        return Err(bad_args(format!(
+                            "Invalid `--via` value `{}` (expected `thread` or `terminal`).",
+                            other.unwrap_or("<missing>")
+                        )))
+                    }
+                };
+                explicit_via = true;
+            }
+            "--engine" => engine = Some(need_detailed(items, "--engine")?),
+            "--provider" => {
+                let raw = need_detailed(items, "--provider")?;
+                provider = Some(
+                    canonical_thread_provider(&raw)
+                        .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?
+                        .to_string(),
+                );
+            }
+            "--model" => model = Some(need_detailed(items, "--model")?),
+            "--effort" => {
+                let raw = need_detailed(items, "--effort")?;
+                effort = Some(normalize_effort(&raw).ok_or_else(|| {
+                    bad_args(format!(
+                        "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
+                    ))
+                })?);
+            }
+            "--workspace" => {
+                let raw = need_detailed(items, "--workspace")?;
+                workspace = Some(normalize_workspace_mode(&raw).ok_or_else(|| {
+                    bad_args(format!(
+                        "Invalid `--workspace` mode `{raw}`. Allowed: inherit, share, branch."
+                    ))
+                })?);
+            }
+            "--name" => {
+                name = Some(need_detailed(items, "--name")?);
+                explicit_name = true;
+            }
+            "--parent" => parent = Some(need_detailed(items, "--parent")?),
+            "--role" => {
+                role = Some(need_detailed(items, "--role")?);
+                explicit_role = true;
+            }
+            "--file" => file = Some(need_detailed(items, "--file")?),
+            "--wait" => wait = true,
+            "--timeout-ms" | "--timeout" => {
+                let raw = need_detailed(items, flag)?;
+                timeout_ms = Some(
+                    raw.parse()
+                        .map_err(|_| bad_args(format!("Invalid `{flag}` integer `{raw}`.")))?,
+                );
+            }
+            "--outlive" => outlive = true,
+            "--hidden" => hidden = true,
+            "--pane" => pane = true,
+            "--" => positionals.extend(items.by_ref().map(|part| part.to_string())),
+            other if other.starts_with('-') => {
+                return Err(bad_args(format!(
+                    "Unknown flag `{other}` for `run`. Run `kite dispatch skill` for valid flags."
+                )))
+            }
+            other => positionals.push(other.to_string()),
+        }
+    }
+    if explicit_via && via == Family::Terminal && (provider.is_some() || workspace.is_some()) {
+        return Err(bad_args(
+            "`--provider` and `--workspace` require `--via thread` (not `--via terminal`).",
+        ));
+    }
+    if explicit_via && via == Family::Thread {
+        if !explicit_role && provider.is_none() && engine.is_none() && !positionals.is_empty() {
+            if let Some(canon) = canonical_thread_provider(&positionals[0]) {
+                positionals.remove(0);
+                provider = Some(canon.to_string());
+            }
+        }
+    } else if !explicit_role && engine.is_none() && !positionals.is_empty() {
+        // A program word is consumed only when neither --role nor --engine is set.
+        let word = positionals.remove(0);
+        if name.is_none() {
+            name = Some(word.clone());
+        }
+        program = Some(word);
+    }
+    let words = positionals.clone();
+    let task = if positionals.is_empty() {
+        None
+    } else {
+        Some(positionals.join(" "))
+    };
+    Ok(Command::Run {
+        via,
+        explicit_via,
+        engine,
+        provider,
+        model,
+        effort,
+        workspace,
+        name,
+        explicit_name,
+        parent,
+        outlive,
+        role,
+        explicit_role,
+        file,
+        task,
+        wait,
+        timeout_ms,
+        hidden,
+        pane,
+        program,
+        words,
+    })
+}
+
+fn parse_address_command<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    build: impl FnOnce(String) -> Command,
+) -> Result<Command, DispatchError> {
+    let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    if address.starts_with("--") || items.next().is_some() {
+        return Err(DispatchError::BadArgs);
+    }
+    Ok(build(address))
+}
+
+fn parse_keys<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    if address.starts_with("--") {
+        return Err(DispatchError::BadArgs);
+    }
+    let keys: Vec<String> = items.map(|part| part.to_string()).collect();
+    if keys.is_empty() {
+        return Err(DispatchError::BadArgs);
+    }
+    Ok(Command::Keys { address, keys })
+}
+
+fn parse_send<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    let mut body = None;
+    let mut file = None;
+    let mut force = false;
+    let mut only_ready = false;
+    let mut allow_queue = true;
+    while let Some(next) = items.next() {
+        match next {
+            "--file" => file = Some(need(items)?),
+            "--force" => force = true,
+            "--if" => {
+                if items.next() != Some("ready") {
+                    return Err(DispatchError::BadArgs);
+                }
+                only_ready = true;
+                allow_queue = false;
+            }
+            "--queue" => allow_queue = true,
+            "--no-queue" => allow_queue = false,
+            other if body.is_none() && !other.starts_with("--") => body = Some(other.to_string()),
+            _ => return Err(DispatchError::BadArgs),
+        }
+    }
+    if body.is_none() && file.is_none() {
+        return Err(DispatchError::BadArgs);
+    }
+    Ok(Command::Send {
+        address,
+        body,
+        file,
+        force,
+        only_ready,
+        allow_queue,
+    })
+}
+
+fn parse_wait<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let mut address = None;
+    let mut until = Vec::new();
+    let mut children = None;
+    let mut timeout_ms = 30_000;
+    while let Some(next) = items.next() {
+        match next {
+            "--until" => {
+                let raw = need(items)?;
+                until = raw
+                    .split(',')
+                    .map(|part| PresenceState::parse(part.trim()).ok_or(DispatchError::BadArgs))
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            "--timeout" => {
+                timeout_ms = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+            }
+            "--children" => {
+                children = Some(match items.next() {
+                    Some("all") => ChildrenMode::All,
+                    Some("any") => ChildrenMode::Any,
+                    _ => return Err(DispatchError::BadArgs),
+                });
+            }
+            other if address.is_none() && !other.starts_with("--") => address = Some(other.to_string()),
+            _ => return Err(DispatchError::BadArgs),
+        }
+    }
+    Ok(Command::Wait {
+        address,
+        until,
+        children,
+        timeout_ms,
+    })
+}
+
+fn parse_read<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    let mut lines = 80;
+    let mut last_assistant = false;
+    while let Some(next) = items.next() {
+        match next {
+            "--lines" => lines = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?,
+            "--last" => last_assistant = true,
+            _ => return Err(DispatchError::BadArgs),
+        }
+    }
+    Ok(Command::Read {
+        address,
+        lines,
+        last_assistant,
+    })
+}
+
+fn parse_report<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let mut to = None;
+    let mut from = None;
+    let mut body = None;
+    let mut file = None;
+    while let Some(next) = items.next() {
+        match next {
+            "--to" => to = Some(need(items)?),
+            "--from" => from = Some(need(items)?),
+            "--body" => body = Some(need(items)?),
+            "--file" => file = Some(need(items)?),
+            _ => return Err(DispatchError::BadArgs),
+        }
+    }
+    if body.is_none() && file.is_none() {
+        return Err(DispatchError::BadArgs);
+    }
+    Ok(Command::Report { to, from, body, file })
+}
+
+fn parse_bool_flag(raw: &str) -> Result<bool, DispatchError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(DispatchError::BadArgs),
+    }
+}
+
+fn parse_swarm_detailed<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, (DispatchError, String)> {
+    let sub = items
+        .next()
+        .ok_or_else(|| bad_args("Missing `swarm` subcommand (expected title, add, post, read, wait, status, model, kill, or channel)."))?;
+    let cmd = match sub {
+        "title" => {
+            let mut title = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--title" => title = Some(need_detailed(items, "--title")?),
+                    other if other.starts_with('-') => {
+                        return Err(bad_args(format!("Unknown flag `{other}` for `swarm title`.")))
+                    }
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let text = title
+                .unwrap_or_else(|| positionals.join(" "))
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return Err(bad_args("Missing title text for `swarm title`."));
+            }
+            SwarmCommand::Title { title: text }
+        }
+        "add" => {
+            let mut name = None;
+            let mut provider = None;
+            let mut model = None;
+            let mut effort = None;
+            let mut workspace = None;
+            let mut channels: Vec<String> = Vec::new();
+            let mut fork = None;
+            let mut role = None;
+            let mut brief = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--name" => name = Some(need_detailed(items, "--name")?),
+                    "--provider" => {
+                        let raw = need_detailed(items, "--provider")?;
+                        provider = Some(
+                            canonical_thread_provider(&raw)
+                                .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?
+                                .to_string(),
+                        );
+                    }
+                    "--model" => model = Some(need_detailed(items, "--model")?),
+                    "--effort" => {
+                        let raw = need_detailed(items, "--effort")?;
+                        effort = Some(normalize_effort(&raw).ok_or_else(|| {
+                            bad_args(format!(
+                                "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
+                            ))
+                        })?);
+                    }
+                    "--workspace" => {
+                        let raw = need_detailed(items, "--workspace")?;
+                        workspace = Some(normalize_workspace_mode(&raw).ok_or_else(|| {
+                            bad_args(format!(
+                                "Invalid `--workspace` mode `{raw}`. Allowed: inherit, share, branch."
+                            ))
+                        })?);
+                    }
+                    "--channels" | "--channel" => {
+                        let csv = need_detailed(items, next)?;
+                        for part in csv.split(',') {
+                            let ch = part.trim().trim_start_matches('#').to_ascii_lowercase();
+                            if !ch.is_empty() && !channels.contains(&ch) {
+                                channels.push(ch);
+                            }
+                        }
+                    }
+                    "--fork" => fork = Some(need_detailed(items, "--fork")?),
+                    "--role" => role = Some(need_detailed(items, "--role")?),
+                    "--brief" => brief = Some(need_detailed(items, "--brief")?),
+                    "--" => positionals.extend(items.by_ref().map(|p| p.to_string())),
+                    other if other.starts_with('-') => {
+                        return Err(bad_args(format!("Unknown flag `{other}` for `swarm add`.")))
+                    }
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let name = name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| bad_args("`swarm add` requires `--name <worker>`."))?;
+            let brief_text = brief
+                .unwrap_or_else(|| positionals.join(" "))
+                .trim()
+                .to_string();
+            if brief_text.is_empty() {
+                return Err(bad_args("`swarm add` requires `--brief \"<assignment>\"`."));
+            }
+            SwarmCommand::Add {
+                name,
+                provider,
+                model,
+                effort,
+                workspace,
+                channels,
+                fork,
+                role,
+                brief: brief_text,
+            }
+        }
+        "model" => {
+            let mut name = None;
+            let mut provider = None;
+            let mut model = None;
+            let mut effort = None;
+            while let Some(next) = items.next() {
+                match next {
+                    "--name" => name = Some(need_detailed(items, "--name")?),
+                    "--provider" => {
+                        let raw = need_detailed(items, "--provider")?;
+                        provider = Some(
+                            canonical_thread_provider(&raw)
+                                .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?
+                                .to_string(),
+                        );
+                    }
+                    "--model" => model = Some(need_detailed(items, "--model")?),
+                    "--effort" => {
+                        let raw = need_detailed(items, "--effort")?;
+                        effort = Some(normalize_effort(&raw).ok_or_else(|| {
+                            bad_args(format!(
+                                "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
+                            ))
+                        })?);
+                    }
+                    other => {
+                        return Err(bad_args(format!(
+                            "Unknown flag `{other}` for `swarm model`."
+                        )))
+                    }
+                }
+            }
+            SwarmCommand::Model {
+                name: name
+                    .map(|s| s.trim().trim_start_matches('@').to_string())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| bad_args("`swarm model` requires `--name <worker>`."))?,
+                provider,
+                model: model
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| bad_args("`swarm model` requires `--model <model_id>`."))?,
+                effort,
+            }
+        }
+        other => {
+            return parse_swarm_rest(other, items)
+                .map_err(|e| (e, format!("Invalid arguments for `swarm {other}`.")));
+        }
+    };
+    Ok(Command::Swarm(cmd))
+}
+
+fn parse_swarm_rest<'a>(
+    sub: &str,
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Command, DispatchError> {
+    let cmd = match sub {
+        "post" => {
+            let mut channel = None;
+            let mut text = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--channel" => {
+                        channel = Some(
+                            need(items)?
+                                .trim()
+                                .trim_start_matches('#')
+                                .to_ascii_lowercase(),
+                        )
+                    }
+                    "--message" | "--body" => text = Some(need(items)?),
+                    "--" => positionals.extend(items.by_ref().map(|p| p.to_string())),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let body = text
+                .unwrap_or_else(|| positionals.join(" "))
+                .trim()
+                .to_string();
+            if body.is_empty() {
+                return Err(DispatchError::BadArgs);
+            }
+            SwarmCommand::Post {
+                channel: channel.filter(|c| !c.is_empty()),
+                text: body,
+            }
+        }
+        "read" => {
+            let mut since = 0u64;
+            let mut channel = None;
+            while let Some(next) = items.next() {
+                match next {
+                    "--since" => {
+                        since = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                    }
+                    "--channel" => {
+                        channel = Some(need(items)?.trim().trim_start_matches('#').to_string());
+                    }
+                    _ => return Err(DispatchError::BadArgs),
+                }
+            }
+            SwarmCommand::Read { since, channel }
+        }
+        "wait" => {
+            let mut since = 0u64;
+            let mut mentions_only = false;
+            let mut timeout_ms = 60_000u64;
+            while let Some(next) = items.next() {
+                match next {
+                    "--since" => {
+                        since = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                    }
+                    "--mentions-only" => {
+                        if let Some(&peek) = items.peek() {
+                            if !peek.starts_with('-') {
+                                mentions_only = parse_bool_flag(items.next().unwrap())?;
+                            } else {
+                                mentions_only = true;
+                            }
+                        } else {
+                            mentions_only = true;
+                        }
+                    }
+                    "--timeout-ms" | "--timeout" => {
+                        timeout_ms = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                    }
+                    _ => return Err(DispatchError::BadArgs),
+                }
+            }
+            SwarmCommand::Wait {
+                since,
+                mentions_only,
+                timeout_ms,
+            }
+        }
+        "status" => {
+            if items.next().is_some() {
+                return Err(DispatchError::BadArgs);
+            }
+            SwarmCommand::Status
+        }
+        "kill" => {
+            let mut name = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--name" => name = Some(need(items)?),
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let target = name
+                .or_else(|| positionals.into_iter().next())
+                .map(|s| s.trim().trim_start_matches('@').to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or(DispatchError::BadArgs)?;
+            SwarmCommand::Kill { name: target }
+        }
+        "channel" => {
+            let sub_action = match items.next() {
+                Some("create") => SwarmChannelAction::Create,
+                Some("subscribe") => SwarmChannelAction::Subscribe,
+                Some("unsubscribe") => SwarmChannelAction::Unsubscribe,
+                Some("archive") => SwarmChannelAction::Archive,
+                Some("list") => SwarmChannelAction::List,
+                _ => return Err(DispatchError::BadArgs),
+            };
+            let mut channel = None;
+            let mut topic = None;
+            let mut member = None;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                match next {
+                    "--channel" => {
+                        channel = Some(
+                            need(items)?
+                                .trim()
+                                .trim_start_matches('#')
+                                .to_ascii_lowercase(),
+                        );
+                    }
+                    "--topic" => topic = Some(need(items)?),
+                    "--name" => {
+                        member = Some(need(items)?.trim().trim_start_matches('@').to_string())
+                    }
+                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            if channel.is_none() {
+                channel = positionals
+                    .into_iter()
+                    .next()
+                    .map(|s| s.trim().trim_start_matches('#').to_ascii_lowercase())
+                    .filter(|s| !s.is_empty());
+            }
+            SwarmCommand::Channel {
+                action: sub_action,
+                channel,
+                topic,
+                member,
+            }
+        }
+        _ => return Err(DispatchError::BadArgs),
+    };
+    Ok(Command::Swarm(cmd))
+}
+
+fn need<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<String, DispatchError> {
+    match items.next() {
+        Some(value) if !value.starts_with("--") => Ok(value.to_string()),
+        _ => Err(DispatchError::BadArgs),
+    }
+}
+
+pub fn manual_text() -> &'static str {
+    static MANUAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MANUAL.get_or_init(compose_manual).as_str()
+}
+
+pub fn skill_text() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(compose_skill).as_str()
+}
+
+/// Strips a leading YAML frontmatter block (`---\n...\n---\n`) when present so
+/// CLI flags like `--system-prompt-override` never receive a leading hyphen token.
+pub fn strip_skill_frontmatter(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    if let Some(after_open) = trimmed
+        .strip_prefix("---\r\n")
+        .or_else(|| trimmed.strip_prefix("---\n"))
+    {
+        if let Some(close_idx) = after_open.find("\n---") {
+            let rest = &after_open[close_idx + "\n---".len()..];
+            if let Some(body) = rest
+                .strip_prefix("\r\n")
+                .or_else(|| rest.strip_prefix('\n'))
+            {
+                return body.trim_start();
+            }
+        }
+    }
+    trimmed
+}
+
+pub fn check_token(expected: &str, presented: &str) -> bool {
+    !expected.is_empty() && expected == presented
+}
+
+pub fn offline_receipt(id: &str, op: &str) -> Receipt {
+    Receipt::new(
+        id,
+        op,
+        ReceiptStatus::Failed,
+        "",
+        false,
+        None,
+        Some(DispatchError::RuntimeOffline.code().into()),
+    )
+}
+
+pub fn bad_token_receipt(id: &str, op: &str) -> Receipt {
+    Receipt::new(
+        id,
+        op,
+        ReceiptStatus::Rejected,
+        "",
+        false,
+        None,
+        Some("bad_token".into()),
+    )
+}
+
+fn inherited_parent(explicit: Option<&String>, from: &str) -> Option<String> {
+    if let Some(parent) = explicit.filter(|value| !value.is_empty()) {
+        return Some(parent.clone());
+    }
+    if is_caller_endpoint(from) {
+        Some(from.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_test_binary_path(exe: &std::path::Path) -> bool {
+    let in_deps = exe
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("deps"));
+    let test_stem = exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| {
+            stem.starts_with("kite_code-")
+                || (stem.starts_with("kite-") && stem != "kite-code")
+        });
+    in_deps || test_stem
+}
+
+fn running_under_test() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    std::env::current_exe()
+        .map(|exe| is_test_binary_path(&exe))
+        .unwrap_or(false)
+}
+
+pub(crate) fn write_shim_to_dir(dir: &std::path::Path, current_exe: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let console_name = if cfg!(windows) { "kite.exe" } else { "kite" };
+    let sibling_console = current_exe.parent().map(|parent| parent.join(console_name));
+    let target_exe = if let Some(src) = sibling_console.filter(|path| path.is_file()) {
+        let dest = dir.join(console_name);
+        if dest != src {
+            let needs_copy = match (std::fs::metadata(&src), std::fs::metadata(&dest)) {
+                (Ok(s), Ok(d)) => {
+                    s.len() != d.len() || std::fs::read(&src).ok() != std::fs::read(&dest).ok()
+                }
+                (Ok(_), Err(_)) => true,
+                _ => false,
+            };
+            if needs_copy {
+                let tmp = dir.join(format!("{console_name}.tmp"));
+                if std::fs::copy(&src, &tmp).is_ok() && std::fs::rename(&tmp, &dest).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                    let _ = std::fs::copy(&src, &dest);
+                }
+            }
+        }
+        if dest.is_file() {
+            dest
+        } else {
+            src
+        }
+    } else {
+        current_exe.to_path_buf()
+    };
+
+    #[cfg(windows)]
+    {
+        let script = format!("@echo off\r\n\"{}\" %*\r\n", target_exe.display());
+        let _ = std::fs::write(dir.join("kite.cmd"), script);
+    }
+    #[cfg(not(windows))]
+    {
+        let path = dir.join("kite");
+        if path != target_exe {
+            let script = format!("#!/usr/bin/env sh\nexec \"{}\" \"$@\"\n", target_exe.display());
+            let _ = std::fs::write(&path, script);
+        }
+    }
+}
+
+/// Writes `kite.cmd` (and copies companion console `kite.exe`) next to app data so a terminal can call `kite` with synchronous stdio.
+pub fn install_kite_shim() -> std::path::PathBuf {
+    let dir = crate::persist::roaming_app_dir().join("bin");
+    if running_under_test() {
+        return dir;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        write_shim_to_dir(&dir, &exe);
+    }
+    dir
+}
+
+fn user_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+}
+
+fn existing_skill_roots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    [
+        home.join(".claude").join("skills"),
+        home.join(".grok").join("skills"),
+        home.join(".codex").join("skills"),
+        home.join(".cursor").join("skills"),
+        home.join(".gemini").join("antigravity-cli").join("skills"),
+        home.join(".gemini").join("antigravity").join("skills"),
+        home.join(".gemini").join("skills"),
+        home.join(".agents").join("skills"),
+        home.join(".config").join("agents").join("skills"),
+        home.join(".config").join("opencode").join("skills"),
+        home.join(".copilot").join("skills"),
+        home.join(".kimi").join("skills"),
+        home.join(".amp").join("skills"),
+        home.join(".config").join("amp").join("skills"),
+        home.join(".factory").join("skills"),
+        home.join(".droid").join("skills"),
+    ]
+    .into_iter()
+    .filter(|root| root.is_dir())
+    .collect()
+}
+
+/// Copies the manual into each existing user skill root as `kite-dispatch/SKILL.md`.
+/// A missing root is left untouched.
+pub(crate) fn copy_skill_into_existing_roots(home: &std::path::Path, text: &str) {
+    for root in existing_skill_roots(home) {
+        let dest = root.join("kite-dispatch");
+        if std::fs::create_dir_all(&dest).is_ok() {
+            let _ = std::fs::write(dest.join("SKILL.md"), text);
+        }
+    }
+}
+
+/// Writes the same manual `kite dispatch skill` prints, copies it into existing
+/// agent skill directories, and returns the app-data path.
+pub fn install_dispatch_skill() -> std::path::PathBuf {
+    let dir = crate::persist::roaming_app_dir().join("dispatch");
+    let path = dir.join("SKILL.md");
+    if running_under_test() {
+        return path;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let text = skill_text();
+    let _ = std::fs::write(&path, text);
+    if let Some(home) = user_home_dir() {
+        copy_skill_into_existing_roots(&home, text);
+    }
+    path
+}
+
+/// `--hidden` wins. Otherwise `--pane` or a human caller asks for a pane.
+fn show_pane(hidden: bool, pane: bool, caller: Caller) -> bool {
+    if hidden {
+        return false;
+    }
+    if pane {
+        return true;
+    }
+    caller == Caller::Human
+}
+
+fn combine_task(file_text: Option<String>, words: Option<String>) -> Option<String> {
+    match (file_text, words.filter(|value| !value.is_empty())) {
+        (Some(mut file), Some(words)) => {
+            file.push_str("\n\n");
+            file.push_str(&words);
+            Some(file)
+        }
+        (Some(file), None) => Some(file),
+        (None, Some(words)) => Some(words),
+        (None, None) => None,
+    }
+}
+
+pub struct ExecContext<'a> {
+    pub id: &'a str,
+    pub caller: Caller,
+    pub from: &'a str,
+    pub now_ms: u64,
+    pub config_dir: Option<&'a std::path::Path>,
+    pub workspace: Option<&'a std::path::Path>,
+    pub mounted: bool,
+}
+
+pub fn execute<P: Port>(
+    service: &mut Service<P>,
+    command: &Command,
+    ctx: &ExecContext<'_>,
+) -> Result<Receipt, DispatchError> {
+    match command {
+        Command::Skill => Err(DispatchError::BadArgs),
+        Command::Ls => {
+            let mut receipt = Receipt::new(
+                ctx.id,
+                "ls",
+                ReceiptStatus::Settled,
+                "",
+                false,
+                None,
+                None,
+            );
+            receipt.text = Some(service.ls().join("\n"));
+            Ok(receipt)
+        }
+        Command::Programs => {
+            let mut receipt = Receipt::new(
+                ctx.id,
+                "programs",
+                ReceiptStatus::Settled,
+                "",
+                false,
+                None,
+                None,
+            );
+            receipt.text = Some(super::programs::lines());
+            Ok(receipt)
+        }
+        Command::Providers { .. } => {
+            let mut receipt = Receipt::new(
+                ctx.id,
+                "providers",
+                ReceiptStatus::Settled,
+                "",
+                false,
+                None,
+                None,
+            );
+            receipt.text = Some(
+                "antigravity\ngrok\ncodex\nclaude\ncursor\nopencode\ngemini".to_string(),
+            );
+            Ok(receipt)
+        }
+        Command::Models { provider, .. } => {
+            let mut receipt = Receipt::new(
+                ctx.id,
+                "models",
+                ReceiptStatus::Settled,
+                provider.as_deref().unwrap_or(""),
+                false,
+                None,
+                None,
+            );
+            receipt.text = Some(
+                provider
+                    .as_deref()
+                    .map(|p| format!("{p}: run via live desktop runtime for dynamic model list"))
+                    .unwrap_or_else(|| {
+                        "Run via live desktop runtime (`kite dispatch models <provider>`) for dynamic model lists.".to_string()
+                    }),
+            );
+            Ok(receipt)
+        }
+        Command::Run {
+            via,
+            explicit_via,
+            engine,
+            provider,
+            model,
+            effort,
+            workspace,
+            name,
+            explicit_name,
+            parent,
+            outlive,
+            role,
+            explicit_role,
+            file,
+            task,
+            wait,
+            timeout_ms: _,
+            hidden,
+            pane,
+            program,
+            words,
+        } => {
+            let file_text = match (file, ctx.workspace) {
+                (Some(path), Some(workspace)) => {
+                    Some(super::files::read_workspace_file(workspace, path)?)
+                }
+                (Some(_), None) => return Err(DispatchError::PathRejected),
+                _ => None,
+            };
+            let effective_via = if *explicit_via {
+                *via
+            } else if ctx.from.starts_with("thread:") {
+                Family::Thread
+            } else {
+                *via
+            };
+            if effective_via == Family::Terminal && (provider.is_some() || workspace.is_some()) {
+                return Err(DispatchError::BadArgs);
+            }
+            let parent = inherited_parent(parent.as_ref(), ctx.from);
+            let cwd = ctx.workspace.map(|p| p.display().to_string());
+            let hide_pane = !show_pane(*hidden, *pane, ctx.caller);
+            if effective_via == Family::Thread {
+                let mut resolved_provider = provider.clone().or_else(|| engine.clone());
+                let mut words_vec = words.clone();
+                if let Some(word) = program {
+                    if !*explicit_role && resolved_provider.is_none() {
+                        if let Some(canon) = canonical_thread_provider(word) {
+                            resolved_provider = Some(canon.to_string());
+                        } else {
+                            words_vec.insert(0, word.clone());
+                        }
+                    } else {
+                        words_vec.insert(0, word.clone());
+                    }
+                }
+                let raw_words = if words_vec.is_empty() {
+                    None
+                } else {
+                    Some(words_vec.join(" "))
+                };
+                let task = combine_task(file_text, raw_words.or_else(|| task.clone()));
+                if *wait && task.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(DispatchError::BadArgs);
+                }
+                let explicit_thread_name = if *explicit_name { name.clone() } else { None };
+                return Ok(service.run(RunInput {
+                    id: ctx.id.to_string(),
+                    via: Family::Thread,
+                    engine: resolved_provider.clone(),
+                    provider: resolved_provider,
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    workspace: workspace.clone(),
+                    command: None,
+                    name: explicit_thread_name,
+                    parent,
+                    outlive: *outlive,
+                    role: None,
+                    subagent_role: role.clone(),
+                    role_missing: false,
+                    task,
+                    caller: ctx.caller,
+                    cwd,
+                    now_ms: ctx.now_ms,
+                    hidden: hide_pane,
+                    argv: Vec::new(),
+                }));
+            }
+            let task = combine_task(file_text, task.clone());
+            if *explicit_role {
+                let role_name = role.as_deref().ok_or(DispatchError::BadArgs)?;
+                let dir = ctx.config_dir.ok_or(DispatchError::RoleNotFound)?;
+                return Ok(service.run_role(
+                    ctx.id,
+                    dir,
+                    role_name,
+                    task,
+                    parent.as_deref(),
+                    ctx.caller,
+                    ctx.now_ms,
+                    name.clone(),
+                    *outlive,
+                    hide_pane,
+                    cwd,
+                ));
+            }
+            if let Some(word) = program {
+                if let Some(dir) = ctx.config_dir {
+                    if super::address::is_alias_name(word) {
+                        let path = super::role::roles_dir(dir).join(format!("{word}.md"));
+                        if path.is_file() {
+                            return Ok(service.run_role(
+                                ctx.id,
+                                dir,
+                                word,
+                                task,
+                                parent.as_deref(),
+                                ctx.caller,
+                                ctx.now_ms,
+                                name.clone(),
+                                *outlive,
+                                hide_pane,
+                                cwd,
+                            ));
+                        }
+                    }
+                }
+                let Some(engine_name) = super::programs::canonical(word) else {
+                    let mut argv = vec![word.clone()];
+                    if !words.is_empty() {
+                        argv.extend(words.clone());
+                    } else if let Some(rest) = task.clone().filter(|text| !text.is_empty()) {
+                        argv.push(rest);
+                    }
+                    let alias = name.clone().filter(|n| super::address::is_alias_name(n));
+                    return Ok(service.run(RunInput {
+                        id: ctx.id.to_string(),
+                        via: *via,
+                        engine: Some(word.clone()),
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        workspace: None,
+                        command: Some(word.clone()),
+                        name: alias,
+                        parent,
+                        outlive: *outlive,
+                        role: None,
+                        subagent_role: None,
+                        role_missing: false,
+                        task: None,
+                        caller: ctx.caller,
+                        cwd,
+                        now_ms: ctx.now_ms,
+                        hidden: hide_pane,
+                        argv,
+                    }));
+                };
+                return Ok(service.run(RunInput {
+                    id: ctx.id.to_string(),
+                    via: *via,
+                    engine: Some(engine_name.to_string()),
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    workspace: None,
+                    command: None,
+                    name: name.clone(),
+                    parent,
+                    outlive: *outlive,
+                    role: None,
+                    subagent_role: None,
+                    role_missing: false,
+                    task,
+                    caller: ctx.caller,
+                    cwd,
+                    now_ms: ctx.now_ms,
+                    hidden: hide_pane,
+                    argv: Vec::new(),
+                }));
+            }
+            Ok(service.run(RunInput {
+                id: ctx.id.to_string(),
+                via: *via,
+                engine: engine.clone(),
+                provider: None,
+                model: None,
+                effort: None,
+                workspace: None,
+                command: None,
+                name: name.clone(),
+                parent,
+                outlive: *outlive,
+                role: None,
+                subagent_role: None,
+                role_missing: false,
+                task,
+                caller: ctx.caller,
+                cwd,
+                now_ms: ctx.now_ms,
+                hidden: hide_pane,
+                argv: Vec::new(),
+            }))
+        }
+        Command::Send {
+            address,
+            body,
+            file,
+            force,
+            only_ready,
+            allow_queue,
+        } => {
+            let input = SendInput {
+                id: ctx.id.to_string(),
+                address: address.clone(),
+                body: body.clone().unwrap_or_default(),
+                caller: ctx.caller,
+                force: *force,
+                allow_queue: *allow_queue,
+                only_ready: *only_ready,
+                wrap: None,
+                from: ctx.from.to_string(),
+                mounted: ctx.mounted,
+                source: None,
+                label: None,
+                now_ms: ctx.now_ms,
+                profile_id: None,
+                system: false,
+                presentation_emitted: false,
+            };
+            if let Some(path) = file {
+                let workspace = ctx.workspace.ok_or(DispatchError::PathRejected)?;
+                Ok(service.send_file(input, workspace, path))
+            } else {
+                Ok(service.send(input))
+            }
+        }
+        Command::Wait {
+            address,
+            until,
+            children,
+            timeout_ms,
+        } => Ok(service.wait(WaitInput {
+            id: ctx.id.to_string(),
+            address: address.clone().or_else(|| {
+                if ctx.from.is_empty() {
+                    None
+                } else {
+                    Some(ctx.from.to_string())
+                }
+            }),
+            until: until.clone(),
+            children: *children,
+            timeout_ms: *timeout_ms,
+            started_ms: ctx.now_ms,
+            now_ms: ctx.now_ms,
+        })),
+        Command::Read {
+            address,
+            lines,
+            last_assistant,
+        } => Ok(service.read_with_mode(ctx.id, address, *lines, *last_assistant)),
+        Command::Report {
+            to,
+            from,
+            body,
+            file,
+        } => {
+            let text = if let Some(path) = file {
+                let workspace = ctx.workspace.ok_or(DispatchError::PathRejected)?;
+                super::files::read_workspace_file(workspace, path)?
+            } else {
+                body.clone().unwrap_or_default()
+            };
+            Ok(service.report(
+                ctx.id,
+                from.as_deref().or(Some(ctx.from).filter(|s| !s.is_empty())),
+                to.as_deref(),
+                &text,
+                ctx.caller,
+                ctx.now_ms,
+            ))
+        }
+        Command::Kill { address } => Ok(service.kill(ctx.id, address)),
+        Command::Interrupt { address } => Ok(service.interrupt(ctx.id, address)),
+        Command::Keys { address, keys } => Ok(service.keys(ctx.id, address, keys)),
+        Command::Attach { address } => Ok(service.show(ctx.id, address)),
+        Command::Swarm(swarm_cmd) => {
+            let cwd = ctx.workspace.map(|p| p.display().to_string());
+            Ok(service.swarm(ctx.id, ctx.from, cwd.as_deref(), swarm_cmd))
+        }
+    }
+}
+
+pub fn render_result(result: Result<Receipt, DispatchError>, id: &str, op: &str) -> (i32, String) {
+    match result {
+        Ok(receipt) => {
+            let code = exit_code(&receipt);
+            let json = serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".into());
+            (code, json)
+        }
+        Err(DispatchError::BadArgs) => (2, bad_args_line(id, op)),
+        Err(err) => {
+            let receipt = Receipt::new(
+                id,
+                op,
+                ReceiptStatus::Rejected,
+                "",
+                false,
+                None,
+                Some(err.code().into()),
+            );
+            (exit_code(&receipt), serde_json::to_string(&receipt).unwrap_or_default())
+        }
+    }
+}
+
+pub fn render_detailed_error(id: &str, op: &str, err: DispatchError, detail: &str) -> (i32, Receipt) {
+    let mut receipt = Receipt::new(
+        id,
+        op,
+        ReceiptStatus::Rejected,
+        "",
+        false,
+        None,
+        Some(err.code().into()),
+    );
+    if !detail.trim().is_empty() {
+        receipt.text = Some(detail.to_string());
+    }
+    let code = if err == DispatchError::BadArgs { 2 } else { exit_code(&receipt) };
+    (code, receipt)
+}
+
+fn bad_args_line(id: &str, op: &str) -> String {
+    let receipt = Receipt::new(
+        id,
+        op,
+        ReceiptStatus::Failed,
+        "",
+        false,
+        None,
+        Some(DispatchError::BadArgs.code().into()),
+    );
+    serde_json::to_string(&receipt).unwrap_or_default()
+}
+
+/// Client helper: if the app is not reachable, return runtime_offline and do not spawn anything.
+pub fn client_when_unreachable(spawned: &mut u32) -> (i32, Receipt) {
+    let _ = spawned;
+    let receipt = offline_receipt("offline", "send");
+    (exit_code(&receipt), receipt)
+}
+
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod tests;

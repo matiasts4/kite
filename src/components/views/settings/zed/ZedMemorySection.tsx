@@ -4,6 +4,7 @@ import {
   ZedPersonaConfig,
 } from '../../../../lib/operator/operatorConfig';
 import { invokeCommand } from '../../../../lib/ipc';
+import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
 
 export interface ZedMemorySectionProps {
   persona: ZedPersonaConfig;
@@ -79,22 +80,48 @@ export const ZedMemorySection: React.FC<ZedMemorySectionProps> = ({
                   { id: 'transcript', label: 'Save transcript' },
                   { id: 'nothing', label: 'Nothing' },
                 ] as const
-              ).map((mode) => (
-                <button
-                  key={mode.id}
-                  type="button"
-                  aria-pressed={persona.afterCallMode === mode.id}
-                  className="ui-segmented__item"
-                  onClick={() => onPersonaChange('afterCallMode', mode.id)}
-                >
-                  <span>{mode.label}</span>
-                </button>
-              ))}
+              ).map((mode) => {
+                const isSelected = persona.afterCallMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className="ui-segmented__item"
+                    onClick={() => onPersonaChange('afterCallMode', mode.id)}
+                  >
+                    {isSelected && <SegmentedIndicator group="settings-zed-memory" />}
+                    <span>{mode.label}</span>
+                  </button>
+                );
+              })}
             </fieldset>
           </div>
         </div>
 
         {/* Memory Notes List */}
+        <div className="ui-card__row settings-row">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Registro de auditoría y trazas (Logs)</h3>
+            <p>
+              Guarda en formato JSONL cada orden, decisión, herramientas consultadas y resultado de
+              las acciones para depuración técnica.
+            </p>
+          </div>
+          <div className="settings-row__control">
+            <button
+              type="button"
+              className="secondary-button"
+              title="Abre la carpeta operator-traces con los archivos .jsonl del asistente."
+              onClick={() => {
+                void invokeCommand('operator_trace_reveal').catch(() => {});
+              }}
+            >
+              Abrir carpeta de trazas
+            </button>
+          </div>
+        </div>
+
         <div
           className="ui-card__row"
           style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '14px 18px' }}

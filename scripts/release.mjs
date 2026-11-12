@@ -73,7 +73,8 @@ function getChangelogEntry(filePath, version) {
   const startIdx = content.search(new RegExp(`{\\s*version:\\s*['"]${version.replace(/\\./g, '\\\\.')}['"]`));
   if (startIdx === -1) return null;
   const slice = content.slice(startIdx);
-  const endIdx = slice.indexOf('\n  },');
+  const endMatch = slice.match(/\r?\n  \},/);
+  const endIdx = endMatch ? endMatch.index : -1;
   const block = endIdx !== -1 ? slice.slice(0, endIdx + 5) : slice.slice(0, 2000);
 
   const titleMatch = block.match(/title:\s*['"]([^'"]+)['"]/);
@@ -99,18 +100,18 @@ function parseNotesToItems(rawNotes) {
     let kind = 'changed';
     let clean = line;
 
-    if (/^(fix|fixed|bugfix|correccion|corregido)[:\s-]/i.test(line)) {
+    if (/^(fixed|fix|bugfix|correccion|corregido)[:\s-]/i.test(line)) {
       kind = 'fixed';
-      clean = line.replace(/^(fix|fixed|bugfix|correccion|corregido)[:\s-]*/i, '').trim();
-    } else if (/^(feat|feature|add|added|nuevo|anadido|añadido)[:\s-]/i.test(line)) {
+      clean = line.replace(/^(fixed|fix|bugfix|correccion|corregido)[:\s-]*/i, '').trim();
+    } else if (/^(added|add|feature|feat|nuevo|anadido|añadido)[:\s-]/i.test(line)) {
       kind = 'added';
-      clean = line.replace(/^(feat|feature|add|added|nuevo|anadido|añadido)[:\s-]*/i, '').trim();
+      clean = line.replace(/^(added|add|feature|feat|nuevo|anadido|añadido)[:\s-]*/i, '').trim();
     } else if (/^(security|seguridad|sec)[:\s-]/i.test(line)) {
       kind = 'security';
       clean = line.replace(/^(security|seguridad|sec)[:\s-]*/i, '').trim();
-    } else if (/^(change|changed|update|updated|refactor|cambio)[:\s-]/i.test(line)) {
+    } else if (/^(changed|change|updated|update|refactor|cambio)[:\s-]/i.test(line)) {
       kind = 'changed';
-      clean = line.replace(/^(change|changed|update|updated|refactor|cambio)[:\s-]*/i, '').trim();
+      clean = line.replace(/^(changed|change|updated|update|refactor|cambio)[:\s-]*/i, '').trim();
     }
     if (clean) items.push({ kind, description: clean });
   }
@@ -123,19 +124,24 @@ function parseNotesToItems(rawNotes) {
 function addChangelogEntry(filePath, { version, title, items, dateStr }) {
   if (!fs.existsSync(filePath)) return false;
   const content = fs.readFileSync(filePath, 'utf8');
-  const target = 'export const KITE_RELEASES: RawReleaseNote[] = [\n';
-  const idx = content.indexOf(target);
-  if (idx === -1) return false;
+  const targetRegex = /export const KITE_RELEASES: RawReleaseNote\[\] = \[\r?\n/;
+  const match = content.match(targetRegex);
+  if (!match) return false;
+  const idx = match.index;
+  const targetLen = match[0].length;
+  const isCRLF = content.includes('\r\n');
+  const eol = isCRLF ? '\r\n' : '\n';
 
   const itemsFormatted = items
     .map(
       (it) => `      {\n        kind: '${it.kind}',\n        description: '${it.description.replace(/'/g, "\\'")}',\n      },`
     )
-    .join('\n');
+    .join('\n')
+    .replace(/\n/g, eol);
 
-  const entry = `  {\n    version: '${version}',\n    tag: 'v${version}',\n    date: '${dateStr}',\n    title: '${title.replace(/'/g, "\\'")}',\n    items: [\n${itemsFormatted}\n    ],\n  },\n`;
+  const entry = `  {\n    version: '${version}',\n    tag: 'v${version}',\n    date: '${dateStr}',\n    title: '${title.replace(/'/g, "\\'")}',\n    items: [\n${itemsFormatted}\n    ],\n  },\n`.replace(/\n/g, eol);
 
-  const newContent = content.slice(0, idx + target.length) + entry + content.slice(idx + target.length);
+  const newContent = content.slice(0, idx + targetLen) + entry + content.slice(idx + targetLen);
   fs.writeFileSync(filePath, newContent, 'utf8');
   return true;
 }
@@ -153,6 +159,9 @@ function addMarkdownChangelogEntry(filePath, { version, title, items, isoDate })
     else grouped.changed.push(it.description);
   }
 
+  const isCRLF = content.includes('\r\n');
+  const eol = isCRLF ? '\r\n' : '\n';
+
   let entry = `## [${version}] - ${isoDate}\n\n`;
   if (title) entry += `> ${title}\n\n`;
   if (grouped.added.length > 0) {
@@ -168,6 +177,7 @@ function addMarkdownChangelogEntry(filePath, { version, title, items, isoDate })
     entry += `### Security\n` + grouped.security.map((d) => `- ${d}`).join('\n') + '\n\n';
   }
   entry += '---\n\n';
+  entry = entry.replace(/\n/g, eol);
 
   const newContent = content.slice(0, idx) + entry + content.slice(idx);
   fs.writeFileSync(filePath, newContent, 'utf8');
@@ -205,7 +215,7 @@ if (github) {
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const cur = pkg.version.split('.').map(Number);
 let next;
-if (/^\\d+\\.\\d+\\.\\d+$/.test(bumpArg)) next = bumpArg;
+if (/^\d+\.\d+\.\d+$/.test(bumpArg)) next = bumpArg;
 else if (bumpArg === 'major') next = `${cur[0] + 1}.0.0`;
 else if (bumpArg === 'minor') next = `${cur[0]}.${cur[1] + 1}.0`;
 else if (bumpArg === 'patch') next = `${cur[0]}.${cur[1]}.${cur[2] + 1}`;
@@ -468,6 +478,15 @@ for (const b of built) {
   fs.copyFileSync(path.join(outDir, b.assetName), path.join(dir, b.assetName));
   fs.writeFileSync(path.join(dir, 'latest.json'), JSON.stringify(b.manifest, null, 2));
   pruneOldArtifacts(dir, 2);
+
+  const installedAppDir = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Kite Code') : '';
+  if (installedAppDir && fs.existsSync(installedAppDir)) {
+    const installedFeedDir = path.join(installedAppDir, 'feed', b.key);
+    fs.mkdirSync(installedFeedDir, { recursive: true });
+    fs.copyFileSync(path.join(outDir, b.assetName), path.join(installedFeedDir, b.assetName));
+    fs.writeFileSync(path.join(installedFeedDir, 'latest.json'), JSON.stringify(b.manifest, null, 2));
+    pruneOldArtifacts(installedFeedDir, 2);
+  }
 }
 pruneOldReleases(path.join(root, 'releases'), 2);
 const ok = await ensureFeedServer();

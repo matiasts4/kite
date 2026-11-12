@@ -179,3 +179,73 @@ describe('Level C: LLM Planner (planTurnLLM)', () => {
     expect(plan.actions[0].type).toBe('open_terminals');
   });
 });
+
+describe('T7: bounded prior turns', () => {
+  const validReply = JSON.stringify({
+    reply: 'Continuando con el plan anterior.',
+    actions: [],
+  });
+
+  it('T7: includes the previous user turn before the current user message', async () => {
+    const mock = new MockPlannerProvider([
+      { rawText: validReply, latencyMs: 12, model: 'mock-model-v1' },
+    ]);
+    const history: ProviderMessage[] = [
+      { role: 'user', content: 'abre una terminal con grok' },
+      { role: 'assistant', content: 'Abriendo una terminal con Grok.' },
+    ];
+
+    await planTurnLLM('ahora corre los tests', mock, undefined, 'turn-t7-history', history);
+
+    const messages = mock.calls[0];
+    expect(messages[0].role).toBe('system');
+
+    const previousUserIndex = messages.findIndex(
+      (message) => message.role === 'user' && message.content === 'abre una terminal con grok'
+    );
+    const currentUserIndex = messages.findIndex(
+      (message) => message.role === 'user' && message.content === 'ahora corre los tests'
+    );
+
+    expect(previousUserIndex).toBeGreaterThan(0);
+    expect(currentUserIndex).toBe(messages.length - 1);
+    expect(previousUserIndex).toBeLessThan(currentUserIndex);
+    expect(messages.some((message) => message.content === 'Abriendo una terminal con Grok.')).toBe(
+      true
+    );
+  });
+
+  it('T7: sends only the system prompt and current user message when history is empty', async () => {
+    const mock = new MockPlannerProvider([
+      { rawText: validReply, latencyMs: 12, model: 'mock-model-v1' },
+    ]);
+
+    await planTurnLLM('cerrar terminal activa', mock, undefined, 'turn-t7-empty', []);
+
+    const messages = mock.calls[0];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('system');
+    expect(messages[1]).toEqual({ role: 'user', content: 'cerrar terminal activa' });
+  });
+
+  it('T7: keeps the 14 most recent prior turns and drops the oldest', async () => {
+    const mock = new MockPlannerProvider([
+      { rawText: validReply, latencyMs: 12, model: 'mock-model-v1' },
+    ]);
+    const history: ProviderMessage[] = Array.from({ length: 16 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `prior-turn-${index + 1}`,
+    }));
+
+    await planTurnLLM('seguir con el plan', mock, undefined, 'turn-t7-cap', history);
+
+    const messages = mock.calls[0];
+    const contents = messages.map((message) => message.content);
+    expect(messages).toHaveLength(16);
+    expect(contents).not.toContain('prior-turn-1');
+    expect(contents).not.toContain('prior-turn-2');
+    expect(contents).toContain('prior-turn-3');
+    expect(contents).toContain('prior-turn-16');
+    expect(contents[contents.length - 1]).toBe('seguir con el plan');
+  });
+});

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_CODENAMES, getNextAgentName, cleanAgentTitle } from './agentNames';
+import {
+  AGENT_CODENAMES,
+  getNextAgentName,
+  cleanAgentTitle,
+  isRawEngineName,
+  resolveCanonicalAgentName,
+} from './agentNames';
 
 describe('Agent Codenames & Name Pool', () => {
   it('contains at least 30 canonical codenames', () => {
@@ -48,5 +54,27 @@ describe('Agent Codenames & Name Pool', () => {
     expect(cleanAgentTitle('')).toBe('');
     expect(cleanAgentTitle(undefined)).toBe('');
     expect(cleanAgentTitle(null)).toBe('');
+  });
+
+  it('recognizes raw engine names and resolves canonical codenames', () => {
+    expect(isRawEngineName('antigravity')).toBe(true);
+    expect(isRawEngineName('grok')).toBe(true);
+    expect(isRawEngineName('Orion')).toBe(false);
+
+    const existing = new Set<string>();
+    // When candidate is raw engine, it allocates next canonical codename
+    const resolved1 = resolveCanonicalAgentName('antigravity', existing);
+    expect(resolved1).toBe('Orion');
+    expect(existing.has('orion')).toBe(true);
+
+    // Case-insensitive codename match normalizes to Title Case
+    const resolved2 = resolveCanonicalAgentName('nova', existing);
+    expect(resolved2).toBe('Nova');
+    expect(existing.has('nova')).toBe(true);
+
+    // Custom alias preserves its casing
+    const resolvedCustom = resolveCanonicalAgentName('Reviewer', existing);
+    expect(resolvedCustom).toBe('Reviewer');
+    expect(existing.has('reviewer')).toBe(true);
   });
 });

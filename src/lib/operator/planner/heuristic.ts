@@ -2,7 +2,11 @@
 // Deterministic Spanish-first parser for voice and text commands.
 // Resilient to STT punctuation anomalies, seseo phonetic spelling, and subjunctive verbs.
 
-import type { OperatorPlan, Engine } from '../contract';
+import type {
+  OperatorPlan,
+  Engine,
+  SwitchWorkspaceAction,
+} from '../contract';
 import { AGENT_CODENAMES } from '../../agentNames';
 
 export interface LegacyOperatorIntent {
@@ -20,105 +24,49 @@ export interface LegacyOperatorIntent {
   prompt?: string;
   prompts?: string[];
   target?: string | number;
+  targets?: (string | number)[];
   url?: string;
   terminalIndex?: number;
   cli?: string;
 }
 
-export function detectEngineFromText(text: string): Engine | undefined {
-  const lower = text.toLowerCase();
+import {
+  detectEngineFromText,
+  OPEN_VERB_SOURCE,
+  CLOSE_TARGET_RE,
+  OPEN_VERB_RE,
+  referencesNonTerminalUiObject,
+  isNegatedTerminalImperative,
+  hasSubordinateCloseClause,
+  detectEngineForOpenClause,
+  SHELL_COMMAND_HEAD_RE,
+  splitCompoundPrompts,
+  parseNumberWord,
+  extractTerminalIndices,
+  normalizeInputForIntent,
+} from './heuristicPatterns';
 
-  // Antigravity (Anti-Gravity, Anti Gravity, The Gravity, De Gravity, Antigravedad, agy)
-  if (/\b(?:(?:anti|the|de|te)[- ]?gravit(?:y|i|ad)|anti[- ]?gravedad|antigravity|antigravedad|agy)\b/i.test(lower)) {
-    return 'antigravity';
-  }
-  // Claude (Claude Code, Anthropic)
-  if (/\b(?:claude(?:[- ]code)?|clod|anthropic|antropic)\b/i.test(lower)) {
-    return 'claude';
-  }
-  // Codex (OpenAI Codex, Code-X)
-  if (/\b(?:codex|code[- ]x|openai(?:\s+codex)?)\b/i.test(lower)) {
-    return 'codex';
-  }
-  // OpenCode (Open-Code)
-  if (/\b(?:open[- ]code|opencode)\b/i.test(lower)) {
-    return 'opencode';
-  }
-  // Grok (xAI, Groc)
-  if (/\b(?:grok|groc|xai|x\.ai)\b/i.test(lower)) {
-    return 'grok';
-  }
-  // PowerShell / Shell / Terminal
-  if (/\b(?:powershell|power[- ]shell|bash|cmd)\b/i.test(lower)) {
-    return 'powershell';
-  }
-
-  return undefined;
-}
-
-export function splitCompoundPrompts(text: string): string[] {
-  if (!text) return [];
-
-  // Match: "[prefix] uno para [Task 1] ... [y] el otro agente [enfocado en] [Task 2]"
-  const pattern1 = /(?:uno|el primero|el primer agente|la primera terminal)\s*(?:para|que|enfocado en)?\s*(.+?)\s*(?:[.,;]+|\by\b)\s*(?:el otro agente|el segundo agente|el otro|la otra terminal|la segunda terminal|el segundo)\s*(?:tiene que estar enfocado en|enfocado en|para|que|se encargue de|haga|sea)?\s*(.+)$/i;
-  const match1 = text.match(pattern1);
-  if (match1 && match1[1] && match1[2]) {
-    const t1 = match1[1].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    const t2 = match1[2].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    if (t1 && t2) return [t1, t2];
-  }
-
-  // Match: "[Task 1] ... [.,;] [y] el otro agente [enfocado en] [Task 2]"
-  const pattern2 = /(.+?)\s*(?:[.,;]+|\by\b)\s*(?:el otro agente|el segundo agente|el otro|la otra terminal|la segunda terminal)\s*(?:tiene que estar enfocado en|enfocado en|para|que|se encargue de|haga|sea)?\s*(.+)$/i;
-  const match2 = text.match(pattern2);
-  if (match2 && match2[1] && match2[2]) {
-    const t1 = match2[1].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    const t2 = match2[2].replace(/^[,\s;]+|[.,;]+$/g, '').trim();
-    if (t1 && t2) return [t1, t2];
-  }
-
-  return [text.trim()];
-}
-
-export function parseNumberWord(word: string): number {
-  const map: Record<string, number> = {
-    un: 1,
-    una: 1,
-    uno: 1,
-    dos: 2,
-    tres: 3,
-    cuatro: 4,
-    cinco: 5,
-    seis: 6,
-    siete: 7,
-    ocho: 8,
-    one: 1,
-    two: 2,
-    three: 3,
-    four: 4,
-    five: 5,
-  };
-  const parsed = parseInt(word, 10);
-  if (!Number.isNaN(parsed)) return parsed;
-  return map[word.toLowerCase()] || 1;
-}
-
-export function normalizeInputForIntent(raw: string): string {
-  if (!raw) return '';
-  let clean = raw.trim();
-
-  // Normalize STT pauses e.g. "dos. Terminales" or "1. Terminal"
-  clean = clean.replace(
-    /\b(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|\d+)\s*\.\s*(terminal|terminales|agente|agentes|consola|consolas|ventana|ventanas)\b/gi,
-    '$1 $2'
-  );
-
-  return clean;
-}
+export {
+  detectEngineFromText,
+  referencesNonTerminalUiObject,
+  isNegatedTerminalImperative,
+  hasSubordinateCloseClause,
+  detectEngineForOpenClause,
+  splitCompoundPrompts,
+  parseNumberWord,
+  extractTerminalIndices,
+  normalizeInputForIntent,
+};
 
 export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   const text = normalizeInputForIntent(rawText);
   const lower = text.toLowerCase();
+
+  // S4: a negated imperative ("no cierres las terminales", "no abras dos terminales")
+  // must never be executed as its affirmative counterpart.
+  if (isNegatedTerminalImperative(text)) {
+    return { kind: 'UNKNOWN' };
+  }
 
   // 1. Immediate silence / stop speaking
   if (
@@ -198,12 +146,17 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   }
 
   // 4. Close terminals / agents (handles seseo: sierra, serrar, and named agents e.g. "Orion")
-  const closeMatch = text.match(
-    /\b(?:cierra|cerrar|cierre|cierren|sierra|serrar|sierre|sierren|close|kill|mata|matar|maten|termina|terminar|terminen|elimina|eliminar|eliminen|apaga|apagar|apaguen)\b(?:\s+(?:a|al|el|la|los|las|the))?(?:\s+(.+))?$/i
-  );
+  // S4: a subordinate purpose clause ("abre una terminal para cerrar los issues")
+  // belongs to the main open verb, not to close_terminals.
+  const closeMatch = hasSubordinateCloseClause(lower) ? null : text.match(CLOSE_TARGET_RE);
   if (closeMatch) {
-    const rawTarget = (closeMatch[1] || '').trim();
+    const rawTarget = (closeMatch[1] || '').replace(/[.,;!?]+$/, '').trim();
     const targetLower = rawTarget.toLowerCase();
+
+    // S4: never resolve a non-terminal UI object with a number onto a terminal.
+    if (referencesNonTerminalUiObject(rawTarget)) {
+      return { kind: 'UNKNOWN' };
+    }
 
     // Check if user meant close browser or session logout
     if (
@@ -225,10 +178,83 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         targetLower === 'terminales' ||
         targetLower === 'las terminales' ||
         targetLower === 'los terminales' ||
-        /^las?\s+terminales$/.test(targetLower)
+        targetLower === 'las abiertas' ||
+        targetLower === 'todas las terminales' ||
+        /^(?:(?:las?|los?|todas?\s+las?)\s+)?terminales(?:\s+(?:abiertas?|que\s+est[aá]n\s+abiertas?|en\s+ejecuci[oó]n))?$/i.test(targetLower) ||
+        /^(?:(?:las?|los?)\s+)?(?:que\s+(?:est[aá]n\s+)?abiertas?|abiertas?)$/i.test(targetLower)
       ) {
         return { kind: 'CLOSE_TERMINALS', target: 'all' };
       }
+
+      // Check for quantifier patterns: e.g. "una de las terminales de anti-gravity", "2 terminales de grok", "una de las terminales", "las dos terminales que están abiertas"
+      const quantifierMatch = rawTarget.match(
+        /^(?:(?:las?|los?|unas?|unos?)\s+)?(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|\d+)\s+(?:de\s+(?:las?|los?)\s+)?(?:terminales?|agentes?|consolas?|paneles?|procesos?)?(?:\s*(?:de|con|en)\s+(.+)|(?:\s+(.+)))?$/i
+      );
+      if (quantifierMatch) {
+        const count = parseNumberWord(quantifierMatch[1]);
+        const remainder = (quantifierMatch[2] || quantifierMatch[3] || '').trim();
+        const remainderLower = remainder.toLowerCase();
+
+        if (
+          !remainder ||
+          /^(?:que\s+(?:est[aá]n\s+)?(?:abiertas?|activas?|corriendo|en\s+ejecuci[oó]n|en\s+espera)?(?:\s+actualmente)?|actuales|actualmente|abiertas?|activas?|que\s+tengo(?:\s+abiertas?)?|que\s+hay(?:\s+abiertas?)?|que\s+le\s+ped[ií]|que\s+ped[ií]|que\s+abriste)$/i.test(remainderLower)
+        ) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'all' };
+        }
+        // If remainder contains explicit indices: e.g. "que están vacías, que es la terminal uno y dos"
+        const subIndices = extractTerminalIndices(remainder);
+        if (subIndices.length > 1) {
+          return {
+            kind: 'CLOSE_TERMINALS',
+            count: subIndices.length,
+            target: subIndices.join(', '),
+            targets: subIndices.map(String),
+          };
+        }
+        if (
+          remainderLower.includes('terminada') ||
+          remainderLower.includes('finished') ||
+          remainderLower.includes('completada') ||
+          remainderLower.includes('done')
+        ) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'finished' };
+        }
+        if (
+          remainderLower.includes('inactiva') ||
+          remainderLower.includes('idle') ||
+          remainderLower.includes('vacía') ||
+          remainderLower.includes('vacia')
+        ) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'idle' };
+        }
+        if (remainderLower.includes('activa') || remainderLower.includes('active')) {
+          return { kind: 'CLOSE_TERMINALS', count, target: 'active' };
+        }
+        const engine = detectEngineFromText(remainder);
+        if (engine) {
+          return { kind: 'CLOSE_TERMINALS', count, target: engine };
+        }
+        const cleanedRemainder = remainder
+          .replace(/^(?:terminal|terminales|agente|agentes|proceso|sesi[oó]n|de)\s+/i, '')
+          .replace(/[.,;!?]+$/, '')
+          .trim();
+        return { kind: 'CLOSE_TERMINALS', count, target: cleanedRemainder || 'all' };
+      }
+
+      // Check numeric terminals first (single or compound: e.g. "terminal 2", "terminal uno que está vacía")
+      const rawIndices = extractTerminalIndices(rawTarget);
+      if (rawIndices.length > 1) {
+        return {
+          kind: 'CLOSE_TERMINALS',
+          count: rawIndices.length,
+          target: rawIndices.join(', '),
+          targets: rawIndices.map(String),
+        };
+      }
+      if (rawIndices.length === 1 && !detectEngineFromText(rawTarget)) {
+        return { kind: 'CLOSE_TERMINALS', target: String(rawIndices[0]) };
+      }
+
       if (
         targetLower.includes('terminada') ||
         targetLower.includes('finished') ||
@@ -237,7 +263,12 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
       ) {
         return { kind: 'CLOSE_TERMINALS', target: 'finished' };
       }
-      if (targetLower.includes('inactiva') || targetLower.includes('idle')) {
+      if (
+        targetLower.includes('inactiva') ||
+        targetLower.includes('idle') ||
+        targetLower.includes('vacía') ||
+        targetLower.includes('vacia')
+      ) {
         return { kind: 'CLOSE_TERMINALS', target: 'idle' };
       }
       if (
@@ -258,17 +289,15 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
         return { kind: 'CLOSE_TERMINALS', target: 'last' };
       }
 
-      // Check numeric terminal (e.g. "terminal 2", "terminal dos", "panel 1")
-      const numMatch = rawTarget.match(
-        /(?:terminal|pantalla|panel)?\s*(\d+|uno|dos|tres|cuatro|cinco|one|two|three|four|five)$/i
-      );
-      if (numMatch && numMatch[1]) {
-        return { kind: 'CLOSE_TERMINALS', target: String(parseNumberWord(numMatch[1])) };
+      // Check engine directly from rawTarget (e.g. "terminal de antigravity", "antigravity", "grok")
+      const engineTarget = detectEngineFromText(rawTarget);
+      if (engineTarget) {
+        return { kind: 'CLOSE_TERMINALS', target: engineTarget };
       }
 
-      // Clean prefix if it says "terminal Orion" or "agente Orion"
+      // Clean prefix if it says "terminal Orion" or "agente Orion" or "terminal de Orion"
       const cleanedTarget = rawTarget
-        .replace(/^(?:terminal|terminales|agente|agentes|proceso|sesi[oó]n)\s+/i, '')
+        .replace(/^(?:terminal|terminales|agente|agentes|proceso|sesi[oó]n)\s+(?:de\s+)?/i, '')
         .replace(/[.,;!?]+$/, '')
         .trim();
 
@@ -396,15 +425,18 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   }
 
   // 7. Spawn terminals
+  const hasQuestionForCount = /(?<![a-záéíóúñ])(?:cu[aá]ntos?|cu[aá]ntas?|cu[aá]l\s+es\s+la\s+cantidad|qu[eé]\s+cantidad)(?![a-záéíóúñ])/i.test(lower);
   if (
-    /(?:abre|abrir|abriera|abrieras|abriese|abriesen|abrir[ií]a|abrime|ábreme|abrí|abran|abras|crea|crear|crees|creas|levanta|levantar|levantes|inicia|iniciar|inicies|pon|poner|pongas|open|spawn|lanza|lanzar|lances|lanzame|lánzame)/i.test(
-      lower
-    ) &&
-    /(?:terminal|terminales|agente|agentes|consola|consolas)/i.test(lower)
+    !hasQuestionForCount &&
+    OPEN_VERB_RE.test(lower) &&
+    /(?<![a-záéíóúñ])(?:terminal|terminales|agente|agentes|consola|consolas)(?![a-záéíóúñ])/i.test(lower)
   ) {
     let count = 1;
     const countMatch = lower.match(
-      /(?:abre|abrir|abriera|abrieras|abriese|abriesen|abrir[ií]a|abrime|ábreme|abrí|abran|abras|crea|crear|crees|creas|levanta|levantar|levantes|inicia|iniciar|inicies|pon|poner|pongas|open|spawn|lanza|lanzar|lances|lanzame|lánzame)(?:\s+(?:las|los|unas|unos|mis|tus|las\s+siguientes|que\s+abras|que\s+lances))?\s*(\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|one|two|three|four|five)?\s*(?:terminal|terminales|agente|agentes|consola|consolas)/i
+      new RegExp(
+        `(?:${OPEN_VERB_SOURCE})(?:\\s+(?:las|los|unas|unos|mis|tus|las\\s+siguientes|que\\s+abras|que\\s+lances))?\\s*(\\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|one|two|three|four|five)?\\s*(?:terminal|terminales|agente|agentes|consola|consolas)`,
+        'i'
+      )
     );
     if (countMatch && countMatch[1]) {
       count = parseNumberWord(countMatch[1]);
@@ -421,9 +453,6 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
     if (hasSecondAgentRef) {
       count = Math.max(count, 2);
     }
-
-    const detectedEngine = detectEngineFromText(lower);
-    const engine = detectedEngine || 'grok';
 
     // Extract prompt/task with subordinate clause support
     let prompt: string | undefined;
@@ -453,6 +482,25 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
       }
     }
 
+    if (prompt) {
+      // "abre una terminal y ejecuta git status" -> the prompt is the shell command
+      // itself, but "corré los tests" keeps its verb (the object is not a command).
+      const stripped = prompt.replace(
+        /^(?:que\s+)?(?:ejecuta(?:r)?|ejecut[aá]|corre(?:r)?|corr[eé]|lanza(?:r)?|lanz[aá])\s+(?:el\s+comando\s+|la\s+orden\s+|lo\s+siguiente\s*:?\s*)?/i,
+        ''
+      );
+      if (stripped !== prompt && SHELL_COMMAND_HEAD_RE.test(stripped.trim())) {
+        prompt = stripped;
+      }
+      prompt = prompt.trim();
+    }
+
+    // S3: the engine only comes from the open/agent clause — never from words inside
+    // the task prompt ("abre dos terminales para revisar el bug de claude" is powershell).
+    const detectedEngine = detectEngineForOpenClause(lower);
+    const isExplicitAgent = /\b(?:agente|agentes|subagente|subagentes)\b/i.test(lower);
+    const engine = detectedEngine || (isExplicitAgent ? 'grok' : 'powershell');
+
     let prompts: string[] | undefined;
     if (prompt) {
       const split = splitCompoundPrompts(prompt);
@@ -476,11 +524,136 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   return { kind: 'UNKNOWN' };
 }
 
+import {
+  parseHandoffIntent,
+  describeHandoff,
+} from './handoffIntent';
+import {
+  parsePaneLayoutIntent,
+  describePaneLayout,
+} from './paneLayoutIntent';
+import {
+  type WorkspaceSwitchIntent,
+  parseWorkspaceSwitchIntent,
+  parseLaunchThreadIntent,
+} from './workspaceThreadIntent';
+
+export {
+  parseHandoffIntent,
+  describeHandoff,
+  parsePaneLayoutIntent,
+  describePaneLayout,
+  type WorkspaceSwitchIntent,
+  parseWorkspaceSwitchIntent,
+  parseLaunchThreadIntent,
+};
+
 /**
  * Plans a turn deterministically using the heuristic engine.
  */
 export function planTurnHeuristic(input: string): OperatorPlan {
-  const intent = parseOperatorIntent(input);
+  const text = normalizeInputForIntent(input);
+
+  // S4: a negated imperative must never open or close anything.
+  if (isNegatedTerminalImperative(text)) {
+    return {
+      strategy: 'heuristic',
+      actions: [],
+      reply: 'Entendido. No abriré ni cerraré ninguna terminal.',
+    };
+  }
+
+  // S4/Compound: support compound multi-intent commands like "Abre terminal de antigravity y cierra la vacía"
+  const compoundMatch = text.match(
+    /^(.+?)\s+(?:y|luego|despu[eé]s|adem[aá]s)\s+((?:cierra|abre|inicia|crea|lanza|inyecta|resume|narr[aá]|divide|iguala|enfoca)\b.+)$/i
+  );
+  if (compoundMatch) {
+    const part1 = compoundMatch[1].trim();
+    const part2 = compoundMatch[2].trim();
+    // Do not split commands where 'y' introduces a shell command prompt (e.g. "abre terminal y ejecuta npm test")
+    const isShellCommandCarrier = /^(?:ejecuta|corre|pon|haz)\s+/i.test(part2);
+    if (!isShellCommandCarrier) {
+      const plan1 = planTurnHeuristic(part1);
+      const plan2 = planTurnHeuristic(part2);
+      if (plan1.actions.length > 0 && plan2.actions.length > 0) {
+        return {
+          strategy: 'heuristic',
+          actions: [...plan1.actions, ...plan2.actions],
+          reply: `${plan1.reply} ${plan2.reply}`.trim(),
+        };
+      }
+    }
+  }
+
+  // S9: workspace switching, optionally followed by actions requested in the same sentence.
+  const workspaceSwitch = parseWorkspaceSwitchIntent(text);
+  if (workspaceSwitch) {
+    const switchAction: SwitchWorkspaceAction = {
+      type: 'switch_workspace',
+      workspaceQuery: workspaceSwitch.workspaceQuery,
+      ...(workspaceSwitch.viewMode ? { viewMode: workspaceSwitch.viewMode } : {}),
+    };
+    const actions: OperatorPlan['actions'] = [switchAction];
+    let reply = `Cambiando al proyecto o workspace "${workspaceSwitch.workspaceQuery}".`;
+
+    if (workspaceSwitch.tail && workspaceSwitch.tail !== text) {
+      const tailPlan = planTurnHeuristic(workspaceSwitch.tail);
+      actions.push(...tailPlan.actions);
+      if (tailPlan.reply) {
+        reply = `${reply} ${tailPlan.reply}`;
+      }
+    }
+
+    return { strategy: 'heuristic', actions, reply };
+  }
+
+  // S7: multi-agent ODD handoff / terminal-to-terminal piping.
+  const handoff = parseHandoffIntent(text);
+  if (handoff) {
+    return {
+      strategy: 'heuristic',
+      actions: [handoff],
+      reply: describeHandoff(handoff),
+    };
+  }
+
+  // S8: spatial pane control (equalize, split, focus, zoom). An explicit
+  // open/spawn request wins so the layout verbs cannot hijack it.
+  const lowerText = text.toLowerCase();
+  const hasOpenRequest =
+    OPEN_VERB_RE.test(lowerText) &&
+    /(?<![a-záéíóúñ])(?:terminal|terminales|agente|agentes|consola|consolas)(?![a-záéíóúñ])/i.test(
+      lowerText
+    );
+  if (!hasOpenRequest) {
+    const paneLayout = parsePaneLayoutIntent(text);
+    if (paneLayout) {
+      return {
+        strategy: 'heuristic',
+        actions: [paneLayout],
+        reply: describePaneLayout(paneLayout),
+      };
+    }
+  }
+
+  // S3: launch or message a thread through the dispatch family.
+  const launchThread = parseLaunchThreadIntent(text);
+  if (launchThread) {
+    const threadDesc = launchThread.threadId
+      ? launchThread.threadId === 'active'
+        ? 'el hilo actual'
+        : `el hilo "${launchThread.threadId}"`
+      : 'un nuevo hilo';
+    const providerDesc = launchThread.provider ? ` con ${launchThread.provider}` : '';
+    const bodyDesc = launchThread.body ? ` para "${launchThread.body}"` : '.';
+    return {
+      strategy: 'heuristic',
+      actions: [launchThread],
+      reply: `Abriendo ${threadDesc}${providerDesc}${bodyDesc}`,
+    };
+  }
+
+  const intent = parseOperatorIntent(text);
 
   switch (intent.kind) {
     case 'STOP_SPEAKING':
@@ -492,7 +665,7 @@ export function planTurnHeuristic(input: string): OperatorPlan {
 
     case 'SPAWN_TERMINALS': {
       const count = Math.min(8, Math.max(1, intent.count || 1));
-      const engine = (intent.engine?.toLowerCase() || 'grok') as Engine;
+      const engine = (intent.engine?.toLowerCase() || 'powershell') as Engine;
       const prompts = intent.prompts || (intent.prompt ? [intent.prompt] : undefined);
       const promptText = intent.prompt ? ` para "${intent.prompt}"` : '';
 
@@ -512,18 +685,27 @@ export function planTurnHeuristic(input: string): OperatorPlan {
 
     case 'CLOSE_TERMINALS': {
       const target = intent.target || 'finished';
+      const count = intent.count;
       let desc = String(target);
-      if (target === 'finished') desc = 'las terminales terminadas';
-      else if (target === 'idle') desc = 'las terminales inactivas';
-      else if (target === 'all') desc = 'todas las terminales';
-      else if (target === 'active') desc = 'las terminales activas';
+      if (intent.targets && intent.targets.length > 1) {
+        desc = `las terminales ${intent.targets.join(' y ')}`;
+      } else if (target === 'finished') desc = count === 1 ? 'una terminal terminada' : count ? `${count} terminales terminadas` : 'las terminales terminadas';
+      else if (target === 'idle') desc = count === 1 ? 'una terminal inactiva' : count ? `${count} terminales inactivas` : 'las terminales inactivas';
+      else if (target === 'all') desc = count === 1 ? 'una terminal' : count ? `${count} terminales` : 'todas las terminales';
+      else if (target === 'active') desc = count === 1 ? 'una terminal activa' : count ? `${count} terminales activas` : 'las terminales activas';
       else if (target === 'last') desc = 'la última terminal';
       else if (typeof target === 'number' || /^\d+$/.test(String(target))) desc = `la terminal ${target}`;
-      else desc = `el agente ${target}`;
+      else desc = count === 1 ? `una terminal de ${target}` : count ? `${count} terminales de ${target}` : `el agente ${target}`;
 
       return {
         strategy: 'heuristic',
-        actions: [{ type: 'close_terminals', target }],
+        actions: [
+          {
+            type: 'close_terminals',
+            target: intent.targets && intent.targets.length > 1 ? intent.targets.join(', ') : target,
+            ...(count ? { count } : {}),
+          },
+        ],
         reply: `Cerrando ${desc}.`,
       };
     }

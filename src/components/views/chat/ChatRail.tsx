@@ -1,5 +1,15 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ExtendedChatThread } from './types';
+import {
+  isFailedThread,
+  recordShelfUndo,
+  shelfPlacement,
+  sidebarThreads,
+  undoShelf,
+  type ShelfAction,
+  type ShelfThread,
+  type ShelfUndo,
+} from './threadInteraction';
 import {
   PinIcon,
   ArchiveIcon,
@@ -7,8 +17,10 @@ import {
   CheckIcon,
   CloseIcon,
   SearchIcon,
+  ChevronRightIcon,
 } from './ChatIcons';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
+import { BrandLogo } from '../../ui/BrandLogo';
 
 export interface ChatRailProps {
   threads: ExtendedChatThread[];
@@ -19,13 +31,15 @@ export interface ChatRailProps {
   onArchiveThread: (threadId: string) => void;
   onRenameThread: (threadId: string, newTitle: string) => void;
   onRestoredThread?: (threadId: string) => void;
+  onRegenerateTitle?: (threadId: string) => void;
+  titlePending?: boolean;
   disabled?: boolean;
 }
 
 export function formatThreadTrailing(thread: ExtendedChatThread, now = Date.now()): string {
   if (thread.status === 'running') return 'Working';
   if (thread.status === 'waiting') return 'Needs you';
-  if (thread.status === 'error') return 'Failed';
+  if (isFailedThread(thread)) return 'Failed';
   const lastTime = thread.updatedAtUnixMs || thread.createdAtUnixMs || 0;
   if (!lastTime) return 'Draft';
   const elapsed = Math.max(0, now - lastTime);
@@ -33,6 +47,23 @@ export function formatThreadTrailing(thread: ExtendedChatThread, now = Date.now(
   if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m`;
   if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h`;
   return `${Math.floor(elapsed / 86_400_000)}d`;
+}
+
+export function isThreadSettled(thread: { isSettled?: boolean; isWarm?: boolean; sessionState?: string; status?: string }): boolean {
+  if (thread.isSettled !== undefined) return thread.isSettled;
+  const isWarm = Boolean(thread.isWarm || thread.sessionState === 'warm');
+  const isBusy = thread.status === 'running' || thread.status === 'waiting' || thread.status === 'error';
+  return !isWarm && !isBusy;
+}
+
+function asShelfThread(thread: ExtendedChatThread): ShelfThread {
+  return {
+    id: thread.id,
+    pinned: thread.pinned,
+    status: thread.status,
+    snoozedUntil: thread.snoozedUntil ?? null,
+    settled: Boolean(thread.isSettled),
+  };
 }
 
 export const ChatRail: React.FC<ChatRailProps> = ({
@@ -44,23 +75,28 @@ export const ChatRail: React.FC<ChatRailProps> = ({
   onArchiveThread,
   onRenameThread,
   onRestoredThread,
+  onRegenerateTitle,
+  titlePending = false,
   disabled = false,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [shelfUndo, setShelfUndo] = useState<ShelfUndo | null>(null);
+  const undoRef = useRef<ShelfUndo | null>(null);
+  const listedThreads = useMemo(() => sidebarThreads(threads), [threads]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState('');
   const [showArchivedModal, setShowArchivedModal] = useState(false);
 
   const filteredThreads = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return threads;
-    return threads.filter(
+    if (!q) return listedThreads;
+    return listedThreads.filter(
       (t) =>
         t.title?.toLowerCase().includes(q) ||
         t.provider?.toLowerCase().includes(q) ||
         t.model?.toLowerCase().includes(q)
     );
-  }, [threads, searchQuery]);
+  }, [listedThreads, searchQuery]);
 
   const pinnedThreads = useMemo(
     () => filteredThreads.filter((t) => t.pinned),
@@ -70,6 +106,86 @@ export const ChatRail: React.FC<ChatRailProps> = ({
     () => filteredThreads.filter((t) => !t.pinned),
     [filteredThreads]
   );
+
+  const activeRecentThreads = useMemo(
+    () => recentThreads.filter((t) => !isThreadSettled(t)),
+    [recentThreads]
+  );
+  const workingThreads = useMemo(
+    () => activeRecentThreads.filter((t) => t.status === 'running' || t.status === 'waiting'),
+    [activeRecentThreads]
+  );
+  const snoozedThreads = useMemo(
+    () => activeRecentThreads.filter((t) => typeof t.snoozedUntil === 'number' && t.snoozedUntil > Date.now()),
+    [activeRecentThreads]
+  );
+  const readyThreads = useMemo(
+    () =>
+      activeRecentThreads.filter(
+        (t) =>
+          t.status !== 'running' &&
+          t.status !== 'waiting' &&
+          !(typeof t.snoozedUntil === 'number' && t.snoozedUntil > Date.now()),
+      ),
+    [activeRecentThreads]
+  );
+  const settledThreads = useMemo(
+    () => recentThreads.filter((t) => isThreadSettled(t)),
+    [recentThreads]
+  );
+
+  const [settledOpen, setSettledOpen] = useState<boolean | null>(null);
+  const isSelectedInSettled = selectedThreadId
+    ? settledThreads.some((t) => t.id === selectedThreadId)
+    : false;
+  const isSettledExpanded =
+    settledOpen !== null
+      ? settledOpen
+      : activeRecentThreads.length === 0 || isSelectedInSettled;
+
+  const rememberUndo = (action: ShelfAction, thread: ExtendedChatThread) => {
+    const placement = shelfPlacement(listedThreads.map(asShelfThread), thread.id, Date.now());
+    if (!placement) return;
+    const next = recordShelfUndo(action, thread.id, placement, Date.now());
+    undoRef.current = next;
+    setShelfUndo(next);
+  };
+
+  const runUndo = () => {
+    const current = undoRef.current;
+    const previous = undoShelf(current, Date.now());
+    undoRef.current = null;
+    setShelfUndo(null);
+    if (!current || !previous) return;
+    if (current.action === 'Archive') {
+      onRestoredThread?.(current.threadId);
+      if (previous.shelf === 'pinned') onPinThread(current.threadId, true);
+      return;
+    }
+    if (current.action === 'Pin' || current.action === 'Unpin') {
+      onPinThread(current.threadId, previous.shelf === 'pinned');
+    }
+  };
+
+  useEffect(() => {
+    if (!shelfUndo) return;
+    const timer = window.setTimeout(() => {
+      undoRef.current = null;
+      setShelfUndo(null);
+    }, 5_000);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.shiftKey || event.altKey) return;
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (event.key.toLowerCase() !== 'z') return;
+      event.preventDefault();
+      runUndo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [shelfUndo]);
 
   const startRename = (thread: ExtendedChatThread, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -126,23 +242,27 @@ export const ChatRail: React.FC<ChatRailProps> = ({
         ? 'chat-thread-row__dot chat-thread-row__dot--running'
         : thread.status === 'waiting'
         ? 'chat-thread-row__dot chat-thread-row__dot--waiting'
-        : thread.status === 'error'
+        : isFailedThread(thread)
         ? 'chat-thread-row__dot chat-thread-row__dot--failed'
-        : 'chat-thread-row__dot';
+        : (thread.isWarm || thread.sessionState === 'warm')
+        ? 'chat-thread-row__dot chat-thread-row__dot--warm'
+        : 'chat-thread-row__dot chat-thread-row__dot--settled';
 
     const trailingClass =
       thread.status === 'running'
         ? 'chat-thread-row__trailing chat-thread-row__trailing--running'
         : thread.status === 'waiting'
         ? 'chat-thread-row__trailing chat-thread-row__trailing--waiting'
-        : thread.status === 'error'
+        : isFailedThread(thread)
         ? 'chat-thread-row__trailing chat-thread-row__trailing--failed'
         : 'chat-thread-row__trailing';
+
+    const settled = isThreadSettled(thread);
 
     return (
       <div
         key={thread.id}
-        className={`chat-thread-row ${isSelected ? 'chat-thread-row--selected' : ''}`}
+        className={`chat-thread-row ${isSelected ? 'chat-thread-row--selected' : ''}${settled ? ' chat-thread-row--settled' : ''}`}
         data-thread-id={thread.id}
       >
         <button
@@ -154,19 +274,37 @@ export const ChatRail: React.FC<ChatRailProps> = ({
           title={`${thread.title} (${thread.provider})`}
         >
           <i aria-hidden="true" className={dotClass} />
+          <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title || 'Untitled'}</span>
-          <span aria-hidden="true" className={trailingClass}>
+          <span
+            aria-hidden="true"
+            className={`${trailingClass}${thread.status === 'running' ? ' chat-working-live' : ''}`}
+          >
             {trailingLabel}
           </span>
         </button>
 
         <span className="chat-thread-row__actions">
+          {onRegenerateTitle && isSelected ? (
+            <button
+              type="button"
+              disabled={disabled || titlePending}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (disabled || titlePending) return;
+                onRegenerateTitle(thread.id);
+              }}
+            >
+              Regenerate title
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label={thread.pinned ? `Unpin ${thread.title}` : `Pin ${thread.title}`}
             disabled={disabled}
             onClick={(e) => {
               e.stopPropagation();
+              rememberUndo(thread.pinned ? 'Unpin' : 'Pin', thread);
               onPinThread(thread.id, !thread.pinned);
             }}
             title={thread.pinned ? 'Unpin' : 'Pin to Top'}
@@ -179,6 +317,7 @@ export const ChatRail: React.FC<ChatRailProps> = ({
             disabled={disabled}
             onClick={(e) => {
               e.stopPropagation();
+              rememberUndo('Archive', thread);
               onArchiveThread(thread.id);
             }}
             title="Archive"
@@ -215,7 +354,7 @@ export const ChatRail: React.FC<ChatRailProps> = ({
         </div>
 
         {/* Empty state */}
-        {threads.length === 0 ? (
+        {listedThreads.length === 0 ? (
           <div className="sidebar-empty sidebar-empty--chat" style={{ padding: 'var(--space-4)', textAlign: 'center' }}>
             <p style={{ fontSize: 'var(--text-caption)', color: 'var(--text-secondary)', marginBottom: 'var(--space-3)' }}>
               Thread mode works without a folder. Add one and every thread you start there is a coding session in it.
@@ -223,7 +362,7 @@ export const ChatRail: React.FC<ChatRailProps> = ({
             <button
               type="button"
               className="primary-button"
-              onClick={onNewThread}
+              onClick={() => void onNewThread()}
               disabled={disabled}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
@@ -243,13 +382,70 @@ export const ChatRail: React.FC<ChatRailProps> = ({
               </section>
             )}
 
-            {/* Recent / Other Section */}
-            {recentThreads.length > 0 && (
-              <section className="chat-rail__band" aria-label="Recent threads">
-                {pinnedThreads.length > 0 && <h3 className="chat-rail__band-title">Recent threads</h3>}
-                <section className="chat-thread-list" aria-label="Recent threads">
-                  {recentThreads.map(renderThreadRow)}
+            {workingThreads.length > 0 && (
+              <section className="chat-rail__band" aria-label="Working">
+                <h3 className="chat-rail__band-title">Working</h3>
+                <section className="chat-thread-list" aria-label="Working threads">
+                  {workingThreads.map(renderThreadRow)}
                 </section>
+              </section>
+            )}
+
+            {/* Active Recent Section */}
+            {readyThreads.length > 0 && (
+              <section className="chat-rail__band" aria-label="Active">
+                {pinnedThreads.length > 0 && <h3 className="chat-rail__band-title">Active</h3>}
+                <section className="chat-thread-list" aria-label="Active threads">
+                  {readyThreads.map(renderThreadRow)}
+                </section>
+              </section>
+            )}
+
+            {snoozedThreads.length > 0 && (
+              <section className="chat-rail__band" aria-label="Snoozed">
+                <h3 className="chat-rail__band-title">Snoozed</h3>
+                <section className="chat-thread-list" aria-label="Snoozed threads">
+                  {snoozedThreads.map(renderThreadRow)}
+                </section>
+              </section>
+            )}
+
+            {/* Settled Section */}
+            {settledThreads.length > 0 && (
+              <section className="chat-rail__band chat-rail__band--settled" aria-label="Settled threads">
+                <button
+                  type="button"
+                  className="chat-rail__settled-toggle"
+                  onClick={() => setSettledOpen(!isSettledExpanded)}
+                  aria-expanded={isSettledExpanded}
+                >
+                  <ChevronRightIcon
+                    size={10}
+                    style={{
+                      transform: isSettledExpanded ? 'rotate(90deg)' : 'none',
+                      transition: 'transform 120ms ease',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span className="chat-rail__band-title" style={{ margin: 0, textTransform: 'none' }}>Settled</span>
+                  <span
+                    style={{
+                      marginLeft: 'auto',
+                      fontSize: 'var(--text-badge)',
+                      color: 'var(--text-faint)',
+                      padding: '0 4px',
+                      borderRadius: 'var(--radius-chip)',
+                      background: 'var(--chip-fill)',
+                    }}
+                  >
+                    {settledThreads.length}
+                  </span>
+                </button>
+                {isSettledExpanded && (
+                  <section className="chat-thread-list" aria-label="Settled threads">
+                    {settledThreads.map(renderThreadRow)}
+                  </section>
+                )}
               </section>
             )}
 
@@ -260,6 +456,27 @@ export const ChatRail: React.FC<ChatRailProps> = ({
             )}
           </div>
         )}
+
+        {shelfUndo ? (
+          <div
+            className="chat-rail__undo rounded-card"
+            role="status"
+            style={{
+              margin: '8px',
+              padding: '8px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '8px',
+              border: '1px solid var(--separator)',
+            }}
+          >
+            <span>{shelfUndo.action}</span>
+            <button type="button" className="chrome-button" onClick={runUndo}>
+              Undo
+            </button>
+          </div>
+        ) : null}
 
         {/* Footer: Archived chats trigger */}
         <div style={{ marginTop: 'auto', padding: 'var(--space-2)', borderTop: '1px solid var(--separator)' }}>

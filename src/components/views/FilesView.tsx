@@ -7,9 +7,8 @@ import type {
   FilesPreviewResponse,
   BootstrapResponse,
 } from '../../types';
-import { invokeCommand } from '../../lib/ipc';
+import { invokeCommand, revealFile, openFileDefault } from '../../lib/ipc';
 import { toHex64String, isValidRevision64 } from './files/syntax';
-import { FolderIcon } from './files/FileIcons';
 import { CodeEditorPane, OpenFileTab } from './files/CodeEditorPane';
 import { ChangesView } from './files/ChangesView';
 import { FilesToolbar } from './files/FilesToolbar';
@@ -21,6 +20,10 @@ import {
   consumePendingFilePreview,
   FilePreviewRequest,
 } from '../../lib/filePreviewNav';
+import { externalUrlFromToken, pathCandidateFromToken } from './files/filesLinkUtils';
+import { FilesBreadcrumbs } from './files/FilesBreadcrumbs';
+import { useFilesTabsPersistence } from './files/useFilesTabsPersistence';
+import { FilesEmptyState } from './files/FilesEmptyState';
 import './files.css';
 
 interface ResolvedFileLink {
@@ -33,35 +36,12 @@ interface ResolvedFileLink {
   column?: number | null;
 }
 
-function externalUrlFromToken(text: string): string | null {
-  const trimmed = text.trim().replace(/^['"`(<\[]+|['"`)>\].,;:]+$/g, '');
-  if (!trimmed || /[\s<>]/.test(trimmed)) return null;
-  if (/^https?:\/\//i.test(trimmed) || /^mailto:/i.test(trimmed)) return trimmed;
-  return null;
-}
-
-function pathCandidateFromToken(text: string): string | null {
-  const trimmed = text.trim().replace(/^['"`(<\[]+|['"`)>\].,;]+$/g, '');
-  if (!trimmed || trimmed.length > 4096 || /[\r\n]/.test(trimmed)) return null;
-  if (externalUrlFromToken(trimmed)) return null;
-  if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('./')) return trimmed;
-  return null;
-}
-
 export interface FilesViewProps {
   workspaceId: string | null;
   workspaceName?: string;
   workspaces?: Array<{ id: string; name?: string; displayName?: string }>;
   onSelectWorkspace?: (workspaceId: string) => void;
   initialMode?: 'files' | 'changes';
-}
-
-interface BreadcrumbSegment {
-  name: string;
-  path: string;
-  entryId?: string;
-  isFolder: boolean;
-  isFile: boolean;
 }
 
 export const FilesView: React.FC<FilesViewProps> = ({
@@ -74,7 +54,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const [currentWsId, setCurrentWsId] = useState<string | null>(() => {
     return (
       workspaceId ||
-      (typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null)
+      (typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null)
     );
   });
   const [mode, setMode] = useState<'files' | 'changes'>(initialMode);
@@ -106,7 +86,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   // Auto-select workspace if none is selected
   useEffect(() => {
     if (!currentWsId && workspacesList.length > 0) {
-      const saved = typeof window !== 'undefined' ? localStorage.getItem('bmone.selectedWorkspaceId') : null;
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
       const target = (saved && workspacesList.some((w) => w.id === saved)) ? saved : workspacesList[0].id;
       setCurrentWsId(target);
       onSelectWorkspace?.(target);
@@ -117,7 +97,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
   useEffect(() => {
     if (currentWsId) {
       try {
-        localStorage.setItem('bmone.selectedWorkspaceId', currentWsId);
+        localStorage.setItem('kite.selectedWorkspaceId', currentWsId);
       } catch {}
     }
   }, [currentWsId]);
@@ -238,15 +218,22 @@ export const FilesView: React.FC<FilesViewProps> = ({
     }
   }, [currentWsId, initWorkspaceFiles]);
 
-  // Window Focus Auto-Refresh
+  // Window Focus Auto-Refresh (debounced to avoid blocking when unminimizing)
   useEffect(() => {
+    let timer: any = null;
     const handleFocus = () => {
       if (currentWsId) {
-        void refreshGit(currentWsId);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          void refreshGit(currentWsId);
+        }, 1200);
       }
     };
     window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [currentWsId, refreshGit]);
 
   // Menu State Sync
@@ -402,8 +389,30 @@ export const FilesView: React.FC<FilesViewProps> = ({
             setLoadingContent(false);
             return;
           } catch {
-            // Fall back to text
+            // Fall back to other handlers
           }
+        }
+
+        const isNonTextMediaOrBinary = /\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v|3gp|mp3|wav|ogg|flac|aac|m4a|wma|opus|zip|tar|gz|bz2|xz|7z|rar|iso|dmg|exe|dll|so|dylib|bin|wasm|docx?|xlsx?|pptx?)$/i.test(
+          link.displayName
+        );
+
+        if (isNonTextMediaOrBinary) {
+          const newTab: OpenFileTab = {
+            entryId: link.entryId,
+            name: link.displayName,
+            relativePath: link.relativePath,
+            revision: '',
+            draftText: '',
+            initialText: '',
+            previewData: null,
+            isUnsupportedBinary: true,
+          };
+
+          setOpenFiles((prev) => [...prev, newTab]);
+          setActiveFileId(link.entryId);
+          setLoadingContent(false);
+          return;
         }
 
         try {
@@ -428,7 +437,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
 
           setOpenFiles((prev) => [...prev, newTab]);
           setActiveFileId(link.entryId);
-        } catch (err: unknown) {
+        } catch {
           try {
             const preview = await invokeCommand<FilesPreviewResponse>('read_files_preview', {
               supportedSchemaVersion: 1,
@@ -450,8 +459,20 @@ export const FilesView: React.FC<FilesViewProps> = ({
             setOpenFiles((prev) => [...prev, newTab]);
             setActiveFileId(link.entryId);
           } catch {
-            const errObj = err as { message?: string };
-            setFileError(errObj?.message || `Failed to open file: ${link.displayName}`);
+            // If neither text nor preview worked, open as unsupported binary card with quick actions
+            const newTab: OpenFileTab = {
+              entryId: link.entryId,
+              name: link.displayName,
+              relativePath: link.relativePath,
+              revision: '',
+              draftText: '',
+              initialText: '',
+              previewData: null,
+              isUnsupportedBinary: true,
+            };
+
+            setOpenFiles((prev) => [...prev, newTab]);
+            setActiveFileId(link.entryId);
           }
         }
       } catch (err: unknown) {
@@ -476,6 +497,22 @@ export const FilesView: React.FC<FilesViewProps> = ({
     [currentWsId, openCandidate]
   );
 
+  const handleRevealFile = useCallback(
+    (relPath: string) => {
+      if (!currentWsId) return;
+      void revealFile({ workspaceId: currentWsId, relativePath: relPath });
+    },
+    [currentWsId]
+  );
+
+  const handleOpenDefaultApp = useCallback(
+    (relPath: string) => {
+      if (!currentWsId) return;
+      void openFileDefault({ workspaceId: currentWsId, relativePath: relPath });
+    },
+    [currentWsId]
+  );
+
   // Listen to navigation bus for file preview requests (from terminal, chat, etc.)
   useEffect(() => {
     const pending = consumePendingFilePreview();
@@ -495,6 +532,19 @@ export const FilesView: React.FC<FilesViewProps> = ({
       window.removeEventListener(OPEN_RIGHT_DOCK_FILE_EVENT, handleFilePreviewEvent);
     };
   }, [openCandidate]);
+
+  // Hook for restoring & persisting tabs & active file across sessions
+  useFilesTabsPersistence({
+    currentWsId,
+    resourceId,
+    openFiles,
+    activeFileId,
+    isEditMode,
+    setIsEditMode,
+    setOpenFiles,
+    setActiveFileId,
+    openCandidate,
+  });
 
   const handleCloseTab = (entryIdToClose: string) => {
     setOpenFiles((prev) => {
@@ -565,7 +615,16 @@ export const FilesView: React.FC<FilesViewProps> = ({
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    const handleSaveFileEvent = () => {
+      if (activeTab && isModified && !isSaving) {
+        void handleSave();
+      }
+    };
+    window.addEventListener('kite:save-file', handleSaveFileEvent);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('kite:save-file', handleSaveFileEvent);
+    };
   }, [activeTab, isModified, isSaving, handleSave]);
 
   useEffect(() => {
@@ -599,93 +658,13 @@ export const FilesView: React.FC<FilesViewProps> = ({
     window.addEventListener('pointerup', handlePointerUp);
   };
 
-  // Breadcrumbs
-  const breadcrumbSegments: BreadcrumbSegment[] = useMemo(() => {
-    const rootName = activeWorkspace?.name || (rootEntry ? rootEntry.displayName : 'Workspace');
-    const rootSeg: BreadcrumbSegment = {
-      name: rootName,
-      path: '',
-      entryId: rootEntry?.entryId,
-      isFolder: true,
-      isFile: false,
-    };
-
-    const targetPath = activeTab ? activeTab.relativePath : activeFolderPath;
-    if (!targetPath) return [rootSeg];
-
-    const parts = targetPath.split('/').filter(Boolean);
-    const segs: BreadcrumbSegment[] = [rootSeg];
-
-    let accumulated = '';
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      accumulated = accumulated ? `${accumulated}/${part}` : part;
-      const isLast = i === parts.length - 1;
-      const isFile = isLast && activeTab !== null && activeTab.relativePath === targetPath;
-      const segEntryId = pathToEntryId.get(accumulated);
-
-      segs.push({
-        name: part,
-        path: accumulated,
-        entryId: segEntryId,
-        isFolder: !isFile,
-        isFile,
-      });
-    }
-
-    return segs;
-  }, [activeWorkspace, rootEntry, activeTab, activeFolderPath, pathToEntryId]);
-
-  const handleBreadcrumbClick = (seg: BreadcrumbSegment) => {
-    if (seg.isFile && activeTab) {
-      setActiveFileId(activeTab.entryId);
-      return;
-    }
-    if (seg.path === '') {
-      setActiveFolderPath('');
-      if (rootEntry && !expandedFolders.has(rootEntry.entryId)) {
-        setExpandedFolders((prev) => new Set(prev).add(rootEntry.entryId));
-      }
-      return;
-    }
-    const folderEntryId = seg.entryId || pathToEntryId.get(seg.path);
-    if (folderEntryId) {
-      void handleToggleFolder(folderEntryId, seg.path);
-    }
-  };
-
   if (!currentWsId) {
     return (
-      <div className="files-pane files-empty-state">
-        <FolderIcon size={36} className="files-empty-icon" />
-        <span style={{ fontWeight: 600, fontSize: '13px' }}>Select a workspace to view files</span>
-        {workspacesList.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '12px', width: '100%', maxWidth: '240px' }}>
-            {workspacesList.map((ws) => (
-              <button
-                key={ws.id}
-                type="button"
-                className="diffs-filter-pill active"
-                style={{ justifyContent: 'flex-start', padding: '6px 12px', height: 'auto' }}
-                onClick={() => {
-                  try {
-                    localStorage.setItem('bmone.selectedWorkspaceId', ws.id);
-                  } catch {}
-                  setCurrentWsId(ws.id);
-                  onSelectWorkspace?.(ws.id);
-                }}
-              >
-                <FolderIcon size={13} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ws.name}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <span style={{ fontSize: '11px', color: 'var(--text-secondary, #8b949e)', marginTop: '4px' }}>
-            Add a folder in Code mode to start browsing files
-          </span>
-        )}
-      </div>
+      <FilesEmptyState
+        workspacesList={workspacesList}
+        onSelectWorkspace={onSelectWorkspace}
+        onSetCurrentWsId={setCurrentWsId}
+      />
     );
   }
 
@@ -711,7 +690,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
         onModeChange={setMode}
         onSelectWorkspace={(wsId) => {
           try {
-            localStorage.setItem('bmone.selectedWorkspaceId', wsId);
+            localStorage.setItem('kite.selectedWorkspaceId', wsId);
           } catch {}
           if (onSelectWorkspace) {
             onSelectWorkspace(wsId);
@@ -801,6 +780,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
               onToggleFolder={handleToggleFolder}
               onOpenFile={handleOpenFile}
               onSplitterPointerDown={handleSplitterPointerDown}
+              onRevealFile={handleRevealFile}
+              onOpenDefaultApp={handleOpenDefaultApp}
             />
           )}
 
@@ -808,27 +789,19 @@ export const FilesView: React.FC<FilesViewProps> = ({
           <div className="files-main">
             {/* Hierarchical Breadcrumbs (visible when tree navigation is active) */}
             {showTree && (
-              <nav
-                aria-label="Breadcrumbs"
-                className="files-breadcrumbs"
-              >
-                {breadcrumbSegments.map((seg, idx) => {
-                  const isLast = idx === breadcrumbSegments.length - 1;
-                  return (
-                    <React.Fragment key={seg.path || 'root'}>
-                      {idx > 0 && <span className="files-breadcrumb-sep">/</span>}
-                      <button
-                        type="button"
-                        className={`files-breadcrumb-btn${isLast ? ' active' : ''}`}
-                        onClick={() => handleBreadcrumbClick(seg)}
-                        title={seg.path || seg.name}
-                      >
-                        {seg.name}
-                      </button>
-                    </React.Fragment>
-                  );
-                })}
-              </nav>
+              <FilesBreadcrumbs
+                workspaceName={activeWorkspace?.name}
+                rootEntry={rootEntry}
+                activeTab={activeTab}
+                activeFolderPath={activeFolderPath}
+                pathToEntryId={pathToEntryId}
+                expandedFolders={expandedFolders}
+                onSelectActiveFile={(entryId) => setActiveFileId(entryId)}
+                onSetActiveFolderPath={setActiveFolderPath}
+                onToggleFolder={(folderId, folderPath) => {
+                  void handleToggleFolder(folderId, folderPath);
+                }}
+              />
             )}
 
             <CodeEditorPane
@@ -885,6 +858,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
                   );
                 }
               }}
+              onRevealInExplorer={handleRevealFile}
+              onOpenInDefaultApp={handleOpenDefaultApp}
             />
           </div>
         </div>

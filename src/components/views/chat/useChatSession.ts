@@ -1,20 +1,41 @@
 import { useState, useEffect, useRef } from 'react';
-import type { ChatItem } from '../../../types';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { invokeCommand } from '../../../lib/ipc';
+import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import {
   ChatProvider,
   ChatMode,
   ExtendedChatThread,
-  LiveChatRun,
-  PROVIDER_CATALOG,
   engineToChatProvider,
 } from './types';
-import type { PlanActionPayload } from './ChatPlanPanel';
-import { withTimeout } from './chatSessionUtils';
 import { useChatAttachments } from './hooks/useChatAttachments';
 import { useChatModels } from './hooks/useChatModels';
-import { pollTurnUpdates } from './turnPolling';
+import { useChatAgents } from './hooks/useChatAgents';
+import {
+  applyDraftPatch,
+  createDraftConfig,
+  draftThreadRequest,
+  type ChatConfigPatch,
+  type ChatDraftConfig,
+} from './hooks/useChatDraftConfig';
+import { getSavedSelectedProvider } from './modelPersistence';
+import { holdThreadSelection, registerNewThreadHandler } from '../../../lib/newThreadRequest';
+import {
+  useChatConnectionBindings,
+  readThreadSendBinding,
+  withResolvedSendBindings,
+} from './hooks/useChatConnectionBindings';
+import {
+  useChatGridPersistence,
+  loadChatSummariesWithFallback,
+  loadSavedGrid,
+  loadThreadWithFallback,
+  sortAgentSummariesByTabOrder,
+} from './hooks/useChatGridPersistence';
+import { useChatTurnActions } from './hooks/useChatTurnActions';
+import { useSubagentEvents } from './hooks/useSubagentEvents';
+
+export { readThreadSendBinding, withResolvedSendBindings };
 
 export interface UseChatSessionProps {
   workspaceId: string | null;
@@ -24,6 +45,7 @@ export interface UseChatSessionProps {
   engineLabel?: string;
   threadId?: string | null;
   agents?: any[];
+  ownsNewThreadRequests?: boolean;
   onThreadsChanged?: () => void;
 }
 
@@ -33,29 +55,37 @@ export function useChatSession({
   agentEngine,
   threadId: initialThreadId,
   agents,
+  ownsNewThreadRequests,
   onThreadsChanged,
 }: UseChatSessionProps) {
-  // Grid and Threads State
-  const [gridThreadIds, setGridThreadIds] = useState<string[]>([]);
-  const [focusedThreadId, setFocusedThreadId] = useState<string | null>(null);
+  // Threads State
   const [threadsMap, setThreadsMap] = useState<Record<string, ExtendedChatThread>>({});
   const [knownThreadsList, setKnownThreadsList] = useState<ExtendedChatThread[]>([]);
-  const [isRunning, setIsRunning] = useState<Record<string, boolean>>({});
-  const [liveRuns, setLiveRuns] = useState<LiveChatRun[]>([]);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
+
+  const currentAgent = agentId ? agents?.find((a) => a.id === agentId) : undefined;
 
   const defaultProvider: ChatProvider = (() => {
     if (agentEngine) {
       return engineToChatProvider(agentEngine);
     }
-    if (agentId) {
-      const ag = agents?.find((a) => a.id === agentId);
-      if (ag?.engine) {
-        return engineToChatProvider(ag.engine);
-      }
+    if (currentAgent?.engine) {
+      return engineToChatProvider(currentAgent.engine);
+    }
+    const saved = getSavedSelectedProvider();
+    if (saved && ['claude', 'codex', 'cursor', 'grok', 'opencode', 'antigravity'].includes(saved)) {
+      return saved as ChatProvider;
     }
     return 'antigravity';
   })();
+
+  // Agent surface draft: provider, mode, model and effort chosen before the
+  // first thread exists. An existing thread's own fields take precedence. The
+  // draft inherits the agent profile's default model so the first thread does
+  // not silently reset a configured model to Automatic.
+  const [draftConfig, setDraftConfig] = useState<ChatDraftConfig>(() =>
+    createDraftConfig(defaultProvider, currentAgent?.defaultModel || null)
+  );
 
   // UI state
   const [showHistoryPopover, setShowHistoryPopover] = useState(false);
@@ -78,15 +108,16 @@ export function useChatSession({
 
   const {
     dynamicModelsMap,
+    catalogStateMap,
     isRefreshingModels,
     fetchDynamicModels,
     refreshModels,
   } = useChatModels();
 
+  const { dynamicAgentsMap, ensureDynamicAgents, refreshAgents } = useChatAgents(defaultProvider);
+
   const isMountedRef = useRef(true);
   const activePollRunsRef = useRef<Set<string>>(new Set());
-  const focusedThreadIdRef = useRef(focusedThreadId);
-  focusedThreadIdRef.current = focusedThreadId;
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -95,6 +126,70 @@ export function useChatSession({
       activePollRunsRef.current.clear();
     };
   }, []);
+
+  useSubagentEvents({ setThreadsMap, isMountedRef });
+
+  const {
+    threadWithResolvedBinding,
+    selectThreadConnection,
+  } = useChatConnectionBindings({
+    threadsMap,
+    setThreadsMap,
+    isMountedRef,
+  });
+
+  const {
+    gridThreadIds,
+    setGridThreadIds,
+    focusedThreadId,
+    setFocusedThreadId,
+    persistGrid,
+    persistAgentTabOrder,
+    handleToggleSplit,
+    handleDropThread,
+    handleClosePane,
+  } = useChatGridPersistence({
+    agentId,
+    workspaceId,
+    draftConfig,
+    threadsMap,
+    setThreadsMap,
+    knownThreadsList,
+    setKnownThreadsList,
+    threadWithResolvedBinding,
+    attachmentsMapRef,
+    writeAttachments,
+    isMountedRef,
+  });
+
+  const focusedThreadIdRef = useRef(focusedThreadId);
+  focusedThreadIdRef.current = focusedThreadId;
+
+  const notifyThreadsChanged = () => {
+    window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+    onThreadsChanged?.();
+  };
+
+  const {
+    isRunning,
+    liveRuns,
+    handleApproval,
+    handleCancelTurn,
+    handleSendPrompt,
+    handleUserInputResponse,
+  } = useChatTurnActions({
+    agentId,
+    threadsMap,
+    setThreadsMap,
+    promptMap,
+    setPromptMap,
+    attachmentsMap,
+    writeAttachments,
+    threadWithResolvedBinding,
+    notifyThreadsChanged,
+    isMountedRef,
+    activePollRunsRef,
+  });
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -119,100 +214,40 @@ export function useChatSession({
     };
   }, [stageDroppedAttachments]);
 
-  // Initial Load
+  // Initial Load. When the pane is already showing this thread, a later selection
+  // update must not reload it and replace the thread the session just opened.
   useEffect(() => {
+    if (initialThreadId && focusedThreadIdRef.current === initialThreadId) return;
     void initChatView();
   }, [workspaceId, agentId, initialThreadId]);
-
-  // Periodic poll for live chat runs
-  useEffect(() => {
-    const timer = setInterval(() => {
-      void checkLiveRuns();
-    }, 4000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const checkLiveRuns = async () => {
-    try {
-      const runs = await withTimeout(
-        invokeCommand<LiveChatRun[]>('list_live_chat_runs'),
-        3000,
-        'list_live_chat_runs'
-      );
-      if (isMountedRef.current && Array.isArray(runs)) {
-        setLiveRuns(runs);
-      }
-    } catch {
-      // Ignore background failure or timeout
-    }
-  };
 
   const initChatView = async () => {
     setIsLoadingInitial(true);
     void fetchDynamicModels(defaultProvider, false);
     try {
-      let summaries: ExtendedChatThread[] = [];
-      try {
-        const hist = agentId
-          ? await invokeCommand<{ summaries: ExtendedChatThread[] }>('list_agent_chat_summaries', { agentId })
-          : await invokeCommand<{ summaries: ExtendedChatThread[] }>('list_chat_summaries');
-        if (hist && Array.isArray(hist.summaries)) {
-          summaries = hist.summaries;
-          if (isMountedRef.current) {
-            setKnownThreadsList(summaries);
-          }
-          if (agentId && summaries.length > 0) {
-            const ordered = [...summaries].sort((left, right) => {
-              const leftOrder = (left as { tabOrder?: number }).tabOrder ?? Number.MAX_SAFE_INTEGER;
-              const rightOrder = (right as { tabOrder?: number }).tabOrder ?? Number.MAX_SAFE_INTEGER;
-              return leftOrder - rightOrder;
-            });
-            summaries = ordered;
-            void persistAgentTabOrder(ordered.map((thread) => thread.id).filter(Boolean));
-            const first = ordered[0];
-            if (first?.id) {
-              const thread = await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', {
-                agentId,
-                threadId: first.id,
-              });
-              if (isMountedRef.current && thread?.id) {
-                setThreadsMap({ [thread.id]: thread });
-                setGridThreadIds([thread.id]);
-                setFocusedThreadId(thread.id);
-                setIsLoadingInitial(false);
-                return;
-              }
-            }
-          }
-          if (agentId) {
-            if (isMountedRef.current) {
-              setGridThreadIds([]);
-              setFocusedThreadId(null);
-              setIsLoadingInitial(false);
-            }
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn('[ChatView] list_chat_summaries notice:', err);
-      }
-
-      if (summaries.length === 0) {
-        try {
-          const raw = localStorage.getItem('kite.chat.summaries.v1');
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              summaries = parsed;
-              if (isMountedRef.current) {
-                setKnownThreadsList(summaries);
-              }
-            }
-          }
-        } catch {}
+      let summaries = await loadChatSummariesWithFallback(agentId);
+      if (isMountedRef.current && summaries.length > 0) {
+        setKnownThreadsList(summaries);
       }
 
       if (agentId) {
+        if (summaries.length > 0) {
+          const ordered = sortAgentSummariesByTabOrder(summaries);
+          summaries = ordered;
+          void persistAgentTabOrder(ordered.map((thread) => thread.id).filter(Boolean));
+          const first = ordered[0];
+          if (first?.id) {
+            const thread = await loadThreadWithFallback(first.id, agentId);
+            if (isMountedRef.current && thread?.id) {
+              const boundThread = threadWithResolvedBinding(thread);
+              setThreadsMap({ [thread.id]: boundThread });
+              setGridThreadIds([thread.id]);
+              setFocusedThreadId(thread.id);
+              setIsLoadingInitial(false);
+              return;
+            }
+          }
+        }
         if (isMountedRef.current) {
           setGridThreadIds([]);
           setFocusedThreadId(null);
@@ -222,63 +257,26 @@ export function useChatSession({
       }
 
       // Fetch saved thread grid
-      let loadedIds: string[] = initialThreadId ? [initialThreadId] : [];
-      let focused: string | null = initialThreadId ?? null;
-      if (!initialThreadId) {
-        try {
-          const gridRes = await invokeCommand<{ grid: { threadIds?: string[]; focusedThreadId?: string } | null }>('load_thread_grid');
-          if (gridRes?.grid?.threadIds && Array.isArray(gridRes.grid.threadIds) && gridRes.grid.threadIds.length > 0) {
-            loadedIds = gridRes.grid.threadIds;
-            focused = gridRes.grid.focusedThreadId ?? loadedIds[0];
-          }
-        } catch (err) {
-          console.warn('[ChatView] load_thread_grid notice:', err);
-        }
-        if (loadedIds.length === 0) {
-          try {
-            const raw = localStorage.getItem('kite.chat.grid.v1');
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              if (parsed?.threadIds && Array.isArray(parsed.threadIds) && parsed.threadIds.length > 0) {
-                loadedIds = parsed.threadIds;
-                focused = parsed.focusedThreadId || loadedIds[0];
-              }
-            }
-          } catch {}
-        }
-      }
+      const { threadIds: loadedIds, focusedThreadId: focused } = await loadSavedGrid(initialThreadId);
 
-      // If there are thread IDs in grid, load them
+      // If there are thread IDs in grid, load them in parallel
       if (loadedIds.length > 0) {
+        const loadedEntries = await Promise.all(
+          loadedIds.map(async (tid) => {
+            const t = await loadThreadWithFallback(tid, agentId);
+            if (t && t.id) return [tid, threadWithResolvedBinding(t)] as const;
+            return null;
+          })
+        );
+
         const loadedMap: Record<string, ExtendedChatThread> = {};
-        for (const tid of loadedIds) {
-          try {
-            const t = agentId
-              ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId: tid })
-              : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
-            if (t && t.id) loadedMap[tid] = t;
-          } catch {
-            // Check localStorage fallback
-            try {
-              const localRaw = localStorage.getItem(`kite.chat.thread.${tid}`);
-              if (localRaw) {
-                const parsed = JSON.parse(localRaw);
-                if (parsed?.id) loadedMap[tid] = parsed;
-              }
-            } catch {}
-          }
-          if (!loadedMap[tid]) {
-            try {
-              const localRaw = localStorage.getItem(`kite.chat.thread.${tid}`);
-              if (localRaw) {
-                const parsed = JSON.parse(localRaw);
-                if (parsed?.id) loadedMap[tid] = parsed;
-              }
-            } catch {}
+        for (const entry of loadedEntries) {
+          if (entry) {
+            loadedMap[entry[0]] = entry[1];
           }
         }
 
-        const validIds = loadedIds.filter((id) => !loadedMap[id] ? false : true);
+        const validIds = loadedIds.filter((id) => Boolean(loadedMap[id]));
         if (isMountedRef.current && validIds.length > 0) {
           setThreadsMap((prev) => ({ ...prev, ...loadedMap }));
           setGridThreadIds(validIds);
@@ -304,89 +302,28 @@ export function useChatSession({
     }
   };
 
-  const persistAgentTabOrder = async (ids: string[]) => {
-    if (!agentId || ids.length === 0) return;
-    const threadIds = [...new Set(ids)].slice(0, 512);
-    try {
-      await invokeCommand('reorder_agent_chat_tabs', {
-        supportedSchemaVersion: 1,
-        agentId,
-        threadIds,
-      });
-    } catch (err) {
-      console.warn('[ChatView] reorder_agent_chat_tabs notice:', err);
-    }
-  };
-
-  const persistGrid = async (ids: string[], focused: string | null) => {
-    if (!focused && ids.length > 0) focused = ids[0];
-    try {
-      localStorage.setItem('kite.chat.grid.v1', JSON.stringify({ threadIds: ids, focusedThreadId: focused }));
-    } catch {}
-    try {
-      await invokeCommand<void>('save_thread_grid', {
-        grid: {
-          schemaVersion: 1,
-          threadIds: ids,
-          focusedThreadId: focused ?? '11111111-1111-4111-8111-111111111111',
-        },
-      });
-    } catch (err) {
-      console.warn('[ChatView] save_thread_grid notice:', err);
-    }
-    await persistAgentTabOrder(ids);
-  };
-
-  useEffect(() => {
-    for (const [id, thread] of Object.entries(threadsMap)) {
-      if (id && thread) {
-        try {
-          localStorage.setItem(`kite.chat.thread.${id}`, JSON.stringify(thread));
-        } catch {}
-      }
-    }
-  }, [threadsMap]);
-
-  useEffect(() => {
-    if (knownThreadsList.length > 0) {
-      try {
-        localStorage.setItem('kite.chat.summaries.v1', JSON.stringify(knownThreadsList));
-      } catch {}
-    }
-  }, [knownThreadsList]);
-
-  const handleStartThreadFromHome = async (
-    promptText: string,
-    provider: ChatProvider,
-    mode: ChatMode,
-    model?: string
-  ) => {
+  const handleStartThreadFromHome = async (promptText: string) => {
+    const request = draftThreadRequest(draftConfig, agentId);
     try {
       const thread = agentId
-        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
-            agentId,
-            provider,
-            mode,
-            model,
-          })
+        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
-            provider,
+            ...request,
             workspaceId: workspaceId ?? null,
-            mode,
-            model,
           });
 
       if (!isMountedRef.current) return;
       const tid = thread.id;
-      setThreadsMap((prev) => ({ ...prev, [tid]: thread }));
-      setKnownThreadsList((prev) => [thread, ...prev.filter((t) => t.id !== tid)]);
+      const boundThread = threadWithResolvedBinding(thread);
+      setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
+      setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
       setGridThreadIds([tid]);
       setFocusedThreadId(tid);
       void persistGrid([tid], tid);
       notifyThreadsChanged();
 
       setTimeout(() => {
-        void handleSendPrompt(tid, promptText, thread);
+        void handleSendPrompt(tid, promptText, boundThread);
       }, 30);
     } catch (err) {
       console.error('[ChatView] Failed to start thread from Chat Home:', err);
@@ -399,56 +336,103 @@ export function useChatSession({
       if (!custom.detail) return;
       const { taskId, title, description } = custom.detail;
       const prompt = `Solve task [${taskId}]: ${title}\n\n${description}`.trim();
-      void handleStartThreadFromHome(prompt, defaultProvider, 'acceptEdits');
+      void handleStartThreadFromHome(prompt);
     };
     window.addEventListener('kite:open-task-in-chat', handleOpenTask);
     return () => window.removeEventListener('kite:open-task-in-chat', handleOpenTask);
-  }, [defaultProvider]);
+  }, [draftConfig, agentId, workspaceId]);
 
-  const notifyThreadsChanged = () => {
-    window.dispatchEvent(new CustomEvent('kite:threads-changed'));
-    onThreadsChanged?.();
-  };
+  const handleCreateNewThread = async (targetWorkspaceId?: string | null | unknown): Promise<string | undefined> => {
+    const scopeWorkspaceId =
+      typeof targetWorkspaceId === 'string'
+        ? targetWorkspaceId
+        : targetWorkspaceId === null
+        ? null
+        : workspaceId;
+    const latest = createDraftConfig(draftConfig.provider, null, draftConfig.agent ?? null);
 
-  const handleCreateNewThread = async () => {
-    // Deduplicate empty draft threads in the same scope
-    const existingDraft = knownThreadsList.find(
-      (t) =>
-        (agentId ? t.profileId === agentId : (t.workspaceId ?? null) === (workspaceId ?? null)) &&
-        (!t.items || t.items.length === 0 || (t as any).status === 'draft' || !t.title || t.title.toLowerCase().includes('draft') || t.title === 'New Chat')
+    // Reuse the open draft ONLY if the currently focused thread in this pane is already
+    // a blank conversation (zero messages, zero voice turns) in the requested scope.
+    const currentThread = focusedThreadId ? threadsMap[focusedThreadId] : null;
+    const currentScopeMatches = currentThread
+      ? (agentId
+          ? currentThread.profileId === agentId
+          : (currentThread.workspaceId ?? null) === (scopeWorkspaceId ?? null))
+      : false;
+    const isCurrentEmptyDraft = Boolean(
+      currentThread &&
+        currentScopeMatches &&
+        (!currentThread.items || currentThread.items.length === 0) &&
+        currentThread.hasContent !== true &&
+        voiceSessionStore.getThreadVoiceTurns(currentThread.id).length === 0
     );
-    if (existingDraft) {
-      void handleLoadThread(existingDraft.id);
-      return;
+
+    if (isCurrentEmptyDraft && currentThread) {
+      await invokeCommand('update_chat_configuration', {
+        threadId: currentThread.id,
+        provider: latest.provider,
+        model: latest.model,
+        effort: latest.effort,
+        mode: latest.mode,
+        ...(latest.agent ? { agent: latest.agent } : {}),
+      });
+      holdThreadSelection(currentThread.id);
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', { detail: { threadId: currentThread.id, mode: 'chat' } })
+      );
+      if (scopeWorkspaceId) {
+        window.dispatchEvent(
+          new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
+        );
+      }
+      return currentThread.id;
     }
 
     try {
+      const request = draftThreadRequest(latest, agentId);
       const thread = agentId
-        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
-            agentId,
-            provider: defaultProvider,
-            mode: 'acceptEdits',
-          })
+        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
-            provider: defaultProvider,
-            workspaceId: workspaceId ?? null,
-            mode: 'acceptEdits',
+            ...request,
+            workspaceId: scopeWorkspaceId ?? null,
           });
       if (!isMountedRef.current) return;
       const tid = thread.id;
-      setThreadsMap((prev) => ({ ...prev, [tid]: thread }));
-      setKnownThreadsList((prev) => [thread, ...prev.filter((t) => t.id !== tid)]);
+      const boundThread = threadWithResolvedBinding(thread);
+      holdThreadSelection(tid);
+      setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
+      setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
 
       const nextGrid = [tid];
       setGridThreadIds(nextGrid);
       setFocusedThreadId(tid);
       void persistGrid(nextGrid, tid);
       setShowHistoryPopover(false);
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
+      );
+      if (scopeWorkspaceId) {
+        window.dispatchEvent(
+          new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
+        );
+      }
       notifyThreadsChanged();
+      return tid;
     } catch (err) {
       console.error('[ChatView] Failed to create new chat:', err);
+      return undefined;
     }
   };
+
+  const createNewThreadRef = useRef(handleCreateNewThread);
+  createNewThreadRef.current = handleCreateNewThread;
+
+  useEffect(() => {
+    if (!ownsNewThreadRequests) return;
+    return registerNewThreadHandler((requestedWorkspaceId) => {
+      void createNewThreadRef.current(requestedWorkspaceId);
+    });
+  }, [ownsNewThreadRequests]);
 
   const handleLoadThread = async (threadId: string) => {
     try {
@@ -456,13 +440,14 @@ export function useChatSession({
         ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId })
         : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId });
       if (!isMountedRef.current) return;
-      setThreadsMap((prev) => ({ ...prev, [threadId]: thread }));
+      const boundThread = threadWithResolvedBinding(thread);
+      setThreadsMap((prev) => ({ ...prev, [threadId]: boundThread }));
       setKnownThreadsList((prev) => {
         const found = prev.find((t) => t.id === threadId);
         if (found) {
-          return prev.map((t) => (t.id === threadId ? thread : t));
+          return prev.map((t) => (t.id === threadId ? boundThread : t));
         }
-        return [thread, ...prev];
+        return [boundThread, ...prev];
       });
       if (!gridThreadIds.includes(threadId)) {
         const nextGrid = [threadId];
@@ -476,87 +461,6 @@ export function useChatSession({
     } catch (err) {
       console.error('[ChatView] Failed to load chat thread:', err);
     }
-  };
-
-  const handleToggleSplit = async () => {
-    if (gridThreadIds.length > 1) {
-      const single = focusedThreadId ? [focusedThreadId] : gridThreadIds.slice(0, 1);
-      setGridThreadIds(single);
-      void persistGrid(single, focusedThreadId);
-    } else {
-      const existingCandidate = knownThreadsList.find((t) => !gridThreadIds.includes(t.id));
-      if (existingCandidate) {
-        const nextGrid = [...gridThreadIds, existingCandidate.id];
-        setGridThreadIds(nextGrid);
-        void persistGrid(nextGrid, focusedThreadId);
-      } else {
-        try {
-          const newThread = agentId
-            ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
-                agentId,
-                provider: defaultProvider,
-                mode: 'acceptEdits',
-              })
-            : await invokeCommand<ExtendedChatThread>('create_general_chat', {
-                provider: defaultProvider,
-                workspaceId: workspaceId ?? null,
-                mode: 'acceptEdits',
-              });
-          if (!isMountedRef.current) return;
-          setThreadsMap((prev) => ({ ...prev, [newThread.id]: newThread }));
-          setKnownThreadsList((prev) => [newThread, ...prev]);
-          const nextGrid = [...gridThreadIds, newThread.id];
-          setGridThreadIds(nextGrid);
-          void persistGrid(nextGrid, focusedThreadId);
-        } catch (err) {
-          console.error('[ChatView] Failed to split with new chat:', err);
-        }
-      }
-    }
-  };
-
-  const handleDropThread = (
-    targetThreadId: string,
-    droppedThreadId: string,
-    position: 'before' | 'replace' | 'after'
-  ) => {
-    if (targetThreadId === droppedThreadId && position === 'replace') return;
-    if (position === 'replace') {
-      const nextGrid = gridThreadIds.map((id) => (id === targetThreadId ? droppedThreadId : id));
-      setGridThreadIds(nextGrid);
-      setFocusedThreadId(droppedThreadId);
-      void persistGrid(nextGrid, droppedThreadId);
-    } else if (position === 'before') {
-      const filtered = gridThreadIds.filter((id) => id !== droppedThreadId);
-      const targetIdx = filtered.indexOf(targetThreadId);
-      if (targetIdx !== -1 && filtered.length < 6) {
-        filtered.splice(targetIdx, 0, droppedThreadId);
-        setGridThreadIds(filtered);
-        setFocusedThreadId(droppedThreadId);
-        void persistGrid(filtered, droppedThreadId);
-      }
-    } else if (position === 'after') {
-      const filtered = gridThreadIds.filter((id) => id !== droppedThreadId);
-      const targetIdx = filtered.indexOf(targetThreadId);
-      if (targetIdx !== -1 && filtered.length < 6) {
-        filtered.splice(targetIdx + 1, 0, droppedThreadId);
-        setGridThreadIds(filtered);
-        setFocusedThreadId(droppedThreadId);
-        void persistGrid(filtered, droppedThreadId);
-      }
-    }
-  };
-
-  const handleClosePane = (threadId: string) => {
-    for (const item of attachmentsMapRef.current[threadId] || []) {
-      void invokeCommand('release_chat_attachment', { threadId, resourceId: item.resourceId });
-    }
-    writeAttachments(threadId, []);
-    const remaining = gridThreadIds.filter((id) => id !== threadId);
-    setGridThreadIds(remaining);
-    const nextFocused = remaining.length > 0 ? (focusedThreadId === threadId ? remaining[0] : focusedThreadId) : null;
-    setFocusedThreadId(nextFocused);
-    void persistGrid(remaining, nextFocused);
   };
 
   const handlePinThread = async (threadId: string, e: React.MouseEvent) => {
@@ -626,16 +530,62 @@ export function useChatSession({
     }
   };
 
+  const handleDraftConfigChange = (patch: ChatConfigPatch) => {
+    if (patch.provider) {
+      void ensureDynamicAgents(patch.provider);
+      void fetchDynamicModels(patch.provider);
+    }
+    setDraftConfig((prev) => applyDraftPatch(prev, patch));
+  };
+
   const handleUpdateConfig = async (
     threadId: string,
-    patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null }
+    patch: {
+      provider?: ChatProvider;
+      mode?: ChatMode;
+      model?: string | null;
+      effort?: string | null;
+      plan?: boolean;
+      agent?: string | null;
+      connectionId?: string | null;
+      workspaceId?: string | null;
+    }
   ) => {
     const thread = threadsMap[threadId];
     if (!thread) return;
-    const provider = patch.provider ?? thread.provider;
-    const mode = patch.mode ?? thread.mode;
-    const model = patch.model !== undefined ? patch.model : thread.model;
-    const effort = patch.effort !== undefined ? patch.effort : thread.effort;
+    const currentConfig: ChatDraftConfig = {
+      provider: thread.provider,
+      mode: thread.mode,
+      model: thread.model ?? null,
+      effort: thread.effort ?? null,
+      agent: (thread as any).agent || (thread as any).workMode || null,
+    };
+    const { provider, mode, model, effort, agent } = applyDraftPatch(currentConfig, patch);
+    const providerChanged = provider !== thread.provider;
+    const connectionOnly =
+      patch.connectionId !== undefined &&
+      patch.provider === undefined &&
+      patch.mode === undefined &&
+      patch.model === undefined &&
+      patch.effort === undefined &&
+      patch.plan === undefined &&
+      patch.agent === undefined &&
+      patch.workspaceId === undefined;
+
+    if (patch.connectionId !== undefined) {
+      await selectThreadConnection(threadId, patch.connectionId);
+    }
+    if (providerChanged) {
+      void ensureDynamicAgents(provider);
+      void fetchDynamicModels(provider);
+      // A binding belonged to the previous provider, so it is cleared before
+      // the new provider's verified connection, if any, is resolved.
+      await selectThreadConnection(threadId, null);
+    }
+    if (connectionOnly) {
+      setActiveDropdown(null);
+      return;
+    }
 
     try {
       let updated = await invokeCommand<ExtendedChatThread>('update_chat_configuration', {
@@ -643,7 +593,11 @@ export function useChatSession({
         provider,
         mode,
         model,
+        effort: effort ?? null,
+        plan: patch.plan !== undefined ? patch.plan : thread.plan,
+        agent: agent ?? (thread as any).agent ?? (thread as any).workMode,
         providerOptions: effort ? [{ id: 'effort', value: effort }] : undefined,
+        workspaceId: patch.workspaceId !== undefined ? patch.workspaceId : (thread.workspaceId ?? null),
       });
       if (agentId && (patch.provider !== undefined || patch.model !== undefined)) {
         updated = await invokeCommand<ExtendedChatThread>('set_agent_chat_model', {
@@ -663,14 +617,19 @@ export function useChatSession({
         });
       }
       if (!isMountedRef.current) return;
+      const mergedThread = threadWithResolvedBinding({
+        ...updated,
+        effort: effort ?? updated.effort,
+      });
       setThreadsMap((prev) => ({
         ...prev,
-        [threadId]: { ...updated, effort: effort ?? updated.effort },
+        [threadId]: mergedThread,
       }));
+      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? mergedThread : t)));
+      notifyThreadsChanged();
 
-      if (PROVIDER_CATALOG[provider]?.isDynamic) {
-        void fetchDynamicModels(provider);
-      }
+      void fetchDynamicModels(provider);
+      void ensureDynamicAgents(provider);
     } catch (err) {
       console.error('[ChatView] update_chat_configuration error:', err);
     } finally {
@@ -678,150 +637,9 @@ export function useChatSession({
     }
   };
 
-  const handleApproval = async (
-    threadId: string,
-    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
-    requestId: string
-  ) => {
-    try {
-      const updated = await invokeCommand<ExtendedChatThread>('respond_chat_approval', {
-        threadId,
-        decision,
-        requestId,
-      });
-      if (isMountedRef.current) {
-        setThreadsMap((prev) => ({ ...prev, [threadId]: updated }));
-      }
-    } catch (err) {
-      console.error('[ChatView] respond_chat_approval error:', err);
-    }
-  };
-
-  const handleCancelTurn = async (threadId: string) => {
-    try {
-      activePollRunsRef.current.clear();
-      if (agentId) {
-        await invokeCommand<void>('cancel_agent_chat_turn', { threadId });
-      } else {
-        await invokeCommand<void>('cancel_chat_turn', { threadId });
-      }
-      if (!isMountedRef.current) return;
-      setIsRunning((prev) => ({ ...prev, [threadId]: false }));
-      setThreadsMap((prev) => {
-        const t = prev[threadId];
-        return t ? { ...prev, [threadId]: { ...t, status: 'idle' } } : prev;
-      });
-    } catch (err) {
-      console.error('[ChatView] cancel_chat_turn error:', err);
-    }
-  };
-
-  const handleSendPrompt = async (
-    threadId: string,
-    overridePrompt?: string,
-    overrideThread?: ExtendedChatThread,
-    planAction?: PlanActionPayload
-  ): Promise<boolean> => {
-    const thread = overrideThread || threadsMap[threadId];
-    const promptText = (overridePrompt !== undefined ? overridePrompt : promptMap[threadId] || '').trim();
-    const currentAttachments = attachmentsMap[threadId] || [];
-
-    if ((!promptText && currentAttachments.length === 0) || !thread || isRunning[threadId]) return false;
-
-    setPromptMap((prev) => ({ ...prev, [threadId]: '' }));
-    writeAttachments(threadId, []);
-
-    const userItem: ChatItem = {
-      id: `u-${Date.now()}`,
-      kind: 'user',
-      text: promptText,
-      title: null,
-      detail: null,
-      status: 'completed',
-      streaming: false,
-      exitCode: null,
-      createdAtUnixMs: Date.now(),
-      attachments: currentAttachments,
-    };
-
-    setThreadsMap((prev) => {
-      const t = prev[threadId] || thread;
-      return { ...prev, [threadId]: { ...t, items: [...t.items, userItem], status: 'running' } };
-    });
-    setIsRunning((prev) => ({ ...prev, [threadId]: true }));
-
-    try {
-      let res: { schemaVersion: number; runId: string; thread: ExtendedChatThread };
-
-      if (agentId) {
-        res = await invokeCommand('start_agent_chat_turn', {
-          agentId,
-          threadId,
-          prompt: promptText,
-          mode: thread.mode,
-          provider: thread.provider,
-          attachments: currentAttachments,
-          planAction,
-        });
-      } else {
-        res = await invokeCommand('start_chat_turn', {
-          threadId,
-          prompt: promptText,
-          mode: thread.mode,
-          provider: thread.provider,
-          attachments: currentAttachments,
-          planAction,
-        });
-      }
-
-      if (!isMountedRef.current) return true;
-      activePollRunsRef.current.add(res.runId);
-      setThreadsMap((prev) => ({ ...prev, [threadId]: res.thread }));
-      if (res.thread?.status === 'idle') {
-        setIsRunning((prev) => ({ ...prev, [threadId]: false }));
-      }
-      notifyThreadsChanged();
-      void pollTurnUpdates({
-        runId: res.runId,
-        threadId,
-        afterSeq: 0,
-        agentId,
-        isMountedRef,
-        activePollRunsRef,
-        setThreadsMap,
-        setIsRunning,
-        notifyThreadsChanged,
-      });
-      return true;
-    } catch (err: any) {
-      for (const item of currentAttachments) {
-        void invokeCommand('release_chat_attachment', { threadId, resourceId: item.resourceId });
-      }
-      console.error('[ChatView] start turn error:', err);
-      if (!isMountedRef.current) return false;
-      setIsRunning((prev) => ({ ...prev, [threadId]: false }));
-      const errItem: ChatItem = {
-        id: `err-${Date.now()}`,
-        kind: 'error',
-        text: err?.message || 'Failed to start chat turn. Ensure provider CLI is installed.',
-        title: 'Execution Error',
-        detail: null,
-        status: 'failed',
-        streaming: false,
-        exitCode: 1,
-        createdAtUnixMs: Date.now(),
-        attachments: [],
-      };
-      setThreadsMap((prev) => {
-        const t = prev[threadId];
-        return t ? { ...prev, [threadId]: { ...t, items: [...t.items, errItem], status: 'error' } } : prev;
-      });
-      return false;
-    }
-  };
-
   return {
     defaultProvider,
+    draftConfig,
     gridThreadIds,
     focusedThreadId,
     threadsMap,
@@ -841,6 +659,10 @@ export function useChatSession({
     setPromptMap,
     attachmentsMap,
     dynamicModelsMap,
+    catalogStateMap,
+    dynamicAgentsMap,
+    ensureDynamicAgents,
+    refreshAgents,
     isRefreshingModels,
     refreshModels,
     setFocusedThreadId,
@@ -854,6 +676,7 @@ export function useChatSession({
     handlePinThread,
     handleArchiveThread,
     handleRenameThread,
+    handleDraftConfigChange,
     handleUpdateConfig,
     handleApproval,
     handleCancelTurn,
@@ -862,6 +685,7 @@ export function useChatSession({
     stageDroppedAttachments,
     handleRemoveAttachment,
     handleSendPrompt,
+    handleUserInputResponse,
     setKnownThreadsList,
     persistAgentTabOrder,
   };

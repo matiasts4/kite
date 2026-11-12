@@ -57,7 +57,7 @@ fn derive_user_bound_key() -> [u8; 32] {
 }
 
 /// Encrypts plaintext bytes using a keystream derived from the user-bound key.
-fn encrypt_secret(plain: &str) -> String {
+pub(crate) fn encrypt_secret(plain: &str) -> String {
     let key = derive_user_bound_key();
     let plain_bytes = plain.as_bytes();
     let mut cipher = Vec::with_capacity(plain_bytes.len());
@@ -93,7 +93,7 @@ fn encrypt_secret(plain: &str) -> String {
 }
 
 /// Decrypts ciphertext string using the user-bound key.
-fn decrypt_secret(cipher_b64: &str) -> Option<String> {
+pub(crate) fn decrypt_secret(cipher_b64: &str) -> Option<String> {
     let trimmed = cipher_b64.trim();
     if trimmed.is_empty() {
         return None;
@@ -163,47 +163,156 @@ pub fn ensure_credentials_table() {
     );
 }
 
-/// Reads a stored credential from the SQLite vault
+/// Sibling sqlite path (synchronizes Kite Code <-> Kite Code Dev vaults)
+fn sibling_db_path() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
+    let sibling_folder = if cfg!(debug_assertions) {
+        "Kite Code"
+    } else {
+        "Kite Code Dev"
+    };
+    let path = std::path::PathBuf::from(base)
+        .join(sibling_folder)
+        .join("kite.sqlite");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Reads a stored credential from the SQLite vault (with fallback to sibling build vault and shared connection registry)
 pub fn get_vault_credential(provider: &str) -> Option<String> {
     ensure_credentials_table();
-    let conn = db_connection().lock().unwrap();
-    let row: Option<String> = conn
-        .query_row(
-            "SELECT ciphertext FROM credentials_vault WHERE provider = ?1",
-            params![provider],
-            |r| r.get(0),
-        )
-        .ok();
+    let direct = {
+        let conn = db_connection().lock().unwrap();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT ciphertext FROM credentials_vault WHERE provider = ?1",
+                params![provider],
+                |r| r.get(0),
+            )
+            .ok();
 
-    row.and_then(|cipher| decrypt_secret(&cipher))
-        .filter(|k| !k.trim().is_empty())
+        row.and_then(|cipher| decrypt_secret(&cipher))
+            .filter(|k| !k.trim().is_empty())
+    };
+
+    if direct.is_some() {
+        return direct;
+    }
+
+    if cfg!(test) {
+        return None;
+    }
+
+    // Fallback 1: Check sibling build vault (Kite Code <-> Kite Code Dev)
+    if let Some(sib_path) = sibling_db_path() {
+        if let Ok(sib_conn) = rusqlite::Connection::open(&sib_path) {
+            let sib_cipher: Option<String> = sib_conn
+                .query_row(
+                    "SELECT ciphertext FROM credentials_vault WHERE provider = ?1",
+                    params![provider],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(plain) = sib_cipher
+                .and_then(|c| decrypt_secret(&c))
+                .filter(|k| !k.trim().is_empty())
+            {
+                let _ = set_vault_credential(provider, &plain);
+                return Some(plain);
+            }
+        }
+    }
+
+    // Fallback 2: Check shared ConnectionRegistry (%APPDATA%\Kite Code\connections\registry.sqlite)
+    if let Ok(registry) = crate::connections::ConnectionRegistry::open() {
+        let conn_id = crate::connections::connection_id_for(
+            provider,
+            "api_key",
+            &crate::connections::AccountIdentity::default(),
+        );
+        if let Some(secret) = registry.get_secret(&conn_id).filter(|k| !k.trim().is_empty()) {
+            let _ = set_vault_credential(provider, &secret);
+            return Some(secret);
+        }
+    }
+
+    None
 }
 
 /// Stores a credential into the SQLite vault with user-bound encryption
 pub fn set_vault_credential(provider: &str, key: &str) -> Result<(), String> {
     ensure_credentials_table();
     let trimmed = key.trim();
-    let conn = db_connection().lock().unwrap();
+    let now = now_ms();
 
-    if trimmed.is_empty() {
-        let _ = conn.execute(
-            "DELETE FROM credentials_vault WHERE provider = ?1",
-            params![provider],
-        );
-        return Ok(());
+    {
+        let conn = db_connection().lock().unwrap();
+        if trimmed.is_empty() {
+            let _ = conn.execute(
+                "DELETE FROM credentials_vault WHERE provider = ?1",
+                params![provider],
+            );
+        } else {
+            let cipher = encrypt_secret(trimmed);
+            conn.execute(
+                "INSERT INTO credentials_vault (provider, ciphertext, updated_at_unix_ms)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(provider) DO UPDATE SET
+                    ciphertext = excluded.ciphertext,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms",
+                params![provider, cipher, now],
+            )
+            .map_err(|e| format!("Failed to save credential for '{provider}': {e}"))?;
+        }
     }
 
-    let cipher = encrypt_secret(trimmed);
-    let now = now_ms();
-    conn.execute(
-        "INSERT INTO credentials_vault (provider, ciphertext, updated_at_unix_ms)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(provider) DO UPDATE SET
-            ciphertext = excluded.ciphertext,
-            updated_at_unix_ms = excluded.updated_at_unix_ms",
-        params![provider, cipher, now],
-    )
-    .map_err(|e| format!("Failed to save credential for '{provider}': {e}"))?;
+    // Mirror credential changes into sibling build database if present
+    if let Some(sib_path) = sibling_db_path() {
+        if let Ok(sib_conn) = rusqlite::Connection::open(&sib_path) {
+            let _ = sib_conn.execute(
+                "CREATE TABLE IF NOT EXISTS credentials_vault (
+                    provider TEXT PRIMARY KEY,
+                    ciphertext TEXT NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL
+                )",
+                [],
+            );
+            if trimmed.is_empty() {
+                let _ = sib_conn.execute(
+                    "DELETE FROM credentials_vault WHERE provider = ?1",
+                    params![provider],
+                );
+            } else {
+                let cipher = encrypt_secret(trimmed);
+                let _ = sib_conn.execute(
+                    "INSERT INTO credentials_vault (provider, ciphertext, updated_at_unix_ms)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(provider) DO UPDATE SET
+                        ciphertext = excluded.ciphertext,
+                        updated_at_unix_ms = excluded.updated_at_unix_ms",
+                    params![provider, cipher, now],
+                );
+            }
+        }
+    }
+
+    // Also mirror deletions into shared connection registry to prevent resurrection
+    if trimmed.is_empty() {
+        if let Ok(mut registry) = crate::connections::ConnectionRegistry::open() {
+            let conn_id = crate::connections::connection_id_for(
+                provider,
+                "api_key",
+                &crate::connections::AccountIdentity::default(),
+            );
+            let _ = registry.remove_secret(&conn_id);
+        }
+    }
 
     Ok(())
 }
@@ -217,20 +326,41 @@ pub fn remove_vault_credential(provider: &str) -> Result<(), String> {
         params![provider],
     )
     .map_err(|e| format!("Failed to delete credential for '{provider}': {e}"))?;
+
+    if let Some(sib_path) = sibling_db_path() {
+        if let Ok(sib_conn) = rusqlite::Connection::open(&sib_path) {
+            let _ = sib_conn.execute(
+                "DELETE FROM credentials_vault WHERE provider = ?1",
+                params![provider],
+            );
+        }
+    }
+
+    if let Ok(mut registry) = crate::connections::ConnectionRegistry::open() {
+        let conn_id = crate::connections::connection_id_for(
+            provider,
+            "api_key",
+            &crate::connections::AccountIdentity::default(),
+        );
+        let _ = registry.remove_secret(&conn_id);
+    }
+
     Ok(())
 }
 
 /// Environment variable names associated with each provider
-fn provider_env_vars(provider: &str) -> &'static [&'static str] {
+pub fn provider_env_vars(provider: &str) -> &'static [&'static str] {
     match provider {
         "deepseek" => &["DEEPSEEK_API_KEY"],
         "grok" => &["GROK_API_KEY", "XAI_API_KEY"],
         "grok_transcription" => &["GROK_TRANSCRIPTION_API_KEY", "GROK_API_KEY", "XAI_API_KEY"],
-        "opencode" => &["OPENCODE_API_KEY", "OPENCODE_GO_AUTH_COOKIE"],
+        "opencode" => &["OPENCODE_API_KEY"],
         "vercel" => &["VERCEL_API_KEY", "VERCEL_AI_GATEWAY_TOKEN"],
         "cloudflare" => &["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_AUTH_TOKEN"],
         "cloudflare_account_id" => &["CLOUDFLARE_ACCOUNT_ID"],
+        "elevenlabs" => &["ELEVENLABS_API_KEY", "XI_API_KEY"],
         "gemini" => &["GEMINI_API_KEY"],
+        "antigravity" => &[],
         "kimi" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
         "claude" => &["CLAUDE_CODE_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
         "codex" => &["CODEX_ACCESS_TOKEN", "CODEX_TOKEN", "OPENAI_API_KEY"],
@@ -238,21 +368,34 @@ fn provider_env_vars(provider: &str) -> &'static [&'static str] {
     }
 }
 
-/// Resolves an API key for any provider following the 3-tier hierarchy:
-/// 1. User Vault (SQLite)
-/// 2. Environment Variables (.env / OS)
-/// 3. Returns None (caller can check local CLI if applicable)
-pub fn resolve_provider_credential(provider: &str) -> Option<(String, CredentialSource)> {
+/// Resolves an API key using injected vault/env lookup functions so caller
+/// isolation is deterministic in production and tests.
+/// Antigravity and Gemini are strictly isolated: Antigravity Google OAuth accounts
+/// must not silently inherit a separate `gemini` API key override.
+pub fn resolve_provider_credential_with(
+    provider: &str,
+    vault_lookup: &dyn Fn(&str) -> Option<String>,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, CredentialSource)> {
     // 1. User Vault
-    if let Some(key) = get_vault_credential(provider) {
+    if let Some(key) = vault_lookup(provider) {
         if !key.trim().is_empty() {
             return Some((key, CredentialSource::Vault));
         }
     }
 
+    // Fallbacks for linked providers (excluding cross-provider gemini <-> antigravity)
+    if provider == "grok_transcription" {
+        if let Some(key) = vault_lookup("grok") {
+            if !key.trim().is_empty() {
+                return Some((key, CredentialSource::Vault));
+            }
+        }
+    }
+
     // 2. Environment Variables
     for &var_name in provider_env_vars(provider) {
-        if let Ok(val) = std::env::var(var_name) {
+        if let Some(val) = env_lookup(var_name) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return Some((trimmed.to_string(), CredentialSource::Env));
@@ -261,6 +404,24 @@ pub fn resolve_provider_credential(provider: &str) -> Option<(String, Credential
     }
 
     None
+}
+
+/// Resolves an explicit Antigravity API-key override configured directly for
+/// `antigravity` in Kite Vault (never falling back to `gemini` or ambient env).
+pub fn resolve_explicit_antigravity_api_key() -> Option<String> {
+    get_vault_credential("antigravity").filter(|k| !k.trim().is_empty())
+}
+
+/// Resolves an API key for any provider following the 3-tier hierarchy:
+/// 1. User Vault (SQLite)
+/// 2. Environment Variables (.env / OS)
+/// 3. Returns None (caller can check local CLI if applicable)
+pub fn resolve_provider_credential(provider: &str) -> Option<(String, CredentialSource)> {
+    resolve_provider_credential_with(
+        provider,
+        &get_vault_credential,
+        &|var_name| std::env::var(var_name).ok().filter(|s| !s.trim().is_empty()),
+    )
 }
 
 /// Convenience helper to get just the key string if available
@@ -283,6 +444,7 @@ pub fn get_provider_credentials() -> Value {
         "vercel",
         "cloudflare",
         "cloudflare_account_id",
+        "elevenlabs",
         "gemini",
         "kimi",
         "claude",
@@ -353,11 +515,25 @@ pub fn save_provider_credential(request: Option<Value>) -> Value {
     }
 
     match set_vault_credential(provider, key) {
-        Ok(_) => json!({
-            "success": true,
-            "provider": provider,
-            "preview": mask_key_preview(key)
-        }),
+        Ok(_) => {
+            // The key is already in the vault; also record the chat connection
+            // both builds share. A failure here must not look like a failed
+            // save of the key itself.
+            if let Err(error) = crate::connections::sync_api_key_connection(provider, key) {
+                return json!({
+                    "success": false,
+                    "provider": provider,
+                    "error": format!(
+                        "The key was saved to the local vault, but the shared connection registry could not be updated: {error}"
+                    )
+                });
+            }
+            json!({
+                "success": true,
+                "provider": provider,
+                "preview": mask_key_preview(key)
+            })
+        }
         Err(e) => json!({ "success": false, "error": e }),
     }
 }
@@ -450,5 +626,44 @@ mod tests {
         // Delete
         remove_vault_credential(test_provider).expect("delete failed");
         assert_eq!(get_vault_credential(test_provider), None);
+    }
+
+    #[test]
+    fn test_antigravity_isolated_from_gemini_vault_api_key_fallback() {
+        let lookup_vault = |provider: &str| -> Option<String> {
+            match provider {
+                "gemini" => Some("AIza-gemini-only-key".to_string()),
+                _ => None,
+            }
+        };
+        let lookup_env = |var_name: &str| -> Option<String> {
+            match var_name {
+                "GEMINI_API_KEY" => Some("AIza-ambient-gemini-env".to_string()),
+                _ => None,
+            }
+        };
+
+        assert_eq!(
+            resolve_provider_credential_with("antigravity", &lookup_vault, &lookup_env),
+            None,
+            "antigravity must not inherit unrelated gemini vault API key or ambient GEMINI_API_KEY"
+        );
+        assert_eq!(
+            resolve_provider_credential_with("gemini", &lookup_vault, &lookup_env).map(|(k, _)| k),
+            Some("AIza-gemini-only-key".to_string())
+        );
+
+        let explicit_vault = |provider: &str| -> Option<String> {
+            match provider {
+                "antigravity" => Some("AIza-explicit-agy-key".to_string()),
+                "gemini" => Some("AIza-gemini-only-key".to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            resolve_provider_credential_with("antigravity", &explicit_vault, &lookup_env)
+                .map(|(k, _)| k),
+            Some("AIza-explicit-agy-key".to_string())
+        );
     }
 }

@@ -53,6 +53,7 @@ export interface WorkspaceLayout {
   tabs: WorkspaceTab[];
   activeTabId: string | null;
   fullscreenLeafId: string | null;
+  revision?: number;
 }
 
 export interface AgentEngineDescriptor {

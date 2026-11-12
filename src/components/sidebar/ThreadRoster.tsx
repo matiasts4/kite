@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { motion, MotionGlobalConfig } from 'motion/react';
+import { springs } from '../../motion/standard/tokens';
 import type { Workspace } from '../../types';
 import type { ChatThreadSummary, MenuItem, ContextMenuState } from './types';
 import { formatThreadTrailing } from './types';
@@ -11,10 +13,32 @@ import {
   CheckIcon,
   CloseIcon,
   PencilIcon,
+  SearchIcon,
+  TrashIcon,
 } from './sidebarIcons';
+import { BrandLogo } from '../ui/BrandLogo';
+import {
+  isFailedThread,
+  recordShelfUndo,
+  shelfFor,
+  shelfPlacement,
+  SHELF_UNDO_MS,
+  undoShelf,
+  visibleRosterThreads,
+  type Shelf,
+  type ShelfAction,
+  type ShelfThread,
+  type ShelfUndo,
+} from '../views/chat/threadInteraction';
+
+export type RosterThread = ChatThreadSummary & {
+  sideChat?: boolean;
+  snoozedUntil?: number | null;
+  model?: string | null;
+};
 
 export interface ThreadRosterProps {
-  threads: ChatThreadSummary[];
+  threads: RosterThread[];
   workspaces?: Workspace[];
   selectedThreadId?: string | null;
   onSelectThread?: (id: string) => void;
@@ -23,38 +47,78 @@ export interface ThreadRosterProps {
   onAddWorkspace?: () => void;
   onTogglePinThread?: (id: string, pinned: boolean) => void;
   onRenameThread?: (id: string, newTitle: string) => void;
+  onArchiveThread?: (id: string) => void;
   onDeleteThread?: (id: string) => void;
+  onRestoreThread?: (id: string) => void;
+  onRegenerateTitle?: (threadId: string) => void;
+  titlePending?: boolean;
   onOpenArchivedChats?: () => void;
+  archivedCount?: number;
   onOpenMenu?: (menu: ContextMenuState) => void;
   onOpenContextMenu?: (menu: ContextMenuState) => void;
   contextMenuTargetId?: string | null;
   activeContextMenuTargetId?: string | null;
 }
 
-function getStatusDotClass(status?: string): string {
-  switch (status) {
-    case 'running':
-      return 'chat-thread-row__dot chat-thread-row__dot--running';
-    case 'waiting':
-      return 'chat-thread-row__dot chat-thread-row__dot--waiting';
-    case 'error':
-      return 'chat-thread-row__dot chat-thread-row__dot--failed';
-    default:
-      return 'chat-thread-row__dot';
+function getStatusDotClass(status?: string, sessionState?: string, isWarm?: boolean): string {
+  if (status === 'running') {
+    return 'chat-thread-row__dot chat-thread-row__dot--running';
   }
+  if (status === 'waiting') {
+    return 'chat-thread-row__dot chat-thread-row__dot--waiting';
+  }
+  if (isFailedThread({ status })) {
+    return 'chat-thread-row__dot chat-thread-row__dot--failed';
+  }
+  if (isWarm || sessionState === 'warm') {
+    return 'chat-thread-row__dot chat-thread-row__dot--warm';
+  }
+  return 'chat-thread-row__dot chat-thread-row__dot--settled';
+}
+
+export function isThreadSettled(thread: ChatThreadSummary): boolean {
+  if (thread.isSettled !== undefined) return thread.isSettled;
+  const isWarm = Boolean(thread.isWarm || thread.sessionState === 'warm');
+  const isBusy = thread.status === 'running' || thread.status === 'waiting' || thread.status === 'error';
+  return !isWarm && !isBusy;
+}
+
+function isPinnedThread(thread: RosterThread): boolean {
+  return Boolean(thread.isPinned || thread.pinned);
+}
+
+function asShelfThread(thread: RosterThread, now: number): ShelfThread {
+  const snoozed = typeof thread.snoozedUntil === 'number' && thread.snoozedUntil > now;
+  return {
+    id: thread.id,
+    pinned: isPinnedThread(thread),
+    status: thread.status,
+    snoozedUntil: thread.snoozedUntil ?? null,
+    settled:
+      snoozed || thread.status === 'running' || thread.status === 'waiting'
+        ? false
+        : isThreadSettled(thread),
+  };
+}
+
+function rosterShelf(thread: RosterThread, now: number): Shelf {
+  return shelfFor(asShelfThread(thread, now), now);
+}
+
+function matchesThreadSearch(thread: RosterThread, query: string): boolean {
+  if (!query) return true;
+  return (
+    thread.title.toLowerCase().includes(query) ||
+    (thread.provider ?? '').toLowerCase().includes(query) ||
+    (thread.model ?? '').toLowerCase().includes(query)
+  );
 }
 
 function getTrailingModifier(status?: string): string {
-  switch (status) {
-    case 'running':
-      return ' chat-thread-row__trailing--running';
-    case 'waiting':
-      return ' chat-thread-row__trailing--waiting';
-    case 'error':
-      return ' chat-thread-row__trailing--failed';
-    default:
-      return '';
-  }
+  if (status === 'running') return ' chat-thread-row__trailing--running';
+  if (status === 'waiting') return ' chat-thread-row__trailing--waiting';
+  if (isFailedThread({ status })) return ' chat-thread-row__trailing--failed';
+  return '';
 }
 
 export const ThreadRoster: React.FC<ThreadRosterProps> = ({
@@ -67,8 +131,13 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   onAddWorkspace,
   onTogglePinThread,
   onRenameThread,
+  onArchiveThread,
   onDeleteThread,
+  onRestoreThread,
+  onRegenerateTitle,
+  titlePending = false,
   onOpenArchivedChats,
+  archivedCount,
   onOpenMenu,
   onOpenContextMenu,
   contextMenuTargetId,
@@ -76,6 +145,9 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 }) => {
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [shelfUndo, setShelfUndo] = useState<ShelfUndo | null>(null);
+  const undoRef = useRef<ShelfUndo | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
 
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
@@ -84,11 +156,15 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 
   useEffect(() => {
     setExpandedWorkspaces((prev) => {
+      let changed = false;
       const next = new Set(prev);
       workspaces.forEach((w) => {
-        if (!next.has(w.id)) next.add(w.id);
+        if (!next.has(w.id)) {
+          next.add(w.id);
+          changed = true;
+        }
       });
-      return next;
+      return changed ? next : prev;
     });
   }, [workspaces]);
 
@@ -101,12 +177,35 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 
   const openMenu = onOpenMenu ?? onOpenContextMenu;
   const menuTargetId = contextMenuTargetId ?? activeContextMenuTargetId;
+  const now = Date.now();
+  const query = searchQuery.trim().toLowerCase();
+  const visibleThreads = visibleRosterThreads(threads).filter((thread) => matchesThreadSearch(thread, query));
+  const shelfOf = (thread: RosterThread) => rosterShelf(thread, now);
 
-  const pinnedThreads = threads.filter((t) => t.isPinned || t.pinned);
+  const pinnedThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'pinned');
+  const workingThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'working');
+  const snoozedThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'snoozed');
   const workspaceIds = new Set(workspaces.map((w) => w.id));
-  const otherThreads = threads.filter(
-    (t) => !(t.isPinned || t.pinned) && (!t.workspaceId || !workspaceIds.has(t.workspaceId))
-  );
+  const listedThreads = visibleRosterThreads(threads);
+  const otherThreads = visibleThreads.filter((thread) => {
+    const shelf = shelfOf(thread);
+    return (
+      (shelf === 'active' || shelf === 'settled') &&
+      (!thread.workspaceId || !workspaceIds.has(thread.workspaceId))
+    );
+  });
+
+  const activeOtherThreads = otherThreads.filter((thread) => shelfOf(thread) === 'active');
+  const settledOtherThreads = otherThreads.filter((thread) => shelfOf(thread) === 'settled');
+
+  const [settledOpen, setSettledOpen] = useState<boolean | null>(null);
+  const isSelectedInSettled = selectedThreadId
+    ? settledOtherThreads.some((t) => t.id === selectedThreadId)
+    : false;
+  const isSettledExpanded =
+    settledOpen !== null
+      ? settledOpen
+      : activeOtherThreads.length === 0 || isSelectedInSettled;
 
   const toggleWorkspace = (wsId: string) => {
     setExpandedWorkspaces((prev) => {
@@ -115,6 +214,70 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       else next.add(wsId);
       return next;
     });
+  };
+
+  const rememberUndo = (action: ShelfAction, thread: RosterThread) => {
+    const placement = shelfPlacement(
+      listedThreads.map((item) => asShelfThread(item, now)),
+      thread.id,
+      now,
+    );
+    if (!placement) return;
+    const next = recordShelfUndo(action, thread.id, placement, now);
+    undoRef.current = next;
+    setShelfUndo(next);
+  };
+
+  const runUndo = () => {
+    const current = undoRef.current;
+    const previous = undoShelf(current, Date.now());
+    undoRef.current = null;
+    setShelfUndo(null);
+    if (!current || !previous) return;
+    if (current.action === 'Archive') {
+      onRestoreThread?.(current.threadId);
+      if (previous.shelf === 'pinned') onTogglePinThread?.(current.threadId, true);
+      return;
+    }
+    if (current.action === 'Pin' || current.action === 'Unpin') {
+      onTogglePinThread?.(current.threadId, previous.shelf === 'pinned');
+    }
+  };
+
+  useEffect(() => {
+    if (!shelfUndo) return;
+    const timer = window.setTimeout(() => {
+      undoRef.current = null;
+      setShelfUndo(null);
+    }, SHELF_UNDO_MS);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.shiftKey || event.altKey) return;
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (event.key.toLowerCase() !== 'z') return;
+      event.preventDefault();
+      runUndo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [shelfUndo]);
+
+  const changePin = (thread: RosterThread, pinned: boolean) => {
+    if (!onTogglePinThread) return;
+    rememberUndo(pinned ? 'Pin' : 'Unpin', thread);
+    onTogglePinThread(thread.id, pinned);
+  };
+
+  const archiveThread = (thread: RosterThread) => {
+    if (!onArchiveThread && !onDeleteThread) return;
+    rememberUndo('Archive', thread);
+    if (onArchiveThread) {
+      onArchiveThread(thread.id);
+    } else {
+      onDeleteThread?.(thread.id);
+    }
   };
 
   const handleCommitRename = (e: React.FormEvent) => {
@@ -146,22 +309,41 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
             setRenameTitle(thread.title);
           },
         },
+        onRegenerateTitle
+          ? {
+              id: 'regenerate-title',
+              title: 'Regenerate title',
+              disabled: titlePending,
+              action: () => {
+                if (titlePending) return;
+                onRegenerateTitle(thread.id);
+              },
+            }
+          : null,
         onTogglePinThread
           ? {
               id: 'pin',
               title: isPinned ? 'Unpin' : 'Pin to Top',
               icon: <PinIcon size={12} filled={isPinned} />,
-              action: () => onTogglePinThread(thread.id, !isPinned),
+              action: () => changePin(thread, !isPinned),
             }
           : null,
       ].filter(Boolean) as MenuItem[],
       [
-        onDeleteThread
+        onArchiveThread || onDeleteThread
           ? {
               id: 'archive',
               title: 'Archive',
-              role: 'destructive',
               icon: <ArchiveIcon size={12} />,
+              action: () => archiveThread(thread),
+            }
+          : null,
+        onDeleteThread
+          ? {
+              id: 'delete',
+              title: 'Delete chat',
+              role: 'destructive',
+              icon: <TrashIcon size={12} />,
               action: () => onDeleteThread(thread.id),
             }
           : null,
@@ -229,14 +411,15 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       );
     }
 
-    return (
-      <div
-        key={thread.id}
-        className={`chat-thread-row${isSelected ? ' chat-thread-row--selected' : ''}${
-          nested ? ' chat-thread-row--nested' : ''
-        }${isMenuOpen ? ' chat-thread-row--menu-open' : ''}`}
-        data-thread-id={thread.id}
-      >
+    const isSettled = isThreadSettled(thread);
+
+    const rowClassName = `chat-thread-row${isSelected ? ' chat-thread-row--selected' : ''}${
+      nested ? ' chat-thread-row--nested' : ''
+    }${isMenuOpen ? ' chat-thread-row--menu-open' : ''}${
+      isSettled ? ' chat-thread-row--settled' : ''
+    }`;
+    const row = (
+      <>
         <button
           type="button"
           aria-current={isSelected ? 'page' : undefined}
@@ -248,42 +431,143 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           onContextMenu={(e) => handleOpenThreadMenu(thread, e)}
           title={folderName ? `${thread.title} · ${folderName}` : thread.title}
         >
-          <i aria-hidden="true" className={getStatusDotClass(thread.status)} />
+          <i aria-hidden="true" className={getStatusDotClass(thread.status, thread.sessionState, thread.isWarm)} />
+          <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title}</span>
           {thread.unread && <i aria-hidden="true" className="chat-thread-row__unread" />}
           <span
             aria-hidden="true"
-            className={`chat-thread-row__trailing${trailingMod}`}
+            className={`chat-thread-row__trailing${trailingMod}${
+              thread.status === 'running' ? ' chat-working-live' : ''
+            }`}
           >
             {trailingText}
           </span>
         </button>
 
         <span className="chat-thread-row__actions">
+          {onRegenerateTitle && isSelected ? (
+            <button
+              type="button"
+              disabled={titlePending}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (titlePending) return;
+                onRegenerateTitle(thread.id);
+              }}
+            >
+              Regenerate title
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label={isPinned ? `Unpin ${thread.title}` : `Pin ${thread.title}`}
             onClick={(e) => {
               e.stopPropagation();
-              onTogglePinThread?.(thread.id, !isPinned);
+              changePin(thread, !isPinned);
             }}
             title={isPinned ? 'Unpin' : 'Pin to Top'}
           >
             <PinIcon size={12} filled={isPinned} />
           </button>
+          {onArchiveThread || onDeleteThread ? (
+            <button
+              type="button"
+              aria-label={`Archive ${thread.title}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                archiveThread(thread);
+              }}
+              title="Archive"
+            >
+              <ArchiveIcon size={12} />
+            </button>
+          ) : null}
         </span>
-      </div>
+      </>
+    );
+
+    if (MotionGlobalConfig.skipAnimations) {
+      return (
+        <div key={thread.id} className={rowClassName} data-thread-id={thread.id}>
+          {row}
+        </div>
+      );
+    }
+
+    return (
+      <motion.div
+        layout
+        transition={springs.reflow}
+        key={thread.id}
+        className={rowClassName}
+        data-thread-id={thread.id}
+      >
+        {row}
+      </motion.div>
     );
   };
 
   return (
     <nav aria-label="Threads" className="chat-rail">
+      <div
+        className="chat-rail__search"
+        style={{
+          padding: '6px 8px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          borderBottom: '1px solid var(--separator)',
+        }}
+      >
+        <SearchIcon size={12} />
+        <input
+          type="text"
+          aria-label="Search threads"
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.currentTarget.value)}
+          placeholder="Search threads…"
+          style={{
+            width: '100%',
+            background: 'transparent',
+            border: 0,
+            outline: 'none',
+            fontSize: 'var(--text-caption)',
+            color: 'var(--text-primary)',
+            padding: '2px 0',
+          }}
+        />
+        {searchQuery ? (
+          <button type="button" aria-label="Clear search" onClick={() => setSearchQuery('')}>
+            <CloseIcon size={11} />
+          </button>
+        ) : null}
+      </div>
+
       {/* 1. Pinned threads */}
       {pinnedThreads.length > 0 && (
         <section className="chat-rail__band chat-rail__band--pinned">
           <h3 className="chat-rail__band-title">Pinned threads</h3>
           <section aria-label="Pinned threads" className="chat-thread-list">
             {pinnedThreads.map((t) => renderRow(t, false))}
+          </section>
+        </section>
+      )}
+
+      {workingThreads.length > 0 && (
+        <section className="chat-rail__band" aria-label="Working">
+          <h3 className="chat-rail__band-title">Working</h3>
+          <section aria-label="Working threads" className="chat-thread-list">
+            {workingThreads.map((thread) => renderRow(thread, false))}
+          </section>
+        </section>
+      )}
+
+      {snoozedThreads.length > 0 && (
+        <section className="chat-rail__band" aria-label="Snoozed">
+          <h3 className="chat-rail__band-title">Snoozed</h3>
+          <section aria-label="Snoozed threads" className="chat-thread-list">
+            {snoozedThreads.map((thread) => renderRow(thread, false))}
           </section>
         </section>
       )}
@@ -307,9 +591,10 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 
       {/* 3. Folder list with nested threads */}
       {workspaces.map((ws) => {
-        const wsThreads = threads.filter(
-          (t) => !(t.isPinned || t.pinned) && t.workspaceId === ws.id
-        );
+        const wsThreads = visibleThreads.filter((thread) => {
+          const shelf = shelfOf(thread);
+          return thread.workspaceId === ws.id && (shelf === 'active' || shelf === 'settled');
+        });
         const isExpanded = expandedWorkspaces.has(ws.id);
         const hasSelected = selectedThreadId ? wsThreads.some((t) => t.id === selectedThreadId) : false;
 
@@ -390,24 +675,93 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       })}
 
       {/* 4. Other threads */}
-      {otherThreads.length > 0 && (
+      {activeOtherThreads.length > 0 && (
         <section className="chat-rail__band">
           <h3 className="chat-rail__band-title">Other threads</h3>
           <section aria-label="Other threads" className="chat-thread-list">
-            {otherThreads.map((t) => renderRow(t, false))}
+            {activeOtherThreads.map((t) => renderRow(t, false))}
           </section>
         </section>
       )}
 
-      {/* 5. Archived threads button */}
+      {/* 5. Settled threads */}
+      {settledOtherThreads.length > 0 && (
+        <section className="chat-rail__band chat-rail__band--settled">
+          <button
+            type="button"
+            className="chat-rail__settled-toggle"
+            onClick={() => setSettledOpen(!isSettledExpanded)}
+            aria-expanded={isSettledExpanded}
+          >
+            <ChevronRightIcon
+              size={10}
+              style={{
+                transform: isSettledExpanded ? 'rotate(90deg)' : 'none',
+                transition: 'transform 120ms ease',
+                flexShrink: 0,
+              }}
+            />
+            <span className="chat-rail__band-title" style={{ margin: 0, textTransform: 'none' }}>Settled</span>
+            <span
+              style={{
+                marginLeft: 'auto',
+                fontSize: 'var(--text-badge)',
+                color: 'var(--text-faint)',
+                padding: '0 4px',
+                borderRadius: 'var(--radius-chip)',
+                background: 'var(--chip-fill)',
+              }}
+            >
+              {settledOtherThreads.length}
+            </span>
+          </button>
+          {isSettledExpanded && (
+            <section aria-label="Settled threads" className="chat-thread-list">
+              {settledOtherThreads.map((t) => renderRow(t, false))}
+            </section>
+          )}
+        </section>
+      )}
+
+      {shelfUndo ? (
+        <div
+          className="chat-rail__undo rounded-card"
+          role="status"
+          style={{
+            margin: '8px',
+            padding: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            border: '1px solid var(--separator)',
+          }}
+        >
+          <span>{shelfUndo.action}</span>
+          <button type="button" className="chrome-button" onClick={runUndo}>
+            Undo
+          </button>
+        </div>
+      ) : null}
+
+      {/* 6. Archived threads button */}
       <button
         type="button"
-        aria-label="Archived threads"
+        aria-label={
+          typeof archivedCount === 'number' && archivedCount > 0
+            ? `Archived threads, ${archivedCount} archived`
+            : 'Archived threads'
+        }
         className="chat-rail__more"
         onClick={onOpenArchivedChats}
       >
         <ArchiveIcon size={12} />
         <span>Archived threads</span>
+        {typeof archivedCount === 'number' && archivedCount > 0 && (
+          <span className="chat-rail__badge" aria-hidden="true">
+            {archivedCount}
+          </span>
+        )}
       </button>
     </nav>
   );

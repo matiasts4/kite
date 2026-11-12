@@ -6,6 +6,463 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.54] - 2026-11-12
+
+> Correcciones en Thread: sidebar, diff stats y turn rail
+
+### Fixed
+- Restaurado listado completo de chats en la sidebar lateral
+- Corregido calculo de estadisticas (+N -M) y visualizacion de archivos modificados
+- Posicionamiento elevado del riel de turnos y margenes contra colision con iconos
+- Perfeccionada geometria circular del indicador de actividad Working
+
+---
+
+## [0.1.53] - 2026-11-12
+
+> Modularización y optimización arquitectónica
+
+### Changed
+- modularización de 15 módulos monolíticos de backend en submódulos cohesivos
+- descomposición de páginas complejas en frontend React
+- encapsulamiento de estado y extracción de módulos spawn y codec en terminal
+
+---
+
+## [0.1.52] - 2026-11-11
+
+> Thread Voice Mode, Operator Traces and Archiving Overhaul
+
+### Added
+- live thread voice mode with trace timeline and locked assistant footer
+- cross-cli chat index and thread dispatch reach
+
+### Fixed
+- route thread archiving correctly and overhaul archived chats modal
+- permit tool execution in persistent plan mode
+- pure CSS styling and background Zed engine wiring for voice mode
+
+---
+
+## [0.1.51] - 2026-11-07
+
+> Delegation paste stability and canonical codename assignment
+
+### Fixed
+- wrap multiline terminal paste in bracketed paste to prevent queue flooding
+- assign canonical codenames to delegated agents
+- distinguish idle/done prompts from genuine blocked approvals
+
+---
+
+## [0.1.50] - 2026-11-07
+
+> Dispatch manual CLI & skill roots fix
+
+### Added
+- Expand dispatch skill installation across OpenCode, Gemini, Copilot, Kimi, Amp, and shared agent skill directories
+
+### Fixed
+- Strip SKILL.md YAML frontmatter and guard leading hyphens when passing system prompts to Grok and Claude Code CLI
+
+---
+
+## [0.1.49] - 2026-11-07
+
+> Dispatch skill channel
+
+### Added
+- The dispatch skill is installed into existing agent skill directories.
+
+### Fixed
+- Agents receive the dispatch manual as a skill file, not the first chat message.
+
+---
+
+## [0.1.48] - 2026-11-07
+
+> Dispatch and local updates
+
+### Added
+- dispatch CLI to launch, send, wait, and kill agents
+- agents receive the complete dispatch manual at start
+
+### Fixed
+- updater signing key for the local feed
+
+---
+
+## [0.1.47] - 2026-11-05
+
+> Restore de terminales AntiGravity y Grok
+
+### Added
+- Restore de sesiones Grok con descubrimiento en ~/.grok/sessions y arranque con -r <id>
+
+### Changed
+- Cursor de puntero por defecto sobre las terminales
+
+### Fixed
+- Primer frame al restaurar terminales: espera geometría estable del pane, snapshot completo tras el resize del PTY y un empujón de una fila para que AntiGravity y OpenCode redibujen
+- El canvas no pinta deltas vacíos hasta el primer frame completo
+- Caret visible en AntiGravity al restaurar
+
+---
+
+## [0.1.46] - 2026-11-04
+
+> Sidebar: nombres de ventana y remocion de badge de proveedor
+
+### Fixed
+- Reemplazar nombres de agente en la cabecera de ventana por 'Ventana N'
+- Eliminar badge de texto de proveedor en subpaneles de la barra lateral
+
+---
+
+## [0.1.45] - 2026-11-04
+
+> Kite Core Daemon framed IPC, terminal canvas binario y reordenamiento de paneles
+
+### Added
+- Arquitectura desacoplada 'kite-core' daemon con IPC framed binario de 9 bytes y control de flujo por créditos
+- Codec de snapshot binario empaquetado para terminal con reutilización de memoria in-place en Canvas 2D
+- Reordenamiento interactivo de paneles de terminal mediante arrastrar y soltar (drag & drop)
+- Árbol de sesiones multiterminal colapsable en la barra lateral con insignias de marcas y jerarquía visual
+
+### Changed
+- Eliminación definitiva de la superficie DOM heredada (XtermDomSurface) en favor del motor Canvas exclusivo
+- Telemetría de recursos del sistema con desglose detallado por proyecto y terminal en el monitor de memoria
+
+### Fixed
+- Recuperación y repintado forzado de pantalla completa ante pérdidas de secuencia de frames en el canvas
+
+---
+
+## [0.1.44] - 2026-11-02
+
+> Estabilización de Terminal Canvas, Enfoque y Scroll en Agentes
+
+### Changed
+- removed: Retirada de badges e indicadores "GhostGrid 2D" en las cabeceras de paneles y barras de herramientas
+
+### Fixed
+- Restauración de captura de pulsaciones de teclado y auto-enfoque en terminal Canvas (GhostGrid 2D)
+- Propagación y sincronización de isFocused en paneles de agentes y workspace (Antigravity, Cursor, etc.)
+- Restauración de paquetes SGR para rueda de ratón y clics en aplicaciones TUI interactivas
+- Prevención de desenfoque por defecto del navegador en mousedown sobre superficie de terminal
+
+---
+
+## [0.1.43] - 2026-11-02
+
+> Arquitectura Modular, Estabilización de Terminal y Monitor de Recursos
+
+### Added
+- Módulos dedicados para renderizado de Canvas 2D, seguimiento de ratón, codificación de teclas y sincronización de sesiones PTY
+
+### Changed
+- Arquitectura modular y desacoplamiento de componentes centrales (TerminalView, TerminalCanvasSurface, CodeWorkspace, RightDock y SystemResourcePopover)
+- Componentes de cuotas y selector de cuentas desacoplados en submódulos especializados
+
+### Fixed
+- Corrección del desplazamiento de viewport (scrollback) con deltaLines en motor Canvas 2D
+- Sincronización de redimensionamiento PTY en superficie DOM de xterm
+- Restauración completa de selección con ratón, auto-scroll y copia al portapapeles en terminal
+- Soporte nativo para arrastre de archivos y pegado de imágenes en terminal
+- Persistencia de configuración de filtros y procesos en monitor de recursos del sistema
+
+---
+
+## [0.1.42] - 2026-11-01
+
+> Motor de Terminal 2D, Eliminación de Artefactos ConPTY y Streaming Continuo
+
+### Added
+- Superficie de renderizado procedural Canvas 2D con rasterizador de glifos box/block/braille
+- Motor de terminal virtual nativo en Rust con snapshots atómicos y soporte de actualizaciones sincronizadas DEC 2026
+- Polling en segundo plano para terminales aparcadas en memoria
+
+### Changed
+- Lanzamiento directo de ejecutables de agentes bajo ConPTY eliminando wrappers innecesarios
+- Desactivar estrangulamiento de timers de WebView2 en segundo plano
+
+### Fixed
+- Desincronización de ancho de celda en glifos VS16 (`U+FE0F`) y secuencias ZWJ en Windows ConPTY que causaba fragmentos y caracteres desplazados
+- Parpadeo y desincronización de scrollback al alternar entre motores de renderizado
+- Eliminar congelamiento y aceleración x5 en terminales al cambiar de proyecto o ventana
+- Omitir repintados costosos de xterm mientras la terminal no es visible
+
+---
+
+## [0.1.41] - 2026-10-29
+
+> Ajuste Estabilizado de Terminal, Apariencia Personalizable y Enrutamiento de Atajos
+
+### Added
+- personalización de apariencia y tipografía en Settings (modo DOM ClearType vs WebGL GPU)
+- cálculo geométrico y ajuste estabilizado de viewport ConPTY con StableCellFitAddon
+
+### Fixed
+- preservación de buffers al reconectar sesiones PTY activas
+- delegación de tecla Escape a la terminal sin abortar asistentes u overlays
+- aislamiento de directorio de datos WebView2 para desarrollo y producción
+
+---
+
+## [0.1.40] - 2026-10-28
+
+> Estabilización ConPTY de Terminal, Paleta de Comandos y Mejoras en Zed
+
+### Added
+- Paleta de comandos integrada y enrutamiento global de atajos de teclado
+- Persistencia local de preferencias de tema, paleta de colores y shell predeterminado
+- Apertura nativa de archivos y opción de revelado en el explorador del sistema operativo
+- Trazabilidad en tiempo real de ejecución del operador y handoff inteligente de terminales para Zed
+- Detección de disponibilidad del terminal antes de despachar el proyectil de prompt
+
+### Changed
+- Consolidación y rediseño unificado de pestañas de configuración y cuentas
+- Indicador activo optimizado para la lista de workspaces y limpieza del panel lateral
+
+### Fixed
+- Eliminación de ghosting de texto y sincronización geométrica de ConPTY en el terminal
+- Renderizado continuo de filas y eliminación de huecos en arte ASCII y caracteres de bloque
+- Prevención de congelamiento de texto residual al restaurar el buffer alternativo de pantalla
+- Normalización de codificación de consola para agentes en terminales Windows
+
+---
+
+## [0.1.39] - 2026-10-27
+
+> Voz Hiperrealista ElevenLabs para Zed, Composer Moderno y Control de Razonamiento
+
+### Added
+- Integración de ElevenLabs Streaming TTS para el asistente Zed con soporte v4 turbo y fallback nativo
+- Selector y control de esfuerzo de razonamiento dinámico por modelo en el composer
+- Configuración de voces curadas y personalizadas en Ajustes > Voz y Zed
+- Sistema integrado de notificaciones toast flotantes con Sileo
+- Telemetría de sistema con desglose granular de subprocesos y memoria privada
+
+### Fixed
+- Sincronización de repositorios y ramas Git entre vistas de Agente e Hilos sin desfase
+- Posicionamiento anclado mediante portales y scroll optimizado en selectores de modelos
+
+---
+
+## [0.1.38] - 2026-10-26
+
+> Gestión de Ramas Git en Hilos, Selector de Workspace y Optimización del Chat
+
+### Added
+- Selector interactivo de ramas Git con búsqueda y creación instantánea de nuevas ramas
+- Selector desplegable de proyecto (workspace) en la cabecera para reasignar hilos de trabajo
+
+### Changed
+- Edición y guardado in-place del título del chat mediante clic directo
+- Reemplazo del icono de nuevo chat por un icono de suma intuitivo
+
+### Fixed
+- Eliminación del panel lateral ThreadInspector y simplificación del frame de chat
+
+---
+
+## [0.1.37] - 2026-10-25
+
+> Conmutación Asíncrona de Cuentas, Restauración de Sesiones y Estabilidad de Terminal
+
+### Added
+- Conmutador desplegable flotante de cuentas superpuesto en el popover de Cuotas
+- Restauración automática de la conversación y sesión activa de AntiGravity al reiniciar o cambiar de cuenta
+
+### Changed
+- Optimización del apagado y reinicio de agentes reduciendo latencia y timeouts
+
+### Fixed
+- Eliminación del congelamiento de la interfaz durante el cambio de cuenta con ejecución asíncrona
+- Corrección de caracteres fantasma y artefactos en la terminal reseteando el estado ANSI al reconectar
+- Corrección del bloqueo de dimensiones de la terminal en 80 columnas sincronizando tamaño real de filas y columnas
+
+---
+
+## [0.1.36] - 2026-10-25
+
+> Consolidacion de Sistema de Diseno y Pestanas Dinamicas
+
+### Added
+- Sistema unificado de border-radius y tokens semánticos en visual-language y Tailwind
+- Pestañas Prompts y Tasks configurables y cerrables a demanda en RightDock
+
+### Changed
+- Estandarización de alturas y controles en paneles laterales a 32px y 28px
+- Integración de directrices estrictas de diseño y arquitectura en AGENTS.md
+
+### Fixed
+- Rediseño visual del botón Commit en DiffsView alineado con el tema principal
+
+---
+
+## [0.1.35] - 2026-10-25
+
+> Restauracion de ZedOrb WebGL2 y Fluidez en Barra de Tareas
+
+### Changed
+- feat(zed): Restaurar el renderizador WebGL2 de ZedOrb con optimizacion inteligente de tasa de cuadros y pausa en minimizado
+- perf(taskbar): Eliminar mas de 110,000 escrituras sincronas en app.log durante eventos de ventana y restauracion
+- perf(titlebar): Restaurar mini-orbe ligero acelerado por GPU eliminando animaciones CSS continuas y capas SVG pesadas
+- perf(focus): Debounce en refreshGit (1.2s), metricas de sistema (2s) y cuotas (2.5s) al reactivar o enfocar la aplicacion
+- perf(terminal): Cachear sesiones de proveedor ya vinculadas evitando re-resolucion innecesaria
+
+---
+
+## [0.1.34] - 2026-10-25
+
+> Eliminacion de Bucles de E/S y Bloqueos de Arranque
+
+### Changed
+- perf: Reemplazar raymarching WebGL2 continuo en ZedOrb por esfera CSS acelerada por hardware
+- perf: Reducir polling IPC inactivo de terminal de 90ms a 220ms conservando 40ms en escritura
+- perf: Acelerar animacion de mini-orbe en barra de titulo con capas de composicion GPU
+
+### Fixed
+- Eliminar escaneo periodico de 70MB de transcripciones y contencion en terminal.rs
+- Desactivar llamadas bloqueantes a Windows Restart Manager (rstrtmgr.dll) en resolucion de sesiones
+
+---
+
+## [0.1.33] - 2026-10-25
+
+> Estabilización y Rendimiento de Arranque
+
+### Changed
+- Mejorar el lanzador de escritorio limpiando procesos residuales y liberando candados de EBWebView
+- Sincronizar catalogo de modelos de Grok y Cursor con sus respectivas CLIs
+
+### Fixed
+- Eliminar shaders WebGL (ReadPixels) y loops de canvas raymarching en vistas de produccion para evitar bloqueos
+- Resolver contencion en el bucle principal de WebView2 y limpiar procesos huerfanos al iniciar
+- Optimizar animaciones de la orbe Zed en la barra de titulo con degradados acelerados por hardware
+
+---
+
+## [0.1.32] - 2026-10-25
+
+> Gobernanza de Plugins y Asignación de Motores de IA
+
+### Added
+- Selector interactivo de proveedores para motores de IA
+- Asignación granular por agente con switches sincronizados
+
+### Changed
+- Modal rediseñado con componente Sheet nativo y tokens de diseño
+
+### Fixed
+- Validación estricta de credenciales en plugins antes de conectar
+
+---
+
+## [0.1.31] - 2026-10-24
+
+> Validación de Credenciales y Selección de Proveedores en Plugins
+
+### Added
+- Modal de detalles con Sheet oficial y pestañas para Configuración, Proveedores de IA y Agentes
+- Selector interactivo de proveedores para habilitar/deshabilitar plugins por motor de IA (Claude, Codex, Antigravity, OpenCode, Cursor, Gemini, Grok)
+- Asignación granular por agente con switches individuales y sincronización con perfiles
+
+### Changed
+- Reemplazo completo de modales flotantes por el componente Sheet nativo con tokens de diseño auténticos
+
+### Fixed
+- Validación estricta de credenciales en plugins antes de conectar, previniendo falsos estados activos
+
+---
+
+## [0.1.30] - 2026-10-24
+
+> Refinamiento de UI y Proveedores en Plugins
+
+### Added
+- Visualización de proveedores y motores compatibles (Claude Code, Codex, Antigravity, OpenCode, Cursor, Gemini) en el modal de detalles
+
+### Changed
+- Diseño minimalista y limpio en las tarjetas del catálogo de Plugins
+- Enrutamiento de gobernanza de plugins directamente a la pestaña Ajustes de cada agente
+
+### Fixed
+- Eliminación de elementos visuales saturados en las tarjetas del catálogo
+
+---
+
+## [0.1.29] - 2026-10-24
+
+> Ecosistema de Plugins y Cobertura de Agentes
+
+### Added
+- Catálogo canónico de 29 plugins para servicios externos y herramientas de agentes
+- Modal interactivo de configuración de credenciales (API keys / puertos MCP) y permisos por plugin
+- Cobertura bidireccional de agentes con gobernanza granular de plugins
+- Pila compacta de mini-avatares en tarjetas conectadas mostrando los agentes activos
+- Sincronización en segundo plano cada 2000ms con detección de foco
+
+### Changed
+- Integración automática de plugins conectados en el catálogo MCP de Agent Settings
+
+### Fixed
+- Control de acceso en modo sólo lectura para herramientas con mutaciones
+
+---
+
+## [0.1.28] - 2026-10-24
+
+> Laboratorio de Animaciones y Ajustes Visuales
+
+### Added
+- Laboratorio interactivo de efectos visuales y motion en el puerto 1430
+
+### Changed
+- Preservacion de la interfaz nativa y personalizacion del chat composer
+- Sincronizacion de metricas de telemetria y cuotas en la barra superior
+
+### Fixed
+- Estabilizacion de dependencias WebGL y eliminacion de img-fx
+
+---
+
+## [0.1.26] - 2026-10-22
+
+> Cuotas a tu medida: agregá, ordená y fijá proveedores
+
+### Added
+- Agregá proveedores de cuotas manualmente desde Configuración → Cuotas
+- Reordená proveedores con flechas y fijá cuál se muestra en la barra
+
+### Changed
+- Todos los proveedores arrancan deshabilitados; solo se monitorean los que agregues
+- La barra superior muestra solo el icono y el porcentaje, sin tiempo de reseteo
+- La primera actualización reinicia la lista de proveedores monitoreados; tus claves y sesiones se conservan
+
+### Fixed
+- La pastilla de cuotas sigue visible aunque no tengas proveedores agregados
+- Navegación con flechas y rueda en el popover cuando hay más de tres proveedores
+
+---
+
+## [0.1.25] - 2026-10-22
+
+> OpenCode Go sincroniza su cuota real
+
+### Added
+- Detección automática de credenciales desde OpenCode (opencode.db y auth.json), OPENCODE_API_KEY y la configuración de OpenCode.
+- Diagnóstico visible con fuente de credencial, endpoint, estado HTTP y errores por ventana.
+
+### Changed
+- La configuración de OpenCode Go usa una API key opcional y deja de pedir la cookie y el workspace legacy.
+
+### Fixed
+- OpenCode Go consulta la API oficial de uso y muestra las ventanas de 5 horas, semanal y mensual en lugar de un 0% fijo.
+
+---
+
 ## [0.1.24] - 2026-10-22
 
 > Soporte oficial para Gentle Shell

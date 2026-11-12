@@ -1,29 +1,74 @@
 import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
-import {
-  StopIcon,
-  PaperclipIcon,
-  CloseIcon,
-  CompassIcon,
-  FileCodeIcon,
-  ArrowUpIcon,
-  MicIcon,
-} from './ChatIcons';
+import './composer/composer.css';
 import {
   ChatProvider,
   ChatMode,
   ChatAttachment,
-  ModelOption,
   ApprovalRequest,
-  PROVIDER_CATALOG,
-  MODE_LABELS,
   formatTokens,
-  formatBytes,
 } from './types';
 import type { ChatItem } from '../../../types';
-import { SelectMenu } from '../../ui/SelectMenu';
-import { EffortPicker } from './EffortPicker';
+import { insertQuoteAtCaret } from './citeDraft';
+import {
+  citationSendLength,
+  draftHasCitation,
+  expandCitations,
+  readCitationClipboard,
+  writeCitationClipboard,
+  type CitationInput,
+} from './citationChip';
+import {
+  draftHasMention,
+  expandMentions,
+  filterMentionMenu,
+  insertDropAtCaret,
+  insertMentionAtCaret,
+  KITE_FILES_MIME,
+  KITE_THREAD_MIME,
+  mentionFromTerminalExcerpt,
+  mentionQueryAt,
+  readMentionClipboard,
+  writeMentionClipboard,
+  deleteComposerChipKey,
+} from './mentionChip';
+import type { DriverDeclaration } from '../../../lib/session/types';
 import { ChatApprovalCard } from './ChatApprovalCard';
-import { invokeCommand } from '../../../lib/ipc';
+import { listConnections } from '../../../lib/ipc';
+import {
+  verifiedSpawnConnections,
+  type ConnectionCandidate,
+} from './connectionBinding';
+import { ComposerSurface } from './composer/ComposerSurface';
+import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { useVoiceSession } from '../../../lib/operator/voice/voiceSessionStore';
+import { composerTextWithLiveSpeech, typedDraftFromComposer } from './liveTranscriptDraft';
+import { VoiceModeFooterBar } from './composer/VoiceModeFooterBar';
+import {
+  restoreStash,
+  slashIntent,
+  stashDraft,
+  stashFileRestorable,
+  type StashEntry,
+} from './threadInteraction';
+import { pasteBecomesFile } from './threadInteraction';
+import { consumeFreshContext, resolveSessionCommand } from './sessionCommands';
+import { ComposerContextStrip } from './composer/ComposerContextStrip';
+import { AttachMenuPopover } from './composer/AttachMenuPopover';
+import { isPlainKey } from './composer/composerTextHelpers';
+import { CitationDraftEditor } from './composer/CitationDraftEditor';
+import { ComposerAttachments } from './composer/ComposerAttachments';
+import { ComposerDictationButton } from './composer/ComposerDictationButton';
+import { ComposerPrimaryActionButton } from './composer/ComposerPrimaryActionButton';
+import { ComposerConfigControls } from './composer/ComposerConfigControls';
+import { usePromptHistory } from './composer/usePromptHistory';
+
+export {
+  extractUserPromptHistory,
+  getNextHistoryIndex,
+  isNoNewlineBefore,
+  isNoNewlineAfter,
+  isPlainKey,
+} from './composer/composerTextHelpers';
 
 export interface ChatComposerProps {
   threadId: string;
@@ -34,68 +79,67 @@ export interface ChatComposerProps {
   threadProvider: ChatProvider;
   threadModel: string | null;
   threadEffort?: string | null;
+  threadAgent?: string | null;
+  threadConnectionId?: string | null;
   threadItems?: ChatItem[];
+  threadBranch?: string | null;
+  threadWorkspaceName?: string | null;
+  workspaces?: Array<{ id: string; name: string }>;
+  branches?: string[];
+  onSwitchBranch?: (branch: string) => void;
+  onCreateBranch?: (branch: string) => void;
+  onSelectWorkspace?: (wsId: string) => void;
+  declaration: DriverDeclaration;
   running: boolean;
+  paused?: boolean;
   prompt: string;
   attachments: ChatAttachment[];
   totalTokens: number;
-  dynamicModels: ModelOption[];
   isRefreshingModels?: boolean;
+  catalogState?: 'missing-binary' | 'signed-out' | 'loading' | 'empty' | null;
   onRefreshModels?: (provider: ChatProvider) => void;
+  ensureDynamicModels?: (provider: ChatProvider) => void;
+  ensureDynamicAgents?: (provider: ChatProvider) => void;
   activeDropdown?: { threadId: string; type: 'provider' | 'model' | 'mode' } | null;
   pendingApproval?: ApprovalRequest | null;
   onChangePrompt: (val: string) => void;
   onSend: () => void;
+  /** Called when the next real message should start a fresh provider session. */
+  onFreshContext?: () => void;
+  /** Asks a supporting provider to compact. Does not invent a protocol frame. */
+  onCompact?: () => void;
+  onQueue?: (text: string) => void;
   onStop: () => void;
   onPickAttachments: (kind?: 'files' | 'folder') => void;
   onStageFiles: (files: File[]) => void;
   onStagePaths: (paths: string[]) => void;
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
-  onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean }) => void;
+  onUpdateConfig: (patch: {
+    provider?: ChatProvider;
+    mode?: ChatMode;
+    model?: string | null;
+    effort?: string | null;
+    plan?: boolean;
+    agent?: string | null;
+    connectionId?: string | null;
+  }) => void;
+  onSelectConnection?: (connectionId: string) => void;
+  files?: string[];
+  threads?: Array<{ id: string; title?: string }>;
+  models?: string[];
+  skills?: string[];
+  goal?: string | null;
+  onGoalStop?: (result: { goal: string | null; paused: boolean; turnEnded: boolean }) => void;
+  initialStashes?: StashEntry[];
+  stashEnvironment?: string;
   onApprovalDecision?: (
     decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
     requestId: string
   ) => void;
-}
-
-function extractUserPromptHistory(items: ChatItem[] = []): string[] {
-  const result: string[] = [];
-  for (const item of items) {
-    if (item.kind !== 'user') continue;
-    const text = item.text?.trim() ?? '';
-    if (text.length !== 0 && result[result.length - 1] !== text) {
-      result.push(text);
-    }
-  }
-  return result;
-}
-
-function getNextHistoryIndex(
-  length: number,
-  currentIndex: number | null,
-  direction: 'older' | 'newer'
-): number | null | undefined {
-  if (length === 0) return undefined;
-  if (direction === 'older') {
-    return currentIndex === null ? length - 1 : currentIndex > 0 ? currentIndex - 1 : undefined;
-  }
-  if (currentIndex !== null) {
-    return currentIndex + 1 < length ? currentIndex + 1 : null;
-  }
-  return undefined;
-}
-
-function isNoNewlineBefore(text: string, pos: number): boolean {
-  return !text.slice(0, pos).includes('\n');
-}
-
-function isNoNewlineAfter(text: string, pos: number): boolean {
-  return !text.slice(pos).includes('\n');
-}
-
-function isPlainKey(e: React.KeyboardEvent): boolean {
-  return !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
+  onSendVoiceTurn?: (text: string) => void;
+  /** Opens Voice Mode in its own conversation. Falls back to binding the current thread. */
+  onStartVoiceMode?: () => void;
 }
 
 export const ChatComposer: React.FC<ChatComposerProps> = ({
@@ -107,180 +151,187 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadProvider,
   threadModel,
   threadEffort,
+  threadAgent,
+  threadConnectionId,
   threadItems = [],
+  threadBranch,
+  threadWorkspaceName,
+  workspaces,
+  branches = [],
+  onSwitchBranch,
+  onCreateBranch,
+  onSelectWorkspace,
+  declaration,
   running,
+  paused = false,
   prompt,
   attachments,
   totalTokens,
-  dynamicModels,
-  isRefreshingModels = false,
-  onRefreshModels,
+  catalogState = null,
+  ensureDynamicModels,
+  ensureDynamicAgents,
   pendingApproval,
   onChangePrompt,
   onSend,
+  onFreshContext,
+  onCompact,
+  onQueue,
   onStop,
   onPickAttachments,
   onStageFiles,
   onStagePaths,
   onRemoveAttachment,
   onUpdateConfig,
+  onSelectConnection,
   onApprovalDecision,
+  files = [],
+  threads = [],
+  models = [],
+  skills = [],
+  goal = null,
+  onGoalStop,
+  initialStashes,
+  stashEnvironment = '',
+  onSendVoiceTurn,
+  onStartVoiceMode,
 }) => {
+  const voice = useVoiceSession();
+  const isVoiceModeActive =
+    (voice.phase === 'active' || voice.phase === 'starting') &&
+    (voice.boundThreadId === threadId || (voice.activeSurface === 'thread' && !voice.boundThreadId));
+  const liveInterim = isVoiceModeActive ? (voice.interimTranscript ?? '').trim() : '';
+  const [holdLiveSpeech, setHoldLiveSpeech] = useState(false);
+  useEffect(() => {
+    if (!liveInterim) setHoldLiveSpeech(false);
+  }, [liveInterim]);
+  const showLiveSpeech = isVoiceModeActive && !voice.isPausedForDictation && !holdLiveSpeech && liveInterim.length > 0;
+  const composerValue = composerTextWithLiveSpeech(prompt, liveInterim, showLiveSpeech);
+  const commitComposerValue = (display: string) => {
+    const next = typedDraftFromComposer(display, prompt, liveInterim, showLiveSpeech);
+    if (next.holdLive) setHoldLiveSpeech(true);
+    if (next.typed !== prompt) onChangePrompt(next.typed);
+  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const caretRef = useRef({ start: 0, end: 0 });
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null);
+  const [draftCaret, setDraftCaret] = useState(0);
+  const [stashes, setStashes] = useState<StashEntry[]>(initialStashes ?? []);
+  const [stashFileNotice, setStashFileNotice] = useState<ReturnType<typeof stashFileRestorable>>(null);
+  const [sideQuestion, setSideQuestion] = useState<string | null>(null);
+  const [newSessionArmed, setNewSessionArmed] = useState(false);
+  const [compactNotice, setCompactNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    setNewSessionArmed(false);
+    setCompactNotice(null);
+  }, [threadId]);
+
   const footerRef = useRef<HTMLDivElement>(null);
 
-  // Drag & drop drop-hint state ('attach' | 'mention' | 'prompt' | null)
+  const [connectionCandidates, setConnectionCandidates] = useState<ConnectionCandidate[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    void listConnections().then((connections) => {
+      if (active) setConnectionCandidates(verifiedSpawnConnections(threadProvider, connections));
+    });
+    return () => {
+      active = false;
+    };
+  }, [threadProvider]);
+
+  useEffect(() => {
+    ensureDynamicModels?.(threadProvider);
+    ensureDynamicAgents?.(threadProvider);
+  }, [ensureDynamicModels, ensureDynamicAgents, threadProvider]);
+
   const [dropKind, setDropKind] = useState<'attach' | 'mention' | 'prompt' | null>(null);
 
-  // Dictation state
-  const [dictationAvailability, setDictationAvailability] = useState<{
-    canStart: boolean;
-    canRequestPermission: boolean;
-    guidance: string;
-  } | null>(null);
-  const [dictationState, setDictationState] = useState<'idle' | 'starting' | 'recording' | 'transcribing'>('idle');
-  const [dictationError, setDictationError] = useState<string | null>(null);
-  const dictationReqIdRef = useRef<string | null>(null);
-  const dictationPollRef = useRef<number | null>(null);
+  const [followUpFlip, setFollowUpFlip] = useState(false);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Control' || event.key === 'Meta') setFollowUpFlip(event.type === 'keydown');
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKey);
+    };
+  }, []);
 
-  // Prompt History navigation state
-  const historyStateRef = useRef<{ owner: string; index: number | null; draft: string }>({
-    owner: threadId,
-    index: null,
-    draft: '',
+  const { handleHistoryKey, resetPromptHistory } = usePromptHistory({
+    threadId,
+    threadItems,
+    prompt,
+    caretRef,
+    onChangePrompt,
   });
 
   useEffect(() => {
-    historyStateRef.current = { owner: threadId, index: null, draft: '' };
-  }, [threadId]);
+    const onCite = (event: Event) => {
+      const detail = (event as CustomEvent<CitationInput>).detail;
+      if (typeof detail !== 'string' && (detail === null || typeof detail !== 'object')) return;
+      const area = textareaRef.current;
+      const usingField = Boolean(area) && !draftHasCitation(prompt);
+      const start = usingField ? (area?.selectionStart ?? prompt.length) : caretRef.current.start;
+      const end = usingField ? (area?.selectionEnd ?? start) : caretRef.current.end;
+      const next = insertQuoteAtCaret(prompt, start, end, detail);
+      caretRef.current = { start: next.caret, end: next.caret };
+      setPendingCaret(next.caret);
+      onChangePrompt(next.text);
+      window.requestAnimationFrame(() => {
+        const field = textareaRef.current;
+        if (!field || draftHasCitation(next.text)) return;
+        field.focus();
+        field.setSelectionRange(next.caret, next.caret);
+      });
+    };
+    window.addEventListener('kite:cite', onCite);
+    return () => window.removeEventListener('kite:cite', onCite);
+  }, [onChangePrompt, prompt]);
+
+  useEffect(() => {
+    const onExcerpt = (event: Event) => {
+      const mention = mentionFromTerminalExcerpt((event as CustomEvent).detail);
+      if (!mention) return;
+      const area = textareaRef.current;
+      const plain = Boolean(area) && !draftHasCitation(prompt) && !draftHasMention(prompt);
+      const start = plain ? (area?.selectionStart ?? caretRef.current.start) : caretRef.current.start;
+      const end = plain ? (area?.selectionEnd ?? start) : caretRef.current.end;
+      const next = insertMentionAtCaret(prompt, start, end, mention);
+      caretRef.current = { start: next.caret, end: next.caret };
+      setDraftCaret(next.caret);
+      setPendingCaret(next.caret);
+      onChangePrompt(next.text);
+    };
+    window.addEventListener('kite:terminal-excerpt', onExcerpt);
+    return () => window.removeEventListener('kite:terminal-excerpt', onExcerpt);
+  }, [onChangePrompt, prompt]);
+
+  useLayoutEffect(() => {
+    if (draftHasCitation(prompt) || draftHasMention(prompt) || pendingCaret === null) return;
+    const field = textareaRef.current;
+    if (!field) return;
+    const caret = Math.min(pendingCaret, field.value.length);
+    field.focus();
+    field.setSelectionRange(caret, caret);
+    setPendingCaret(null);
+  }, [pendingCaret, prompt]);
 
   // Dynamic textarea height
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (el) {
-      el.style.height = '62px';
-      el.style.height = `${Math.min(240, Math.max(62, el.scrollHeight))}px`;
+      el.style.height = '52px';
+      el.style.height = `${Math.min(240, Math.max(52, el.scrollHeight))}px`;
     }
-  }, [prompt]);
-
-  // Load dictation availability on mount
-  useEffect(() => {
-    let isMounted = true;
-    invokeCommand<any>('read_dictation_availability', { supportedSchemaVersion: 1 })
-      .then((avail) => {
-        if (isMounted && avail) {
-          setDictationAvailability({
-            canStart: Boolean(avail.canStart),
-            canRequestPermission: Boolean(avail.canRequestPermission),
-            guidance: avail.guidance || '',
-          });
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setDictationAvailability({
-            canStart: false,
-            canRequestPermission: false,
-            guidance: 'Dictation is unavailable on this computer.',
-          });
-        }
-      });
-
-    return () => {
-      isMounted = false;
-      if (dictationPollRef.current) {
-        window.clearInterval(dictationPollRef.current);
-        dictationPollRef.current = null;
-      }
-      if (dictationReqIdRef.current) {
-        invokeCommand('cancel_dictation', {
-          id: dictationReqIdRef.current,
-          supportedSchemaVersion: 1,
-        }).catch(() => undefined);
-        dictationReqIdRef.current = null;
-      }
-    };
-  }, []);
-
-  const toggleDictation = async () => {
-    if (running) return;
-    setDictationError(null);
-
-    if (dictationState === 'recording' || dictationState === 'starting') {
-      const id = dictationReqIdRef.current;
-      if (!id) return;
-      setDictationState('transcribing');
-      try {
-        await invokeCommand('stop_dictation', { id, supportedSchemaVersion: 1 });
-      } catch (err: any) {
-        setDictationError(err?.message || 'Error stopping dictation.');
-        setDictationState('idle');
-        dictationReqIdRef.current = null;
-      }
-      return;
-    }
-
-    if (dictationState !== 'idle') return;
-
-    const id = crypto.randomUUID();
-    dictationReqIdRef.current = id;
-    setDictationState('starting');
-
-    try {
-      await invokeCommand('start_dictation', { id, supportedSchemaVersion: 1 });
-      setDictationState('recording');
-
-      dictationPollRef.current = window.setInterval(async () => {
-        if (dictationReqIdRef.current !== id) {
-          if (dictationPollRef.current) window.clearInterval(dictationPollRef.current);
-          return;
-        }
-        try {
-          const take = await invokeCommand<any>('read_dictation', { id, supportedSchemaVersion: 1 });
-          if (!take) return;
-          if (take.phase === 'recording') {
-            setDictationState('recording');
-          } else if (take.phase === 'transcribing') {
-            setDictationState('transcribing');
-          } else if (take.phase === 'done') {
-            if (dictationPollRef.current) {
-              window.clearInterval(dictationPollRef.current);
-              dictationPollRef.current = null;
-            }
-            dictationReqIdRef.current = null;
-            setDictationState('idle');
-            const transcript = (take.transcript || '').trim();
-            if (transcript) {
-              onChangePrompt(prompt.trim() ? `${prompt.trimEnd()} ${transcript}` : transcript);
-            }
-          } else if (take.phase === 'error' || take.phase === 'cancelled') {
-            if (dictationPollRef.current) {
-              window.clearInterval(dictationPollRef.current);
-              dictationPollRef.current = null;
-            }
-            dictationReqIdRef.current = null;
-            setDictationState('idle');
-            if (take.error?.message) {
-              setDictationError(take.error.message);
-            } else if (take.message) {
-              setDictationError(take.message);
-            }
-          }
-        } catch {
-          // Keep polling
-        }
-      }, 250);
-    } catch (err: any) {
-      dictationReqIdRef.current = null;
-      setDictationState('idle');
-      setDictationError(err?.message || 'Dictation could not start.');
-    }
-  };
+  }, [prompt, composerValue]);
 
   const insertAtCursor = (insertion: string, isMention: boolean = false) => {
     const target = textareaRef.current;
-    const start = target?.selectionStart ?? prompt.length;
-    const end = target?.selectionEnd ?? start;
+    const start = target?.selectionStart ?? caretRef.current.start;
+    const end = target?.selectionEnd ?? caretRef.current.end;
     const before = prompt.slice(0, start);
     const formatted = isMention
       ? `${before.length === 0 || /\s$/u.test(before) ? '' : ' '}@${insertion} `
@@ -298,7 +349,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     if (running) return null;
     const types = event.dataTransfer?.types ?? [];
     if (types.includes('application/x-kite-prompt')) return 'prompt';
-    if (types.includes('application/x-kite-files-entry')) return 'mention';
+    if (types.includes(KITE_THREAD_MIME) || types.includes(KITE_FILES_MIME)) return 'mention';
     if (types.includes('Files')) return 'attach';
     return null;
   };
@@ -318,86 +369,41 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       return;
     }
 
-    if (types.includes('application/x-kite-files-entry')) {
-      try {
-        const raw = event.dataTransfer.getData('application/x-kite-files-entry');
-        const parsed = JSON.parse(raw);
-        const path = parsed.relativePath || parsed.path || parsed.name;
-        if (path) insertAtCursor(path, true);
-      } catch {
-        const text = event.dataTransfer.getData('text/plain');
-        if (text) insertAtCursor(text, true);
-      }
+    if (types.includes(KITE_THREAD_MIME) || types.includes(KITE_FILES_MIME)) {
+      const threadRaw = types.includes(KITE_THREAD_MIME) ? event.dataTransfer.getData(KITE_THREAD_MIME) : '';
+      const mime = threadRaw ? KITE_THREAD_MIME : KITE_FILES_MIME;
+      const raw = threadRaw || event.dataTransfer.getData(KITE_FILES_MIME);
+      const area = textareaRef.current;
+      const plain = Boolean(area) && !draftHasCitation(prompt) && !draftHasMention(prompt);
+      const start = plain ? (area?.selectionStart ?? caretRef.current.start) : caretRef.current.start;
+      const end = plain ? (area?.selectionEnd ?? start) : caretRef.current.end;
+      const next = insertDropAtCaret(prompt, start, end, mime, raw);
+      if (!next) return;
+      caretRef.current = { start: next.caret, end: next.caret };
+      setDraftCaret(next.caret);
+      setPendingCaret(next.caret);
+      onChangePrompt(next.text);
       return;
     }
 
     if (types.includes('Files')) {
-      const files = Array.from(event.dataTransfer?.files ?? []);
-      if (files.length === 0) return;
-      const paths = files
+      const stagedFiles = Array.from(event.dataTransfer?.files ?? []);
+      if (stagedFiles.length === 0) return;
+      const paths = stagedFiles
         .map((file) => (file as File & { path?: string }).path)
         .filter((path): path is string => Boolean(path));
       if (paths.length > 0) onStagePaths(paths);
-      else onStageFiles(files);
+      else onStageFiles(stagedFiles);
     }
   };
 
-  const handleHistoryKey = (e: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
-    const isUp = e.key === 'ArrowUp';
-    if ((!isUp && e.key !== 'ArrowDown') || !isPlainKey(e)) return false;
+  const measuredLength = citationSendLength(prompt);
+  const draftOverLimit = measuredLength > 120_000;
+  const canSend = !draftOverLimit && Boolean(prompt.trim() || attachments.length > 0);
 
-    const target = e.currentTarget;
-    const { selectionStart, selectionEnd } = target;
-    if (selectionStart !== selectionEnd) return false;
-
-    if (isUp ? !isNoNewlineBefore(prompt, selectionStart) : !isNoNewlineAfter(prompt, selectionStart)) {
-      return false;
-    }
-
-    const history = extractUserPromptHistory(threadItems);
-    if (history.length === 0) return false;
-
-    const currentIdx = historyStateRef.current.owner === threadId ? historyStateRef.current.index : null;
-    const resolvedIdx = currentIdx !== null && prompt === history[currentIdx] ? currentIdx : null;
-
-    if (resolvedIdx === null && isUp) {
-      historyStateRef.current.draft = prompt;
-    }
-
-    const nextIdx = getNextHistoryIndex(history.length, resolvedIdx, isUp ? 'older' : 'newer');
-    if (nextIdx !== undefined) {
-      e.preventDefault();
-      historyStateRef.current = {
-        owner: threadId,
-        index: nextIdx,
-        draft: historyStateRef.current.draft,
-      };
-      const nextText = nextIdx === null ? historyStateRef.current.draft : (history[nextIdx] ?? '');
-      onChangePrompt(nextText);
-      requestAnimationFrame(() => {
-        target.focus();
-        target.setSelectionRange(nextText.length, nextText.length);
-      });
-      return true;
-    }
-    return false;
-  };
-
-  const providerMeta = (PROVIDER_CATALOG as Record<string, any>)[threadProvider] || PROVIDER_CATALOG.claude;
-  const models: ModelOption[] = providerMeta.isDynamic && dynamicModels.length > 0 ? dynamicModels : providerMeta.models;
-  const currentModelOption = models.find((m) => m.id === threadModel);
-  const currentModelName = currentModelOption?.name || threadModel || providerMeta.defaultModel;
-  const supportsEffort = Boolean(providerMeta.supportsEffort || currentModelOption?.supportsEffort);
-
-  const modelTriggerLabel =
-    agentName && (!threadModel || threadModel === providerMeta.defaultModel)
-      ? 'Automatic'
-      : currentModelName.replace(/^Claude /u, '');
-
-  const canSend = Boolean(prompt.trim() || attachments.length > 0);
-  const executionMode = threadPlan ? 'plan' : threadMode;
-
-  const composerPlaceholder = agentName
+  const composerPlaceholder = isVoiceModeActive
+    ? 'Escribir en la sesión de voz…'
+    : agentName
     ? running
       ? 'Write a follow-up while your agent works…'
       : `Message ${agentName}…`
@@ -411,128 +417,319 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     ? 'Ask about the code. Nothing gets changed.'
     : 'Ask anything, or describe the change…';
 
+  const onComposerCopy = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const field = event.currentTarget;
+    const fullField = field.value === prompt;
+    const start = fullField ? (field.selectionStart ?? 0) : caretRef.current.start;
+    const end = fullField ? (field.selectionEnd ?? start) : caretRef.current.end;
+    const selected = prompt.slice(start, end);
+    if (draftHasMention(selected)) {
+      event.preventDefault();
+      writeMentionClipboard(event.clipboardData, selected);
+      return;
+    }
+    if (!draftHasCitation(selected)) return;
+    event.preventDefault();
+    writeCitationClipboard(event.clipboardData, selected);
+  };
+
+  const onComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (running) return;
+    const dt = event.clipboardData;
+    if (!dt) return;
+
+    let pasteFiles: File[] = Array.from(dt.files ?? []);
+    if (pasteFiles.length === 0 && dt.items) {
+      const itemFiles = Array.from(dt.items)
+        .filter((item) => item.kind === 'file' || item.type.startsWith('image/'))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null);
+      if (itemFiles.length > 0) pasteFiles = itemFiles;
+    }
+    if (pasteFiles.length > 0) {
+      event.preventDefault();
+      onStageFiles(pasteFiles);
+      return;
+    }
+
+    const mentioned = readMentionClipboard(dt);
+    const kite = mentioned ?? readCitationClipboard(dt);
+    if (kite) {
+      event.preventDefault();
+      const field = event.currentTarget;
+      const fullField = !draftHasCitation(prompt) || field.value === prompt;
+      const start = fullField ? (field.selectionStart ?? prompt.length) : caretRef.current.start;
+      const end = fullField ? (field.selectionEnd ?? start) : caretRef.current.end;
+      const next = `${prompt.slice(0, start)}${kite}${prompt.slice(end)}`;
+      const caret = start + kite.length;
+      caretRef.current = { start: caret, end: caret };
+      setPendingCaret(caret);
+      onChangePrompt(next);
+      return;
+    }
+
+    if (typeof dt.getData !== 'function') return;
+    const text = dt.getData('text/plain');
+    if (!text) return;
+    const flags = event.nativeEvent as { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean };
+    const forceInline = Boolean((flags.ctrlKey || flags.metaKey) && flags.shiftKey);
+    const bytes = new TextEncoder().encode(text).length;
+    if (!pasteBecomesFile(bytes, measuredLength, text.length, forceInline)) return;
+    event.preventDefault();
+    onStageFiles([new File([text], 'pasted-text.txt', { type: 'text/plain' })]);
+  };
+
+  const deliverDraft = (mode: 'send' | 'queue') => {
+    if (isVoiceModeActive && prompt.trim()) {
+      const text = expandMentions(expandCitations(prompt)).trim();
+      onChangePrompt('');
+      if (onSendVoiceTurn) {
+        onSendVoiceTurn(text);
+      } else {
+        onSend();
+      }
+      return;
+    }
+
+    const command = resolveSessionCommand(prompt, threadProvider);
+    if (command.kind === 'compact') {
+      onChangePrompt('');
+      onCompact?.();
+      return;
+    }
+    if (command.kind === 'refuse-compact') {
+      setCompactNotice(command.notice);
+      onChangePrompt('');
+      return;
+    }
+    if (command.kind === 'arm-clear') {
+      setNewSessionArmed(true);
+      onChangePrompt('');
+      return;
+    }
+    if (mode === 'queue' && onQueue && prompt.trim()) {
+      onQueue(expandMentions(expandCitations(prompt)));
+      onChangePrompt('');
+      return;
+    }
+    const fresh = consumeFreshContext(newSessionArmed);
+    setNewSessionArmed(fresh.armed);
+    if (fresh.freshContext) onFreshContext?.();
+    onSend();
+  };
+
+  const onComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.nativeEvent as { isComposing?: boolean }).isComposing) return;
+    const field = event.currentTarget;
+    const fullField = field.value === prompt;
+    if (fullField && (event.key === 'Backspace' || event.key === 'Delete') && isPlainKey(event)) {
+      const deleted = deleteComposerChipKey(
+        prompt,
+        field.selectionStart ?? 0,
+        field.selectionEnd ?? 0,
+        event.key,
+      );
+      if (deleted) {
+        event.preventDefault();
+        caretRef.current = { start: deleted.caret, end: deleted.caret };
+        setPendingCaret(deleted.caret);
+        onChangePrompt(deleted.text);
+        return;
+      }
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault();
+      if (prompt.trim()) {
+        const next = stashDraft(stashes, prompt, Date.now());
+        setStashes(next.entries);
+        setStashFileNotice(null);
+        if (next.cleared) onChangePrompt('');
+      } else {
+        const entry = stashes.length === 1 ? stashes[0] : null;
+        const fileRestore = entry ? stashFileRestorable(entry, Date.now(), stashEnvironment) : null;
+        const restored = restoreStash(stashes);
+        setStashes(restored.entries);
+        setStashFileNotice(fileRestore);
+        if (restored.text) onChangePrompt(restored.text);
+      }
+      return;
+    }
+    if (handleHistoryKey(event)) return;
+
+    if (event.key === 'Backspace' && !prompt && !composerValue && attachments.length > 0 && isPlainKey(event)) {
+      event.preventDefault();
+      onRemoveAttachment(attachments[attachments.length - 1].resourceId);
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      if (isVoiceModeActive) {
+        if (!prompt.trim()) return;
+        deliverDraft('send');
+        return;
+      }
+      if (!canSend) return;
+      resetPromptHistory();
+      const intent = slashIntent(prompt, threadProvider);
+      if (intent === 'side') {
+        const question = prompt.replace(/^\/(side|btw)\s*/i, '').trim() || prompt;
+        setSideQuestion(question);
+        window.dispatchEvent(new CustomEvent('kite:side-chat', { detail: { threadId, question } }));
+        onChangePrompt('');
+        return;
+      }
+      deliverDraft(running && onQueue ? 'queue' : 'send');
+    }
+  };
+
+  const mentionQuery = mentionQueryAt(prompt, draftCaret);
+  const mentionRows = mentionQuery ? filterMentionMenu(mentionQuery.query, { files, threads, models }) : [];
+  const pickMention = (row: (typeof mentionRows)[number]) => {
+    if (!mentionQuery) return;
+    const next = insertMentionAtCaret(prompt, mentionQuery.start, draftCaret, {
+      kind: row.kind,
+      id: row.id,
+      label: row.label,
+    });
+    caretRef.current = { start: next.caret, end: next.caret };
+    setDraftCaret(next.caret);
+    setPendingCaret(next.caret);
+    onChangePrompt(next.text);
+  };
+
   return (
-    <div
-      className="chat-thread-layout__composer"
-      style={{ width: '100%', boxSizing: 'border-box', alignItems: 'stretch' }}
-      onDragOver={(event) => {
-        if (running) return;
-        const kind = getDropKind(event);
-        if (kind !== null) {
-          event.preventDefault();
-        }
-      }}
-    >
-      {/* Approval Card integrated into Composer */}
+    <div className="kite-composer-shell" style={{ boxSizing: 'border-box' }}>
+      {/* Approval Card integrated above Composer */}
       {pendingApproval && onApprovalDecision && (
-        <div style={{ width: '100%', maxWidth: 'var(--chat-column, 720px)', margin: '0 auto 10px' }}>
-          <ChatApprovalCard
-            approval={pendingApproval}
-            onDecision={onApprovalDecision}
-          />
+        <div className="w-full max-w-[var(--chat-content-max-width,46rem)] mx-auto mb-2">
+          <ChatApprovalCard approval={pendingApproval} onDecision={onApprovalDecision} />
         </div>
       )}
 
-      <div
-        className="chat-composer composer"
-        style={{ width: '100%', maxWidth: 'var(--chat-column, 720px)', margin: '0 auto', boxSizing: 'border-box' }}
-        data-drop={dropKind ?? undefined}
+      {compactNotice ? (
+        <p className="chat-note-row" role="status">
+          {compactNotice}
+        </p>
+      ) : null}
+      {newSessionArmed ? (
+        <div className="chat-note-row" role="status">
+          <span>New session</span>
+          <button type="button" onClick={() => setNewSessionArmed(false)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
+      {/* Tier 1: Main Floating Glass Card */}
+      <ComposerSurface.Main
+        onDragOver={(event) => {
+          if (running) return;
+          const kind = getDropKind(event);
+          if (kind !== null) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+            setDropKind(kind);
+          }
+        }}
         onDragLeave={(e) => {
           const rel = e.relatedTarget;
           if (rel instanceof Node && e.currentTarget.contains(rel)) return;
           setDropKind(null);
         }}
-        onDragOver={(e) => {
-          const kind = getDropKind(e);
-          if (kind !== null) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'copy';
-            setDropKind(kind);
-          }
-        }}
-        onPointerDown={(e) => {
-          const t = e.target as HTMLElement;
-          if (t === e.currentTarget || t === footerRef.current || t.classList.contains('chat-composer__spacer')) {
-            e.preventDefault();
-            textareaRef.current?.focus();
-          }
-        }}
         onDrop={handleDrop}
       >
-        {/* Staged attachments */}
-        {attachments.length > 0 && (
-          <div className="chat-composer__attachment-area">
-            <ul className="chat-composer__attachments">
-              {attachments.map((att) => (
-                <li key={att.resourceId} className="chat-composer__attachment">
-                  <FileCodeIcon size={13} style={{ color: 'var(--text-secondary)' }} />
-                  <span title={att.displayName}>{att.displayName}</span>
-                  {att.byteSize && <small style={{ color: 'var(--text-faint)' }}>{formatBytes(att.byteSize)}</small>}
-                  <button
-                    type="button"
-                    onClick={() => onRemoveAttachment(att.resourceId)}
-                    title="Remove attachment"
-                  >
-                    <CloseIcon size={12} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Input textarea */}
-        <textarea
-          ref={textareaRef}
-          data-testid={agentName ? 'agent-chat-input' : undefined}
-          data-drop-targeted={dropKind !== null ? true : undefined}
-          value={prompt}
-          disabled={running}
-          onPaste={(event) => {
-            if (running) return;
-            const dt = event.clipboardData;
-            if (!dt) return;
-
-            let files: File[] = Array.from(dt.files ?? []);
-            if (files.length === 0 && dt.items) {
-              const itemFiles = Array.from(dt.items)
-                .filter((item) => item.kind === 'file' || item.type.startsWith('image/'))
-                .map((item) => item.getAsFile())
-                .filter((f): f is File => f !== null);
-              if (itemFiles.length > 0) {
-                files = itemFiles;
-              }
-            }
-
-            if (files.length === 0) return;
-            event.preventDefault();
-            onStageFiles(files);
-          }}
-          onChange={(e) => onChangePrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.nativeEvent as any).isComposing) return;
-            if (handleHistoryKey(e)) return;
-
-            if (e.key === 'Backspace' && !prompt && attachments.length > 0 && isPlainKey(e)) {
-              e.preventDefault();
-              onRemoveAttachment(attachments[attachments.length - 1].resourceId);
-              return;
-            }
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              if (canSend) {
-                historyStateRef.current = { owner: threadId, index: null, draft: '' };
-                onSend();
-              }
-            }
-          }}
-          placeholder={composerPlaceholder}
-          rows={2}
+        {/* Attachment chips */}
+        <ComposerAttachments
+          attachments={attachments}
+          onRemoveAttachment={onRemoveAttachment}
         />
+
+        {prompt.startsWith('/') || prompt.startsWith('$') ? (
+          <ComposerCommandMenu
+            query={prompt}
+            skills={skills}
+            onPick={(value) => onChangePrompt(value.startsWith('/') ? `${value} ` : value)}
+          />
+        ) : null}
+        {mentionQuery ? (
+          <div className="composer-command-menu rounded-card" role="listbox" aria-label="Mentions">
+            {mentionRows.map((row) => (
+              <button
+                key={`${row.kind}:${row.id}`}
+                type="button"
+                role="option"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pickMention(row)}
+              >
+                {row.menuLabel}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {stashFileNotice === 'attach-again' ? (
+          <button type="button" onClick={() => onPickAttachments()}>
+            Attach again
+          </button>
+        ) : null}
+        {stashFileNotice === 'wrong-environment' ? (
+          <p role="status">Uploaded files stay in the environment that saved them.</p>
+        ) : null}
+        {sideQuestion ? (
+          <p className="chat-note-row" role="status">
+            Side: {sideQuestion}
+          </p>
+        ) : null}
+
+        {/* Textarea Input */}
+        {draftHasCitation(prompt) || draftHasMention(prompt) ? (
+          <CitationDraftEditor
+            prompt={prompt}
+            onChange={onChangePrompt}
+            onKeyDown={onComposerKeyDown}
+            onPaste={onComposerPaste}
+            onCopy={onComposerCopy}
+            pendingCaret={pendingCaret}
+            onPendingCaretApplied={() => setPendingCaret(null)}
+            onCaret={setPendingCaret}
+            onDraftCaret={setDraftCaret}
+            caretRef={caretRef}
+            testId={agentName ? 'agent-chat-input' : undefined}
+          />
+        ) : (
+          <textarea
+            ref={textareaRef}
+            data-testid={agentName ? 'agent-chat-input' : undefined}
+            data-drop-targeted={dropKind !== null ? true : undefined}
+            value={composerValue}
+            onPaste={onComposerPaste}
+            onCopy={onComposerCopy}
+            onChange={(event) => {
+              const rawStart = event.target.selectionStart ?? event.target.value.length;
+              const rawEnd = event.target.selectionEnd ?? rawStart;
+              const start = showLiveSpeech ? Math.min(rawStart, prompt.length) : rawStart;
+              const end = showLiveSpeech ? Math.min(rawEnd, prompt.length) : rawEnd;
+              caretRef.current = { start, end };
+              setDraftCaret(start);
+              commitComposerValue(event.target.value);
+            }}
+            onKeyDown={onComposerKeyDown}
+            onSelect={(event) => {
+              const rawStart = event.currentTarget.selectionStart ?? 0;
+              const rawEnd = event.currentTarget.selectionEnd ?? rawStart;
+              const start = showLiveSpeech ? Math.min(rawStart, prompt.length) : rawStart;
+              const end = showLiveSpeech ? Math.min(rawEnd, prompt.length) : rawEnd;
+              caretRef.current = { start, end };
+              setDraftCaret(start);
+            }}
+            placeholder={composerPlaceholder}
+            rows={2}
+            className="kite-composer-textarea"
+          />
+        )}
 
         {/* Drop Hint */}
         {dropKind && (
-          <span aria-hidden="true" className="chat-composer__drop-hint">
+          <span className="absolute top-2 right-2 px-2.5 py-0.5 rounded-full bg-primary text-white text-2xs font-semibold pointer-events-none z-20">
             {dropKind === 'mention'
               ? 'Drop to mention'
               : dropKind === 'prompt'
@@ -541,205 +738,128 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           </span>
         )}
 
-        {/* Composer footer */}
-        <div className="chat-composer__footer" ref={footerRef}>
-          <div className="chat-composer__controls">
-            {/* Attach button: fits strictly in 28px (:first-child > .select-menu-trigger--toolbar) */}
-            <SelectMenu
-              variant="toolbar"
-              label="Attach"
-              help="Attach files or a folder"
-              triggerIcon={<PaperclipIcon size={14} />}
-              panelTitle="Attach to message"
-              panelDetail="A folder lets the agent read everything inside it."
-              disabled={running}
-              rows={[
-                { id: 'files', title: 'Add files…', detail: 'Choose one or more files.' },
-                { id: 'folder', title: 'Add folder…', detail: 'The agent can read everything inside the folder.' },
-              ]}
-              onSelect={(kind) => onPickAttachments(kind as 'files' | 'folder')}
+        {/* Footer Bar */}
+        {isVoiceModeActive ? (
+          <VoiceModeFooterBar
+            threadId={threadId}
+            hasDraftText={Boolean(prompt.trim())}
+            onSendDraft={() => deliverDraft('send')}
+            onEndSession={() => voice.stopSession()}
+          />
+        ) : (
+          <div ref={footerRef} className="kite-composer-footer">
+            {/* Left Controls */}
+            <ComposerConfigControls
+              threadProvider={threadProvider}
+              threadModel={threadModel}
+              threadEffort={threadEffort}
+              threadAgent={threadAgent}
+              threadPlan={threadPlan}
+              threadMode={threadMode}
+              threadConnectionId={threadConnectionId}
+              declaration={declaration}
+              running={running}
+              catalogState={catalogState}
+              connectionCandidates={connectionCandidates}
+              ensureDynamicModels={ensureDynamicModels}
+              onUpdateConfig={onUpdateConfig}
+              onSelectConnection={onSelectConnection}
             />
 
-            {/* Mode: wrapped in span.chat-composer__mode to avoid 28px child rule */}
-            {!agentName && (
-              <span
-                className="chat-composer__mode"
-                data-execution={executionMode}
-              >
-                <SelectMenu
-                  variant="toolbar"
-                  label="Mode"
-                  triggerIcon={<CompassIcon size={12} />}
-                  triggerLabel={threadPlan ? 'Plan' : MODE_LABELS[threadMode]?.title || 'Mode'}
-                  disabled={running}
-                  value={executionMode}
-                  panelTitle="Execution Mode"
-                  rows={[
-                    { id: 'plan', title: 'Plan', detail: 'Reads and plans, changes nothing' },
-                    ...providerMeta.modes.map((m: ChatMode) => {
-                      const meta = MODE_LABELS[m];
-                      return {
-                        id: m,
-                        title: meta?.title || m,
-                        detail: meta?.detail,
-                      };
-                    }),
-                  ]}
-                  onSelect={(m) => {
-                    if (m === 'plan') {
-                      onUpdateConfig({ plan: true });
-                    } else {
-                      onUpdateConfig({ plan: false, mode: m as ChatMode });
-                    }
-                  }}
-                />
-              </span>
-            )}
-          </div>
-
-          <span className="chat-composer__spacer" />
-
-          {/* Token usage counter */}
-          {totalTokens > 0 && (
-            <span className="chat-composer__usage" title="Total tokens in session">
-              {formatTokens(totalTokens)}
-            </span>
-          )}
-
-          {/* Engine group: child 1 = Provider (30px), child 2 = Model, child 3 = Effort */}
-          <div className="chat-composer__engine">
-            {/* Child 1: Provider logo only (fits in 30px) */}
-            <SelectMenu
-              variant="toolbar"
-              label="Provider"
-              help={`Provider · ${providerMeta.label}`}
-              triggerEngine={providerMeta.engineId || threadProvider}
-              disabled={running}
-              value={threadProvider}
-              panelTitle="AI Provider"
-              rows={(Object.keys(PROVIDER_CATALOG) as ChatProvider[]).map((pKey) => {
-                const pMeta = (PROVIDER_CATALOG as Record<string, any>)[pKey];
-                return {
-                  id: pKey,
-                  title: pMeta.label,
-                  detail: pMeta.vendor,
-                  engine: pMeta.engineId || pKey,
-                };
-              })}
-              onSelect={(p) => onUpdateConfig({ provider: p as ChatProvider })}
-            />
-
-            {/* Child 2: Model selector with label */}
-            <SelectMenu
-              variant="toolbar"
-              label="Model"
-              help="Model"
-              searchable
-              triggerLabel={modelTriggerLabel}
-              triggerBadge={isRefreshingModels ? 'Syncing…' : undefined}
-              disabled={running}
-              value={threadModel || providerMeta.defaultModel}
-              panelTitle={`${providerMeta.label} Models`}
-              panelDetail={isRefreshingModels ? 'Querying live provider CLI…' : undefined}
-              panelEngine={providerMeta.engineId || threadProvider}
-              rows={[
-                ...models.map((m) => ({
-                  id: m.id,
-                  title: m.name,
-                  detail: m.description,
-                })),
-                ...(onRefreshModels
-                  ? [
-                      {
-                        id: '__refresh_models__',
-                        title: isRefreshingModels ? 'Checking live models…' : 'Refresh available models…',
-                        detail: 'Query provider CLI directly for newly released models',
-                        ruleBefore: true,
-                        disabled: isRefreshingModels,
-                      },
-                    ]
-                  : []),
-              ]}
-              onSelect={(m) => {
-                if (m === '__refresh_models__') {
-                  onRefreshModels?.(threadProvider);
-                  return;
-                }
-                onUpdateConfig({ model: m });
-              }}
-            />
-
-            {/* Child 3: EffortPicker (if supported by provider / model) */}
-            {supportsEffort && (
-              <EffortPicker
-                value={threadEffort || 'medium'}
+            {/* Right Actions */}
+            <div className="kite-composer-footer-right">
+              {/* Attachment Button with Popover */}
+              <AttachMenuPopover
                 disabled={running}
-                placement="top"
-                onSelect={(val) => onUpdateConfig({ effort: val })}
+                onPickAttachments={onPickAttachments}
               />
-            )}
+
+              {/* Dictation Button */}
+              <ComposerDictationButton
+                running={running}
+                prompt={prompt}
+                onChangePrompt={onChangePrompt}
+                voice={voice}
+              />
+
+              {/* Voice Mode Button (S1, S7) */}
+              <button
+                type="button"
+                disabled={running}
+                onClick={() => {
+                  if (onStartVoiceMode) {
+                    onStartVoiceMode();
+                    return;
+                  }
+                  voice.startSession(threadId, 'thread');
+                }}
+                title="Iniciar sesión de voz"
+                aria-label="Iniciar sesión de voz"
+                className="chat-voice-mode-control size-8 rounded-control"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 10v4" />
+                  <path d="M8 6v12" />
+                  <path d="M12 3v18" />
+                  <path d="M16 7v10" />
+                  <path d="M20 11v2" />
+                </svg>
+              </button>
+
+              {/* Token Counter */}
+              {totalTokens > 0 && (
+                <span className="text-2xs font-mono text-muted-foreground px-1 select-none">
+                  {formatTokens(totalTokens)}
+                </span>
+              )}
+              {draftOverLimit && (
+                <span className="text-2xs font-mono text-destructive px-1 select-none" role="status">
+                  {measuredLength.toLocaleString()} / 120,000
+                </span>
+              )}
+
+              {/* Send / Interrupt / Queue / Steer / Resume */}
+              <ComposerPrimaryActionButton
+                running={running}
+                prompt={prompt}
+                attachmentsCount={attachments.length}
+                paused={paused}
+                threadProvider={threadProvider}
+                followUpFlip={followUpFlip}
+                canSend={canSend}
+                agentName={agentName}
+                goal={goal}
+                onGoalStop={onGoalStop}
+                onStop={onStop}
+                onSend={onSend}
+                deliverDraft={deliverDraft}
+                hasQueueHandler={Boolean(onQueue)}
+              />
+            </div>
           </div>
+        )}
+      </ComposerSurface.Main>
 
-          {/* Dictation Control Button */}
-          <span className="dictation-control">
-            <button
-              type="button"
-              className="dictation-control__button"
-              data-recording={dictationState === 'recording' || undefined}
-              disabled={
-                running ||
-                (dictationAvailability !== null &&
-                  !dictationAvailability.canStart &&
-                  !dictationAvailability.canRequestPermission)
-              }
-              onClick={toggleDictation}
-              title={
-                dictationState === 'recording'
-                  ? 'Finish dictation'
-                  : dictationState === 'transcribing'
-                  ? 'Transcribing…'
-                  : dictationError || 'Dictate message'
-              }
-              aria-label={dictationState === 'recording' ? 'Finish dictation' : 'Dictate message'}
-            >
-              {dictationState === 'recording' ? <StopIcon size={10} /> : <MicIcon size={12} />}
-            </button>
-            <span aria-live="polite" className="sr-only" role="status">
-              {dictationState === 'recording' ? 'Listening. Press again to transcribe.' : 'Dictate message'}
-            </span>
-            {dictationError && (
-              <span className="dictation-control__error" role="alert">
-                {dictationError}
-              </span>
-            )}
-          </span>
-
-          {/* Send or Stop Button */}
-          {running ? (
-            <button
-              type="button"
-              aria-label="Stop generation"
-              title="Stop execution"
-              className="chat-composer__stop"
-              onClick={onStop}
-            >
-              <StopIcon size={10} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              aria-label="Send message"
-              title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
-              disabled={!canSend}
-              className="chat-composer__send"
-              data-testid={agentName ? 'agent-chat-send' : undefined}
-              onClick={onSend}
-            >
-              <ArrowUpIcon size={16} />
-            </button>
-          )}
-        </div>
-      </div>
+      {/* Tier 2: Recessed Lower Context Strip */}
+      <ComposerContextStrip
+        currentBranch={threadBranch || 'main'}
+        branches={branches}
+        currentWorkspace={threadWorkspaceName || 'Local'}
+        workspaces={workspaces}
+        onSelectBranch={onSwitchBranch}
+        onCreateBranch={onCreateBranch}
+        onSelectWorkspace={onSelectWorkspace}
+      />
     </div>
   );
 };

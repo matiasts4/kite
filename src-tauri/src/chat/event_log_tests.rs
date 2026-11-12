@@ -23,6 +23,16 @@
             "workspaceId": Value::Null,
             "pinned": false,
             "pendingApproval": Value::Null,
+            "parentThreadId": Value::Null,
+            "parentToolCallId": Value::Null,
+            "startedByAgent": false,
+            "sideChat": false,
+            "subagentRole": Value::Null,
+            "workspaceMode": Value::Null,
+            "swarmId": Value::Null,
+            "swarmMemberName": Value::Null,
+            "subagentRuns": [],
+            "swarmState": Value::Null,
             "createdAtUnixMs": 1_700_000_000_000i64,
             "updatedAtUnixMs": 1_700_000_000_000i64
         })

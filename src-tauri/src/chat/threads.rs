@@ -10,7 +10,7 @@ use crate::chat::utils::{clip_title, now_ms};
 /// `blank_thread` writes exactly these names, and the renderer plus the native
 /// readers depend on them. A projection that adds, drops, or renames one is a
 /// compatibility break, so the event log fold is asserted against this list.
-pub const THREAD_FIELD_NAMES: [&str; 20] = [
+pub const THREAD_FIELD_NAMES: [&str; 30] = [
     "schemaVersion",
     "revision",
     "id",
@@ -29,6 +29,16 @@ pub const THREAD_FIELD_NAMES: [&str; 20] = [
     "workspaceId",
     "pinned",
     "pendingApproval",
+    "parentThreadId",
+    "parentToolCallId",
+    "startedByAgent",
+    "sideChat",
+    "subagentRole",
+    "workspaceMode",
+    "swarmId",
+    "swarmMemberName",
+    "subagentRuns",
+    "swarmState",
     "createdAtUnixMs",
     "updatedAtUnixMs",
 ];
@@ -88,6 +98,16 @@ pub fn blank_thread(
         "workspaceId": workspace_id,
         "pinned": false,
         "pendingApproval": Value::Null,
+        "parentThreadId": Value::Null,
+        "parentToolCallId": Value::Null,
+        "startedByAgent": false,
+        "sideChat": false,
+        "subagentRole": Value::Null,
+        "workspaceMode": Value::Null,
+        "swarmId": Value::Null,
+        "swarmMemberName": Value::Null,
+        "subagentRuns": [],
+        "swarmState": Value::Null,
         "createdAtUnixMs": now,
         "updatedAtUnixMs": now
     })
@@ -166,6 +186,22 @@ pub fn hydrate_thread_binding(thread: &mut Value) {
     if thread.get("agent").is_none() {
         if let Some(agent) = thread.get("workMode").and_then(|value| value.as_str()) {
             thread["agent"] = json!(agent);
+        }
+    }
+    for (key, default) in [
+        ("parentThreadId", Value::Null),
+        ("parentToolCallId", Value::Null),
+        ("startedByAgent", json!(false)),
+        ("sideChat", json!(false)),
+        ("subagentRole", Value::Null),
+        ("workspaceMode", Value::Null),
+        ("swarmId", Value::Null),
+        ("swarmMemberName", Value::Null),
+        ("subagentRuns", json!([])),
+        ("swarmState", Value::Null),
+    ] {
+        if thread.get(key).is_none() {
+            thread[key] = default;
         }
     }
 }
@@ -444,6 +480,14 @@ pub fn summary_of(thread: &Value) -> Option<Value> {
         "hasContent": thread.get("items").and_then(|v| v.as_array()).map(|items| !items.is_empty()).unwrap_or(false),
         "workspaceId": thread.get("workspaceId").cloned().unwrap_or(Value::Null),
         "pinned": thread.get("pinned").cloned().unwrap_or(json!(false)),
+        "parentThreadId": thread.get("parentThreadId").cloned().unwrap_or(Value::Null),
+        "parentToolCallId": thread.get("parentToolCallId").cloned().unwrap_or(Value::Null),
+        "startedByAgent": thread.get("startedByAgent").cloned().unwrap_or(json!(false)),
+        "sideChat": thread.get("sideChat").cloned().unwrap_or(json!(false)),
+        "subagentRole": thread.get("subagentRole").cloned().unwrap_or(Value::Null),
+        "workspaceMode": thread.get("workspaceMode").cloned().unwrap_or(Value::Null),
+        "swarmId": thread.get("swarmId").cloned().unwrap_or(Value::Null),
+        "swarmMemberName": thread.get("swarmMemberName").cloned().unwrap_or(Value::Null),
         "createdAtUnixMs": thread.get("createdAtUnixMs").cloned().unwrap_or(json!(now_ms())),
         "updatedAtUnixMs": thread.get("updatedAtUnixMs").cloned().unwrap_or(json!(now_ms()))
     }))

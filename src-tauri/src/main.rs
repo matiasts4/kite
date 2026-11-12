@@ -472,6 +472,8 @@ fn main() {
             get_agent_availability,
             get_chat_session_status,
             get_subscription_quotas,
+            get_thread_subagent_detail,
+            get_thread_swarm_state,
             opencode_go_credential_status,
             save_opencode_api_key,
             clear_opencode_api_key,

@@ -18,6 +18,7 @@ fn test_live_chat_runs_and_approval() {
         started_at_ms: 1234567890,
         routine_id: None,
         delivered_through: 0,
+        file_baselines: Default::default(),
     };
     {
         let mut live = live_turns().lock().unwrap();
@@ -158,4 +159,122 @@ fn test_get_chat_session_status_command() {
     assert_eq!(unknown["state"], "closed");
     assert_eq!(unknown["isWarm"], false);
     assert_eq!(unknown["hasResumeHandle"], false);
+}
+
+#[test]
+fn thread_persists_subagent_and_swarm_metadata_and_serves_detail_commands() {
+    use crate::chat::threads::{blank_thread, create_thread, summary_of, THREAD_FIELD_NAMES};
+
+    let sample = blank_thread("blank-subagent-check", None, "Check", "claude", None);
+    for key in [
+        "parentThreadId",
+        "parentToolCallId",
+        "startedByAgent",
+        "sideChat",
+        "subagentRole",
+        "workspaceMode",
+        "swarmId",
+        "swarmMemberName",
+        "subagentRuns",
+        "swarmState",
+    ] {
+        assert!(THREAD_FIELD_NAMES.contains(&key), "missing {key} in THREAD_FIELD_NAMES");
+        assert!(sample.get(key).is_some(), "missing {key} in blank_thread");
+    }
+
+    let parent = create_thread(None, "Parent Thread", "claude", None);
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let _cleanup_parent = RemoveThread(parent_id.clone());
+
+    let child = create_thread(None, "Child Subagent", "grok", None);
+    let child_id = child["id"].as_str().unwrap().to_string();
+    let _cleanup_child = RemoveThread(child_id.clone());
+
+    {
+        let mut all = threads().lock().unwrap();
+        if let Some(ch) = all.iter_mut().find(|t| t["id"] == child_id) {
+            ch["parentThreadId"] = json!(parent_id);
+            ch["parentToolCallId"] = json!("call_sub_1");
+            ch["startedByAgent"] = json!(true);
+            ch["subagentRole"] = json!("Code Reviewer");
+            ch["workspaceMode"] = json!("share");
+            ch["swarmId"] = json!("swarm_1");
+            ch["swarmMemberName"] = json!("reviewer");
+            ch["items"] = json!([{
+                "id": "step_1",
+                "kind": "tool",
+                "title": "Read main.rs",
+                "status": "completed",
+                "text": "ok",
+                "streaming": false,
+                "exitCode": Value::Null,
+                "createdAtUnixMs": 1,
+                "attachments": []
+            }]);
+        }
+        if let Some(p) = all.iter_mut().find(|t| t["id"] == parent_id) {
+            p["subagentRuns"] = json!([{
+                "subagentId": "sub_1",
+                "parentThreadId": parent_id,
+                "parentToolCallId": "call_sub_1",
+                "role": "Code Reviewer",
+                "provider": "grok",
+                "model": "grok-mini",
+                "workspaceMode": "share",
+                "status": "running",
+                "childThreadId": child_id,
+                "stepCount": 1,
+                "items": [],
+                "startedAtUnixMs": 100,
+                "updatedAtUnixMs": 100
+            }]);
+            p["swarmState"] = json!({
+                "swarmId": "swarm_1",
+                "title": "Audit Swarm",
+                "coordinatorModel": "claude-opus-4-6",
+                "members": [{
+                    "name": "reviewer",
+                    "role": "Code Reviewer",
+                    "provider": "grok",
+                    "model": "grok-mini",
+                    "workspaceMode": "share",
+                    "state": "working",
+                    "channels": ["main"],
+                    "childThreadId": child_id
+                }],
+                "posts": [{
+                    "seq": 1,
+                    "author": "coordinator",
+                    "channel": "main",
+                    "text": "@reviewer check src-tauri",
+                    "mentions": ["@reviewer"],
+                    "createdAtUnixMs": 100
+                }],
+                "channels": [{ "name": "main", "archived": false }]
+            });
+        }
+    }
+
+    let child_snap = threads()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == child_id)
+        .cloned()
+        .unwrap();
+    let child_summary = summary_of(&child_snap).expect("summary_of");
+    assert_eq!(child_summary["parentThreadId"], parent_id);
+    assert_eq!(child_summary["startedByAgent"], true);
+    assert_eq!(child_summary["swarmMemberName"], "reviewer");
+
+    let detail = get_thread_subagent_detail(Some(json!({
+        "threadId": parent_id,
+        "subagentId": "sub_1"
+    })));
+    assert_eq!(detail["subagentId"], "sub_1");
+    assert_eq!(detail["items"].as_array().map(|a| a.len()), Some(1));
+
+    let swarm = get_thread_swarm_state(Some(json!({ "threadId": parent_id })));
+    assert_eq!(swarm["title"], "Audit Swarm");
+    assert_eq!(swarm["members"][0]["name"], "reviewer");
 }

@@ -897,6 +897,39 @@ pub fn reorder_agent_chat_tabs(request: Option<Value>) -> Value {
     Value::Null
 }
 
+#[tauri::command]
+pub fn get_thread_subagent_detail(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let subagent_id = req
+        .and_then(|r| r.get("subagentId").or_else(|| r.get("subagent_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (Some(tid), Some(sid)) = (thread_id, subagent_id) else {
+        return json!({ "error": "threadId and subagentId are required" });
+    };
+    crate::chat::subagents::build_subagent_detail(tid, sid).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+pub fn get_thread_swarm_state(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let Some(tid) = req
+        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return json!({ "error": "threadId is required" });
+    };
+    crate::chat::subagents::build_swarm_state(tid)
+}
+
 #[cfg(test)]
 #[path = "chat_commands_tests.rs"]
 mod tests;

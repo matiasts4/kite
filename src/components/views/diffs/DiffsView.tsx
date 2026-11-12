@@ -1,38 +1,19 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { createWorkspaceGitService, STATUS_LETTERS, splitPath } from '../files/gitTypes';
+import { createWorkspaceGitService, splitPath } from '../files/gitTypes';
 import { useWorkspaceGit } from '../files/useWorkspaceGit';
 import { DiffFileCard } from './DiffFileCard';
 import { DiffFileTree } from './DiffFileTree';
 import { DiffCodeViewer } from './DiffCodeViewer';
-import {
-  ColumnsGlyph,
-  RowsGlyph,
-  WrapTextGlyph,
-  FolderTreeGlyph,
-  ChevronsUpDownGlyph,
-  ChevronsDownUpGlyph,
-  CopyGlyph,
-  CheckGlyph,
-  ListGlyph,
-} from '../../dockIcons';
+import { DiffsCommitBar } from './DiffsCommitBar';
+import { DiffsToolbar } from './DiffsToolbar';
+import { DiffFocusedHeader } from './DiffFocusedHeader';
 import {
   FolderIcon,
   CheckIcon,
   AlertCircleIcon,
-  CloseIcon,
-  FileTextIcon,
-  PlusIcon,
-  MinusIcon,
-  Undo2Icon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  ChevronDownIcon,
-  MoreHorizontalIcon,
 } from '../files/FileIcons';
-import { RefreshIcon } from '../../code/codeIcons';
 import { SpinnerIcon } from '../chat/ChatIcons';
 import './diffs.css';
-import { useDiffsMenuPresence } from './diffsMotion';
 
 export interface DiffsViewProps {
   workspaceId: string | null;
@@ -79,8 +60,6 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     }
   }, [currentWsId]);
 
-  const [isFolderMenuOpen, setIsFolderMenuOpen] = useState<boolean>(false);
-  const folderMenuPresence = useDiffsMenuPresence(isFolderMenuOpen);
   const activeWorkspaceName = useMemo(() => {
     if (!currentWsId) return null;
     const found = workspaces?.find((w) => w.id === currentWsId);
@@ -146,18 +125,10 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const [filter, setFilter] = useState<'all' | 'staged' | 'unstaged'>('all');
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [copiedPath, setCopiedPath] = useState<boolean>(false);
-  const [showDiscardConfirm, setShowDiscardConfirm] = useState<boolean>(false);
 
-  // Responsive dock width observer & more menu state
+  // Responsive dock width observer
   const containerRef = useRef<HTMLDivElement>(null);
-  const moreMenuRef = useRef<HTMLDivElement>(null);
-  const quickJumpRef = useRef<HTMLDivElement>(null);
   const [isNarrow, setIsNarrow] = useState<boolean>(false);
-  const [moreMenuOpen, setMoreMenuOpen] = useState<boolean>(false);
-  const moreMenuPresence = useDiffsMenuPresence(moreMenuOpen);
-  const [quickJumpOpen, setQuickJumpOpen] = useState<boolean>(false);
-  const quickJumpPresence = useDiffsMenuPresence(quickJumpOpen);
-  const [quickJumpFilter, setQuickJumpFilter] = useState<string>('');
 
   useEffect(() => {
     const el = containerRef.current;
@@ -170,30 +141,6 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  useEffect(() => {
-    if (!moreMenuOpen && !quickJumpOpen) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (moreMenuOpen && moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
-        setMoreMenuOpen(false);
-      }
-      if (quickJumpOpen && quickJumpRef.current && !quickJumpRef.current.contains(e.target as Node)) {
-        setQuickJumpOpen(false);
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (moreMenuOpen) setMoreMenuOpen(false);
-        if (quickJumpOpen) setQuickJumpOpen(false);
-      }
-    };
-    window.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [moreMenuOpen, quickJumpOpen]);
 
   useEffect(() => {
     try {
@@ -282,13 +229,6 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [viewMode, handlePrevFile, handleNextFile]);
-
-  // Filtered files for Quick Jump Menu
-  const quickJumpFilteredFiles = useMemo(() => {
-    if (!quickJumpFilter.trim()) return displayedFiles;
-    const q = quickJumpFilter.toLowerCase();
-    return displayedFiles.filter((f) => f.path.toLowerCase().includes(q));
-  }, [displayedFiles, quickJumpFilter]);
 
   // Reset expanded files when switching workspaces so all diffs start collapsed
   const currentWorkspaceRef = useRef<string | null>(null);
@@ -468,526 +408,60 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
 
   return (
     <div className="diffs-container" ref={containerRef}>
-      {/* ------------------------------------------------------------------
-         Top Zone 1: Commit Bar (at the top, exactly as requested)
-         ------------------------------------------------------------------ */}
-      <section className="diffs-commit-bar" aria-label="Git commit">
-        <div className="diffs-commit-input-row">
-          <textarea
-            className="diffs-commit-textarea"
-            placeholder="Commit message (Ctrl+Enter to commit)"
-            value={commitDraft}
-            disabled={gitBusy !== null}
-            onChange={(e) => setCommitDraft(e.target.value)}
-            onKeyDown={handleCommitKeyDown}
-            rows={2}
-            aria-label="Commit message"
-          />
-          <button
-            type="button"
-            className="primary-button diffs-commit-btn"
-            disabled={!canCommit}
-            onClick={handleCommitSubmit}
-            title={
-              hasNoStaged
-                ? 'Stage all changes and commit (Ctrl+Enter)'
-                : 'Commit staged changes (Ctrl+Enter)'
-            }
-          >
-            <CheckIcon size={12} />
-            <span>{hasNoStaged ? 'Commit All' : 'Commit'}</span>
-          </button>
-        </div>
+      {/* Top Zone 1: Commit Bar */}
+      <DiffsCommitBar
+        commitDraft={commitDraft}
+        setCommitDraft={setCommitDraft}
+        gitBusy={gitBusy}
+        canCommit={canCommit}
+        hasNoStaged={hasNoStaged}
+        onCommitSubmit={handleCommitSubmit}
+        onCommitKeyDown={handleCommitKeyDown}
+        unstagedCount={unstagedFiles.length}
+        stagedCount={stagedFiles.length}
+        totalFilesCount={allFiles.length}
+        onStageAll={handleStageAll}
+        onUnstageAll={handleUnstageAll}
+        gitWriteError={gitWriteError}
+        onDismissWriteError={() => setGitWriteError(null)}
+      />
 
-        <div className="diffs-commit-subbar">
-          <div className="diffs-staging-actions">
-            <button
-              type="button"
-              className="diffs-text-btn"
-              disabled={gitBusy !== null || unstagedFiles.length === 0}
-              onClick={() => void handleStageAll()}
-            >
-              Stage all
-            </button>
-            <span style={{ opacity: 0.3 }}>•</span>
-            <button
-              type="button"
-              className="diffs-text-btn"
-              disabled={gitBusy !== null || stagedFiles.length === 0}
-              onClick={() => void handleUnstageAll()}
-            >
-              Unstage all
-            </button>
-          </div>
+      {/* Top Zone 2: Toolbar */}
+      <DiffsToolbar
+        workspaces={workspaces}
+        currentWsId={currentWsId}
+        activeWorkspaceName={activeWorkspaceName}
+        onSelectWorkspaceId={(id) => {
+          setCurrentWsId(id);
+          onSelectWorkspace?.(id);
+          try {
+            localStorage.setItem('kite.selectedWorkspaceId', id);
+          } catch {}
+        }}
+        filter={filter}
+        setFilter={setFilter}
+        allFilesCount={allFiles.length}
+        stagedFilesCount={stagedFiles.length}
+        unstagedFilesCount={unstagedFiles.length}
+        gitLoading={gitLoading}
+        onRefresh={() => {
+          if (currentWsId) void refreshGit(currentWsId);
+        }}
+        isNarrow={isNarrow}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        layout={layout}
+        setLayout={setLayout}
+        wordWrap={wordWrap}
+        setWordWrap={setWordWrap}
+        fileTreeOpen={fileTreeOpen}
+        setFileTreeOpen={setFileTreeOpen}
+        allCollapsed={allCollapsed}
+        onToggleAllCollapse={toggleAllCollapse}
+        displayedFilesCount={displayedFiles.length}
+      />
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {gitBusy && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: 'var(--accent, #818cf8)' }}>
-                <SpinnerIcon size={12} />
-                <span>{gitBusy}</span>
-              </span>
-            )}
-            <span>
-              {allFiles.length} changed {allFiles.length === 1 ? 'file' : 'files'}
-            </span>
-          </div>
-        </div>
-
-        {/* Write Error Banner */}
-        {gitWriteError && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '6px 10px',
-              borderRadius: '4px',
-              background: 'rgba(244, 63, 94, 0.15)',
-              border: '1px solid rgba(244, 63, 94, 0.3)',
-              color: '#fecdd3',
-              fontSize: '11px',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <AlertCircleIcon size={13} />
-              <span>{gitWriteError}</span>
-            </div>
-            <button
-              type="button"
-              className="diffs-text-btn"
-              onClick={() => setGitWriteError(null)}
-              aria-label="Dismiss error"
-            >
-              <CloseIcon size={10} />
-            </button>
-          </div>
-        )}
-      </section>
-
-      {/* ------------------------------------------------------------------
-         Top Zone 2: Toolbar
-         ------------------------------------------------------------------ */}
-      <nav className="diffs-toolbar" aria-label="Diffs toolbar">
-        {/* Left: Folder Picker & Filter Pills */}
-        <div className="diffs-toolbar-left">
-          {workspaces && workspaces.length > 0 && (
-            <div style={{ position: 'relative' }}>
-              <button
-                type="button"
-                className="_folderButton"
-                aria-expanded={isFolderMenuOpen}
-                aria-haspopup="menu"
-                aria-label={`Folder, ${activeWorkspaceName ?? 'none'}`}
-                onClick={() => setIsFolderMenuOpen((prev) => !prev)}
-                title="Switch diff folder"
-                style={{
-                  height: '24px',
-                  padding: '0 8px',
-                  fontSize: '11px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '5px',
-                  borderRadius: 'var(--radius-chip, 12px)',
-                  background: 'var(--block-fill, rgba(255, 255, 255, 0.05))',
-                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
-                  color: 'var(--text-primary, #f1f5f9)',
-                  cursor: 'pointer',
-                  maxWidth: '160px',
-                }}
-              >
-                <FolderIcon size={12} style={{ color: 'var(--accent, #6366f1)', flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {activeWorkspaceName ?? 'Select folder'}
-                </span>
-                <ChevronDownIcon size={10} style={{ opacity: 0.6, flexShrink: 0 }} />
-              </button>
-
-              {folderMenuPresence.mounted && (
-                <>
-                  <div
-                    style={{ position: 'fixed', inset: 0, zIndex: 49 }}
-                    onClick={() => setIsFolderMenuOpen(false)}
-                  />
-                  <div
-                    role="menu"
-                    aria-label="Select workspace folder"
-                    className={`ui-menu diffs-overflow-menu diffs-overflow-menu--anchor-left scroll-quiet${
-                      folderMenuPresence.motionClass ? ` ${folderMenuPresence.motionClass}` : ''
-                    }`}
-                    style={{
-                      position: 'absolute',
-                      top: 'calc(100% + 4px)',
-                      marginTop: 0,
-                      zIndex: 50,
-                      minWidth: '200px',
-                    }}
-                  >
-                    <div className="ui-menu__header" style={{ padding: '6px 10px' }}>
-                      <div
-                        style={{
-                          fontWeight: 600,
-                          fontSize: '11px',
-                          color: 'var(--text-primary, #f0f6fc)',
-                        }}
-                      >
-                        Show diffs from
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        height: '1px',
-                        background: 'var(--separator, rgba(255,255,255,0.08))',
-                        margin: '4px 0',
-                      }}
-                    />
-                    {workspaces.map((ws) => (
-                      <button
-                        key={ws.id}
-                        type="button"
-                        role="menuitem"
-                        className={`ui-menu__row${ws.id === currentWsId ? ' active' : ''}`}
-                        style={{
-                          width: '100%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          gap: '8px',
-                          padding: '6px 10px',
-                          background: ws.id === currentWsId ? 'var(--hover-fill, rgba(255,255,255,0.08))' : 'transparent',
-                          border: 'none',
-                          color: 'var(--text-primary, #f0f6fc)',
-                          fontSize: '11px',
-                          cursor: 'pointer',
-                          textAlign: 'left',
-                        }}
-                        onClick={() => {
-                          setCurrentWsId(ws.id);
-                          onSelectWorkspace?.(ws.id);
-                          try {
-                            localStorage.setItem('kite.selectedWorkspaceId', ws.id);
-                          } catch {}
-                          setIsFolderMenuOpen(false);
-                        }}
-                      >
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          <FolderIcon size={12} style={{ color: 'var(--accent, #6366f1)' }} />
-                          <span>{ws.displayName ?? ws.name ?? 'Workspace'}</span>
-                        </span>
-                        {ws.id === currentWsId && <CheckIcon size={11} />}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          <button
-            type="button"
-            className={`diffs-filter-pill ${filter === 'all' ? 'active' : ''}`}
-            onClick={() => setFilter('all')}
-          >
-            <span>All</span>
-            <span style={{ opacity: 0.7, fontFamily: 'var(--font-mono, monospace)' }}>
-              ({allFiles.length})
-            </span>
-          </button>
-          <button
-            type="button"
-            className={`diffs-filter-pill ${filter === 'staged' ? 'active' : ''}`}
-            onClick={() => setFilter('staged')}
-          >
-            <span>Staged</span>
-            <span style={{ opacity: 0.7, fontFamily: 'var(--font-mono, monospace)' }}>
-              ({stagedFiles.length})
-            </span>
-          </button>
-          <button
-            type="button"
-            className={`diffs-filter-pill ${filter === 'unstaged' ? 'active' : ''}`}
-            onClick={() => setFilter('unstaged')}
-          >
-            <span>Unstaged</span>
-            <span style={{ opacity: 0.7, fontFamily: 'var(--font-mono, monospace)' }}>
-              ({unstagedFiles.length})
-            </span>
-          </button>
-        </div>
-
-        {/* Right: Controls & Toggles */}
-        <div className="diffs-toolbar-right">
-          {/* Refresh git (SVG RefreshIcon, no emojis) */}
-          <button
-            type="button"
-            className="diffs-tool-btn"
-            onClick={() => {
-              if (currentWsId) void refreshGit(currentWsId);
-            }}
-            title="Refresh changes"
-            aria-label="Refresh changes"
-          >
-            <RefreshIcon size={12} className={gitLoading ? 'icon-spin' : ''} />
-          </button>
-
-          {!isNarrow ? (
-            <>
-              {/* View Presentation Mode Toggle: Focused vs Stream */}
-              <button
-                type="button"
-                className={`diffs-filter-pill ${viewMode === 'focused' ? 'active' : ''}`}
-                onClick={() => setViewMode((m) => (m === 'focused' ? 'stream' : 'focused'))}
-                title={viewMode === 'focused' ? 'Switch to All Files Stream' : 'Switch to Focused File View'}
-                aria-label="Toggle view mode"
-                style={{ height: '22px', fontSize: '10.5px' }}
-              >
-                {viewMode === 'focused' ? 'Focused' : 'Stream'}
-              </button>
-
-              {/* Expand / Collapse All (active in Stream mode) */}
-              {viewMode === 'stream' && displayedFiles.length > 0 && (
-                <button
-                  type="button"
-                  className="diffs-tool-btn"
-                  onClick={toggleAllCollapse}
-                  title={allCollapsed ? 'Expand all files' : 'Collapse all files'}
-                  aria-label={allCollapsed ? 'Expand all files' : 'Collapse all files'}
-                >
-                  {allCollapsed ? <ChevronsUpDownGlyph size={13} /> : <ChevronsDownUpGlyph size={13} />}
-                </button>
-              )}
-
-              <div className="diffs-sep" />
-
-              {/* View Mode Toggle: Unified vs Split */}
-              <button
-                type="button"
-                className={`diffs-tool-btn ${layout === 'unified' ? 'active' : ''}`}
-                onClick={() => setLayout('unified')}
-                title="Unified diff view (stacked)"
-                aria-label="Unified diff view"
-              >
-                <RowsGlyph size={13} />
-              </button>
-              <button
-                type="button"
-                className={`diffs-tool-btn ${layout === 'split' ? 'active' : ''}`}
-                onClick={() => setLayout('split')}
-                title="Split diff view (side-by-side)"
-                aria-label="Split diff view"
-              >
-                <ColumnsGlyph size={13} />
-              </button>
-
-              <div className="diffs-sep" />
-
-              {/* Word Wrap Toggle (crucial fix for truncated code lines!) */}
-              <button
-                type="button"
-                className={`diffs-tool-btn ${wordWrap ? 'active' : ''}`}
-                onClick={() => setWordWrap((v) => !v)}
-                title={wordWrap ? 'Disable line wrapping' : 'Enable line wrapping'}
-                aria-label={wordWrap ? 'Disable line wrapping' : 'Enable line wrapping'}
-              >
-                <WrapTextGlyph size={13} />
-              </button>
-            </>
-          ) : (
-            /* Compact Overflow Menu (•••) for Narrow Dock Widths */
-            <div className="diffs-more-menu-wrapper" ref={moreMenuRef}>
-              <button
-                type="button"
-                className={`diffs-tool-btn ${moreMenuOpen ? 'active' : ''}`}
-                onClick={() => setMoreMenuOpen((v) => !v)}
-                title="Diff display options"
-                aria-label="Diff display options"
-                aria-expanded={moreMenuOpen}
-                aria-haspopup="menu"
-              >
-                <MoreHorizontalIcon size={13} />
-              </button>
-
-              {moreMenuPresence.mounted && (
-                <div
-                  role="menu"
-                  aria-label="Diff display options"
-                  className={`ui-menu diffs-overflow-menu scroll-quiet${
-                    moreMenuPresence.motionClass ? ` ${moreMenuPresence.motionClass}` : ''
-                  }`}
-                >
-                  <div className="ui-menu__header" role="presentation">
-                    <span className="ui-menu__title">Diff options</span>
-                  </div>
-                  <div aria-hidden="true" className="ui-menu__rule" />
-
-                  <div className="ui-menu__heading" role="presentation">
-                    View mode
-                  </div>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`ui-menu__row ${viewMode === 'focused' ? 'active' : ''}`}
-                    onClick={() => {
-                      setViewMode('focused');
-                      setMoreMenuOpen(false);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <FileTextIcon size={12} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Focused</span>
-                    </span>
-                    {viewMode === 'focused' && (
-                      <span className="ui-menu__status">
-                        <CheckGlyph size={11} />
-                      </span>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`ui-menu__row ${viewMode === 'stream' ? 'active' : ''}`}
-                    onClick={() => {
-                      setViewMode('stream');
-                      setMoreMenuOpen(false);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <ListGlyph size={12} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Stream (All files)</span>
-                    </span>
-                    {viewMode === 'stream' && (
-                      <span className="ui-menu__status">
-                        <CheckGlyph size={11} />
-                      </span>
-                    )}
-                  </button>
-
-                  <div aria-hidden="true" className="ui-menu__rule" />
-                  <div className="ui-menu__heading" role="presentation">
-                    Diff layout
-                  </div>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`ui-menu__row ${layout === 'unified' ? 'active' : ''}`}
-                    onClick={() => {
-                      setLayout('unified');
-                      setMoreMenuOpen(false);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <RowsGlyph size={12} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Unified (Stacked)</span>
-                    </span>
-                    {layout === 'unified' && (
-                      <span className="ui-menu__status">
-                        <CheckGlyph size={11} />
-                      </span>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`ui-menu__row ${layout === 'split' ? 'active' : ''}`}
-                    onClick={() => {
-                      setLayout('split');
-                      setMoreMenuOpen(false);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <ColumnsGlyph size={12} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Split (Side by side)</span>
-                    </span>
-                    {layout === 'split' && (
-                      <span className="ui-menu__status">
-                        <CheckGlyph size={11} />
-                      </span>
-                    )}
-                  </button>
-
-                  <div aria-hidden="true" className="ui-menu__rule" />
-                  <div className="ui-menu__heading" role="presentation">
-                    Formatting
-                  </div>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`ui-menu__row ${wordWrap ? 'active' : ''}`}
-                    onClick={() => {
-                      setWordWrap((w) => !w);
-                    }}
-                  >
-                    <span aria-hidden="true" className="ui-menu__icon">
-                      <WrapTextGlyph size={12} />
-                    </span>
-                    <span className="ui-menu__label">
-                      <span className="ui-menu__row-title">Wrap lines</span>
-                    </span>
-                    {wordWrap && (
-                      <span className="ui-menu__status">
-                        <CheckGlyph size={11} />
-                      </span>
-                    )}
-                  </button>
-
-                  {viewMode === 'stream' && displayedFiles.length > 0 && (
-                    <>
-                      <div aria-hidden="true" className="ui-menu__rule" />
-                      <div className="ui-menu__heading" role="presentation">
-                        Cards
-                      </div>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="ui-menu__row"
-                        onClick={() => {
-                          toggleAllCollapse();
-                          setMoreMenuOpen(false);
-                        }}
-                      >
-                        <span aria-hidden="true" className="ui-menu__icon">
-                          {allCollapsed ? (
-                            <ChevronsUpDownGlyph size={12} />
-                          ) : (
-                            <ChevronsDownUpGlyph size={12} />
-                          )}
-                        </span>
-                        <span className="ui-menu__label">
-                          <span className="ui-menu__row-title">
-                            {allCollapsed ? 'Expand all files' : 'Collapse all files'}
-                          </span>
-                        </span>
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* File Tree Drawer Toggle */}
-          <button
-            type="button"
-            className={`diffs-tool-btn ${fileTreeOpen ? 'active' : ''}`}
-            onClick={() => setFileTreeOpen((v) => !v)}
-            title={fileTreeOpen ? 'Hide file tree' : 'Show file tree'}
-            aria-label={fileTreeOpen ? 'Hide file tree' : 'Show file tree'}
-          >
-            <FolderTreeGlyph size={13} />
-          </button>
-        </div>
-      </nav>
-
-      {/* ------------------------------------------------------------------
-         Body Area: File Tree + Diff Viewer (Focused or Stream)
-         ------------------------------------------------------------------ */}
+      {/* Body Area: File Tree + Diff Viewer (Focused or Stream) */}
       <div className="diffs-body">
         {/* Collapsible File Tree Drawer (Open by default) */}
         {fileTreeOpen && displayedFiles.length > 0 && (
@@ -1017,236 +491,21 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         ) : viewMode === 'focused' && activeSelectedFile ? (
           /* Focused Single-File Master-Detail View */
           <div className="diffs-focused-pane">
-            {/* Unified Focused File Header */}
-            {(() => {
-              const { name, directory } = splitPath(activeSelectedFile.path);
-              const letter = STATUS_LETTERS[activeSelectedFile.status] || 'M';
-
-              return (
-                <header className="diff-focused-header">
-                  <div className="diff-focused-header-left">
-                    {/* File Stepper buttons for reviewing one-by-one */}
-                    {displayedFiles.length > 1 && (
-                      <div className="diff-stepper-group">
-                        <button
-                          type="button"
-                          className="diff-stepper-btn"
-                          disabled={currentIndex <= 0}
-                          onClick={handlePrevFile}
-                          title="Previous file (Alt+Left)"
-                          aria-label="Previous file"
-                        >
-                          <ChevronLeftIcon size={11} />
-                        </button>
-                        <button
-                          type="button"
-                          className="diff-stepper-btn"
-                          disabled={currentIndex >= displayedFiles.length - 1}
-                          onClick={handleNextFile}
-                          title="Next file (Alt+Right)"
-                          aria-label="Next file"
-                        >
-                          <ChevronRightIcon size={11} />
-                        </button>
-                      </div>
-                    )}
-
-                    <span
-                      className={`diff-status-pill ${activeSelectedFile.status}`}
-                      title={`Status: ${activeSelectedFile.status}`}
-                    >
-                      {letter}
-                    </span>
-
-                    <div className="diff-file-path" title={activeSelectedFile.path}>
-                      {directory ? (
-                        <span className="diff-file-dir" dir="rtl">
-                          <bdi dir="ltr">{directory}/</bdi>
-                        </span>
-                      ) : null}
-                      <span className="diff-file-name">{name}</span>
-                    </div>
-
-                    {(activeStats.additions > 0 || activeStats.deletions > 0) && (
-                      <span className="diffs-stat-badge">
-                        {activeStats.additions > 0 && (
-                          <span className="diffs-stat-add">+{activeStats.additions}</span>
-                        )}
-                        {activeStats.deletions > 0 && (
-                          <span className="diffs-stat-del">-{activeStats.deletions}</span>
-                        )}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="diff-focused-header-right">
-                    {/* Sleek File Counter & Quick Jump Menu */}
-                    {displayedFiles.length > 1 && (
-                      <div className="diff-quick-jump-wrapper" ref={quickJumpRef}>
-                        <button
-                          type="button"
-                          className="diff-counter-pill"
-                          onClick={() => setQuickJumpOpen((v) => !v)}
-                          title="Jump to file"
-                          aria-label="Open jump to file menu"
-                        >
-                          <span>{currentIndex >= 0 ? `${currentIndex + 1} of ${displayedFiles.length}` : `${displayedFiles.length} files`}</span>
-                          <ChevronDownIcon size={10} style={{ opacity: 0.6 }} />
-                        </button>
-
-                        {/* Hidden native select for test and screen reader compatibility */}
-                        <select
-                          className="diffs-stepper-file-selector"
-                          value={activeSelectedFile.path}
-                          onChange={(e) => setSelectedDiffPath(e.target.value)}
-                          aria-label="Jump to file"
-                        >
-                          {displayedFiles.map((f, idx) => (
-                            <option key={f.path} value={f.path}>
-                              {idx + 1}. {f.path}
-                            </option>
-                          ))}
-                        </select>
-
-                        {quickJumpPresence.mounted && (
-                          <div
-                            className={`diff-quick-jump-popover${
-                              quickJumpPresence.motionClass ? ` ${quickJumpPresence.motionClass}` : ''
-                            }`}
-                          >
-                            <input
-                              type="text"
-                              className="diff-quick-jump-search"
-                              placeholder="Search changed files…"
-                              value={quickJumpFilter}
-                              onChange={(e) => setQuickJumpFilter(e.target.value)}
-                              autoFocus
-                            />
-                            <ul className="diff-quick-jump-list scroll-quiet">
-                              {quickJumpFilteredFiles.map((f) => {
-                                const { name: fName, directory: fDir } = splitPath(f.path);
-                                const fLetter = STATUS_LETTERS[f.status] || 'M';
-                                const isCur = f.path === activeSelectedFile.path;
-                                return (
-                                  <li key={f.path}>
-                                    <button
-                                      type="button"
-                                      className={`diff-quick-jump-item ${isCur ? 'active' : ''}`}
-                                      onClick={() => {
-                                        setSelectedDiffPath(f.path);
-                                        setQuickJumpOpen(false);
-                                        setQuickJumpFilter('');
-                                      }}
-                                    >
-                                      <span
-                                        className={`diff-status-pill ${f.status}`}
-                                        style={{ width: 14, height: 14, fontSize: 8 }}
-                                      >
-                                        {fLetter}
-                                      </span>
-                                      <span className="diff-quick-jump-path">
-                                        {fDir && <span className="diff-quick-jump-dir">{fDir}/</span>}
-                                        <span className="diff-quick-jump-name">{fName}</span>
-                                      </span>
-                                    </button>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      className="diff-card-btn"
-                      onClick={() => handleCopyPath(activeSelectedFile.path)}
-                      title={copiedPath ? 'Path copied!' : 'Copy relative path'}
-                      aria-label="Copy relative path"
-                    >
-                      {copiedPath ? <CheckGlyph size={12} /> : <CopyGlyph size={12} />}
-                    </button>
-
-                    {activeSelectedFile.status !== 'deleted' && onOpenFileInEditor && (
-                      <button
-                        type="button"
-                        className="diff-card-btn"
-                        onClick={() => onOpenFileInEditor(activeSelectedFile.path)}
-                        title="Open file in editor"
-                        aria-label="Open file in editor"
-                      >
-                        <FileTextIcon size={12} />
-                      </button>
-                    )}
-
-                    {activeSelectedFile.status !== 'untracked' && (
-                      <button
-                        type="button"
-                        className="diff-card-btn danger"
-                        disabled={gitBusy !== null}
-                        onClick={() => setShowDiscardConfirm(true)}
-                        title="Discard changes"
-                        aria-label="Discard changes"
-                      >
-                        <Undo2Icon size={12} />
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      className="diff-card-btn"
-                      disabled={gitBusy !== null}
-                      onClick={() => handleToggleStage(activeSelectedFile, activeSelectedFile.staged)}
-                      title={activeSelectedFile.staged ? 'Unstage file' : 'Stage file'}
-                      aria-label={activeSelectedFile.staged ? 'Unstage file' : 'Stage file'}
-                    >
-                      {activeSelectedFile.staged ? <MinusIcon size={12} /> : <PlusIcon size={12} />}
-                    </button>
-                  </div>
-                </header>
-              );
-            })()}
-
-            {/* Discard Confirmation Inline Alert */}
-            {showDiscardConfirm && activeSelectedFile && (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  padding: '8px 12px',
-                  background: 'rgba(244, 63, 94, 0.12)',
-                  borderBottom: '1px solid rgba(244, 63, 94, 0.25)',
-                  fontSize: '11.5px',
-                  color: '#fecdd3',
-                }}
-              >
-                <span>
-                  Discard changes to <strong>{splitPath(activeSelectedFile.path).name}</strong>? Edits will be lost.
-                </span>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    type="button"
-                    className="diffs-text-btn"
-                    onClick={() => setShowDiscardConfirm(false)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="diffs-text-btn"
-                    style={{ color: '#f43f5e', fontWeight: 600 }}
-                    onClick={() => {
-                      setShowDiscardConfirm(false);
-                      void handleDiscardChanges(activeSelectedFile);
-                    }}
-                  >
-                    Confirm Discard
-                  </button>
-                </div>
-              </div>
-            )}
+            <DiffFocusedHeader
+              activeSelectedFile={activeSelectedFile}
+              displayedFiles={displayedFiles}
+              currentIndex={currentIndex}
+              onPrevFile={handlePrevFile}
+              onNextFile={handleNextFile}
+              onSelectDiffPath={setSelectedDiffPath}
+              activeStats={activeStats}
+              copiedPath={copiedPath}
+              onCopyPath={handleCopyPath}
+              onOpenFileInEditor={onOpenFileInEditor}
+              gitBusy={gitBusy}
+              onToggleStage={handleToggleStage}
+              onDiscardChanges={handleDiscardChanges}
+            />
 
             {/* Focused Diff Code Viewer Content */}
             <div className="diffs-focused-content scroll-quiet" key={activeSelectedFile.path}>

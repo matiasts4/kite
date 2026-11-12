@@ -6,10 +6,6 @@ import {
   TERMINAL_APPEARANCE_CHANGED_EVENT,
 } from '../../lib/terminalAppearancePrefs';
 import {
-  isTerminalDividerDragging,
-  onTerminalDividerDragEnd,
-} from '../../lib/terminalViewport';
-import {
   type SelectionPoint,
   selectionRows,
   type HoveredLinkSpan,
@@ -23,13 +19,16 @@ import {
 } from './terminal/canvas/terminalCanvasTypes';
 import { renderCanvasGrid } from './terminal/canvas/canvasGridRenderer';
 import { cursorPaintPhase } from './terminal/canvas/cursorPaintPhase';
-import { finishPtyResize, planStartupNudge, requestPtyResize } from './terminal/canvas/ptyResizeGate';
-import { collectFindHits, type GridFindHit } from './terminal/canvas/terminalGridText';
+import { type GridFindHit } from './terminal/canvas/terminalGridText';
+import { normalizePasteText } from './terminal/canvas/terminalInputKeyEncoder';
 import './terminal/canvas/terminalCanvasChrome.css';
-import { encodeVtKey, normalizePasteText } from './terminal/canvas/terminalInputKeyEncoder';
 import { useTerminalMouseTracking } from './terminal/canvas/useTerminalMouseTracking';
 import { useTerminalSnapshotPoller } from './terminal/canvas/useTerminalSnapshotPoller';
-import { recordTerminalUserInput } from './terminal/canvas/terminalBenchMetrics';
+import { useTerminalKeyInput } from './terminal/canvas/useTerminalKeyInput';
+import { useTerminalFindController } from './terminal/canvas/useTerminalFindController';
+import { useTerminalPtyResize } from './terminal/canvas/useTerminalPtyResize';
+import { TerminalFindBar } from './terminal/canvas/TerminalFindBar';
+import { TerminalCanvasScrollbar } from './terminal/canvas/TerminalCanvasScrollbar';
 import { classifyBinaryPollPayload, decodeBinarySnapshot } from './terminal/canvas/binarySnapshotDecoder';
 import { OUTPUT_GAP_HIDDEN_HEARTBEAT_MS, type OutputPace } from './terminal/canvas/outputClock';
 
@@ -50,10 +49,6 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     getTerminalAppearancePrefs()
   );
   const [viewport, setViewport] = useState({ offset: 0, depth: 0, alt: false });
-  const [findOpen, setFindOpen] = useState(false);
-  const [findQuery, setFindQuery] = useState('');
-  const [findIndex, setFindIndex] = useState(0);
-  const [findCount, setFindCount] = useState(0);
   const [liveText, setLiveText] = useState('');
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -85,9 +80,8 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const rowWrappedRef = useRef<boolean[]>([]);
   const findHitsRef = useRef<GridFindHit[]>([]);
   const findIndexRef = useRef(0);
-  const findQueryRef = useRef('');
   const findOpenRef = useRef(false);
-  const findInputRef = useRef<HTMLInputElement>(null);
+  const onViewportMetricsFindRef = useRef<((depth: number) => void) | null>(null);
   const onStageClipboardBlobRef = useRef(onStageClipboardBlob);
   onStageClipboardBlobRef.current = onStageClipboardBlob;
   const scrollbarTrackRef = useRef<HTMLDivElement>(null);
@@ -131,8 +125,6 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     blink: false,
   });
 
-  const isComposingRef = useRef<boolean>(false);
-
   // Reset tracking when sessionId changes
   useEffect(() => {
     lastSeqRef.current = 0;
@@ -173,13 +165,6 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     selectionEndRef.current = null;
     hoveredLinkRef.current = null;
     rowWrappedRef.current = [];
-    findHitsRef.current = [];
-    findQueryRef.current = '';
-    findOpenRef.current = false;
-    setFindOpen(false);
-    setFindQuery('');
-    setFindIndex(0);
-    setFindCount(0);
     setViewport({ offset: 0, depth: 0, alt: false });
   }, [sessionId]);
 
@@ -289,20 +274,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       if (prev.offset === metrics.offset && prev.depth === metrics.depth && prev.alt === alt) return prev;
       return { offset: metrics.offset, depth: metrics.depth, alt };
     });
-    if (findOpenRef.current && findQueryRef.current.trim()) {
-      findHitsRef.current = collectFindHits(
-        matrixRef.current,
-        rowWrappedRef.current,
-        findQueryRef.current,
-      );
-      const count = findHitsRef.current.length;
-      setFindCount((prev) => (prev === count ? prev : count));
-      setFindIndex((prev) => {
-        const next = count === 0 ? 0 : Math.min(prev, count - 1);
-        findIndexRef.current = next;
-        return next;
-      });
-    }
+    onViewportMetricsFindRef.current?.(metrics.depth);
   }, []);
 
   const onScreenText = useCallback((text: string) => {
@@ -581,126 +553,49 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   });
   syncSelectionOnScrollRef.current = syncSelectionOnScroll;
 
-  const flushPtyResizeRef = useRef<() => void>(() => {});
-  const sendPtyResizeRef = useRef<(cols: number, rows: number, force?: boolean) => void>(() => {});
+  const {
+    findOpen,
+    setFindOpen,
+    findQuery,
+    findIndex,
+    findCount,
+    findInputRef,
+    applyFindQuery,
+    stepFind,
+    closeFind,
+    onViewportMetricsFind,
+  } = useTerminalFindController({
+    sessionId,
+    matrixRef,
+    rowWrappedRef,
+    pullViewport,
+    scheduleRender,
+    inputRef,
+    findHitsRef,
+    findIndexRef,
+    findOpenRef,
+  });
+  onViewportMetricsFindRef.current = onViewportMetricsFind;
 
-  flushPtyResizeRef.current = () => {
-    const decision = finishPtyResize({
-      inFlight: false,
-      appliedCols: appliedPtyColsRef.current,
-      appliedRows: appliedPtyRowsRef.current,
-      queued: queuedPtyRef.current,
-    });
-    queuedPtyRef.current = decision.gate.queued;
-    appliedPtyColsRef.current = decision.gate.appliedCols;
-    appliedPtyRowsRef.current = decision.gate.appliedRows;
-    if (!decision.send) {
-      resizeInFlightRef.current = false;
-      resumePoll();
-      return;
-    }
-    resizeInFlightRef.current = true;
-    armFastPoll(350);
-    void invokeCommand('resize_terminal', {
-      sessionId,
-      columns: decision.send.cols,
-      rows: decision.send.rows,
-    })
-      .catch(() => {})
-      .finally(() => {
-        flushPtyResizeRef.current();
-      });
-  };
-
-  reconcilePtySizeRef.current = () => {
-    sendPtyResizeRef.current(
-      appliedPtyColsRef.current,
-      appliedPtyRowsRef.current,
-      true,
-    );
-  };
-
-  sendPtyResizeRef.current = (cols: number, rows: number, force = false) => {
-    const decision = requestPtyResize(
-      {
-        inFlight: resizeInFlightRef.current,
-        appliedCols: appliedPtyColsRef.current,
-        appliedRows: appliedPtyRowsRef.current,
-        queued: queuedPtyRef.current,
-      },
-      cols,
-      rows,
-      force,
-    );
-    queuedPtyRef.current = decision.gate.queued;
-    appliedPtyColsRef.current = decision.gate.appliedCols;
-    appliedPtyRowsRef.current = decision.gate.appliedRows;
-    resizeInFlightRef.current = decision.gate.inFlight;
-    if (!decision.send) return;
-    armFastPoll(350);
-    void invokeCommand('resize_terminal', {
-      sessionId,
-      columns: decision.send.cols,
-      rows: decision.send.rows,
-    })
-      .catch(() => {})
-      .finally(() => {
-        flushPtyResizeRef.current();
-      });
-  };
-
-  const armStartupNudge = (cols: number, rows: number) => {
-    if (startupNudgeArmedRef.current || isTerminalDividerDragging()) return;
-    const planned = planStartupNudge(cols, rows);
-    if (!planned) return;
-    startupNudgeArmedRef.current = true;
-    if (startupNudgeTimerRef.current !== null) {
-      window.clearTimeout(startupNudgeTimerRef.current);
-    }
-    const fire = () => {
-      startupNudgeTimerRef.current = null;
-      if (!containerRef.current) return;
-      if (isTerminalDividerDragging()) return;
-      if (resizeInFlightRef.current) {
-        startupNudgeTimerRef.current = window.setTimeout(fire, 50);
-        return;
-      }
-      const latest = measureTerminalCanvasGrid(containerRef.current, prefs);
-      const again = planStartupNudge(latest.cols, latest.rows);
-      if (!again) return;
-      sendPtyResizeRef.current(again.nudge.cols, again.nudge.rows, true);
-      sendPtyResizeRef.current(again.restore.cols, again.restore.rows, true);
-    };
-    startupNudgeTimerRef.current = window.setTimeout(fire, 350);
-  };
-
-  const syncGridAndResizePty = useCallback(
-    (forceImmediate = false) => {
-      const container = containerRef.current;
-      if (!container) return;
-
-      const rect = container.getBoundingClientRect();
-      cachedRectRef.current = rect;
-      if (rect.width < 120 || rect.height < 60) return;
-
-      const metrics = measureTerminalCanvasGrid(container, prefs);
-
-      cellWidthRef.current = metrics.cellW;
-      cellHeightRef.current = metrics.cellH;
-      baselineOffsetRef.current = metrics.baselineOffset;
-      gridColsRef.current = metrics.cols;
-      gridRowsRef.current = metrics.rows;
-      scheduleRender();
-
-      if (isTerminalDividerDragging() && !forceImmediate) {
-        return;
-      }
-
-      sendPtyResizeRef.current(metrics.cols, metrics.rows, forceImmediate);
-      armStartupNudge(metrics.cols, metrics.rows);
-    },
-    [prefs, scheduleRender, sessionId]
-  );
+  const { syncGridAndResizePty } = useTerminalPtyResize({
+    sessionId,
+    containerRef,
+    cachedRectRef,
+    cellWidthRef,
+    cellHeightRef,
+    baselineOffsetRef,
+    gridColsRef,
+    gridRowsRef,
+    prefs,
+    scheduleRender,
+    armFastPoll,
+    resumePoll,
+    appliedPtyColsRef,
+    appliedPtyRowsRef,
+    resizeInFlightRef,
+    queuedPtyRef,
+    reconcilePtySizeRef,
+  });
 
   const jumpToOffset = useCallback(
     (offset: number) => {
@@ -727,66 +622,6 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     [armFastPoll, pullViewport]
   );
 
-  const applyFindQuery = useCallback(
-    (query: string) => {
-      findQueryRef.current = query;
-      setFindQuery(query);
-      if (!query.trim()) {
-        findHitsRef.current = [];
-        setFindCount(0);
-        setFindIndex(0);
-        scheduleRender();
-        return;
-      }
-      const local = collectFindHits(matrixRef.current, rowWrappedRef.current, query);
-      if (local.length > 0) {
-        findHitsRef.current = local;
-        setFindCount(local.length);
-        setFindIndex(0);
-        findIndexRef.current = 0;
-        scheduleRender();
-        return;
-      }
-      void invokeCommand<{ hits: Array<{ scrollbackOffset: number; row: number; col: number }> }>(
-        'find_terminal_text',
-        { sessionId, query, limit: 40 },
-      )
-        .then(async (res) => {
-          const hit = res?.hits?.[0];
-          if (!hit || findQueryRef.current !== query) {
-            if (findQueryRef.current === query) {
-              findHitsRef.current = [];
-              setFindCount(0);
-              scheduleRender();
-            }
-            return;
-          }
-          await pullViewport({ absoluteOffset: hit.scrollbackOffset });
-          if (findQueryRef.current !== query) return;
-          const next = collectFindHits(matrixRef.current, rowWrappedRef.current, query);
-          findHitsRef.current = next;
-          setFindCount(next.length);
-          setFindIndex(0);
-          findIndexRef.current = 0;
-          scheduleRender();
-        })
-        .catch(() => {});
-    },
-    [pullViewport, scheduleRender, sessionId]
-  );
-
-  const stepFind = useCallback(
-    (direction: 1 | -1) => {
-      const count = findHitsRef.current.length;
-      if (count === 0) return;
-      const next = (findIndexRef.current + direction + count) % count;
-      findIndexRef.current = next;
-      setFindIndex(next);
-      scheduleRender();
-    },
-    [scheduleRender]
-  );
-
   useImperativeHandle(
     ref,
     () => ({
@@ -805,113 +640,6 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     }),
     [immediatePoll, sessionId, syncGridAndResizePty]
   );
-
-  useEffect(() => {
-    if (findOpen) findInputRef.current?.focus();
-  }, [findOpen]);
-
-  // Sync PTY whenever prefs or sessionId change
-  useEffect(() => {
-    syncGridAndResizePty(false);
-  }, [syncGridAndResizePty]);
-
-  // ResizeObserver and layout resize listener
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    let resizeTimer: number | null = null;
-    const onContainerResize = () => {
-      const rect = container.getBoundingClientRect();
-      cachedRectRef.current = rect;
-      if (rect.width < 120 || rect.height < 60) return;
-
-      const metrics = measureTerminalCanvasGrid(container, prefs);
-      cellWidthRef.current = metrics.cellW;
-      cellHeightRef.current = metrics.cellH;
-      baselineOffsetRef.current = metrics.baselineOffset;
-      gridColsRef.current = metrics.cols;
-      gridRowsRef.current = metrics.rows;
-      scheduleRender();
-
-      if (isTerminalDividerDragging()) {
-        return;
-      }
-
-      if (
-        metrics.cols === appliedPtyColsRef.current &&
-        metrics.rows === appliedPtyRowsRef.current
-      ) {
-        if (resizeTimer !== null) {
-          window.clearTimeout(resizeTimer);
-          resizeTimer = null;
-        }
-        return;
-      }
-
-      if (resizeTimer !== null) {
-        window.clearTimeout(resizeTimer);
-      }
-
-      resizeTimer = window.setTimeout(() => {
-        resizeTimer = null;
-        if (isTerminalDividerDragging()) return;
-        const latestRect = container.getBoundingClientRect();
-        cachedRectRef.current = latestRect;
-        if (latestRect.width < 120 || latestRect.height < 60) return;
-        const latest = measureTerminalCanvasGrid(container, prefs);
-        gridColsRef.current = latest.cols;
-        gridRowsRef.current = latest.rows;
-        sendPtyResizeRef.current(latest.cols, latest.rows, false);
-      }, 32);
-    };
-
-    let ro: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(() => onContainerResize());
-      ro.observe(container);
-    }
-
-    const unbindDragEnd = onTerminalDividerDragEnd(() => {
-      if (resizeTimer !== null) {
-        window.clearTimeout(resizeTimer);
-        resizeTimer = null;
-      }
-      syncGridAndResizePty(true);
-    });
-
-    const handleWindowResize = () => onContainerResize();
-    const handleLayoutResize = () => {
-      cachedRectRef.current = null;
-      syncGridAndResizePty(true);
-    };
-
-    window.addEventListener('resize', handleWindowResize);
-    window.addEventListener('kite:layout-resized', handleLayoutResize);
-
-    return () => {
-      ro?.disconnect();
-      unbindDragEnd();
-      window.removeEventListener('resize', handleWindowResize);
-      window.removeEventListener('kite:layout-resized', handleLayoutResize);
-      if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-    };
-  }, [prefs, scheduleRender, syncGridAndResizePty]);
-
-  // Fonts often finish after the first grid measure. Remeasure once they are
-  // ready so the opening frame uses the real cell size.
-  useEffect(() => {
-    const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
-    if (!fonts?.ready) return;
-    let cancelled = false;
-    void fonts.ready.then(() => {
-      if (cancelled) return;
-      syncGridAndResizePty(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [syncGridAndResizePty]);
 
   // Appearance change subscription
   useEffect(() => {
@@ -953,116 +681,32 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     }
   }, [sessionId]);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    recordTerminalUserInput();
-    if (e.nativeEvent.isComposing) return;
-    armFastPoll(1000);
-
-    // Ctrl/Cmd + C / V clipboard shortcuts
-    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
-      const key = e.key.toLowerCase();
-      if (key === 'c') {
-        if (e.shiftKey || copySelectionToClipboard()) {
-          const start = selectionStartRef.current;
-          const end = selectionEndRef.current;
-          selectionStartRef.current = null;
-          selectionEndRef.current = null;
-          scheduleRender(
-            selectionRows(start, end, scrollbackOffsetRef.current, gridRowsRef.current),
-          );
-          e.preventDefault();
-          return;
-        }
-        if (!e.metaKey) {
-          sendInput('\x03');
-          e.preventDefault();
-          return;
-        }
-      }
-      if (key === 'f') {
-        e.preventDefault();
-        findOpenRef.current = true;
-        setFindOpen(true);
-        return;
-      }
-      if (key === 'v') {
-        e.preventDefault();
-        if (e.shiftKey && typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
-          void navigator.clipboard.readText().then((txt) => {
-            if (txt) pasteTextToTerminal(txt);
-          });
-          return;
-        }
-        void (async () => {
-          const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
-          if (clipboard?.read) {
-            try {
-              const items = await clipboard.read();
-              for (const item of items) {
-                const imgType = item.types.find((type) => type.toLowerCase().startsWith('image/'));
-                if (!imgType) continue;
-                const blob = await item.getType(imgType);
-                if (onStageClipboardBlobRef.current?.(blob, imgType)) return;
-              }
-            } catch {
-              // Fall through to text. A path already on the clipboard still pastes.
-            }
-          }
-          const readText = clipboard?.readText?.bind(clipboard);
-          const text = readText ? await readText().catch(() => '') : '';
-          if (text) pasteTextToTerminal(text);
-        })();
-        return;
-      }
-    }
-
-    const vtSeq = encodeVtKey(e, {
-      kittyFlags: kittyKeyboardFlagsRef.current,
-      win32Mode: win32InputModeRef.current,
-      applicationCursor: applicationCursorRef.current,
-      alternateScreen: alternateScreenRef.current,
-      gridRows: gridRowsRef.current,
-      onScrollPageUp: () => requestScrollLines(Math.max(1, gridRowsRef.current - 2)),
-      onScrollPageDown: () => requestScrollLines(-Math.max(1, gridRowsRef.current - 2)),
-    });
-
-    if (vtSeq !== null) {
-      e.preventDefault();
-      sendInput(vtSeq);
-    } else if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
-      e.preventDefault();
-    }
-  };
-
-  const handleInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
-    if (isComposingRef.current) return;
-    const value = e.currentTarget.value;
-    if (value) {
-      sendInput(value);
-      e.currentTarget.value = '';
-    }
-  };
-
-  const handleCompositionStart = () => {
-    isComposingRef.current = true;
-  };
-
-  const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
-    isComposingRef.current = false;
-    const value = e.currentTarget.value || e.data;
-    if (value) {
-      sendInput(value);
-      e.currentTarget.value = '';
-    }
-  };
-
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const text = e.clipboardData.getData('text/plain');
-    if (text) {
-      e.preventDefault();
-      pasteTextToTerminal(text);
-    }
-  };
+  const {
+    handleKeyDown,
+    handleInput,
+    handleCompositionStart,
+    handleCompositionEnd,
+    handlePaste,
+  } = useTerminalKeyInput({
+    sessionId,
+    sendInput,
+    pasteTextToTerminal,
+    armFastPoll,
+    copySelectionToClipboard,
+    selectionStartRef,
+    selectionEndRef,
+    scrollbackOffsetRef,
+    gridRowsRef,
+    scheduleRender,
+    findOpenRef,
+    setFindOpen,
+    onStageClipboardBlobRef,
+    kittyKeyboardFlagsRef,
+    win32InputModeRef,
+    applicationCursorRef,
+    alternateScreenRef,
+    requestScrollLines,
+  });
 
   const onScrollbarPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (viewport.depth <= 0) return;
@@ -1136,77 +780,24 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
           cursor: 'default',
         }}
       />
-      {showScrollbar ? (
-        <div
-          ref={scrollbarTrackRef}
-          className="terminal-canvas-scrollbar"
-          onPointerDown={onScrollbarPointerDown}
-        >
-          <div
-            className="terminal-canvas-scrollbar__thumb"
-            style={{
-              height: `${Math.max(8, Math.round(thumbRatio * 100))}%`,
-              top: `${viewport.depth <= 0 ? 0 : ((viewport.depth - viewport.offset) / viewport.depth) * (100 - Math.max(8, Math.round(thumbRatio * 100)))}%`,
-            }}
-          />
-        </div>
-      ) : null}
-      {findOpen ? (
-        <form
-          className="terminal-canvas-find"
-          onSubmit={(event) => {
-            event.preventDefault();
-            stepFind(1);
-          }}
-        >
-          <input
-            ref={findInputRef}
-            aria-label="Buscar en la terminal"
-            placeholder="Buscar"
-            value={findQuery}
-            onChange={(event) => applyFindQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                event.preventDefault();
-                findOpenRef.current = false;
-                findHitsRef.current = [];
-                setFindOpen(false);
-                setFindCount(0);
-                scheduleRender();
-                inputRef.current?.focus();
-                return;
-              }
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                stepFind(event.shiftKey ? -1 : 1);
-              }
-            }}
-          />
-          <span className="terminal-canvas-find__count">
-            {findCount === 0 ? '0' : `${findIndex + 1}/${findCount}`}
-          </span>
-          <button type="button" aria-label="Anterior" onClick={() => stepFind(-1)}>
-            ↑
-          </button>
-          <button type="button" aria-label="Siguiente" onClick={() => stepFind(1)}>
-            ↓
-          </button>
-          <button
-            type="button"
-            aria-label="Cerrar búsqueda"
-            onClick={() => {
-              findOpenRef.current = false;
-              findHitsRef.current = [];
-              setFindOpen(false);
-              setFindCount(0);
-              scheduleRender();
-              inputRef.current?.focus();
-            }}
-          >
-            ×
-          </button>
-        </form>
-      ) : null}
+      <TerminalCanvasScrollbar
+        show={showScrollbar}
+        scrollbarTrackRef={scrollbarTrackRef}
+        onPointerDown={onScrollbarPointerDown}
+        thumbRatio={thumbRatio}
+        depth={viewport.depth}
+        offset={viewport.offset}
+      />
+      <TerminalFindBar
+        isOpen={findOpen}
+        query={findQuery}
+        count={findCount}
+        index={findIndex}
+        findInputRef={findInputRef}
+        onChangeQuery={applyFindQuery}
+        onStepFind={stepFind}
+        onClose={closeFind}
+      />
       <div className="terminal-canvas-live" aria-live="polite" aria-atomic="true">
         {liveText}
       </div>

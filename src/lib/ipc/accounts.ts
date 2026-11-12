@@ -72,6 +72,25 @@ export async function saveCurrentAccountProfile(
   }
 }
 
+export interface ProviderSessionSummary {
+  sessionId: string;
+  engine: string;
+  workspaceId?: string | null;
+  paneId?: string | null;
+  cwd: string;
+  busy: boolean;
+  reasons: string[];
+  lastOutputAgeMs?: number | null;
+  presentationLive: boolean;
+}
+
+export interface ProviderSessionsInspection {
+  managedIdle: ProviderSessionSummary[];
+  managedBusy: ProviderSessionSummary[];
+  externalBlocking: string[];
+  unaffectedTerminalsCount: number;
+}
+
 export interface SwitchAccountProfileResult {
   success: boolean;
   profile?: SavedAccountProfile;
@@ -80,14 +99,38 @@ export interface SwitchAccountProfileResult {
   terminalsRestarted?: number;
   targetedSessionIds?: string[];
   skippedUnaffectedCount?: number;
+  busySessions?: ProviderSessionSummary[];
+  managedIdleCount?: number;
+  unaffectedTerminalsCount?: number;
+}
+
+export async function inspectProviderSessions(
+  provider: string
+): Promise<ProviderSessionsInspection> {
+  try {
+    return await invokeCommand<ProviderSessionsInspection>('inspect_provider_sessions', { provider });
+  } catch (err) {
+    console.warn('[IPC] inspectProviderSessions failed:', err);
+    return {
+      managedIdle: [],
+      managedBusy: [],
+      externalBlocking: [],
+      unaffectedTerminalsCount: 0,
+    };
+  }
 }
 
 export async function switchAccountProfile(
   provider: string,
-  accountId: string
+  accountId: string,
+  opts?: { force?: boolean }
 ): Promise<SwitchAccountProfileResult> {
   try {
-    return await invokeCommand('switch_account_profile', { provider, accountId });
+    const payload =
+      opts?.force !== undefined
+        ? { provider, accountId, force: opts.force }
+        : { provider, accountId };
+    return await invokeCommand('switch_account_profile', payload);
   } catch (err) {
     console.error('[IPC] switchAccountProfile failed:', err);
     return { success: false, error: String(err) };

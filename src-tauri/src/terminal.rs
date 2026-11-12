@@ -35,6 +35,11 @@ pub use workspace::*;
 #[derive(Debug, Clone)]
 pub enum SpawnMode {
     Fresh,
+    /// Fresh provider session without resuming any prior `--conversation` id,
+    /// supporting both direct agent CLIs and hybrid generic-shell launches.
+    Agent {
+        hybrid_shell_agent: Option<String>,
+    },
     Resume {
         provider_session_id: Option<String>,
         allow_continue_fallback: bool,
@@ -54,6 +59,8 @@ pub struct SpawnOptions {
     pub system_prompt: Option<String>,
     /// When set, this argv is the process. The agent CLI is not also started.
     pub raw_argv: Option<Vec<String>>,
+    /// Keep existing disk scrollback when respawning an agent session (e.g. account rotation).
+    pub preserve_scrollback_on_agent: bool,
 }
 
 impl Default for SpawnOptions {
@@ -68,6 +75,7 @@ impl Default for SpawnOptions {
             auto_approve: false,
             system_prompt: None,
             raw_argv: None,
+            preserve_scrollback_on_agent: false,
         }
     }
 }
@@ -104,6 +112,9 @@ pub struct TerminalInstance {
     pub(crate) presentation_live: AtomicBool,
     pub(crate) exit_notified: AtomicBool,
     pub(crate) lifecycle_stop: AtomicBool,
+    /// Set during planned account rotation so PTY termination does not show a crash/exit bar.
+    pub(crate) suppress_exit_event: AtomicBool,
+    pub(crate) last_output_ms: AtomicU64,
     pub(crate) last_paint_emit_ms: AtomicU64,
     pub(crate) paint_flush_armed: AtomicBool,
 }

@@ -59,11 +59,22 @@ pub fn emit_terminal_activity_to_webview(
     );
 }
 
+pub fn emit_terminal_ui_event(event: &str, payload: serde_json::Value) {
+    crate::core_daemon::broadcast_daemon_ui_event(event, payload.clone());
+    if let Some(app) = crate::get_app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(event, payload);
+    }
+}
+
 pub fn notify_terminal_exit(session_id: &str, inst: &TerminalInstance, code: i64) {
     if inst.exit_notified.swap(true, Ordering::Relaxed) {
         return;
     }
     inst.lifecycle_stop.store(true, Ordering::Relaxed);
+    if inst.suppress_exit_event.load(Ordering::Relaxed) {
+        return;
+    }
     let seq = inst.vt_engine.lock().ok().map(|vt| vt.seq()).unwrap_or(0);
     emit_terminal_activity(session_id, seq, true, Some(code));
 }
@@ -387,7 +398,9 @@ pub fn spawn_pty_reader(
                     *cwd_guard = osc_dir;
                 }
             }
-            let _ = capture_terminal_output(&session_id, &inst, &temp[..n], now_unix_ms());
+            let now_ms = now_unix_ms();
+            inst.last_output_ms.store(now_ms as u64, Ordering::Relaxed);
+            let _ = capture_terminal_output(&session_id, &inst, &temp[..n], now_ms);
             {
                 let mut b_guard = inst.buffer.lock().ok();
                 let mut s_guard = inst.scrollback.lock().ok();

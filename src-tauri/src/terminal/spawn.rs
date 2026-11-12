@@ -71,7 +71,8 @@ pub fn spawn_session_with_options(
     let requested_cols = options.cols;
     let requested_rows = options.rows;
     let hybrid_engine = match &options.mode {
-        SpawnMode::Resume { hybrid_shell_agent, .. } => hybrid_shell_agent.as_deref(),
+        SpawnMode::Resume { hybrid_shell_agent, .. }
+        | SpawnMode::Agent { hybrid_shell_agent } => hybrid_shell_agent.as_deref(),
         SpawnMode::Fresh => None,
     };
     let is_agent_cli =
@@ -108,6 +109,9 @@ pub fn spawn_session_with_options(
             hybrid_shell_agent: Some(agent),
             provider_session_id: Some(_),
             ..
+        }
+        | SpawnMode::Agent {
+            hybrid_shell_agent: Some(agent),
         } if is_generic_shell_engine(engine) && !is_generic_shell_engine(agent) => {
             Some(agent.clone())
         }
@@ -245,16 +249,16 @@ pub fn spawn_session_with_options(
     // Inject API credentials cleanly. Antigravity uses Google OAuth by default; only an
     // explicit `antigravity` vault override injects `GEMINI_API_KEY`, and ambient inherited
     // `GEMINI_API_KEY` is scrubbed when active Antigravity OAuth credentials exist.
-    if engine == "antigravity" || engine == "agy" {
+    if manual_engine == "antigravity" || manual_engine == "agy" {
         if let Some(explicit_key) = crate::credentials::resolve_explicit_antigravity_api_key() {
             cmd.env("GEMINI_API_KEY", explicit_key);
         } else if crate::quota::read_antigravity_credential().is_some() {
             cmd.env_remove("GEMINI_API_KEY");
         }
     } else {
-        for &var_name in crate::credentials::provider_env_vars(engine) {
+        for &var_name in crate::credentials::provider_env_vars(manual_engine) {
             if std::env::var(var_name).is_err() {
-                if let Some((key, _)) = crate::credentials::resolve_provider_credential(engine) {
+                if let Some((key, _)) = crate::credentials::resolve_provider_credential(manual_engine) {
                     cmd.env(var_name, key);
                     break;
                 }
@@ -300,7 +304,8 @@ pub fn spawn_session_with_options(
 
     let buffer = Arc::new(Mutex::new(Vec::new()));
 
-    let initial_scrollback = if is_agent_cli {
+    let clear_scrollback = is_agent_cli && !options.preserve_scrollback_on_agent;
+    let initial_scrollback = if clear_scrollback {
         delete_scrollback_file(session_id);
         Vec::new()
     } else {
@@ -312,7 +317,7 @@ pub fn spawn_session_with_options(
     let initial_cols = if cols == 0 { 80 } else { cols };
     let initial_rows = if rows == 0 { 24 } else { rows };
     let mut vt_engine_init = crate::vt_engine::TerminalVtEngine::new(initial_cols, initial_rows);
-    if !is_agent_cli {
+    if !clear_scrollback {
         if let Ok(sb_guard) = scrollback.lock() {
             if !sb_guard.is_empty() {
                 vt_engine_init.feed(&sb_guard);
@@ -329,7 +334,7 @@ pub fn spawn_session_with_options(
             allow_continue_fallback,
             ..
         } => provider_session_id.is_some() || *allow_continue_fallback,
-        SpawnMode::Fresh => false,
+        SpawnMode::Fresh | SpawnMode::Agent { .. } => false,
     };
 
     let instance = Arc::new(TerminalInstance {
@@ -362,6 +367,8 @@ pub fn spawn_session_with_options(
         presentation_live: AtomicBool::new(true),
         exit_notified: AtomicBool::new(false),
         lifecycle_stop: AtomicBool::new(false),
+        suppress_exit_event: AtomicBool::new(false),
+        last_output_ms: AtomicU64::new(0),
         last_paint_emit_ms: AtomicU64::new(0),
         paint_flush_armed: AtomicBool::new(false),
     });
@@ -400,7 +407,7 @@ pub fn spawn_session_with_options(
         spawned_at_unix_ms: spawned_at_ms,
         saved_at_unix_ms: spawned_at_ms,
     };
-    if matches!(options.mode, SpawnMode::Fresh) {
+    if matches!(options.mode, SpawnMode::Fresh | SpawnMode::Agent { .. }) {
         upsert_persisted_terminal_session_clearing_provider(record);
     } else {
         upsert_persisted_terminal_session(record);

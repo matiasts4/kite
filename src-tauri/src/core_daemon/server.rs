@@ -311,6 +311,13 @@ pub fn handle_control_rpc_request(
             Ok(crate::terminal::restart_agent_terminal_for_autopilot_local_sync(p))
         }
 
+        "session.inspect_provider" => {
+            let p = params.unwrap_or_else(|| json!({}));
+            let provider = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let report = crate::terminal::inspect_provider_sessions_local(provider);
+            serde_json::to_value(report).map_err(|e| e.to_string())
+        }
+
         "session.quiesce_provider" => {
             let p = params.unwrap_or_else(|| json!({}));
             let provider = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
@@ -322,11 +329,12 @@ pub fn handle_control_rpc_request(
             let p = params.unwrap_or_else(|| json!({}));
             let provider = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
             let label = p.get("newAccountLabel").and_then(|v| v.as_str()).unwrap_or("");
+            let email = p.get("newEmail").and_then(|v| v.as_str());
             let quiesced: Vec<crate::terminal::QuiescedTerminal> = p
                 .get("quiesced")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            crate::terminal::respawn_provider_terminals_local(provider, label, &quiesced);
+            crate::terminal::respawn_provider_terminals_local(provider, label, email, &quiesced);
             Ok(json!({ "ok": true }))
         }
 
@@ -799,8 +807,8 @@ where
             }
         }
 
-        // CLOSE exactly once when the process exits.
-        if exited && !state.last_exited {
+        // CLOSE exactly once when the process exits (unless suppressed during planned rotation).
+        if exited && !state.last_exited && !inst.suppress_exit_event.load(Ordering::Relaxed) {
             state.last_exited = true;
             let code = exit_code.unwrap_or(0) as i32;
             if writer

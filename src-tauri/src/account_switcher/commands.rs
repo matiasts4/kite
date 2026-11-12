@@ -387,7 +387,91 @@ pub fn save_current_account_profile_impl(request: Option<Value>) -> Value {
     save_current_account_profile_direct(provider, label)
 }
 
+pub(crate) fn validate_profile_switch_ready_in(
+    root: &std::path::Path,
+    provider: &str,
+    account_id: &str,
+) -> Result<(), String> {
+    let canon = canon_provider(provider);
+    let src_dir = root.join(&canon).join(account_id);
+    if canon == "agy" {
+        let cred_file = src_dir.join("gemini_antigravity_cred.json");
+        if !cred_file.exists() {
+            return Err("El perfil seleccionado no contiene credenciales válidas de Antigravity (gemini_antigravity_cred.json). Vuelve a iniciar sesión con esa cuenta y guárdala.".to_string());
+        }
+        let raw = fs::read_to_string(&cred_file)
+            .map_err(|e| format!("No se pudo leer gemini_antigravity_cred.json: {e}"))?;
+        crate::quota::parse_antigravity_credential_with_tokens(&raw).map_err(|code| match code {
+            "missing_tokens" => "El perfil seleccionado no contiene tokens OAuth válidos (access_token o refresh_token). Vuelve a iniciar sesión con esa cuenta y guárdala.".to_string(),
+            _ => "El archivo de credenciales de Antigravity está dañado o no contiene una identidad válida.".to_string(),
+        })?;
+        let ide_snap_path = src_dir.join("ide_auth_state.json");
+        if ide_snap_path.is_file() {
+            let ide_raw = fs::read_to_string(&ide_snap_path)
+                .map_err(|e| format!("No se pudo leer ide_auth_state.json: {e}"))?;
+            serde_json::from_str::<crate::quota::IdeAuthStateSnapshot>(&ide_raw)
+                .map_err(|e| format!("ide_auth_state.json está corrupto: {e}"))?;
+        }
+        return Ok(());
+    }
+
+    let mappings = get_provider_file_mappings(&canon);
+    if !mappings.iter().any(|m| src_dir.join(m.rel_dest).exists()) {
+        return Err("El perfil guardado no contiene archivos de sesión.".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn switch_preflight_check_with(
+    root: &std::path::Path,
+    provider: &str,
+    account_id: &str,
+    force: bool,
+    idle_check: Result<(), String>,
+    inspection: &crate::terminal::ProviderSessionsInspection,
+) -> Option<Value> {
+    // 1. Validate target profile credential material BEFORE external process or PTY touches.
+    if let Err(err) = validate_profile_switch_ready_in(root, provider, account_id) {
+        return Some(json!({
+            "success": false,
+            "code": "INVALID_TARGET_PROFILE",
+            "error": err,
+        }));
+    }
+
+    // 2. Fail closed if an external IDE/CLI instance holds locks.
+    if let Err(msg) = idle_check {
+        return Some(json!({
+            "success": false,
+            "code": "PROVIDER_BUSY",
+            "error": msg,
+        }));
+    }
+
+    // 3. Guard against interrupting active Kite terminal turns unless confirmed with `force`.
+    if !force && !inspection.managed_busy.is_empty() {
+        return Some(json!({
+            "success": false,
+            "code": "CONFIRM_BUSY_TERMINALS",
+            "error": "Hay terminales activas ejecutando una respuesta en este proveedor.",
+            "busySessions": inspection.managed_busy,
+            "managedIdleCount": inspection.managed_idle.len(),
+            "unaffectedTerminalsCount": inspection.unaffected_terminals_count,
+        }));
+    }
+
+    None
+}
+
 pub fn switch_account_profile_direct(provider: String, account_id: String) -> Value {
+    switch_account_profile_direct_with_options(provider, account_id, false)
+}
+
+pub fn switch_account_profile_direct_with_options(
+    provider: String,
+    account_id: String,
+    force: bool,
+) -> Value {
     let provider = canon_provider(&provider);
     let _guard = REGISTRY_LOCK.lock().unwrap();
     let mut reg = load_registry();
@@ -400,9 +484,19 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         return json!({ "success": false, "error": "Profile not found" });
     };
 
-    // Preflight: ensure no external client (e.g. Antigravity IDE) locks auth/DB files BEFORE quiescing Kite PTYs.
-    if let Err(msg) = ensure_provider_idle(&provider) {
-        return json!({ "success": false, "code": "PROVIDER_BUSY", "error": msg });
+    // Preflight strictly in order (target validity -> external client lock -> managed busy PTYs)
+    // BEFORE touching or terminating any Kite terminal.
+    let idle_res = ensure_provider_idle(&provider);
+    let inspection = crate::terminal::inspect_provider_sessions(&provider);
+    if let Some(rejection) = switch_preflight_check_with(
+        &profiles_root(),
+        &provider,
+        &account_id,
+        force,
+        idle_res,
+        &inspection,
+    ) {
+        return rejection;
     }
 
     // 0. Quiesce only Kite-managed terminals matching `provider`.
@@ -411,10 +505,7 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         .iter()
         .map(|q| q.session_id.clone())
         .collect();
-    let skipped_unaffected_count = crate::terminal::get_terminals()
-        .lock()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let skipped_unaffected_count = inspection.unaffected_terminals_count;
 
     // 1. Persist latest state of active profile before leaving it, with live identity verification
     let live_ident = probe_live_provider_identity(&provider);
@@ -467,13 +558,20 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     // 2. Transactional restore (backs up current state, rolls back on failure).
     if let Err(e) = apply_profile_to_active(&provider, &account_id) {
         log_trace(&format!("account_switcher: switch failed: {e}"));
-        let current_label = reg
+        let rollback_profile = reg
             .profiles
             .iter()
-            .find(|p| same_provider(&p.provider, &provider) && p.is_active)
+            .find(|p| same_provider(&p.provider, &provider) && p.is_active);
+        let current_label = rollback_profile
             .map(|p| p.label.as_str())
             .unwrap_or("Actual");
-        crate::terminal::respawn_provider_terminals(&provider, current_label, &quiesced_terminals);
+        let current_email = rollback_profile.and_then(|p| p.email.as_deref());
+        crate::terminal::respawn_provider_terminals(
+            &provider,
+            current_label,
+            current_email,
+            &quiesced_terminals,
+        );
         return json!({ "success": false, "error": e });
     }
 
@@ -492,7 +590,8 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     // sibling sync decoupled
     save_registry(&reg);
 
-    // Invalidate quota cache for this provider so stale in-memory cached identity does not shadow the newly switched account
+    // Invalidate quota cache and evict stale warm chat sessions / model catalog caches
+    // so subsequent chat turns and quota queries never use the previous account's state.
     let canon = canon_provider(&provider);
     let quota_key = match canon.as_str() {
         "agy" => "antigravity",
@@ -500,9 +599,15 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     };
     crate::quota::invalidate_provider_cache(quota_key);
     crate::quota::invalidate_provider_cache(&provider);
+    crate::chat::runtime::state::evict_provider_runtime_state(quota_key);
 
     // 4. Respawn the quiesced terminals with the new account's credentials!
-    crate::terminal::respawn_provider_terminals(&provider, &activated_profile.label, &quiesced_terminals);
+    crate::terminal::respawn_provider_terminals(
+        &provider,
+        &activated_profile.label,
+        activated_profile.email.as_deref(),
+        &quiesced_terminals,
+    );
 
     log_trace(&format!(
         "account_switcher: Switched to profile {} ({}) for provider {} (restarted {} terminals)",
@@ -530,15 +635,36 @@ pub async fn switch_account_profile_impl(request: Option<Value>) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let force = req
+        .and_then(|r| r.get("force"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     tokio::task::spawn_blocking(move || {
-        switch_account_profile_direct(provider, account_id)
+        switch_account_profile_direct_with_options(provider, account_id, force)
     })
     .await
     .unwrap_or_else(|e| {
         json!({
             "success": false,
             "error": format!("Worker task failed: {e}")
+        })
+    })
+}
+
+pub fn inspect_provider_sessions_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity");
+    let report = crate::terminal::inspect_provider_sessions(provider);
+    serde_json::to_value(report).unwrap_or_else(|_| {
+        json!({
+            "managedIdle": [],
+            "managedBusy": [],
+            "externalBlocking": [],
+            "unaffectedTerminalsCount": 0
         })
     })
 }

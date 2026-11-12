@@ -913,3 +913,49 @@ pub fn sanitize_options(options: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 #[path = "models_tests.rs"]
 mod tests;
+
+/// Returns true when a cache key (plain provider, `"provider:suffix"`, or `"provider|conn"` from
+/// `catalog_cache_key`) belongs to `provider`, normalizing `"agy"` <-> `"antigravity"` aliases.
+pub(crate) fn provider_cache_key_matches(key: &str, provider: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    let target = provider.trim().to_ascii_lowercase();
+    let matches_single = |canon: &str| {
+        k == canon
+            || k.starts_with(&format!("{canon}:"))
+            || k.starts_with(&format!("{canon}|"))
+    };
+    if target == "agy" || target == "antigravity" {
+        matches_single("agy") || matches_single("antigravity")
+    } else {
+        matches_single(&target)
+    }
+}
+
+/// Clears cached model catalogs for `provider` (including `"agy"` <-> `"antigravity"` aliases)
+/// from memory and the given disk cache file so a newly activated account's models are discovered cleanly.
+pub(crate) fn invalidate_provider_model_cache_in(path: &std::path::Path, provider: &str) {
+    if let Ok(mut guard) = model_cache().lock() {
+        guard.retain(|k, _| !provider_cache_key_matches(k, provider));
+    }
+
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(mut root) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(obj) = root.as_object_mut() {
+                let before = obj.len();
+                obj.retain(|k, _| !provider_cache_key_matches(k, provider));
+                if obj.len() != before {
+                    if let Ok(serialized) = serde_json::to_vec_pretty(&root) {
+                        let _ = std::fs::write(path, serialized);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Clears cached model catalogs for `provider` (including `"agy"` <-> `"antigravity"` aliases)
+/// from memory and disk so a newly activated account's models are discovered cleanly.
+pub(crate) fn invalidate_provider_model_cache(provider: &str) {
+    let path = models_cache_path();
+    invalidate_provider_model_cache_in(&path, provider);
+}

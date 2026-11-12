@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { invokeCommand } from '../../lib/ipc';
+import { listen } from '@tauri-apps/api/event';
+import { invokeCommand, isTauriEnvironment } from '../../lib/ipc';
 import {
   waitForTerminalReady,
   markTerminalPromptInjected,
@@ -306,6 +307,39 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     window.addEventListener('kite:terminal-command', onCommand);
     return () => window.removeEventListener('kite:terminal-command', onCommand);
   }, [appearance.fontSize, chrome, engine, handleClear, interruptSession, propSessionId, sessionIdRef, setExitCode, setStatus, startSession, terminateSession, workspaceId]);
+
+  // Keep pane running state synchronized when backend replaces PTY under account rotation.
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen<{
+      sessionId?: string;
+      provider?: string;
+      accountLabel?: string;
+      email?: string | null;
+    }>('terminal://account-rotated', (event) => {
+      if (!active) return;
+      const targetSid = event.payload?.sessionId;
+      const activeSid = sessionIdRef.current || propSessionId;
+      if (!targetSid || !activeSid || targetSid !== activeSid) return;
+      setExitCode(null);
+      setStatus('running');
+      surfaceHandleRef.current?.fit();
+    })
+      .then((stop) => {
+        if (!active) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [propSessionId, sessionIdRef, setExitCode, setStatus]);
 
   // Appearance change broadcasts
   useEffect(() => {

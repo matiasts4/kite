@@ -51,3 +51,8 @@ pub fn get_active_account_profile(request: Option<Value>) -> Value {
 pub fn prepare_new_account_login(request: Option<Value>) -> Value {
     commands::prepare_new_account_login_impl(request)
 }
+
+#[tauri::command]
+pub fn inspect_provider_sessions(request: Option<Value>) -> Value {
+    commands::inspect_provider_sessions_impl(request)
+}

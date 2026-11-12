@@ -87,6 +87,7 @@ use session::*;
 use system_metrics::*;
 use headroom_monitor::fetch_headroom_monitor;
 use terminal::*;
+use account_switcher::inspect_provider_sessions;
 use tickets::*;
 use updater::*;
 use window::*;
@@ -665,6 +666,7 @@ fn main() {
             list_detected_cli_accounts,
             save_current_account_profile,
             switch_account_profile,
+            inspect_provider_sessions,
             prepare_new_account_login,
             delete_account_profile,
             get_active_account_profile,

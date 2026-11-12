@@ -827,3 +827,227 @@ fn observed_bytes_attach_to_snapshot_poll_json() {
         .expect("observed bytes");
     assert_eq!(decode_base64(encoded).unwrap(), b"OpenCode v0.2.0\n");
 }
+
+#[test]
+fn spawn_mode_agent_never_passes_conversation_flag_for_direct_or_hybrid_shell() {
+    let agent_mode = SpawnMode::Agent {
+        hybrid_shell_agent: None,
+    };
+    let (agy_args, agy_bound) =
+        build_agent_cli_args_ext("agy", "sid-1", "E:/kite", &agent_mode, None, true, None);
+    assert!(agy_bound.is_none());
+    assert!(!agy_args.contains(&"--conversation".to_string()));
+    assert!(!agy_args.contains(&"--continue".to_string()));
+    assert!(agy_args.contains(&"--dangerously-skip-permissions".to_string()));
+
+    let hybrid_mode = SpawnMode::Agent {
+        hybrid_shell_agent: Some("agy".to_string()),
+    };
+    let (hybrid_args, hybrid_bound) =
+        build_agent_cli_args_ext("antigravity", "sid-2", "E:/kite", &hybrid_mode, None, true, None);
+    assert!(hybrid_bound.is_none());
+    assert!(!hybrid_args.contains(&"--conversation".to_string()));
+    assert!(!hybrid_args.contains(&"--continue".to_string()));
+
+    let (claude_args, claude_bound) =
+        build_agent_cli_args_ext("claude", "sid-3", "E:/kite", &agent_mode, None, false, None);
+    assert!(claude_bound.is_some() || claude_bound.is_none());
+    assert!(!claude_args.contains(&"--resume".to_string()));
+    assert!(!claude_args.contains(&"--continue".to_string()));
+}
+
+#[test]
+fn classify_session_activity_distinguishes_recent_output_pending_buffer_and_idle() {
+    // 1. Quiet terminal (>3s since last output, empty buffer) => idle
+    let (busy_idle, reasons_idle, age_idle) = classify_session_activity(&SessionActivityInput {
+        now_ms: 10_000,
+        last_output_ms: 5_000,
+        last_paint_emit_ms: 4_500,
+        output_byte_offset: 1024,
+        pending_buffer_len: 0,
+        child_running: true,
+        had_user_activity: true,
+    });
+    assert!(!busy_idle);
+    assert!(reasons_idle.is_empty());
+    assert_eq!(age_idle, Some(5_000));
+
+    // 2. Output within 3000ms while child runs => busy
+    let (busy_recent, reasons_recent, age_recent) =
+        classify_session_activity(&SessionActivityInput {
+            now_ms: 10_000,
+            last_output_ms: 8_200,
+            last_paint_emit_ms: 8_100,
+            output_byte_offset: 2048,
+            pending_buffer_len: 0,
+            child_running: true,
+            had_user_activity: false,
+        });
+    assert!(busy_recent);
+    assert!(reasons_recent.iter().any(|r| r == "recent_output"));
+    assert_eq!(age_recent, Some(1_800));
+
+    // 3. Unread bytes buffered in PTY while child runs => busy even if timestamps are stale
+    let (busy_buf, reasons_buf, _) = classify_session_activity(&SessionActivityInput {
+        now_ms: 20_000,
+        last_output_ms: 1_000,
+        last_paint_emit_ms: 1_000,
+        output_byte_offset: 512,
+        pending_buffer_len: 128,
+        child_running: true,
+        had_user_activity: false,
+    });
+    assert!(busy_buf);
+    assert!(reasons_buf.iter().any(|r| r == "pending_output"));
+
+    // 4. Child already exited => never busy
+    let (busy_dead, _, _) = classify_session_activity(&SessionActivityInput {
+        now_ms: 10_000,
+        last_output_ms: 9_900,
+        last_paint_emit_ms: 9_900,
+        output_byte_offset: 512,
+        pending_buffer_len: 64,
+        child_running: false,
+        had_user_activity: true,
+    });
+    assert!(!busy_dead);
+}
+
+#[test]
+fn rotation_divider_preserves_scrollback_and_suppress_exit_skips_activity() {
+    let sid = format!("test-rotate-sb-{}", Uuid::new_v4());
+    let old_sb = b"previous transcript line 1\r\nprevious line 2\r\n";
+    write_scrollback_file(&sid, old_sb);
+
+    append_rotation_divider_to_scrollback(&sid, "Work Gmail");
+    let combined = read_scrollback_file(&sid).expect("scrollback must survive rotation");
+    let text = String::from_utf8_lossy(&combined);
+    assert!(text.contains("previous transcript line 1"));
+    assert!(text.contains("─── ✦ Kite Vault: Sesión reactivada con cuenta «Work Gmail» ───"));
+
+    let _ = delete_scrollback_file(&sid);
+}
+
+#[test]
+fn quiesce_suppresses_exit_event_and_respawn_prioritizes_live_and_defers_unfocused() {
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from(r"E:\kite"))
+        .to_string_lossy()
+        .into_owned();
+    let live_sid = format!("test-rot-live-{}", Uuid::new_v4());
+    let bg_sid = format!("test-rot-bg-{}", Uuid::new_v4());
+
+    // Simulate two persisted sessions (one live, one unfocused) with stale provider_session_id.
+    upsert_persisted_terminal_session(PersistedTerminalSession {
+        session_id: live_sid.clone(),
+        workspace_id: Some("ws-test".to_string()),
+        pane_id: Some("pane-live".to_string()),
+        base_engine: "powershell".to_string(),
+        active_engine: "powershell".to_string(),
+        provider_session_id: Some("old-conv-live".to_string()),
+        cwd: cwd.clone(),
+        had_user_activity: true,
+        last_user_input: None,
+        spawned_at_unix_ms: 1,
+        saved_at_unix_ms: 2,
+    });
+    upsert_persisted_terminal_session(PersistedTerminalSession {
+        session_id: bg_sid.clone(),
+        workspace_id: Some("ws-test".to_string()),
+        pane_id: Some("pane-bg".to_string()),
+        base_engine: "powershell".to_string(),
+        active_engine: "powershell".to_string(),
+        provider_session_id: Some("old-conv-bg".to_string()),
+        cwd: cwd.clone(),
+        had_user_activity: true,
+        last_user_input: None,
+        spawned_at_unix_ms: 1,
+        saved_at_unix_ms: 2,
+    });
+
+    write_scrollback_file(&live_sid, b"live pre-switch\r\n");
+    write_scrollback_file(&bg_sid, b"bg pre-switch\r\n");
+
+    let quiesced = vec![
+        QuiescedTerminal {
+            session_id: live_sid.clone(),
+            workspace_id: Some("ws-test".to_string()),
+            pane_id: Some("pane-live".to_string()),
+            base_engine: "powershell".to_string(),
+            effective_engine: "powershell".to_string(),
+            provider_session_id: None,
+            cwd: cwd.clone(),
+            cols: 80,
+            rows: 24,
+            presentation_live: true,
+            auto_approve: false,
+        },
+        QuiescedTerminal {
+            session_id: bg_sid.clone(),
+            workspace_id: Some("ws-test".to_string()),
+            pane_id: Some("pane-bg".to_string()),
+            base_engine: "powershell".to_string(),
+            effective_engine: "powershell".to_string(),
+            provider_session_id: None,
+            cwd,
+            cols: 80,
+            rows: 24,
+            presentation_live: false,
+            auto_approve: false,
+        },
+    ];
+
+    respawn_provider_terminals_local("agy", "New Label", Some("new@example.com"), &quiesced);
+
+    // Live pane must respawn immediately; background pane must remain deferred until focused.
+    {
+        let map = get_terminals().lock().unwrap();
+        assert!(map.contains_key(&live_sid), "presentation_live pane should respawn immediately");
+        assert!(!map.contains_key(&bg_sid), "unfocused pane should stay deferred until focused");
+    }
+
+    // Both persisted records must clear stale provider_session_id.
+    let persisted_after = read_persisted_terminal_sessions();
+    assert_eq!(
+        persisted_after.get(&live_sid).and_then(|s| s.provider_session_id.as_ref()),
+        None
+    );
+    assert_eq!(
+        persisted_after.get(&bg_sid).and_then(|s| s.provider_session_id.as_ref()),
+        None
+    );
+
+    // Scrollback for both must preserve history + divider.
+    let bg_sb = String::from_utf8_lossy(&read_scrollback_file(&bg_sid).unwrap()).into_owned();
+    assert!(bg_sb.contains("bg pre-switch"));
+    assert!(bg_sb.contains("─── ✦ Kite Vault: Sesión reactivada con cuenta «New Label» ───"));
+
+    // Focusing background pane triggers deferred respawn.
+    let pres_res = set_terminal_presentation_local_sync(serde_json::json!({
+        "sessionId": bg_sid,
+        "live": true
+    }));
+    assert_eq!(pres_res["ok"], true);
+    assert!(
+        get_terminals().lock().unwrap().contains_key(&bg_sid),
+        "focusing deferred pane must lazily respawn it"
+    );
+
+    // Also inspect suppress_exit_event skips notify_terminal_exit emission cleanly.
+    if let Some(inst) = get_terminals().lock().unwrap().get(&live_sid).cloned() {
+        inst.suppress_exit_event
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        notify_terminal_exit(&live_sid, &inst, 0);
+        assert!(inst.lifecycle_stop.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // Clean up
+    let _ = terminate_terminal_local_sync(serde_json::json!({ "sessionId": live_sid }));
+    let _ = terminate_terminal_local_sync(serde_json::json!({ "sessionId": bg_sid }));
+    let _ = delete_scrollback_file(&live_sid);
+    let _ = delete_scrollback_file(&bg_sid);
+    let mut map = read_persisted_terminal_sessions();
+    map.remove(&live_sid);
+    map.remove(&bg_sid);
+    write_persisted_terminal_sessions(&map);
+}

@@ -459,7 +459,7 @@ pub fn build_agent_cli_args_ext(
     let mut bound_id: Option<String> = None;
 
     match mode {
-        SpawnMode::Fresh => {
+        SpawnMode::Fresh | SpawnMode::Agent { .. } => {
             match canonical.as_str() {
                 "grok" => {
                     if auto_approve {

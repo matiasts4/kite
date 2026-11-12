@@ -297,6 +297,14 @@ pub fn set_terminal_presentation_sync(request: serde_json::Value) -> serde_json:
 }
 
 pub fn set_terminal_presentation_local_sync(request: serde_json::Value) -> serde_json::Value {
+    {
+        let req_check = request.get("request").unwrap_or(&request);
+        let sid_check = req_check.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+        let live_check = req_check.get("live").and_then(|v| v.as_bool()).unwrap_or(false);
+        if live_check && !instance_exists(sid_check) {
+            crate::terminal::maybe_respawn_deferred_terminal_local(sid_check);
+        }
+    }
     let req = request.get("request").unwrap_or(&request);
     let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let live = req.get("live").and_then(|v| v.as_bool()).unwrap_or(false);

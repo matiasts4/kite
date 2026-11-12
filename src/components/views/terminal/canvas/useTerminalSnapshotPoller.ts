@@ -482,6 +482,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
     };
     void pull(true, true);
 
+    let unlistenRotated: (() => void) | null = null;
     if (isTauriEnvironment()) {
       void listen<{
         sessionId?: string;
@@ -505,6 +506,26 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
         }
         unlisten = stop;
       });
+
+      void listen<{
+        sessionId?: string;
+        provider?: string;
+        accountLabel?: string;
+        email?: string | null;
+      }>('terminal://account-rotated', (event) => {
+        if (!active || event.payload.sessionId !== sessionId) return;
+        hasNotifiedExitRef.current = false;
+        lastSeqRef.current = 0;
+        packedGridRef.current = null;
+        clearGap();
+        void pull(true, true);
+      }).then((stop) => {
+        if (!active) {
+          stop();
+          return;
+        }
+        unlistenRotated = stop;
+      });
     }
 
     return () => {
@@ -514,6 +535,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
       fullResyncRef.current = null;
       clearGap();
       unlisten?.();
+      unlistenRotated?.();
     };
   }, [applySnapshot, hasNotifiedExitRef, lastSeqRef, sessionId]);
 

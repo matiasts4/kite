@@ -457,3 +457,219 @@ fn test_ensure_provider_idle_fails_closed_when_process_enum_unavailable() {
     )
     .expect("unrelated CLI or shell processes must not block Antigravity switch");
 }
+
+#[test]
+fn test_switch_preflight_order_validates_target_before_idle_and_busy_terminals() {
+    use super::commands::switch_preflight_check_with;
+    use crate::terminal::{ProviderSessionSummary, ProviderSessionsInspection};
+
+    let tmp = std::env::temp_dir().join(format!("kite_preflight_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    let prof_dir = tmp.join("agy").join("acc-valid");
+    let bad_dir = tmp.join("agy").join("acc-tokenless");
+    fs::create_dir_all(&prof_dir).unwrap();
+    fs::create_dir_all(&bad_dir).unwrap();
+
+    // Valid token profile
+    let valid_cred = json!({
+        "id_token_email": "valid@example.com",
+        "token": {
+            "access_token": "ya29.valid-access",
+            "refresh_token": "1//valid-refresh"
+        }
+    });
+    fs::write(
+        prof_dir.join("gemini_antigravity_cred.json"),
+        serde_json::to_string(&valid_cred).unwrap(),
+    )
+    .unwrap();
+
+    // Tokenless profile
+    let tokenless_cred = json!({
+        "id_token_email": "broken@example.com",
+        "token": {
+            "access_token": "",
+            "refresh_token": ""
+        }
+    });
+    fs::write(
+        bad_dir.join("gemini_antigravity_cred.json"),
+        serde_json::to_string(&tokenless_cred).unwrap(),
+    )
+    .unwrap();
+
+    let busy_inspection = ProviderSessionsInspection {
+        managed_idle: vec![],
+        managed_busy: vec![ProviderSessionSummary {
+            session_id: "sid-busy-1".to_string(),
+            engine: "agy".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+            pane_id: Some("pane-1".to_string()),
+            cwd: "E:/kite".to_string(),
+            busy: true,
+            reasons: vec!["recent_output".to_string()],
+            last_output_age_ms: Some(450),
+            presentation_live: true,
+        }],
+        external_blocking: vec![],
+        unaffected_terminals_count: 2,
+    };
+
+    // 1. Tokenless target MUST fail BEFORE PROVIDER_BUSY or CONFIRM_BUSY_TERMINALS.
+    let res_invalid = switch_preflight_check_with(
+        &tmp,
+        "antigravity",
+        "acc-tokenless",
+        false,
+        Err("Antigravity IDE running".to_string()),
+        &busy_inspection,
+    )
+    .expect("tokenless profile must fail preflight");
+    assert_eq!(res_invalid["success"], false);
+    assert_ne!(res_invalid["code"], "PROVIDER_BUSY");
+    assert_ne!(res_invalid["code"], "CONFIRM_BUSY_TERMINALS");
+
+    // 2. Valid target + blocking external IDE MUST fail with PROVIDER_BUSY BEFORE busy terminal prompt.
+    let res_ide_busy = switch_preflight_check_with(
+        &tmp,
+        "antigravity",
+        "acc-valid",
+        true,
+        Err("antigravity.exe está abierto".to_string()),
+        &busy_inspection,
+    )
+    .expect("external blocking IDE must return PROVIDER_BUSY even when force=true");
+    assert_eq!(res_ide_busy["success"], false);
+    assert_eq!(res_ide_busy["code"], "PROVIDER_BUSY");
+
+    // 3. Valid target + idle IDE + managedBusy + force=false MUST return CONFIRM_BUSY_TERMINALS.
+    let res_confirm = switch_preflight_check_with(
+        &tmp,
+        "antigravity",
+        "acc-valid",
+        false,
+        Ok(()),
+        &busy_inspection,
+    )
+    .expect("busy terminal without force must pause with CONFIRM_BUSY_TERMINALS");
+    assert_eq!(res_confirm["success"], false);
+    assert_eq!(res_confirm["code"], "CONFIRM_BUSY_TERMINALS");
+    assert_eq!(res_confirm["busySessions"][0]["sessionId"], "sid-busy-1");
+    assert_eq!(res_confirm["managedIdleCount"], 0);
+    assert_eq!(res_confirm["unaffectedTerminalsCount"], 2);
+
+    // 4. Valid target + idle IDE + managedBusy + force=true MUST pass preflight (None).
+    let res_forced = switch_preflight_check_with(
+        &tmp,
+        "antigravity",
+        "acc-valid",
+        true,
+        Ok(()),
+        &busy_inspection,
+    );
+    assert!(res_forced.is_none());
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_canonical_handoff_provider_normalizes_agy_and_defaults_to_antigravity() {
+    use crate::chat::runtime::settle::canonical_handoff_provider;
+
+    assert_eq!(canonical_handoff_provider(None), "antigravity");
+    assert_eq!(canonical_handoff_provider(Some("")), "antigravity");
+    assert_eq!(canonical_handoff_provider(Some("  ")), "antigravity");
+    assert_eq!(canonical_handoff_provider(Some("agy")), "antigravity");
+    assert_eq!(canonical_handoff_provider(Some("antigravity")), "antigravity");
+    assert_eq!(canonical_handoff_provider(Some("codex")), "codex");
+}
+
+#[test]
+fn test_invalidate_provider_model_cache_clears_agy_and_antigravity_aliases() {
+    use crate::chat::models::{
+        invalidate_provider_model_cache_in, model_cache, CachedProviderModels,
+    };
+    use crate::chat::normalize::catalog_cache_key;
+    use std::time::Instant;
+
+    let tmp_dir = std::env::temp_dir().join(format!("kite_model_cache_evict_{}", Uuid::new_v4()));
+    fs::create_dir_all(&tmp_dir).unwrap();
+    let disk_cache_path = tmp_dir.join("provider_models_cache.json");
+
+    let key_pipe_default = catalog_cache_key("antigravity", None); // "antigravity|"
+    let key_pipe_conn = catalog_cache_key("agy", Some("conn-1")); // "antigravity|conn-1"
+    let key_colon = "antigravity:default".to_string();
+    let key_codex_pipe = catalog_cache_key("codex", None); // "codex|"
+
+    fs::write(
+        &disk_cache_path,
+        serde_json::to_string_pretty(&json!({
+            "agy": { "models": [{ "id": "m0" }], "cachedAtUnixMs": 9999999999999i64 },
+            key_pipe_default.clone(): { "models": [{ "id": "m1" }], "cachedAtUnixMs": 9999999999999i64 },
+            key_pipe_conn.clone(): { "models": [{ "id": "m2" }], "cachedAtUnixMs": 9999999999999i64 },
+            key_colon.clone(): { "models": [{ "id": "m3" }], "cachedAtUnixMs": 9999999999999i64 },
+            key_codex_pipe.clone(): { "models": [{ "id": "gpt-5" }], "cachedAtUnixMs": 9999999999999i64 },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    {
+        let mut cache = model_cache().lock().unwrap();
+        for k in ["agy", &key_pipe_default, &key_pipe_conn, &key_colon] {
+            cache.insert(
+                k.to_string(),
+                CachedProviderModels {
+                    cached_at: Instant::now(),
+                    models: vec![json!({ "id": "model-agy" })],
+                },
+            );
+        }
+        cache.insert(
+            key_codex_pipe.clone(),
+            CachedProviderModels {
+                cached_at: Instant::now(),
+                models: vec![json!({ "id": "gpt-5" })],
+            },
+        );
+    }
+
+    invalidate_provider_model_cache_in(&disk_cache_path, "antigravity");
+
+    {
+        let mut cache = model_cache().lock().unwrap();
+        assert!(!cache.contains_key("agy"));
+        assert!(!cache.contains_key(&key_pipe_default));
+        assert!(!cache.contains_key(&key_pipe_conn));
+        assert!(!cache.contains_key(&key_colon));
+        assert!(cache.contains_key(&key_codex_pipe));
+        cache.remove(&key_codex_pipe);
+    }
+
+    let disk_after: Value = serde_json::from_slice(&fs::read(&disk_cache_path).unwrap()).unwrap();
+    let obj = disk_after.as_object().unwrap();
+    assert!(!obj.contains_key("agy"));
+    assert!(!obj.contains_key(&key_pipe_default));
+    assert!(!obj.contains_key(&key_pipe_conn));
+    assert!(!obj.contains_key(&key_colon));
+    assert!(obj.contains_key(&key_codex_pipe));
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_clear_provider_thread_handles_clears_antigravity_aliases_and_preserves_codex() {
+    use crate::chat::runtime::state::clear_provider_thread_handles;
+
+    let mut threads = vec![
+        json!({ "id": "t1", "provider": "antigravity", "providerSessionId": "conv-old-1" }),
+        json!({ "id": "t2", "provider": "agy", "providerSessionId": "conv-old-2" }),
+        json!({ "id": "t3", "provider": "codex", "providerSessionId": "conv-codex" }),
+    ];
+
+    let cleared = clear_provider_thread_handles(&mut threads, "antigravity");
+    assert_eq!(cleared, 2);
+    assert!(threads[0]["providerSessionId"].is_null());
+    assert!(threads[1]["providerSessionId"].is_null());
+    assert_eq!(threads[2]["providerSessionId"], "conv-codex");
+}

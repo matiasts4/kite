@@ -205,6 +205,7 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
             auto_approve,
             system_prompt,
             raw_argv,
+            ..Default::default()
         },
     );
 
@@ -322,6 +323,10 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
         .get("rows")
         .and_then(|value| value.as_u64())
         .unwrap_or(0) as u16;
+
+    // If this pane was quiesced in background during account rotation, materialize it now
+    // with its preserved divider scrollback and fresh agent credentials before attaching.
+    crate::terminal::maybe_respawn_deferred_terminal_local(&session_id);
 
     let (attached_to_existing, initial_scrollback, screen_seed) = {
         let mut map = get_terminals().lock().unwrap();
@@ -488,7 +493,8 @@ pub fn attach_terminal_local_sync(request: serde_json::Value) -> serde_json::Val
         };
 
         let is_agent_cli_restore = match &mode {
-            SpawnMode::Resume { hybrid_shell_agent, .. } => {
+            SpawnMode::Resume { hybrid_shell_agent, .. }
+            | SpawnMode::Agent { hybrid_shell_agent } => {
                 !is_generic_shell || hybrid_shell_agent.is_some()
             }
             SpawnMode::Fresh => !is_generic_shell,

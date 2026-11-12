@@ -346,6 +346,13 @@ pub fn settle_turn_notification(run_id: &str, thread_id: &str, profile_id: Optio
     }
 }
 
+pub(crate) fn canonical_handoff_provider(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("agy") | Some("antigravity") => "antigravity".to_string(),
+        Some(other) => other.to_string(),
+    }
+}
+
 pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, String> {
     let req = crate::persist::body(&request);
     let thread_id = req
@@ -353,11 +360,10 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let target_provider = req
-        .and_then(|r| r.get("targetProvider").or_else(|| r.get("target_provider")))
-        .and_then(|v| v.as_str())
-        .unwrap_or("agy")
-        .to_string();
+    let target_provider = canonical_handoff_provider(
+        req.and_then(|r| r.get("targetProvider").or_else(|| r.get("target_provider")))
+            .and_then(|v| v.as_str()),
+    );
     let target_account_id = req
         .and_then(|r| r.get("targetAccountId").or_else(|| r.get("target_account_id")))
         .and_then(|v| v.as_str())

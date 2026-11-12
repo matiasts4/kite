@@ -309,3 +309,50 @@ pub fn emit_note_item(thread_id: &str, run_id: &str, message: &str) {
     live_cv().notify_all();
     persist();
 }
+
+/// Clears stored `providerSessionId` handles on threads matching `provider`
+/// (normalizing `"agy"` <-> `"antigravity"`) so subsequent turns never resume across accounts.
+pub(crate) fn clear_provider_thread_handles(items: &mut [Value], provider: &str) -> usize {
+    let norm = |s: &str| match s.trim().to_ascii_lowercase().as_str() {
+        "agy" | "antigravity" => "antigravity".to_string(),
+        other => other.to_string(),
+    };
+    let target = norm(provider);
+    let mut cleared = 0usize;
+    for thread in items.iter_mut() {
+        let Some(tp) = thread.get("provider").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if norm(tp) != target {
+            continue;
+        }
+        if thread
+            .get("providerSessionId")
+            .is_some_and(|v| !v.is_null())
+        {
+            thread["providerSessionId"] = Value::Null;
+            touch(thread);
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
+/// Evicts warm chat sessions, persisted thread conversation handles, & model caches belonging to
+/// `provider` after account rotation so no cached process, resume id, or model list outlives the credential swap.
+pub(crate) fn evict_provider_runtime_state(provider: &str) -> Vec<String> {
+    let evicted = if let Ok(mut manager) = session_manager().lock() {
+        manager.evict_provider_sessions(provider)
+    } else {
+        Vec::new()
+    };
+    let cleared = {
+        let mut items = threads().lock().unwrap();
+        clear_provider_thread_handles(&mut items, provider)
+    };
+    if cleared > 0 {
+        persist();
+    }
+    crate::chat::models::invalidate_provider_model_cache(provider);
+    evicted
+}

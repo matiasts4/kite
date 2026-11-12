@@ -304,11 +304,21 @@ describe('failed threads and side chats', () => {
         railThread({ id: 'main', title: 'Main' }),
         railThread({ id: 'side', title: 'Side note', parentThreadId: 'main', sideChat: true }),
         railThread({ id: 'child', title: 'Child agent', parentThreadId: 'main', sideChat: false }),
+        railThread({ id: 'subagent-child', title: 'Spawned worker', parentThreadId: 'main', startedByAgent: true, sideChat: false }),
       ],
     }));
     expect(screen.getByText('Main')).toBeInTheDocument();
     expect(screen.getByText('Child agent')).toBeInTheDocument();
     expect(screen.queryByText('Side note')).not.toBeInTheDocument();
+    expect(screen.queryByText('Spawned worker')).not.toBeInTheDocument();
+  });
+
+  it('keeps agent-started child subagent threads out of sidebarThreads while retaining user children', () => {
+    expect(sidebarThreads([
+      { id: 'main', sideChat: false },
+      { id: 'agent-child', parentThreadId: 'main', startedByAgent: true, sideChat: false },
+      { id: 'user-child', parentThreadId: 'main', startedByAgent: false, sideChat: false },
+    ]).map((thread) => thread.id)).toEqual(['main', 'user-child']);
   });
 
   it('offers Regenerate title only for the selected thread and disables it while pending', () => {

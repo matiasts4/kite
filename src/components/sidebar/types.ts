@@ -17,6 +17,14 @@ export interface ChatThreadSummary {
   sessionState?: string;
   isWarm?: boolean;
   isSettled?: boolean;
+  parentThreadId?: string | null;
+  parentToolCallId?: string | null;
+  startedByAgent?: boolean;
+  sideChat?: boolean;
+  subagentRole?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  swarmId?: string | null;
+  swarmMemberName?: string | null;
 }
 
 export interface WorkspaceSessionPaneInfo {

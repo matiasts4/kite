@@ -1,5 +1,24 @@
-import type { ChatThread } from '../../../types';
+import type {
+  ChatThread,
+  SubagentMeta,
+  SwarmMeta,
+  SubagentRun,
+  SwarmMember,
+  SwarmBoardPost,
+  SwarmChannel,
+  SwarmState,
+} from '../../../types';
 import type { ProposedPlan } from './ChatPlanPanel';
+
+export type {
+  SubagentMeta,
+  SwarmMeta,
+  SubagentRun,
+  SwarmMember,
+  SwarmBoardPost,
+  SwarmChannel,
+  SwarmState,
+};
 
 export type ChatProvider = 'claude' | 'codex' | 'cursor' | 'grok' | 'opencode' | 'antigravity' | 'gemini';
 export type ChatMode = 'acceptEdits' | 'fullAccess' | 'readOnly';

@@ -100,6 +100,98 @@ export interface BrowserSurfaceView {
   designMode: boolean;
 }
 
+export interface SubagentMeta {
+  subagentId: string;
+  action: 'spawn' | 'define' | 'message' | 'manage' | string;
+  role: string;
+  typeName?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  prompt?: string | null;
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | string;
+  transcriptUri?: string | null;
+  childThreadId?: string | null;
+  swarmMemberName?: string | null;
+  latestActivity?: string | null;
+  stepCount: number;
+}
+
+export interface SwarmMeta {
+  swarmId?: string | null;
+  action: 'title' | 'add' | 'post_message' | 'read_board' | 'wait' | 'status' | 'model' | 'kill' | 'channel' | string;
+  swarmTitle?: string | null;
+  channel?: string | null;
+  memberName?: string | null;
+  memberNames?: string[];
+  model?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  brief?: string | null;
+  postText?: string | null;
+  seq?: number | null;
+  mentions?: string[];
+}
+
+export interface SubagentRun {
+  subagentId: string;
+  parentThreadId: string;
+  parentToolCallId: string;
+  role: string;
+  typeName?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  prompt?: string | null;
+  status: string;
+  transcriptUri?: string | null;
+  childThreadId?: string | null;
+  swarmMemberName?: string | null;
+  latestActivity?: string | null;
+  stepCount: number;
+  items: ChatItem[];
+  startedAtUnixMs: number;
+  updatedAtUnixMs: number;
+  completedAtUnixMs?: number | null;
+}
+
+export interface SwarmMember {
+  name: string;
+  role: string;
+  provider?: string | null;
+  model?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  state: 'waiting' | 'working' | 'stopped' | 'killed' | string;
+  currentActivity?: string | null;
+  channels: string[];
+  subagentId?: string | null;
+  childThreadId?: string | null;
+  brief?: string | null;
+}
+
+export interface SwarmBoardPost {
+  seq: number;
+  author: string;
+  channel: string;
+  text: string;
+  mentions: string[];
+  createdAtUnixMs: number;
+}
+
+export interface SwarmChannel {
+  name: string;
+  topic?: string | null;
+  archived?: boolean;
+}
+
+export interface SwarmState {
+  swarmId: string;
+  title: string;
+  coordinatorModel?: string | null;
+  members: SwarmMember[];
+  posts: SwarmBoardPost[];
+  channels: SwarmChannel[];
+}
+
 export interface ChatThread {
   schemaVersion: number;
   revision: string;
@@ -121,6 +213,16 @@ export interface ChatThread {
   };
   workspaceId: string | null;
   pinned: boolean;
+  parentThreadId?: string | null;
+  parentToolCallId?: string | null;
+  startedByAgent?: boolean;
+  sideChat?: boolean;
+  subagentRole?: string | null;
+  workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
+  swarmId?: string | null;
+  swarmMemberName?: string | null;
+  subagentRuns?: SubagentRun[];
+  swarmState?: SwarmState | null;
   quotaHandoffOffer?: QuotaHandoffOffer | null;
   sessionState?: string;
   isWarm?: boolean;
@@ -142,13 +244,16 @@ export interface ChatItem {
   attachments: unknown[];
   handoffOffer?: QuotaHandoffOffer;
   toolName?: string | null;
-  toolKind?: 'commandExecution' | 'fileChange' | 'mcpToolCall' | 'webSearch' | 'dynamicToolCall' | 'planUpdate' | string | null;
+  toolKind?: 'commandExecution' | 'fileChange' | 'mcpToolCall' | 'webSearch' | 'dynamicToolCall' | 'planUpdate' | 'subagent' | 'swarm' | string | null;
   serverName?: string | null;
   command?: string | null;
   filePath?: string | null;
   addedLines?: number | null;
   removedLines?: number | null;
   durationSeconds?: number | null;
+  subagentMeta?: SubagentMeta | null;
+  swarmMeta?: SwarmMeta | null;
+  parentToolUseId?: string | null;
 }
 
 export interface NotificationRecord {

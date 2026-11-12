@@ -285,12 +285,20 @@ export function handoffChannel(provider: string, versionSupportsDirect: boolean)
   return provider === 'codex' && versionSupportsDirect ? 'direct' : 'attributed';
 }
 
-export function sidebarThreads<T extends { sideChat?: boolean }>(threads: T[]): T[] {
-  return threads.filter((thread) => thread.sideChat !== true);
+export function sidebarThreads<
+  T extends { sideChat?: boolean; parentThreadId?: string | null; startedByAgent?: boolean },
+>(threads: T[]): T[] {
+  return threads.filter(
+    (thread) =>
+      thread.sideChat !== true &&
+      !(Boolean(thread.parentThreadId) && Boolean(thread.startedByAgent))
+  );
 }
 
-/** Live roster rows. Side chats stay in the side drawer. */
-export function visibleRosterThreads<T extends { sideChat?: boolean }>(threads: T[]): T[] {
+/** Live roster rows. Side chats and agent-spawned child threads stay in their drawers. */
+export function visibleRosterThreads<
+  T extends { sideChat?: boolean; parentThreadId?: string | null; startedByAgent?: boolean },
+>(threads: T[]): T[] {
   return sidebarThreads(threads);
 }
 

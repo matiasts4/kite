@@ -33,6 +33,7 @@ import {
   sortAgentSummariesByTabOrder,
 } from './hooks/useChatGridPersistence';
 import { useChatTurnActions } from './hooks/useChatTurnActions';
+import { useSubagentEvents } from './hooks/useSubagentEvents';
 
 export { readThreadSendBinding, withResolvedSendBindings };
 
@@ -125,6 +126,8 @@ export function useChatSession({
       activePollRunsRef.current.clear();
     };
   }, []);
+
+  useSubagentEvents({ setThreadsMap, isMountedRef });
 
   const {
     threadWithResolvedBinding,

@@ -223,3 +223,21 @@ export async function restoreThreadCheckpoint(
 ): Promise<{ restored: boolean; error: string | null }> {
   return invokeCommand('restore_thread_checkpoint', { threadId });
 }
+
+export async function getThreadSubagentDetail(
+  threadId: string,
+  subagentId: string
+): Promise<import('../../types').SubagentRun | null> {
+  return invokeCommand<import('../../types').SubagentRun | null>('get_thread_subagent_detail', {
+    threadId,
+    subagentId,
+  });
+}
+
+export async function getThreadSwarmState(
+  threadId: string
+): Promise<import('../../types').SwarmState | null> {
+  return invokeCommand<import('../../types').SwarmState | null>('get_thread_swarm_state', {
+    threadId,
+  });
+}

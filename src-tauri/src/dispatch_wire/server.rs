@@ -539,8 +539,97 @@ fn loopback_cli_response(args: &[String]) -> Option<Value> {
     Some(serde_json::from_str(line.trim()).unwrap_or(Value::Null))
 }
 
+fn emit_receipt_or_value(value: &Value) {
+    if let Some(receipt) = value.get("receipt") {
+        emit_cli_line(&serde_json::to_string(receipt).unwrap_or_default());
+    } else {
+        emit_cli_line(&value.to_string());
+    }
+}
+
+fn run_blocking_subagent_dispatch(args: &[String], wait_timeout_ms: u64) -> i32 {
+    let Some(value) = loopback_cli_response(args).or_else(|| dispatch_over_core_pipe(args)) else {
+        emit_cli_line(
+            &serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default(),
+        );
+        return 1;
+    };
+    let run_exit = value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
+    let child_address = value
+        .get("receipt")
+        .and_then(|r| r.get("address"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if run_exit != 0 || !child_address.starts_with("thread:") {
+        emit_receipt_or_value(&value);
+        return run_exit;
+    }
+
+    let started = std::time::Instant::now();
+    let wait_args = vec![
+        "kite".to_string(),
+        "dispatch".to_string(),
+        "wait".to_string(),
+        child_address.clone(),
+        "--until".to_string(),
+        "done,error,gone".to_string(),
+        "--timeout".to_string(),
+        wait_timeout_ms.to_string(),
+    ];
+    loop {
+        let Some(wait_val) =
+            loopback_cli_response(&wait_args).or_else(|| dispatch_over_core_pipe(&wait_args))
+        else {
+            emit_cli_line(
+                &serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default(),
+            );
+            return 1;
+        };
+        if receipt_still_waiting(&wait_val) {
+            if started.elapsed() >= Duration::from_millis(wait_timeout_ms) {
+                emit_cli_line(
+                    &serde_json::to_string(&timeout_receipt(&wait_val)).unwrap_or_default(),
+                );
+                return 1;
+            }
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let wait_exit = wait_val.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
+        if wait_exit != 0 {
+            emit_receipt_or_value(&wait_val);
+            return wait_exit;
+        }
+        break;
+    }
+
+    let read_args = vec![
+        "kite".to_string(),
+        "dispatch".to_string(),
+        "read".to_string(),
+        child_address.clone(),
+        "--last".to_string(),
+    ];
+    let read_val =
+        loopback_cli_response(&read_args).or_else(|| dispatch_over_core_pipe(&read_args));
+    let final_text = read_val
+        .as_ref()
+        .and_then(|v| v.get("receipt"))
+        .and_then(|r| r.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let child_id = child_address.strip_prefix("thread:").unwrap_or(&child_address);
+    let formatted = crate::chat::subagents::format_subagent_wait_output(final_text, child_id);
+    emit_cli_line(&formatted);
+    0
+}
+
 pub fn run_dispatch_cli(args: &[String]) -> i32 {
     attach_parent_console();
+    if let Some(wait_timeout_ms) = cli::blocking_run_wait_ms(args) {
+        return run_blocking_subagent_dispatch(args, wait_timeout_ms);
+    }
     let wait_for = cli::blocking_wait_ms(args);
     let started = std::time::Instant::now();
     loop {
@@ -570,11 +659,7 @@ pub fn run_dispatch_cli(args: &[String]) -> i32 {
             thread::sleep(Duration::from_millis(200));
             continue;
         }
-        if let Some(receipt) = value.get("receipt") {
-            emit_cli_line(&serde_json::to_string(receipt).unwrap_or_default());
-        } else {
-            emit_cli_line(&value.to_string());
-        }
+        emit_receipt_or_value(&value);
         return value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
     }
 }

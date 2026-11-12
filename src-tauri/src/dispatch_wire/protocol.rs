@@ -12,7 +12,7 @@ use tauri::Emitter;
 
 use crate::dispatch::cli;
 use crate::dispatch::policy::Service;
-use crate::dispatch::port::{Port, StartRequest, Started, SubmitMeta};
+use crate::dispatch::port::{Port, StartRequest, StartThreadRequest, Started, SubmitMeta};
 use crate::dispatch::presence::{BlockKind, PresenceState};
 use crate::dispatch::types::{Caller, DispatchError, Family, PaneVisibility};
 
@@ -97,22 +97,7 @@ impl Port for LivePort {
                 }
                 Ok(())
             }
-            Family::Thread => {
-                clear_thread_killed(id);
-                let profile_id = crate::persist::threads().lock().ok().and_then(|list| {
-                    list.iter()
-                        .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
-                        .and_then(|t| t.get("profileId").and_then(Value::as_str))
-                        .map(str::to_string)
-                });
-                let value =
-                    crate::chat::start_turn(id, profile_id.as_deref(), text, Vec::new(), None);
-                if value.get("error").is_some() {
-                    Err(DispatchError::TransportUnsupported)
-                } else {
-                    Ok(())
-                }
-            }
+            Family::Thread => start_thread_turn(id, text),
         }
     }
 
@@ -122,6 +107,20 @@ impl Port for LivePort {
             Family::Thread => thread_tail(id),
         };
         Ok(crate::dispatch::envelope::last_lines(&text, lines))
+    }
+
+    fn read_final_response(&mut self, family: Family, id: &str) -> Result<String, DispatchError> {
+        match family {
+            Family::Thread => {
+                let text = crate::chat::subagents::extract_final_assistant_text(id);
+                if text.is_empty() {
+                    Ok(thread_tail(id))
+                } else {
+                    Ok(text)
+                }
+            }
+            Family::Terminal => self.read(family, id, 200),
+        }
     }
 
     fn stop(&mut self, family: Family, id: &str) -> Result<(), DispatchError> {
@@ -214,6 +213,71 @@ impl Port for LivePort {
         })
     }
 
+    fn start_thread(&mut self, request: &StartThreadRequest) -> Result<Started, DispatchError> {
+        let parent_thread_id = request
+            .parent
+            .as_deref()
+            .map(|p| p.strip_prefix("thread:").unwrap_or(p).to_string());
+        let workspace_mode = request
+            .workspace_mode
+            .as_deref()
+            .unwrap_or("inherit")
+            .to_string();
+        let spawned = crate::chat::subagents::spawn_child_subagent_thread(
+            crate::chat::subagents::ChildSubagentSpawnParams {
+                parent_thread_id,
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+                effort: request.effort.clone(),
+                role: request.role.clone(),
+                workspace_mode,
+                fallback_cwd: request.cwd.clone(),
+                task: request.task.clone(),
+            },
+        )
+        .map_err(|err| {
+            crate::chat::utils::chat_log(&format!("start_thread failed: {err}"));
+            DispatchError::TransportUnsupported
+        })?;
+
+        clear_thread_killed(&spawned.child_thread_id);
+        let turn_prompt = match request
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            Some(role) if !request.task.trim().is_empty() => {
+                format!("[Subagent Role: {role}]\n\n{}", request.task)
+            }
+            _ => request.task.clone(),
+        };
+        if !turn_prompt.trim().is_empty() {
+            if let Err(err) = start_thread_turn(&spawned.child_thread_id, &turn_prompt) {
+                if let Ok(mut all) = crate::persist::threads().lock() {
+                    if let Some(child) = all.iter_mut().find(|t| {
+                        t.get("id").and_then(Value::as_str)
+                            == Some(spawned.child_thread_id.as_str())
+                    }) {
+                        child["status"] = json!("error");
+                    }
+                }
+                crate::chat::subagents::sync_child_thread_to_parent(&spawned.child_thread_id);
+                return Err(err);
+            }
+        }
+
+        let pane = if request.hidden {
+            PaneVisibility::Hidden
+        } else {
+            PaneVisibility::Pending
+        };
+        Ok(Started {
+            session_id: spawned.child_thread_id,
+            pane,
+        })
+    }
+
     fn type_bytes(&mut self, family: Family, id: &str, text: &str) -> Result<(), DispatchError> {
         match family {
             Family::Terminal => {
@@ -239,6 +303,22 @@ impl Port for LivePort {
 
     fn reveal(&mut self, id: &str, engine: &str, name: Option<&str>) -> Result<(), DispatchError> {
         emit_open_pane(id, engine, name);
+        Ok(())
+    }
+}
+
+fn start_thread_turn(id: &str, text: &str) -> Result<(), DispatchError> {
+    clear_thread_killed(id);
+    let profile_id = crate::persist::threads().lock().ok().and_then(|list| {
+        list.iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|t| t.get("profileId").and_then(Value::as_str))
+            .map(str::to_string)
+    });
+    let value = crate::chat::start_turn(id, profile_id.as_deref(), text, Vec::new(), None);
+    if value.get("error").is_some() {
+        Err(DispatchError::TransportUnsupported)
+    } else {
         Ok(())
     }
 }

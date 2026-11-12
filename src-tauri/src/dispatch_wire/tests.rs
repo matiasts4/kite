@@ -577,3 +577,151 @@ fn live_port_interrupt_and_sub_ms_publish_work_for_threads() {
         id != tid && id != ptid
     });
 }
+
+#[test]
+fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
+    use crate::chat::subagents::{
+        extract_final_assistant_text, format_subagent_wait_output, provision_subagent_worktree,
+        spawn_child_subagent_thread, sync_child_thread_to_parent, ChildSubagentSpawnParams,
+    };
+    use crate::persist::threads;
+
+    let unique = format!(
+        "kite-subagent-wt-{}-{}",
+        std::process::id(),
+        super::protocol::now_ms()
+    );
+    let repo_dir = std::env::temp_dir().join(&unique);
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let git = |args: &[&str]| {
+        crate::git::run_git(&repo_dir, args).expect("git executable available for worktree test")
+    };
+    assert!(git(&["init"]).status.success());
+    assert!(git(&["config", "user.email", "test@kite.local"]).status.success());
+    assert!(git(&["config", "user.name", "Kite Test"]).status.success());
+    std::fs::write(repo_dir.join("README.md"), "init\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-m", "init"]).status.success());
+
+    let wt_share = provision_subagent_worktree(&repo_dir, "share", "s1111111")
+        .expect("share worktree should succeed");
+    assert!(wt_share.starts_with(repo_dir.join(".kite").join("worktrees")));
+    assert!(wt_share.join("README.md").exists());
+
+    let wt_branch = provision_subagent_worktree(&repo_dir, "branch", "b2222222")
+        .expect("branch worktree should succeed");
+    assert!(wt_branch.starts_with(repo_dir.join(".kite").join("worktrees")));
+    assert!(wt_branch.join("README.md").exists());
+    let branch_out = crate::git::run_git(&wt_branch, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&branch_out.stdout).trim(),
+        "kite/subagent-b2222222"
+    );
+
+    let parent_id = "test-cross-provider-parent";
+    {
+        let mut list = threads().lock().unwrap();
+        list.retain(|t| {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            id != parent_id && t.get("parentThreadId").and_then(Value::as_str) != Some(parent_id)
+        });
+        list.push(json!({
+            "id": parent_id,
+            "provider": "antigravity",
+            "model": "claude-opus-4-6",
+            "workspaceId": Value::Null,
+            "workingDirectory": repo_dir.to_string_lossy().to_string(),
+            "status": "running",
+            "items": [],
+            "subagentRuns": [],
+        }));
+    }
+
+    let spawned = spawn_child_subagent_thread(ChildSubagentSpawnParams {
+        parent_thread_id: Some(parent_id.to_string()),
+        provider: Some("grok".to_string()),
+        model: Some("grok-3-mini".to_string()),
+        effort: Some("low".to_string()),
+        role: Some("Grok Executor".to_string()),
+        workspace_mode: "inherit".to_string(),
+        fallback_cwd: Some(repo_dir.to_string_lossy().to_string()),
+        task: "Inspect auth.rs".to_string(),
+    })
+    .expect("child thread spawn must succeed");
+
+    let child_id = spawned.child_thread_id.clone();
+    {
+        let list = threads().lock().unwrap();
+        let child = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_id.as_str()))
+            .expect("child thread must be persisted");
+        assert_eq!(child.get("parentThreadId").and_then(Value::as_str), Some(parent_id));
+        assert_eq!(child.get("startedByAgent").and_then(Value::as_bool), Some(true));
+        assert_eq!(child.get("sideChat").and_then(Value::as_bool), Some(true));
+        assert_eq!(child.get("provider").and_then(Value::as_str), Some("grok"));
+        assert_eq!(child.get("model").and_then(Value::as_str), Some("grok-3-mini"));
+        assert_eq!(child.get("effort").and_then(Value::as_str), Some("low"));
+        assert_eq!(child.get("subagentRole").and_then(Value::as_str), Some("Grok Executor"));
+        assert_eq!(child.get("workspaceMode").and_then(Value::as_str), Some("inherit"));
+
+        let parent = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id))
+            .expect("parent thread must exist");
+        let runs = parent["subagentRuns"].as_array().expect("subagentRuns array");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].get("childThreadId").and_then(Value::as_str), Some(child_id.as_str()));
+        assert_eq!(runs[0].get("provider").and_then(Value::as_str), Some("grok"));
+        assert_eq!(runs[0].get("status").and_then(Value::as_str), Some("running"));
+        let tool_items = parent["items"].as_array().expect("parent items");
+        assert_eq!(tool_items.len(), 1);
+        assert_eq!(tool_items[0].get("toolKind").and_then(Value::as_str), Some("subagent"));
+    }
+
+    // Simulate child thread executing a tool and completing an assistant reply.
+    {
+        let mut list = threads().lock().unwrap();
+        if let Some(child) = list
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_id.as_str()))
+        {
+            child["status"] = json!("idle");
+            child["items"] = json!([
+                { "id": "u1", "kind": "user", "text": "Inspect auth.rs" },
+                { "id": "t1", "kind": "tool", "title": "Read auth.rs", "status": "completed" },
+                { "id": "a1", "kind": "assistant", "text": "Auth token validation is clean." }
+            ]);
+        }
+    }
+    sync_child_thread_to_parent(&child_id);
+    {
+        let list = threads().lock().unwrap();
+        let parent = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id))
+            .unwrap();
+        let run = &parent["subagentRuns"][0];
+        assert_eq!(run.get("status").and_then(Value::as_str), Some("completed"));
+        assert_eq!(run.get("stepCount").and_then(Value::as_u64), Some(1));
+        assert!(run.get("completedAtUnixMs").and_then(Value::as_i64).is_some());
+    }
+
+    let final_resp = extract_final_assistant_text(&child_id);
+    let formatted = format_subagent_wait_output(&final_resp, &child_id);
+    assert_eq!(
+        formatted,
+        format!("Auth token validation is clean.\n\n[subagent_id: thread:{child_id}]")
+    );
+
+    // Cleanup worktrees and test threads
+    let _ = git(&["worktree", "remove", "--force", &wt_share.to_string_lossy()]);
+    let _ = git(&["worktree", "remove", "--force", &wt_branch.to_string_lossy()]);
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    let mut list = threads().lock().unwrap();
+    list.retain(|t| {
+        let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+        id != parent_id && id != child_id.as_str()
+    });
+}

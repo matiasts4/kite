@@ -343,8 +343,19 @@ pub fn append_reasoning_delta(thread_id: &str, run_id: &str, text: &str) {
 }
 
 pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapshot) {
-    let streaming = matches!(
-        snap.status.as_str(),
+    let mut resolved_status = snap.status.clone();
+    if resolved_status != "killed"
+        && crate::acp::response_indicates_failure(
+            &resolved_status,
+            None,
+            None,
+            Some(snap.output.as_str()),
+        )
+    {
+        resolved_status = "failed".to_string();
+    }
+    let mut streaming = matches!(
+        resolved_status.as_str(),
         "inProgress" | "running" | "pending" | "in_progress"
     );
     let mut item = chat_item(&snap.id, "tool", &snap.output, streaming);
@@ -354,7 +365,7 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
         snap.title.clone()
     };
     item["title"] = json!(title);
-    item["status"] = json!(snap.status);
+    item["status"] = json!(resolved_status);
     item["toolKind"] = json!(snap.kind);
     if let Some(path) = &snap.path {
         item["filePath"] = json!(path);
@@ -421,6 +432,18 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
                         item[key] = value.clone();
                     }
                 }
+            }
+        }
+    }
+    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+        if resolved_status != "killed"
+            && crate::acp::response_indicates_failure(&resolved_status, None, None, Some(text))
+        {
+            streaming = false;
+            item["status"] = json!("failed");
+            item["streaming"] = json!(false);
+            if let Some(ref mut m) = sub_meta {
+                m.status = "failed".to_string();
             }
         }
     }

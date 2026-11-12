@@ -199,7 +199,7 @@ describe('SubagentInspectorView', () => {
 
     const hierarchy = screen.getByTestId('subagent-model-hierarchy');
     expect(hierarchy.textContent).toMatch(/Main:\s*Opus 4\.6/);
-    expect(hierarchy.textContent).toMatch(/Subagent:\s*Gemini Flash/);
+    expect(hierarchy.textContent).toMatch(/Subagent:\s*Gemini 2\.5 Flash/);
     expect(screen.getByText('inherit')).toBeInTheDocument();
 
     // TaskBriefCard collapsed -> expanded toggle
@@ -301,5 +301,48 @@ describe('SubagentInspectorView', () => {
     await waitFor(() => {
       expect(stopSubagentRunMock).toHaveBeenCalledWith('thread-main-1', 'sub-1');
     });
+  });
+
+  it('shows inline failure diagnostics instead of waiting placeholder when a subagent run fails with zero steps', async () => {
+    const failedThread = makeThread({
+      subagentRuns: [
+        {
+          subagentId: 'sub-fail-1',
+          parentThreadId: 'thread-main-1',
+          parentToolCallId: 'call-fail-1',
+          role: 'Grok subagent',
+          provider: 'grok',
+          model: 'grok-4',
+          workspaceMode: 'inherit',
+          status: 'failed',
+          prompt: 'Audit auth layer',
+          latestActivity: 'No model connected for provider grok',
+          stepCount: 0,
+          startedAtUnixMs: Date.now() - 2_000,
+          updatedAtUnixMs: Date.now() - 1_000,
+          items: [],
+        },
+      ],
+      swarmState: null,
+    });
+    loadChatThreadMock.mockResolvedValueOnce(failedThread);
+
+    render(
+      <SubagentInspectorView
+        workspaceId="ws-1"
+        selectedThreadId="thread-main-1"
+        requestedTarget={{
+          threadId: 'thread-main-1',
+          subagentId: 'sub-fail-1',
+          mode: 'subagent',
+        }}
+      />,
+    );
+
+    const card = await screen.findByTestId('subagent-failure-card');
+    expect(card.textContent).toContain('Subagent execution failed');
+    expect(card.textContent).toContain('No model connected for provider grok');
+    expect(screen.getByText('No steps captured before failure')).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting for subagent steps/i)).toBeNull();
   });
 });

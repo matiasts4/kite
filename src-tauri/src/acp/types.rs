@@ -419,11 +419,98 @@ pub fn normalize_subagent_status(raw_status: &str, action: Option<&str>) -> Stri
     }
     match raw_status.trim().to_ascii_lowercase().as_str() {
         "completed" | "done" | "succeeded" | "success" => "completed".to_string(),
-        "failed" | "error" => "failed".to_string(),
+        "failed" | "error" | "rejected" | "denied" | "errored" | "timed_out" | "timeout" => {
+            "failed".to_string()
+        }
         "killed" | "terminated" | "cancelled" | "canceled" => "killed".to_string(),
         "waiting" | "paused" | "requiresapproval" | "requires_approval" => "waiting".to_string(),
         _ => "running".to_string(),
     }
+}
+
+fn value_failure_flag(val: &Value, depth: u8) -> bool {
+    if depth > 2 {
+        return false;
+    }
+    let Some(obj) = val.as_object() else {
+        return false;
+    };
+    if obj
+        .get("isError")
+        .or_else(|| obj.get("is_error"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    if obj.get("ok").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    for key in ["exitCode", "exit_code", "exit", "returnCode", "return_code"] {
+        if let Some(code) = obj.get(key).and_then(Value::as_i64) {
+            if code != 0 {
+                return true;
+            }
+        }
+    }
+    if let Some(status) = obj.get("status").and_then(Value::as_str) {
+        if matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "failed" | "error" | "rejected" | "denied" | "errored" | "timed_out" | "timeout"
+        ) {
+            return true;
+        }
+    }
+    if let Some(err) = obj.get("error") {
+        let non_empty = match err {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::String(s) => !s.trim().is_empty(),
+            Value::Object(m) => !m.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Number(_) => true,
+        };
+        if non_empty {
+            return true;
+        }
+    }
+    for nested_key in ["state", "metadata", "rawOutput", "output", "result"] {
+        if let Some(nested) = obj.get(nested_key) {
+            if value_failure_flag(nested, depth + 1) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when any status, exit code, ACP error flag, or JSON receipt indicates failure.
+pub fn response_indicates_failure(
+    raw_status: &str,
+    meta_val: Option<&Value>,
+    parsed_output: Option<&Value>,
+    output: Option<&str>,
+) -> bool {
+    if matches!(
+        raw_status.trim().to_ascii_lowercase().as_str(),
+        "failed" | "error" | "rejected" | "denied" | "errored" | "timed_out" | "timeout"
+    ) {
+        return true;
+    }
+    if meta_val.is_some_and(|v| value_failure_flag(v, 0)) {
+        return true;
+    }
+    if parsed_output.is_some_and(|v| value_failure_flag(v, 0)) {
+        return true;
+    }
+    if parsed_output.is_none() {
+        if let Some(parsed) = parse_output_json(output) {
+            if value_failure_flag(&parsed, 0) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn extract_mentions(text: &str) -> Vec<String> {
@@ -459,9 +546,15 @@ pub fn extract_mentions(text: &str) -> Vec<String> {
     mentions
 }
 
-fn tokenize_shell_words(cmd: &str) -> Vec<String> {
+struct ShellToken {
+    text: String,
+    quoted: bool,
+}
+
+fn tokenize_shell_tokens(cmd: &str) -> Vec<ShellToken> {
     let mut words = Vec::new();
     let mut current = String::new();
+    let mut current_quoted = false;
     let mut quote: Option<char> = None;
     let mut escape = false;
     for ch in cmd.chars() {
@@ -479,55 +572,119 @@ fn tokenize_shell_words(cmd: &str) -> Vec<String> {
                     current.push(ch);
                 }
             }
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                current_quoted = true;
+            }
             None if ch.is_whitespace() => {
                 if !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
+                    words.push(ShellToken {
+                        text: std::mem::take(&mut current),
+                        quoted: current_quoted,
+                    });
+                    current_quoted = false;
                 }
+            }
+            None if ch == ';' => {
+                if !current.is_empty() {
+                    words.push(ShellToken {
+                        text: std::mem::take(&mut current),
+                        quoted: current_quoted,
+                    });
+                    current_quoted = false;
+                }
+                words.push(ShellToken {
+                    text: ";".to_string(),
+                    quoted: false,
+                });
             }
             None => current.push(ch),
         }
     }
     if !current.is_empty() {
-        words.push(current);
+        words.push(ShellToken {
+            text: current,
+            quoted: current_quoted,
+        });
     }
     words
 }
 
-enum DispatchCliCommand<'a> {
-    Run(&'a [String]),
-    Swarm(&'a [String]),
+fn sanitize_cli_args(tokens: &[ShellToken]) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if !tok.quoted {
+            let t = tok.text.as_str();
+            if matches!(t, "|" | "||" | "&&" | ";" | "&") {
+                break;
+            }
+            if matches!(
+                t,
+                "2>&1" | "1>&2" | "2>&2" | "1>&1" | ">&1" | ">&2" | "*>&1"
+            ) {
+                i += 1;
+                continue;
+            }
+            if matches!(
+                t,
+                ">" | ">>" | "<" | "<<" | "<<<" | "1>" | "1>>" | "2>" | "2>>" | "&>" | "&>>" | ">|" | "<>" | "*>" | "*>>"
+            ) {
+                i = (i + 2).min(tokens.len());
+                continue;
+            }
+            if t.starts_with('>')
+                || t.starts_with('<')
+                || t.starts_with("&>")
+                || t.starts_with("1>")
+                || t.starts_with("2>")
+                || t.starts_with("*>")
+            {
+                i += 1;
+                continue;
+            }
+        }
+        cleaned.push(tok.text.clone());
+        i += 1;
+    }
+    cleaned
 }
 
-fn match_dispatch_cli(words: &[String]) -> Option<DispatchCliCommand<'_>> {
-    for idx in 0..words.len() {
-        let bin = Path::new(&words[idx])
+enum DispatchCliCommand {
+    Run(Vec<String>),
+    Swarm(Vec<String>),
+}
+
+fn match_dispatch_cli(tokens: &[ShellToken]) -> Option<DispatchCliCommand> {
+    for idx in 0..tokens.len() {
+        let bin = Path::new(&tokens[idx].text)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or(&words[idx])
+            .unwrap_or(&tokens[idx].text)
             .to_ascii_lowercase();
-        if bin == "kite" && words.get(idx + 1).is_some_and(|w| w.eq_ignore_ascii_case("dispatch")) {
-            let sub = words.get(idx + 2).map(|s| s.to_ascii_lowercase());
+        if bin == "kite" && tokens.get(idx + 1).is_some_and(|w| w.text.eq_ignore_ascii_case("dispatch")) {
+            let sub = tokens.get(idx + 2).map(|s| s.text.to_ascii_lowercase());
             if sub.as_deref() == Some("run") {
-                return Some(DispatchCliCommand::Run(&words[idx + 3..]));
+                return Some(DispatchCliCommand::Run(sanitize_cli_args(&tokens[idx + 3..])));
             }
             if sub.as_deref() == Some("swarm") {
-                return Some(DispatchCliCommand::Swarm(&words[idx + 3..]));
+                return Some(DispatchCliCommand::Swarm(sanitize_cli_args(&tokens[idx + 3..])));
             }
         } else if bin == "kite-dispatch" {
-            let sub = words.get(idx + 1).map(|s| s.to_ascii_lowercase());
+            let sub = tokens.get(idx + 1).map(|s| s.text.to_ascii_lowercase());
             if sub.as_deref() == Some("run") {
-                return Some(DispatchCliCommand::Run(&words[idx + 2..]));
+                return Some(DispatchCliCommand::Run(sanitize_cli_args(&tokens[idx + 2..])));
             }
             if sub.as_deref() == Some("swarm") {
-                return Some(DispatchCliCommand::Swarm(&words[idx + 2..]));
+                return Some(DispatchCliCommand::Swarm(sanitize_cli_args(&tokens[idx + 2..])));
             }
         }
     }
     None
 }
 
-fn take_cli_flag<'a>(args: &'a [String], names: &[&str]) -> Option<String> {
+fn take_cli_flag(args: &[String], names: &[&str]) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -553,7 +710,10 @@ fn collect_cli_positionals(args: &[String]) -> Vec<String> {
         let arg = &args[i];
         if arg.starts_with("--") {
             if !arg.contains('=')
-                && !matches!(arg.as_str(), "--wait" | "--all" | "--json" | "--exact")
+                && !matches!(
+                    arg.as_str(),
+                    "--wait" | "--all" | "--json" | "--exact" | "--refresh" | "--no-wait" | "--help"
+                )
                 && i + 1 < args.len()
             {
                 i += 2;
@@ -626,10 +786,70 @@ pub fn is_swarm_tool_name(clean_name: &str) -> bool {
 
 fn parse_output_json(output: Option<&str>) -> Option<Value> {
     let text = output?.trim();
+    if text.is_empty() {
+        return None;
+    }
     if text.starts_with('{') && text.ends_with('}') {
-        serde_json::from_str::<Value>(text).ok()
-    } else {
-        None
+        if let Ok(val) = serde_json::from_str::<Value>(text) {
+            if val.is_object() {
+                return Some(val);
+            }
+        }
+    }
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+                if val.is_object() {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_shell_wrapper_name(clean_name: &str) -> bool {
+    matches!(
+        clean_name.trim().to_ascii_lowercase().replace(' ', "_").as_str(),
+        "run_command"
+            | "execute_command"
+            | "command_execution"
+            | "bash"
+            | "shell"
+            | "sh"
+            | "zsh"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "terminal"
+            | "exec"
+    )
+}
+
+fn is_generic_subagent_role(role: &str) -> bool {
+    let trimmed = role.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "subagent"
+        || lower.ends_with(" subagent")
+        || is_shell_wrapper_name(trimmed)
+        || is_subagent_tool_name(&lower.replace(' ', "_"))
+}
+
+fn display_provider_label(provider: &str) -> &str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "antigravity" | "agy" => "Antigravity",
+        "grok" => "Grok",
+        "codex" => "Codex",
+        "claude" | "claude-code" => "Claude",
+        "opencode" | "open-code" => "OpenCode",
+        "cursor" | "cursor-agent" => "Cursor",
+        "gemini" => "Gemini",
+        "fx" => "FX",
+        _ => "Subagent",
     }
 }
 
@@ -667,10 +887,9 @@ pub fn extract_subagent_meta(
 ) -> Option<SubagentMeta> {
     let (_, clean_name) = strip_mcp_prefix(raw_name, params);
     let command = lookup_text(params, &["CommandLine", "command", "cmd"]);
-    let cli_words = command.as_deref().map(tokenize_shell_words);
-    let is_cli_run = cli_words
-        .as_deref()
-        .is_some_and(|w| matches!(match_dispatch_cli(w), Some(DispatchCliCommand::Run(_))));
+    let cli_tokens = command.as_deref().map(tokenize_shell_tokens);
+    let cli_cmd = cli_tokens.as_deref().and_then(match_dispatch_cli);
+    let is_cli_run = matches!(cli_cmd, Some(DispatchCliCommand::Run(_)));
     if !is_subagent_tool_name(&clean_name) && !is_cli_run {
         return None;
     }
@@ -681,7 +900,8 @@ pub fn extract_subagent_meta(
     let mut role = lookup_text(
         params,
         &["Role", "role", "description", "Description", "name", "Name", "title"],
-    );
+    )
+    .filter(|r| !is_shell_wrapper_name(r) && !is_subagent_tool_name(&r.replace(' ', "_")));
     let mut type_name = lookup_text(
         params,
         &["TypeName", "typeName", "type_name", "subagent_type", "subagentType", "agentType"],
@@ -698,20 +918,20 @@ pub fn extract_subagent_meta(
         &["Prompt", "prompt", "Message", "message", "brief", "Brief", "task", "instruction"],
     );
 
-    if let Some(words) = cli_words.as_deref() {
-        if let Some(DispatchCliCommand::Run(args)) = match_dispatch_cli(words) {
-            role = role.or_else(|| take_cli_flag(args, &["--role", "--title"]));
-            type_name = type_name.or_else(|| take_cli_flag(args, &["--type"]));
-            provider = provider.or_else(|| take_cli_flag(args, &["--provider", "--agent"]));
-            model = model.or_else(|| take_cli_flag(args, &["--model"]));
-            workspace_mode = workspace_mode.or_else(|| {
-                take_cli_flag(args, &["--workspace"]).and_then(|w| normalize_workspace_mode(&w))
-            });
-            if prompt.is_none() {
-                let pos = collect_cli_positionals(args);
-                if !pos.is_empty() {
-                    prompt = Some(pos.join(" "));
-                }
+    if let Some(DispatchCliCommand::Run(args)) = cli_cmd {
+        role = role
+            .or_else(|| take_cli_flag(&args, &["--role", "--title"]))
+            .filter(|r| !is_shell_wrapper_name(r) && !is_subagent_tool_name(&r.replace(' ', "_")));
+        type_name = type_name.or_else(|| take_cli_flag(&args, &["--type"]));
+        provider = provider.or_else(|| take_cli_flag(&args, &["--provider", "--agent"]));
+        model = model.or_else(|| take_cli_flag(&args, &["--model"]));
+        workspace_mode = workspace_mode.or_else(|| {
+            take_cli_flag(&args, &["--workspace"]).and_then(|w| normalize_workspace_mode(&w))
+        });
+        if prompt.is_none() {
+            let pos = collect_cli_positionals(&args);
+            if !pos.is_empty() {
+                prompt = Some(pos.join(" "));
             }
         }
     }
@@ -774,7 +994,7 @@ pub fn extract_subagent_meta(
                 &["logAbsoluteUri", "log_absolute_uri", "transcriptUri", "transcript_uri"],
             )
         });
-    let latest_activity = parsed_out
+    let mut latest_activity = parsed_out
         .as_ref()
         .and_then(|o| lookup_text(o, &["latestActivity", "latest_activity"]))
         .or_else(|| lookup_text(params, &["latestActivity", "latest_activity"]));
@@ -785,8 +1005,32 @@ pub fn extract_subagent_meta(
 
     let resolved_role = role
         .or_else(|| type_name.clone())
-        .unwrap_or_else(|| clean_name.replace('_', " "));
-    let status = normalize_subagent_status(raw_status, action.as_deref());
+        .unwrap_or_else(|| {
+            if is_shell_wrapper_name(&clean_name) || is_subagent_tool_name(&clean_name) {
+                provider
+                    .as_deref()
+                    .map(|p| match display_provider_label(p) {
+                        "Subagent" => "Subagent".to_string(),
+                        label => format!("{label} subagent"),
+                    })
+                    .unwrap_or_else(|| "Subagent".to_string())
+            } else {
+                clean_name.replace('_', " ")
+            }
+        });
+    let mut status = normalize_subagent_status(raw_status, action.as_deref());
+    if status != "killed"
+        && response_indicates_failure(raw_status, Some(params), parsed_out.as_ref(), output)
+    {
+        status = "failed".to_string();
+    }
+    if status == "failed" && latest_activity.is_none() {
+        latest_activity = parsed_out
+            .as_ref()
+            .and_then(|o| lookup_text(o, &["error", "message", "reason"]))
+            .or_else(|| lookup_text(params, &["error", "message", "reason"]))
+            .map(|msg| msg.chars().take(180).collect());
+    }
 
     Some(SubagentMeta {
         subagent_id,
@@ -811,10 +1055,9 @@ pub fn extract_swarm_meta(
 ) -> Option<SwarmMeta> {
     let (_, clean_name) = strip_mcp_prefix(raw_name, params);
     let command = lookup_text(params, &["CommandLine", "command", "cmd"]);
-    let cli_words = command.as_deref().map(tokenize_shell_words);
-    let is_cli_swarm = cli_words
-        .as_deref()
-        .is_some_and(|w| matches!(match_dispatch_cli(w), Some(DispatchCliCommand::Swarm(_))));
+    let cli_tokens = command.as_deref().map(tokenize_shell_tokens);
+    let cli_cmd = cli_tokens.as_deref().and_then(match_dispatch_cli);
+    let is_cli_swarm = matches!(cli_cmd, Some(DispatchCliCommand::Swarm(_)));
     if !is_swarm_tool_name(&clean_name) && !is_cli_swarm {
         return None;
     }
@@ -845,55 +1088,53 @@ pub fn extract_swarm_meta(
     let mut post_text = lookup_text(params, &["message", "Message", "text", "body", "postText"]);
     let mut brief = lookup_text(params, &["brief", "Brief"]);
 
-    if let Some(words) = cli_words.as_deref() {
-        if let Some(DispatchCliCommand::Swarm(args)) = match_dispatch_cli(words) {
-            if let Some(sub) = args.first() {
-                action = match sub.to_ascii_lowercase().as_str() {
-                    "post" | "post_message" => "post_message".to_string(),
-                    "read" | "read_board" => "read_board".to_string(),
-                    "wait" | "swarm_wait" => "swarm_wait".to_string(),
-                    other => other.to_string(),
-                };
-                let rest = &args[1..];
-                swarm_id = swarm_id.or_else(|| take_cli_flag(rest, &["--swarm", "--swarm-id"]));
-                swarm_title = swarm_title.or_else(|| take_cli_flag(rest, &["--title"]));
-                member_name = member_name.or_else(|| take_cli_flag(rest, &["--name", "--member"]));
-                model = model.or_else(|| take_cli_flag(rest, &["--model"]));
-                workspace_mode = workspace_mode.or_else(|| {
-                    take_cli_flag(rest, &["--workspace"]).and_then(|w| normalize_workspace_mode(&w))
-                });
-                channel = channel.or_else(|| take_cli_flag(rest, &["--channel"]));
-                brief = brief.or_else(|| take_cli_flag(rest, &["--brief"]));
+    if let Some(DispatchCliCommand::Swarm(args)) = cli_cmd {
+        if let Some(sub) = args.first() {
+            action = match sub.to_ascii_lowercase().as_str() {
+                "post" | "post_message" => "post_message".to_string(),
+                "read" | "read_board" => "read_board".to_string(),
+                "wait" | "swarm_wait" => "swarm_wait".to_string(),
+                other => other.to_string(),
+            };
+            let rest = &args[1..];
+            swarm_id = swarm_id.or_else(|| take_cli_flag(rest, &["--swarm", "--swarm-id"]));
+            swarm_title = swarm_title.or_else(|| take_cli_flag(rest, &["--title"]));
+            member_name = member_name.or_else(|| take_cli_flag(rest, &["--name", "--member"]));
+            model = model.or_else(|| take_cli_flag(rest, &["--model"]));
+            workspace_mode = workspace_mode.or_else(|| {
+                take_cli_flag(rest, &["--workspace"]).and_then(|w| normalize_workspace_mode(&w))
+            });
+            channel = channel.or_else(|| take_cli_flag(rest, &["--channel"]));
+            brief = brief.or_else(|| take_cli_flag(rest, &["--brief"]));
 
-                if member_names.is_empty() {
-                    if let Some(tasks_csv) = take_cli_flag(rest, &["--tasks"]) {
+            if member_names.is_empty() {
+                if let Some(tasks_csv) = take_cli_flag(rest, &["--tasks"]) {
+                    let base = member_name.as_deref().unwrap_or("worker");
+                    let count = tasks_csv.split(',').filter(|s| !s.trim().is_empty()).count();
+                    for idx in 1..=count {
+                        member_names.push(format!("{base}-{idx}"));
+                    }
+                } else if let Some(n_str) = take_cli_flag(rest, &["--n"]) {
+                    if let Ok(n) = n_str.parse::<usize>() {
                         let base = member_name.as_deref().unwrap_or("worker");
-                        let count = tasks_csv.split(',').filter(|s| !s.trim().is_empty()).count();
-                        for idx in 1..=count {
+                        for idx in 1..=n {
                             member_names.push(format!("{base}-{idx}"));
                         }
-                    } else if let Some(n_str) = take_cli_flag(rest, &["--n"]) {
-                        if let Ok(n) = n_str.parse::<usize>() {
-                            let base = member_name.as_deref().unwrap_or("worker");
-                            for idx in 1..=n {
-                                member_names.push(format!("{base}-{idx}"));
-                            }
-                        }
-                    } else if let Some(ref m) = member_name {
-                        member_names.push(m.clone());
                     }
+                } else if let Some(ref m) = member_name {
+                    member_names.push(m.clone());
                 }
+            }
 
-                let pos = collect_cli_positionals(rest);
-                if action == "post_message" && post_text.is_none() && !pos.is_empty() {
-                    post_text = Some(pos.join(" "));
-                } else if action == "title" && swarm_title.is_none() && !pos.is_empty() {
-                    swarm_title = Some(pos.join(" "));
-                } else if action == "channel" && channel.is_none() && !pos.is_empty() {
-                    channel = Some(pos[0].clone());
-                } else if action == "add" && brief.is_none() && !pos.is_empty() {
-                    brief = Some(pos.join(" "));
-                }
+            let pos = collect_cli_positionals(rest);
+            if action == "post_message" && post_text.is_none() && !pos.is_empty() {
+                post_text = Some(pos.join(" "));
+            } else if action == "title" && swarm_title.is_none() && !pos.is_empty() {
+                swarm_title = Some(pos.join(" "));
+            } else if action == "channel" && channel.is_none() && !pos.is_empty() {
+                channel = Some(pos[0].clone());
+            } else if action == "add" && brief.is_none() && !pos.is_empty() {
+                brief = Some(pos.join(" "));
             }
         }
     }
@@ -936,12 +1177,10 @@ pub fn merge_subagent_meta(existing: Option<&SubagentMeta>, mut incoming: Subage
         {
             incoming.subagent_id = prev.subagent_id.clone();
         }
-        if incoming.role.trim().is_empty()
-            || is_subagent_tool_name(&incoming.role.replace(' ', "_"))
-        {
-            if !prev.role.trim().is_empty() {
-                incoming.role = prev.role.clone();
-            }
+        if is_generic_subagent_role(&incoming.role) && !is_generic_subagent_role(&prev.role) {
+            incoming.role = prev.role.clone();
+        } else if is_shell_wrapper_name(&incoming.role) && !prev.role.trim().is_empty() {
+            incoming.role = prev.role.clone();
         }
         if incoming.type_name.is_none() {
             incoming.type_name = prev.type_name.clone();
@@ -969,6 +1208,11 @@ pub fn merge_subagent_meta(existing: Option<&SubagentMeta>, mut incoming: Subage
         }
         if incoming.step_count == 0 {
             incoming.step_count = prev.step_count;
+        }
+        if prev.status == "killed" && incoming.status != "killed" {
+            incoming.status = "killed".to_string();
+        } else if prev.status == "failed" && incoming.status == "running" {
+            incoming.status = "failed".to_string();
         }
     }
     incoming
@@ -1158,8 +1402,8 @@ pub fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option
         }
     }
 
-    let cli_words = command.as_deref().map(tokenize_shell_words);
-    let cli_kind = cli_words.as_deref().and_then(match_dispatch_cli);
+    let cli_tokens = command.as_deref().map(tokenize_shell_tokens);
+    let cli_kind = cli_tokens.as_deref().and_then(match_dispatch_cli);
 
     let tool_kind = if is_swarm_tool_name(&clean_name) || matches!(cli_kind, Some(DispatchCliCommand::Swarm(_))) {
         "swarm"
@@ -1266,6 +1510,12 @@ pub fn build_acp_tool_call(
     let server_name = server_override.or(classified_server);
     let tool_kind = kind_override.unwrap_or(classified_kind);
     let title = title_override.unwrap_or(classified_title);
+    let mut status = status;
+    if status != "killed"
+        && response_indicates_failure(&status, Some(&params), None, output.as_deref())
+    {
+        status = "failed".to_string();
+    }
     let detail = detail_override.unwrap_or_else(|| summarize_tool_detail(&params, &output, &command, &file_path));
     let subagent_meta = extract_subagent_meta(raw_name, &id, &params, output.as_deref(), &status);
     let swarm_meta = extract_swarm_meta(raw_name, &params, output.as_deref());
@@ -1313,11 +1563,21 @@ pub fn acp_tool_from_update(
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("running");
-    let status = match raw_status {
-        "completed" | "done" | "succeeded" => "completed",
-        "failed" | "error" => "failed",
-        "pending" => "pending",
-        _ => "running",
+    let status = if raw_status.eq_ignore_ascii_case("killed")
+        || raw_status.eq_ignore_ascii_case("terminated")
+        || raw_status.eq_ignore_ascii_case("cancelled")
+        || raw_status.eq_ignore_ascii_case("canceled")
+    {
+        "killed"
+    } else if response_indicates_failure(raw_status, Some(update), None, output.as_deref()) {
+        "failed"
+    } else {
+        match raw_status {
+            "completed" | "done" | "succeeded" => "completed",
+            "failed" | "error" => "failed",
+            "pending" => "pending",
+            _ => "running",
+        }
     };
     let tool_params = update
         .get("rawInput")

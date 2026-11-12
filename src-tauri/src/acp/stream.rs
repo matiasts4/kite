@@ -687,12 +687,21 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                     .or_else(|| val.get("parent_tool_use_id"))
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let initial_status = if response_indicates_failure("", Some(src), None, None) {
+                    "failed".to_string()
+                } else {
+                    src.get("status")
+                        .or_else(|| src.pointer("/state/status"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| normalize_subagent_status(s, None))
+                        .unwrap_or_else(|| "running".to_string())
+                };
                 return Some(AcpStreamEvent::ToolUpdate {
                     tool: build_acp_tool_call(
                         tool_id,
                         tool_name,
                         params,
-                        "running".to_string(),
+                        initial_status,
                         None,
                         None,
                         None,
@@ -740,7 +749,15 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                             None
                         }
                     });
-                let is_error = src.get("is_error").or_else(|| val.get("is_error")).and_then(|v| v.as_bool()).unwrap_or(false);
+                let is_error = src
+                    .get("is_error")
+                    .or_else(|| src.get("isError"))
+                    .or_else(|| val.get("is_error"))
+                    .or_else(|| val.get("isError"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    || response_indicates_failure("", Some(src), None, output.as_deref())
+                    || response_indicates_failure("", Some(&val), None, None);
                 let status = if is_error { "failed" } else { "completed" };
                 let parent_tool_use_id = src
                     .get("parent_tool_use_id")

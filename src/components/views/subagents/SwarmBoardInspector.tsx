@@ -37,11 +37,19 @@ export function formatInspectorModelName(
 ): string {
   const m = (model ?? '').trim();
   const lower = m.toLowerCase();
-  if (lower.includes('opus-4-6')) return 'Opus 4.6';
-  if (lower.includes('sonnet-4-6')) return 'Sonnet 4.6';
-  if (lower.includes('haiku-3-5') || lower.includes('3-5-haiku')) return 'Haiku 3.5';
-  if (lower.includes('gemini-2.5-flash')) return 'Gemini Flash';
-  if (lower.includes('gemini-2.5-pro')) return 'Gemini Pro';
+  const claudeMatch = lower.match(/claude-(opus|sonnet|haiku)-(\d+)[-.](\d+)/);
+  if (claudeMatch) {
+    const family = claudeMatch[1].charAt(0).toUpperCase() + claudeMatch[1].slice(1);
+    return `${family} ${claudeMatch[2]}.${claudeMatch[3]}`;
+  }
+  const geminiMatch = lower.match(/^gemini-(\d+(?:\.\d+)?)-([a-z-]+)$/);
+  if (geminiMatch) {
+    const tier = geminiMatch[2]
+      .split('-')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+    return `Gemini ${geminiMatch[1]} ${tier}`;
+  }
   return formatShortModelLabel(model, provider) || provider || 'Default';
 }
 

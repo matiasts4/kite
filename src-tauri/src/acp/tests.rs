@@ -250,3 +250,49 @@ fn diff_metadata_handles_partial_edits_nested_args_multi_chunks_and_acp_content(
         other => panic!("expected Codex file_change ToolUpdate, got {:?}", other.is_some()),
     }
 }
+
+#[test]
+fn cli_dispatch_strips_shell_redirections_avoids_run_command_role_and_propagates_failures() {
+    let params = serde_json::json!({
+        "CommandLine": "kite dispatch run --via thread --provider grok \"Audit auth 2>&1\" 2>&1 | tee dispatch.log && echo done"
+    });
+    let (kind, _, title, _, _, _, _) = classify_tool_metadata("run_command", &params);
+    assert_eq!(kind, "subagent");
+    assert!(!title.to_ascii_lowercase().contains("run command"), "{title}");
+
+    let meta = extract_subagent_meta(
+        "run_command",
+        "cmd-redir",
+        &params,
+        Some("stderr noise\n{\"exit\":2,\"status\":\"rejected\",\"error\":\"Provider grok is not signed in\"}"),
+        "completed",
+    )
+    .expect("subagent meta");
+    assert_eq!(meta.role, "Grok subagent");
+    assert_eq!(meta.prompt.as_deref(), Some("Audit auth 2>&1"));
+    assert_eq!(meta.status, "failed");
+    assert_eq!(
+        meta.latest_activity.as_deref(),
+        Some("Provider grok is not signed in")
+    );
+
+    let update_tool = acp_tool_from_update(
+        &serde_json::json!({
+            "toolCallId": "cmd-exit-2",
+            "toolName": "bash",
+            "status": "completed",
+            "exitCode": 2,
+            "rawInput": {
+                "command": "kite dispatch run --provider codex \"Fix race\" > out.log 2>&1"
+            }
+        }),
+        None,
+        None,
+    );
+    assert_eq!(update_tool.tool_kind, "subagent");
+    assert_eq!(update_tool.status, "failed");
+    let update_meta = update_tool.subagent_meta.expect("subagent meta");
+    assert_eq!(update_meta.role, "Codex subagent");
+    assert_eq!(update_meta.prompt.as_deref(), Some("Fix race"));
+    assert_eq!(update_meta.status, "failed");
+}

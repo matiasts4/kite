@@ -8,6 +8,7 @@ import {
   stopSubagentRun,
 } from '../../../lib/ipc/chat';
 import type { OpenRightDockSubagentDetail } from '../../../lib/subagentNav';
+import { setActiveSubagentInspection } from '../../../lib/subagentNav';
 import { tweens } from '../../../motion/standard/tokens';
 import type { SubagentRun, SwarmMember } from '../../../types';
 import { ChatWorkEntry } from '../chat/ChatItemRow';
@@ -185,6 +186,26 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     }
     return runs[0];
   }, [runs, selectedSubagentId]);
+
+  useEffect(() => {
+    if (!thread) return;
+    if (mode === 'swarm' && swarmState) {
+      setActiveSubagentInspection({
+        threadId: thread.id,
+        swarmId: swarmState.swarmId,
+        mode: 'swarm',
+        workspaceId,
+      });
+    } else if (activeRun) {
+      setActiveSubagentInspection({
+        threadId: thread.id,
+        subagentId: activeRun.subagentId,
+        childThreadId: activeRun.childThreadId ?? null,
+        mode: 'subagent',
+        workspaceId,
+      });
+    }
+  }, [thread?.id, mode, swarmState?.swarmId, activeRun?.subagentId, activeRun?.childThreadId, workspaceId]);
 
   // Hydrate missing steps on demand via getThreadSubagentDetail / getThreadSwarmState
   useEffect(() => {
@@ -477,11 +498,11 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                 <span className={`subagent-dot ${runStatusDotClass(activeRun.status)}`} />
                 <span>{activeRun.role || 'Subagent'}</span>
                 {activeRun.typeName && (
-                  <span className="subagent-badge">{activeRun.typeName}</span>
+                  <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
                 )}
               </div>
               <div className="subagent-inspector__status-actions">
-                <span className="subagent-badge subagent-badge--status">
+                <span className="subagent-inspector__status-text">
                   {runStatusLabel(activeRun, nowUnixMs)}
                 </span>
                 {isRunActive(activeRun.status) && (
@@ -498,9 +519,8 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
               </div>
             </div>
 
-            <div className="subagent-inspector__meta-badges">
+            <div className="subagent-inspector__meta-subtitle">
               <span
-                className="subagent-badge subagent-badge--hierarchy"
                 data-testid="subagent-model-hierarchy"
                 aria-label="Main to Subagent model hierarchy"
               >
@@ -508,10 +528,27 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                 {formatInspectorModelName(activeRun.model, activeRun.provider)}
               </span>
               {activeRun.workspaceMode && (
-                <span className="subagent-badge">{activeRun.workspaceMode}</span>
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>{activeRun.workspaceMode}</span>
+                </>
               )}
             </div>
           </div>
+
+          {activeRun.status?.toLowerCase() === 'failed' && (
+            <div
+              className="subagent-inspector__failure-card"
+              data-testid="subagent-failure-card"
+              role="status"
+            >
+              <strong>Subagent execution failed</strong>
+              <span>
+                {activeRun.latestActivity ||
+                  'The subagent exited with an error. Check provider credentials, model availability, or CLI arguments.'}
+              </span>
+            </div>
+          )}
 
           {activeRun.prompt && (
             <div className="subagent-brief-card">
@@ -545,8 +582,28 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
             >
               {(activeRun.items ?? []).length === 0 ? (
                 <div className="subagent-inspector__empty">
-                  <strong>Waiting for subagent steps…</strong>
-                  <span>{activeRun.latestActivity || 'Starting subagent execution.'}</span>
+                  {activeRun.status?.toLowerCase() === 'failed' ? (
+                    <>
+                      <strong>No steps captured before failure</strong>
+                      <span>
+                        {activeRun.latestActivity || 'The subagent failed before producing transcript items.'}
+                      </span>
+                    </>
+                  ) : !isRunActive(activeRun.status) ? (
+                    <>
+                      <strong>
+                        {activeRun.status?.toLowerCase() === 'killed' ? 'Subagent stopped' : 'Subagent settled'}
+                      </strong>
+                      <span>
+                        {activeRun.latestActivity || 'No individual step items were recorded for this run.'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <strong>Waiting for subagent steps…</strong>
+                      <span>{activeRun.latestActivity || 'Starting subagent execution.'}</span>
+                    </>
+                  )}
                 </div>
               ) : (
                 (activeRun.items ?? []).map((step) => {

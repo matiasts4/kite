@@ -23,6 +23,7 @@ import {
   renameChatThread,
 } from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
+import { SubagentGroupRow } from './SubagentActivityCard';
 import { filterTranscriptForVisibility, readToolVisibility, TOOL_VISIBILITY_EVENT, type ToolVisibilityMode } from './toolVisibility';
 import { QueuedRunsControl } from './QueuedRunsControl';
 import { SideChatPane } from './SideChatPane';
@@ -520,10 +521,13 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                       )}
 
                       {displayedRows.map((row) => {
-                        const rowKey = row.kind === 'work' ? row.id : row.item.id;
+                        const rowKey =
+                          row.kind === 'work' || row.kind === 'subagentGroup'
+                            ? row.id
+                            : row.item.id;
                         return (
                           <React.Fragment key={rowKey}>
-                            {row.kind !== 'work' && row.item.kind === 'assistant' && /<html[\s\S]*<\/html>/i.test(row.item.text) ? (
+                            {row.kind === 'item' && row.item.kind === 'assistant' && /<html[\s\S]*<\/html>/i.test(row.item.text) ? (
                               <HtmlRenderFrame html={row.item.text.match(/<html[\s\S]*<\/html>/i)?.[0] ?? row.item.text} />
                             ) : null}
                             {row.kind === 'work' ? (
@@ -532,6 +536,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                                 running={running}
                                 enterFor={enterFor}
                                 interrupted={Boolean(thread.stoppedByBuilder)}
+                              />
+                            ) : row.kind === 'subagentGroup' ? (
+                              <SubagentGroupRow
+                                items={row.items}
+                                threadId={thread.id}
+                                workspaceId={thread.workspaceId ?? workspaceId ?? null}
+                                subagentRuns={thread.subagentRuns ?? null}
+                                enterFor={enterFor}
                               />
                             ) : (
                               <ChatItemRow

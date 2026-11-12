@@ -8,6 +8,7 @@ import {
   groupTranscriptRows,
   liveThoughtLine,
 } from '../../../components/views/chat/ChatItemRow';
+import { SubagentGroupRow } from '../../../components/views/chat/SubagentActivityCard';
 import { ChatApprovalCard } from '../../../components/views/chat/ChatApprovalCard';
 import { MarkdownMessage } from '../../../components/views/chat/MarkdownMessage';
 import type { ChatItem } from '../../../types';
@@ -259,6 +260,10 @@ function ChatPane({
                   )}
                 </Fragment>
               );
+            }
+
+            if (row.kind === 'subagentGroup') {
+              return <SubagentGroupRow key={row.id} items={row.items} />;
             }
 
             return (

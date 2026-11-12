@@ -507,9 +507,19 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
     let Some(meta_val) = tool_item.get("subagentMeta") else {
         return;
     };
-    let Ok(meta) = serde_json::from_value::<SubagentMeta>(meta_val.clone()) else {
+    let Ok(mut meta) = serde_json::from_value::<SubagentMeta>(meta_val.clone()) else {
         return;
     };
+    let item_status = tool_item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or(meta.status.as_str());
+    let item_text = tool_item.get("text").and_then(Value::as_str);
+    if meta.status != "killed"
+        && crate::acp::response_indicates_failure(item_status, Some(tool_item), None, item_text)
+    {
+        meta.status = "failed".to_string();
+    }
     let tool_call_id = tool_item
         .get("id")
         .and_then(Value::as_str)
@@ -1328,6 +1338,9 @@ pub(crate) fn set_thread_effort_option(thread: &mut Value, effort: &str) {
 }
 
 pub(crate) fn remembered_provider_defaults(provider: &str) -> (Option<String>, Option<String>) {
+    let canon = crate::chat::models::canonical_thread_provider_id(provider)
+        .unwrap_or(provider)
+        .to_string();
     let Ok(all) = threads().lock() else {
         return (None, None);
     };
@@ -1335,10 +1348,14 @@ pub(crate) fn remembered_provider_defaults(provider: &str) -> (Option<String>, O
     let mut best_model: Option<String> = None;
     let mut best_effort: Option<String> = None;
     for t in all.iter() {
+        if t.get("startedByAgent").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
         let Some(p) = t.get("provider").and_then(Value::as_str) else {
             continue;
         };
-        if !p.eq_ignore_ascii_case(provider) {
+        let p_canon = crate::chat::models::canonical_thread_provider_id(p).unwrap_or(p);
+        if !p_canon.eq_ignore_ascii_case(&canon) {
             continue;
         }
         let ts = t
@@ -1351,6 +1368,14 @@ pub(crate) fn remembered_provider_defaults(provider: &str) -> (Option<String>, O
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        if let Some(ref m) = model {
+            if crate::chat::models::model_likely_belongs_to_another_provider(&canon, m)
+                || (!cfg!(test)
+                    && crate::chat::models::validate_provider_model_selection(&canon, m).is_err())
+            {
+                continue;
+            }
+        }
         let effort = t
             .get("effort")
             .and_then(Value::as_str)
@@ -1749,14 +1774,7 @@ pub fn extract_final_assistant_text(thread_id: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn format_subagent_wait_output(response_text: &str, child_thread_id: &str) -> String {
-    let trimmed = response_text.trim();
-    if trimmed.is_empty() {
-        format!("[subagent_id: thread:{child_thread_id}]")
-    } else {
-        format!("{trimmed}\n\n[subagent_id: thread:{child_thread_id}]")
-    }
-}
+pub use crate::dispatch::cli_wire::format_subagent_wait_output;
 
 pub fn send_subagent_message_with_launcher(
     thread_id: &str,
@@ -2205,5 +2223,47 @@ mod tests {
         assert_eq!(stopped["status"], "killed");
         assert_eq!(stopped["latestActivity"], "Stopped by user");
         crate::dispatch_wire::protocol::clear_thread_killed(&child_id);
+    }
+
+    #[test]
+    fn remembered_defaults_reject_incompatible_cross_provider_models() {
+        assert!(crate::chat::models::model_likely_belongs_to_another_provider(
+            "grok",
+            "claude-opus-4-6"
+        ));
+        assert!(crate::chat::models::model_likely_belongs_to_another_provider(
+            "grok",
+            "gemini-3-flash"
+        ));
+        assert!(!crate::chat::models::model_likely_belongs_to_another_provider(
+            "grok",
+            "grok-code-fast"
+        ));
+        assert!(!crate::chat::models::model_likely_belongs_to_another_provider(
+            "antigravity",
+            "claude-opus-4-6"
+        ));
+
+        let poisoned_id = format!("poison-grok-{}", uuid::Uuid::new_v4().simple());
+        let valid_id = format!("valid-grok-{}", uuid::Uuid::new_v4().simple());
+        let _c1 = CleanupThread(poisoned_id.clone());
+        let _c2 = CleanupThread(valid_id.clone());
+
+        let mut valid_grok = blank_thread(&valid_id, None, "Valid Grok", "grok", None);
+        valid_grok["model"] = json!("grok-code-fast");
+        valid_grok["effort"] = json!("low");
+        valid_grok["updatedAtUnixMs"] = json!(i64::MAX - 100);
+
+        let mut poisoned_grok = blank_thread(&poisoned_id, None, "Poisoned Grok", "grok", None);
+        poisoned_grok["model"] = json!("claude-opus-4-6");
+        poisoned_grok["effort"] = json!("high");
+        poisoned_grok["updatedAtUnixMs"] = json!(i64::MAX - 50);
+
+        threads().lock().unwrap().push(valid_grok);
+        threads().lock().unwrap().push(poisoned_grok);
+
+        let (model, effort) = remembered_provider_defaults("grok");
+        assert_eq!(model.as_deref(), Some("grok-code-fast"));
+        assert_eq!(effort.as_deref(), Some("low"));
     }
 }

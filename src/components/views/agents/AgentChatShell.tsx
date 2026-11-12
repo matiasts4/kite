@@ -8,6 +8,7 @@ import {
   CalendarIcon,
 } from '../chat/ChatIcons';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from '../chat/ChatItemRow';
+import { SubagentGroupRow } from '../chat/SubagentActivityCard';
 import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import { ChatComposer } from '../chat/ChatComposer';
 import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
@@ -625,7 +626,8 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               >
                 <div className="chat-transcript__column">
                   {groupTranscriptRows(activeThread.items).map((row, index, rows) => {
-                    const rowKey = row.kind === 'work' ? row.id : row.item.id;
+                    const rowKey =
+                      row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
                     const liveAt = running ? liveActivityRowIndex(rows) : -1;
                     return (
                       <React.Fragment key={rowKey}>
@@ -645,6 +647,14 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                             running={running}
                             enterFor={enterFor}
                             interrupted={Boolean(activeThread.stoppedByBuilder)}
+                          />
+                        ) : row.kind === 'subagentGroup' ? (
+                          <SubagentGroupRow
+                            items={row.items}
+                            threadId={activeThread.id}
+                            workspaceId={effectiveWsId}
+                            subagentRuns={activeThread.subagentRuns}
+                            enterFor={enterFor}
                           />
                         ) : (
                           <ChatItemRow

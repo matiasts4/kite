@@ -8,11 +8,29 @@ export interface OpenRightDockSubagentDetail {
 }
 
 export const OPEN_RIGHT_DOCK_SUBAGENT_EVENT = 'kite:open-right-dock-subagent';
+export const SUBAGENT_INSPECTION_CHANGE_EVENT = 'kite:subagent-inspection-changed';
 
 let pendingSubagentRequest: OpenRightDockSubagentDetail | null = null;
+let activeInspectionTarget: OpenRightDockSubagentDetail | null = null;
+
+export function setActiveSubagentInspection(next: OpenRightDockSubagentDetail | null) {
+  activeInspectionTarget = next ? { ...next } : null;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent<OpenRightDockSubagentDetail | null>(SUBAGENT_INSPECTION_CHANGE_EVENT, {
+        detail: activeInspectionTarget,
+      })
+    );
+  }
+}
+
+export function getActiveSubagentInspection(): OpenRightDockSubagentDetail | null {
+  return activeInspectionTarget;
+}
 
 export function openSubagentInRightDock(req: OpenRightDockSubagentDetail) {
   pendingSubagentRequest = { ...req };
+  setActiveSubagentInspection(pendingSubagentRequest);
   window.dispatchEvent(
     new CustomEvent<OpenRightDockSubagentDetail>(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, {
       detail: pendingSubagentRequest,

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::acp::{
     classify_tool_metadata, extract_subagent_meta, extract_swarm_meta, merge_subagent_meta,
-    merge_swarm_meta, SubagentMeta, SwarmMeta,
+    merge_swarm_meta, response_indicates_failure, SubagentMeta, SwarmMeta,
 };
 use crate::chat::session::ApprovalDecision;
 
@@ -456,6 +456,16 @@ impl ToolCallTracker {
         if entry.deletions.is_none() {
             entry.deletions = classified_del.map(|n| n as i64);
         }
+        if entry.status != "killed"
+            && (response_indicates_failure(
+                &entry.status,
+                Some(src),
+                None,
+                Some(entry.output.as_str()),
+            ) || response_indicates_failure(&entry.status, Some(update), None, None))
+        {
+            entry.status = "failed".to_string();
+        }
         if let Some(meta) = extract_subagent_meta(
             eval_name,
             &entry.id,
@@ -463,6 +473,9 @@ impl ToolCallTracker {
             Some(entry.output.as_str()),
             &entry.status,
         ) {
+            if meta.status == "failed" && entry.status != "killed" {
+                entry.status = "failed".to_string();
+            }
             entry.kind = "subagent".into();
             if entry.title.is_empty() || entry.title == eval_name {
                 entry.title = classified_title;
@@ -510,6 +523,14 @@ impl ToolCallTracker {
             parent_tool_use_id: None,
         });
         entry.output.push_str(chunk);
+        if entry.status != "killed"
+            && response_indicates_failure(&entry.status, None, None, Some(entry.output.as_str()))
+        {
+            entry.status = "failed".to_string();
+            if let Some(meta) = entry.subagent_meta.as_mut() {
+                meta.status = "failed".to_string();
+            }
+        }
         entry.clone()
     }
 }

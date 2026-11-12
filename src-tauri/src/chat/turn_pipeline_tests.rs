@@ -291,3 +291,35 @@ fn tool_tracker_extracts_diff_counts_and_normalizes_file_change_kind() {
     assert_eq!(raw_snap.additions, Some(2));
     assert_eq!(raw_snap.deletions, Some(1));
 }
+
+#[test]
+fn tool_tracker_marks_failed_cli_subagent_and_cleans_shell_redirections() {
+    let mut tracker = ToolCallTracker::default();
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "cli-sub-fail",
+        "name": "run_command",
+        "rawInput": {
+            "CommandLine": "kite dispatch run --provider gemini \"Check routes\" 2>&1"
+        }
+    }));
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "cli-sub-fail",
+        "status": "completed",
+        "exitCode": 2,
+        "rawOutput": "{\"status\":\"rejected\",\"exit\":2,\"error\":\"Unknown model gemini-2.5-flash\"}"
+    }));
+
+    let snap = tracker.snapshot("cli-sub-fail").expect("failed subagent snapshot");
+    assert_eq!(snap.kind, "subagent");
+    assert_eq!(snap.status, "failed");
+    let meta = snap.subagent_meta.as_ref().expect("subagent_meta");
+    assert_eq!(meta.role, "Gemini subagent");
+    assert_eq!(meta.prompt.as_deref(), Some("Check routes"));
+    assert_eq!(meta.status, "failed");
+    assert_eq!(
+        meta.latest_activity.as_deref(),
+        Some("Unknown model gemini-2.5-flash")
+    );
+}

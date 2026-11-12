@@ -451,4 +451,34 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     expect(rows[1]?.kind === 'item' ? rows[1].item.id : null).toBe('sub-1');
     expect(rows[2]?.kind === 'item' ? rows[2].item.id : null).toBe('sw-1');
   });
+
+  it('groups two or more consecutive subagent items into an expandable subagentGroup row', () => {
+    const rows = groupTranscriptRows([
+      mockItem({
+        id: 'sub-1',
+        kind: 'tool',
+        toolKind: 'subagent',
+        title: 'Explorer',
+        text: '',
+        status: 'completed',
+        subagentMeta: { subagentId: 'sub_1', action: 'spawn', role: 'Explorer', status: 'completed', stepCount: 0 },
+      }),
+      mockItem({
+        id: 'sub-2',
+        kind: 'tool',
+        toolKind: 'subagent',
+        title: 'Reviewer',
+        text: '',
+        status: 'running',
+        subagentMeta: { subagentId: 'sub_2', action: 'spawn', role: 'Reviewer', status: 'running', stepCount: 0 },
+      }),
+      mockItem({ id: 'a-1', kind: 'assistant', text: 'Merged findings.' }),
+    ]);
+
+    expect(rows.map((r) => r.kind)).toEqual(['subagentGroup', 'item']);
+    expect(rows[0]?.kind === 'subagentGroup' ? rows[0].items.map((i) => i.id) : []).toEqual([
+      'sub-1',
+      'sub-2',
+    ]);
+  });
 });

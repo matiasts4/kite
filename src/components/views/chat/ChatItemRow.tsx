@@ -75,20 +75,33 @@ export function liveThoughtLine(markdown?: string | null): string {
 
 export type TranscriptRow =
   | { kind: 'work'; id: string; items: ChatItem[] }
+  | { kind: 'subagentGroup'; id: string; items: ChatItem[] }
   | { kind: 'item'; item: ChatItem };
 
-function isUngroupedSubagentOrSwarm(item: ChatItem): boolean {
+function isSubagentItem(item: ChatItem): boolean {
   return (
-    item.toolKind === 'subagent' ||
-    item.toolKind === 'swarm' ||
-    Boolean(item.subagentMeta) ||
-    Boolean(item.swarmMeta)
+    (item.kind === 'tool' || item.kind === 'command') &&
+    (item.toolKind === 'subagent' || Boolean(item.subagentMeta)) &&
+    item.toolKind !== 'swarm' &&
+    !item.swarmMeta
   );
+}
+
+function isSwarmItem(item: ChatItem): boolean {
+  return (
+    (item.kind === 'tool' || item.kind === 'command') &&
+    (item.toolKind === 'swarm' || Boolean(item.swarmMeta))
+  );
+}
+
+function isUngroupedSubagentOrSwarm(item: ChatItem): boolean {
+  return isSubagentItem(item) || isSwarmItem(item);
 }
 
 export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   const result: TranscriptRow[] = [];
   let currentWork: ChatItem[] = [];
+  let currentSubagents: ChatItem[] = [];
 
   const flushWork = () => {
     if (currentWork.length > 0) {
@@ -101,9 +114,28 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
     }
   };
 
+  const flushSubagents = () => {
+    if (currentSubagents.length >= 2) {
+      result.push({
+        kind: 'subagentGroup',
+        id: `subagents-${currentSubagents[0]?.id ?? result.length}`,
+        items: currentSubagents,
+      });
+    } else if (currentSubagents.length === 1) {
+      result.push({ kind: 'item', item: currentSubagents[0] });
+    }
+    currentSubagents = [];
+  };
+
   for (const item of items) {
+    if (isSubagentItem(item)) {
+      flushWork();
+      currentSubagents.push(item);
+      continue;
+    }
+    flushSubagents();
     if (item.kind === 'tool' || item.kind === 'command') {
-      if (isUngroupedSubagentOrSwarm(item)) {
+      if (isSwarmItem(item)) {
         flushWork();
         result.push({ kind: 'item', item });
         continue;
@@ -116,6 +148,7 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
       result.push({ kind: 'item', item });
     }
   }
+  flushSubagents();
   flushWork();
   return result;
 }
@@ -124,7 +157,7 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
 export function liveActivityRowIndex(rows: TranscriptRow[]): number {
   const last = rows[rows.length - 1];
   if (!last) return -1;
-  if (last.kind === 'work') return rows.length - 1;
+  if (last.kind === 'work' || last.kind === 'subagentGroup') return rows.length - 1;
   if (
     last.kind === 'item' &&
     (last.item.kind === 'reasoning' || isUngroupedSubagentOrSwarm(last.item))

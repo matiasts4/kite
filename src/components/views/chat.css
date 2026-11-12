@@ -1593,5 +1593,208 @@
   font-variant-numeric: tabular-nums;
 }
 
+.chat-subagent-card-wrap {
+  margin: 4px 0;
+  width: 100%;
+}
+
+.chat-subagent-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  text-align: left;
+  border-radius: var(--card-radius);
+  border: 1px solid var(--block-stroke);
+  background: var(--block-fill);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--duration-ink) var(--ease-ink), border-color var(--duration-ink) var(--ease-ink);
+}
+
+.chat-subagent-card:hover {
+  background: var(--hover-fill);
+  border-color: var(--control-stroke-hover);
+}
+
+.chat-subagent-card--running {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--block-stroke));
+}
+
+.chat-subagent-card--failed {
+  border-color: color-mix(in srgb, var(--danger-ink) 32%, var(--block-stroke));
+}
+
+.chat-subagent-card__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.chat-subagent-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex: none;
+}
+
+.chat-subagent-card__title {
+  font-size: var(--text-row);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-subagent-card__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: var(--chip-fill);
+  border: 1px solid var(--block-stroke);
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.chat-subagent-card__pill--ws-branch {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.chat-subagent-card__pill--ws-share {
+  color: var(--text-primary);
+}
+
+.chat-subagent-card__spacer {
+  flex: 1 1 auto;
+}
+
+.chat-subagent-card__telemetry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: var(--text-meta);
+  color: var(--text-tertiary);
+}
+
+.chat-subagent-card__clock {
+  font-variant-numeric: tabular-nums;
+  color: var(--running-text);
+}
+
+.chat-subagent-card__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-subagent-card__state--done {
+  color: var(--status-running);
+}
+
+.chat-subagent-card__state--failed {
+  color: var(--danger-ink);
+}
+
+.chat-subagent-card__steps,
+.chat-subagent-card__inspect-label {
+  font-size: var(--text-meta);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-subagent-card__chevron {
+  display: inline-flex;
+  color: var(--text-tertiary);
+  transition: transform var(--duration-ink) var(--ease-ink), color var(--duration-ink) var(--ease-ink);
+}
+
+.chat-subagent-card:hover .chat-subagent-card__chevron,
+.chat-subagent-card:hover .chat-subagent-card__inspect-label {
+  color: var(--text-primary);
+}
+
+.chat-subagent-card:hover .chat-subagent-card__chevron {
+  transform: translateX(2px);
+}
+
+.chat-subagent-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 20px;
+  min-width: 0;
+}
+
+.chat-subagent-card__preview,
+.chat-subagent-card__prompt {
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: 1.35;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-subagent-card__prompt {
+  color: var(--text-tertiary);
+}
+
+.chat-swarm-card__roster {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chat-swarm-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: var(--chip-fill);
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+}
+
+.chat-swarm-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--text-tertiary);
+  flex: none;
+}
+
+.chat-swarm-dot--working {
+  background: var(--status-running);
+  animation: chat-working-ping 1.8s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+}
+
+.chat-swarm-dot--waiting {
+  background: var(--accent);
+}
+
+.chat-swarm-dot--stopped {
+  background: var(--text-tertiary);
+}
+
+.chat-swarm-dot--killed {
+  background: var(--danger-ink);
+}
+
+
 
 

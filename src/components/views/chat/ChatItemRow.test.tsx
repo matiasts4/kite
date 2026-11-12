@@ -406,4 +406,49 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     expect(screen.getByTitle('Ran git')).toBeInTheDocument();
     expect(screen.getByTitle('Ran cargo')).toBeInTheDocument();
   });
+
+  it('exempts subagent and swarm items from ChatWorkGroup post-turn burst folding', () => {
+    const rows = groupTranscriptRows([
+      mockItem({ id: 't1', kind: 'tool', toolKind: 'read', title: 'Read a.ts', text: '', status: 'completed' }),
+      mockItem({ id: 't2', kind: 'tool', toolKind: 'read', title: 'Read b.ts', text: '', status: 'completed' }),
+      mockItem({
+        id: 'sub-1',
+        kind: 'tool',
+        toolKind: 'subagent',
+        title: 'Researcher',
+        text: '',
+        status: 'completed',
+        subagentMeta: {
+          subagentId: 'sub_1',
+          action: 'spawn',
+          role: 'Codebase Researcher',
+          model: 'gemini-2.5-flash',
+          workspaceMode: 'inherit',
+          status: 'completed',
+          stepCount: 4,
+        },
+      }),
+      mockItem({
+        id: 'sw-1',
+        kind: 'tool',
+        toolKind: 'swarm',
+        title: 'Swarm',
+        text: '',
+        status: 'completed',
+        swarmMeta: {
+          swarmId: 'swarm_1',
+          action: 'post_message',
+          channel: 'main',
+          memberName: 'coordinator',
+          postText: '@worker inspect crates',
+          seq: 1,
+        },
+      }),
+      mockItem({ id: 't3', kind: 'tool', toolKind: 'edit', title: 'Edit c.ts', text: '', status: 'completed' }),
+    ]);
+
+    expect(rows.map((r) => r.kind)).toEqual(['work', 'item', 'item', 'work']);
+    expect(rows[1]?.kind === 'item' ? rows[1].item.id : null).toBe('sub-1');
+    expect(rows[2]?.kind === 'item' ? rows[2].item.id : null).toBe('sw-1');
+  });
 });

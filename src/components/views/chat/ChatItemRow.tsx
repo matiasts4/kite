@@ -10,7 +10,9 @@ import {
   CopyIcon,
   PencilIcon,
 } from './ChatIcons';
-import type { ChatItem } from '../../../types';
+import type { ChatItem, SubagentRun, SwarmState } from '../../../types';
+import { SubagentActivityCard } from './SubagentActivityCard';
+import { SwarmActivityCard } from './SwarmActivityCard';
 import { ActivityGlyph } from './activityGlyph';
 import {
   activityTraceLabel,
@@ -75,6 +77,15 @@ export type TranscriptRow =
   | { kind: 'work'; id: string; items: ChatItem[] }
   | { kind: 'item'; item: ChatItem };
 
+function isUngroupedSubagentOrSwarm(item: ChatItem): boolean {
+  return (
+    item.toolKind === 'subagent' ||
+    item.toolKind === 'swarm' ||
+    Boolean(item.subagentMeta) ||
+    Boolean(item.swarmMeta)
+  );
+}
+
 export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   const result: TranscriptRow[] = [];
   let currentWork: ChatItem[] = [];
@@ -92,6 +103,11 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
 
   for (const item of items) {
     if (item.kind === 'tool' || item.kind === 'command') {
+      if (isUngroupedSubagentOrSwarm(item)) {
+        flushWork();
+        result.push({ kind: 'item', item });
+        continue;
+      }
       currentWork.push(item);
       continue;
     }
@@ -109,7 +125,12 @@ export function liveActivityRowIndex(rows: TranscriptRow[]): number {
   const last = rows[rows.length - 1];
   if (!last) return -1;
   if (last.kind === 'work') return rows.length - 1;
-  if (last.kind === 'item' && last.item.kind === 'reasoning') return rows.length - 1;
+  if (
+    last.kind === 'item' &&
+    (last.item.kind === 'reasoning' || isUngroupedSubagentOrSwarm(last.item))
+  ) {
+    return rows.length - 1;
+  }
   return -1;
 }
 
@@ -507,6 +528,9 @@ function restoreCommandMissing(text: string): boolean {
 export const ChatItemRow: React.FC<{
   item: ChatItem;
   threadId?: string;
+  workspaceId?: string | null;
+  subagentRuns?: SubagentRun[] | null;
+  swarmState?: SwarmState | null;
   /** True when this row is new and should animate in. */
   enter?: boolean;
   onEditUserMessage?: (text: string) => void;
@@ -518,6 +542,9 @@ export const ChatItemRow: React.FC<{
 }> = ({
   item,
   threadId,
+  workspaceId = null,
+  subagentRuns = null,
+  swarmState = null,
   enter = false,
   onEditUserMessage,
   onRewindTranscript,
@@ -805,6 +832,34 @@ export const ChatItemRow: React.FC<{
 
   // Tool / Command Work Row (rendered individually if not grouped)
   if (item.kind === 'tool' || item.kind === 'command') {
+    if (item.toolKind === 'subagent' || item.subagentMeta) {
+      const matchedRun =
+        subagentRuns?.find(
+          (r) =>
+            (item.subagentMeta?.subagentId && r.subagentId === item.subagentMeta.subagentId) ||
+            r.parentToolCallId === item.id
+        ) ?? null;
+      return (
+        <SubagentActivityCard
+          item={item}
+          threadId={threadId}
+          workspaceId={workspaceId}
+          run={matchedRun}
+          enter={enter}
+        />
+      );
+    }
+    if (item.toolKind === 'swarm' || item.swarmMeta) {
+      return (
+        <SwarmActivityCard
+          item={item}
+          threadId={threadId}
+          workspaceId={workspaceId}
+          swarmState={swarmState}
+          enter={enter}
+        />
+      );
+    }
     return <ChatWorkEntry item={item} running={item.streaming} enter={enter} />;
   }
 

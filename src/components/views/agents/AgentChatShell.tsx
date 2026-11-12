@@ -634,6 +634,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                             running={running}
                             pendingApproval={activeThread.pendingApproval}
                             items={activeThread.items}
+                            swarmState={activeThread.swarmState}
                             interrupted={false}
                             durationSeconds={activeThread.usage?.durationSeconds}
                           />
@@ -649,6 +650,9 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                           <ChatItemRow
                             item={row.item}
                             threadId={activeThread.id}
+                            workspaceId={effectiveWsId}
+                            subagentRuns={activeThread.subagentRuns}
+                            swarmState={activeThread.swarmState}
                             enter={enterFor(row.item.id)}
                             onEditUserMessage={(text) => {
                               onChangePrompt(text);
@@ -669,6 +673,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                       running={running}
                       pendingApproval={activeThread.pendingApproval}
                       items={activeThread.items}
+                      swarmState={activeThread.swarmState}
                       interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
                       durationSeconds={activeThread.usage?.durationSeconds}
                     />

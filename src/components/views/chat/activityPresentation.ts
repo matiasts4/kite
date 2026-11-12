@@ -16,6 +16,21 @@ export interface ActivityItem {
   query?: string | null;
   createdAtUnixMs?: number;
   durationSeconds?: number | null;
+  subagentMeta?: {
+    role?: string | null;
+    status?: string | null;
+  } | null;
+  swarmMeta?: {
+    swarmTitle?: string | null;
+    action?: string | null;
+    memberNames?: string[] | null;
+  } | null;
+}
+
+export interface ActivitySwarmSummary {
+  title?: string | null;
+  workingCount?: number | null;
+  members?: Array<{ name?: string | null; state?: string | null }> | null;
 }
 
 export type ActivityIconKind =
@@ -121,6 +136,14 @@ export function activityIconKind(item: ActivityItem): ActivityIconKind {
     return 'mcp';
   }
   if (item.toolKind === 'planUpdate') return 'plan';
+  if (
+    item.toolKind === 'subagent' ||
+    item.toolKind === 'swarm' ||
+    Boolean(item.subagentMeta) ||
+    Boolean(item.swarmMeta)
+  ) {
+    return 'subagent';
+  }
   const blob = `${item.title ?? ''} ${item.toolName ?? ''} ${item.detail ?? ''}`.toLowerCase();
   if (/(subagent|delegate)/.test(blob)) return 'subagent';
   if (item.toolKind === 'webSearch' || item.toolKind === 'fetch') return 'web';
@@ -158,7 +181,10 @@ function isFailed(item: ActivityItem): boolean {
  * What the running turn is doing right now, for the live caption. Null until the
  * provider has actually sent something this turn, so nothing is claimed early.
  */
-export function liveStageLabel(items: ActivityItem[]): string | null {
+export function liveStageLabel(
+  items: ActivityItem[],
+  swarmState?: ActivitySwarmSummary | null
+): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (!item || item.kind === 'user') return null;
@@ -170,7 +196,20 @@ export function liveStageLabel(items: ActivityItem[]): string | null {
       if (trimmed(item.text).length > 0) return 'Thinking';
       continue;
     }
-    if (item.kind === 'tool' || item.kind === 'command') return activityTraceLabel(item);
+    if (item.kind === 'tool' || item.kind === 'command') {
+      if (item.toolKind === 'subagent' || item.subagentMeta) {
+        const role = trimmed(item.subagentMeta?.role) || trimmed(item.title) || 'Worker';
+        return `Subagent: ${role}`;
+      }
+      if (item.toolKind === 'swarm' || item.swarmMeta) {
+        const workingCount = (swarmState?.members ?? []).filter((m) => m.state === 'working').length;
+        if (workingCount > 0) return `Swarm: ${workingCount} working`;
+        const hinted = item.swarmMeta?.memberNames?.length ?? 0;
+        if (hinted > 0) return `Swarm: ${hinted} working`;
+        return `Swarm: ${trimmed(swarmState?.title) || trimmed(item.swarmMeta?.swarmTitle) || 'active'}`;
+      }
+      return activityTraceLabel(item);
+    }
   }
   return null;
 }

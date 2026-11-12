@@ -35,12 +35,14 @@ export function TurnActivityStatus({
   running,
   pendingApproval,
   items,
+  swarmState = null,
   interrupted = false,
   durationSeconds = null,
 }: {
   running: boolean;
   pendingApproval?: TurnApproval | null;
   items: ActivityItem[];
+  swarmState?: import('./activityPresentation').ActivitySwarmSummary | null;
   interrupted?: boolean;
   durationSeconds?: number | null;
 }) {
@@ -74,7 +76,10 @@ export function TurnActivityStatus({
   return (
     <div className="chat-turn-activity" role="status">
       <p className="chat-turn-activity__working">
-        <WorkingStatus line={workingLine(turnStartUnixMs(items), now)} stage={liveStageLabel(items)} />
+        <WorkingStatus
+          line={workingLine(turnStartUnixMs(items), now)}
+          stage={liveStageLabel(items, swarmState)}
+        />
       </p>
     </div>
   );

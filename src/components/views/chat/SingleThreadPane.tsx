@@ -537,6 +537,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                               <ChatItemRow
                                 item={row.item}
                                 threadId={thread.id}
+                                workspaceId={thread.workspaceId ?? workspaceId ?? null}
+                                subagentRuns={thread.subagentRuns ?? null}
+                                swarmState={thread.swarmState ?? null}
                                 enter={enterFor(row.item.id)}
                                 fileRestoreEnabled={fileRestoreAllowed(
                                   Boolean(thread.providerCanRewind),
@@ -565,6 +568,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                         running={running}
                         pendingApproval={thread.pendingApproval}
                         items={transcriptItems}
+                        swarmState={thread.swarmState ?? null}
                         interrupted={Boolean(thread.stoppedByBuilder) && !running}
                         durationSeconds={thread.usage?.durationSeconds}
                       />

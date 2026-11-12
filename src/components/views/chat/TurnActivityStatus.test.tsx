@@ -97,6 +97,68 @@ describe('TurnActivityStatus', () => {
     expect(screen.queryByText(/Working/)).not.toBeInTheDocument();
   });
 
+  it('shows Subagent role and Swarm working count in the live Working stage', () => {
+    const subItem: ChatItem = {
+      id: 'sub-1',
+      kind: 'tool',
+      text: '',
+      title: 'Codebase Explorer',
+      detail: 'Exploring src-tauri',
+      status: 'running',
+      streaming: true,
+      exitCode: null,
+      createdAtUnixMs: 1,
+      attachments: [],
+      toolKind: 'subagent',
+      subagentMeta: {
+        subagentId: 'sub_1',
+        action: 'spawn',
+        role: 'Codebase Explorer',
+        status: 'running',
+        stepCount: 2,
+      },
+    };
+    const { container, rerender } = render(
+      <TurnActivityStatus running items={[{ kind: 'user', createdAtUnixMs: Date.now() - 4000 }, subItem]} />,
+    );
+    expect(container.querySelector('.chat-working-caption__stage')?.textContent).toBe('Subagent: Codebase Explorer');
+
+    const swarmItem: ChatItem = {
+      id: 'sw-1',
+      kind: 'tool',
+      text: '',
+      title: 'Swarm @parser',
+      detail: '',
+      status: 'running',
+      streaming: true,
+      exitCode: null,
+      createdAtUnixMs: 2,
+      attachments: [],
+      toolKind: 'swarm',
+      swarmMeta: {
+        swarmId: 'swarm_1',
+        action: 'post_message',
+        channel: 'main',
+        postText: '@parser @verifier check build',
+      },
+    };
+    rerender(
+      <TurnActivityStatus
+        running
+        items={[{ kind: 'user', createdAtUnixMs: Date.now() - 4000 }, swarmItem]}
+        swarmState={{
+          title: 'Build Swarm',
+          members: [
+            { name: 'parser', state: 'working' },
+            { name: 'verifier', state: 'working' },
+            { name: 'idle', state: 'waiting' },
+          ],
+        }}
+      />,
+    );
+    expect(container.querySelector('.chat-working-caption__stage')?.textContent).toBe('Swarm: 2 working');
+  });
+
   it('reads You stopped after when the turn was interrupted', () => {
     render(
       <TurnActivityStatus running={false} interrupted durationSeconds={8} items={[]} />,

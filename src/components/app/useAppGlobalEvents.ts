@@ -2,6 +2,10 @@ import { useEffect } from 'react';
 import type React from 'react';
 import { OPEN_SETTINGS_EVENT } from '../../lib/settingsNav';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../../lib/terminalLinkNav';
+import {
+  OPEN_RIGHT_DOCK_SUBAGENT_EVENT,
+  type OpenRightDockSubagentDetail,
+} from '../../lib/subagentNav';
 import { sendUiAck, type UiBusRequestPayload } from '../../lib/operator/executor/ui-bus';
 import { registerToastNavigator } from '../../lib/toast';
 import type { WorkMode } from '../Sidebar';
@@ -124,6 +128,25 @@ export function useAppGlobalEvents({
       }
     };
 
+    const handleOpenSubagentInDock = (e: Event) => {
+      const custom = e as CustomEvent<OpenRightDockSubagentDetail>;
+      setRightDockVisible(true);
+      if (custom.detail?.workspaceId) {
+        setSelectedWorkspaceId(custom.detail.workspaceId);
+      }
+    };
+
+    const handleOpenDiffsInDock = () => {
+      setRightDockVisible(true);
+    };
+
+    const handleDockShortcutKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        setRightDockVisible(true);
+      }
+    };
+
     const handleSpawnAgentTerminal = (e: Event) => {
       const custom = e as CustomEvent<{ workspaceId?: string | null }>;
       setWorkMode('code');
@@ -174,6 +197,10 @@ export function useAppGlobalEvents({
     window.addEventListener('kite:select-thread', handleSelectThread);
     window.addEventListener('kite:open-right-dock-file', handleOpenFilePreview);
     window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
+    window.addEventListener(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, handleOpenSubagentInDock);
+    window.addEventListener('kite:open-right-dock-diffs', handleOpenDiffsInDock);
+    window.addEventListener('kite:open-diffs', handleOpenDiffsInDock);
+    window.addEventListener('keydown', handleDockShortcutKeyDown);
     window.addEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
     window.addEventListener('kite:op-request', handleOpRequest);
     window.addEventListener('kite:add-workspace', handleAddWorkspaceEvent);
@@ -185,6 +212,10 @@ export function useAppGlobalEvents({
       window.removeEventListener('kite:select-thread', handleSelectThread);
       window.removeEventListener('kite:open-right-dock-file', handleOpenFilePreview);
       window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
+      window.removeEventListener(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, handleOpenSubagentInDock);
+      window.removeEventListener('kite:open-right-dock-diffs', handleOpenDiffsInDock);
+      window.removeEventListener('kite:open-diffs', handleOpenDiffsInDock);
+      window.removeEventListener('keydown', handleDockShortcutKeyDown);
       window.removeEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
       window.removeEventListener('kite:op-request', handleOpRequest);
       window.removeEventListener('kite:add-workspace', handleAddWorkspaceEvent);

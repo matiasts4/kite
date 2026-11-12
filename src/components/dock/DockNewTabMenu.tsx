@@ -10,7 +10,7 @@ export interface DockNewTabMenuProps {
   onClose: () => void;
   highlightedMenuId: string | null;
   setHighlightedMenuId: (id: string | null) => void;
-  onOpenStandardTab: (kind: 'browser' | 'files' | 'diffs' | 'tasks' | 'prompts') => void;
+  onOpenStandardTab: (kind: 'browser' | 'files' | 'diffs' | 'tasks' | 'prompts' | 'subagents') => void;
   onOpenAppTab: (appId: SidePanelAppId) => void;
   menuRef?: React.RefObject<HTMLDivElement | null>;
 }

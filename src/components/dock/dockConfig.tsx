@@ -10,6 +10,7 @@ import {
   TimerGlyph,
   NotebookPenGlyph,
   FlameGlyph,
+  SubagentsGlyph,
 } from '../dockIcons';
 
 export type SidePanelAppId = 'focusTimer' | 'scratchpad' | 'bombSprint' | 'kiteVerse';
@@ -21,6 +22,7 @@ export type RightDockTabKind =
   | 'diffs'
   | 'tasks'
   | 'prompts'
+  | 'subagents'
   | 'app';
 
 export interface DockTabItem {
@@ -59,7 +61,7 @@ export function loadInitialTabs(): { tabs: DockTabItem[]; activeTabId: string } 
 
         for (const item of parsed.tabs) {
           if (!item || typeof item.id !== 'string' || seenIds.has(item.id)) continue;
-          if (['dashboard', 'browser', 'files', 'diffs', 'tasks', 'prompts', 'app'].includes(item.kind)) {
+          if (['dashboard', 'browser', 'files', 'diffs', 'tasks', 'prompts', 'subagents', 'app'].includes(item.kind)) {
             seenIds.add(item.id);
             validTabs.push({
               id: item.id,
@@ -133,6 +135,12 @@ export const TAB_CONFIGS: Record<string, TabResolvedDef> = {
   diffs: { label: 'Diffs', tooltip: 'Diffs & Changes', closable: true, renderIcon: () => <GitDiffGlyph /> },
   tasks: { label: 'Tasks', tooltip: 'Tasks', closable: true, renderIcon: () => <ListTodoGlyph /> },
   prompts: { label: 'Prompts', tooltip: 'Prompts', closable: true, renderIcon: () => <MessageSquareQuoteGlyph /> },
+  subagents: {
+    label: 'Subagents',
+    tooltip: 'Subagents & Swarm (Ctrl+Alt+S)',
+    closable: true,
+    renderIcon: () => <SubagentsGlyph />,
+  },
   'app:focusTimer': { label: 'Focus timer', tooltip: 'Focus timer', closable: true, renderIcon: () => <TimerGlyph /> },
   'app:scratchpad': { label: 'Scratchpad', tooltip: 'Scratchpad', closable: true, renderIcon: () => <NotebookPenGlyph /> },
   'app:bombSprint': { label: 'Bomb Sprint', tooltip: 'Bomb Sprint', closable: true, renderIcon: () => <FlameGlyph /> },
@@ -150,6 +158,7 @@ export const STANDARD_MENU_TABS = [
   { kind: 'diffs' as const, label: 'Diffs', icon: <GitDiffGlyph />, shortcut: 'Ctrl+Alt+D' },
   { kind: 'tasks' as const, label: 'Tasks', icon: <ListTodoGlyph /> },
   { kind: 'prompts' as const, label: 'Prompts', icon: <MessageSquareQuoteGlyph /> },
+  { kind: 'subagents' as const, label: 'Subagents', icon: <SubagentsGlyph />, shortcut: 'Ctrl+Alt+S' },
 ];
 
 export const APP_MENU_TABS: Array<{ appId: SidePanelAppId; label: string; icon: React.ReactElement }> = [

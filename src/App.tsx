@@ -644,6 +644,7 @@ export const App: React.FC = () => {
               visible={rightDockVisible}
               onClose={() => setRightDockVisible(false)}
               workspaceId={selectedWorkspaceId}
+              selectedThreadId={selectedThreadId}
               isOccluded={
                 isUsageModalOpen ||
                 isWhatsNewOpen ||

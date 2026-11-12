@@ -47,6 +47,7 @@ import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
 import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 import { ThreadTurnRail } from './ThreadTurnRail';
 import { composeRewoundPrompt, changedFilesForTurn } from './pane/threadTurnHelpers';
+import { openDiffsInRightDock } from '../../../lib/diffPreviewNav';
 import { useThreadBranches } from './pane/useThreadBranches';
 import { SingleThreadHeader } from './pane/SingleThreadHeader';
 
@@ -739,13 +740,22 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             />
             <ChangedFilesCard
               files={changedFilesForTurn(transcriptItems)}
+              workspaceName={effectiveWorkspaceName}
               onOpenTurnDiff={() => {
-                window.dispatchEvent(new CustomEvent('kite:open-right-dock-diffs'));
-                window.dispatchEvent(new CustomEvent('kite:open-diffs'));
+                const turnFiles = changedFilesForTurn(transcriptItems);
+                openDiffsInRightDock({
+                  workspaceId: activeWsId,
+                  workspaceName: effectiveWorkspaceName,
+                  focusPaths: turnFiles.map((f) => f.path),
+                });
               }}
               onOpenFile={(path) => {
-                window.dispatchEvent(new CustomEvent('kite:open-file', { detail: { path } }));
-                window.dispatchEvent(new CustomEvent('kite:open-right-dock-file', { detail: { path } }));
+                openDiffsInRightDock({
+                  workspaceId: activeWsId,
+                  workspaceName: effectiveWorkspaceName,
+                  focusPaths: [path],
+                  selectedPath: path,
+                });
               }}
             />
 

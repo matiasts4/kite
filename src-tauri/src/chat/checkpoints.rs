@@ -78,6 +78,252 @@ pub fn capture_for_thread(thread: &Value, thread_id: &str, run_id: &str) -> Opti
     capture_turn_checkpoint(&dir, thread_id, run_id)
 }
 
+fn normalize_slash_path(raw: &str) -> String {
+    let stripped = raw.trim().strip_prefix(r"\\?\").unwrap_or(raw.trim());
+    stripped.replace('\\', "/")
+}
+
+fn resolve_worktree_paths(
+    worktree: Option<&Path>,
+    raw_file_path: &str,
+) -> Option<(String, PathBuf, Option<String>)> {
+    let trimmed = raw_file_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let raw_norm = normalize_slash_path(trimmed);
+    let raw_p = Path::new(trimmed);
+
+    if let Some(wt) = worktree {
+        let wt_norm = normalize_slash_path(&wt.to_string_lossy());
+        let wt_parts: Vec<&str> = wt_norm.split('/').filter(|s| !s.is_empty()).collect();
+
+        if raw_p.is_relative() {
+            let clean_rel = raw_norm.trim_start_matches("./").to_string();
+            let abs = wt.join(trimmed);
+            let key = if cfg!(windows) {
+                clean_rel.to_ascii_lowercase()
+            } else {
+                clean_rel.clone()
+            };
+            return Some((key, abs, Some(clean_rel)));
+        }
+
+        let target_parts: Vec<&str> = raw_norm.split('/').filter(|s| !s.is_empty()).collect();
+        let same_prefix = target_parts.len() > wt_parts.len()
+            && wt_parts.iter().zip(target_parts.iter()).all(|(a, b)| {
+                if cfg!(windows) {
+                    a.eq_ignore_ascii_case(b)
+                } else {
+                    a == b
+                }
+            });
+        if same_prefix {
+            let rel = target_parts[wt_parts.len()..].join("/");
+            let key = if cfg!(windows) {
+                rel.to_ascii_lowercase()
+            } else {
+                rel.clone()
+            };
+            return Some((key, raw_p.to_path_buf(), Some(rel)));
+        }
+
+        // Canonical fallback if symlink / short 8.3 path differs on disk.
+        if let (Ok(canon_wt), Ok(canon_target)) = (std::fs::canonicalize(wt), std::fs::canonicalize(raw_p)) {
+            if let Ok(stripped) = canon_target.strip_prefix(&canon_wt) {
+                let rel = normalize_slash_path(&stripped.to_string_lossy());
+                if !rel.is_empty() {
+                    let key = if cfg!(windows) {
+                        rel.to_ascii_lowercase()
+                    } else {
+                        rel.clone()
+                    };
+                    return Some((key, raw_p.to_path_buf(), Some(rel)));
+                }
+            }
+        }
+    }
+
+    if raw_p.is_absolute() {
+        let key = if cfg!(windows) {
+            raw_norm.to_ascii_lowercase()
+        } else {
+            raw_norm
+        };
+        return Some((key, raw_p.to_path_buf(), None));
+    }
+
+    None
+}
+
+fn read_text_if_small(path: &Path) -> Option<String> {
+    const MAX_DIFF_BYTES: u64 = 2 * 1024 * 1024;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_DIFF_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn git_show_checkpoint_file(worktree: &Path, checkpoint_ref: &str, rel_path: &str) -> Option<String> {
+    if !is_safe_checkpoint_ref(checkpoint_ref) || rel_path.is_empty() {
+        return None;
+    }
+    let spec = format!("{checkpoint_ref}:{rel_path}");
+    let out = git(worktree, &["show", &spec]).ok()?;
+    if !out.status.success() || out.stdout.len() > 2 * 1024 * 1024 || out.stdout.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn git_checkpoint_exists(worktree: &Path, checkpoint_ref: &str) -> bool {
+    if !is_safe_checkpoint_ref(checkpoint_ref) {
+        return false;
+    }
+    let spec = format!("{checkpoint_ref}^{{commit}}");
+    git(worktree, &["cat-file", "-e", &spec])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Computes `(added_lines, removed_lines)` for a file edit when a provider omitted
+/// diff payloads, maintaining per-turn baselines across consecutive edits.
+pub fn resolve_worktree_file_diff(
+    worktree: Option<&Path>,
+    checkpoint_ref: Option<&str>,
+    baselines: &mut std::collections::HashMap<String, String>,
+    raw_file_path: &str,
+    is_streaming: bool,
+) -> Option<(usize, usize)> {
+    let (key, abs_path, rel_path) = resolve_worktree_paths(worktree, raw_file_path)?;
+
+    if is_streaming {
+        baselines.entry(key).or_insert_with(|| {
+            if let (Some(wt), Some(cp), Some(rel)) = (worktree, checkpoint_ref, rel_path.as_deref()) {
+                if let Some(tracked) = git_show_checkpoint_file(wt, cp, rel) {
+                    return tracked;
+                }
+            }
+            read_text_if_small(&abs_path).unwrap_or_default()
+        });
+        return None;
+    }
+
+    let before = if let Some(prev) = baselines.get(&key) {
+        prev.clone()
+    } else if let (Some(wt), Some(cp), Some(rel)) = (worktree, checkpoint_ref, rel_path.as_deref()) {
+        if let Some(tracked) = git_show_checkpoint_file(wt, cp, rel) {
+            tracked
+        } else if git_checkpoint_exists(wt, cp) {
+            String::new()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let after = if abs_path.exists() {
+        read_text_if_small(&abs_path)?
+    } else {
+        String::new()
+    };
+
+    let counts = crate::acp::diff_line_counts(&before, &after);
+    baselines.insert(key, after);
+    Some(counts)
+}
+
+/// Populates missing `addedLines`/`removedLines` on a file-changing tool item by diffing
+/// against this turn's checkpoint (or cached pre-edit disk baseline).
+pub fn maybe_fill_turn_tool_diff(thread_id: &str, run_id: &str, item: &mut Value, is_streaming: bool) {
+    let tool_kind = item.get("toolKind").and_then(Value::as_str).unwrap_or("");
+    if !matches!(tool_kind, "fileChange" | "edit" | "delete" | "move") {
+        return;
+    }
+    if !is_streaming {
+        let status = item.get("status").and_then(Value::as_str).unwrap_or("");
+        if status != "completed" {
+            return;
+        }
+        let has_counts = item.get("addedLines").and_then(Value::as_u64).is_some()
+            && item.get("removedLines").and_then(Value::as_u64).is_some();
+        if has_counts {
+            return;
+        }
+    }
+    let Some(file_path) = item
+        .get("filePath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    let (worktree, checkpoint_ref) = {
+        let items = crate::persist::threads().lock().unwrap();
+        let Some(thread) = items
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+        else {
+            return;
+        };
+        (
+            workspace_dir(thread),
+            thread
+                .get("checkpointRef")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        )
+    };
+
+    let Some((key, _, _)) = resolve_worktree_paths(worktree.as_deref(), &file_path) else {
+        return;
+    };
+
+    let mut local_baselines = std::collections::HashMap::new();
+    {
+        let live = crate::chat::runtime::live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get(run_id) {
+            if let Some(existing) = run.file_baselines.get(&key) {
+                local_baselines.insert(key.clone(), existing.clone());
+            }
+        }
+    }
+
+    let counts = resolve_worktree_file_diff(
+        worktree.as_deref(),
+        checkpoint_ref.as_deref(),
+        &mut local_baselines,
+        &file_path,
+        is_streaming,
+    );
+
+    if let Some(updated) = local_baselines.remove(&key) {
+        let mut live = crate::chat::runtime::live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            if is_streaming {
+                run.file_baselines.entry(key).or_insert(updated);
+            } else {
+                run.file_baselines.insert(key, updated);
+            }
+        }
+    }
+
+    if let Some((added, removed)) = counts {
+        item["addedLines"] = serde_json::json!(added);
+        item["removedLines"] = serde_json::json!(removed);
+    }
+}
+
 /// Writes `refs/kite/checkpoints/<thread>/<run>` without moving HEAD.
 ///
 /// A missing folder, a non-repo, and any git failure return `None`. A clean
@@ -623,5 +869,91 @@ mod tests {
             "checkpoint\n"
         );
         assert_eq!(rev_parse(dir.path(), "HEAD"), head);
+    }
+
+    #[test]
+    fn worktree_file_diff_computes_agy_style_edits_consecutively_and_with_dirty_base() {
+        if skip_without_git("worktree diff computation") {
+            return;
+        }
+        let dir = TempDir::new("worktree-diff");
+        init_repo(dir.path());
+        commit_file(
+            dir.path(),
+            "README.md",
+            "### Building\nCompile the standalone native Windows installer:\n\n```powershell\n",
+            "initial",
+        );
+        // Simulate pre-existing dirty edit on disk before turn begins.
+        fs::write(
+            dir.path().join("README.md"),
+            "### Building for Production\nCompile the standalone native Windows installer:\n\n```powershell\n",
+        )
+        .unwrap();
+
+        let ref_name = capture_turn_checkpoint(dir.path(), "thread-diff", "run-1")
+            .expect("checkpoint capture");
+        let mut baselines = std::collections::HashMap::new();
+        let abs_readme = dir.path().join("README.md").to_string_lossy().to_string();
+
+        // 1. Streaming ACTIVE call primes baseline without returning counts yet.
+        assert_eq!(
+            resolve_worktree_file_diff(
+                Some(dir.path()),
+                Some(&ref_name),
+                &mut baselines,
+                &abs_readme,
+                true,
+            ),
+            None
+        );
+
+        // 2. Edit replaces 2 lines with 2 new lines (pre-existing dirty header stays unchanged!).
+        fs::write(
+            dir.path().join("README.md"),
+            "### Building for Production\n<!-- Thread diff test -->\nCompile the standalone native installer:\n```powershell\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_worktree_file_diff(
+                Some(dir.path()),
+                Some(&ref_name),
+                &mut baselines,
+                &abs_readme,
+                false,
+            ),
+            Some((2, 2))
+        );
+
+        // 3. Second edit in the same turn adds 1 more line without double-counting the first edit.
+        fs::write(
+            dir.path().join("README.md"),
+            "### Building for Production\n<!-- Thread diff test -->\n<!-- Extra note -->\nCompile the standalone native installer:\n```powershell\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_worktree_file_diff(
+                Some(dir.path()),
+                Some(&ref_name),
+                &mut baselines,
+                &abs_readme,
+                false,
+            ),
+            Some((1, 0))
+        );
+
+        // 4. Brand-new untracked file created during turn without ACTIVE priming.
+        let new_file = dir.path().join("NOTES.md");
+        fs::write(&new_file, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(
+            resolve_worktree_file_diff(
+                Some(dir.path()),
+                Some(&ref_name),
+                &mut baselines,
+                &new_file.to_string_lossy(),
+                false,
+            ),
+            Some((3, 0))
+        );
     }
 }

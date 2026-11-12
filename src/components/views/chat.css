@@ -316,27 +316,61 @@
   border-radius: var(--card-radius, 12px);
 }
 
+.changed-files-shell {
+  width: 100%;
+  max-width: var(--chat-content-max-width, 46rem);
+  margin: 0 auto;
+  padding: 0 1rem 0.375rem;
+  box-sizing: border-box;
+}
+
 .changed-files-card {
   width: 100%;
-  max-width: 720px;
-  margin: 8px auto;
   border-radius: var(--card-radius, 12px);
-  background: var(--composer, #18181b);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
-  padding: 10px 14px;
+  background: color-mix(in srgb, var(--surface-raised, var(--surface, #18181b)) 82%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.08)));
+  box-shadow: 0 6px 18px -12px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
   box-sizing: border-box;
+}
+
+[data-theme='light'] .changed-files-card {
+  background: color-mix(in srgb, var(--surface-raised, #ffffff) 90%, transparent);
+  border-color: var(--border, rgba(0, 0, 0, 0.1));
+  box-shadow: 0 6px 16px -12px rgba(15, 23, 42, 0.14);
 }
 
 .changed-files-card__header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: var(--text-caption, 11px);
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 36px;
+  padding: 5px 8px 5px 12px;
+  font-size: var(--text-caption, 11.5px);
+  box-sizing: border-box;
+}
+
+.changed-files-card__summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.changed-files-card__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .changed-files-card__title {
   font-weight: var(--weight-semibold, 600);
   color: var(--text-primary, #f4f4f5);
+  font-size: 12px;
 }
 
 .diff-stat-label {
@@ -357,33 +391,41 @@
 }
 
 .changed-files-card__btn {
-  background: var(--chip-fill, rgba(255, 255, 255, 0.08));
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--vl-control-sm, 26px);
+  padding: 0 10px;
+  background: var(--block-fill, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.1)));
   color: var(--text-secondary, #a1a1aa);
-  border-radius: var(--radius-chip, 6px);
+  border-radius: var(--control-radius, 8px);
   font-size: 11px;
   font-weight: 500;
-  padding: 3px 8px;
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
 .changed-files-card__btn:hover {
-  background: var(--hover-fill, rgba(255, 255, 255, 0.14));
+  background: var(--hover-fill, rgba(255, 255, 255, 0.12));
+  border-color: rgba(255, 255, 255, 0.18);
   color: var(--text-primary, #f4f4f5);
 }
 
 .changed-files-card__open-diff {
-  margin-left: auto;
+  color: var(--text-primary, #f4f4f5);
 }
 
 .changed-files-card__list {
   list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
+  margin: 0;
+  padding: 4px;
+  border-top: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.07)));
   display: flex;
   flex-direction: column;
   gap: 2px;
+  max-height: 140px;
+  overflow-y: auto;
 }
 
 .changed-files-card__item {
@@ -396,8 +438,9 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 5px 8px;
-  border-radius: var(--radius-chip, 6px);
+  min-height: var(--vl-control-sm, 26px);
+  padding: 3px 8px;
+  border-radius: var(--control-radius, 8px);
   background: transparent;
   border: 0;
   color: var(--text-secondary, #a1a1aa);
@@ -1474,10 +1517,11 @@
 .chat-turn-rail {
   position: absolute;
   left: 12px;
-  bottom: 60px;
+  top: 12px;
+  bottom: 12px;
   z-index: 15;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 10px;
   pointer-events: none;
 }
@@ -1488,7 +1532,7 @@
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  max-height: min(260px, 50vh);
+  max-height: min(260px, 100%);
   overflow-y: auto;
   scrollbar-width: none;
   padding: 6px 4px;

@@ -1,6 +1,7 @@
 # Kite Code
 
-Autonomous agentic development environment and native multi-model terminal desktop application built with React, TypeScript, Rust and Tauri 2.
+<!-- Diff verification test: line added/removed -->
+Autonomous agentic development environment and native multi-model terminal desktop application built with React, TypeScript, Rust, and Tauri 2.
 
 ## Key Features
 
@@ -29,8 +30,8 @@ npm run app
 
 ### Building for Production
 
-Compile the standalone native Windows installer:
-
+<!-- Thread diff test: verification of line addition and removal in thread view -->
+Compile the standalone native installer (Windows / cross-platform target):
 ```powershell
 npm run build:installer
 ```

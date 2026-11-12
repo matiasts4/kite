@@ -31,6 +31,9 @@ pub struct TurnRun {
     /// Highest sequence a client has already been given. Older events can leave
     /// the buffer without hiding a row the transcript has not seen.
     pub delivered_through: u64,
+    /// Per-turn incremental baseline contents keyed by normalized path so tools that
+    /// omit diffs (or edit the same file multiple times in one turn) compute accurate counts.
+    pub file_baselines: HashMap<String, String>,
 }
 
 pub struct LiveTurns {

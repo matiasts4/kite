@@ -129,4 +129,53 @@ describe('ThreadTurnRail', () => {
     fireEvent.click(dots[2]!);
     expect(scrollSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
   });
+
+  it('grows turn dots incrementally and keeps the active dot scrolled into view on overflow', () => {
+    const initialItems: ChatItem[] = [
+      mockItem({ id: 'u1', kind: 'user', text: 'First turn' }),
+      mockItem({ id: 'a1', kind: 'assistant', text: 'First answer' }),
+    ];
+
+    const Wrapper: React.FC<{ items: ChatItem[] }> = ({ items }) => {
+      const ref = React.useRef<HTMLDivElement | null>(null);
+      return (
+        <div>
+          <ThreadTurnRail items={items} transcriptRef={ref} />
+          <div ref={ref} />
+        </div>
+      );
+    };
+
+    const { rerender } = render(<Wrapper items={initialItems} />);
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+
+    const manyItems: ChatItem[] = [];
+    for (let idx = 1; idx <= 20; idx += 1) {
+      manyItems.push(mockItem({ id: `u${idx}`, kind: 'user', text: `Prompt ${idx}` }));
+      manyItems.push(mockItem({ id: `a${idx}`, kind: 'assistant', text: `Reply ${idx}` }));
+    }
+
+    rerender(<Wrapper items={manyItems} />);
+    const dots = screen.getAllByRole('listitem');
+    expect(dots).toHaveLength(20);
+
+    const list = screen.getByRole('list');
+    Object.defineProperty(list, 'scrollHeight', { value: 420, configurable: true });
+    Object.defineProperty(list, 'clientHeight', { value: 180, configurable: true });
+    const firstDot = dots[0]!;
+    const lastDot = dots[19]!;
+    Object.defineProperty(firstDot, 'offsetTop', { value: 8, configurable: true });
+    Object.defineProperty(firstDot, 'offsetHeight', { value: 14, configurable: true });
+    Object.defineProperty(lastDot, 'offsetTop', { value: 360, configurable: true });
+    Object.defineProperty(lastDot, 'offsetHeight', { value: 14, configurable: true });
+
+    list.scrollTop = 200;
+    fireEvent.click(firstDot);
+    expect(firstDot).toHaveAttribute('aria-current', 'step');
+    expect(list.scrollTop).toBe(4);
+
+    fireEvent.click(lastDot);
+    expect(lastDot).toHaveAttribute('aria-current', 'step');
+    expect(list.scrollTop).toBe(198);
+  });
 });

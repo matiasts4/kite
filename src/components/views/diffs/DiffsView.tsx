@@ -13,6 +13,12 @@ import {
   AlertCircleIcon,
 } from '../files/FileIcons';
 import { SpinnerIcon } from '../chat/ChatIcons';
+import {
+  type DiffPreviewRequest,
+  OPEN_RIGHT_DOCK_DIFFS_EVENT,
+  consumePendingDiffPreview,
+  resolveRepoDiffPaths,
+} from '../../../lib/diffPreviewNav';
 import './diffs.css';
 
 export interface DiffsViewProps {
@@ -123,8 +129,21 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   });
 
   const [filter, setFilter] = useState<'all' | 'staged' | 'unstaged'>('all');
+  const [turnFocusPaths, setTurnFocusPaths] = useState<string[] | null>(null);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [copiedPath, setCopiedPath] = useState<boolean>(false);
+  const [focusTick, setFocusTick] = useState<number>(0);
+  const pendingFocusRequestRef = useRef<DiffPreviewRequest | null>(null);
+  const focusSeqRef = useRef<number>(0);
+  const pendingFocusRefreshSeqRef = useRef<number>(0);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Responsive dock width observer
   const containerRef = useRef<HTMLDivElement>(null);
@@ -172,12 +191,25 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const unstagedFiles = useMemo(() => allFiles.filter((f) => f.unstaged), [allFiles]);
   const hasNoStaged = stagedFiles.length === 0;
 
-  // Filtered files
+  // Filtered files (scoped to thread turn paths when focused)
   const displayedFiles = useMemo(() => {
+    if (turnFocusPaths && turnFocusPaths.length > 0) {
+      const focusSet = new Set(turnFocusPaths);
+      const focused = allFiles.filter((f) => focusSet.has(f.path));
+      if (focused.length > 0) {
+        return focused;
+      }
+    }
     if (filter === 'staged') return stagedFiles;
     if (filter === 'unstaged') return unstagedFiles;
     return allFiles;
-  }, [filter, stagedFiles, unstagedFiles, allFiles]);
+  }, [turnFocusPaths, filter, stagedFiles, unstagedFiles, allFiles]);
+
+  const isTurnFocusActive = useMemo(() => {
+    if (!turnFocusPaths || turnFocusPaths.length === 0) return false;
+    const focusSet = new Set(turnFocusPaths);
+    return allFiles.some((f) => focusSet.has(f.path));
+  }, [turnFocusPaths, allFiles]);
 
   // Auto-select first file if none selected or selected file filtered out
   useEffect(() => {
@@ -234,10 +266,140 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const currentWorkspaceRef = useRef<string | null>(null);
   useEffect(() => {
     if (currentWsId && currentWsId !== currentWorkspaceRef.current) {
+      const previousWsId = currentWorkspaceRef.current;
       currentWorkspaceRef.current = currentWsId;
-      setExpandedFiles(new Set());
+      if (previousWsId !== null && !pendingFocusRequestRef.current) {
+        setTurnFocusPaths(null);
+        setExpandedFiles(new Set());
+      }
     }
   }, [currentWsId]);
+
+  // Apply external focus requests dispatched from Thread ChangedFilesCard
+  const acceptFocusRequest = useCallback(
+    (req: DiffPreviewRequest) => {
+      pendingFocusRequestRef.current = req;
+      const targetWs = req.workspaceId ?? currentWsId;
+      if (req.workspaceId && req.workspaceId !== currentWsId) {
+        setCurrentWsId(req.workspaceId);
+        onSelectWorkspace?.(req.workspaceId);
+      }
+      if (req.viewMode) {
+        setViewMode(req.viewMode);
+      }
+      setFilter('all');
+      if (targetWs) {
+        const refreshResult = refreshGit(targetWs) as unknown;
+        if (
+          refreshResult &&
+          typeof (refreshResult as Promise<unknown>).then === 'function'
+        ) {
+          const seq = ++focusSeqRef.current;
+          pendingFocusRefreshSeqRef.current = seq;
+          setFocusTick((n) => n + 1);
+          Promise.resolve(refreshResult).finally(() => {
+            if (pendingFocusRefreshSeqRef.current === seq) {
+              pendingFocusRefreshSeqRef.current = 0;
+              if (isMountedRef.current) {
+                setFocusTick((n) => n + 1);
+              }
+            }
+          });
+        } else {
+          pendingFocusRefreshSeqRef.current = 0;
+          setFocusTick((n) => n + 1);
+        }
+      } else {
+        pendingFocusRefreshSeqRef.current = 0;
+        setFocusTick((n) => n + 1);
+      }
+    },
+    [currentWsId, onSelectWorkspace, refreshGit]
+  );
+
+  useEffect(() => {
+    const initial = consumePendingDiffPreview();
+    if (initial) {
+      acceptFocusRequest(initial);
+    }
+    const handleEvent = (e: Event) => {
+      const detail = (e as CustomEvent<DiffPreviewRequest>).detail;
+      const pending = consumePendingDiffPreview();
+      const req = pending ?? detail;
+      if (req) {
+        acceptFocusRequest(req);
+      }
+    };
+    window.addEventListener(OPEN_RIGHT_DOCK_DIFFS_EVENT, handleEvent);
+    return () => window.removeEventListener(OPEN_RIGHT_DOCK_DIFFS_EVENT, handleEvent);
+  }, [acceptFocusRequest]);
+
+  useEffect(() => {
+    const req = pendingFocusRequestRef.current;
+    if (!req) return;
+    if (!currentWsId) return;
+    if (req.workspaceId && req.workspaceId !== currentWsId) return;
+
+    const candidates = req.focusPaths?.length
+      ? req.focusPaths
+      : req.selectedPath
+      ? [req.selectedPath]
+      : [];
+    if (candidates.length === 0) {
+      pendingFocusRequestRef.current = null;
+      pendingFocusRefreshSeqRef.current = 0;
+      setTurnFocusPaths(null);
+      return;
+    }
+
+    const waitingForRefresh =
+      gitLoading || pendingFocusRefreshSeqRef.current !== 0;
+    const repoPaths = allFiles.map((f) => f.path);
+    const matched = resolveRepoDiffPaths(
+      candidates,
+      repoPaths,
+      req.workspaceName ?? activeWorkspaceName,
+      gitChanges?.workspacePrefix
+    );
+
+    if (matched.length > 0) {
+      const primary =
+        (req.selectedPath
+          ? resolveRepoDiffPaths(
+              [req.selectedPath],
+              matched,
+              req.workspaceName ?? activeWorkspaceName,
+              gitChanges?.workspacePrefix
+            )[0]
+          : undefined) || matched[0];
+      setTurnFocusPaths(matched);
+      setFilter('all');
+      setExpandedFiles(new Set(matched));
+      setSelectedDiffPath(primary);
+      if (!waitingForRefresh) {
+        pendingFocusRequestRef.current = null;
+      }
+      if (typeof window !== 'undefined') {
+        window.requestAnimationFrame(() => {
+          const el = document.getElementById(`diff-file-${encodeURIComponent(primary)}`);
+          if (el && typeof el.scrollIntoView === 'function') {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        });
+      }
+    } else if (!waitingForRefresh) {
+      pendingFocusRequestRef.current = null;
+      setTurnFocusPaths(null);
+    }
+  }, [
+    allFiles,
+    gitLoading,
+    gitChanges?.workspacePrefix,
+    activeWorkspaceName,
+    currentWsId,
+    setSelectedDiffPath,
+    focusTick,
+  ]);
 
   // Pre-load adjacent diffs in background so next/prev switching is 0ms instant
   useEffect(() => {
@@ -432,6 +594,8 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         currentWsId={currentWsId}
         activeWorkspaceName={activeWorkspaceName}
         onSelectWorkspaceId={(id) => {
+          pendingFocusRequestRef.current = null;
+          setTurnFocusPaths(null);
           setCurrentWsId(id);
           onSelectWorkspace?.(id);
           try {
@@ -439,7 +603,11 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
           } catch {}
         }}
         filter={filter}
-        setFilter={setFilter}
+        setFilter={(nextFilter) => {
+          pendingFocusRequestRef.current = null;
+          setTurnFocusPaths(null);
+          setFilter(nextFilter);
+        }}
         allFilesCount={allFiles.length}
         stagedFilesCount={stagedFiles.length}
         unstagedFilesCount={unstagedFiles.length}
@@ -460,6 +628,25 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         onToggleAllCollapse={toggleAllCollapse}
         displayedFilesCount={displayedFiles.length}
       />
+
+      {/* Focused Thread Turn Changes Bar */}
+      {isTurnFocusActive && (
+        <div className="diffs-turn-focus-bar" role="status" aria-label="Focused turn changes">
+          <span className="diffs-turn-focus-bar__label">
+            Showing {displayedFiles.length} {displayedFiles.length === 1 ? 'change' : 'changes'} from thread
+          </span>
+          <button
+            type="button"
+            className="diffs-turn-focus-bar__clear"
+            onClick={() => {
+              pendingFocusRequestRef.current = null;
+              setTurnFocusPaths(null);
+            }}
+          >
+            Show all ({allFiles.length})
+          </button>
+        </div>
+      )}
 
       {/* Body Area: File Tree + Diff Viewer (Focused or Stream) */}
       <div className="diffs-body">

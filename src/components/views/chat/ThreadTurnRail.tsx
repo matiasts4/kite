@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatItem } from '../../../types';
 import { activityTraceLabel, summarizeWorkBurst } from './activityPresentation';
 import { expandCitations } from './citationChip';
@@ -105,6 +105,7 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
   const turns = useMemo(() => buildThreadTurns(items, running), [items, running]);
   const [activeIndex, setActiveIndex] = useState<number>(() => Math.max(0, turns.length - 1));
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const dotsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (turns.length === 0) {
@@ -114,6 +115,20 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
     }
     setActiveIndex((prev) => (prev >= turns.length ? turns.length - 1 : prev));
   }, [turns.length]);
+
+  useEffect(() => {
+    const list = dotsRef.current;
+    if (!list || list.scrollHeight <= list.clientHeight) return;
+    const activeEl = list.children.item(activeIndex) as HTMLElement | null;
+    if (!activeEl) return;
+    const itemTop = activeEl.offsetTop;
+    const itemBottom = itemTop + activeEl.offsetHeight;
+    if (itemTop < list.scrollTop) {
+      list.scrollTop = Math.max(0, itemTop - 4);
+    } else if (itemBottom > list.scrollTop + list.clientHeight) {
+      list.scrollTop = itemBottom - list.clientHeight + 4;
+    }
+  }, [activeIndex, turns.length]);
 
   const syncActiveFromScroll = useCallback(() => {
     const container = transcriptRef.current;
@@ -184,7 +199,7 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
       aria-label="Conversation turns"
       onMouseLeave={() => setHoveredIndex(null)}
     >
-      <div className="chat-turn-rail__dots" role="list">
+      <div className="chat-turn-rail__dots" role="list" ref={dotsRef}>
         {turns.map((turn) => {
           const isActive = turn.index === activeIndex;
           const isHovered = turn.index === hoveredIndex;

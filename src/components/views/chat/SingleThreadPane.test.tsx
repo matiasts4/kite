@@ -1,8 +1,13 @@
 import { createElement } from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { SingleThreadPane } from './SingleThreadPane';
 import { composeRewoundPrompt, changedFilesForTurn } from './pane/threadTurnHelpers';
+import {
+  consumePendingDiffPreview,
+  OPEN_RIGHT_DOCK_DIFFS_EVENT,
+  type DiffPreviewRequest,
+} from '../../../lib/diffPreviewNav';
 import type { ExtendedChatThread } from './types';
 import type { ChatItem } from '../../../types';
 
@@ -125,6 +130,66 @@ describe('SingleThreadPane component', () => {
     fireEvent.click(screen.getByTitle('Save title'));
     expect(onSaveRename).toHaveBeenCalled();
   });
+
+  it('opens Diffs focused on turn changes when clicking Open diff or a file row', () => {
+    const listener = vi.fn();
+    const onEvent = (e: Event) => listener((e as CustomEvent<DiffPreviewRequest>).detail);
+    window.addEventListener(OPEN_RIGHT_DOCK_DIFFS_EVENT, onEvent);
+
+    const thread = createThread({
+      items: [
+        {
+          id: 'u1',
+          kind: 'user',
+          text: 'Edit README',
+          title: null,
+          detail: null,
+          status: null,
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: 1,
+          attachments: [],
+        },
+        {
+          id: 't1',
+          kind: 'tool',
+          text: '',
+          title: 'Edit README.md',
+          detail: null,
+          status: 'completed',
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: 2,
+          attachments: [],
+          toolKind: 'fileChange',
+          filePath: 'C:\\Users\\PC\\Desktop\\Proyectos\\Test Workspace\\README.md',
+          addedLines: 2,
+          removedLines: 2,
+        },
+      ],
+    });
+
+    render(createElement(SingleThreadPane, { thread, ...defaultProps }));
+
+    const card = screen.getByRole('region', { name: '1 changed file' });
+    fireEvent.click(within(card).getByRole('button', { name: 'Open diff' }));
+    expect(listener).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      workspaceName: 'Test Workspace',
+      focusPaths: ['C:\\Users\\PC\\Desktop\\Proyectos\\Test Workspace\\README.md'],
+    });
+
+    fireEvent.click(within(card).getByRole('button', { name: /README\.md/i }));
+    expect(listener).toHaveBeenLastCalledWith({
+      workspaceId: 'ws-1',
+      workspaceName: 'Test Workspace',
+      focusPaths: ['C:\\Users\\PC\\Desktop\\Proyectos\\Test Workspace\\README.md'],
+      selectedPath: 'C:\\Users\\PC\\Desktop\\Proyectos\\Test Workspace\\README.md',
+    });
+
+    consumePendingDiffPreview();
+    window.removeEventListener(OPEN_RIGHT_DOCK_DIFFS_EVENT, onEvent);
+  });
 });
 
 describe('threadTurnHelpers', () => {
@@ -201,6 +266,45 @@ describe('threadTurnHelpers', () => {
         path: 'src/file2.ts',
         additions: 10,
         deletions: 0,
+      },
+    ]);
+  });
+
+  it('changedFilesForTurn handles edit/delete/move toolKinds and unified diff fallback text', () => {
+    const items: ChatItem[] = [
+      {
+        id: 'u1',
+        kind: 'user',
+        text: 'edit readme',
+        title: null,
+        detail: null,
+        status: null,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: 1,
+        attachments: [],
+      },
+      {
+        id: 'e1',
+        kind: 'tool',
+        filePath: 'C:\\Users\\PC\\Desktop\\Proyectos\\kite\\README.md',
+        toolKind: 'edit',
+        text: '@@ -30,2 +30,2 @@\n-old line 1\n-old line 2\n+new line 1\n+new line 2\n',
+        title: 'Edit README.md',
+        detail: null,
+        status: 'completed',
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: 2,
+        attachments: [],
+      },
+    ];
+
+    expect(changedFilesForTurn(items)).toEqual([
+      {
+        path: 'C:\\Users\\PC\\Desktop\\Proyectos\\kite\\README.md',
+        additions: 2,
+        deletions: 2,
       },
     ]);
   });

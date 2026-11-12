@@ -2,6 +2,12 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMe
 import { BrowserView } from './views/BrowserView';
 import { closeBrowserSurfaceSession, getBrowserSurfaceSession } from './views/browser/browserSurfaceRegistry';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../lib/terminalLinkNav';
+import {
+  OPEN_DIFFS_EVENT,
+  OPEN_RIGHT_DOCK_DIFFS_EVENT,
+  peekPendingDiffPreview,
+} from '../lib/diffPreviewNav';
+import { openFileInRightDock } from '../lib/filePreviewNav';
 import { FilesView } from './views/FilesView';
 import { DiffsView } from './views/diffs/DiffsView';
 import { TicketsView } from './views/TicketsView';
@@ -217,8 +223,15 @@ export const RightDock: React.FC<RightDockProps> = ({
       });
       setActiveTabId('diffs');
     };
-    window.addEventListener('kite:open-right-dock-diffs', handleOpenDiffs);
-    return () => window.removeEventListener('kite:open-right-dock-diffs', handleOpenDiffs);
+    if (peekPendingDiffPreview()) {
+      handleOpenDiffs();
+    }
+    window.addEventListener(OPEN_RIGHT_DOCK_DIFFS_EVENT, handleOpenDiffs);
+    window.addEventListener(OPEN_DIFFS_EVENT, handleOpenDiffs);
+    return () => {
+      window.removeEventListener(OPEN_RIGHT_DOCK_DIFFS_EVENT, handleOpenDiffs);
+      window.removeEventListener(OPEN_DIFFS_EVENT, handleOpenDiffs);
+    };
   }, []);
 
   // Shortcut Ctrl+Alt+D to open or focus diffs tab, Ctrl+Alt+S for subagents tab
@@ -814,11 +827,10 @@ export const RightDock: React.FC<RightDockProps> = ({
                           return prev;
                         });
                         setActiveTabId('files');
-                        window.dispatchEvent(
-                          new CustomEvent('kite:open-right-dock-file', {
-                            detail: { filePath, workspaceId: effectiveWorkspaceId },
-                          })
-                        );
+                        openFileInRightDock({
+                          candidate: filePath,
+                          workspaceId: effectiveWorkspaceId,
+                        });
                       }}
                     />
                   )}

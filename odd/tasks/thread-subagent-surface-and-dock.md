@@ -53,13 +53,13 @@ Acceptance:
     - Matches `invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents` (`antigravity` / ACP), `Task` / `Agent` / `dispatch_agent` (`claude`), `subagent` / `delegate` / `spawn_agent` (`grok`, `codex`, `cursor`, `opencode`, `gemini`), and `kite dispatch run` commands targeting a subagent.
     - Extracts a structured `SubagentMeta` payload stored on `ToolCallSnapshot` and persisted on the `ChatItem`:
       - `subagentId: String` (resolved from the provider's child `conversationId`, `session_id`, `childThreadId`, or deterministic `tool_call_id` fallback)
-      - `role: String` (from `Role`, `description`, `subagent_type`, `--role`, or humanized tool title)
-      - `typeName: Option<String>` (from `TypeName` or `subagent_type`, e.g. `research`, `browser`, `odd-worker`)
+      - `role: String` (from `Role`, `description`, `subagent_type`, `--role`, `--provider`/program, or concise `"Subagent"` fallback — never leaking generic host shell tool names like `"run command"`)
+      - `typeName: Option<String>` (from `TypeName` or `subagent_type`, e.g. `research`, `browser`, `worker`)
       - `provider: Option<String>` (defaults to parent provider unless cross-provider is specified)
-      - `model: Option<String>` (from `Model`, `model`, `--model`, e.g. `"flash"`, `"flash_lite"`, `"pro"`, `"inherit"`)
+      - `model: Option<String>` (from `Model`, `model`, `--model`)
       - `workspaceMode: Option<String>` (`"inherit" | "share" | "branch"`, from `Workspace` or `--workspace`)
-      - `prompt: Option<String>` (from `Prompt`, `prompt`, `Message`, or `brief`)
-      - `status: String` (`"running" | "waiting" | "completed" | "failed" | "killed"`)
+      - `prompt: Option<String>` (from `Prompt`, `prompt`, `Message`, or `brief`, stripping trailing shell redirection/pipeline operators such as `2>&1`, `1>&2`, `|`, `&&`, `;` when extracted from shell commands)
+      - `status: String` (`"running" | "waiting" | "completed" | "failed" | "killed"` — non-zero exit codes, host errors, or rejected CLI JSON receipts always map to `"failed"` and never report a false `"completed"` status)
       - `transcriptUri: Option<String>` (extracted from tool result JSON such as `logAbsoluteUri` when present)
       - `childThreadId: Option<String>` (when backed by a local `ChatThread`)
       - `latestActivity: Option<String>` (1-line summary of the subagent's newest internal tool or reasoning step)
@@ -108,30 +108,22 @@ Current fact:
 Acceptance:
 - **Dedicated Timeline Cards (`SubagentActivityCard.tsx` & `SwarmActivityCard.tsx`)**:
   - When `ChatItemRow` or `ChatWorkGroup` encounters an item with `toolKind === 'subagent'` (or `item.subagentMeta`), it renders `<SubagentActivityCard>` instead of a plain `<pre>` work entry.
-  - **Geometry & Design Tokens (`AGENTS.md` Compliance)**:
-    - Outer card uses `border-radius: var(--card-radius)` (`12px`, `rounded-card`), subtle elevated surface (`var(--surface-raised)` / `var(--chip-fill)`), `1px solid var(--block-stroke)`, and optical concentric inner highlight (`calc(var(--card-radius) - 1px)`).
-    - Interactive controls and badges inside the card use `var(--control-radius)` (`8px`, `rounded-control`) or `var(--vl-radius-sm)` (`6px`, `rounded-sm` for micro-tags). Zero arbitrary pixel radii.
+  - **Geometry & Minimalist Workbench Design Tokens (`AGENTS.md` Compliance)**:
+    - Single subagent and swarm entries render as refined, restrained minimalist activity rows (`min-height: 32px`, `border-radius: var(--control-radius)` (`8px`), `1px solid` hairline separator/stroke on hover or active selection rather than heavy nested button boxes), matching the typography hierarchy of `ChatWorkEntry`.
+    - Interactive controls and micro-tags inside rows use `var(--control-radius)` (`8px`) and `var(--vl-radius-sm)` (`6px`). Zero arbitrary pixel radii.
   - **`SubagentActivityCard` Anatomy**:
-    1. **Top Row (`min-height: 32px`, `padding: 6px 12px`, `display: flex`, `align-items: center`, ` gap: 8px`)**:
-       - **Leading Icon**: `24px × 24px` (`rounded-sm`) badge with the `Bot` glyph (or provider logo when `subagentMeta.provider` differs from the parent thread's provider). While `status === 'running'`, displays a subtle pulsing ring.
-       - **Role & Type Title**: Primary label showing `subagentMeta.role` (e.g. `Codebase Architecture Explorer`), truncated cleanly on narrow widths (`text-overflow: ellipsis`).
-       - **Model & Workspace Micro-Badges**:
-         - Model pill (`rounded-sm`, `font-size: 11px`, `padding: 1px 6px`): displays the resolved model label (e.g. `Flash`, `Flash Lite`, `Pro`, `Grok-3-Mini`, `Haiku`, or `Inherit`), visually distinguishing lightweight worker models from the heavy parent model.
-         - Workspace pill (shown when `workspaceMode` is `"share"` or `"branch"`): displays a git-branch micro-tag (`share` / `branch`).
-       - **Trailing Status & Elapsed Clock**:
-         - While `running`: 6px ripple dot (`chat-working-ping`) + `Working · 14s` in `tabular-nums`.
-         - When `waiting`: amber dot + `Waiting`.
-         - When `completed`: muted check glyph + duration (`18s`) + chevron `Inspect ▸`.
-         - When `failed` / `killed`: destructive icon + `Failed` / `Killed`.
-    2. **Bottom Live Activity Row (`min-height: 24px`, `padding: 0 12px 8px 44px`, `font-size: 12px`)**:
-       - While `running`: shows the subagent's live current action (`subagentMeta.latestActivity`, e.g., `Reading src/components/RightDock.tsx`) with `.live-tool-shine` animation (disabled under `prefers-reduced-motion`) and step counter (`4 steps`).
-       - When `completed`: shows a 1-line clamped preview of the subagent's final handoff or prompt summary plus total steps (`Completed · 7 steps`).
+    1. **Primary Compact Row (`min-height: 32px`, `padding: 6px 10px`, `display: flex`, `align-items: center`, `gap: 8px`)**:
+       - **Status / Leading Icon**: Crisp 14–16px status glyph (pulsing active indicator while `running`, calm check on `completed`, destructive cross on `failed`/`killed`).
+       - **Verb + Role / Task Label**: Crisp inline primary label (e.g. `Started · Code Explorer` or muted role + concise prompt excerpt) with `.live-tool-shine` animation while active (disabled under `prefers-reduced-motion`), truncated cleanly on narrow widths (`text-overflow: ellipsis`).
+       - **Subtle Metadata**: Minimal provider/model text badge and optional `share` / `branch` workspace badge (`--vl-radius-sm`), without visual pill noise or duplicated raw prompt lines.
+       - **Trailing Status & Elapsed Clock**: `Working · 14s` while running, duration or failure indicator (`Failed` / `Stopped`) on settle in `tabular-nums`.
+       - **Clickability Honesty**: Renders as an interactive inspect trigger (hover fill + inspect chevron) **only** when backed by a `childThreadId`, `transcriptUri`, or captured `items`; non-inspectable failed or unbacked rows render statically without a dead inspect chevron.
+    2. **Optional Secondary Sub-Line**:
+       - Only shown when a distinct live tool activity or failure summary adds signal beyond the primary row (e.g., live step `Reading src/components/RightDock.tsx` or concise CLI validation error message).
   - **`SwarmActivityCard` Anatomy (`SwarmActivityCard.tsx`)**:
-    - Renders when `toolKind === 'swarm'` or when a turn initializes/updates a Swarm.
-    - Header shows a `Network` / `Hub` glyph, the Swarm title (e.g. `Swarm · the parser rewrite`), and live worker counter pills (`2 working`, `3 waiting`, `1 killed`).
-    - Body shows a compact horizontal roster of worker pills (`@parser · Flash`, `@verifier · Flash`, each with its live state dot) and the latest `@mention` post from the board (`#8 @coordinator -> @verifier: Check #4 and #6`).
-  - **Transcript Grouping Rule (`transcriptGrouping.ts`)**:
-    - Items with `toolKind === 'subagent'` or `toolKind === 'swarm'` never disappear inside a collapsed `Worked for <duration>` burst. If a work burst contains subagent or swarm cards, those cards remain visible below or alongside the folded summary row so the user can click them at any time during or after the turn.
+    - Renders a matching minimalist hairline row when `toolKind === 'swarm'` or when a turn initializes/updates a Swarm, showing the Swarm title, concise active/waiting worker summary, member status dots, and latest `@mention` post preview.
+  - **Multi-Subagent Disclosure Grouping (`transcriptGrouping.ts`)**:
+    - Parallel or consecutive subagent invocations (2 or more consecutive `subagent` items) group cleanly into an expandable inline disclosure container (`Started N subagents` / `N subagents running`), matching `ChatWorkGroup` restraint while letting each backed subagent row open `RightDock` on click. Single subagent or swarm rows remain ungrouped inline rows and never disappear inside unrelated tool bursts.
   - **Click-to-Inspect Action**:
     - Clicking a `SubagentActivityCard` dispatches `window.dispatchEvent(new CustomEvent('kite:open-right-dock-subagent', { detail: { threadId, subagentId: meta.subagentId, childThreadId: meta.childThreadId, mode: 'subagent' } }))`.
     - Clicking a `SwarmActivityCard` dispatches `window.dispatchEvent(new CustomEvent('kite:open-right-dock-subagent', { detail: { threadId, swarmId: meta.swarmId, mode: 'swarm' } }))`.
@@ -196,6 +188,8 @@ Acceptance:
     - Renders the subagent's internal `ChatItem[]` stream using the same `24px` work-log row anatomy (`Eye`, `SquarePen`, `Terminal`, `Search`, `Globe`, `Brain` with `.live-tool-shine`) and markdown assistant blocks as `SingleThreadPane`.
     - Automatically scrolls to the newest step while the subagent is `running` (`follow-the-newest` observer) and pauses auto-scroll when the user scrolls up manually.
     - Animates new subagent steps with the `4px` upward reveal transition (`tweens.reveal`, respecting `prefers-reduced-motion`).
+  - **Minimalist Inspector Header & Error Visibility**:
+    - Streamlines `SubagentInspectorView` metadata banner into a concise header row (`Role` + hairline subtitle `MainModel -> Provider / SubagentModel · Workspace` + live status timer) and renders a clean inline failure card when a subagent settled with `failed` status so diagnostics are immediately legible without opening raw logs.
   - **Empty State**: When no subagent has been launched yet in the active thread, renders a clean empty state explaining that subagents and swarms spawned by the main agent will appear here live.
 - **3. Swarm Board & Roster Mode (`SwarmBoardInspector.tsx`)**:
   - **Coordinator vs. Workers Header**: Shows the Swarm `title` and highlights the **Main Coordinator** (with its heavy model badge) alongside the pool of **Workers** (with their lightweight/assigned model badges).
@@ -231,6 +225,10 @@ Checks: component tests in `SubagentInspectorView.test.tsx` and `SwarmBoardInspe
   Wire `RightDockTabKind`, `TAB_CONFIGS`, `STANDARD_MENU_TABS`, automatic `setRightDockVisible(true)` on subagent/diff dock events, active running count badge, and responsive split layout.
 - [x] **T5 — Build `SubagentInspectorView.tsx`, `SwarmBoardInspector.tsx`, and `subagents.css` inside `RightDock`.** `S5`. Route: inline. Evidence: `SubagentInspectorView.test.tsx` (3 passed), `SwarmBoardInspector.test.tsx` (2 passed), `chat`+`subagents`+`RightDock`+`dock`+`useAppGlobalEvents` Vitest (39 files / 272 passed), `acp::` (6 passed), `chat::` (207 passed), `chat_commands::tests::` (8 passed), `tsc --noEmit` (0 errors), `audit-references.mjs --check` (clean).
   Implement the subagent selector, `Main -> Subagent` model hierarchy badge, collapsible `TaskBriefCard`, live auto-scrolling subagent step stream, and the 3-view `SwarmBoardInspector` (`Board Feed` with `#channels` & `@mentions`, `Roster` with worker drill-down, and `Activity Graph`).
+- [ ] **T6 — Harden subagent CLI normalization in `acp/types.rs`, `turn_pipeline.rs`, and `subagents.rs` to strip shell redirections (`2>&1`), eliminate `"run command"` role fallback, and propagate failed CLI exit codes/receipts as `"failed"`.** `S1`. Route: inline (`src-tauri/src/acp/types.rs`, `src-tauri/src/chat/turn_pipeline.rs`, `src-tauri/src/chat/runtime/stream_json.rs`, `src-tauri/src/chat/subagents.rs`).
+  Ensure shell invocation failures never produce false `"completed"` subagent cards, remove `"2>&1"` / pipeline tokens from extracted prompts, and fall back to `"Subagent"` or the target provider rather than `"run command"`.
+- [ ] **T7 — Redesign `SubagentActivityCard`, `SwarmActivityCard`, multi-subagent disclosure grouping, and `RightDock` inspector visuals for minimalist workbench clarity under `AGENTS.md` tokens.** `S3`, `S5`. Route: inline (`src/components/views/chat/SubagentActivityCard.tsx`, `SwarmActivityCard.tsx`, `ChatItemRow.tsx`, `chat.css`, `src/components/views/subagents/`).
+  Adopt single-line hairline workbench rows with accurate interactive states (clickable only when backed by a child thread, transcript URI, or captured steps), expandable multi-subagent disclosure groups (`Started N subagents`), and clean header/error hierarchy in `RightDock`.
 
 ---
 
@@ -247,3 +245,4 @@ Checks: component tests in `SubagentInspectorView.test.tsx` and `SwarmBoardInspe
 
 - **L1. 2026-11-12.** User words: "Mira, creo que es de los próximos tópicos que podemos tomar de la parte de thread Sería la muestra de subagentes, o la ejecución de estos mismos. Así también Swarm... Básicamente te muestran la ejecución de los subagentes. En el chat principal y bueno, si uno les da clic, se abre la zona como en una sidebar... También sé que Antigravity implementa como una función de swarm. Y donde se tiene como un modelo pesado en la conversación main. Y modelos livianos en las conversaciones, eh, más livianas, claramente, de subagentes." / "Podemos primero partir dando soporte nativo a los subagentes de estas a, de estos proveedores. Como Grok, que, claro, tiene subagentes. Antigravity también tiene subagentes en su CLI... Bueno, en esa misma zona lateral, en nuestra sidebar, por así decirlo. Ahí podríamos incluir esta inspección para el subagente... Claro, tendríamos que crear esta nueva parte de visualización de subagentes. Con las animaciones correspondientes, vista correspondiente, que quede todo bien responsivo." / "Mira, creo que arma ese lo de D, pero que quiero que sea muy muy específico, por ende, si que se llegan a realizar muchas tareas. Puedes llegar a crear dos. ODDs distintos. Eh, con tal de que los subagentes que realmente lo hagan. Puedan llegar a entender qué tanto se espera. Por ende. Yo creo que solamente hagas los oDD. Y esperes, luego ya comenzaré a ejecutarlos con otro." Created `odd/tasks/thread-subagent-surface-and-dock.md` (ODD 1 of 2) specifying native subagent & swarm stream normalization, durable thread metadata, interactive timeline cards, and the `RightDock` Subagent & Swarm Inspector.
 - **L2. 2026-11-12.** Executed and verified T1-T5 of ODD 1 (`acp::` 6 passed, `chat::` 207 passed, `chat_commands::tests::` 8 passed, Vitest 39 files / 272 passed, `tsc --noEmit` 0 errors, `audit-references.mjs --check` clean). Also wired `AgentChatShell.tsx` to match `SingleThreadPane.tsx` for subagent/swarm card rendering and live stage telemetry.
+- **L3. 2026-11-12.** User words: "También para la parte de subagentes donde se muestran, no le gustan mucho. Quiero decir, se pueden mejorar bastante, hacer un poco más profesional. Puedes basarte en anti-gravity, utilizar REA para ver cómo lo hacen ellos. La parte de mostrarlo." / "Okay, mira, exacto, tenemos que llegar a modificar todas estas cosas, pero no sé si realmente valga la pena crear un nuevo ODD, sino que modificar los que ya creamos, con respecto a esto. Entonces, la cosa sería configurar esos o sea, configurar correctamente la skill, hacer las correcciones pertinentes para todo el instruccionamiento, vista y demás. Quiero que vayas con todo eso como tal. Pero claro, quiero que modifiques también el ODD. E implementes de una, no me consultes nuevamente." Updated `S1`, `S3`, and `S5`, and added `T6`–`T7` covering shell redirection/role/failed-status normalization and the minimalist workbench redesign of `SubagentActivityCard`, `SwarmActivityCard`, multi-subagent grouping, and `RightDock` inspector header/failure presentation.

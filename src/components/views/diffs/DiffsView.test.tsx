@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { StrictMode, useCallback, useState } from 'react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { DiffsView } from './DiffsView';
 import { DiffCodeViewer } from './DiffCodeViewer';
+import { openDiffsInRightDock, consumePendingDiffPreview } from '../../../lib/diffPreviewNav';
 import type { WorkspaceChanges } from '../files/gitTypes';
 import type { DiffData } from '../chat/types';
 import { MOTION_EXIT_MS } from '../../../motion/contract';
@@ -41,28 +43,34 @@ const mockFileDiff: DiffData = {
   ],
 };
 
+const defaultWorkspaceGitState = () => ({
+  gitChanges: mockChanges,
+  gitLoading: false,
+  gitError: null,
+  selectedDiffPath: 'index.html',
+  diffData: mockFileDiff,
+  diffLoading: false,
+  diffError: null,
+  gitBusy: null,
+  gitWriteError: null,
+  commitDraft: 'Initial commit message',
+  setCommitDraft: vi.fn(),
+  setSelectedDiffPath: vi.fn(),
+  setGitWriteError: vi.fn(),
+  refreshGit: vi.fn(),
+  handleToggleStage: vi.fn(),
+  handleStageAll: vi.fn(),
+  handleUnstageAll: vi.fn(),
+  handleDiscardChanges: vi.fn(),
+  handleCommit: vi.fn(),
+});
+
+const { useWorkspaceGitSpy } = vi.hoisted(() => ({
+  useWorkspaceGitSpy: vi.fn(),
+}));
+
 vi.mock('../files/useWorkspaceGit', () => ({
-  useWorkspaceGit: () => ({
-    gitChanges: mockChanges,
-    gitLoading: false,
-    gitError: null,
-    selectedDiffPath: 'index.html',
-    diffData: mockFileDiff,
-    diffLoading: false,
-    diffError: null,
-    gitBusy: null,
-    gitWriteError: null,
-    commitDraft: 'Initial commit message',
-    setCommitDraft: vi.fn(),
-    setSelectedDiffPath: vi.fn(),
-    setGitWriteError: vi.fn(),
-    refreshGit: vi.fn(),
-    handleToggleStage: vi.fn(),
-    handleStageAll: vi.fn(),
-    handleUnstageAll: vi.fn(),
-    handleDiscardChanges: vi.fn(),
-    handleCommit: vi.fn(),
-  }),
+  useWorkspaceGit: (...args: unknown[]) => useWorkspaceGitSpy(...args),
 }));
 
 vi.mock('../files/gitTypes', async () => {
@@ -84,6 +92,9 @@ vi.mock('../files/gitTypes', async () => {
 describe('DiffsView Component Tests', () => {
   beforeEach(() => {
     localStorage.clear();
+    consumePendingDiffPreview();
+    useWorkspaceGitSpy.mockReset();
+    useWorkspaceGitSpy.mockImplementation(defaultWorkspaceGitState);
   });
 
   it('renders top commit bar with draft message and commit buttons', () => {
@@ -316,6 +327,129 @@ describe('DiffsView Component Tests', () => {
 
     expect(onSelect).toHaveBeenCalledWith('ws-auto');
     expect(screen.getByText('Auto Project')).toBeInTheDocument();
+  });
+
+  it('focuses and expands turn files when opened via openDiffsInRightDock and allows showing all', async () => {
+    openDiffsInRightDock({
+      workspaceId: 'ws-test',
+      workspaceName: 'kite',
+      focusPaths: ['C:\\Users\\PC\\Desktop\\Proyectos\\kite\\index.html'],
+    });
+
+    render(<DiffsView workspaceId="ws-test" />);
+
+    expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
+    expect(screen.getAllByRole('article')).toHaveLength(1);
+    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Show all \(2\)/i }));
+    expect(screen.queryByText('Showing 1 change from thread')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('article')).toHaveLength(2);
+  });
+
+  it('retains pending focus across initial empty render and React StrictMode while gitChanges loads asynchronously', async () => {
+    let resolveLoad!: (value: WorkspaceChanges) => void;
+    const pendingLoad = new Promise<WorkspaceChanges>((resolve) => {
+      resolveLoad = resolve;
+    });
+
+    useWorkspaceGitSpy.mockImplementation(() => {
+      const [gitChanges, setGitChanges] = useState<WorkspaceChanges | null>(null);
+      const [gitLoading, setGitLoading] = useState(false);
+      const refreshGit = useCallback(async () => {
+        setGitLoading(true);
+        const result = await pendingLoad;
+        setGitChanges(result);
+        setGitLoading(false);
+      }, []);
+
+      return {
+        ...defaultWorkspaceGitState(),
+        gitChanges,
+        gitLoading,
+        refreshGit,
+      };
+    });
+
+    openDiffsInRightDock({
+      workspaceId: 'ws-test',
+      workspaceName: 'kite',
+      focusPaths: ['Proyectos/kite/index.html'],
+      selectedPath: 'Proyectos/kite/index.html',
+    });
+
+    render(
+      <StrictMode>
+        <DiffsView workspaceId="ws-test" />
+      </StrictMode>
+    );
+
+    expect(screen.getByText('Reading workspace git status…')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveLoad(mockChanges);
+      await pendingLoad;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole('article')).toHaveLength(1);
+    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+  });
+
+  it('waits for refreshGit before clearing focus when a newly changed file arrives asynchronously while mounted', async () => {
+    const initialChanges: WorkspaceChanges = {
+      ...mockChanges,
+      files: [mockChanges.files[0]],
+    };
+    let resolveRefresh!: (value: WorkspaceChanges) => void;
+    const pendingRefresh = new Promise<WorkspaceChanges>((resolve) => {
+      resolveRefresh = resolve;
+    });
+
+    useWorkspaceGitSpy.mockImplementation(() => {
+      const [gitChanges, setGitChanges] = useState<WorkspaceChanges | null>(initialChanges);
+      const [gitLoading, setGitLoading] = useState(false);
+      const refreshGit = useCallback(async () => {
+        setGitLoading(true);
+        const result = await pendingRefresh;
+        setGitChanges(result);
+        setGitLoading(false);
+      }, []);
+
+      return {
+        ...defaultWorkspaceGitState(),
+        gitChanges,
+        gitLoading,
+        refreshGit,
+      };
+    });
+
+    render(<DiffsView workspaceId="ws-test" />);
+    expect(screen.getAllByRole('article')).toHaveLength(1);
+
+    act(() => {
+      openDiffsInRightDock({
+        workspaceId: 'ws-test',
+        workspaceName: 'kite',
+        focusPaths: ['Proyectos/kite/src/main.ts'],
+        selectedPath: 'Proyectos/kite/src/main.ts',
+      });
+    });
+
+    await act(async () => {
+      resolveRefresh(mockChanges);
+      await pendingRefresh;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
+    });
+    const articles = screen.getAllByRole('article');
+    expect(articles).toHaveLength(1);
+    expect(articles[0]).toHaveAttribute('id', 'diff-file-src%2Fmain.ts');
+    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
   });
 });
 

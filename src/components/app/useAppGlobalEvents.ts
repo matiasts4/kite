@@ -136,8 +136,12 @@ export function useAppGlobalEvents({
       }
     };
 
-    const handleOpenDiffsInDock = () => {
+    const handleOpenDiffsInDock = (e: Event) => {
+      const custom = e as CustomEvent<{ workspaceId?: string | null }>;
       setRightDockVisible(true);
+      if (custom.detail?.workspaceId) {
+        setSelectedWorkspaceId(custom.detail.workspaceId);
+      }
     };
 
     const handleDockShortcutKeyDown = (e: KeyboardEvent) => {

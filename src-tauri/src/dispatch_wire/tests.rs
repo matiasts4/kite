@@ -497,7 +497,83 @@ fn live_port_interrupt_and_sub_ms_publish_work_for_threads() {
     let receipt = svc.interrupt("int-thread-1", &address);
     assert_eq!(receipt.status, ReceiptStatus::Submitted, "receipt={receipt:?}");
 
+    // Interrupt on a persistent session leaves it Closed & Done/Idle (not Gone), ready for re-attach.
+    let ptid = "test-interrupt-persistent-opencode";
+    let paddr = format!("thread:{ptid}");
+    {
+        let mut list = threads().lock().unwrap();
+        list.retain(|t| t.get("id").and_then(Value::as_str) != Some(ptid));
+        list.push(json!({
+            "id": ptid,
+            "provider": "opencode",
+            "status": "idle",
+            "pendingApproval": Value::Null,
+            "pendingUserInput": Value::Null,
+            "items": [{ "id": "u1", "kind": "user", "text": "hello" }],
+        }));
+    }
+    let first_tr = crate::chat::session::ScriptedTransport::new();
+    {
+        let mut mgr = crate::chat::session_manager().lock().unwrap();
+        mgr.attach(
+            crate::chat::session::SessionSpec {
+                thread_id: ptid.to_string(),
+                driver: "opencode".into(),
+                connection_id: None,
+                working_directory: None,
+                mode: crate::chat::session::SessionMode::Persistent,
+                recipe: None,
+                resume_handle: None,
+                extra_env: Vec::new(),
+            },
+            Box::new(first_tr.clone()),
+        )
+        .unwrap();
+        mgr.start(ptid).unwrap();
+    }
+    let _ = svc.attach(Family::Thread, ptid, None, None, false);
+    let preceipt = svc.interrupt("int-persistent-1", &paddr);
+    assert_eq!(preceipt.status, ReceiptStatus::Submitted);
+    assert_eq!(
+        super::protocol::thread_presence(ptid),
+        (crate::dispatch::presence::PresenceState::Done, None)
+    );
+    assert_eq!(first_tr.stop_count(), 1);
+    {
+        let mut mgr = crate::chat::session_manager().lock().unwrap();
+        let next_tr = crate::chat::session::ScriptedTransport::new();
+        mgr.attach(
+            crate::chat::session::SessionSpec {
+                thread_id: ptid.to_string(),
+                driver: "opencode".into(),
+                connection_id: None,
+                working_directory: None,
+                mode: crate::chat::session::SessionMode::Persistent,
+                recipe: None,
+                resume_handle: None,
+                extra_env: Vec::new(),
+            },
+            Box::new(next_tr),
+        )
+        .expect("re-attach after interrupt must succeed");
+    }
+
+    // Kill -> mark_thread_killed -> clear_thread_killed (as on new UI turn) -> Done.
     let _ = svc.kill("test-cleanup-interrupt", &address);
+    assert_eq!(
+        super::protocol::thread_presence(tid),
+        (crate::dispatch::presence::PresenceState::Gone, None)
+    );
+    super::protocol::clear_thread_killed(tid);
+    assert_eq!(
+        super::protocol::thread_presence(tid),
+        (crate::dispatch::presence::PresenceState::Done, None)
+    );
+
+    let _ = svc.kill("test-cleanup-persistent", &paddr);
     let mut list = threads().lock().unwrap();
-    list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid));
+    list.retain(|t| {
+        let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+        id != tid && id != ptid
+    });
 }

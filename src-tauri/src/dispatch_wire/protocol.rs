@@ -151,11 +151,18 @@ impl Port for LivePort {
             Family::Thread => {
                 crate::chat::cancel_turn(id);
                 if let Ok(mut manager) = crate::chat::session_manager().lock() {
-                    let attached_open = manager
-                        .status(id)
-                        .is_some_and(|r| r.state != crate::chat::SessionState::Closed);
-                    if attached_open {
+                    let state = manager.status(id).map(|r| r.state);
+                    if matches!(state, Some(s) if s != crate::chat::SessionState::Closed) {
                         let _ = manager.interrupt(id);
+                    }
+                    // `interrupt()` leaves persistent servers (e.g. OpenCode) in `Interrupted`,
+                    // which blocks `SessionManager::attach` on the next turn; closing it to
+                    // `Closed` keeps the thread resumable (`Done`/`Idle`, not `Gone`).
+                    if manager
+                        .status(id)
+                        .is_some_and(|r| r.state == crate::chat::SessionState::Interrupted)
+                    {
+                        let _ = manager.stop(id);
                     }
                 }
                 Ok(())
@@ -468,9 +475,7 @@ pub fn thread_presence(thread_id: &str) -> (PresenceState, Option<BlockKind>) {
         return (PresenceState::Working, None);
     }
 
-    if is_thread_killed(thread_id)
-        || session_state == Some(crate::chat::SessionState::Closed)
-    {
+    if is_thread_killed(thread_id) {
         return (PresenceState::Gone, None);
     }
 

@@ -384,6 +384,7 @@ pub fn start_turn_with_binding(
             }
         }
     }
+    crate::dispatch_wire::protocol::clear_thread_killed(thread_id);
     thread["status"] = json!("running");
     touch(&mut thread);
     replace_thread(&thread);

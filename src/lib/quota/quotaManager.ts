@@ -206,7 +206,9 @@ class SubscriptionQuotaManager {
   private timer: any = null;
   private startupTimer: any = null;
   private isPolling = false;
-  private isFetching = false;
+  private inFlightFetch: Promise<Record<string, ProviderQuotaStatus>> | null = null;
+  private focusHandler: (() => void) | null = null;
+  private focusTimer: any = null;
   private tauriListenerRegistered = false;
 
   constructor() {
@@ -263,6 +265,15 @@ class SubscriptionQuotaManager {
     };
   }
 
+  private bindFocusListener(tick: () => void) {
+    if (typeof window === 'undefined' || this.focusHandler) return;
+    this.focusHandler = () => {
+      if (this.focusTimer) clearTimeout(this.focusTimer);
+      this.focusTimer = setTimeout(tick, 2500);
+    };
+    window.addEventListener('focus', this.focusHandler);
+  }
+
   startPolling() {
     if (this.isPolling) return;
     this.isPolling = true;
@@ -286,15 +297,16 @@ class SubscriptionQuotaManager {
       }, 4000);
 
       this.timer = setInterval(tick, this.pollIntervalMs);
-
-      if (typeof window !== 'undefined') {
-        let focusTimer: any = null;
-        window.addEventListener('focus', () => {
-          if (focusTimer) clearTimeout(focusTimer);
-          focusTimer = setTimeout(tick, 2500);
-        });
-      }
+      this.bindFocusListener(tick);
     }
+  }
+
+  startPollingForTest() {
+    if (this.isPolling) return;
+    this.isPolling = true;
+    this.bindFocusListener(() => {
+      void this.fetchAll(false);
+    });
   }
 
   stopPolling() {
@@ -306,7 +318,37 @@ class SubscriptionQuotaManager {
       clearInterval(this.timer);
       this.timer = null;
     }
+    if (this.focusTimer) {
+      clearTimeout(this.focusTimer);
+      this.focusTimer = null;
+    }
+    if (typeof window !== 'undefined' && this.focusHandler) {
+      window.removeEventListener('focus', this.focusHandler);
+      this.focusHandler = null;
+    }
     this.isPolling = false;
+  }
+
+  invalidateAndMarkRefreshing(providerId: string) {
+    const existing = this.cache.get(providerId);
+    this.cache.set(providerId, {
+      providerId,
+      displayName: existing?.displayName ?? (providerId === PROVIDERS.ANTIGRAVITY ? 'Antigravity' : providerId),
+      isAvailable: false,
+      isAuth: false,
+      primaryUsagePercent: 0,
+      primaryRemainingPercent: 0,
+      primaryResetAt: null,
+      timeUntilResetMs: null,
+      windows: [],
+      metadata: {
+        refreshing: true,
+        accountSource: 'switching',
+      },
+      lastUpdatedMs: Date.now(),
+    });
+    saveQuotaCache(this.getAllQuotas());
+    this.notify();
   }
 
   /**
@@ -324,9 +366,10 @@ class SubscriptionQuotaManager {
     });
   }
 
-  async fetchAll(force: boolean = false, providersOverride?: string[]): Promise<Record<string, ProviderQuotaStatus>> {
-    if (this.isFetching) return this.getAllQuotas();
-    this.isFetching = true;
+  private async runFetch(
+    force: boolean,
+    providersOverride?: string[]
+  ): Promise<Record<string, ProviderQuotaStatus>> {
     try {
       let prefs = readQuotaPreferences();
       if (needsQuotaSetupMigration()) {
@@ -349,10 +392,47 @@ class SubscriptionQuotaManager {
       }
     } catch (err) {
       console.warn('[SubscriptionQuotaManager] fetch failed:', err);
-    } finally {
-      this.isFetching = false;
     }
     return this.getAllQuotas();
+  }
+
+  fetchAll(
+    force: boolean = false,
+    providersOverride?: string[]
+  ): Promise<Record<string, ProviderQuotaStatus>> {
+    if (this.inFlightFetch) {
+      if (!force) {
+        return this.inFlightFetch;
+      }
+      return (async () => {
+        while (this.inFlightFetch) {
+          try {
+            await this.inFlightFetch;
+          } catch {
+            // Prior fetch already logged; proceed to forced refresh.
+          }
+        }
+        return this.fetchAll(true, providersOverride);
+      })();
+    }
+
+    let current!: Promise<Record<string, ProviderQuotaStatus>>;
+    current = this.runFetch(force, providersOverride).then(
+      (res) => {
+        if (this.inFlightFetch === current) {
+          this.inFlightFetch = null;
+        }
+        return res;
+      },
+      (err) => {
+        if (this.inFlightFetch === current) {
+          this.inFlightFetch = null;
+        }
+        throw err;
+      }
+    );
+    this.inFlightFetch = current;
+    return current;
   }
 
   getQuota(providerId: string): ProviderQuotaStatus | null {

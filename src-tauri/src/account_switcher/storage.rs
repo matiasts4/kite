@@ -208,6 +208,16 @@ pub(crate) fn get_provider_file_mappings(provider: &str) -> Vec<FileMapping> {
                 rel_dest: "jetski_state.pbtxt",
             },
         ],
+        "gemini" => vec![
+            FileMapping {
+                source: home.join(".gemini").join("oauth_creds.json"),
+                rel_dest: "oauth_creds.json",
+            },
+            FileMapping {
+                source: home.join(".gemini").join("google_accounts.json"),
+                rel_dest: "google_accounts.json",
+            },
+        ],
         "claude" => vec![
             FileMapping {
                 source: home.join(".claude").join(".credentials.json"),

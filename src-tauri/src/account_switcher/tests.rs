@@ -376,3 +376,62 @@ fn test_apply_profile_rolls_back_on_post_write_verification_failure() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_reconcile_live_identity_clears_active_on_signout_and_keeps_list_fast() {
+    let mut reg = AccountProfilesRegistry::default();
+    reg.profiles.push(SavedAccountProfile {
+        id: "prof-a".to_string(),
+        provider: "agy".to_string(),
+        label: "Account A".to_string(),
+        email: Some("a@example.com".to_string()),
+        plan_name: Some("Pro".to_string()),
+        is_active: true,
+        last_used_unix_ms: 100,
+        primary_remaining_percent: Some(90.0),
+        primary_reset_at: None,
+        time_until_reset_ms: None,
+        credential_status: Some("valid".to_string()),
+        has_refresh_token: true,
+    });
+    reg.profiles.push(SavedAccountProfile {
+        id: "prof-b".to_string(),
+        provider: "agy".to_string(),
+        label: "Account B".to_string(),
+        email: Some("b@example.com".to_string()),
+        plan_name: None,
+        is_active: false,
+        last_used_unix_ms: 90,
+        primary_remaining_percent: None,
+        primary_reset_at: None,
+        time_until_reset_ms: None,
+        credential_status: Some("valid".to_string()),
+        has_refresh_token: true,
+    });
+
+    // When signed out (live_ident == None), stale is_active must be cleared cleanly
+    let (changed_signout, unreg) = reconcile_live_identity_with_registry(&mut reg, "agy", None, None);
+    assert!(changed_signout);
+    assert!(unreg.is_none());
+    assert!(reg.profiles.iter().all(|p| !p.is_active));
+
+    // When live probe reports Account B, prof-b becomes active and prof-a stays inactive
+    let live_b = LiveIdentityProbe {
+        provider: "agy".to_string(),
+        email: "b@example.com".to_string(),
+        name: Some("User B".to_string()),
+        source: "gemini:antigravity".to_string(),
+    };
+    let (changed_b, _) = reconcile_live_identity_with_registry(&mut reg, "agy", Some(&live_b), None);
+    assert!(changed_b);
+    assert!(!reg.profiles[0].is_active);
+    assert!(reg.profiles[1].is_active);
+}
+
+#[test]
+fn test_gemini_cli_mappings_stay_distinct_from_agy() {
+    let gemini_maps = get_provider_file_mappings("gemini");
+    let gemini_dests: Vec<&str> = gemini_maps.iter().map(|m| m.rel_dest).collect();
+    assert!(gemini_dests.contains(&"oauth_creds.json"));
+    assert!(gemini_dests.contains(&"google_accounts.json"));
+}

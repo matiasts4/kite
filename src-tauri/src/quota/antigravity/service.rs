@@ -267,7 +267,12 @@ pub fn fetch_antigravity_quota() -> ProviderQuotaStatus {
     };
     // The RPC responds, so Antigravity is present. Google files are still
     // identity only, and the RPC verifies the quota route, not CLI chat or ACP.
-    record_google_oauth_connection(google_connection_identity.as_ref());
+    let google_oauth_ref = if rpc_identity.email.is_some() {
+        Some(&rpc_identity)
+    } else {
+        google_connection_identity.as_ref()
+    };
+    record_google_oauth_connection(google_oauth_ref);
     persist_antigravity_connection("local_rpc", |registry| {
         record_local_rpc_probe(registry, &rpc_identity)
     });

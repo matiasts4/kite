@@ -18,15 +18,3 @@ pub use types::*;
 pub fn list_provider_mcp_servers(request: Option<serde_json::Value>) -> serde_json::Value {
     accounts::list_provider_mcp_servers_impl(request)
 }
-
-/// Reads active Antigravity credentials and ~/.gemini/google_accounts.json to list accounts.
-#[tauri::command]
-pub fn antigravity_list_google_accounts() -> Result<serde_json::Value, String> {
-    accounts::antigravity_list_google_accounts_impl()
-}
-
-/// Switches the active Google account in ~/.gemini/google_accounts.json.
-#[tauri::command]
-pub fn antigravity_set_active_google_account(email: String) -> Result<serde_json::Value, String> {
-    accounts::antigravity_set_active_google_account_impl(email)
-}

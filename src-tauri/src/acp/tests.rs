@@ -74,15 +74,6 @@ fn read_file_keeps_a_capitalized_path() {
 }
 
 #[test]
-fn test_antigravity_list_google_accounts() {
-    let res = antigravity_list_google_accounts().unwrap();
-    println!("LIST GOOGLE ACCOUNTS: {}", serde_json::to_string_pretty(&res).unwrap());
-    assert!(res.get("active").and_then(|v| v.as_str()).is_some(), "Expected active account to be present");
-    let arr = res.get("accounts").and_then(|v| v.as_array()).unwrap();
-    assert!(!arr.is_empty(), "Expected accounts array not to be empty");
-}
-
-#[test]
 fn classifies_native_subagent_and_swarm_tools_with_metadata() {
     let agy_params = serde_json::json!({
         "TypeName": "research",

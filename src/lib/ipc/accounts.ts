@@ -118,19 +118,6 @@ export async function prepareNewAccountLogin(
   }
 }
 
-export async function listGoogleAccounts(): Promise<{ active: string | null; accounts: string[] }> {
-  try {
-    return await invokeCommand<{ active: string | null; accounts: string[] }>('antigravity_list_google_accounts');
-  } catch (err) {
-    console.warn('[IPC] listGoogleAccounts failed:', err);
-    return { active: null, accounts: [] };
-  }
-}
-
-export async function setActiveGoogleAccount(email: string): Promise<{ success: boolean; active: string; accounts: string[] }> {
-  return await invokeCommand<{ success: boolean; active: string; accounts: string[] }>('antigravity_set_active_google_account', { email });
-}
-
 export interface CredentialStatusItem {
   provider: string;
   isConfigured: boolean;

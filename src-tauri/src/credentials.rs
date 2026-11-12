@@ -359,7 +359,8 @@ pub fn provider_env_vars(provider: &str) -> &'static [&'static str] {
         "cloudflare" => &["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_AUTH_TOKEN"],
         "cloudflare_account_id" => &["CLOUDFLARE_ACCOUNT_ID"],
         "elevenlabs" => &["ELEVENLABS_API_KEY", "XI_API_KEY"],
-        "gemini" | "antigravity" => &["GEMINI_API_KEY"],
+        "gemini" => &["GEMINI_API_KEY"],
+        "antigravity" => &[],
         "kimi" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
         "claude" => &["CLAUDE_CODE_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
         "codex" => &["CODEX_ACCESS_TOKEN", "CODEX_TOKEN", "OPENAI_API_KEY"],
@@ -367,33 +368,25 @@ pub fn provider_env_vars(provider: &str) -> &'static [&'static str] {
     }
 }
 
-/// Resolves an API key for any provider following the 3-tier hierarchy:
-/// 1. User Vault (SQLite)
-/// 2. Environment Variables (.env / OS)
-/// 3. Returns None (caller can check local CLI if applicable)
-pub fn resolve_provider_credential(provider: &str) -> Option<(String, CredentialSource)> {
+/// Resolves an API key using injected vault/env lookup functions so caller
+/// isolation is deterministic in production and tests.
+/// Antigravity and Gemini are strictly isolated: Antigravity Google OAuth accounts
+/// must not silently inherit a separate `gemini` API key override.
+pub fn resolve_provider_credential_with(
+    provider: &str,
+    vault_lookup: &dyn Fn(&str) -> Option<String>,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, CredentialSource)> {
     // 1. User Vault
-    if let Some(key) = get_vault_credential(provider) {
+    if let Some(key) = vault_lookup(provider) {
         if !key.trim().is_empty() {
             return Some((key, CredentialSource::Vault));
         }
     }
 
-    // Fallbacks for linked providers
+    // Fallbacks for linked providers (excluding cross-provider gemini <-> antigravity)
     if provider == "grok_transcription" {
-        if let Some(key) = get_vault_credential("grok") {
-            if !key.trim().is_empty() {
-                return Some((key, CredentialSource::Vault));
-            }
-        }
-    } else if provider == "antigravity" {
-        if let Some(key) = get_vault_credential("gemini") {
-            if !key.trim().is_empty() {
-                return Some((key, CredentialSource::Vault));
-            }
-        }
-    } else if provider == "gemini" {
-        if let Some(key) = get_vault_credential("antigravity") {
+        if let Some(key) = vault_lookup("grok") {
             if !key.trim().is_empty() {
                 return Some((key, CredentialSource::Vault));
             }
@@ -402,7 +395,7 @@ pub fn resolve_provider_credential(provider: &str) -> Option<(String, Credential
 
     // 2. Environment Variables
     for &var_name in provider_env_vars(provider) {
-        if let Ok(val) = std::env::var(var_name) {
+        if let Some(val) = env_lookup(var_name) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return Some((trimmed.to_string(), CredentialSource::Env));
@@ -411,6 +404,24 @@ pub fn resolve_provider_credential(provider: &str) -> Option<(String, Credential
     }
 
     None
+}
+
+/// Resolves an explicit Antigravity API-key override configured directly for
+/// `antigravity` in Kite Vault (never falling back to `gemini` or ambient env).
+pub fn resolve_explicit_antigravity_api_key() -> Option<String> {
+    get_vault_credential("antigravity").filter(|k| !k.trim().is_empty())
+}
+
+/// Resolves an API key for any provider following the 3-tier hierarchy:
+/// 1. User Vault (SQLite)
+/// 2. Environment Variables (.env / OS)
+/// 3. Returns None (caller can check local CLI if applicable)
+pub fn resolve_provider_credential(provider: &str) -> Option<(String, CredentialSource)> {
+    resolve_provider_credential_with(
+        provider,
+        &get_vault_credential,
+        &|var_name| std::env::var(var_name).ok().filter(|s| !s.trim().is_empty()),
+    )
 }
 
 /// Convenience helper to get just the key string if available
@@ -615,5 +626,44 @@ mod tests {
         // Delete
         remove_vault_credential(test_provider).expect("delete failed");
         assert_eq!(get_vault_credential(test_provider), None);
+    }
+
+    #[test]
+    fn test_antigravity_isolated_from_gemini_vault_api_key_fallback() {
+        let lookup_vault = |provider: &str| -> Option<String> {
+            match provider {
+                "gemini" => Some("AIza-gemini-only-key".to_string()),
+                _ => None,
+            }
+        };
+        let lookup_env = |var_name: &str| -> Option<String> {
+            match var_name {
+                "GEMINI_API_KEY" => Some("AIza-ambient-gemini-env".to_string()),
+                _ => None,
+            }
+        };
+
+        assert_eq!(
+            resolve_provider_credential_with("antigravity", &lookup_vault, &lookup_env),
+            None,
+            "antigravity must not inherit unrelated gemini vault API key or ambient GEMINI_API_KEY"
+        );
+        assert_eq!(
+            resolve_provider_credential_with("gemini", &lookup_vault, &lookup_env).map(|(k, _)| k),
+            Some("AIza-gemini-only-key".to_string())
+        );
+
+        let explicit_vault = |provider: &str| -> Option<String> {
+            match provider {
+                "antigravity" => Some("AIza-explicit-agy-key".to_string()),
+                "gemini" => Some("AIza-gemini-only-key".to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            resolve_provider_credential_with("antigravity", &explicit_vault, &lookup_env)
+                .map(|(k, _)| k),
+            Some("AIza-explicit-agy-key".to_string())
+        );
     }
 }

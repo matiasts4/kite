@@ -242,12 +242,22 @@ pub fn spawn_session_with_options(
         cmd.env("KITE_PANE_ID", p_id);
     }
 
-    // Inject API credentials from the Kite vault into the agent terminal if not already present in env
-    for &var_name in crate::credentials::provider_env_vars(engine) {
-        if std::env::var(var_name).is_err() {
-            if let Some((key, _)) = crate::credentials::resolve_provider_credential(engine) {
-                cmd.env(var_name, key);
-                break;
+    // Inject API credentials cleanly. Antigravity uses Google OAuth by default; only an
+    // explicit `antigravity` vault override injects `GEMINI_API_KEY`, and ambient inherited
+    // `GEMINI_API_KEY` is scrubbed when active Antigravity OAuth credentials exist.
+    if engine == "antigravity" || engine == "agy" {
+        if let Some(explicit_key) = crate::credentials::resolve_explicit_antigravity_api_key() {
+            cmd.env("GEMINI_API_KEY", explicit_key);
+        } else if crate::quota::read_antigravity_credential().is_some() {
+            cmd.env_remove("GEMINI_API_KEY");
+        }
+    } else {
+        for &var_name in crate::credentials::provider_env_vars(engine) {
+            if std::env::var(var_name).is_err() {
+                if let Some((key, _)) = crate::credentials::resolve_provider_credential(engine) {
+                    cmd.env(var_name, key);
+                    break;
+                }
             }
         }
     }

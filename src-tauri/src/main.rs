@@ -402,8 +402,6 @@ fn main() {
             abandon_agent_draft,
             accept_agent_draft,
             add_workspace,
-            antigravity_list_google_accounts,
-            antigravity_set_active_google_account,
             agent_install_open_docs,
             agent_message_inbox,
             agent_messaging_preference,

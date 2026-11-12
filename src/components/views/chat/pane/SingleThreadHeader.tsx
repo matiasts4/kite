@@ -33,9 +33,6 @@ export interface SingleThreadHeaderProps {
   onNewThread: () => void | Promise<string | null | undefined | void>;
   isMulti: boolean;
   onClosePane: () => void;
-  onPinThread?: (id: string, e: React.MouseEvent) => void;
-  onArchiveThread?: (id: string, e: React.MouseEvent) => void;
-  onToggleSplit?: () => void;
 }
 
 export const SingleThreadHeader: React.FC<SingleThreadHeaderProps> = ({

@@ -151,7 +151,7 @@ export function useAppGlobalEvents({
           sendUiAck({
             reqId: custom.detail.reqId,
             ok: false,
-            reason: `Modo inválido: ${targetMode}`,
+            reason: `Invalid mode: ${targetMode}`,
           });
         }
       }

@@ -173,6 +173,7 @@ export function useChatSession({
     handleApproval,
     handleCancelTurn,
     handleSendPrompt,
+    handleUserInputResponse,
   } = useChatTurnActions({
     agentId,
     threadsMap,
@@ -681,6 +682,7 @@ export function useChatSession({
     stageDroppedAttachments,
     handleRemoveAttachment,
     handleSendPrompt,
+    handleUserInputResponse,
     setKnownThreadsList,
     persistAgentTabOrder,
   };

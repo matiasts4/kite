@@ -60,13 +60,13 @@ export const withResolvedSendBindings = (
 };
 
 export interface UseChatConnectionBindingsOptions {
-  threadsMap: Record<string, ExtendedChatThread>;
+  threadsMap?: Record<string, ExtendedChatThread>;
   setThreadsMap: React.Dispatch<React.SetStateAction<Record<string, ExtendedChatThread>>>;
   isMountedRef?: MutableRefObject<boolean>;
 }
 
 export function useChatConnectionBindings({
-  threadsMap,
+  threadsMap: _ignoredThreadsMap,
   setThreadsMap,
   isMountedRef,
 }: UseChatConnectionBindingsOptions) {
@@ -101,7 +101,7 @@ export function useChatConnectionBindings({
     setThreadsMap((prev) =>
       withResolvedSendBindings(prev, connections, threadConnections)
     );
-  }, [connections, threadConnections, threadsMap, setThreadsMap]);
+  }, [connections, threadConnections, setThreadsMap]);
 
   const resolveThreadSendBinding = (
     thread: ExtendedChatThread

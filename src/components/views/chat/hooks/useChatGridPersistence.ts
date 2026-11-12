@@ -101,13 +101,7 @@ export const loadThreadWithFallback = async (
       : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
     if (t && t.id) return t;
   } catch {
-    try {
-      const localRaw = localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}${tid}`);
-      if (localRaw) {
-        const parsed = JSON.parse(localRaw);
-        if (parsed?.id) return parsed;
-      }
-    } catch {}
+    // Fall back to localStorage if IPC fails or thread is offline
   }
   try {
     const localRaw = localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}${tid}`);

@@ -129,12 +129,12 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   titleInput,
   onFocus,
   onClosePane,
-  onToggleSplit,
+  onToggleSplit: _onToggleSplit,
   onToggleHistory: _onToggleHistory,
   onNewThread,
   onSelectHistoryThread: _onSelectHistoryThread,
-  onPinThread,
-  onArchiveThread,
+  onPinThread: _onPinThread,
+  onArchiveThread: _onArchiveThread,
   onStartRename,
   onSaveRename,
   onChangeTitleInput,
@@ -455,9 +455,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
           onNewThread={onNewThread}
           isMulti={isMulti}
           onClosePane={onClosePane}
-          onPinThread={onPinThread}
-          onArchiveThread={onArchiveThread}
-          onToggleSplit={onToggleSplit}
         />
       )}
 
@@ -514,7 +511,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                             style={{
                               fontSize: '12px',
                               padding: '6px 14px',
-                              borderRadius: '6px',
+                              borderRadius: 'var(--control-radius, 8px)',
                             }}
                           >
                             Show earlier messages ({displayedRows.length} of {transcriptRows.length} shown)
@@ -591,9 +588,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 <h1>
                   {isVoiceActiveHere ? (
                     voice.micMuted ? (
-                      'Micrófono en silencio'
+                      'Microphone muted'
                     ) : (
-                      'Te escucho'
+                      'Listening...'
                     )
                   ) : agentName ? (
                     'What should we build?'
@@ -608,7 +605,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 </h1>
                 <p>
                   {isVoiceActiveHere
-                    ? 'Hablá o escribí. Zed responde con voz y deja cada acción en esta conversación.'
+                    ? 'Speak or type. Zed replies with voice and logs each action in this conversation.'
                     : agentName
                     ? null
                     : effectiveWorkspaceName
@@ -663,10 +660,10 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                     alignItems: 'center',
                     gap: '6px',
                   }}
-                  title="Mostrar artefacto oculto"
+                  title="Show hidden artifact"
                 >
                   <FileCodeIcon size={11} />
-                  <span>Ver artefacto: {activePlan.status === 'ready' ? 'Proposed Plan' : activePlan.status}</span>
+                  <span>View artifact: {activePlan.status === 'ready' ? 'Proposed Plan' : activePlan.status}</span>
                 </button>
               </div>
             )}

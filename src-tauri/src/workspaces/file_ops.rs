@@ -78,8 +78,9 @@ pub fn open_path_with_default_app(path: &Path) -> Result<(), String> {
     let result = {
         #[cfg(windows)]
         {
-            std::process::Command::new("cmd")
-                .args(["/c", "start", "", path.to_string_lossy().as_ref()])
+            // Spawn explorer.exe directly to open path with default system handler safely without cmd.exe
+            std::process::Command::new("explorer")
+                .arg(path.to_string_lossy().as_ref())
                 .spawn()
         }
         #[cfg(target_os = "macos")]
@@ -142,12 +143,19 @@ pub fn reveal_file(app: tauri::AppHandle, request: Option<Value>) -> Result<Valu
         let Some(ws_path) = workspace_path(workspace_id) else {
             return Err("Workspace folder could not be found.".to_string());
         };
-        if relative_path.is_empty() {
-            PathBuf::from(ws_path)
+        let ws_root = PathBuf::from(ws_path);
+        let joined = if relative_path.is_empty() {
+            ws_root.clone()
         } else {
             let clean_rel = relative_path.trim_start_matches(|c| c == '/' || c == '\\');
-            PathBuf::from(ws_path).join(clean_rel)
+            ws_root.join(clean_rel)
+        };
+        if let (Ok(canon_target), Ok(canon_root)) = (joined.canonicalize(), ws_root.canonicalize()) {
+            if !canon_target.starts_with(&canon_root) {
+                return Err("Access denied: path is outside the workspace root.".to_string());
+            }
         }
+        joined
     } else {
         return Err("No valid file path provided to reveal.".to_string());
     };
@@ -189,12 +197,19 @@ pub fn open_file_default(app: tauri::AppHandle, request: Option<Value>) -> Resul
         let Some(ws_path) = workspace_path(workspace_id) else {
             return Err("Workspace folder could not be found.".to_string());
         };
-        if relative_path.is_empty() {
-            PathBuf::from(ws_path)
+        let ws_root = PathBuf::from(ws_path);
+        let joined = if relative_path.is_empty() {
+            ws_root.clone()
         } else {
             let clean_rel = relative_path.trim_start_matches(|c| c == '/' || c == '\\');
-            PathBuf::from(ws_path).join(clean_rel)
+            ws_root.join(clean_rel)
+        };
+        if let (Ok(canon_target), Ok(canon_root)) = (joined.canonicalize(), ws_root.canonicalize()) {
+            if !canon_target.starts_with(&canon_root) {
+                return Err("Access denied: path is outside the workspace root.".to_string());
+            }
         }
+        joined
     } else {
         return Err("No valid file path provided to open.".to_string());
     };

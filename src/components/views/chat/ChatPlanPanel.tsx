@@ -105,7 +105,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
           aria-controls={expanded ? contentId : undefined}
           aria-expanded={expanded}
           onClick={() => setExpanded((v) => !v)}
-          title={expanded ? 'Minimizar artefacto' : 'Expandir artefacto'}
+          title={expanded ? 'Minimize artifact' : 'Expand artifact'}
         >
           <ChevronRightIcon
             size={10}
@@ -124,8 +124,8 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
               type="button"
               className="chat-plan-panel__icon-btn chat-plan-panel__icon-btn--close"
               onClick={onDismiss}
-              title="Cerrar / Ocultar artefacto"
-              aria-label="Cerrar / Ocultar artefacto"
+              title="Close / Hide artifact"
+              aria-label="Close / Hide artifact"
               style={{
                 background: 'none',
                 border: 'none',
@@ -135,7 +135,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
                 alignItems: 'center',
                 justifyContent: 'center',
                 padding: '3px',
-                borderRadius: '4px',
+                borderRadius: 'var(--vl-radius-xs, 4px)',
                 transition: 'color 0.15s ease, background-color 0.15s ease',
               }}
               onMouseEnter={(e) => {

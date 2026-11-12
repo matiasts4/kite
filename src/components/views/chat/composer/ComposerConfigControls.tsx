@@ -96,7 +96,7 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
 
       <ComposerControlSeparator />
 
-      {/* Effort Slider Popover (Exact Codex Discrete Slider Card) */}
+      {/* Effort Slider Popover (Discrete Effort Level Control) */}
       <EffortSliderPopover
         effort={threadEffort}
         modelName={currentModelName}

@@ -19,6 +19,30 @@ export type {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.54',
+    tag: 'v0.1.54',
+    date: 'Nov 12, 2026',
+    title: 'Correcciones en Thread: sidebar, diff stats y turn rail',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Restaurado listado completo de chats en la sidebar lateral',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corregido calculo de estadisticas (+N -M) y visualizacion de archivos modificados',
+      },
+      {
+        kind: 'fixed',
+        description: 'Posicionamiento elevado del riel de turnos y margenes contra colision con iconos',
+      },
+      {
+        kind: 'fixed',
+        description: 'Perfeccionada geometria circular del indicador de actividad Working',
+      },
+    ],
+  },
+  {
     version: '0.1.53',
     tag: 'v0.1.53',
     date: 'Nov 12, 2026',

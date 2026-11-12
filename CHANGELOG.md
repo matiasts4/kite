@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.54] - 2026-11-12
+
+> Correcciones en Thread: sidebar, diff stats y turn rail
+
+### Fixed
+- Restaurado listado completo de chats en la sidebar lateral
+- Corregido calculo de estadisticas (+N -M) y visualizacion de archivos modificados
+- Posicionamiento elevado del riel de turnos y margenes contra colision con iconos
+- Perfeccionada geometria circular del indicador de actividad Working
+
+---
+
 ## [0.1.53] - 2026-11-12
 
 > Modularización y optimización arquitectónica

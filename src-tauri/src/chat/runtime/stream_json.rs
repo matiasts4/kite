@@ -11,6 +11,19 @@ use super::settle::finish_run;
 use super::state::{emit_notice_item, live_cv, live_turns};
 use super::turn::push_event;
 
+pub fn extract_parent_subagent_id(val: &Value) -> Option<String> {
+    val.get("parent_tool_use_id")
+        .or_else(|| val.get("parentToolUseId"))
+        .or_else(|| val.get("subagent_id"))
+        .or_else(|| val.get("subagentId"))
+        .or_else(|| val.pointer("/params/update/parent_tool_use_id"))
+        .or_else(|| val.pointer("/step_update/parent_tool_use_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str, line: &str) -> bool {
     let trimmed = line.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
@@ -19,6 +32,92 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
     let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
         return false;
     };
+
+    if let Some(parent_id) = extract_parent_subagent_id(&val) {
+        if crate::chat::subagents::ingest_nested_subagent_frame(thread_id, run_id, &parent_id, &val) {
+            return true;
+        }
+    }
+
+    if let Some(parts) = val.pointer("/message/content").and_then(Value::as_array) {
+        let msg_type = val.get("type").and_then(Value::as_str).unwrap_or("");
+        if matches!(msg_type, "assistant" | "user") && !parts.is_empty() {
+            let mut handled = false;
+            for (idx, part) in parts.iter().enumerate() {
+                match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "thinking" => {
+                        if let Some(text) = part.get("thinking").or_else(|| part.get("text")).and_then(Value::as_str) {
+                            if !text.trim().is_empty() {
+                                let thought_id = format!("r_{}_{}", run_id, idx);
+                                let reasoning_item = chat_item(&thought_id, "reasoning", text, false);
+                                {
+                                    let mut live = live_turns().lock().unwrap();
+                                    if let Some(run) = live.runs.get_mut(run_id) {
+                                        push_event(run, json!({ "kind": "upsert", "item": reasoning_item.clone() }));
+                                    }
+                                }
+                                live_cv().notify_all();
+                                let mut items = threads().lock().unwrap();
+                                if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
+                                    upsert_item(thread, &reasoning_item);
+                                }
+                                handled = true;
+                            }
+                        }
+                    }
+                    "text" => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                emit_deltas(thread_id, run_id, assistant_id, text);
+                                handled = true;
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let tool_id = part.get("id").and_then(Value::as_str).unwrap_or("tool_1").to_string();
+                        let tool_name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let params = part.get("input").cloned().unwrap_or(Value::Null);
+                        let tool = crate::acp::build_acp_tool_call(
+                            tool_id,
+                            tool_name,
+                            params,
+                            "running".to_string(),
+                            None, None, None, None, None, None, None, None,
+                        );
+                        record_acp_tool_update(thread_id, run_id, tool);
+                        handled = true;
+                    }
+                    "tool_result" => {
+                        let tool_id = part.get("tool_use_id").or_else(|| part.get("id")).and_then(Value::as_str).unwrap_or("tool_1").to_string();
+                        let output = part.get("content").and_then(|v| {
+                            v.as_str()
+                                .map(str::to_string)
+                                .or_else(|| (!v.is_null()).then(|| serde_json::to_string_pretty(v).ok()).flatten())
+                        });
+                        let is_error = part.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                        let tool = crate::acp::build_acp_tool_call(
+                            tool_id,
+                            "",
+                            Value::Null,
+                            if is_error { "failed".into() } else { "completed".into() },
+                            output,
+                            None, None,
+                            Some("dynamicToolCall".to_string()),
+                            Some(String::new()),
+                            Some(String::new()),
+                            None, None,
+                        );
+                        record_acp_tool_update(thread_id, run_id, tool);
+                        handled = true;
+                    }
+                    _ => {}
+                }
+            }
+            if handled {
+                return true;
+            }
+        }
+    }
 
     if apply_known_turn_pipeline(thread_id, run_id, assistant_id, &val) {
         return true;
@@ -73,110 +172,7 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                 return true;
             }
             crate::acp::AcpStreamEvent::ToolUpdate { tool } => {
-                let is_streaming = tool.status == "running" || tool.status == "pending";
-                let is_terminal = tool.status == "completed" || tool.status == "failed";
-                let output_str = tool.output.as_deref().unwrap_or("");
-                let mut tool_item = chat_item(&tool.id, "tool", output_str, is_streaming);
-                tool_item["title"] = json!(if tool.title.is_empty() { tool.name.clone() } else { tool.title.clone() });
-                tool_item["detail"] = json!(tool.detail);
-                tool_item["status"] = json!(tool.status);
-                tool_item["toolName"] = json!(tool.name);
-                tool_item["toolKind"] = json!(tool.tool_kind);
-                if let Some(srv) = tool.server_name {
-                    tool_item["serverName"] = json!(srv);
-                }
-                if let Some(cmd) = tool.command {
-                    tool_item["command"] = json!(cmd);
-                }
-                if let Some(fp) = tool.file_path {
-                    tool_item["filePath"] = json!(fp);
-                }
-                if let Some(add) = tool.added_lines {
-                    tool_item["addedLines"] = json!(add);
-                }
-                if let Some(rem) = tool.removed_lines {
-                    tool_item["removedLines"] = json!(rem);
-                }
-                if let Some(dur) = tool.duration_seconds {
-                    tool_item["durationSeconds"] = json!(dur);
-                }
-
-                // If this is a subsequent tool update (e.g. tool_result), preserve existing metadata
-                {
-                    let items = threads().lock().unwrap();
-                    if let Some(thread) = items.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-                        if let Some(list) = thread.get("items").and_then(|v| v.as_array()) {
-                            if let Some(ex) = list.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(&tool.id)) {
-                                if let Some(ex_title) = ex.get("title").and_then(|v| v.as_str()) {
-                                    if !ex_title.is_empty() && ex_title != "tool" && tool_item["title"].as_str().map_or(true, |s| s.is_empty() || s == "tool") {
-                                        tool_item["title"] = json!(ex_title);
-                                    }
-                                }
-                                if let Some(ex_detail) = ex.get("detail").and_then(|v| v.as_str()) {
-                                    if !ex_detail.is_empty() && tool_item["detail"].as_str().map_or(true, |s| s.is_empty()) {
-                                        tool_item["detail"] = json!(ex_detail);
-                                    }
-                                }
-                                if let Some(ex_name) = ex.get("toolName").and_then(|v| v.as_str()) {
-                                    if !ex_name.is_empty() && ex_name != "tool" && tool_item["toolName"].as_str().map_or(true, |s| s.is_empty() || s == "tool") {
-                                        tool_item["toolName"] = json!(ex_name);
-                                    }
-                                }
-                                if let Some(ex_kind) = ex.get("toolKind").and_then(|v| v.as_str()) {
-                                    if !ex_kind.is_empty() && tool_item["toolKind"].as_str().map_or(true, |s| s.is_empty() || s == "dynamicToolCall") {
-                                        tool_item["toolKind"] = json!(ex_kind);
-                                    }
-                                }
-                                if tool_item.get("serverName").is_none() {
-                                    if let Some(s) = ex.get("serverName") {
-                                        tool_item["serverName"] = s.clone();
-                                    }
-                                }
-                                if tool_item.get("command").is_none() {
-                                    if let Some(c) = ex.get("command") {
-                                        tool_item["command"] = c.clone();
-                                    }
-                                }
-                                if tool_item.get("filePath").is_none() {
-                                    if let Some(f) = ex.get("filePath") {
-                                        tool_item["filePath"] = f.clone();
-                                    }
-                                }
-                                if tool_item.get("addedLines").is_none() {
-                                    if let Some(a) = ex.get("addedLines") {
-                                        tool_item["addedLines"] = a.clone();
-                                    }
-                                }
-                                if tool_item.get("removedLines").is_none() {
-                                    if let Some(r) = ex.get("removedLines") {
-                                        tool_item["removedLines"] = r.clone();
-                                    }
-                                }
-                                if let Some(c) = ex.get("createdAtUnixMs") {
-                                    tool_item["createdAtUnixMs"] = c.clone();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                {
-                    let mut live = live_turns().lock().unwrap();
-                    if let Some(run) = live.runs.get_mut(run_id) {
-                        push_event(run, json!({ "kind": "upsert", "item": tool_item.clone() }));
-                    }
-                }
-                live_cv().notify_all();
-                {
-                    let mut items = threads().lock().unwrap();
-                    if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-                        upsert_item(thread, &tool_item);
-                        touch(thread);
-                    }
-                }
-                if is_terminal {
-                    persist();
-                }
+                record_acp_tool_update(thread_id, run_id, tool);
                 return true;
             }
             crate::acp::AcpStreamEvent::PermissionRequired { approval } => {
@@ -576,4 +572,121 @@ pub fn chars_chunks(text: &str, size: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
+}
+
+pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::AcpToolCall) {
+    let mut item = crate::chat::subagents::acp_tool_to_chat_item(&tool);
+    let streaming = tool.status == "running" || tool.status == "pending";
+    let existing = {
+        let items = threads().lock().unwrap();
+        items
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+            .and_then(|t| t.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|it| it.get("id").and_then(Value::as_str) == Some(tool.id.as_str()))
+            })
+            .cloned()
+    };
+    if let Some(ex) = existing {
+        if tool.name.trim().is_empty() {
+            if let Some(v) = ex.get("toolName").and_then(Value::as_str) {
+                item["toolName"] = json!(v);
+            }
+            if let Some(v) = ex.get("toolKind").and_then(Value::as_str) {
+                item["toolKind"] = json!(v);
+            }
+        }
+        if tool.title.trim().is_empty() {
+            if let Some(v) = ex.get("title").and_then(Value::as_str) {
+                item["title"] = json!(v);
+            }
+        }
+        if tool.detail.trim().is_empty() {
+            if let Some(v) = ex.get("detail").and_then(Value::as_str) {
+                item["detail"] = json!(v);
+            }
+        }
+        if tool.output.is_none() {
+            if let Some(v) = ex.get("text").and_then(Value::as_str) {
+                if !v.is_empty() {
+                    item["text"] = json!(v);
+                }
+            }
+        }
+        for key in [
+            "serverName",
+            "command",
+            "filePath",
+            "addedLines",
+            "removedLines",
+            "parentToolUseId",
+        ] {
+            if item.get(key).is_none() {
+                if let Some(v) = ex.get(key) {
+                    item[key] = v.clone();
+                }
+            }
+        }
+        if let Some(ex_sub) = ex
+            .get("subagentMeta")
+            .and_then(|v| serde_json::from_value::<crate::acp::SubagentMeta>(v.clone()).ok())
+        {
+            let mut merged = match tool.subagent_meta.clone() {
+                Some(m) => crate::acp::merge_subagent_meta(Some(&ex_sub), m),
+                None => ex_sub,
+            };
+            if matches!(tool.status.as_str(), "completed" | "failed" | "cancelled") {
+                merged.status = tool.status.clone();
+            }
+            item["toolKind"] = json!("subagent");
+            if let Ok(v) = serde_json::to_value(merged) {
+                item["subagentMeta"] = v;
+            }
+        }
+        if let Some(ex_swarm) = ex
+            .get("swarmMeta")
+            .and_then(|v| serde_json::from_value::<crate::acp::SwarmMeta>(v.clone()).ok())
+        {
+            let merged = match tool.swarm_meta.clone() {
+                Some(m) => crate::acp::merge_swarm_meta(Some(&ex_swarm), m),
+                None => ex_swarm,
+            };
+            item["toolKind"] = json!("swarm");
+            if let Ok(v) = serde_json::to_value(merged) {
+                item["swarmMeta"] = v;
+            }
+        }
+    }
+
+    crate::chat::checkpoints::maybe_fill_turn_tool_diff(thread_id, run_id, &mut item, streaming);
+
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "upsert", "item": item.clone() }));
+        }
+    }
+    live_cv().notify_all();
+    {
+        let mut all_threads = threads().lock().unwrap();
+        if let Some(thread) = all_threads
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+        {
+            upsert_item(thread, &item);
+            touch(thread);
+        }
+    }
+    if item.get("subagentMeta").is_some() {
+        crate::chat::subagents::record_subagent_tool_call(thread_id, &item);
+    }
+    if item.get("swarmMeta").is_some() {
+        crate::chat::subagents::record_swarm_tool_call(thread_id, &item);
+    }
+    if !streaming {
+        persist();
+    }
 }

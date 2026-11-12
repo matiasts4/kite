@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::acp::{classify_tool_metadata, summarize_tool_detail, AcpToolCall};
+use crate::acp::{acp_tool_from_update, build_acp_tool_call, classify_tool_metadata, AcpToolCall};
 pub use super::approval::*;
 
 #[path = "turn_pipeline.rs"]
@@ -246,30 +246,30 @@ fn normalize_json_frame(provider: &str, raw: &str, value: &Value) -> Vec<Normali
                     .or_else(|| value.get("parameters"))
                     .cloned()
                     .unwrap_or(Value::Null);
-                let (tool_kind, server_name, title, command, file_path, added_lines, removed_lines) =
-                    classify_tool_metadata(tool_name, &parameters);
-                let detail = summarize_tool_detail(&parameters, &None, &command, &file_path);
+                let id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool_1")
+                    .to_string();
+                let parent_tool_use_id = value
+                    .get("parent_tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 vec![NormalizedEvent::Tool {
-                    tool: AcpToolCall {
-                        id: value
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("tool_1")
-                            .to_string(),
-                        name: tool_name.to_string(),
-                        title,
-                        detail,
-                        tool_kind,
-                        server_name,
-                        command,
-                        file_path,
-                        added_lines,
-                        removed_lines,
+                    tool: build_acp_tool_call(
+                        id,
+                        tool_name,
                         parameters,
-                        status: "running".to_string(),
-                        output: None,
-                        duration_seconds: None,
-                    },
+                        "running".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        parent_tool_use_id,
+                    ),
                 }]
             }
             "result" => normalize_type_result(value),
@@ -372,7 +372,7 @@ fn normalize_antigravity_tool(
         .or_else(|| step.get("output"))
         .or_else(|| step.get("result"))
         .and_then(value_to_text);
-    let (tool_kind, server_name, title, command, file_path, added_lines, removed_lines) =
+    let (tool_kind, server_name, title, command, file_path, _added_lines, _removed_lines) =
         classify_tool_metadata(tool_name, &parameters);
 
     if needs_approval(tool_name, state) {
@@ -408,27 +408,29 @@ fn normalize_antigravity_tool(
     } else {
         "running"
     };
-    let detail = summarize_tool_detail(&parameters, &output, &command, &file_path);
     let id = json_id(step.get("tool_call_id"))
         .or_else(|| json_id(step.get("id")))
         .unwrap_or_else(|| format!("tool-{step_index}"));
+    let parent_tool_use_id = step
+        .get("parent_tool_use_id")
+        .or_else(|| step.get("parentToolUseId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     vec![NormalizedEvent::Tool {
-        tool: AcpToolCall {
+        tool: build_acp_tool_call(
             id,
-            name: tool_name.to_string(),
-            title,
-            detail,
-            tool_kind,
-            server_name,
-            command,
-            file_path,
-            added_lines,
-            removed_lines,
+            tool_name,
             parameters,
-            status: status.to_string(),
+            status.to_string(),
             output,
-            duration_seconds: step.get("duration_seconds").and_then(Value::as_f64),
-        },
+            step.get("duration_seconds").and_then(Value::as_f64),
+            server_name,
+            Some(tool_kind),
+            Some(title),
+            None,
+            command,
+            parent_tool_use_id,
+        ),
     }]
 }
 
@@ -535,59 +537,17 @@ fn normalize_acp_update(provider: &str, raw: &str, value: &Value) -> Vec<Normali
 }
 
 fn normalize_acp_tool(update: &Value) -> Vec<NormalizedEvent> {
-    let tool_id = update
-        .get("toolCallId")
-        .or_else(|| update.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or("acp_tool")
-        .to_string();
-    let tool_name = update
-        .get("toolName")
-        .or_else(|| update.get("name"))
-        .or_else(|| update.get("title"))
-        .and_then(Value::as_str)
-        .unwrap_or("tool");
-    let status = match update
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("running")
-    {
-        "completed" | "done" | "succeeded" => "completed",
-        "failed" | "error" => "failed",
-        "pending" => "pending",
-        _ => "running",
-    };
-    let parameters = update
-        .get("rawInput")
-        .or_else(|| update.get("parameters"))
-        .or_else(|| update.get("input"))
-        .cloned()
-        .unwrap_or(Value::Null);
     let output = update
         .get("rawOutput")
         .or_else(|| update.get("output"))
         .and_then(value_to_text);
-    let (tool_kind, server_name, title, command, file_path, added_lines, removed_lines) =
-        classify_tool_metadata(tool_name, &parameters);
-    let detail = summarize_tool_detail(&parameters, &output, &command, &file_path);
+    let parent_tool_use_id = update
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     vec![NormalizedEvent::Tool {
-        tool: AcpToolCall {
-            id: tool_id,
-            name: tool_name.to_string(),
-            title,
-            detail,
-            tool_kind,
-            server_name,
-            command,
-            file_path,
-            added_lines,
-            removed_lines,
-            parameters,
-            status: status.to_string(),
-            output,
-            duration_seconds: update.get("durationSeconds").and_then(Value::as_f64),
-        },
+        tool: acp_tool_from_update(update, output, parent_tool_use_id),
     }]
 }
 

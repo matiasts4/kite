@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::acp::{
+    classify_tool_metadata, extract_subagent_meta, extract_swarm_meta, merge_subagent_meta,
+    merge_swarm_meta, SubagentMeta, SwarmMeta,
+};
 use crate::chat::session::ApprovalDecision;
 
 pub const DELTA_WINDOW: Duration = Duration::from_millis(50);
@@ -68,6 +72,12 @@ pub struct ToolCallSnapshot {
     pub additions: Option<i64>,
     pub deletions: Option<i64>,
     pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_meta: Option<SubagentMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_meta: Option<SwarmMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -159,6 +169,7 @@ pub struct EffectivePermission {
 #[derive(Debug, Default, Clone)]
 pub struct ToolCallTracker {
     calls: BTreeMap<String, ToolCallSnapshot>,
+    call_meta: BTreeMap<String, (String, Value)>,
     next_anon_id: usize,
     last_anon_id: Option<String>,
 }
@@ -255,14 +266,27 @@ impl ToolCallTracker {
             additions: None,
             deletions: None,
             output: String::new(),
+            subagent_meta: None,
+            swarm_meta: None,
+            parent_tool_use_id: None,
         });
+        let incoming_name = src
+            .get("name")
+            .or_else(|| src.get("tool"))
+            .or_else(|| src.get("tool_name"))
+            .or_else(|| src.get("toolName"))
+            .or_else(|| src.get("title"))
+            .or_else(|| update.get("name"))
+            .or_else(|| update.get("toolName"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if let Some(kind) = src
             .get("kind")
             .or_else(|| update.get("kind"))
             .and_then(Value::as_str)
         {
-            if !kind.is_empty() {
-                entry.kind = kind.to_string();
+            if !kind.is_empty() && entry.kind != "subagent" && entry.kind != "swarm" {
+                entry.kind = crate::acp::normalize_tool_kind_name(kind);
             }
         }
         if let Some(title) = src
@@ -287,6 +311,17 @@ impl ToolCallTracker {
         {
             if !status.is_empty() {
                 entry.status = status.to_string();
+            }
+        }
+        if let Some(parent_id) = src
+            .get("parent_tool_use_id")
+            .or_else(|| src.get("parentToolUseId"))
+            .or_else(|| update.get("parent_tool_use_id"))
+            .or_else(|| update.get("parentToolUseId"))
+            .and_then(Value::as_str)
+        {
+            if !parent_id.is_empty() {
+                entry.parent_tool_use_id = Some(parent_id.to_string());
             }
         }
         let input = src
@@ -319,6 +354,23 @@ impl ToolCallTracker {
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
+        let (content_path, content_add, content_del) = {
+            let from_src = crate::acp::extract_acp_diff_and_path(src);
+            if from_src.1.is_some() || from_src.2.is_some() || from_src.0.is_some() {
+                from_src
+            } else {
+                crate::acp::extract_acp_diff_and_path(update)
+            }
+        };
+        if entry.path.is_none() {
+            entry.path = content_path;
+        }
+        if let Some(add) = content_add {
+            entry.additions = Some(add as i64);
+        }
+        if let Some(del) = content_del {
+            entry.deletions = Some(del as i64);
+        }
         if let Some(add) = src
             .pointer("/diff/additions")
             .or_else(|| src.get("addedLines"))
@@ -343,12 +395,95 @@ impl ToolCallTracker {
             .or_else(|| src.pointer("/state/output"))
             .or_else(|| update.get("rawOutput"))
             .or_else(|| update.get("output"))
-            .and_then(Value::as_str)
         {
-            if !out.is_empty() {
-                entry.output = out.to_string();
+            let out_str = if let Some(s) = out.as_str() {
+                Some(s.to_string())
+            } else if !out.is_null() {
+                serde_json::to_string(out).ok()
+            } else {
+                None
+            };
+            if let Some(text) = out_str {
+                if !text.is_empty() {
+                    entry.output = text;
+                }
             }
         }
+
+        let (stored_name, stored_input) = self
+            .call_meta
+            .entry(id.clone())
+            .or_insert_with(|| (String::new(), Value::Null));
+        if let Some(name) = incoming_name {
+            if !name.is_empty() {
+                *stored_name = name;
+            }
+        }
+        if let Some(inp) = input {
+            if !inp.is_null() {
+                *stored_input = inp.clone();
+            }
+        }
+        let eval_name = if stored_name.is_empty() {
+            if entry.subagent_meta.is_some() {
+                "invoke_subagent"
+            } else if entry.swarm_meta.is_some() {
+                "swarm"
+            } else {
+                entry.title.as_str()
+            }
+        } else {
+            stored_name.as_str()
+        };
+        let (
+            classified_kind,
+            _,
+            classified_title,
+            classified_cmd,
+            classified_path,
+            classified_add,
+            classified_del,
+        ) = classify_tool_metadata(eval_name, stored_input);
+        if entry.command.is_none() {
+            entry.command = classified_cmd;
+        }
+        if entry.path.is_none() {
+            entry.path = classified_path;
+        }
+        if entry.additions.is_none() {
+            entry.additions = classified_add.map(|n| n as i64);
+        }
+        if entry.deletions.is_none() {
+            entry.deletions = classified_del.map(|n| n as i64);
+        }
+        if let Some(meta) = extract_subagent_meta(
+            eval_name,
+            &entry.id,
+            stored_input,
+            Some(entry.output.as_str()),
+            &entry.status,
+        ) {
+            entry.kind = "subagent".into();
+            if entry.title.is_empty() || entry.title == eval_name {
+                entry.title = classified_title;
+            }
+            entry.subagent_meta = Some(merge_subagent_meta(entry.subagent_meta.as_ref(), meta));
+        } else if let Some(meta) =
+            extract_swarm_meta(eval_name, stored_input, Some(entry.output.as_str()))
+        {
+            entry.kind = "swarm".into();
+            if entry.title.is_empty() || entry.title == eval_name {
+                entry.title = classified_title;
+            }
+            entry.swarm_meta = Some(merge_swarm_meta(entry.swarm_meta.as_ref(), meta));
+        } else if classified_kind == "subagent"
+            || classified_kind == "swarm"
+            || (classified_kind == "fileChange"
+                && matches!(entry.kind.as_str(), "tool" | "other" | ""))
+        {
+            entry.kind = classified_kind;
+        }
+
         entry.clone()
     }
 
@@ -370,6 +505,9 @@ impl ToolCallTracker {
             additions: None,
             deletions: None,
             output: String::new(),
+            subagent_meta: None,
+            swarm_meta: None,
+            parent_tool_use_id: None,
         });
         entry.output.push_str(chunk);
         entry.clone()

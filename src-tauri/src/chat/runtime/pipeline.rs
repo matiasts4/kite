@@ -206,7 +206,19 @@ pub fn apply_known_turn_pipeline(thread_id: &str, run_id: &str, assistant_id: &s
     for event in events {
         match event {
             ProviderTurnEvent::MessageDelta { .. } | ProviderTurnEvent::ReasoningDelta { .. } => {}
-            ProviderTurnEvent::ToolCallUpdated { tool } => upsert_tool_snapshot(thread_id, run_id, &tool),
+            ProviderTurnEvent::ToolCallUpdated { tool } => {
+                if let Some(ref parent_id) = tool.parent_tool_use_id {
+                    if crate::chat::subagents::ingest_nested_subagent_frame(
+                        thread_id,
+                        run_id,
+                        parent_id,
+                        frame,
+                    ) {
+                        continue;
+                    }
+                }
+                upsert_tool_snapshot(thread_id, run_id, &tool);
+            }
             ProviderTurnEvent::ApprovalRequested {
                 request_id,
                 tool_name,
@@ -359,6 +371,8 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
     if let Some(deletions) = snap.deletions {
         item["removedLines"] = json!(deletions);
     }
+    let mut sub_meta = snap.subagent_meta.clone();
+    let mut swarm_meta = snap.swarm_meta.clone();
     {
         let items = threads().lock().unwrap();
         if let Some(existing) = items
@@ -373,6 +387,24 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
                     item["text"] = text.clone();
                 }
             }
+            if let Some(ex_sub) = existing
+                .get("subagentMeta")
+                .and_then(|v| serde_json::from_value::<crate::acp::SubagentMeta>(v.clone()).ok())
+            {
+                sub_meta = Some(match sub_meta.take() {
+                    Some(m) => crate::acp::merge_subagent_meta(Some(&ex_sub), m),
+                    None => ex_sub,
+                });
+            }
+            if let Some(ex_swarm) = existing
+                .get("swarmMeta")
+                .and_then(|v| serde_json::from_value::<crate::acp::SwarmMeta>(v.clone()).ok())
+            {
+                swarm_meta = Some(match swarm_meta.take() {
+                    Some(m) => crate::acp::merge_swarm_meta(Some(&ex_swarm), m),
+                    None => ex_swarm,
+                });
+            }
             for key in [
                 "createdAtUnixMs",
                 "serverName",
@@ -380,6 +412,8 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
                 "detail",
                 "query",
                 "filePath",
+                "addedLines",
+                "removedLines",
                 "command",
             ] {
                 if item.get(key).is_none() {
@@ -390,6 +424,19 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
             }
         }
     }
+    if let Some(ref m) = sub_meta {
+        item["toolKind"] = json!("subagent");
+        if let Ok(v) = serde_json::to_value(m) {
+            item["subagentMeta"] = v;
+        }
+    }
+    if let Some(ref m) = swarm_meta {
+        item["toolKind"] = json!("swarm");
+        if let Ok(v) = serde_json::to_value(m) {
+            item["swarmMeta"] = v;
+        }
+    }
+    crate::chat::checkpoints::maybe_fill_turn_tool_diff(thread_id, run_id, &mut item, streaming);
     {
         let mut live = live_turns().lock().unwrap();
         if let Some(run) = live.runs.get_mut(run_id) {
@@ -406,6 +453,12 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
             upsert_item(thread, &item);
             touch(thread);
         }
+    }
+    if item.get("subagentMeta").is_some() {
+        crate::chat::subagents::record_subagent_tool_call(thread_id, &item);
+    }
+    if item.get("swarmMeta").is_some() {
+        crate::chat::subagents::record_swarm_tool_call(thread_id, &item);
     }
     if !streaming {
         persist();

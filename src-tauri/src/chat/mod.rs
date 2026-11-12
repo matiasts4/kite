@@ -12,6 +12,7 @@ pub mod recipe;
 pub mod recovery;
 pub mod runtime;
 pub mod session;
+pub mod subagents;
 pub mod threads;
 pub mod utils;
 
@@ -28,6 +29,7 @@ pub use recipe::*;
 pub use recovery::*;
 pub use runtime::*;
 pub use session::*;
+pub use subagents::*;
 pub use threads::*;
 pub use utils::*;
 

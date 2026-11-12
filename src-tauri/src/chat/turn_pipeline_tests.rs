@@ -193,3 +193,101 @@ fn effort_round_trips_through_provider_options() {
     let cleared_thread = json!({ "providerOptions": cleared, "effort": Value::Null });
     assert!(hydrated_effort(&cleared_thread).is_none());
 }
+
+#[test]
+fn tool_tracker_normalizes_subagent_and_swarm_calls_across_updates() {
+    let mut tracker = ToolCallTracker::default();
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "sub-1",
+        "name": "invoke_subagent",
+        "title": "invoke_subagent",
+        "rawInput": {
+            "TypeName": "research",
+            "Role": "Protocol Auditor",
+            "Model": "flash_lite",
+            "Workspace": "share",
+            "Prompt": "Verify ACP frames."
+        }
+    }));
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "sub-1",
+        "status": "completed",
+        "rawOutput": "{\"conversationId\":\"conv-sub-1\",\"logAbsoluteUri\":\"file:///tmp/conv-sub-1.jsonl\"}"
+    }));
+
+    let sub_snap = tracker.snapshot("sub-1").expect("subagent snapshot");
+    assert_eq!(sub_snap.kind, "subagent");
+    assert_eq!(sub_snap.status, "completed");
+    let meta = sub_snap.subagent_meta.as_ref().expect("subagent_meta");
+    assert_eq!(meta.subagent_id, "conv-sub-1");
+    assert_eq!(meta.role, "Protocol Auditor");
+    assert_eq!(meta.model.as_deref(), Some("flash_lite"));
+    assert_eq!(meta.workspace_mode.as_deref(), Some("share"));
+    assert_eq!(
+        meta.transcript_uri.as_deref(),
+        Some("file:///tmp/conv-sub-1.jsonl")
+    );
+
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "swm-1",
+        "name": "swarm",
+        "rawInput": {
+            "action": "title",
+            "title": "Parser Rewrite"
+        }
+    }));
+    let swarm_snap = tracker.snapshot("swm-1").expect("swarm snapshot");
+    assert_eq!(swarm_snap.kind, "swarm");
+    let swarm_meta = swarm_snap.swarm_meta.as_ref().expect("swarm_meta");
+    assert_eq!(swarm_meta.action, "title");
+    assert_eq!(swarm_meta.swarm_title.as_deref(), Some("Parser Rewrite"));
+}
+
+#[test]
+fn tool_tracker_extracts_diff_counts_and_normalizes_file_change_kind() {
+    let mut tracker = ToolCallTracker::default();
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "fc-acp-1",
+        "kind": "edit",
+        "name": "edit_file",
+        "title": "Edit README.md",
+        "rawInput": { "path": "README.md" }
+    }));
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "fc-acp-1",
+        "status": "completed",
+        "content": [{
+            "type": "diff",
+            "path": "README.md",
+            "oldText": "line a\nline b",
+            "newText": "line a\nline b\nline c"
+        }]
+    }));
+    let snap = tracker.snapshot("fc-acp-1").expect("file change snapshot");
+    assert_eq!(snap.kind, "fileChange");
+    assert_eq!(snap.path.as_deref(), Some("README.md"));
+    assert_eq!(snap.additions, Some(1));
+    assert_eq!(snap.deletions, Some(0));
+
+    tracker.ingest(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "fc-raw-1",
+        "name": "Edit",
+        "rawInput": {
+            "file_path": "src/lib.rs",
+            "old_string": "fn a() {}\nfn b() {}",
+            "new_string": "fn a() {}\nfn b_updated() {}\nfn c() {}"
+        },
+        "status": "completed"
+    }));
+    let raw_snap = tracker.snapshot("fc-raw-1").expect("raw diff snapshot");
+    assert_eq!(raw_snap.kind, "fileChange");
+    assert_eq!(raw_snap.path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(raw_snap.additions, Some(2));
+    assert_eq!(raw_snap.deletions, Some(1));
+}

@@ -2,8 +2,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -21,13 +21,21 @@ use super::protocol::{
     STOP,
 };
 
-pub fn start_background() {
+static GUI_STOP: AtomicBool = AtomicBool::new(false);
+static GUI_BRIDGE_PORT: AtomicU16 = AtomicU16::new(0);
+
+fn bind_dispatch_listener(
+    endpoint_file: &Path,
+    stop_flag: &'static AtomicBool,
+    track_gui_port: bool,
+) {
     let _ = cli::install_kite_shim();
     let _ = cli::install_dispatch_skill();
     let _ = ensure_sample_role(&crate::persist::roaming_app_dir());
     let _ = import_historical();
-    if STOP.swap(false, Ordering::SeqCst) {
-        // A previous shutdown can be reversed when the window is opening.
+    stop_flag.store(false, Ordering::SeqCst);
+    if let Ok(mut svc) = service().lock() {
+        svc.set_online(true);
     }
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
@@ -37,17 +45,37 @@ pub fn start_background() {
         Ok(addr) => addr.port(),
         Err(_) => return,
     };
+    if track_gui_port {
+        GUI_BRIDGE_PORT.store(port, Ordering::SeqCst);
+    }
     let token = uuid::Uuid::new_v4().to_string();
-    let body = json!({ "token": token, "port": port });
-    if let Some(parent) = endpoint_path().parent() {
+    let body = json!({
+        "token": token,
+        "port": port,
+        "pid": std::process::id(),
+    });
+    if let Some(parent) = endpoint_file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if std::fs::write(&endpoint_path(), serde_json::to_vec_pretty(&body).unwrap_or_default()).is_err()
-    {
+    if std::fs::write(endpoint_file, serde_json::to_vec_pretty(&body).unwrap_or_default()).is_err() {
+        if track_gui_port {
+            GUI_BRIDGE_PORT.store(0, Ordering::SeqCst);
+        }
         return;
     }
     let _ = listener.set_nonblocking(true);
-    thread::spawn(move || serve(listener, token));
+    thread::spawn(move || serve(listener, token, stop_flag));
+}
+
+pub fn start_background() {
+    bind_dispatch_listener(&endpoint_path(), &STOP, false);
+}
+
+/// Starts the GUI-local dispatch listener (`gui-dispatch-endpoint.json`) so Thread, Swarm,
+/// and live model/provider discovery always execute inside the active GUI process holding
+/// `persist::threads()`, ACP sessions, and the WebView event handle.
+pub fn start_gui_background() {
+    bind_dispatch_listener(&crate::dispatch::cli_wire::gui_endpoint_path(), &GUI_STOP, true);
 }
 
 pub fn shutdown() {
@@ -58,8 +86,27 @@ pub fn shutdown() {
     let _ = std::fs::remove_file(endpoint_path());
 }
 
-fn serve(listener: TcpListener, token: String) {
-    while !STOP.load(Ordering::SeqCst) {
+pub fn shutdown_gui_bridge() {
+    GUI_STOP.store(true, Ordering::SeqCst);
+    GUI_BRIDGE_PORT.store(0, Ordering::SeqCst);
+    let path = crate::dispatch::cli_wire::gui_endpoint_path();
+    let remove_allowed = match std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    {
+        Some(file) => match file.get("pid").and_then(Value::as_u64) {
+            Some(pid) => pid == u64::from(std::process::id()),
+            None => true,
+        },
+        None => false,
+    };
+    if remove_allowed {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn serve(listener: TcpListener, token: String, stop_flag: &'static AtomicBool) {
+    while !stop_flag.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let token = token.clone();
@@ -69,6 +116,273 @@ fn serve(listener: TcpListener, token: String) {
                 thread::sleep(Duration::from_millis(40));
             }
             Err(_) => break,
+        }
+    }
+}
+
+pub(crate) fn is_gui_action_payload(action: &str, payload: &Value) -> bool {
+    if matches!(action, "swarm" | "providers" | "models") {
+        return true;
+    }
+    if action == "run"
+        && payload
+            .get("via")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.eq_ignore_ascii_case("thread"))
+    {
+        return true;
+    }
+    for key in ["address", "to", "from", "parent"] {
+        if payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.starts_with("thread:"))
+        {
+            return true;
+        }
+    }
+    payload.get("children").and_then(Value::as_str).is_some()
+}
+
+pub(crate) fn request_targets_gui(request: &Value) -> bool {
+    if let Some(arr) = request.get("argv").and_then(Value::as_array) {
+        let argv: Vec<String> = arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        return crate::dispatch::cli_wire::should_prefer_gui_endpoint(
+            &argv,
+            request.get("from").and_then(Value::as_str),
+        );
+    }
+    if let Some(op) = request
+        .get("action")
+        .or_else(|| request.get("op"))
+        .and_then(Value::as_str)
+    {
+        return is_gui_action_payload(op, request);
+    }
+    false
+}
+
+pub(crate) fn try_forward_to_gui_bridge_at(path: &Path, request: &Value) -> Option<Value> {
+    if !request_targets_gui(request) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let endpoint = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let port = endpoint.get("port").and_then(Value::as_u64).unwrap_or(0) as u16;
+    let token = endpoint.get("token").and_then(Value::as_str).unwrap_or("");
+    if port == 0 || token.is_empty() {
+        return None;
+    }
+    let addr = format!("127.0.0.1:{port}")
+        .parse()
+        .unwrap_or(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(400)).ok()?;
+    let mut forwarded = request.clone();
+    if let Some(obj) = forwarded.as_object_mut() {
+        obj.insert("token".to_string(), json!(token));
+    } else {
+        forwarded = json!({ "token": token });
+    }
+    if stream
+        .write_all(&serde_json::to_vec(&forwarded).unwrap_or_default())
+        .is_err()
+        || stream.write_all(b"\n").is_err()
+    {
+        return None;
+    }
+    let _ = stream.flush();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return None;
+    }
+    serde_json::from_str(line.trim()).ok()
+}
+
+pub fn try_forward_to_gui_bridge(request: &Value) -> Option<Value> {
+    if cfg!(test) || GUI_BRIDGE_PORT.load(Ordering::SeqCst) != 0 {
+        return None;
+    }
+    try_forward_to_gui_bridge_at(&crate::dispatch::cli_wire::gui_endpoint_path(), request)
+}
+
+fn lookup_thread_provider(from: &str) -> Option<String> {
+    let tid = from.strip_prefix("thread:").unwrap_or(from).trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let all = crate::persist::threads().lock().ok()?;
+    all.iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))
+        .and_then(|t| {
+            t.get("provider")
+                .or_else(|| t.get("engine"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn lookup_swarm_member_provider(from: &str, member_name: &str) -> Option<String> {
+    if member_name.eq_ignore_ascii_case("coordinator") {
+        return lookup_thread_provider(from);
+    }
+    let tid = from.strip_prefix("thread:").unwrap_or(from).trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let all = crate::persist::threads().lock().ok()?;
+    let coord = all
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))?;
+    coord
+        .get("swarmState")
+        .and_then(|s| s.get("members"))
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|m| {
+            m.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.eq_ignore_ascii_case(member_name))
+        })
+        .and_then(|m| m.get("provider").and_then(Value::as_str).map(str::to_string))
+}
+
+fn validate_live_command_models(request: &Value, command: &cli::Command) -> Result<(), String> {
+    let from = request.get("from").and_then(Value::as_str).unwrap_or("");
+    match command {
+        cli::Command::Run {
+            via,
+            explicit_via,
+            engine,
+            provider,
+            model,
+            explicit_role,
+            program,
+            ..
+        } => {
+            let effective_via = if *explicit_via {
+                *via
+            } else if from.starts_with("thread:") {
+                Family::Thread
+            } else {
+                *via
+            };
+            if effective_via != Family::Thread {
+                return Ok(());
+            }
+            let mut explicit_provider = provider.clone().or_else(|| engine.clone());
+            if let Some(word) = program {
+                if !*explicit_role && explicit_provider.is_none() {
+                    if let Some(canon) = cli::canonical_thread_provider(word) {
+                        explicit_provider = Some(canon.to_string());
+                    }
+                }
+            }
+            if let Some(ref p) = explicit_provider {
+                crate::chat::models::validate_provider_connection(p)?;
+            }
+            let effective_provider = explicit_provider.or_else(|| lookup_thread_provider(from));
+            if let Some(ref m) = model {
+                if let Some(ref p) = effective_provider {
+                    crate::chat::models::validate_provider_model_selection(p, m)?;
+                } else if !crate::chat::models::model_id_ok(m) {
+                    return Err(format!("Invalid model id `{m}`."));
+                }
+            }
+        }
+        cli::Command::Swarm(cli::SwarmCommand::Add {
+            provider, model, ..
+        }) => {
+            if let Some(ref p) = provider {
+                crate::chat::models::validate_provider_connection(p)?;
+            }
+            let effective_provider = provider.clone().or_else(|| lookup_thread_provider(from));
+            if let Some(ref m) = model {
+                if let Some(ref p) = effective_provider {
+                    crate::chat::models::validate_provider_model_selection(p, m)?;
+                } else if !crate::chat::models::model_id_ok(m) {
+                    return Err(format!("Invalid model id `{m}`."));
+                }
+            }
+        }
+        cli::Command::Swarm(cli::SwarmCommand::Model {
+            name,
+            provider,
+            model,
+            ..
+        }) => {
+            if let Some(ref p) = provider {
+                crate::chat::models::validate_provider_connection(p)?;
+            }
+            let effective_provider = provider
+                .clone()
+                .or_else(|| lookup_swarm_member_provider(from, name))
+                .or_else(|| lookup_thread_provider(from));
+            if let Some(ref p) = effective_provider {
+                crate::chat::models::validate_provider_model_selection(p, model)?;
+            } else if !crate::chat::models::model_id_ok(model) {
+                return Err(format!("Invalid model id `{model}`."));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn execute_argv_dispatch(request: &Value, id: &str, argv: &[String]) -> Value {
+    match cli::parse_args_detailed(argv) {
+        Ok(cli::Command::Skill) => json!({ "skill": skill_text(), "exit": 0 }),
+        Ok(cli::Command::Providers { refresh }) => {
+            let discovery = crate::chat::models::discover_thread_providers(refresh);
+            let text = crate::chat::models::format_providers_text(&discovery);
+            json!({ "exit": 0, "textOut": text, "providers": discovery })
+        }
+        Ok(cli::Command::Models { provider, refresh }) => {
+            if let Some(prov) = provider {
+                let catalog = crate::chat::models::provider_models(&prov, refresh);
+                let text = crate::chat::models::format_models_text(&catalog);
+                json!({ "exit": 0, "textOut": text, "models": catalog })
+            } else {
+                let mut sections = Vec::new();
+                for prov in crate::chat::models::THREAD_PROVIDERS {
+                    let catalog = crate::chat::models::provider_models(prov, refresh);
+                    sections.push(crate::chat::models::format_models_text(&catalog));
+                }
+                json!({ "exit": 0, "textOut": sections.join("\n\n") })
+            }
+        }
+        Ok(command) => {
+            let online = service()
+                .lock()
+                .map(|g| online_flag(&g))
+                .unwrap_or(false);
+            if online {
+                if let Err(detail) = validate_live_command_models(request, &command) {
+                    let (code, receipt) =
+                        cli::render_detailed_error(id, "dispatch", DispatchError::BadArgs, &detail);
+                    return json!({ "exit": code, "receipt": receipt });
+                }
+            }
+            let response = match command {
+                cli::Command::Swarm(ref swarm_cmd) => execute_swarm_command(request, id, swarm_cmd),
+                _ => execute_command(request, &command, id),
+            };
+            if response.op == "programs" {
+                return json!({
+                    "programs": response.text.clone().unwrap_or_default(),
+                    "exit": 0,
+                });
+            }
+            let exit = crate::dispatch::types::exit_code(&response);
+            json!({ "exit": exit, "receipt": response })
+        }
+        Err((err, detail)) => {
+            let (code, receipt) = cli::render_detailed_error(id, "dispatch", err, &detail);
+            json!({ "exit": code, "receipt": receipt })
         }
     }
 }
@@ -89,6 +403,9 @@ fn handle_client(stream: TcpStream, token: &str) {
         .to_string();
     let response = if !check_token(token, presented) {
         bad_token_receipt(&id, "dispatch")
+    } else if let Some(forwarded) = try_forward_to_gui_bridge(&request) {
+        let _ = write_response(&mut reader, &forwarded);
+        return;
     } else if let Some(op) = request.get("op").and_then(Value::as_str) {
         direct_op(&request, op, &id)
     } else {
@@ -103,31 +420,9 @@ fn handle_client(stream: TcpStream, token: &str) {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        match cli::parse_args(&argv) {
-            Ok(cli::Command::Skill) => {
-                let _ = write_response(&mut reader, &json!({ "skill": skill_text(), "exit": 0 }));
-                return;
-            }
-            Ok(command) => {
-                let response = match command {
-                    cli::Command::Swarm(ref swarm_cmd) => {
-                        execute_swarm_command(&request, &id, swarm_cmd)
-                    }
-                    _ => execute_command(&request, &command, &id),
-                };
-                if response.op == "programs" {
-                    let text = response.text.clone().unwrap_or_default();
-                    let _ = write_response(&mut reader, &json!({ "programs": text, "exit": 0 }));
-                    return;
-                }
-                response
-            }
-            Err(_) => {
-                let (code, body) = cli::render_result(Err(DispatchError::BadArgs), &id, "dispatch");
-                let _ = write_response(&mut reader, &json!({ "exit": code, "receipt": serde_json::from_str::<Value>(&body).unwrap_or(Value::Null) }));
-                return;
-            }
-        }
+        let envelope = execute_argv_dispatch(&request, &id, &argv);
+        let _ = write_response(&mut reader, &envelope);
+        return;
     };
     let exit = crate::dispatch::types::exit_code(&response);
     let _ = write_response(
@@ -457,35 +752,7 @@ fn attach_parent_console() {
     }
 }
 
-fn emit_cli_line(text: &str) {
-    let mut stdout = std::io::stdout();
-    if writeln!(stdout, "{text}").is_ok() && stdout.flush().is_ok() {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
-            let _ = writeln!(file, "{text}");
-            let _ = file.flush();
-        }
-    }
-}
-
-pub fn receipt_still_waiting(value: &Value) -> bool {
-    let receipt = value.get("receipt").unwrap_or(value);
-    receipt.get("op").and_then(Value::as_str) == Some("wait")
-        && receipt.get("status").and_then(Value::as_str) == Some("queued")
-}
-
-pub fn timeout_receipt(value: &Value) -> Value {
-    let mut receipt = value.get("receipt").cloned().unwrap_or_else(|| json!({}));
-    if let Some(obj) = receipt.as_object_mut() {
-        obj.insert("status".to_string(), json!("failed"));
-        obj.insert("error".to_string(), json!("timeout"));
-        obj.insert("submitted".to_string(), json!(false));
-    }
-    receipt
-}
+pub use crate::dispatch::cli_wire::{receipt_still_waiting, timeout_receipt};
 
 fn dispatch_over_core_pipe(args: &[String]) -> Option<Value> {
     let caller = if std::env::var("KITE_DISPATCH").ok().as_deref() == Some("1") {
@@ -508,6 +775,9 @@ fn dispatch_over_core_pipe(args: &[String]) -> Option<Value> {
 /// Executes a full dispatch argv envelope, mirroring the loopback endpoint so a
 /// daemon-owned core reaches its live PTYs over the pipe.
 pub fn execute_argv_envelope(request: &Value) -> Value {
+    if let Some(forwarded) = try_forward_to_gui_bridge(request) {
+        return forwarded;
+    }
     let id = request
         .get("id")
         .and_then(Value::as_str)
@@ -524,221 +794,10 @@ pub fn execute_argv_envelope(request: &Value) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-
-    match cli::parse_args(&argv) {
-        Ok(cli::Command::Skill) => json!({ "exit": 0, "skill": skill_text() }),
-        Ok(command) => {
-            let response = match command {
-                cli::Command::Swarm(ref swarm_cmd) => {
-                    execute_swarm_command(request, &id, swarm_cmd)
-                }
-                _ => execute_command(request, &command, &id),
-            };
-            if response.op == "programs" {
-                return json!({
-                    "exit": 0,
-                    "programs": response.text.clone().unwrap_or_default(),
-                });
-            }
-            let exit = crate::dispatch::types::exit_code(&response);
-            json!({ "exit": exit, "receipt": response })
-        }
-        Err(_) => {
-            let (code, body) = cli::render_result(Err(DispatchError::BadArgs), &id, "dispatch");
-            json!({
-                "exit": code,
-                "receipt": serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
-            })
-        }
-    }
-}
-
-fn loopback_cli_response(args: &[String]) -> Option<Value> {
-    let path = endpoint_path();
-    let bytes = std::fs::read(&path).ok()?;
-    let file = serde_json::from_slice::<Value>(&bytes).ok()?;
-    let port = file.get("port").and_then(Value::as_u64).unwrap_or(0) as u16;
-    let token = file.get("token").and_then(Value::as_str).unwrap_or("");
-    if port == 0 || token.is_empty() {
-        return None;
-    }
-    let mut stream = TcpStream::connect_timeout(
-        &format!("127.0.0.1:{port}")
-            .parse()
-            .unwrap_or(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
-        Duration::from_millis(400),
-    )
-    .ok()?;
-    let caller = if std::env::var("KITE_DISPATCH").ok().as_deref() == Some("1") {
-        "agent"
-    } else {
-        "human"
-    };
-    let payload = json!({
-        "token": token,
-        "argv": args,
-        "id": uuid::Uuid::new_v4().to_string(),
-        "caller": caller,
-        "from": std::env::var("KITE_ADDRESS").unwrap_or_default(),
-        "workspace": std::env::current_dir().ok().map(|path| path.display().to_string()),
-    });
-    if stream.write_all(&serde_json::to_vec(&payload).unwrap_or_default()).is_err()
-        || stream.write_all(b"\n").is_err()
-    {
-        return None;
-    }
-    let _ = stream.flush();
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return None;
-    }
-    Some(serde_json::from_str(line.trim()).unwrap_or(Value::Null))
-}
-
-fn emit_receipt_or_value(value: &Value) {
-    if let Some(receipt) = value.get("receipt") {
-        emit_cli_line(&serde_json::to_string(receipt).unwrap_or_default());
-    } else {
-        emit_cli_line(&value.to_string());
-    }
-}
-
-fn run_blocking_subagent_dispatch(args: &[String], wait_timeout_ms: u64) -> i32 {
-    let Some(value) = loopback_cli_response(args).or_else(|| dispatch_over_core_pipe(args)) else {
-        emit_cli_line(
-            &serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default(),
-        );
-        return 1;
-    };
-    let run_exit = value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
-    let child_address = value
-        .get("receipt")
-        .and_then(|r| r.get("address"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if run_exit != 0 || !child_address.starts_with("thread:") {
-        emit_receipt_or_value(&value);
-        return run_exit;
-    }
-
-    let started = std::time::Instant::now();
-    let wait_args = vec![
-        "kite".to_string(),
-        "dispatch".to_string(),
-        "wait".to_string(),
-        child_address.clone(),
-        "--until".to_string(),
-        "done,error,gone,blocked".to_string(),
-        "--timeout".to_string(),
-        wait_timeout_ms.to_string(),
-    ];
-    let settled_presence;
-    loop {
-        let Some(wait_val) =
-            loopback_cli_response(&wait_args).or_else(|| dispatch_over_core_pipe(&wait_args))
-        else {
-            emit_cli_line(
-                &serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default(),
-            );
-            return 1;
-        };
-        if receipt_still_waiting(&wait_val) {
-            if started.elapsed() >= Duration::from_millis(wait_timeout_ms) {
-                emit_cli_line(
-                    &serde_json::to_string(&timeout_receipt(&wait_val)).unwrap_or_default(),
-                );
-                return 1;
-            }
-            thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-        let wait_exit = wait_val.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
-        if wait_exit != 0 {
-            emit_receipt_or_value(&wait_val);
-            return wait_exit;
-        }
-        settled_presence = wait_val
-            .get("receipt")
-            .and_then(|r| r.get("presenceAtSubmit"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        break;
-    }
-
-    let read_args = vec![
-        "kite".to_string(),
-        "dispatch".to_string(),
-        "read".to_string(),
-        child_address.clone(),
-        "--last".to_string(),
-    ];
-    let read_val =
-        loopback_cli_response(&read_args).or_else(|| dispatch_over_core_pipe(&read_args));
-    let final_text = read_val
-        .as_ref()
-        .and_then(|v| v.get("receipt"))
-        .and_then(|r| r.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if matches!(settled_presence.as_str(), "error" | "gone" | "blocked") {
-        let failure = json!({
-            "schemaVersion": 1,
-            "id": "run",
-            "op": "run",
-            "status": "failed",
-            "address": child_address,
-            "submitted": true,
-            "presenceAtSubmit": settled_presence,
-            "error": format!("subagent_{settled_presence}"),
-            "text": final_text,
-        });
-        emit_cli_line(&failure.to_string());
-        return 1;
-    }
-    let child_id = child_address.strip_prefix("thread:").unwrap_or(&child_address);
-    let formatted = crate::chat::subagents::format_subagent_wait_output(final_text, child_id);
-    emit_cli_line(&formatted);
-    0
+    execute_argv_dispatch(request, &id, &argv)
 }
 
 pub fn run_dispatch_cli(args: &[String]) -> i32 {
     attach_parent_console();
-    if let Some(wait_timeout_ms) = cli::blocking_run_wait_ms(args) {
-        return run_blocking_subagent_dispatch(args, wait_timeout_ms);
-    }
-    let wait_for = cli::blocking_wait_ms(args);
-    let started = std::time::Instant::now();
-    loop {
-        let response = loopback_cli_response(args).or_else(|| dispatch_over_core_pipe(args));
-        let Some(value) = response else {
-            emit_cli_line(
-                &serde_json::to_string(&offline_receipt("cli", "dispatch")).unwrap_or_default(),
-            );
-            return 1;
-        };
-        if let Some(skill) = value.get("skill").and_then(Value::as_str) {
-            emit_cli_line(skill);
-            return 0;
-        }
-        if let Some(programs) = value.get("programs").and_then(Value::as_str) {
-            emit_cli_line(programs);
-            return 0;
-        }
-        if receipt_still_waiting(&value) {
-            let timed_out = wait_for
-                .map(|timeout_ms| started.elapsed() >= Duration::from_millis(timeout_ms))
-                .unwrap_or(true);
-            if timed_out {
-                emit_cli_line(&serde_json::to_string(&timeout_receipt(&value)).unwrap_or_default());
-                return 1;
-            }
-            thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-        emit_receipt_or_value(&value);
-        return value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
-    }
+    crate::dispatch::cli_wire::run_cli(args, Some(&dispatch_over_core_pipe))
 }

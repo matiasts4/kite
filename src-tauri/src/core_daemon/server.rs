@@ -352,7 +352,9 @@ pub fn handle_control_rpc_request(
 
         "agent.dispatch" => {
             let p = params.unwrap_or_else(|| json!({}));
-            let result = if p.get("argv").is_some() {
+            let result = if let Some(forwarded) = crate::dispatch_wire::try_forward_to_gui_bridge(&p) {
+                forwarded
+            } else if p.get("argv").is_some() {
                 // CLI envelope: the daemon parses argv exactly like the loopback
                 // endpoint so both transports share one dispatch path.
                 crate::dispatch_wire::execute_argv_envelope(&p)

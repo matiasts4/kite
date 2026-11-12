@@ -24,6 +24,9 @@ fn proxy_dispatch(action: &str, request: Option<Value>) -> Option<Value> {
     if payload.is_null() {
         payload = json!({});
     }
+    if super::server::is_gui_action_payload(action, &payload) {
+        return None;
+    }
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("action".to_string(), json!(action));
     }

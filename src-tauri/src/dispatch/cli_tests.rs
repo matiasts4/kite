@@ -914,3 +914,108 @@ fn manual_and_skill_document_cross_provider_subagents_and_swarm() {
         );
     }
 }
+
+#[test]
+fn test_binary_path_guard_detects_cargo_test_harnesses_without_blocking_release_binaries() {
+    assert!(is_test_binary_path(std::path::Path::new(
+        r"C:\repo\src-tauri\target\debug\deps\kite_code-bfcae09c3d87a467.exe"
+    )));
+    assert!(is_test_binary_path(std::path::Path::new(
+        r"/tmp/target/debug/deps/kite_code-abc123"
+    )));
+    assert!(!is_test_binary_path(std::path::Path::new(
+        r"C:\repo\src-tauri\target\debug\kite-code.exe"
+    )));
+    assert!(!is_test_binary_path(std::path::Path::new(
+        r"C:\repo\src-tauri\target\debug\kite.exe"
+    )));
+}
+
+#[test]
+fn write_shim_to_dir_prefers_sibling_console_kite_binary() {
+    let dir = std::env::temp_dir().join(format!("kite-shim-test-{}", std::process::id()));
+    let bin_dir = dir.join("app");
+    let out_dir = dir.join("roaming-bin");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&bin_dir).expect("create app dir");
+
+    let console_name = if cfg!(windows) { "kite.exe" } else { "kite" };
+    let gui_name = if cfg!(windows) { "kite-code.exe" } else { "kite-code" };
+    let console_src = bin_dir.join(console_name);
+    let gui_src = bin_dir.join(gui_name);
+    std::fs::write(&console_src, b"console-binary-bytes").expect("write mock kite binary");
+    std::fs::write(&gui_src, b"gui-binary-bytes").expect("write mock gui binary");
+
+    write_shim_to_dir(&out_dir, &gui_src);
+
+    let copied = out_dir.join(console_name);
+    assert_eq!(std::fs::read(&copied).expect("copied console binary"), b"console-binary-bytes");
+
+    #[cfg(windows)]
+    {
+        let cmd = std::fs::read_to_string(out_dir.join("kite.cmd")).expect("read kite.cmd");
+        assert!(cmd.contains(&copied.display().to_string()), "kite.cmd must target console kite.exe: {cmd}");
+        assert!(!cmd.contains("kite-code.exe"), "kite.cmd must not target GUI subsystem executable: {cmd}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cli_wire_routes_thread_and_swarm_commands_to_gui_endpoint() {
+    use super::super::cli_wire::{
+        blocking_run_wait_ms as wire_run_wait_ms,
+        blocking_wait_ms as wire_wait_ms,
+        should_prefer_gui_endpoint,
+    };
+
+    assert!(should_prefer_gui_endpoint(&owned(&["run", "--via", "thread", "grok", "hi"]), None));
+    assert!(should_prefer_gui_endpoint(&owned(&["swarm", "status"]), None));
+    assert!(should_prefer_gui_endpoint(&owned(&["providers"]), None));
+    assert!(should_prefer_gui_endpoint(&owned(&["models", "grok"]), None));
+    assert!(should_prefer_gui_endpoint(&owned(&["read", "thread:abc", "--last"]), None));
+    assert!(should_prefer_gui_endpoint(&owned(&["run", "grok", "hi"]), Some("thread:parent")));
+    assert!(!should_prefer_gui_endpoint(&owned(&["run", "--via", "terminal", "grok", "hi"]), Some("thread:parent")));
+    assert!(!should_prefer_gui_endpoint(&owned(&["ls"]), None));
+    assert_eq!(wire_run_wait_ms(&owned(&["run", "--wait", "--timeout-ms", "45000", "hi"])), Some(45_000));
+    assert_eq!(wire_wait_ms(&owned(&["wait", "thread:abc", "--timeout", "1500"])), Some(1_500));
+}
+
+#[test]
+fn providers_and_models_commands_parse_and_skill_has_no_legacy_model_literals() {
+    let prov = parse_args(&owned(&["kite", "dispatch", "providers", "--refresh"])).unwrap();
+    assert_eq!(prov, Command::Providers { refresh: true });
+
+    let mods = parse_args(&owned(&["kite", "dispatch", "models", "open-code", "--refresh"])).unwrap();
+    assert_eq!(
+        mods,
+        Command::Models {
+            provider: Some("opencode".to_string()),
+            refresh: true,
+        }
+    );
+
+    let (err, detail) =
+        parse_args_detailed(&owned(&["run", "--via", "thread", "--provider", "bogus", "hi"]))
+            .expect_err("unknown provider must fail with descriptive message");
+    assert_eq!(err, DispatchError::BadArgs);
+    assert!(detail.contains("Allowed thread providers"));
+    assert!(detail.contains("kite dispatch providers"));
+
+    assert_eq!(canonical_thread_provider("claude-code"), Some("claude"));
+    assert_eq!(canonical_thread_provider("open-code"), Some("opencode"));
+    assert_eq!(canonical_thread_provider("cursor-agent"), Some("cursor"));
+    assert_eq!(parse_args(&owned(&["kite", "dispatch", "--help"])).unwrap(), Command::Skill);
+    assert_eq!(parse_args(&owned(&["kite", "dispatch", "-h"])).unwrap(), Command::Skill);
+    assert_eq!(parse_args(&owned(&["kite", "dispatch", "help"])).unwrap(), Command::Skill);
+
+    let manual = manual_text();
+    let skill = skill_text();
+    for text in [manual, skill] {
+        assert!(text.contains("kite dispatch providers"));
+        assert!(text.contains("kite dispatch models"));
+        assert!(!text.contains("grok-3-mini"));
+        assert!(!text.contains("o4-mini"));
+        assert!(!text.contains("gemini-2.5-flash"));
+    }
+}

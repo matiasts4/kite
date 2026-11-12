@@ -408,15 +408,17 @@ fn spawn_swarm_member_thread(
         })
         .unwrap_or((None, None, None, None));
 
-    let provider = provider_override
+    let raw_provider = provider_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase)
         .or_else(|| coord_provider.clone())
         .unwrap_or_else(|| "antigravity".to_string());
-    if !provider_ok(&provider) {
+    let Some(canon_provider) = crate::chat::models::canonical_thread_provider_id(&raw_provider)
+    else {
         return Err(DispatchError::BadArgs);
-    }
+    };
+    let provider = canon_provider.to_string();
 
     let same_provider_as_parent = coord_provider
         .as_deref()
@@ -433,6 +435,12 @@ fn spawn_swarm_member_thread(
                 remembered_model.clone()
             }
         });
+    if model_override.is_some() {
+        if let Some(ref explicit_model) = requested_model {
+            crate::chat::models::validate_provider_model_selection(&provider, explicit_model)
+                .map_err(|_| DispatchError::BadArgs)?;
+        }
+    }
 
     let child_id = uuid::Uuid::new_v4().to_string();
     let short_id: String = child_id.chars().filter(|c| *c != '-').take(8).collect();
@@ -848,14 +856,24 @@ pub fn execute_swarm_action(
                 if state.members[idx].state == "working" {
                     return Err(DispatchError::NotReady);
                 }
-                if let Some(ref p) = provider {
-                    if !provider_ok(p) {
-                        return Err(DispatchError::BadArgs);
-                    }
-                }
+                let canon_new_provider = provider
+                    .as_deref()
+                    .map(|p| {
+                        crate::chat::models::canonical_thread_provider_id(p)
+                            .map(str::to_string)
+                            .ok_or(DispatchError::BadArgs)
+                    })
+                    .transpose()?;
                 let prev_provider = state.members[idx].provider.clone();
+                let effective_provider = canon_new_provider
+                    .clone()
+                    .or_else(|| prev_provider.clone());
+                if let Some(ref eff_p) = effective_provider {
+                    crate::chat::models::validate_provider_model_selection(eff_p, model)
+                        .map_err(|_| DispatchError::BadArgs)?;
+                }
                 let prev_state = state.members[idx].state.clone();
-                if let Some(ref p) = provider {
+                if let Some(ref p) = canon_new_provider {
                     state.members[idx].provider = Some(p.clone());
                 }
                 state.members[idx].model = Some(model.clone());
@@ -1760,24 +1778,25 @@ mod tests {
         assert_eq!(state.members[0].channels, vec!["parser".to_string(), "main".to_string()]);
         let worker_cid = state.members[0].child_thread_id.clone().unwrap();
 
-        {
+        let (child, parent) = {
             let all = threads().lock().unwrap();
-            let child = all.iter().find(|t| t["id"] == worker_cid).unwrap();
-            assert!(child["profileId"].is_null(), "profileId={:?}", child["profileId"]);
-            assert_eq!(child["workspaceId"].as_str(), Some("ws-1"));
-            assert_ne!(child["model"].as_str(), Some("claude-opus-4-6"));
-            assert_ne!(child["effort"].as_str(), Some("high"));
+            let child = all.iter().find(|t| t["id"] == worker_cid).unwrap().clone();
+            let parent = all.iter().find(|t| t["id"] == coord_id).unwrap().clone();
+            (child, parent)
+        };
+        assert!(child["profileId"].is_null(), "profileId={:?}", child["profileId"]);
+        assert_eq!(child["workspaceId"].as_str(), Some("ws-1"));
+        assert_ne!(child["model"].as_str(), Some("claude-opus-4-6"));
+        assert_ne!(child["effort"].as_str(), Some("high"));
 
-            let parent = all.iter().find(|t| t["id"] == coord_id).unwrap();
-            let runs = parent["subagentRuns"].as_array().unwrap();
-            assert!(
-                runs.iter().any(|r| {
-                    r.get("childThreadId").and_then(Value::as_str) == Some(worker_cid.as_str())
-                        && r.get("swarmMemberName").and_then(Value::as_str) == Some("parser")
-                }),
-                "runs={runs:?}"
-            );
-        }
+        let runs = parent["subagentRuns"].as_array().unwrap();
+        assert!(
+            runs.iter().any(|r| {
+                r.get("childThreadId").and_then(Value::as_str) == Some(worker_cid.as_str())
+                    && r.get("swarmMemberName").and_then(Value::as_str) == Some("parser")
+            }),
+            "runs={runs:?}"
+        );
         assert!(crate::chat::subagents::build_subagent_detail(&coord_id, &worker_cid).is_some());
 
         // Stopped worker stays stopped in build_swarm_state even if child["status"] == "idle".

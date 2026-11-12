@@ -4,6 +4,15 @@ version = "0.1.54"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
+default-run = "kite-code"
+
+[[bin]]
+name = "kite-code"
+path = "src/main.rs"
+
+[[bin]]
+name = "kite"
+path = "src/bin/kite.rs"
 
 [dependencies]
 tauri = { version = "2", features = ["unstable"] }

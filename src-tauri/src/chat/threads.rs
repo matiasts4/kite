@@ -52,17 +52,25 @@ pub fn blank_thread(
 ) -> Value {
     let now = now_ms();
     let provider = if provider_ok(provider) { provider } else { "antigravity" };
-    let default_model_val = crate::persist::last_model()
-        .lock()
-        .unwrap()
-        .as_deref()
-        .filter(|m| !m.trim().is_empty())
-        .map(|m| json!(m))
-        .unwrap_or(Value::Null);
-    let default_effort_val = crate::persist::last_effort()
-        .lock()
-        .unwrap()
-        .clone();
+    let last_model_raw = crate::persist::last_model().lock().unwrap().clone();
+    let model_compatible = last_model_raw.as_deref().is_some_and(|m| {
+        !m.trim().is_empty()
+            && !crate::chat::models::model_likely_belongs_to_another_provider(provider, m)
+    });
+    let default_model_val = if model_compatible {
+        last_model_raw
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| json!(m))
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let default_effort_val = if model_compatible || last_model_raw.is_none() {
+        crate::persist::last_effort().lock().unwrap().clone()
+    } else {
+        None
+    };
     let provider_options = if let Some(ref effort) = default_effort_val {
         if !effort.trim().is_empty() {
             vec![json!({ "id": "effort", "value": effort })]
@@ -660,7 +668,11 @@ mod rewind {
 
     impl Drop for RemoveThread {
         fn drop(&mut self) {
-            remove_thread(&self.0);
+            if !threads().is_poisoned() && !std::thread::panicking() {
+                remove_thread(&self.0);
+            } else if let Ok(mut list) = threads().lock() {
+                list.retain(|thread| thread.get("id").and_then(|v| v.as_str()) != Some(&self.0));
+            }
         }
     }
 

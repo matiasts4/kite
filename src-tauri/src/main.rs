@@ -374,8 +374,14 @@ fn main() {
                 let _ = crate::persist::initial_state();
             });
             crate::chat::persistent::start_idle_reaper();
-            // A detached core owns loopback dispatch; otherwise serve it here.
-            if !crate::core_daemon::ensure_core_daemon_started() {
+            crate::dispatch_wire::start_gui_background();
+            // A detached core owns terminal PTYs and background dispatch; connect eagerly
+            // so daemon-emitted events reach the WebView from startup.
+            if crate::core_daemon::ensure_core_daemon_started() {
+                std::thread::spawn(|| {
+                    let _ = crate::core_daemon::CoreConnection::get();
+                });
+            } else {
                 crate::dispatch_wire::start_background();
             }
             crate::system_metrics::init_benchmark_from_env();
@@ -740,10 +746,12 @@ fn main() {
         match event {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
+                crate::dispatch_wire::shutdown_gui_bridge();
                 crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, detaching GUI from persistent core");
+                crate::dispatch_wire::shutdown_gui_bridge();
                 crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::MainEventsCleared => {

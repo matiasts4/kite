@@ -4,6 +4,7 @@
 pub mod address;
 pub mod audit;
 pub mod cli;
+pub mod cli_wire;
 pub mod envelope;
 pub mod files;
 pub mod keys;

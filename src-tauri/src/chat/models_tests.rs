@@ -385,3 +385,48 @@
         assert_eq!(levels, vec!["low", "high", "ultra"]);
         assert_eq!(models[1].get("supportsEffort").and_then(|v| v.as_bool()), Some(false));
     }
+
+    #[test]
+    fn canonical_thread_provider_id_maps_common_cli_aliases() {
+        assert_eq!(canonical_thread_provider_id("antigravity"), Some("antigravity"));
+        assert_eq!(canonical_thread_provider_id("agy"), Some("antigravity"));
+        assert_eq!(canonical_thread_provider_id("claude-code"), Some("claude"));
+        assert_eq!(canonical_thread_provider_id("open-code"), Some("opencode"));
+        assert_eq!(canonical_thread_provider_id("cursor-agent"), Some("cursor"));
+        assert_eq!(canonical_thread_provider_id("bogus"), None);
+    }
+
+    #[test]
+    fn validate_provider_model_with_catalog_rejects_discontinued_or_missing_models() {
+        let grok_catalog = json!({
+            "provider": "grok",
+            "catalogState": "ready",
+            "models": [
+                { "id": "grok-4.7", "name": "grok-4.7" },
+                { "id": "grok-4.7-build-fast", "name": "grok-4.7-build-fast" }
+            ]
+        });
+        assert!(validate_provider_model_with_catalog("grok", "grok-4.7-build-fast", &grok_catalog).is_ok());
+
+        let err = validate_provider_model_with_catalog("grok", "grok-3-mini", &grok_catalog)
+            .expect_err("stale grok-3-mini must be rejected when live catalog excludes it");
+        assert!(err.contains("grok-3-mini"));
+        assert!(err.contains("grok-4.7-build-fast"));
+
+        let missing_catalog = json!({
+            "provider": "cursor",
+            "catalogState": "missing-binary",
+            "models": []
+        });
+        let missing_err = validate_provider_model_with_catalog("cursor", "auto", &missing_catalog)
+            .expect_err("missing-binary provider must fail");
+        assert!(missing_err.contains("missing-binary"));
+
+        // Ready provider without a model listing command (e.g. claude) stays flexible
+        let claude_catalog = json!({
+            "provider": "claude",
+            "catalogState": "ready",
+            "models": []
+        });
+        assert!(validate_provider_model_with_catalog("claude", "claude-sonnet-4-6", &claude_catalog).is_ok());
+    }

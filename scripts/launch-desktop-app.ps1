@@ -1,4 +1,4 @@
-# Kite Code - Launch on User Desktop (WinSta0\Default)
+﻿# Kite Code - Launch on User Desktop (WinSta0\Default)
 param (
     [switch]$Wait = $false,
     [switch]$Rebuild = $false,
@@ -389,7 +389,7 @@ if ($NativeDeck) {
 
         Write-Host "Compilando backend en modo desarrollo en tiempo real (Vite devUrl activo, sin custom-protocol)..." -ForegroundColor Yellow
         Push-Location $SrcTauriDir
-        cargo build --bin kite-code --no-default-features
+        cargo build --bin kite-code --bin kite --no-default-features
         Pop-Location
         if (-not (Test-Path $binary)) {
             Write-Error "No se pudo compilar el ejecutable $binary."

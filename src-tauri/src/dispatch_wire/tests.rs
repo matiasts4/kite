@@ -156,13 +156,21 @@ fn on_thread_settled_publishes_done_presence_for_attached_thread() {
 
     super::protocol::on_thread_settled(tid);
 
-    let row = {
-        let svc = super::protocol::service().lock().unwrap();
-        svc.ls()
-            .into_iter()
-            .find(|line| line.starts_with(&address))
-    };
-    assert_eq!(row.as_deref(), Some(format!("{address} done").as_str()));
+    let expected = format!("{address} done");
+    let mut row = None;
+    for _ in 0..40 {
+        row = {
+            let svc = super::protocol::service().lock().unwrap();
+            svc.ls()
+                .into_iter()
+                .find(|line| line.starts_with(&address))
+        };
+        if row.as_deref() == Some(expected.as_str()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(row.as_deref(), Some(expected.as_str()));
 
     {
         let mut svc = super::protocol::service().lock().unwrap();
@@ -771,4 +779,81 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
         let id = t.get("id").and_then(Value::as_str).unwrap_or("");
         id != parent_id && id != child_id.as_str() && id != codex_id.as_str()
     });
+}
+
+#[test]
+fn gui_bridge_forwards_thread_and_swarm_requests_with_gui_token() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gui bridge");
+    let port = listener.local_addr().unwrap().port();
+    let dir = std::env::temp_dir().join(format!("kite-gui-bridge-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let endpoint = dir.join("gui-dispatch-endpoint.json");
+    std::fs::write(
+        &endpoint,
+        serde_json::to_vec(&json!({ "token": "gui-secret", "port": port, "pid": std::process::id() })).unwrap(),
+    )
+    .unwrap();
+
+    let server_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept forwarded request");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let req: Value = serde_json::from_str(line.trim()).unwrap();
+        let reply = json!({
+            "exit": 0,
+            "forwardedToken": req.get("token").cloned().unwrap_or(Value::Null),
+            "argv": req.get("argv").cloned().unwrap_or(Value::Null),
+        });
+        let s = reader.get_mut();
+        s.write_all(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        s.write_all(b"\n").unwrap();
+        s.flush().unwrap();
+    });
+
+    let ls_req = json!({ "token": "daemon-tok", "argv": ["ls"], "from": "session:abc" });
+    assert!(
+        super::server::try_forward_to_gui_bridge_at(&endpoint, &ls_req).is_none(),
+        "terminal ls must stay on daemon without forwarding to GUI bridge"
+    );
+
+    let thread_req = json!({
+        "token": "daemon-tok",
+        "argv": ["run", "--via", "thread", "--provider", "grok", "hi"],
+        "from": "thread:root"
+    });
+    let forwarded = super::server::try_forward_to_gui_bridge_at(&endpoint, &thread_req)
+        .expect("thread run must forward to GUI bridge");
+    assert_eq!(forwarded["exit"], 0);
+    assert_eq!(forwarded["forwardedToken"], "gui-secret");
+
+    server_handle.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn argv_envelope_reports_descriptive_errors_for_invalid_provider_and_serves_providers_discovery() {
+    let bad = execute_argv_envelope(&json!({
+        "argv": ["kite", "dispatch", "run", "--via", "thread", "--provider", "nonexistent", "hi"],
+        "id": "bad-prov"
+    }));
+    assert_eq!(bad["exit"], 2);
+    assert_eq!(bad["receipt"]["error"], "bad_args");
+    let detail = bad["receipt"]["text"].as_str().unwrap_or("");
+    assert!(detail.contains("Unknown thread provider"), "got: {detail}");
+    assert!(detail.contains("kite dispatch providers"), "got: {detail}");
+
+    let providers = execute_argv_envelope(&json!({
+        "argv": ["kite", "dispatch", "providers"],
+        "id": "list-prov"
+    }));
+    assert_eq!(providers["exit"], 0);
+    let text = providers["textOut"].as_str().unwrap_or("");
+    assert!(text.contains("antigravity"), "got: {text}");
+    assert!(text.contains("grok"), "got: {text}");
+    assert!(text.contains("codex"), "got: {text}");
 }

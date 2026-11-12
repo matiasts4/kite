@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat::threads::blank_thread;
 use crate::chat::TurnRun;
 
 #[test]
@@ -277,4 +278,136 @@ fn thread_persists_subagent_and_swarm_metadata_and_serves_detail_commands() {
     let swarm = get_thread_swarm_state(Some(json!({ "threadId": parent_id })));
     assert_eq!(swarm["title"], "Audit Swarm");
     assert_eq!(swarm["members"][0]["name"], "reviewer");
+}
+
+#[test]
+fn interactive_subagent_and_swarm_ui_commands_drive_lifecycle() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let parent_id = format!("chat-cmd-ui-parent-{suffix}");
+    let child_id = format!("chat-cmd-ui-child-{suffix}");
+    let worker_id = format!("chat-cmd-ui-worker-{suffix}");
+    let scratch = std::env::temp_dir().join(format!("kite-ui-cmd-{suffix}"));
+    let _ = std::fs::create_dir_all(&scratch);
+    struct UiCmdCleanup {
+        ids: Vec<String>,
+        dir: std::path::PathBuf,
+    }
+    impl Drop for UiCmdCleanup {
+        fn drop(&mut self) {
+            for id in &self.ids {
+                crate::dispatch_wire::protocol::clear_thread_killed(id);
+            }
+            if let Ok(mut all) = threads().lock() {
+                all.retain(|t| {
+                    let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+                    !self.ids.iter().any(|x| x == id)
+                });
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    let _cleanup = UiCmdCleanup {
+        ids: vec![parent_id.clone(), child_id.clone(), worker_id.clone()],
+        dir: scratch.clone(),
+    };
+    {
+        let mut all = threads().lock().unwrap();
+        let mut parent = blank_thread(&parent_id, None, "Coordinator", "antigravity", None);
+        parent["workingDirectory"] = json!(scratch.to_string_lossy().to_string());
+        parent["subagentRuns"] = json!([{
+            "subagentId": "sub_ui_1",
+            "parentThreadId": parent_id,
+            "parentToolCallId": "call_ui_1",
+            "role": "Grok Verifier",
+            "provider": "grok",
+            "model": "grok-3-mini",
+            "workspaceMode": "inherit",
+            "status": "running",
+            "childThreadId": child_id,
+            "stepCount": 0,
+            "items": [],
+            "startedAtUnixMs": 100,
+            "updatedAtUnixMs": 100
+        }]);
+        parent["items"] = json!([{
+            "id": "call_ui_1",
+            "kind": "tool",
+            "toolKind": "subagent",
+            "toolName": "Task",
+            "title": "Grok Verifier",
+            "status": "running"
+        }]);
+        all.push(parent);
+        all.push(blank_thread(&child_id, None, "Child", "grok", None));
+        let mut worker = blank_thread(&worker_id, None, "Worker", "grok", None);
+        worker["workingDirectory"] = json!(scratch.to_string_lossy().to_string());
+        worker["swarmParentThreadId"] = json!(parent_id);
+        worker["swarmMemberName"] = json!("analyst");
+        worker["status"] = json!("error");
+        all.push(worker);
+    }
+
+    // Seed swarm state cleanly
+    let seeded = swarm_post_from_ui(Some(json!({
+        "threadId": parent_id,
+        "channel": "main",
+        "message": "Initial board note"
+    })));
+    assert_eq!(seeded["ok"], true);
+    assert_eq!(seeded["swarmState"]["posts"].as_array().unwrap().len(), 1);
+
+    // Register a stopped member directly on the swarm state so UI switch & kill can operate
+    {
+        let mut all = threads().lock().unwrap();
+        let p = all.iter_mut().find(|t| t["id"] == parent_id).unwrap();
+        p["swarmState"]["members"] = json!([{
+            "name": "analyst",
+            "role": "Analyst",
+            "provider": "grok",
+            "model": "grok-3-mini",
+            "workspaceMode": "inherit",
+            "state": "stopped",
+            "channels": ["main"],
+            "childThreadId": worker_id,
+            "subagentId": worker_id
+        }]);
+    }
+
+    // Stop active subagent run from UI
+    let stopped = stop_subagent_run(Some(json!({
+        "threadId": parent_id,
+        "subagentId": "sub_ui_1"
+    })));
+    assert_eq!(stopped["ok"], true);
+    assert_eq!(stopped["run"]["status"], "killed");
+
+    // Empty message on send_subagent_message must error cleanly
+    let bad_send = send_subagent_message(Some(json!({
+        "threadId": parent_id,
+        "subagentId": "sub_ui_1",
+        "message": "   "
+    })));
+    assert!(bad_send.get("error").is_some());
+
+    // Invalid provider on switch errors cleanly
+    let bad_switch = swarm_switch_worker_model(Some(json!({
+        "threadId": parent_id,
+        "name": "analyst",
+        "provider": "not-a-provider",
+        "model": "foo"
+    })));
+    assert!(bad_switch.get("error").is_some());
+
+    let bad_kill = swarm_kill_worker_from_ui(Some(json!({
+        "threadId": parent_id,
+        "name": "missing-member"
+    })));
+    assert!(bad_kill.get("error").is_some());
+
+    let killed = swarm_kill_worker_from_ui(Some(json!({
+        "threadId": parent_id,
+        "name": "analyst"
+    })));
+    assert_eq!(killed["ok"], true);
+    assert_eq!(killed["swarmState"]["members"][0]["state"], "killed");
 }

@@ -219,13 +219,285 @@ fn live_port_stop_cancels_active_live_turn_and_settles_presence() {
     port.stop(Family::Thread, tid).expect("stop must succeed");
 
     assert!(!crate::chat::is_turn_running(tid));
-    assert_eq!(super::protocol::thread_presence(tid), (PresenceState::Done, None));
+    assert_eq!(super::protocol::thread_presence(tid), (PresenceState::Gone, None));
+
+    // Also verify persistent warm/idle sessions close cleanly (Closed, not Interrupted)
+    let p_tid = "test-stop-persistent-closed-thread";
+    let transport = crate::chat::session::ScriptedTransport::new();
+    {
+        let mut mgr = crate::chat::session_manager().lock().unwrap();
+        let spec = crate::chat::session::SessionSpec {
+            thread_id: p_tid.to_string(),
+            driver: "opencode".to_string(),
+            connection_id: None,
+            working_directory: None,
+            mode: crate::chat::session::SessionMode::Persistent,
+            recipe: None,
+            resume_handle: None,
+            extra_env: Vec::new(),
+        };
+        mgr.attach(spec, Box::new(transport.clone())).unwrap();
+        mgr.start(p_tid).unwrap();
+        mgr.send_turn(p_tid, "cmd-1", "hi").unwrap();
+    }
+    port.stop(Family::Thread, p_tid).expect("stop persistent must succeed");
+    assert_eq!(transport.stop_count(), 1);
+    {
+        let mgr = crate::chat::session_manager().lock().unwrap();
+        assert_eq!(
+            mgr.status(p_tid).map(|r| r.state),
+            Some(crate::chat::session::SessionState::Closed)
+        );
+    }
+    assert_eq!(super::protocol::thread_presence(p_tid), (PresenceState::Gone, None));
+    // Deferred settlement after stop must not clobber Gone back to Done.
+    super::protocol::on_thread_settled(p_tid);
+    assert_eq!(super::protocol::thread_presence(p_tid), (PresenceState::Gone, None));
 
     {
         let mut live = live_turns().lock().unwrap();
         live.by_thread.remove(tid);
         live.runs.remove(rid);
     }
+    let mut list = threads().lock().unwrap();
+    list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid));
+}
+
+#[test]
+fn thread_presence_distinguishes_question_fallback_done_and_persistent_providers() {
+    use crate::chat::session::{ScriptedTransport, SessionMode, SessionSpec, TransportEvent};
+    use crate::dispatch::presence::{BlockKind, PresenceState};
+    use crate::persist::threads;
+
+    fn persistent_spec(tid: &str, driver: &str) -> SessionSpec {
+        SessionSpec {
+            thread_id: tid.to_string(),
+            driver: driver.to_string(),
+            connection_id: None,
+            working_directory: None,
+            mode: SessionMode::Persistent,
+            recipe: None,
+            resume_handle: None,
+            extra_env: Vec::new(),
+        }
+    }
+
+    // 1. pendingUserInput + status == "waiting" must yield BlockKind::Question, not Permission.
+    let q_tid = "test-question-blocked-thread";
+    {
+        let mut list = threads().lock().unwrap();
+        list.retain(|t| t.get("id").and_then(Value::as_str) != Some(q_tid));
+        list.push(json!({
+            "id": q_tid,
+            "provider": "claude",
+            "status": "waiting",
+            "pendingApproval": Value::Null,
+            "pendingUserInput": { "id": "ask-1", "question": "Proceed?" },
+            "items": [{ "id": "u1", "kind": "user", "text": "hi" }],
+        }));
+    }
+    assert_eq!(
+        super::protocol::thread_presence(q_tid),
+        (PresenceState::Blocked, Some(BlockKind::Question))
+    );
+
+    // 2. Persistent spawn failure (SessionState::Failed) + successful one-shot fallback => Done.
+    let fb_tid = "test-failed-session-oneshot-fallback-thread";
+    let fail_transport = ScriptedTransport::new().failing_spawn("boom");
+    {
+        let mut mgr = crate::chat::session_manager().lock().unwrap();
+        let spec = persistent_spec(fb_tid, "grok");
+        mgr.attach(spec, Box::new(fail_transport)).unwrap();
+        let _ = mgr.start(fb_tid);
+    }
+    {
+        let mut list = threads().lock().unwrap();
+        list.retain(|t| t.get("id").and_then(Value::as_str) != Some(fb_tid));
+        list.push(json!({
+            "id": fb_tid,
+            "provider": "grok",
+            "status": "idle",
+            "pendingApproval": Value::Null,
+            "pendingUserInput": Value::Null,
+            "items": [{ "id": "a1", "kind": "assistant", "text": "fallback ok" }],
+        }));
+    }
+    assert_eq!(
+        super::protocol::thread_presence(fb_tid),
+        (PresenceState::Done, None)
+    );
+
+    // 3. Persistent grok & antigravity transitions: Running -> Working, TurnEnded -> Done.
+    for provider in ["grok", "antigravity"] {
+        let tid = format!("test-persistent-presence-{provider}");
+        {
+            let mut list = threads().lock().unwrap();
+            list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid.as_str()));
+            list.push(json!({
+                "id": tid,
+                "provider": provider,
+                "status": "running",
+                "pendingApproval": Value::Null,
+                "pendingUserInput": Value::Null,
+                "items": [{ "id": "u1", "kind": "user", "text": "hello" }],
+            }));
+        }
+        let transport = ScriptedTransport::new();
+        {
+            let mut mgr = crate::chat::session_manager().lock().unwrap();
+            let spec = persistent_spec(&tid, provider);
+            mgr.attach(spec, Box::new(transport.clone())).unwrap();
+            mgr.start(&tid).unwrap();
+            mgr.send_turn(&tid, "turn-1", "hello").unwrap();
+        }
+        assert_eq!(
+            super::protocol::thread_presence(&tid),
+            (PresenceState::Working, None)
+        );
+        transport.script(TransportEvent::TurnEnded);
+        {
+            let mut mgr = crate::chat::session_manager().lock().unwrap();
+            let _ = mgr.poll(&tid);
+        }
+        {
+            let mut list = threads().lock().unwrap();
+            if let Some(t) = list
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            {
+                t["status"] = json!("idle");
+                t["items"] = json!([
+                    { "id": "u1", "kind": "user", "text": "hello" },
+                    { "id": "a1", "kind": "assistant", "text": "done" }
+                ]);
+            }
+        }
+        assert_eq!(
+            super::protocol::thread_presence(&tid),
+            (PresenceState::Done, None)
+        );
+        {
+            let mut mgr = crate::chat::session_manager().lock().unwrap();
+            let _ = mgr.stop(&tid);
+        }
+        let mut list = threads().lock().unwrap();
+        list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid.as_str()));
+    }
+
+    // 4. One-shot claude & codex transitions via live_turns() -> Done.
+    for provider in ["claude", "codex"] {
+        let tid = format!("test-oneshot-presence-{provider}");
+        let rid = format!("run-{provider}");
+        {
+            let mut list = threads().lock().unwrap();
+            list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid.as_str()));
+            list.push(json!({
+                "id": tid,
+                "provider": provider,
+                "status": "running",
+                "pendingApproval": Value::Null,
+                "pendingUserInput": Value::Null,
+                "items": [],
+            }));
+        }
+        {
+            let mut live = crate::chat::runtime::state::live_turns().lock().unwrap();
+            live.by_thread.insert(tid.clone(), rid.clone());
+            live.runs.insert(
+                rid.clone(),
+                crate::chat::runtime::state::TurnRun {
+                    revision: "r".into(),
+                    events: Vec::new(),
+                    next_sequence: 0,
+                    assistant_id: "a1".into(),
+                    assistant_text: String::new(),
+                    child: None,
+                    stdin: None,
+                    closing: false,
+                    finished: false,
+                    started_at_ms: 1,
+                    routine_id: None,
+                    delivered_through: 0,
+                    file_baselines: std::collections::HashMap::new(),
+                },
+            );
+        }
+        assert_eq!(
+            super::protocol::thread_presence(&tid),
+            (PresenceState::Working, None)
+        );
+        {
+            let mut live = crate::chat::runtime::state::live_turns().lock().unwrap();
+            live.by_thread.remove(&tid);
+            live.runs.remove(&rid);
+            let mut list = threads().lock().unwrap();
+            if let Some(t) = list
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            {
+                t["status"] = json!("idle");
+                t["items"] = json!([{ "id": "a1", "kind": "assistant", "text": "done" }]);
+            }
+        }
+        assert_eq!(
+            super::protocol::thread_presence(&tid),
+            (PresenceState::Done, None)
+        );
+    }
+
+    let mut list = threads().lock().unwrap();
+    list.retain(|t| {
+        let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+        id != q_tid && id != fb_tid && !id.starts_with("test-oneshot-presence-")
+    });
+}
+
+#[test]
+fn live_port_interrupt_and_sub_ms_publish_work_for_threads() {
+    use crate::dispatch::types::ReceiptStatus;
+    use crate::persist::threads;
+
+    let tid = "test-interrupt-and-subms-thread";
+    let address = format!("thread:{tid}");
+    {
+        let mut list = threads().lock().unwrap();
+        list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid));
+        list.push(json!({
+            "id": tid,
+            "provider": "claude",
+            "status": "running",
+            "pendingApproval": Value::Null,
+            "pendingUserInput": Value::Null,
+            "items": [{ "id": "u1", "kind": "user", "text": "work" }],
+        }));
+    }
+
+    let mut svc = super::protocol::service().lock().unwrap();
+    let _ = svc.attach(Family::Thread, tid, None, None, false);
+    // Two publishes back-to-back within the same millisecond must not drop the second transition.
+    super::protocol::publish_thread(&mut svc, tid);
+    {
+        let mut list = threads().lock().unwrap();
+        if let Some(t) = list
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))
+        {
+            t["status"] = json!("idle");
+        }
+    }
+    super::protocol::publish_thread(&mut svc, tid);
+    let row = svc
+        .ls()
+        .into_iter()
+        .find(|line| line.starts_with(&address))
+        .unwrap_or_default();
+    assert_eq!(row, format!("{address} done"));
+
+    // Interrupt must succeed for Family::Thread instead of TransportUnsupported.
+    let receipt = svc.interrupt("int-thread-1", &address);
+    assert_eq!(receipt.status, ReceiptStatus::Submitted, "receipt={receipt:?}");
+
+    let _ = svc.kill("test-cleanup-interrupt", &address);
     let mut list = threads().lock().unwrap();
     list.retain(|t| t.get("id").and_then(Value::as_str) != Some(tid));
 }

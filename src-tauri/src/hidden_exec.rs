@@ -544,10 +544,10 @@ mod windows_impl {
                 continue;
             }
             let clean_val: String = value.chars().filter(|&ch| ch != '\0').collect();
-            merged.insert(clean_key.to_lowercase(), (clean_key, clean_val));
+            merged.insert(clean_key.to_uppercase(), (clean_key, clean_val));
         }
         merged
-            .entry("agy_cli_disable_auto_update".to_string())
+            .entry("AGY_CLI_DISABLE_AUTO_UPDATE".to_string())
             .or_insert_with(|| {
                 (
                     "AGY_CLI_DISABLE_AUTO_UPDATE".to_string(),
@@ -560,7 +560,7 @@ mod windows_impl {
                 continue;
             }
             let clean_val: String = value.chars().filter(|&ch| ch != '\0').collect();
-            merged.insert(clean_key.to_lowercase(), (clean_key, clean_val));
+            merged.insert(clean_key.to_uppercase(), (clean_key, clean_val));
         }
 
         let mut block = Vec::new();
@@ -831,6 +831,8 @@ mod tests {
     fn windows_environment_block_overrides_case_insensitively_and_sorts() {
         let base = vec![
             ("Path".to_string(), r"C:\Windows\System32".to_string()),
+            ("FOO_BAR".to_string(), "1".to_string()),
+            ("FOOBAZ".to_string(), "2".to_string()),
             ("Z_KEEP".to_string(), "1".to_string()),
         ];
         let block = super::windows_impl::build_windows_environment_block(
@@ -851,6 +853,8 @@ mod tests {
             entries,
             vec![
                 "AGY_CLI_DISABLE_AUTO_UPDATE=true",
+                "FOOBAZ=2",
+                "FOO_BAR=1",
                 "KITE_DISPATCH=1",
                 r"PATH=C:\Kite\bin;C:\Windows\System32",
                 "Z_KEEP=1",

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +17,46 @@ use crate::dispatch::presence::{BlockKind, PresenceState};
 use crate::dispatch::types::{Caller, DispatchError, Family, PaneVisibility};
 
 pub static STOP: AtomicBool = AtomicBool::new(false);
+static PUBLISH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_publish_seq() -> u64 {
+    let ts = now_ms();
+    loop {
+        let prev = PUBLISH_SEQ.load(Ordering::Relaxed);
+        let next = prev.max(ts).saturating_add(1);
+        if PUBLISH_SEQ
+            .compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn killed_threads() -> &'static Mutex<HashSet<String>> {
+    static KILLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    KILLED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub fn mark_thread_killed(thread_id: &str) {
+    if let Ok(mut set) = killed_threads().lock() {
+        set.insert(thread_id.to_string());
+    }
+}
+
+pub fn clear_thread_killed(thread_id: &str) {
+    if let Ok(mut set) = killed_threads().lock() {
+        set.remove(thread_id);
+    }
+}
+
+fn is_thread_killed(thread_id: &str) -> bool {
+    killed_threads()
+        .lock()
+        .ok()
+        .map(|set| set.contains(thread_id))
+        .unwrap_or(false)
+}
 
 pub struct LivePort;
 
@@ -58,7 +98,15 @@ impl Port for LivePort {
                 Ok(())
             }
             Family::Thread => {
-                let value = crate::chat::start_turn(id, None, text, Vec::new(), None);
+                clear_thread_killed(id);
+                let profile_id = crate::persist::threads().lock().ok().and_then(|list| {
+                    list.iter()
+                        .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
+                        .and_then(|t| t.get("profileId").and_then(Value::as_str))
+                        .map(str::to_string)
+                });
+                let value =
+                    crate::chat::start_turn(id, profile_id.as_deref(), text, Vec::new(), None);
                 if value.get("error").is_some() {
                     Err(DispatchError::TransportUnsupported)
                 } else {
@@ -82,13 +130,37 @@ impl Port for LivePort {
                 let _ = crate::terminal::terminate_terminal_sync(json!({ "sessionId": id }));
             }
             Family::Thread => {
+                mark_thread_killed(id);
                 crate::chat::cancel_turn(id);
                 if let Ok(mut manager) = crate::chat::session_manager().lock() {
-                    let _ = manager.interrupt(id);
+                    let already_closed = manager
+                        .status(id)
+                        .is_some_and(|r| r.state == crate::chat::SessionState::Closed);
+                    if !already_closed {
+                        let _ = manager.stop(id);
+                    }
                 }
             }
         }
         Ok(())
+    }
+
+    fn interrupt(&mut self, family: Family, id: &str) -> Result<(), DispatchError> {
+        match family {
+            Family::Terminal => self.type_bytes(family, id, "\u{3}"),
+            Family::Thread => {
+                crate::chat::cancel_turn(id);
+                if let Ok(mut manager) = crate::chat::session_manager().lock() {
+                    let attached_open = manager
+                        .status(id)
+                        .is_some_and(|r| r.state != crate::chat::SessionState::Closed);
+                    if attached_open {
+                        let _ = manager.interrupt(id);
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 
     fn start_terminal(&mut self, request: &StartRequest) -> Result<Started, DispatchError> {
@@ -148,7 +220,13 @@ impl Port for LivePort {
                 }
                 Ok(())
             }
-            Family::Thread => Err(DispatchError::TransportUnsupported),
+            Family::Thread => {
+                if text == "\u{3}" {
+                    self.interrupt(family, id)
+                } else {
+                    Err(DispatchError::TransportUnsupported)
+                }
+            }
         }
     }
 
@@ -299,7 +377,7 @@ pub fn prepare(svc: &mut Service<LivePort>, address: &str, observed: Option<&str
 pub fn publish_thread(svc: &mut Service<LivePort>, thread_id: &str) {
     let (state, kind) = thread_presence(thread_id);
     let address = format!("thread:{thread_id}");
-    let _ = svc.publish_reported(&address, state, kind, now_ms(), now_ms());
+    let _ = svc.publish_reported(&address, state, kind, next_publish_seq(), now_ms());
 }
 
 pub fn on_thread_settled(thread_id: &str) {
@@ -358,12 +436,9 @@ pub fn thread_presence(thread_id: &str) -> (PresenceState, Option<BlockKind>) {
             .map(|record| (record.state, !record.pending_approvals.is_empty()))
     });
 
-    if persisted.as_ref().map(|p| p.0).unwrap_or(false)
-        || session_info
-            .map(|(state, pending)| pending || state == crate::chat::SessionState::Waiting)
-            .unwrap_or(false)
-        || persisted.as_ref().map(|p| p.2.as_str()) == Some("waiting")
-    {
+    let approval_pending = persisted.as_ref().map(|p| p.0).unwrap_or(false)
+        || session_info.map(|(_, pending)| pending).unwrap_or(false);
+    if approval_pending {
         return (PresenceState::Blocked, Some(BlockKind::Permission));
     }
 
@@ -371,35 +446,54 @@ pub fn thread_presence(thread_id: &str) -> (PresenceState, Option<BlockKind>) {
         return (PresenceState::Blocked, Some(BlockKind::Question));
     }
 
+    if session_info
+        .map(|(state, _)| state == crate::chat::SessionState::Waiting)
+        .unwrap_or(false)
+        || persisted.as_ref().map(|p| p.2.as_str()) == Some("waiting")
+    {
+        return (PresenceState::Blocked, Some(BlockKind::Permission));
+    }
+
+    let session_state = session_info.map(|(state, _)| state);
     if live_running
         || matches!(
-            session_info.map(|(state, _)| state),
+            session_state,
             Some(
                 crate::chat::SessionState::Running
                     | crate::chat::SessionState::Starting
                     | crate::chat::SessionState::Resurrecting
             )
         )
-        || persisted.as_ref().map(|p| p.2.as_str()) == Some("running")
     {
         return (PresenceState::Working, None);
     }
 
-    if session_info.map(|(state, _)| state) == Some(crate::chat::SessionState::Closed) {
+    if is_thread_killed(thread_id)
+        || session_state == Some(crate::chat::SessionState::Closed)
+    {
         return (PresenceState::Gone, None);
     }
 
-    if session_info.map(|(state, _)| state) == Some(crate::chat::SessionState::Failed)
-        || persisted.as_ref().map(|p| p.2.as_str()) == Some("error")
-    {
+    if persisted.as_ref().map(|p| p.2.as_str()) == Some("running") {
+        return (PresenceState::Working, None);
+    }
+
+    if persisted.as_ref().map(|p| p.2.as_str()) == Some("error") {
         return (PresenceState::Error, None);
     }
 
-    if session_info.map(|(state, _)| state) == Some(crate::chat::SessionState::Completed)
-        || (persisted.as_ref().map(|p| p.2.as_str()) == Some("idle")
-            && persisted.as_ref().map(|p| p.3).unwrap_or(false))
+    if persisted.as_ref().map(|p| p.2.as_str()) == Some("idle")
+        && persisted.as_ref().map(|p| p.3).unwrap_or(false)
     {
         return (PresenceState::Done, None);
+    }
+
+    if session_state == Some(crate::chat::SessionState::Completed) {
+        return (PresenceState::Done, None);
+    }
+
+    if session_state == Some(crate::chat::SessionState::Failed) {
+        return (PresenceState::Error, None);
     }
 
     (PresenceState::Idle, None)

@@ -571,9 +571,27 @@ impl<P: Port> Service<P> {
         }
     }
 
-    /// Writes Ctrl+C. Does not press Enter and does not use the send gate.
+    /// Sends an interrupt signal. Does not press Enter and does not use the send gate.
     pub fn interrupt(&mut self, id: &str, address: &str) -> Receipt {
-        self.write_control(id, "interrupt", address, "\u{3}")
+        if let Some(existing) = self.receipts.get(id) {
+            return existing.clone();
+        }
+        let (family, session) = match self.resolve_control_target(address) {
+            Ok(target) => target,
+            Err(err) => return self.finish(rejected(id, "interrupt", address, err)),
+        };
+        match self.port.interrupt(family, &session) {
+            Ok(()) => self.finish(Receipt::new(
+                id,
+                "interrupt",
+                ReceiptStatus::Submitted,
+                address,
+                true,
+                None,
+                None,
+            )),
+            Err(err) => self.finish(rejected(id, "interrupt", address, err)),
+        }
     }
 
     /// Writes the named keys. Enter is written only when a key is `enter`.
@@ -641,23 +659,25 @@ impl<P: Port> Service<P> {
         }
     }
 
+    fn resolve_control_target(&mut self, address: &str) -> Result<(Family, String), DispatchError> {
+        if !self.online {
+            return Err(DispatchError::RuntimeOffline);
+        }
+        let key = self.resolve(address)?;
+        let ep = self
+            .endpoints
+            .get(&key)
+            .ok_or(DispatchError::UnknownAddress)?;
+        Ok((ep.family, ep.id.clone()))
+    }
+
     pub(crate) fn write_control(&mut self, id: &str, op: &str, address: &str, bytes: &str) -> Receipt {
         if let Some(existing) = self.receipts.get(id) {
             return existing.clone();
         }
-        if !self.online {
-            return self.finish(rejected(id, op, address, DispatchError::RuntimeOffline));
-        }
-        let key = match self.resolve(address) {
-            Ok(key) => key,
+        let (family, session) = match self.resolve_control_target(address) {
+            Ok(target) => target,
             Err(err) => return self.finish(rejected(id, op, address, err)),
-        };
-        let (family, session) = {
-            let ep = match self.endpoints.get(&key) {
-                Some(ep) => ep,
-                None => return self.finish(rejected(id, op, address, DispatchError::UnknownAddress)),
-            };
-            (ep.family, ep.id.clone())
         };
         match self.port.type_bytes(family, &session, bytes) {
             Ok(()) => self.finish(Receipt::new(

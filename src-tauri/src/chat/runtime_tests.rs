@@ -914,3 +914,42 @@
             "KITE_WORKSPACE_ID must be omitted when unbound"
         );
     }
+
+    #[test]
+    fn session_spec_and_transport_spec_preserve_thread_dispatch_env() {
+        use crate::chat::session::ScriptedTransport;
+
+        let env = compose_thread_dispatch_env(
+            "thread-env-spec-1",
+            Some("ws-1"),
+            std::path::Path::new("C:/Kite/skills/kite-dispatch/SKILL.md"),
+            std::path::Path::new("C:/Kite/bin"),
+            None,
+            "C:\\Windows\\System32",
+        );
+        let transport = ScriptedTransport::new();
+        let mut mgr = SessionManager::new();
+        let spec = SessionSpec {
+            thread_id: "thread-env-spec-1".to_string(),
+            driver: "grok".to_string(),
+            connection_id: None,
+            working_directory: None,
+            mode: SessionMode::Persistent,
+            recipe: None,
+            resume_handle: None,
+            extra_env: Vec::new(),
+        }
+        .with_extra_env(env);
+        mgr.attach(spec, Box::new(transport.clone())).unwrap();
+        mgr.start("thread-env-spec-1").unwrap();
+        let specs = transport.spawned_specs();
+        assert_eq!(specs.len(), 1);
+        let map: std::collections::HashMap<&str, &str> = specs[0]
+            .extra_env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(map.get("KITE_DISPATCH").copied(), Some("1"));
+        assert_eq!(map.get("KITE_ADDRESS").copied(), Some("thread:thread-env-spec-1"));
+        assert_eq!(map.get("KITE_WORKSPACE_ID").copied(), Some("ws-1"));
+    }

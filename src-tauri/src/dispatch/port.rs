@@ -55,6 +55,11 @@ pub trait Port {
 
     fn stop(&mut self, family: Family, id: &str) -> Result<(), DispatchError>;
 
+    /// Send an interrupt signal (Ctrl+C for terminals; cancel/interrupt for threads).
+    fn interrupt(&mut self, family: Family, id: &str) -> Result<(), DispatchError> {
+        self.type_bytes(family, id, "\u{3}")
+    }
+
     fn start_terminal(&mut self, request: &StartRequest) -> Result<Started, DispatchError>;
 
     /// Write bytes exactly. Do not append Enter and do not play a flight.

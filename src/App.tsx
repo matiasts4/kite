@@ -34,6 +34,7 @@ import { useAppSidebarHandlers } from './components/app/useAppSidebarHandlers';
 import { AppModals } from './components/app/AppModals';
 import { AppNotificationsPopover } from './components/app/AppNotificationsPopover';
 import { AppMainStage } from './components/app/AppMainStage';
+import { GuidedLoginBanner } from './components/quota/GuidedLoginBanner';
 
 export type ShellRoute =
   | { kind: 'agent' }
@@ -514,6 +515,8 @@ export const App: React.FC = () => {
           }}
           onOpenUsage={() => setIsUsageModalOpen(true)}
         />
+
+        <GuidedLoginBanner />
 
         {/* Main Workspace Shell */}
         <div

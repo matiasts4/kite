@@ -1,8 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AddProviderModal } from './AddProviderModal';
 import { AccountSwitcherModal } from './AccountSwitcherModal';
+import { guidedLoginCoordinator } from '../../lib/accounts/guidedLoginCoordinator';
+
+vi.mock('../../lib/quota/quotaManager', () => ({
+  subscriptionQuotaManager: {
+    fetchAll: vi.fn().mockResolvedValue({}),
+  },
+}));
 
 vi.mock('../../lib/ipc', () => {
   const sampleProfiles = [
@@ -30,10 +37,34 @@ vi.mock('../../lib/ipc', () => {
       profiles: sampleProfiles,
       unregisteredLiveSession: null,
     }),
+    startAccountLoginFlow: vi.fn().mockResolvedValue({
+      success: true,
+      flowId: 'flow-modal-1',
+      previousEmail: 'personal@gmail.com',
+      previousEmailSaved: 'personal@gmail.com',
+      engine: 'agy',
+      loginArgv: ['C:\\Tools\\agy.exe', 'acp', '--login'],
+      loginCommand: 'agy acp --login',
+      keyringDeleted: true,
+      ideCleared: true,
+    }),
+    cancelAccountLoginFlow: vi.fn().mockResolvedValue({
+      success: true,
+      restored: true,
+      restoredEmail: 'personal@gmail.com',
+    }),
+    probeLiveAccountLoginStatus: vi.fn().mockResolvedValue({
+      provider: 'agy',
+      authenticated: false,
+      credentialStatus: 'missing_file',
+      email: null,
+      hasRefreshToken: false,
+      sameAsPrevious: false,
+    }),
     prepareNewAccountLogin: vi.fn().mockResolvedValue({
       success: true,
       previousEmailSaved: 'personal@gmail.com',
-      loginCommand: 'agy',
+      loginCommand: 'agy acp --login',
     }),
     switchAccountProfile: vi.fn().mockResolvedValue({
       success: true,
@@ -51,6 +82,9 @@ vi.mock('../../lib/ipc', () => {
 });
 
 describe('AddProviderModal & AccountSwitcherModal (Unified Modals)', () => {
+  afterEach(() => {
+    guidedLoginCoordinator.reset();
+  });
   it('renders AddProviderModal with search filter and multi-selection', async () => {
     const user = userEvent.setup();
     const handleAdd = vi.fn();
@@ -191,7 +225,7 @@ describe('AddProviderModal & AccountSwitcherModal (Unified Modals)', () => {
   });
 
   it('renders unregisteredLiveSession banner and connects new account in AccountSwitcherModal', async () => {
-    const { listSavedAccountsFull, prepareNewAccountLogin } = await import('../../lib/ipc');
+    const { listSavedAccountsFull, startAccountLoginFlow } = await import('../../lib/ipc');
     vi.mocked(listSavedAccountsFull).mockResolvedValueOnce({
       profiles: [
         {
@@ -203,6 +237,14 @@ describe('AddProviderModal & AccountSwitcherModal (Unified Modals)', () => {
         email: 'unregistered-live@gmail.com',
       },
     });
+
+    (window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted = true;
+    const spawns: Array<Record<string, unknown>> = [];
+    const legacyCmds: unknown[] = [];
+    const onSpawn = (e: Event) => spawns.push((e as CustomEvent).detail);
+    const onLegacy = (e: Event) => legacyCmds.push((e as CustomEvent).detail);
+    window.addEventListener('kite:spawn-agent-terminal', onSpawn);
+    window.addEventListener('kite:terminal-command', onLegacy);
 
     const user = userEvent.setup();
     const handleClose = vi.fn();
@@ -221,10 +263,21 @@ describe('AddProviderModal & AccountSwitcherModal (Unified Modals)', () => {
     expect(screen.getByText('unregistered-live@gmail.com')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Guardar en bóveda/i })).toBeInTheDocument();
 
-    // Connect new account button is present
+    // Connect new account button starts guided flow and spawns interactive login argv cleanly
     const connectBtn = screen.getByRole('button', { name: /Conectar nueva cuenta/i });
     expect(connectBtn).toBeInTheDocument();
     await user.click(connectBtn);
-    expect(prepareNewAccountLogin).toHaveBeenCalledWith('antigravity');
+    expect(startAccountLoginFlow).toHaveBeenCalledWith('antigravity', { force: undefined });
+    expect(legacyCmds).toHaveLength(0);
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0]).toMatchObject({
+      engine: 'agy',
+      argv: ['C:\\Tools\\agy.exe', 'acp', '--login'],
+    });
+    expect(await screen.findByText(/Esperando inicio de sesión \(agy acp --login\)/i)).toBeInTheDocument();
+
+    window.removeEventListener('kite:spawn-agent-terminal', onSpawn);
+    window.removeEventListener('kite:terminal-command', onLegacy);
+    delete (window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted;
   });
 });

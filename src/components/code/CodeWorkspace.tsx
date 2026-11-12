@@ -249,17 +249,32 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     return startAgentInboxPolling(() => workspaceCwdRef.current);
   }, [selectedWorkspace?.id]);
 
+  const hasActiveWorkspace = Boolean(selectedWorkspace && workspaces.length > 0);
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      (window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted = true;
-      window.dispatchEvent(new CustomEvent('kite:code-workspace-ready'));
+      const w = window as unknown as {
+        __kiteCodeWorkspaceMounted?: boolean;
+        __kiteHasActiveWorkspace?: boolean;
+      };
+      w.__kiteHasActiveWorkspace = hasActiveWorkspace;
+      w.__kiteCodeWorkspaceMounted = hasActiveWorkspace;
+      window.dispatchEvent(
+        new CustomEvent(
+          hasActiveWorkspace ? 'kite:code-workspace-ready' : 'kite:code-workspace-no-workspace'
+        )
+      );
     }
     return () => {
       if (typeof window !== 'undefined') {
-        (window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted = false;
+        const w = window as unknown as {
+          __kiteCodeWorkspaceMounted?: boolean;
+          __kiteHasActiveWorkspace?: boolean;
+        };
+        w.__kiteCodeWorkspaceMounted = false;
+        delete w.__kiteHasActiveWorkspace;
       }
     };
-  }, []);
+  }, [hasActiveWorkspace]);
 
   const allTerminalLeaves = useMemo(() => {
     const list: Array<{ leaf: PaneLeaf; tabId: string; isActiveTab: boolean }> = [];

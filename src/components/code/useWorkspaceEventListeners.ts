@@ -199,6 +199,7 @@ export function useWorkspaceEventListeners({
     const spawnTerminalCore = async (detail: {
       sessionId: string;
       engine?: string;
+      argv?: string[];
       title?: string;
       agentName?: string;
       splitAxis?: 'vertical' | 'horizontal';
@@ -212,6 +213,9 @@ export function useWorkspaceEventListeners({
       projectileLabel?: string;
       requestId?: string;
     }) => {
+      if (!selectedWorkspace) {
+        return;
+      }
       const paneId = globalThis.crypto.randomUUID();
       const wireEngine = detail.engine || 'powershell';
       const isShell = wireEngine === 'powershell' || wireEngine === 'terminal';
@@ -238,6 +242,7 @@ export function useWorkspaceEventListeners({
           await invokeCommand('start_terminal', {
             sessionId: detail.sessionId,
             engine: wireEngine,
+            ...(detail.argv !== undefined ? { argv: detail.argv } : {}),
             workspaceId: selectedWorkspace?.id || null,
             paneId,
             columns: dims.columns,
@@ -323,6 +328,7 @@ export function useWorkspaceEventListeners({
       const customEvent = e as CustomEvent<{
         sessionId: string;
         engine?: string;
+        argv?: string[];
         initialPrompt?: string;
         autoApprove?: boolean;
         title?: string;

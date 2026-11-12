@@ -191,6 +191,18 @@ pub fn extract_antigravity_token_material(raw: &str) -> (Option<String>, Option<
     )
 }
 
+pub(crate) fn inspect_raw_antigravity_credential_health(
+    raw: Option<&str>,
+) -> (&'static str, bool, Option<String>) {
+    let Some(raw_str) = raw else {
+        return ("missing_file", false, None);
+    };
+    match parse_antigravity_credential_with_tokens(raw_str) {
+        Ok(ident) => ("valid", ident.has_refresh_token, Some(ident.email)),
+        Err(code) => (code, false, None),
+    }
+}
+
 pub fn inspect_antigravity_credential_file(cred_file: &Path) -> (&'static str, bool) {
     if !cred_file.exists() {
         return ("missing_file", false);
@@ -198,10 +210,8 @@ pub fn inspect_antigravity_credential_file(cred_file: &Path) -> (&'static str, b
     let Ok(raw) = std::fs::read_to_string(cred_file) else {
         return ("corrupt", false);
     };
-    match parse_antigravity_credential_with_tokens(&raw) {
-        Ok(ident) => ("valid", ident.has_refresh_token),
-        Err(code) => (code, false),
-    }
+    let (status, has_refresh, _) = inspect_raw_antigravity_credential_health(Some(&raw));
+    (status, has_refresh)
 }
 
 pub fn read_antigravity_credential() -> Option<(String, Option<String>)> {
@@ -458,7 +468,7 @@ pub fn extract_ide_auth_state_from_db(
     Ok(Some(IdeAuthStateSnapshot { email, keys }))
 }
 
-fn delete_ide_auth_keys_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+fn delete_ide_auth_keys_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<usize, String> {
     tx.execute(
         "DELETE FROM ItemTable WHERE key IN (?1, ?2, ?3, ?4)",
         rusqlite::params![
@@ -468,8 +478,25 @@ fn delete_ide_auth_keys_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), Stri
             IDE_AUTH_STATE_KEYS[3],
         ],
     )
-    .map_err(|e| format!("No se pudieron limpiar las claves de sesión en state.vscdb: {e}"))?;
-    Ok(())
+    .map_err(|e| format!("No se pudieron limpiar las claves de sesión en state.vscdb: {e}"))
+}
+
+pub fn clear_ide_auth_state_from_db(db_path: &Path) -> Result<bool, String> {
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let mut conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("No se pudo abrir {} para limpiar sesión del IDE: {e}", db_path.display()))?;
+    if !has_item_table(&conn)? {
+        return Ok(false);
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("No se pudo iniciar transacción de limpieza en state.vscdb: {e}"))?;
+    let deleted = delete_ide_auth_keys_in_tx(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("No se pudo confirmar limpieza de state.vscdb: {e}"))?;
+    Ok(deleted > 0)
 }
 
 pub fn apply_ide_auth_state_to_db(

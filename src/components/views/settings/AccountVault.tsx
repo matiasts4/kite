@@ -4,9 +4,13 @@ import {
   deleteAccountProfile,
   listSavedAccountsFull,
   saveCurrentAccountProfile,
-  prepareNewAccountLogin,
   switchAccountProfile,
 } from '../../../lib/ipc';
+import {
+  guidedLoginCoordinator,
+  isSameAccountProvider,
+  useGuidedLoginState,
+} from '../../../lib/accounts/guidedLoginCoordinator';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { SparklesIcon } from './icons';
 
@@ -46,9 +50,16 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [saving, setSaving] = useState(false);
-  const [isConnectingNew, setIsConnectingNew] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  const loginState = useGuidedLoginState();
+  const matchesLoginProvider = isSameAccountProvider(loginState.provider, provider);
+  const isConnectingNew =
+    matchesLoginProvider &&
+    (loginState.phase === 'preparing' ||
+      loginState.phase === 'waiting' ||
+      loginState.phase === 'saving');
 
   const providerLabel = MULTI_ACCOUNT_PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
 
@@ -71,6 +82,14 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
     setError(null);
     setNotice(null);
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const onAccountsChanged = () => {
+      void refresh();
+    };
+    window.addEventListener('kite:accounts-changed', onAccountsChanged);
+    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
   }, [refresh]);
 
   const handleSwitch = async (id: string) => {
@@ -131,45 +150,9 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
 
   const handleConnectNewAccount = async () => {
     if (isConnectingNew) return;
-    setIsConnectingNew(true);
     setError(null);
     setNotice(null);
-    try {
-      const res = await prepareNewAccountLogin(provider);
-      if (res.success) {
-        setNotice(
-          res.previousEmailSaved
-            ? `Sesión anterior (${res.previousEmailSaved}) guardada en la bóveda. Iniciando nueva autenticación...`
-            : 'Listo para conectar nueva cuenta. Abre tu terminal e inicia sesión.'
-        );
-        window.dispatchEvent(
-          new CustomEvent('kite:terminal-command', {
-            detail: { command: 'launch-cli', provider },
-          })
-        );
-        let attempts = 0;
-        const interval = setInterval(async () => {
-          attempts++;
-          const check = await listSavedAccountsFull(provider);
-          if (check.unregisteredLiveSession || check.profiles.some((p) => p.isActive)) {
-            clearInterval(interval);
-            setIsConnectingNew(false);
-            await refresh();
-            setNotice('¡Nueva cuenta detectada y guardada en la bóveda!');
-            onChanged?.();
-          } else if (attempts >= 24) {
-            clearInterval(interval);
-            setIsConnectingNew(false);
-          }
-        }, 2500);
-      } else {
-        setError(res.error || 'No se pudo preparar la conexión de una nueva cuenta.');
-        setIsConnectingNew(false);
-      }
-    } catch (err: any) {
-      setError(err?.message || 'Error al conectar nueva cuenta');
-      setIsConnectingNew(false);
-    }
+    await guidedLoginCoordinator.start(provider);
   };
 
   const handleDelete = async (id: string) => {
@@ -200,6 +183,66 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
 
       {error ? <div className="qt-banner" data-tone="error">{error}</div> : null}
       {notice ? <div className="qt-banner" data-tone="ok">{notice}</div> : null}
+
+      {matchesLoginProvider && loginState.phase === 'waiting' ? (
+        <div
+          className="qt-banner"
+          data-tone={loginState.timedOut ? 'warn' : 'ok'}
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
+        >
+          <div>
+            <div>
+              {loginState.timedOut
+                ? loginState.notice
+                : `Esperando inicio de sesión (${loginState.loginCommand || 'agy acp --login'})...`}
+            </div>
+            {!loginState.timedOut && loginState.notice ? (
+              <div style={{ fontSize: '11px', opacity: 0.85, marginTop: '2px' }}>{loginState.notice}</div>
+            ) : null}
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+            {loginState.timedOut ? (
+              <button
+                type="button"
+                className="qt-button qt-button--primary"
+                onClick={() => void guidedLoginCoordinator.retryWaiting()}
+              >
+                Reintentar
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="qt-button"
+              onClick={() => void guidedLoginCoordinator.cancelAndRestore()}
+            >
+              Cancelar y restaurar
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {matchesLoginProvider && (loginState.phase === 'done' || loginState.phase === 'cancelled') && loginState.notice ? (
+        <div className="qt-banner" data-tone="ok">{loginState.notice}</div>
+      ) : null}
+
+      {matchesLoginProvider && loginState.phase === 'error' && loginState.error ? (
+        <div
+          className="qt-banner"
+          data-tone="error"
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
+        >
+          <span>{loginState.error}</span>
+          {loginState.canForceStart ? (
+            <button
+              type="button"
+              className="qt-button qt-button--primary"
+              onClick={() => void guidedLoginCoordinator.start(provider, { force: true })}
+            >
+              Forzar y continuar
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {unregisteredSession ? (
         <div className="qt-banner" data-tone="warn" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>

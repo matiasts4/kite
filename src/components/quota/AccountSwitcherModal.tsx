@@ -4,11 +4,15 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { SavedAccountProfile } from '../../types';
 import {
   listSavedAccountsFull,
-  prepareNewAccountLogin,
   saveCurrentAccountProfile,
   switchAccountProfile,
   deleteAccountProfile,
 } from '../../lib/ipc';
+import {
+  guidedLoginCoordinator,
+  isSameAccountProvider,
+  useGuidedLoginState,
+} from '../../lib/accounts/guidedLoginCoordinator';
 import { surfaceMotion } from '../../motion/standard/surfaces';
 import { springs, tweens } from '../../motion/standard/tokens';
 import { BrandLogo } from '../ui/BrandLogo';
@@ -39,9 +43,16 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     email: string;
     planName?: string | null;
   } | null>(null);
-  const [isConnectingNew, setIsConnectingNew] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const loginState = useGuidedLoginState(isOpen);
+  const matchesLoginProvider = isSameAccountProvider(loginState.provider, provider);
+  const isConnectingNew =
+    matchesLoginProvider &&
+    (loginState.phase === 'preparing' ||
+      loginState.phase === 'waiting' ||
+      loginState.phase === 'saving');
 
   const titleId = useId();
   const descId = useId();
@@ -75,6 +86,15 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       setShowAddForm(false);
       setNewLabel('');
     }
+  }, [isOpen, provider]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onAccountsChanged = () => {
+      void fetchProfiles();
+    };
+    window.addEventListener('kite:accounts-changed', onAccountsChanged);
+    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
   }, [isOpen, provider]);
 
   const handleSwitch = async (id: string) => {
@@ -134,44 +154,9 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
 
   const handleConnectNewAccount = async () => {
     if (isConnectingNew) return;
-    setIsConnectingNew(true);
     setErrorMsg(null);
     setSuccessMsg(null);
-    try {
-      const res = await prepareNewAccountLogin(provider);
-      if (res.success) {
-        setSuccessMsg(
-          res.previousEmailSaved
-            ? `Sesión anterior (${res.previousEmailSaved}) guardada en la bóveda. Iniciando nueva autenticación...`
-            : 'Listo para conectar nueva cuenta. Abre tu terminal e inicia sesión.'
-        );
-        window.dispatchEvent(
-          new CustomEvent('kite:terminal-command', {
-            detail: { command: 'launch-cli', provider },
-          })
-        );
-        let attempts = 0;
-        const interval = setInterval(async () => {
-          attempts++;
-          const check = await listSavedAccountsFull(provider);
-          if (check.unregisteredLiveSession || check.profiles.some((p) => p.isActive)) {
-            clearInterval(interval);
-            setIsConnectingNew(false);
-            await fetchProfiles();
-            setSuccessMsg('¡Nueva cuenta detectada y disponible en la bóveda!');
-          } else if (attempts >= 24) {
-            clearInterval(interval);
-            setIsConnectingNew(false);
-          }
-        }, 2500);
-      } else {
-        setErrorMsg(res.error || 'No se pudo preparar la conexión de una nueva cuenta.');
-        setIsConnectingNew(false);
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Error al conectar nueva cuenta');
-      setIsConnectingNew(false);
-    }
+    await guidedLoginCoordinator.start(provider);
   };
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
@@ -269,6 +254,68 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
           {successMsg ? (
             <div className="qt-banner" data-tone="ok">
               {successMsg}
+            </div>
+          ) : null}
+
+          {matchesLoginProvider && loginState.phase === 'waiting' ? (
+            <div
+              className="qt-banner"
+              data-tone={loginState.timedOut ? 'warn' : 'ok'}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
+            >
+              <div>
+                <div>
+                  {loginState.timedOut
+                    ? loginState.notice
+                    : `Esperando inicio de sesión (${loginState.loginCommand || 'agy acp --login'})...`}
+                </div>
+                {!loginState.timedOut && loginState.notice ? (
+                  <div style={{ fontSize: '11px', opacity: 0.85, marginTop: '2px' }}>{loginState.notice}</div>
+                ) : null}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                {loginState.timedOut ? (
+                  <button
+                    type="button"
+                    className="qt-button qt-button--primary"
+                    onClick={() => void guidedLoginCoordinator.retryWaiting()}
+                  >
+                    Reintentar
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="qt-button"
+                  onClick={() => void guidedLoginCoordinator.cancelAndRestore()}
+                >
+                  Cancelar y restaurar
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {matchesLoginProvider && (loginState.phase === 'done' || loginState.phase === 'cancelled') && loginState.notice ? (
+            <div className="qt-banner" data-tone="ok">
+              {loginState.notice}
+            </div>
+          ) : null}
+
+          {matchesLoginProvider && loginState.phase === 'error' && loginState.error ? (
+            <div
+              className="qt-banner"
+              data-tone="error"
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
+            >
+              <span>{loginState.error}</span>
+              {loginState.canForceStart ? (
+                <button
+                  type="button"
+                  className="qt-button qt-button--primary"
+                  onClick={() => void guidedLoginCoordinator.start(provider, { force: true })}
+                >
+                  Forzar y continuar
+                </button>
+              ) : null}
             </div>
           ) : null}
 

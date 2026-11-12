@@ -292,6 +292,7 @@ pub(crate) fn copy_atomic(src: &Path, dst: &Path) -> bool {
 pub(crate) trait AntigravityCredStore {
     fn read_raw(&self) -> Option<String>;
     fn write_checked(&self, blob_json: &str) -> Result<(), String>;
+    fn delete(&self) -> bool;
 }
 
 pub(crate) struct LiveAntigravityCredStore;
@@ -303,6 +304,10 @@ impl AntigravityCredStore for LiveAntigravityCredStore {
 
     fn write_checked(&self, blob_json: &str) -> Result<(), String> {
         crate::quota::write_antigravity_credential_checked(blob_json)
+    }
+
+    fn delete(&self) -> bool {
+        crate::quota::delete_antigravity_credential()
     }
 }
 

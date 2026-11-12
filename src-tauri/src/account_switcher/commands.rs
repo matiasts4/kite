@@ -1,19 +1,23 @@
 use crate::logger::log_trace;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::quota::{get_cached_live_quota, LiveQuota};
 use super::registry::{
-    appdata_dir, canon_provider, hydrate_profile_credential_health, load_registry, now_ms,
-    profile_storage_dir, profiles_root, same_provider, save_registry, user_home_dir,
-    AccountProfilesRegistry, SavedAccountProfile, REGISTRY_LOCK,
+    appdata_dir, canon_provider, hydrate_profile_credential_health, load_registry,
+    load_registry_from, now_ms, profile_storage_dir, profile_storage_dir_in, profiles_root,
+    same_provider, save_registry, save_registry_to, user_home_dir, AccountProfilesRegistry,
+    SavedAccountProfile, REGISTRY_LOCK,
 };
 use super::storage::{
     apply_profile_to_active, copy_atomic, decode_jwt_payload, ensure_provider_idle,
     get_provider_file_mappings, probe_live_provider_identity, snapshot_active_to_profile,
-    LiveIdentityProbe,
+    snapshot_active_to_profile_with, write_bytes_atomic, AntigravityCredStore, FileMapping,
+    LiveAntigravityCredStore, LiveIdentityProbe,
 };
 
 pub(crate) fn build_antigravity_auth_telemetry(live_ident: Option<&LiveIdentityProbe>) -> Value {
@@ -225,9 +229,186 @@ pub async fn list_saved_accounts_impl(request: Option<Value>) -> Value {
         })
 }
 
+pub(crate) fn cleanup_stale_login_rollback(root: &Path, provider: &str) {
+    let dir = root.join("_login_rollback").join(canon_provider(provider));
+    if dir.exists() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+pub(crate) fn save_account_profile_with(
+    root: &Path,
+    provider: &str,
+    label: String,
+    mappings: &[FileMapping],
+    state_vscdb: Option<&Path>,
+    cred_store: &dyn AntigravityCredStore,
+    live_ident: Option<LiveIdentityProbe>,
+    live_q: Option<LiveQuota>,
+) -> Value {
+    let provider = canon_provider(provider);
+    if mappings.is_empty() && provider != "agy" {
+        return json!({ "success": false, "error": format!("Proveedor no soportado: {provider}") });
+    }
+
+    if provider == "agy" && live_ident.is_none() {
+        return json!({
+            "success": false,
+            "error": "No se detectó una sesión activa de Antigravity en el sistema (gemini:antigravity). Inicia sesión primero."
+        });
+    }
+
+    let email = live_ident
+        .as_ref()
+        .map(|i| i.email.clone())
+        .or_else(|| live_q.as_ref().and_then(|q| q.email.clone()));
+
+    let (plan_name, primary_remaining_percent, primary_reset_at, time_until_reset_ms) =
+        match live_q {
+            Some(q) => (q.plan, Some(q.percent), q.reset_at, q.until_ms),
+            None => (None, None, None, None),
+        };
+
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let mut reg = load_registry_from(root);
+    let now = now_ms();
+
+    // Match strictly by email against reg.profiles
+    let existing_idx = if let Some(ref em) = email {
+        reg.profiles.iter().position(|p| {
+            same_provider(&p.provider, &provider)
+                && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(em))
+        })
+    } else {
+        None
+    };
+
+    let account_id = if let Some(idx) = existing_idx {
+        reg.profiles[idx].id.clone()
+    } else {
+        Uuid::new_v4().to_string()
+    };
+
+    // 1. Snapshot files to account storage; refuse to create an empty or tokenless profile.
+    match snapshot_active_to_profile_with(
+        root,
+        &provider,
+        &account_id,
+        mappings,
+        state_vscdb,
+        cred_store,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            if existing_idx.is_none() {
+                let _ = fs::remove_dir_all(profile_storage_dir_in(root, &provider, &account_id));
+            }
+            return json!({
+                "success": false,
+                "error": "No se encontraron archivos de sesión para guardar. ¿Iniciaste sesión en este proveedor?"
+            });
+        }
+        Err(err) => {
+            if existing_idx.is_none() {
+                let _ = fs::remove_dir_all(profile_storage_dir_in(root, &provider, &account_id));
+            }
+            return json!({
+                "success": false,
+                "error": err
+            });
+        }
+    }
+
+    // Other accounts for this provider are no longer active.
+    for p in &mut reg.profiles {
+        if same_provider(&p.provider, &provider) {
+            p.is_active = false;
+        }
+    }
+
+    let profile = if let Some(idx) = existing_idx {
+        let p = &mut reg.profiles[idx];
+        let trimmed_label = label.trim();
+        if !trimmed_label.is_empty() {
+            // Preserve a user-chosen label (e.g. "Personal Pro") when auto-save passes the raw email.
+            let existing_is_custom = !p.label.trim().is_empty()
+                && email
+                    .as_deref()
+                    .map_or(true, |em| !p.label.trim().eq_ignore_ascii_case(em));
+            let incoming_is_raw_email = email
+                .as_deref()
+                .map_or(false, |em| trimmed_label.eq_ignore_ascii_case(em));
+            if !(existing_is_custom && incoming_is_raw_email) {
+                p.label = trimmed_label.to_string();
+            }
+        }
+        if email.is_some() {
+            p.email = email;
+        }
+        if plan_name.is_some() {
+            p.plan_name = plan_name;
+        }
+        p.is_active = true;
+        p.last_used_unix_ms = now;
+        if primary_remaining_percent.is_some() {
+            p.primary_remaining_percent = primary_remaining_percent;
+            p.primary_reset_at = primary_reset_at;
+            p.time_until_reset_ms = time_until_reset_ms;
+        }
+        hydrate_profile_credential_health(root, std::slice::from_mut(p));
+        p.clone()
+    } else {
+        let mut new_prof = SavedAccountProfile {
+            id: account_id.clone(),
+            provider: provider.clone(),
+            label: if label.trim().is_empty() {
+                email
+                    .clone()
+                    .unwrap_or_else(|| format!("{provider} Profile"))
+            } else {
+                label.trim().to_string()
+            },
+            email,
+            plan_name,
+            is_active: true,
+            last_used_unix_ms: now,
+            primary_remaining_percent,
+            primary_reset_at,
+            time_until_reset_ms,
+            credential_status: None,
+            has_refresh_token: false,
+        };
+        hydrate_profile_credential_health(root, std::slice::from_mut(&mut new_prof));
+        reg.profiles.push(new_prof.clone());
+        new_prof
+    };
+
+    if let Err(err) = save_registry_to(root, &reg) {
+        return json!({
+            "success": false,
+            "error": err
+        });
+    }
+
+    if provider == "agy" {
+        cleanup_stale_login_rollback(root, "agy");
+    }
+
+    log_trace(&format!(
+        "account_switcher: Saved profile {} for provider {}",
+        account_id, provider
+    ));
+
+    json!({
+        "success": true,
+        "profile": profile
+    })
+}
+
 pub fn save_current_account_profile_direct(provider: String, label: String) -> Value {
     let provider = canon_provider(&provider);
-    if get_provider_file_mappings(&provider).is_empty() && provider != "agy" {
+    let mappings = get_provider_file_mappings(&provider);
+    if mappings.is_empty() && provider != "agy" {
         return json!({ "success": false, "error": format!("Proveedor no soportado: {provider}") });
     }
 
@@ -259,117 +440,22 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
         live_q = None;
     }
 
-    let email = live_ident.as_ref().map(|i| i.email.clone())
-        .or_else(|| live_q.as_ref().and_then(|q| q.email.clone()));
-
-    let (plan_name, primary_remaining_percent, primary_reset_at, time_until_reset_ms) = match live_q {
-        Some(q) => (q.plan, Some(q.percent), q.reset_at, q.until_ms),
-        None => (None, None, None, None),
-    };
-
-    let _guard = REGISTRY_LOCK.lock().unwrap();
-    let mut reg = load_registry();
-    let now = now_ms();
-
-    // Match strictly by email against reg.profiles
-    let existing_idx = if let Some(ref em) = email {
-        reg.profiles.iter().position(|p| {
-            same_provider(&p.provider, &provider)
-                && p.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(em))
-        })
+    let state_vscdb = if provider == "agy" {
+        crate::quota::find_existing_state_vscdb()
     } else {
         None
     };
 
-    let account_id = if let Some(idx) = existing_idx {
-        reg.profiles[idx].id.clone()
-    } else {
-        Uuid::new_v4().to_string()
-    };
-
-    // 1. Snapshot files to account storage; refuse to create an empty or tokenless profile.
-    match snapshot_active_to_profile(&provider, &account_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            if existing_idx.is_none() {
-                let _ = fs::remove_dir_all(profile_storage_dir(&provider, &account_id));
-            }
-            return json!({
-                "success": false,
-                "error": "No se encontraron archivos de sesión para guardar. ¿Iniciaste sesión en este proveedor?"
-            });
-        }
-        Err(err) => {
-            if existing_idx.is_none() {
-                let _ = fs::remove_dir_all(profile_storage_dir(&provider, &account_id));
-            }
-            return json!({
-                "success": false,
-                "error": err
-            });
-        }
-    }
-
-    // Other accounts for this provider are no longer active.
-    for p in &mut reg.profiles {
-        if same_provider(&p.provider, &provider) {
-            p.is_active = false;
-        }
-    }
-
-    let profile = if let Some(idx) = existing_idx {
-        let p = &mut reg.profiles[idx];
-        if !label.trim().is_empty() {
-            p.label = label.trim().to_string();
-        }
-        if email.is_some() {
-            p.email = email;
-        }
-        if plan_name.is_some() {
-            p.plan_name = plan_name;
-        }
-        p.is_active = true;
-        p.last_used_unix_ms = now;
-        p.primary_remaining_percent = primary_remaining_percent;
-        p.primary_reset_at = primary_reset_at;
-        p.time_until_reset_ms = time_until_reset_ms;
-        hydrate_profile_credential_health(&profiles_root(), std::slice::from_mut(p));
-        p.clone()
-    } else {
-        let mut new_prof = SavedAccountProfile {
-            id: account_id.clone(),
-            provider: provider.clone(),
-            label: if label.trim().is_empty() {
-                email.clone().unwrap_or_else(|| format!("{provider} Profile"))
-            } else {
-                label.trim().to_string()
-            },
-            email,
-            plan_name,
-            is_active: true,
-            last_used_unix_ms: now,
-            primary_remaining_percent,
-            primary_reset_at,
-            time_until_reset_ms,
-            credential_status: None,
-            has_refresh_token: false,
-        };
-        hydrate_profile_credential_health(&profiles_root(), std::slice::from_mut(&mut new_prof));
-        reg.profiles.push(new_prof.clone());
-        new_prof
-    };
-
-    save_registry(&reg);
-
-    log_trace(&format!(
-        "account_switcher: Saved profile {} for provider {}",
-        account_id, provider
-    ));
-
-    json!({
-        "success": true,
-        "profile": profile
-    })
+    save_account_profile_with(
+        &profiles_root(),
+        &provider,
+        label,
+        &mappings,
+        state_vscdb.as_deref(),
+        &LiveAntigravityCredStore,
+        live_ident,
+        live_q,
+    )
 }
 
 pub fn save_current_account_profile_impl(request: Option<Value>) -> Value {
@@ -1165,58 +1251,750 @@ pub fn list_detected_cli_accounts_impl() -> Value {
     })
 }
 
-pub fn prepare_new_account_login_direct(provider: String) -> Value {
-    let provider = canon_provider(&provider);
-    if provider == "agy" {
-        let live_ident = probe_live_provider_identity("agy");
-        let previous_email = live_ident.as_ref().map(|i| i.email.clone());
+pub(crate) trait LoginFlowOps {
+    fn quiesce_and_evict(&self) -> Vec<crate::terminal::QuiescedTerminal>;
+    fn invalidate_and_evict(&self);
+    fn respawn(
+        &self,
+        account_label: &str,
+        email: Option<&str>,
+        quiesced: &[crate::terminal::QuiescedTerminal],
+    );
+}
 
-        if let Err(msg) = ensure_provider_idle("agy") {
-            return json!({
-                "success": false,
-                "code": "PROVIDER_BUSY",
-                "error": msg
-            });
+pub(crate) struct LiveLoginFlowOps;
+
+impl LoginFlowOps for LiveLoginFlowOps {
+    fn quiesce_and_evict(&self) -> Vec<crate::terminal::QuiescedTerminal> {
+        let quiesced = crate::terminal::quiesce_provider_terminals("agy");
+        self.invalidate_and_evict();
+        quiesced
+    }
+
+    fn invalidate_and_evict(&self) {
+        crate::quota::invalidate_provider_cache("antigravity");
+        crate::quota::invalidate_provider_cache("agy");
+        crate::chat::runtime::state::evict_provider_runtime_state("antigravity");
+    }
+
+    fn respawn(
+        &self,
+        account_label: &str,
+        email: Option<&str>,
+        quiesced: &[crate::terminal::QuiescedTerminal],
+    ) {
+        crate::terminal::respawn_provider_terminals("agy", account_label, email, quiesced);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginRollbackMapping {
+    source_path: String,
+    rel_dest: String,
+    had_file: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginRollbackBundle {
+    flow_id: String,
+    provider: String,
+    created_at_ms: i64,
+    previous_email: Option<String>,
+    had_cred: bool,
+    had_ide_rows: bool,
+    mappings: Vec<LoginRollbackMapping>,
+    quiesced_terminals: Vec<crate::terminal::QuiescedTerminal>,
+}
+
+fn write_login_rollback_bundle(
+    rollback_dir: &Path,
+    bundle: &LoginRollbackBundle,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(bundle)
+        .map_err(|e| format!("No se pudo serializar rollback.json: {e}"))?;
+    write_bytes_atomic(&rollback_dir.join("rollback.json"), &bytes)
+}
+
+fn resolve_rollback_dir(root: &Path, flow_id: Option<&str>) -> Option<PathBuf> {
+    let base = root.join("_login_rollback").join("agy");
+    if let Some(id) = flow_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let candidate = base.join(id);
+        if candidate.join("rollback.json").exists() {
+            return Some(candidate);
         }
-
-        // 1. If active identity exists, snapshot/save it to vault first
-        if let Some(ref em) = previous_email {
-            let _ = save_current_account_profile_direct("agy".into(), em.clone());
+    }
+    let latest_path = base.join("latest.txt");
+    if let Ok(latest) = fs::read_to_string(&latest_path) {
+        let trimmed = latest.trim();
+        if !trimmed.is_empty() {
+            let candidate = base.join(trimmed);
+            if candidate.join("rollback.json").exists() {
+                return Some(candidate);
+            }
         }
-
-        // 2. Quiesce only Kite-owned terminals for agy (never kill unrelated user processes globally)
-        crate::terminal::quiesce_provider_terminals("agy");
-
-        // 3. Clear generic credential from Windows Credential Manager
-        let deleted = crate::quota::delete_antigravity_credential();
-
-        // 5. Mark all agy profiles in profiles.json as is_active = false
-        {
-            let _guard = REGISTRY_LOCK.lock().unwrap();
-            let mut reg = load_registry();
-            for p in &mut reg.profiles {
-                if same_provider(&p.provider, "agy") {
-                    p.is_active = false;
+    }
+    let Ok(entries) = fs::read_dir(&base) else {
+        return None;
+    };
+    let mut best: Option<(i64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let meta_path = path.join("rollback.json");
+        if let Ok(raw) = fs::read(&meta_path) {
+            if let Ok(bundle) = serde_json::from_slice::<LoginRollbackBundle>(&raw) {
+                if best
+                    .as_ref()
+                    .map_or(true, |(ts, _)| bundle.created_at_ms >= *ts)
+                {
+                    best = Some((bundle.created_at_ms, path));
                 }
             }
-            let _ = save_registry(&reg);
         }
+    }
+    best.map(|(_, path)| path)
+}
 
-        // 6. Invalidate antigravity quota cache
-        crate::quota::invalidate_provider_cache("antigravity");
+/// Computes the interactive CLI login argv and display command from `acp --help`
+/// output, wrapping Windows `.cmd`/`.bat` shims with `cmd.exe /C`.
+pub(crate) fn build_antigravity_login_argv_from_help(
+    binary: Option<&Path>,
+    acp_help_text: Option<&str>,
+) -> (Vec<String>, String) {
+    let supports_login = acp_help_text.map_or(false, |text| text.contains("--login"));
+    let bin_str = binary
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "agy".to_string());
+    let is_batch_script = binary
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map_or(false, |ext| {
+            ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+        });
 
-        json!({
-            "success": true,
-            "previousEmailSaved": previous_email,
-            "loginCommand": "agy",
-            "keyringDeleted": deleted
-        })
+    let mut argv = if is_batch_script {
+        vec!["cmd.exe".to_string(), "/C".to_string(), bin_str]
     } else {
+        vec![bin_str]
+    };
+
+    if supports_login {
+        argv.push("acp".to_string());
+        argv.push("--login".to_string());
+        (argv, "agy acp --login".to_string())
+    } else {
+        (argv, "agy".to_string())
+    }
+}
+
+pub(crate) fn resolve_antigravity_login_argv() -> (Vec<String>, String) {
+    let binary = crate::acp::resolve_antigravity_acp_binary()
+        .or_else(|| crate::terminal::resolve_engine_program("antigravity").map(PathBuf::from));
+    let help_text = binary.as_deref().and_then(|bin| {
+        crate::hidden_exec::run(bin, &["acp", "--help"], std::time::Duration::from_millis(3500))
+            .ok()
+            .and_then(|out| {
+                // `agy acp --help` writes flags to stderr on Windows, so combine both streams.
+                let combined = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if combined.trim().is_empty() {
+                    None
+                } else {
+                    Some(combined)
+                }
+            })
+    });
+    build_antigravity_login_argv_from_help(binary.as_deref(), help_text.as_deref())
+}
+
+pub(crate) fn start_account_login_flow_with(
+    root: &Path,
+    provider: &str,
+    force: bool,
+    mappings: &[FileMapping],
+    state_vscdb: Option<&Path>,
+    cred_store: &dyn AntigravityCredStore,
+    idle_check: Result<(), String>,
+    inspection: &crate::terminal::ProviderSessionsInspection,
+    login_argv: Vec<String>,
+    login_command: String,
+    ops: &dyn LoginFlowOps,
+) -> Value {
+    let canon = canon_provider(provider);
+    if canon != "agy" {
+        return json!({
+            "success": false,
+            "code": "UNSUPPORTED_PROVIDER",
+            "error": format!("Inicio de sesión guiado no soportado para proveedor: {canon}")
+        });
+    }
+
+    // 1. Check external client lock & active Kite turns BEFORE touching any credentials or terminals.
+    if let Err(msg) = idle_check {
+        return json!({
+            "success": false,
+            "code": "PROVIDER_BUSY",
+            "error": msg
+        });
+    }
+
+    if !force && !inspection.managed_busy.is_empty() {
+        return json!({
+            "success": false,
+            "code": "CONFIRM_BUSY_TERMINALS",
+            "error": "Hay terminales activas ejecutando una respuesta en este proveedor.",
+            "busySessions": inspection.managed_busy,
+            "managedIdleCount": inspection.managed_idle.len(),
+            "unaffectedTerminalsCount": inspection.unaffected_terminals_count,
+        });
+    }
+
+    // 1b. If a previous login attempt never saved or cancelled cleanly, recover its prior
+    // auth snapshot before inspecting or creating a fresh rollback bundle.
+    let mut prior_quiesced: Vec<crate::terminal::QuiescedTerminal> = Vec::new();
+    let (_, initial_cred_valid, _) = {
+        let raw = cred_store.read_raw();
+        let (st, _, em) = crate::quota::inspect_raw_antigravity_credential_health(raw.as_deref());
+        (raw, st == "valid", em)
+    };
+    if let Some(prev_rollback_dir) = resolve_rollback_dir(root, None) {
+        if !initial_cred_valid {
+            if let Ok((prev_bundle, _)) = restore_rollback_artifacts_from_dir(
+                root,
+                &prev_rollback_dir,
+                mappings,
+                state_vscdb,
+                cred_store,
+            ) {
+                prior_quiesced = prev_bundle.quiesced_terminals;
+            }
+        }
+        let _ = fs::remove_dir_all(root.join("_login_rollback").join("agy"));
+    }
+
+    // 2. Inspect existing credential health and auto-save valid previous account before clearing.
+    let raw_cred = cred_store.read_raw();
+    let (cred_status, _, previous_email) =
+        crate::quota::inspect_raw_antigravity_credential_health(raw_cred.as_deref());
+
+    let mut previous_email_saved: Option<String> = None;
+    let mut previous_save_warning: Option<String> = None;
+    if cred_status == "valid" {
+        if let Some(ref em) = previous_email {
+            let live_ident = Some(LiveIdentityProbe {
+                provider: "agy".to_string(),
+                email: em.clone(),
+                name: None,
+                source: "gemini:antigravity".to_string(),
+            });
+            let saved = save_account_profile_with(
+                root,
+                "agy",
+                String::new(),
+                mappings,
+                state_vscdb,
+                cred_store,
+                live_ident,
+                None,
+            );
+            if saved.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                previous_email_saved = Some(em.clone());
+            } else {
+                previous_save_warning = saved
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| {
+                        Some("No se pudo guardar automáticamente la cuenta anterior.".to_string())
+                    });
+            }
+        }
+    }
+
+    // 3. Persist transactional rollback bundle BEFORE clearing credentials or quiescing terminals.
+    let flow_id = Uuid::new_v4().to_string();
+    let rollback_dir = root.join("_login_rollback").join("agy").join(&flow_id);
+    if let Err(err) = fs::create_dir_all(&rollback_dir) {
+        return json!({
+            "success": false,
+            "error": format!("No se pudo crear respaldo previo de inicio de sesión: {err}")
+        });
+    }
+
+    let mut had_cred = false;
+    if let Some(ref raw) = raw_cred {
+        if let Err(err) =
+            write_bytes_atomic(&rollback_dir.join("gemini_antigravity_cred.json"), raw.as_bytes())
+        {
+            let _ = fs::remove_dir_all(&rollback_dir);
+            return json!({ "success": false, "error": err });
+        }
+        had_cred = true;
+    }
+
+    let mut had_ide_rows = false;
+    if let Some(db_path) = state_vscdb {
+        match crate::quota::extract_ide_auth_rows_from_db(db_path) {
+            Ok(rows) if !rows.is_empty() => {
+                let bytes = match serde_json::to_vec_pretty(&rows) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = fs::remove_dir_all(&rollback_dir);
+                        return json!({
+                            "success": false,
+                            "error": format!("No se pudo respaldar estado IDE: {e}")
+                        });
+                    }
+                };
+                if let Err(err) = write_bytes_atomic(&rollback_dir.join("ide_auth_rows.json"), &bytes)
+                {
+                    let _ = fs::remove_dir_all(&rollback_dir);
+                    return json!({ "success": false, "error": err });
+                }
+                had_ide_rows = true;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                let _ = fs::remove_dir_all(&rollback_dir);
+                return json!({ "success": false, "error": err });
+            }
+        }
+    }
+
+    let mut rollback_mappings = Vec::with_capacity(mappings.len());
+    for m in mappings {
+        let had_file = m.source.exists();
+        if had_file && !copy_atomic(&m.source, &rollback_dir.join(m.rel_dest)) {
+            let _ = fs::remove_dir_all(&rollback_dir);
+            return json!({
+                "success": false,
+                "error": format!("No se pudo respaldar {} antes de iniciar sesión.", m.rel_dest)
+            });
+        }
+        rollback_mappings.push(LoginRollbackMapping {
+            source_path: m.source.to_string_lossy().to_string(),
+            rel_dest: m.rel_dest.to_string(),
+            had_file,
+        });
+    }
+
+    let mut bundle = LoginRollbackBundle {
+        flow_id: flow_id.clone(),
+        provider: "agy".to_string(),
+        created_at_ms: now_ms(),
+        previous_email: previous_email.clone(),
+        had_cred,
+        had_ide_rows,
+        mappings: rollback_mappings,
+        quiesced_terminals: Vec::new(),
+    };
+    if let Err(err) = write_login_rollback_bundle(&rollback_dir, &bundle) {
+        let _ = fs::remove_dir_all(&rollback_dir);
+        return json!({ "success": false, "error": err });
+    }
+    let _ = write_bytes_atomic(
+        &root.join("_login_rollback").join("agy").join("latest.txt"),
+        flow_id.as_bytes(),
+    );
+
+    // 4. Quiesce only Kite-owned agy terminals and evict stale quota/runtime state.
+    let mut quiesced = ops.quiesce_and_evict();
+    for prev in prior_quiesced {
+        if !quiesced.iter().any(|q| q.session_id == prev.session_id) {
+            quiesced.push(prev);
+        }
+    }
+    let quiesced_count = quiesced.len();
+    bundle.quiesced_terminals = quiesced;
+    if let Err(err) = write_login_rollback_bundle(&rollback_dir, &bundle) {
+        log_trace(&format!(
+            "account_switcher: could not update quiesced terminals in rollback bundle {flow_id}: {err}"
+        ));
+    }
+
+    // 5. Clear CLI + IDE auth cleanly and mark all agy Vault profiles inactive.
+    let keyring_deleted = cred_store.delete();
+    for m in mappings {
+        if m.source.exists() {
+            let _ = fs::remove_file(&m.source);
+        }
+    }
+    let ide_cleared = if let Some(db_path) = state_vscdb {
+        crate::quota::clear_ide_auth_state_from_db(db_path).unwrap_or(false)
+    } else {
+        false
+    };
+
+    {
+        let _guard = REGISTRY_LOCK.lock().unwrap();
+        let mut reg = load_registry_from(root);
+        for p in &mut reg.profiles {
+            if same_provider(&p.provider, "agy") {
+                p.is_active = false;
+            }
+        }
+        let _ = save_registry_to(root, &reg);
+    }
+
+    json!({
+        "success": true,
+        "flowId": flow_id,
+        "previousEmail": previous_email,
+        "previousEmailSaved": previous_email_saved,
+        "previousSaveWarning": previous_save_warning,
+        "engine": "agy",
+        "loginArgv": login_argv,
+        "loginCommand": login_command,
+        "keyringDeleted": keyring_deleted,
+        "ideCleared": ide_cleared,
+        "quiescedTerminalsCount": quiesced_count,
+        "unaffectedTerminalsCount": inspection.unaffected_terminals_count,
+    })
+}
+
+pub fn start_account_login_flow_direct(provider: String, force: bool) -> Value {
+    let canon = canon_provider(&provider);
+    if canon != "agy" {
+        return json!({
+            "success": false,
+            "code": "UNSUPPORTED_PROVIDER",
+            "error": format!("Inicio de sesión guiado no soportado para proveedor: {canon}")
+        });
+    }
+    let mappings = get_provider_file_mappings("agy");
+    let state_vscdb = crate::quota::find_existing_state_vscdb();
+    let idle_check = ensure_provider_idle("agy");
+    let inspection = crate::terminal::inspect_provider_sessions("agy");
+    let (login_argv, login_command) = resolve_antigravity_login_argv();
+    start_account_login_flow_with(
+        &profiles_root(),
+        &canon,
+        force,
+        &mappings,
+        state_vscdb.as_deref(),
+        &LiveAntigravityCredStore,
+        idle_check,
+        &inspection,
+        login_argv,
+        login_command,
+        &LiveLoginFlowOps,
+    )
+}
+
+pub async fn start_account_login_flow_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity")
+        .to_string();
+    let force = req
+        .and_then(|r| r.get("force"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    tokio::task::spawn_blocking(move || start_account_login_flow_direct(provider, force))
+        .await
+        .unwrap_or_else(|e| {
+            json!({
+                "success": false,
+                "error": format!("Worker task failed: {e}")
+            })
+        })
+}
+
+fn restore_rollback_artifacts_from_dir(
+    root: &Path,
+    rollback_dir: &Path,
+    mappings: &[FileMapping],
+    state_vscdb: Option<&Path>,
+    cred_store: &dyn AntigravityCredStore,
+) -> Result<(LoginRollbackBundle, String), Value> {
+    let bundle_bytes = fs::read(rollback_dir.join("rollback.json")).map_err(|e| {
         json!({
             "success": false,
-            "error": format!("Preparación de nuevo login no soportada para proveedor: {provider}")
+            "restored": false,
+            "error": format!("No se pudo leer respaldo de inicio de sesión: {e}")
         })
+    })?;
+    let bundle: LoginRollbackBundle = serde_json::from_slice(&bundle_bytes).map_err(|e| {
+        json!({
+            "success": false,
+            "restored": false,
+            "error": format!("Respaldo de inicio de sesión corrupto: {e}")
+        })
+    })?;
+
+    if bundle.had_cred {
+        let cred_raw =
+            fs::read_to_string(rollback_dir.join("gemini_antigravity_cred.json")).map_err(|e| {
+                json!({
+                    "success": false,
+                    "restored": false,
+                    "error": format!("No se pudo leer la credencial respaldada: {e}")
+                })
+            })?;
+        if let Err(err) = cred_store.write_checked(&cred_raw) {
+            return Err(json!({
+                "success": false,
+                "restored": false,
+                "error": err
+            }));
+        }
+    } else {
+        let _ = cred_store.delete();
     }
+
+    if let Some(db_path) = state_vscdb {
+        if bundle.had_ide_rows {
+            let bytes = fs::read(rollback_dir.join("ide_auth_rows.json")).map_err(|e| {
+                json!({
+                    "success": false,
+                    "restored": false,
+                    "error": format!("No se pudo abrir respaldo IDE: {e}")
+                })
+            })?;
+            let rows: BTreeMap<String, String> = serde_json::from_slice(&bytes).map_err(|e| {
+                json!({
+                    "success": false,
+                    "restored": false,
+                    "error": format!("No se pudo leer respaldo IDE: {e}")
+                })
+            })?;
+            if let Err(err) = crate::quota::restore_ide_auth_rows_to_db(db_path, &rows) {
+                return Err(json!({ "success": false, "restored": false, "error": err }));
+            }
+        } else if let Err(err) = crate::quota::clear_ide_auth_state_from_db(db_path) {
+            return Err(json!({ "success": false, "restored": false, "error": err }));
+        }
+    }
+
+    // Prefer live `mappings` destination paths when supplied (tests pass isolated paths),
+    // falling back to paths stored inside the rollback bundle.
+    for bm in &bundle.mappings {
+        let target_path = mappings
+            .iter()
+            .find(|m| m.rel_dest == bm.rel_dest)
+            .map(|m| m.source.clone())
+            .unwrap_or_else(|| PathBuf::from(&bm.source_path));
+        if bm.had_file {
+            if !copy_atomic(&rollback_dir.join(&bm.rel_dest), &target_path) {
+                return Err(json!({
+                    "success": false,
+                    "restored": false,
+                    "error": format!("No se pudo restaurar {}", bm.rel_dest)
+                }));
+            }
+        } else if target_path.exists() {
+            let _ = fs::remove_file(&target_path);
+        }
+    }
+
+    let restored_label = {
+        let _guard = REGISTRY_LOCK.lock().unwrap();
+        let mut reg = load_registry_from(root);
+        let mut label: Option<String> = None;
+        for p in &mut reg.profiles {
+            if same_provider(&p.provider, "agy") {
+                let matches_prev = bundle.previous_email.as_deref().map_or(false, |prev| {
+                    p.email
+                        .as_deref()
+                        .map_or(false, |em| em.eq_ignore_ascii_case(prev))
+                });
+                p.is_active = matches_prev;
+                if matches_prev && label.is_none() {
+                    label = Some(p.label.clone());
+                }
+            }
+        }
+        let _ = save_registry_to(root, &reg);
+        label
+            .or_else(|| bundle.previous_email.clone())
+            .unwrap_or_else(|| "Antigravity".to_string())
+    };
+
+    Ok((bundle, restored_label))
+}
+
+pub(crate) fn cancel_account_login_flow_with(
+    root: &Path,
+    provider: &str,
+    flow_id: Option<&str>,
+    mappings: &[FileMapping],
+    state_vscdb: Option<&Path>,
+    cred_store: &dyn AntigravityCredStore,
+    ops: &dyn LoginFlowOps,
+) -> Value {
+    let canon = canon_provider(provider);
+    if canon != "agy" {
+        return json!({
+            "success": false,
+            "restored": false,
+            "error": format!("Cancelación de inicio de sesión no soportada para proveedor: {canon}")
+        });
+    }
+
+    let Some(rollback_dir) = resolve_rollback_dir(root, flow_id) else {
+        return json!({
+            "success": false,
+            "restored": false,
+            "error": "No se encontró respaldo previo de inicio de sesión para restaurar."
+        });
+    };
+
+    let (bundle, restored_label) = match restore_rollback_artifacts_from_dir(
+        root,
+        &rollback_dir,
+        mappings,
+        state_vscdb,
+        cred_store,
+    ) {
+        Ok(res) => res,
+        Err(err_val) => return err_val,
+    };
+
+    ops.invalidate_and_evict();
+    if !bundle.quiesced_terminals.is_empty() {
+        ops.respawn(
+            &restored_label,
+            bundle.previous_email.as_deref(),
+            &bundle.quiesced_terminals,
+        );
+    }
+
+    let _ = fs::remove_dir_all(&rollback_dir);
+    let latest_path = root.join("_login_rollback").join("agy").join("latest.txt");
+    if let Ok(latest) = fs::read_to_string(&latest_path) {
+        if latest.trim() == bundle.flow_id {
+            let _ = fs::remove_file(&latest_path);
+        }
+    }
+
+    json!({
+        "success": true,
+        "restored": true,
+        "restoredEmail": bundle.previous_email,
+        "terminalsRestarted": bundle.quiesced_terminals.len(),
+    })
+}
+
+pub fn cancel_account_login_flow_direct(provider: String, flow_id: Option<String>) -> Value {
+    let canon = canon_provider(&provider);
+    let mappings = get_provider_file_mappings(&canon);
+    let state_vscdb = crate::quota::find_existing_state_vscdb();
+    cancel_account_login_flow_with(
+        &profiles_root(),
+        &canon,
+        flow_id.as_deref(),
+        &mappings,
+        state_vscdb.as_deref(),
+        &LiveAntigravityCredStore,
+        &LiveLoginFlowOps,
+    )
+}
+
+pub async fn cancel_account_login_flow_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity")
+        .to_string();
+    let flow_id = req
+        .and_then(|r| r.get("flowId").or_else(|| r.get("flow_id")))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    tokio::task::spawn_blocking(move || cancel_account_login_flow_direct(provider, flow_id))
+        .await
+        .unwrap_or_else(|e| {
+            json!({
+                "success": false,
+                "restored": false,
+                "error": format!("Worker task failed: {e}")
+            })
+        })
+}
+
+pub(crate) fn probe_live_account_login_status_with(
+    provider: &str,
+    previous_email: Option<&str>,
+    cred_store: &dyn AntigravityCredStore,
+) -> Value {
+    let canon = canon_provider(provider);
+    if canon != "agy" {
+        return json!({
+            "provider": canon,
+            "authenticated": false,
+            "credentialStatus": "unsupported",
+            "email": null,
+            "hasRefreshToken": false,
+            "sameAsPrevious": false,
+        });
+    }
+
+    // Strictly check the live OS credential store; never fall back to stale IDE DBs or spawn CLI usage checks.
+    let raw = cred_store.read_raw();
+    let (credential_status, has_refresh_token, email) =
+        crate::quota::inspect_raw_antigravity_credential_health(raw.as_deref());
+    let authenticated = credential_status == "valid";
+    let same_as_previous = match (&email, previous_email) {
+        (Some(curr), Some(prev)) => curr.trim().eq_ignore_ascii_case(prev.trim()),
+        _ => false,
+    };
+
+    json!({
+        "provider": canon,
+        "authenticated": authenticated,
+        "credentialStatus": credential_status,
+        "email": email,
+        "hasRefreshToken": has_refresh_token,
+        "sameAsPrevious": same_as_previous,
+    })
+}
+
+pub async fn probe_live_account_login_status_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity")
+        .to_string();
+    let previous_email = req
+        .and_then(|r| r.get("previousEmail").or_else(|| r.get("previous_email")))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    tokio::task::spawn_blocking(move || {
+        probe_live_account_login_status_with(
+            &provider,
+            previous_email.as_deref(),
+            &LiveAntigravityCredStore,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        json!({
+            "provider": "agy",
+            "authenticated": false,
+            "credentialStatus": "error",
+            "email": null,
+            "hasRefreshToken": false,
+            "sameAsPrevious": false,
+            "error": format!("Worker task failed: {e}")
+        })
+    })
+}
+
+pub fn prepare_new_account_login_direct(provider: String) -> Value {
+    start_account_login_flow_direct(provider, false)
 }
 
 pub fn prepare_new_account_login_impl(request: Option<Value>) -> Value {

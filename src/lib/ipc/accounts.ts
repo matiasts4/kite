@@ -160,15 +160,107 @@ export async function getActiveAccountProfile(
   }
 }
 
-export async function prepareNewAccountLogin(
-  provider: string
-): Promise<{ success: boolean; previousEmailSaved?: string; loginCommand?: string; keyringDeleted?: boolean; error?: string }> {
+export interface StartAccountLoginFlowResult {
+  success: boolean;
+  code?: string;
+  error?: string;
+  flowId?: string;
+  previousEmail?: string | null;
+  previousEmailSaved?: string | null;
+  previousSaveWarning?: string | null;
+  engine?: string;
+  loginArgv?: string[];
+  loginCommand?: string;
+  keyringDeleted?: boolean;
+  ideCleared?: boolean;
+  quiescedTerminalsCount?: number;
+  unaffectedTerminalsCount?: number;
+  busySessions?: Array<{
+    sessionId: string;
+    engine: string;
+    workspaceId?: string;
+    paneId?: string;
+    cwd: string;
+    reasons: string[];
+  }>;
+  managedIdleCount?: number;
+}
+
+export interface CancelAccountLoginFlowResult {
+  success: boolean;
+  restored?: boolean;
+  restoredEmail?: string | null;
+  terminalsRestarted?: number;
+  error?: string;
+}
+
+export interface LiveAccountLoginProbe {
+  provider: string;
+  authenticated: boolean;
+  credentialStatus: string;
+  email?: string | null;
+  hasRefreshToken: boolean;
+  sameAsPrevious: boolean;
+  error?: string;
+}
+
+export async function startAccountLoginFlow(
+  provider: string,
+  options?: { force?: boolean }
+): Promise<StartAccountLoginFlowResult> {
   try {
-    return await invokeCommand('prepare_new_account_login', { provider });
+    return await invokeCommand('start_account_login_flow', {
+      provider,
+      force: options?.force ?? false,
+    });
   } catch (err: any) {
-    console.error('[IPC] prepareNewAccountLogin failed:', err);
+    console.error('[IPC] startAccountLoginFlow failed:', err);
     return { success: false, error: err?.message || String(err) };
   }
+}
+
+export async function cancelAccountLoginFlow(
+  provider: string,
+  flowId?: string | null
+): Promise<CancelAccountLoginFlowResult> {
+  try {
+    return await invokeCommand('cancel_account_login_flow', {
+      provider,
+      ...(flowId ? { flowId } : {}),
+    });
+  } catch (err: any) {
+    console.error('[IPC] cancelAccountLoginFlow failed:', err);
+    return { success: false, restored: false, error: err?.message || String(err) };
+  }
+}
+
+export async function probeLiveAccountLoginStatus(
+  provider: string,
+  previousEmail?: string | null
+): Promise<LiveAccountLoginProbe> {
+  try {
+    return await invokeCommand('probe_live_account_login_status', {
+      provider,
+      ...(previousEmail ? { previousEmail } : {}),
+    });
+  } catch (err: any) {
+    console.warn('[IPC] probeLiveAccountLoginStatus failed:', err);
+    return {
+      provider,
+      authenticated: false,
+      credentialStatus: 'error',
+      email: null,
+      hasRefreshToken: false,
+      sameAsPrevious: false,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+export async function prepareNewAccountLogin(
+  provider: string
+): Promise<{ success: boolean; previousEmailSaved?: string | null; loginCommand?: string; keyringDeleted?: boolean; error?: string }> {
+  return startAccountLoginFlow(provider);
 }
 
 export interface CredentialStatusItem {

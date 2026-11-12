@@ -178,6 +178,11 @@ impl AntigravityCredStore for MockAgyCredStore {
         *self.read_value.borrow_mut() = Some(blob_json.to_string());
         Ok(())
     }
+
+    fn delete(&self) -> bool {
+        *self.read_value.borrow_mut() = None;
+        true
+    }
 }
 
 #[test]
@@ -672,4 +677,616 @@ fn test_clear_provider_thread_handles_clears_antigravity_aliases_and_preserves_c
     assert!(threads[0]["providerSessionId"].is_null());
     assert!(threads[1]["providerSessionId"].is_null());
     assert_eq!(threads[2]["providerSessionId"], "conv-codex");
+}
+
+#[derive(Default)]
+struct MockLoginFlowOps {
+    quiesced_to_return: std::cell::RefCell<Vec<crate::terminal::QuiescedTerminal>>,
+    quiesce_calls: std::cell::Cell<usize>,
+    evict_calls: std::cell::Cell<usize>,
+    respawn_calls: std::cell::RefCell<Vec<(String, Option<String>, Vec<String>)>>,
+}
+
+impl super::commands::LoginFlowOps for MockLoginFlowOps {
+    fn quiesce_and_evict(&self) -> Vec<crate::terminal::QuiescedTerminal> {
+        self.quiesce_calls.set(self.quiesce_calls.get() + 1);
+        self.evict_calls.set(self.evict_calls.get() + 1);
+        self.quiesced_to_return.borrow().clone()
+    }
+
+    fn invalidate_and_evict(&self) {
+        self.evict_calls.set(self.evict_calls.get() + 1);
+    }
+
+    fn respawn(
+        &self,
+        account_label: &str,
+        email: Option<&str>,
+        quiesced: &[crate::terminal::QuiescedTerminal],
+    ) {
+        self.respawn_calls.borrow_mut().push((
+            account_label.to_string(),
+            email.map(String::from),
+            quiesced.iter().map(|q| q.session_id.clone()).collect(),
+        ));
+    }
+}
+
+#[test]
+fn test_clear_ide_auth_state_from_db_removes_only_auth_keys_in_tx() {
+    let dir = std::env::temp_dir().join(format!("kite-clear-ide-db-{}", Uuid::new_v4()));
+    fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("state.vscdb");
+
+    assert_eq!(crate::quota::clear_ide_auth_state_from_db(&dir.join("missing.vscdb")).unwrap(), false);
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        for (k, v) in [
+            ("antigravityAuthStatus", r#"{"email":"old@example.com","name":"Old"}"#),
+            ("antigravityUnifiedStateSync.oauthToken", "tok-123"),
+            ("antigravityUnifiedStateSync.userStatus", "status-123"),
+            ("antigravity.profileUrl", "https://example.com/p.png"),
+            ("unrelated.theme", "kite-dark"),
+        ] {
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                rusqlite::params![k, v],
+            )
+            .unwrap();
+        }
+    }
+
+    assert_eq!(crate::quota::clear_ide_auth_state_from_db(&db_path).unwrap(), true);
+    assert_eq!(crate::quota::clear_ide_auth_state_from_db(&db_path).unwrap(), false);
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let remaining_auth = crate::quota::extract_ide_auth_rows_from_db(&db_path).unwrap();
+    assert!(remaining_auth.is_empty());
+    let unrelated: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'unrelated.theme'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unrelated, "kite-dark");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_inspect_raw_antigravity_credential_health_classifies_all_states() {
+    assert_eq!(
+        crate::quota::inspect_raw_antigravity_credential_health(None),
+        ("missing_file", false, None)
+    );
+    assert_eq!(
+        crate::quota::inspect_raw_antigravity_credential_health(Some("not-json")),
+        ("corrupt", false, None)
+    );
+    assert_eq!(
+        crate::quota::inspect_raw_antigravity_credential_health(Some(
+            r#"{"id_token_email":"empty@example.com","token":{"access_token":"","refresh_token":""}}"#
+        )),
+        ("missing_tokens", false, None)
+    );
+    assert_eq!(
+        crate::quota::inspect_raw_antigravity_credential_health(Some(
+            r#"{"id_token_email":"access@example.com","token":{"access_token":"ya29.only"}}"#
+        )),
+        ("valid", false, Some("access@example.com".to_string()))
+    );
+    assert_eq!(
+        crate::quota::inspect_raw_antigravity_credential_health(Some(
+            r#"{"id_token_email":"full@example.com","token":{"access_token":"ya29.ok","refresh_token":"1//ok"}}"#
+        )),
+        ("valid", true, Some("full@example.com".to_string()))
+    );
+}
+
+#[test]
+fn test_build_antigravity_login_argv_from_help_supports_exe_cmd_and_fallback() {
+    use std::path::Path;
+
+    let (argv, cmd) = super::commands::build_antigravity_login_argv_from_help(
+        Some(Path::new(r"C:\Tools\agy.exe")),
+        Some("Flags:\n  --login   Log in with Google interactively, then exit"),
+    );
+    assert_eq!(argv, vec![r"C:\Tools\agy.exe", "acp", "--login"]);
+    assert_eq!(cmd, "agy acp --login");
+
+    let (argv_cmd, cmd_cmd) = super::commands::build_antigravity_login_argv_from_help(
+        Some(Path::new(r"C:\Tools\agy.cmd")),
+        Some("  --login   Log in with Google interactively"),
+    );
+    assert_eq!(argv_cmd, vec!["cmd.exe", "/C", r"C:\Tools\agy.cmd", "acp", "--login"]);
+    assert_eq!(cmd_cmd, "agy acp --login");
+
+    let (argv_fallback, cmd_fallback) = super::commands::build_antigravity_login_argv_from_help(
+        Some(Path::new(r"C:\Tools\agy.exe")),
+        Some("Usage: agy acp\n  --stdio"),
+    );
+    assert_eq!(argv_fallback, vec![r"C:\Tools\agy.exe"]);
+    assert_eq!(cmd_fallback, "agy");
+
+    let (argv_unresolved_login, cmd_unresolved_login) =
+        super::commands::build_antigravity_login_argv_from_help(None, Some("  --login"));
+    assert_eq!(argv_unresolved_login, vec!["agy", "acp", "--login"]);
+    assert_eq!(cmd_unresolved_login, "agy acp --login");
+
+    let (argv_unresolved, cmd_unresolved) =
+        super::commands::build_antigravity_login_argv_from_help(None, None);
+    assert_eq!(argv_unresolved, vec!["agy"]);
+    assert_eq!(cmd_unresolved, "agy");
+}
+
+#[test]
+fn test_start_and_cancel_account_login_flow_snapshots_clears_and_restores_all_auth_state() {
+    use super::commands::{cancel_account_login_flow_with, probe_live_account_login_status_with, start_account_login_flow_with};
+    use crate::terminal::{ProviderSessionSummary, ProviderSessionsInspection, QuiescedTerminal};
+
+    let dir = std::env::temp_dir().join(format!("kite-login-flow-test-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let live_dir = dir.join("live");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&live_dir).unwrap();
+
+    let prev_cred = r#"{"token":{"access_token":"ya29.prev","refresh_token":"1//prev"},"id_token_email":"prev@example.com"}"#;
+    let pbtxt1 = live_dir.join("antigravity_state.pbtxt");
+    let pbtxt2 = live_dir.join("jetski_state.pbtxt");
+    fs::write(&pbtxt1, "prev-agy-pbtxt").unwrap();
+    fs::write(&pbtxt2, "prev-jetski-pbtxt").unwrap();
+
+    let db_path = dir.join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["antigravityAuthStatus", r#"{"email":"prev@example.com","name":"Prev"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["unrelated.key", "keep-me"],
+        )
+        .unwrap();
+    }
+
+    let mappings = vec![
+        FileMapping { source: pbtxt1.clone(), rel_dest: "antigravity_state.pbtxt" },
+        FileMapping { source: pbtxt2.clone(), rel_dest: "jetski_state.pbtxt" },
+    ];
+    let store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(Some(prev_cred.to_string())),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+
+    // Pre-seed custom label in registry to verify auto-save preserves custom label
+    let mut initial_reg = AccountProfilesRegistry::default();
+    initial_reg.profiles.push(SavedAccountProfile {
+        id: "prof-prev".to_string(),
+        provider: "agy".to_string(),
+        label: "Personal Pro".to_string(),
+        email: Some("prev@example.com".to_string()),
+        plan_name: None,
+        is_active: true,
+        last_used_unix_ms: 100,
+        primary_remaining_percent: None,
+        primary_reset_at: None,
+        time_until_reset_ms: None,
+        credential_status: None,
+        has_refresh_token: false,
+    });
+    save_registry_to(&root, &initial_reg).unwrap();
+
+    let ops = MockLoginFlowOps {
+        quiesced_to_return: std::cell::RefCell::new(vec![crate::terminal::QuiescedTerminal {
+            session_id: "sid-agy-1".to_string(),
+            cwd: dir.to_string_lossy().to_string(),
+            base_engine: "agy".to_string(),
+            effective_engine: "agy".to_string(),
+            provider_session_id: None,
+            workspace_id: Some("ws-1".to_string()),
+            pane_id: Some("pane-1".to_string()),
+            cols: 80,
+            rows: 24,
+            presentation_live: true,
+            auto_approve: true,
+        }]),
+        ..Default::default()
+    };
+
+    let empty_inspection = ProviderSessionsInspection::default();
+    let busy_inspection = ProviderSessionsInspection {
+        managed_busy: vec![ProviderSessionSummary {
+            session_id: "sid-agy-1".to_string(),
+            engine: "agy".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+            pane_id: Some("pane-1".to_string()),
+            cwd: dir.to_string_lossy().to_string(),
+            busy: true,
+            reasons: vec!["recent_output".to_string()],
+            last_output_age_ms: Some(200),
+            presentation_live: true,
+        }],
+        ..Default::default()
+    };
+
+    // 1. Unsupported provider rejected cleanly
+    let bad_prov = start_account_login_flow_with(
+        &root,
+        "codex",
+        false,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &empty_inspection,
+        vec!["agy".to_string()],
+        "agy".to_string(),
+        &ops,
+    );
+    assert_eq!(bad_prov["success"], false);
+    assert_eq!(ops.quiesce_calls.get(), 0);
+
+    // 2. External IDE busy blocks before touching credentials or terminals
+    let ide_busy = start_account_login_flow_with(
+        &root,
+        "antigravity",
+        true,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Err("antigravity.exe active".to_string()),
+        &busy_inspection,
+        vec!["agy".to_string(), "acp".to_string(), "--login".to_string()],
+        "agy acp --login".to_string(),
+        &ops,
+    );
+    assert_eq!(ide_busy["success"], false);
+    assert_eq!(ide_busy["code"], "PROVIDER_BUSY");
+    assert_eq!(ops.quiesce_calls.get(), 0);
+    assert!(store.read_raw().is_some());
+
+    // 3. Busy Kite terminal without force returns CONFIRM_BUSY_TERMINALS before touching credentials
+    let term_busy = start_account_login_flow_with(
+        &root,
+        "antigravity",
+        false,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &busy_inspection,
+        vec!["agy".to_string(), "acp".to_string(), "--login".to_string()],
+        "agy acp --login".to_string(),
+        &ops,
+    );
+    assert_eq!(term_busy["success"], false);
+    assert_eq!(term_busy["code"], "CONFIRM_BUSY_TERMINALS");
+    assert_eq!(ops.quiesce_calls.get(), 0);
+    assert!(store.read_raw().is_some());
+
+    // 4. Start flow cleanly (force = true with busy terminal)
+    let started = start_account_login_flow_with(
+        &root,
+        "antigravity",
+        true,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &busy_inspection,
+        vec!["C:\\agy.exe".to_string(), "acp".to_string(), "--login".to_string()],
+        "agy acp --login".to_string(),
+        &ops,
+    );
+    assert_eq!(started["success"], true);
+    let flow_id = started["flowId"].as_str().unwrap().to_string();
+    assert_eq!(started["previousEmail"], "prev@example.com");
+    assert_eq!(started["previousEmailSaved"], "prev@example.com");
+    assert_eq!(started["engine"], "agy");
+    assert_eq!(started["loginCommand"], "agy acp --login");
+    assert_eq!(started["keyringDeleted"], true);
+    assert_eq!(started["ideCleared"], true);
+    assert_eq!(ops.quiesce_calls.get(), 1);
+    assert_eq!(ops.evict_calls.get(), 1);
+
+    // Cred store, pbtxt files, and IDE auth keys are cleared; unrelated DB key stays intact; active flags cleared
+    assert!(store.read_raw().is_none());
+    assert!(!pbtxt1.exists());
+    assert!(!pbtxt2.exists());
+    assert!(crate::quota::extract_ide_auth_rows_from_db(&db_path).unwrap().is_empty());
+    let reg_mid = load_registry_from(&root);
+    assert_eq!(reg_mid.profiles[0].label, "Personal Pro");
+    assert!(!reg_mid.profiles[0].is_active);
+
+    // Probe must strictly return unauthenticated (never fall back to anything else)
+    let probe_empty = probe_live_account_login_status_with("antigravity", Some("prev@example.com"), &store);
+    assert_eq!(probe_empty["authenticated"], false);
+    assert_eq!(probe_empty["credentialStatus"], "missing_file");
+
+    // Tokenless credential must also report unauthenticated
+    store.write_checked(r#"{"id_token_email":"partial@example.com","token":{"access_token":"","refresh_token":""}}"#).unwrap();
+    let probe_tokenless = probe_live_account_login_status_with("antigravity", Some("prev@example.com"), &store);
+    assert_eq!(probe_tokenless["authenticated"], false);
+    assert_eq!(probe_tokenless["credentialStatus"], "missing_tokens");
+
+    // 5. Cancel flow restores cred, pbtxt, IDE rows, active flag, respawns quiesced terminals, removes rollback dir
+    fs::write(&pbtxt1, "partial-new-pbtxt").unwrap();
+    let cancelled = cancel_account_login_flow_with(
+        &root,
+        "antigravity",
+        Some(&flow_id),
+        &mappings,
+        Some(&db_path),
+        &store,
+        &ops,
+    );
+    assert_eq!(cancelled["success"], true);
+    assert_eq!(cancelled["restored"], true);
+    assert_eq!(cancelled["restoredEmail"], "prev@example.com");
+
+    assert_eq!(store.read_raw().as_deref(), Some(prev_cred));
+    assert_eq!(fs::read_to_string(&pbtxt1).unwrap(), "prev-agy-pbtxt");
+    assert_eq!(fs::read_to_string(&pbtxt2).unwrap(), "prev-jetski-pbtxt");
+    let restored_rows = crate::quota::extract_ide_auth_rows_from_db(&db_path).unwrap();
+    assert!(restored_rows.get("antigravityAuthStatus").unwrap().contains("prev@example.com"));
+    let reg_after = load_registry_from(&root);
+    assert!(reg_after.profiles[0].is_active);
+    assert_eq!(ops.respawn_calls.borrow().len(), 1);
+    assert_eq!(ops.respawn_calls.borrow()[0].2, vec!["sid-agy-1".to_string()]);
+    assert!(!root.join("_login_rollback").join("agy").join(&flow_id).exists());
+
+    // 6. Probe with valid new credential differentiates sameAsPrevious
+    let new_cred = r#"{"token":{"access_token":"ya29.new","refresh_token":"1//new"},"id_token_email":"new@example.com"}"#;
+    store.write_checked(new_cred).unwrap();
+    let probe_new = probe_live_account_login_status_with("antigravity", Some("prev@example.com"), &store);
+    assert_eq!(probe_new["authenticated"], true);
+    assert_eq!(probe_new["credentialStatus"], "valid");
+    assert_eq!(probe_new["email"], "new@example.com");
+    assert_eq!(probe_new["hasRefreshToken"], true);
+    assert_eq!(probe_new["sameAsPrevious"], false);
+
+    let probe_same = probe_live_account_login_status_with("antigravity", Some("NEW@example.com"), &store);
+    assert_eq!(probe_same["sameAsPrevious"], true);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_cancel_login_without_prior_session_clears_partial_artifacts_and_save_cleans_rollback() {
+    use super::commands::{cancel_account_login_flow_with, save_account_profile_with, start_account_login_flow_with};
+    use crate::terminal::ProviderSessionsInspection;
+
+    let dir = std::env::temp_dir().join(format!("kite-login-noprev-test-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let live_dir = dir.join("live");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&live_dir).unwrap();
+
+    let pbtxt1 = live_dir.join("antigravity_state.pbtxt");
+    let db_path = dir.join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let mappings = vec![FileMapping { source: pbtxt1.clone(), rel_dest: "antigravity_state.pbtxt" }];
+    let store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(None),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+    let ops = MockLoginFlowOps::default();
+
+    let started = start_account_login_flow_with(
+        &root,
+        "agy",
+        false,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &ProviderSessionsInspection::default(),
+        vec!["agy".to_string()],
+        "agy".to_string(),
+        &ops,
+    );
+    assert_eq!(started["success"], true);
+    assert!(started["previousEmail"].is_null());
+    let flow_id = started["flowId"].as_str().unwrap().to_string();
+
+    // Simulate partial artifacts written during aborted login
+    store.write_checked(r#"{"id_token_email":"partial@example.com"}"#).unwrap();
+    fs::write(&pbtxt1, "partial-pbtxt").unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["antigravityAuthStatus", r#"{"email":"partial@example.com"}"#],
+        )
+        .unwrap();
+    }
+
+    let cancelled = cancel_account_login_flow_with(
+        &root,
+        "agy",
+        Some(&flow_id),
+        &mappings,
+        Some(&db_path),
+        &store,
+        &ops,
+    );
+    assert_eq!(cancelled["success"], true);
+    assert_eq!(cancelled["restored"], true);
+    assert!(cancelled["restoredEmail"].is_null());
+    assert!(store.read_raw().is_none());
+    assert!(!pbtxt1.exists());
+    assert!(crate::quota::extract_ide_auth_rows_from_db(&db_path).unwrap().is_empty());
+
+    // Now simulate starting a new login and completing it via save_account_profile_with -> stale rollback cleaned
+    let started2 = start_account_login_flow_with(
+        &root,
+        "agy",
+        false,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &ProviderSessionsInspection::default(),
+        vec!["agy".to_string()],
+        "agy".to_string(),
+        &ops,
+    );
+    let flow_id2 = started2["flowId"].as_str().unwrap().to_string();
+    assert!(root.join("_login_rollback").join("agy").join(&flow_id2).exists());
+
+    let valid_new = r#"{"token":{"access_token":"ya29.ok","refresh_token":"1//ok"},"id_token_email":"saved@example.com"}"#;
+    store.write_checked(valid_new).unwrap();
+    let saved = save_account_profile_with(
+        &root,
+        "agy",
+        "Saved Account".to_string(),
+        &mappings,
+        Some(&db_path),
+        &store,
+        Some(LiveIdentityProbe {
+            provider: "agy".to_string(),
+            email: "saved@example.com".to_string(),
+            name: None,
+            source: "gemini:antigravity".to_string(),
+        }),
+        None,
+    );
+    assert_eq!(saved["success"], true);
+    assert!(!root.join("_login_rollback").join("agy").exists());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_consecutive_start_account_login_flow_preserves_original_rollback_and_cleans_orphan() {
+    let dir = std::env::temp_dir().join(format!("kite-login-consecutive-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let pbtxt = dir.join("antigravity_state.pbtxt");
+    let db_path = dir.join("state.vscdb");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&pbtxt, "orig-pbtxt").unwrap();
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["antigravityAuthStatus", r#"{"email":"orig@example.com"}"#],
+        )
+        .unwrap();
+    }
+
+    let valid_orig = r#"{"token":{"access_token":"ya29.orig","refresh_token":"1//orig"},"id_token_email":"orig@example.com"}"#;
+    let store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(Some(valid_orig.to_string())),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+    let mappings = vec![FileMapping {
+        source: pbtxt.clone(),
+        rel_dest: "antigravity_state.pbtxt",
+    }];
+
+    let ops = MockLoginFlowOps {
+        quiesced_to_return: std::cell::RefCell::new(vec![crate::terminal::QuiescedTerminal {
+            session_id: "agy-orig".into(),
+            cwd: dir.to_string_lossy().to_string(),
+            base_engine: "agy".into(),
+            effective_engine: "agy".into(),
+            provider_session_id: None,
+            workspace_id: Some("ws-1".into()),
+            pane_id: None,
+            cols: 100,
+            rows: 30,
+            presentation_live: true,
+            auto_approve: false,
+        }]),
+        ..Default::default()
+    };
+
+    let first = start_account_login_flow_with(
+        &root,
+        "agy",
+        false,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &crate::terminal::ProviderSessionsInspection::default(),
+        vec!["agy".to_string()],
+        "agy".to_string(),
+        &ops,
+    );
+    assert_eq!(first["success"], true);
+    let flow_1 = first["flowId"].as_str().unwrap().to_string();
+
+    // Calling start_account_login_flow again while credentials are empty must carry forward
+    // orig@example.com, original IDE rows/.pbtxt, and prior quiesced terminals without leaving flow_1.
+    ops.quiesced_to_return.borrow_mut().clear();
+    let second = start_account_login_flow_with(
+        &root,
+        "agy",
+        false,
+        &mappings,
+        Some(&db_path),
+        &store,
+        Ok(()),
+        &crate::terminal::ProviderSessionsInspection::default(),
+        vec!["agy".to_string()],
+        "agy".to_string(),
+        &ops,
+    );
+    assert_eq!(second["success"], true);
+    let flow_2 = second["flowId"].as_str().unwrap().to_string();
+    assert_ne!(flow_2, flow_1);
+    assert_eq!(second["previousEmail"], "orig@example.com");
+    assert!(!root.join("_login_rollback").join("agy").join(&flow_1).exists());
+
+    let cancelled = cancel_account_login_flow_with(
+        &root,
+        "agy",
+        Some(&flow_2),
+        &mappings,
+        Some(&db_path),
+        &store,
+        &ops,
+    );
+    assert_eq!(cancelled["success"], true);
+    assert_eq!(cancelled["restoredEmail"], "orig@example.com");
+    assert_eq!(cancelled["terminalsRestarted"], 1);
+    assert_eq!(store.read_raw().as_deref(), Some(valid_orig));
+    assert_eq!(fs::read_to_string(&pbtxt).unwrap(), "orig-pbtxt");
+    assert!(crate::quota::extract_ide_auth_rows_from_db(&db_path)
+        .unwrap()
+        .contains_key("antigravityAuthStatus"));
+
+    let _ = fs::remove_dir_all(&dir);
 }

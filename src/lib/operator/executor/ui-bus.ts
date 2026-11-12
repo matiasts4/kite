@@ -142,27 +142,45 @@ export function sendUiAck(ack: UiBusAckPayload): void {
 export function waitForCodeWorkspaceReady(timeoutMs: number = 3000): Promise<boolean> {
   if (typeof window === 'undefined') return Promise.resolve(false);
 
+  const w = window as unknown as {
+    __kiteCodeWorkspaceMounted?: boolean;
+    __kiteHasActiveWorkspace?: boolean;
+  };
+  if (w.__kiteHasActiveWorkspace === false) {
+    return Promise.resolve(false);
+  }
   // If already signaled ready on window global
-  if ((window as unknown as { __kiteCodeWorkspaceMounted?: boolean }).__kiteCodeWorkspaceMounted) {
+  if (w.__kiteCodeWorkspaceMounted) {
     return Promise.resolve(true);
   }
 
   return new Promise((resolve) => {
     let timer: number | null = null;
 
-    const onReady = () => {
+    const cleanup = () => {
       if (timer !== null) {
         window.clearTimeout(timer);
         timer = null;
       }
       window.removeEventListener('kite:code-workspace-ready', onReady);
+      window.removeEventListener('kite:code-workspace-no-workspace', onNoWorkspace);
+    };
+
+    const onReady = () => {
+      cleanup();
       resolve(true);
     };
 
+    const onNoWorkspace = () => {
+      cleanup();
+      resolve(false);
+    };
+
     window.addEventListener('kite:code-workspace-ready', onReady);
+    window.addEventListener('kite:code-workspace-no-workspace', onNoWorkspace);
 
     timer = window.setTimeout(() => {
-      window.removeEventListener('kite:code-workspace-ready', onReady);
+      cleanup();
       resolve(false);
     }, timeoutMs);
   });

@@ -1,0 +1,86 @@
+.guided-login-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  border-radius: var(--card-radius);
+  border: 1px solid var(--block-stroke);
+  background: var(--block-fill);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.guided-login-banner[data-tone='ok'] {
+  border-color: color-mix(in srgb, var(--status-running) 35%, transparent);
+  background: color-mix(in srgb, var(--status-running) 12%, var(--block-fill));
+}
+
+.guided-login-banner[data-tone='error'] {
+  border-color: color-mix(in srgb, var(--danger-ink) 35%, transparent);
+  background: var(--danger-fill);
+  color: var(--danger-ink);
+}
+
+.guided-login-banner[data-tone='warn'] {
+  border-color: color-mix(in srgb, var(--warning-text) 35%, transparent);
+  background: color-mix(in srgb, var(--warning-tint) 65%, var(--block-fill));
+}
+
+.guided-login-banner__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.guided-login-banner__title {
+  font-weight: 600;
+}
+
+.guided-login-banner__sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.guided-login-banner[data-tone='error'] .guided-login-banner__sub {
+  color: inherit;
+  opacity: 0.9;
+}
+
+.guided-login-banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.guided-login-banner__btn {
+  height: var(--control-row);
+  padding: 0 12px;
+  border-radius: var(--control-radius);
+  border: 1px solid var(--block-stroke);
+  background: var(--chip-fill);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.guided-login-banner__btn:hover:not(:disabled) {
+  background: var(--hover-fill);
+}
+
+.guided-login-banner__btn--primary {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill-edge, transparent);
+  color: var(--accent-on-fill, #fff);
+}
+
+.guided-login-banner__btn--primary:hover:not(:disabled) {
+  background: var(--accent-fill-hover, var(--accent-fill));
+}

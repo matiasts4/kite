@@ -53,6 +53,21 @@ pub fn prepare_new_account_login(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub async fn start_account_login_flow(request: Option<Value>) -> Value {
+    commands::start_account_login_flow_impl(request).await
+}
+
+#[tauri::command]
+pub async fn cancel_account_login_flow(request: Option<Value>) -> Value {
+    commands::cancel_account_login_flow_impl(request).await
+}
+
+#[tauri::command]
+pub async fn probe_live_account_login_status(request: Option<Value>) -> Value {
+    commands::probe_live_account_login_status_impl(request).await
+}
+
+#[tauri::command]
 pub fn inspect_provider_sessions(request: Option<Value>) -> Value {
     commands::inspect_provider_sessions_impl(request)
 }

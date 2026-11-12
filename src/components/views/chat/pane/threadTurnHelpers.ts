@@ -15,11 +15,20 @@ export function changedFilesForTurn(items: ExtendedChatThread['items']) {
   for (const item of items.slice(start)) {
     if (!item.filePath) continue;
     if (item.toolKind !== 'fileChange' && item.addedLines == null && item.removedLines == null) continue;
-    files.set(item.filePath, {
-      path: item.filePath,
-      additions: item.addedLines ?? 0,
-      deletions: item.removedLines ?? 0,
-    });
+    const key = item.filePath.replace(/\\/g, '/');
+    const added = item.addedLines ?? 0;
+    const deleted = item.removedLines ?? 0;
+    const existing = files.get(key);
+    if (existing) {
+      existing.additions += added;
+      existing.deletions += deleted;
+    } else {
+      files.set(key, {
+        path: item.filePath,
+        additions: added,
+        deletions: deleted,
+      });
+    }
   }
   return [...files.values()];
 }

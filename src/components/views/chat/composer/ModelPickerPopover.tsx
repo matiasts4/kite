@@ -17,12 +17,16 @@ import { ComposerControl, ComposerControlChevron } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
 
 const DEFAULT_PROVIDERS: Record<string, { label: string; vendor: string }> = {
-  claude: { label: 'Anthropic', vendor: 'Anthropic PBC' },
+  antigravity: { label: 'Antigravity', vendor: 'Google DeepMind' },
+  claude: { label: 'Claude Code', vendor: 'Anthropic PBC' },
+  codex: { label: 'Codex', vendor: 'OpenAI LLC' },
+  grok: { label: 'Grok Build', vendor: 'xAI Corp.' },
+  opencode: { label: 'OpenCode', vendor: 'OpenCode' },
+  cursor: { label: 'Cursor Agent', vendor: 'Cursor' },
+  gemini: { label: 'Gemini CLI', vendor: 'Google LLC' },
   openai: { label: 'OpenAI', vendor: 'OpenAI LLC' },
-  gemini: { label: 'Google DeepMind', vendor: 'Google LLC' },
   deepseek: { label: 'DeepSeek', vendor: 'DeepSeek AI' },
   openrouter: { label: 'OpenRouter', vendor: 'OpenRouter Inc.' },
-  xai: { label: 'xAI', vendor: 'xAI Corp.' },
   ollama: { label: 'Ollama', vendor: 'Local Runtime' },
 };
 
@@ -52,6 +56,12 @@ const StarSvg: React.FC<{ filled?: boolean; className?: string; size?: number }>
 interface FavoriteModelEntry {
   provider: ChatProvider;
   modelId: string;
+  label?: string;
+  detail?: string;
+}
+
+interface DisplayedModelItem extends DriverChoice {
+  itemProvider?: ChatProvider;
 }
 
 const STORAGE_KEY = 'kite_favorite_models_v1';
@@ -94,7 +104,7 @@ export interface ModelPickerPopoverProps {
   modelReason?: string | null;
   catalogState?: CatalogEmptyKind | null;
   ensureDynamicModels?: (provider: ChatProvider) => void;
-  onSelectModel: (modelId: string | null) => void;
+  onSelectModel: (modelId: string | null, targetProvider?: ChatProvider) => void;
   onSelectProvider: (provider: ChatProvider) => void;
 }
 
@@ -143,11 +153,14 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
       requestAnimationFrame(() => {
         searchInputRef.current?.focus();
       });
-      const requested =
-        activeRailTab === 'favorites' ? provider : (activeRailTab as ChatProvider);
-      ensureDynamicModels?.(requested);
+      if (activeRailTab === 'favorites') {
+        const unique = new Set([provider, ...favorites.map((f) => f.provider)]);
+        unique.forEach((p) => ensureDynamicModels?.(p));
+      } else {
+        ensureDynamicModels?.(activeRailTab as ChatProvider);
+      }
     }
-  }, [isOpen, provider, activeRailTab, ensureDynamicModels]);
+  }, [isOpen, provider, activeRailTab, favorites, ensureDynamicModels]);
 
   // Close on outside click or escape
   useEffect(() => {
@@ -215,13 +228,19 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
   );
 
   const toggleFavorite = useCallback(
-    (e: React.MouseEvent, prov: ChatProvider, modelId: string) => {
+    (
+      e: React.MouseEvent,
+      prov: ChatProvider,
+      modelId: string,
+      modelLabel?: string,
+      modelDetail?: string
+    ) => {
       e.stopPropagation();
       setFavorites((prev) => {
         const exists = prev.some((f) => f.provider === prov && f.modelId === modelId);
         const next = exists
           ? prev.filter((f) => !(f.provider === prov && f.modelId === modelId))
-          : [...prev, { provider: prov, modelId }];
+          : [...prev, { provider: prov, modelId, label: modelLabel, detail: modelDetail }];
         saveFavorites(next);
         return next;
       });
@@ -229,15 +248,24 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
     []
   );
 
-  const displayedModels = useMemo<DriverChoice[]>(() => {
-    let list: DriverChoice[] = [];
+  const displayedModels = useMemo<DisplayedModelItem[]>(() => {
+    let list: DisplayedModelItem[] = [];
     if (activeRailTab === 'favorites') {
-      const favoriteIds = new Set(
-        favorites.filter((f) => f.provider === provider).map((f) => f.modelId)
-      );
-      list = models.filter((m) => favoriteIds.has(m.id));
+      list = favorites.map((fav) => {
+        const match = fav.provider === provider ? models.find((m) => m.id === fav.modelId) : undefined;
+        return {
+          id: fav.modelId,
+          label: match?.label ?? fav.label ?? fav.modelId,
+          detail: match?.detail ?? fav.detail ?? DEFAULT_PROVIDERS[fav.provider]?.label ?? fav.provider,
+          engine: fav.provider,
+          itemProvider: fav.provider,
+        };
+      });
     } else {
-      list = models;
+      list = models.map((m) => ({
+        ...m,
+        itemProvider: provider,
+      }));
     }
 
     if (!searchQuery.trim()) {
@@ -246,18 +274,22 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
 
     const q = searchQuery.toLowerCase().trim();
     return list.filter(
-      (m: DriverChoice) =>
+      (m: DisplayedModelItem) =>
         m.label.toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q) ||
         (m.detail && m.detail.toLowerCase().includes(q))
     );
   }, [activeRailTab, favorites, models, provider, searchQuery]);
 
-  const handleSelectModelRow = (selectedId: string) => {
-    if (selectedId === AUTOMATIC_MODEL_ID) {
-      onSelectModel(null);
+  const handleSelectModelRow = (item: DisplayedModelItem) => {
+    const targetProv = item.itemProvider || provider;
+    if (targetProv !== provider) {
+      onSelectProvider(targetProv);
+    }
+    if (item.id === AUTOMATIC_MODEL_ID) {
+      onSelectModel(null, targetProv);
     } else {
-      onSelectModel(selectedId);
+      onSelectModel(item.id, targetProv);
     }
     setIsOpen(false);
   };
@@ -406,22 +438,29 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                 className="kite-model-list"
               >
                 {displayedModels.length > 0 ? (
-                  displayedModels.map((item: DriverChoice) => {
-                    const isSelected = item.id === currentModelId;
-                    const favored = isFavorite(provider, item.id);
+                  displayedModels.map((item: DisplayedModelItem) => {
+                    const itemProv = item.itemProvider || provider;
+                    const isSelected = itemProv === provider && item.id === currentModelId;
+                    const favored = isFavorite(itemProv, item.id);
                     const badge = getModelBadge(item);
+                    const itemProviderRow =
+                      providers.find((row) => row.id === itemProv) ?? {
+                        id: itemProv,
+                        label: DEFAULT_PROVIDERS[itemProv]?.label ?? itemProv,
+                        engine: itemProv,
+                      };
 
                     return (
                       <div
-                        key={item.id}
+                        key={`${itemProv}:${item.id}`}
                         role="option"
                         aria-selected={isSelected}
                         tabIndex={0}
-                        onClick={() => handleSelectModelRow(item.id)}
+                        onClick={() => handleSelectModelRow(item)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
-                            handleSelectModelRow(item.id);
+                            handleSelectModelRow(item);
                           }
                         }}
                         className={`kite-model-item ${
@@ -431,13 +470,25 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                         <div className="kite-model-item-left">
                           <span className="shrink-0 inline-flex items-center">
                             <BrandLogo
-                              engine={activeTabProviderRow.engine ?? activeTabProviderRow.id}
-                              label={activeTabProviderRow.label}
+                              engine={itemProviderRow.engine ?? itemProviderRow.id}
+                              label={itemProviderRow.label}
                               size={14}
                             />
                           </span>
                           <span className="kite-model-item-label">{item.label}</span>
                           {badge && <span className="kite-model-item-badge">{badge}</span>}
+                          {activeRailTab === 'favorites' && (
+                            <span
+                              className="kite-model-item-badge"
+                              style={{
+                                opacity: 0.7,
+                                marginLeft: 'auto',
+                                marginRight: '0.25rem',
+                              }}
+                            >
+                              {itemProviderRow.label}
+                            </span>
+                          )}
                         </div>
 
                         <div className="kite-model-item-right">
@@ -456,7 +507,9 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                                   ? `Unfavorite ${item.label}`
                                   : `Favorite ${item.label}`
                               }
-                              onClick={(e) => toggleFavorite(e, provider, item.id)}
+                              onClick={(e) =>
+                                toggleFavorite(e, itemProv, item.id, item.label, item.detail)
+                              }
                               className={`kite-model-star-btn ${
                                 favored ? 'kite-model-star-btn--fav' : ''
                               }`}

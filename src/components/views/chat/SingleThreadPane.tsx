@@ -723,8 +723,13 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             />
             <ChangedFilesCard
               files={changedFilesForTurn(transcriptItems)}
+              onOpenTurnDiff={() => {
+                window.dispatchEvent(new CustomEvent('kite:open-right-dock-diffs'));
+                window.dispatchEvent(new CustomEvent('kite:open-diffs'));
+              }}
               onOpenFile={(path) => {
                 window.dispatchEvent(new CustomEvent('kite:open-file', { detail: { path } }));
+                window.dispatchEvent(new CustomEvent('kite:open-right-dock-file', { detail: { path } }));
               }}
             />
 

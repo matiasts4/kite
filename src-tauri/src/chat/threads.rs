@@ -394,11 +394,7 @@ pub fn history(agent_id: Option<&str>) -> Value {
         .iter()
         .filter(|thread| match agent_id {
             Some(id) => thread.get("profileId").and_then(|v| v.as_str()) == Some(id),
-            None => {
-                thread.get("profileId").is_none()
-                    || thread.get("profileId").and_then(|v| v.as_str()).is_none()
-                    || thread["profileId"].is_null()
-            }
+            None => true,
         })
         .filter(|thread| archived_at_ms(thread).is_none())
         .filter_map(|thread| summary_of(thread))

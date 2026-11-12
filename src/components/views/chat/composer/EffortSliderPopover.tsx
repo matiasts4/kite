@@ -10,9 +10,9 @@ import { createPortal } from 'react-dom';
 import { composerMenuStyle } from './composerMenu';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
 import { SPANISH_EFFORT_LABELS } from '../types';
-import { ZapIcon, ChevronRightIcon } from '../ChatIcons';
+import { ChevronRightIcon } from '../ChatIcons';
 import { resolveEffortGlyph } from '../effortGlyph';
-import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from './ComposerControl';
+import { ComposerControl, ComposerControlChevron } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
 
 const ResetSvg: React.FC<{ size?: number; className?: string }> = ({ size = 13, className = '' }) => (
@@ -223,8 +223,12 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
           }
         }}
       >
-        <ComposerControlIcon icon={ZapIcon} size={14} className="text-primary" />
-        <svg className="effort-glyph" width={glyph.heights.length * 4} height={14} aria-hidden="true">
+        <svg
+          className="effort-glyph shrink-0 text-primary"
+          width={glyph.heights.length * 4}
+          height={14}
+          aria-hidden="true"
+        >
           {glyph.heights.map((height, index) => (
             <rect
               key={index}
@@ -232,8 +236,9 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
               y={14 - height}
               width={2}
               height={height}
+              rx={1}
               fill="currentColor"
-              opacity={index <= glyph.filledUntil ? 1 : 0.4}
+              opacity={index <= glyph.filledUntil ? 1 : 0.35}
             />
           ))}
         </svg>
@@ -260,9 +265,27 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
           >
             {/* Header Row */}
             <div className="kite-effort-header-row">
-              {/* Left: Zap Icon matching screenshot */}
-              <div className="kite-effort-zap-icon">
-                <ZapIcon size={16} />
+              {/* Left: Dynamic effort glyph */}
+              <div className="kite-effort-zap-icon inline-flex items-center justify-center">
+                <svg
+                  className="effort-glyph text-primary shrink-0"
+                  width={glyph.heights.length * 4}
+                  height={14}
+                  aria-hidden="true"
+                >
+                  {glyph.heights.map((height, index) => (
+                    <rect
+                      key={index}
+                      x={index * 4}
+                      y={14 - height}
+                      width={2}
+                      height={height}
+                      rx={1}
+                      fill="currentColor"
+                      opacity={index <= glyph.filledUntil ? 1 : 0.35}
+                    />
+                  ))}
+                </svg>
               </div>
 
               {/* Center: Title + Model Subtitle with Chevron */}

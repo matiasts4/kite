@@ -216,17 +216,42 @@ pub fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let target_str = params
+        .get("TargetContent")
+        .or_else(|| params.get("Target"))
+        .or_else(|| params.get("target"))
+        .or_else(|| params.get("old_string"))
+        .or_else(|| params.get("old_str"))
+        .or_else(|| params.get("oldText"))
+        .or_else(|| params.get("old_text"))
+        .or_else(|| params.get("find"))
+        .and_then(|v| v.as_str());
+
+    let replacement_str = params
+        .get("ReplacementContent")
+        .or_else(|| params.get("Replacement"))
+        .or_else(|| params.get("replacement"))
+        .or_else(|| params.get("new_string"))
+        .or_else(|| params.get("new_str"))
+        .or_else(|| params.get("newText"))
+        .or_else(|| params.get("new_text"))
+        .or_else(|| params.get("replace"))
+        .and_then(|v| v.as_str());
+
     let mut added_lines = None;
     let mut removed_lines = None;
-    if let (Some(target), Some(replacement)) = (
-        params.get("TargetContent").or_else(|| params.get("old_string")).and_then(|v| v.as_str()),
-        params.get("ReplacementContent").or_else(|| params.get("new_string")).and_then(|v| v.as_str()),
-    ) {
-        removed_lines = Some(target.lines().count().max(1));
-        added_lines = Some(replacement.lines().count().max(1));
-    } else if let Some(code) = params.get("CodeContent").or_else(|| params.get("content")).and_then(|v| v.as_str()) {
+    if let (Some(target), Some(replacement)) = (target_str, replacement_str) {
+        removed_lines = Some(target.lines().count().max(if target.is_empty() { 0 } else { 1 }));
+        added_lines = Some(replacement.lines().count().max(if replacement.is_empty() { 0 } else { 1 }));
+    } else if let Some(code) = params
+        .get("CodeContent")
+        .or_else(|| params.get("Content"))
+        .or_else(|| params.get("content"))
+        .or_else(|| params.get("text"))
+        .and_then(|v| v.as_str())
+    {
         if file_path.is_some() {
-            added_lines = Some(code.lines().count().max(1));
+            added_lines = Some(code.lines().count().max(if code.is_empty() { 0 } else { 1 }));
             removed_lines = Some(0);
         }
     }

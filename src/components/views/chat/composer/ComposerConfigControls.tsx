@@ -88,7 +88,13 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
         modelReason={modelReason}
         catalogState={catalogState}
         ensureDynamicModels={ensureDynamicModels}
-        onSelectModel={(modelId) => onUpdateConfig({ model: modelId })}
+        onSelectModel={(modelId, targetProv) => {
+          if (targetProv && targetProv !== threadProvider) {
+            onUpdateConfig({ provider: targetProv, model: modelId });
+          } else {
+            onUpdateConfig({ model: modelId });
+          }
+        }}
         onSelectProvider={(provider) => onUpdateConfig({ provider })}
       />
       {modelReason && <ControlReason reason={modelReason} />}

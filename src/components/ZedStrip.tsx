@@ -922,7 +922,7 @@ export const ZedStripHost: React.FC<ZedStripHostProps> = ({ call, ...rest }) => 
     status: 'listening',
     toolCalls: [],
   };
-  const hideFloatingOrb = !call?.isActive && voiceSession.activeSurface === 'thread';
+  const hideFloatingOrb = voiceSession.activeSurface === 'thread';
 
   return <ZedStrip call={effectiveCall} hideFloatingOrb={hideFloatingOrb} {...rest} />;
 };

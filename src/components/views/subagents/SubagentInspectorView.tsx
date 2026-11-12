@@ -4,6 +4,8 @@ import {
   getThreadSubagentDetail,
   getThreadSwarmState,
   loadChatThread,
+  sendSubagentMessage,
+  stopSubagentRun,
 } from '../../../lib/ipc/chat';
 import type { OpenRightDockSubagentDetail } from '../../../lib/subagentNav';
 import { tweens } from '../../../motion/standard/tokens';
@@ -72,6 +74,10 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   const [briefExpanded, setBriefExpanded] = useState(false);
   const [autoScrollPaused, setAutoScrollPaused] = useState(false);
   const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
+  const [steeringText, setSteeringText] = useState('');
+  const [sendingSteering, setSendingSteering] = useState(false);
+  const [stoppingRun, setStoppingRun] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const streamRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
@@ -270,6 +276,58 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     }
   };
 
+  const handleStopActiveRun = async () => {
+    if (!thread || !activeRun || stoppingRun) return;
+    setStoppingRun(true);
+    setActionError(null);
+    try {
+      const res = await stopSubagentRun(thread.id, activeRun.subagentId);
+      if (res.run) {
+        setThread((prev) =>
+          prev
+            ? applySubagentEvent(prev, {
+                kind: 'subagentRunUpdated',
+                threadId: prev.id,
+                run: res.run!,
+              })
+            : prev,
+        );
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to stop subagent');
+    } finally {
+      setStoppingRun(false);
+    }
+  };
+
+  const handleSendSteering = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!thread || !activeRun || sendingSteering) return;
+    const msg = steeringText.trim();
+    if (!msg) return;
+    setSendingSteering(true);
+    setActionError(null);
+    try {
+      const res = await sendSubagentMessage(thread.id, activeRun.subagentId, msg);
+      setSteeringText('');
+      if (res.run) {
+        setThread((prev) =>
+          prev
+            ? applySubagentEvent(prev, {
+                kind: 'subagentRunUpdated',
+                threadId: prev.id,
+                run: res.run!,
+              })
+            : prev,
+        );
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to send subagent message');
+    } finally {
+      setSendingSteering(false);
+    }
+  };
+
   const handleInspectWorker = (member: SwarmMember) => {
     const matched = runs.find(
       (r) =>
@@ -394,10 +452,22 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
 
       {mode === 'swarm' && swarmState ? (
         <SwarmBoardInspector
+          threadId={thread?.id ?? null}
           swarmState={swarmState}
           parentModelLabel={parentModelLabel}
           subagentRuns={runs}
           onInspectWorker={handleInspectWorker}
+          onSwarmUpdated={(nextSwarm) =>
+            setThread((prev) =>
+              prev
+                ? applySubagentEvent(prev, {
+                    kind: 'swarmStateUpdated',
+                    threadId: prev.id,
+                    swarmState: nextSwarm,
+                  })
+                : prev,
+            )
+          }
         />
       ) : activeRun ? (
         <>
@@ -410,9 +480,22 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                   <span className="subagent-badge">{activeRun.typeName}</span>
                 )}
               </div>
-              <span className="subagent-badge subagent-badge--status">
-                {runStatusLabel(activeRun, nowUnixMs)}
-              </span>
+              <div className="subagent-inspector__status-actions">
+                <span className="subagent-badge subagent-badge--status">
+                  {runStatusLabel(activeRun, nowUnixMs)}
+                </span>
+                {isRunActive(activeRun.status) && (
+                  <button
+                    type="button"
+                    className="subagent-stop-btn"
+                    aria-label="Stop subagent"
+                    disabled={stoppingRun}
+                    onClick={() => void handleStopActiveRun()}
+                  >
+                    Stop
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="subagent-inspector__meta-badges">
@@ -511,6 +594,38 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
               </button>
             )}
           </div>
+
+          {actionError && (
+            <div className="subagent-inspector__error" role="alert">
+              {actionError}
+            </div>
+          )}
+
+          <form
+            className="subagent-inspector__composer"
+            data-testid="subagent-steering-form"
+            onSubmit={(e) => void handleSendSteering(e)}
+          >
+            <input
+              type="text"
+              className="subagent-inspector__composer-input"
+              value={steeringText}
+              placeholder={
+                activeRun.childThreadId
+                  ? `Message ${activeRun.role || 'subagent'}…`
+                  : 'Follow-up steering requires a child thread subagent'
+              }
+              disabled={!activeRun.childThreadId || sendingSteering}
+              onChange={(e) => setSteeringText(e.target.value)}
+            />
+            <button
+              type="submit"
+              className="subagent-inspector__composer-submit"
+              disabled={!activeRun.childThreadId || sendingSteering || !steeringText.trim()}
+            >
+              Send
+            </button>
+          </form>
         </>
       ) : null}
     </div>

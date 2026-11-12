@@ -241,3 +241,108 @@ export async function getThreadSwarmState(
     threadId,
   });
 }
+
+function unwrapSubagentCommandResult<T extends { ok?: boolean; error?: string }>(
+  result: T | null | undefined,
+  fallbackError: string
+): T {
+  if (result && result.error) {
+    throw new Error(result.error);
+  }
+  if (!result) {
+    throw new Error(fallbackError);
+  }
+  return result;
+}
+
+export async function sendSubagentMessage(
+  threadId: string,
+  subagentId: string,
+  message: string
+): Promise<{ ok: boolean; run?: import('../../types').SubagentRun | null; error?: string }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    run?: import('../../types').SubagentRun | null;
+    error?: string;
+  }>('send_subagent_message', {
+    threadId,
+    subagentId,
+    message,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to send subagent message');
+  return { ok: Boolean(unwrapped.ok ?? true), run: unwrapped.run ?? null };
+}
+
+export async function stopSubagentRun(
+  threadId: string,
+  subagentId: string
+): Promise<{ ok: boolean; run?: import('../../types').SubagentRun | null; error?: string }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    run?: import('../../types').SubagentRun | null;
+    error?: string;
+  }>('stop_subagent_run', {
+    threadId,
+    subagentId,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to stop subagent run');
+  return { ok: Boolean(unwrapped.ok ?? true), run: unwrapped.run ?? null };
+}
+
+export async function swarmPostFromUi(
+  threadId: string,
+  message: string,
+  channel?: string | null
+): Promise<{ ok: boolean; swarmState?: import('../../types').SwarmState | null; error?: string }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    swarmState?: import('../../types').SwarmState | null;
+    error?: string;
+  }>('swarm_post_from_ui', {
+    threadId,
+    message,
+    channel: channel ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to post swarm message');
+  return { ok: Boolean(unwrapped.ok ?? true), swarmState: unwrapped.swarmState ?? null };
+}
+
+export async function swarmSwitchWorkerModel(
+  threadId: string,
+  params: {
+    name: string;
+    model: string;
+    provider?: string | null;
+    effort?: string | null;
+  }
+): Promise<{ ok: boolean; swarmState?: import('../../types').SwarmState | null; error?: string }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    swarmState?: import('../../types').SwarmState | null;
+    error?: string;
+  }>('swarm_switch_worker_model', {
+    threadId,
+    name: params.name,
+    model: params.model,
+    provider: params.provider ?? null,
+    effort: params.effort ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to switch worker model');
+  return { ok: Boolean(unwrapped.ok ?? true), swarmState: unwrapped.swarmState ?? null };
+}
+
+export async function swarmKillWorkerFromUi(
+  threadId: string,
+  name: string
+): Promise<{ ok: boolean; swarmState?: import('../../types').SwarmState | null; error?: string }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    swarmState?: import('../../types').SwarmState | null;
+    error?: string;
+  }>('swarm_kill_worker_from_ui', {
+    threadId,
+    name,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to kill swarm worker');
+  return { ok: Boolean(unwrapped.ok ?? true), swarmState: unwrapped.swarmState ?? null };
+}

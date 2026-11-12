@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SwarmBoardInspector } from './SwarmBoardInspector';
 import type { SwarmState } from '../../../types';
 
@@ -155,5 +155,44 @@ describe('SwarmBoardInspector', () => {
     expect(graph.textContent).toContain('Coordinator');
     expect(graph.textContent).toContain('@parser');
     expect(graph.textContent).toContain('stall');
+  });
+
+  it('supports posting to the board composer, switching a worker model, and killing a worker', async () => {
+    const onInspectWorker = vi.fn();
+    const onPostMessage = vi.fn().mockResolvedValue(undefined);
+    const onSwitchModel = vi.fn().mockResolvedValue(undefined);
+    const onKillWorker = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <SwarmBoardInspector
+        swarmState={sampleSwarm}
+        parentModelLabel="Opus 4.6"
+        onInspectWorker={onInspectWorker}
+        onPostMessage={onPostMessage}
+        onSwitchModel={onSwitchModel}
+        onKillWorker={onKillWorker}
+      />,
+    );
+
+    const input = screen.getByPlaceholderText(/Post @worker or @all/i);
+    fireEvent.change(input, { target: { value: '@reviewer check token validation' } });
+    fireEvent.submit(screen.getByTestId('swarm-board-composer'));
+    await waitFor(() => {
+      expect(onPostMessage).toHaveBeenCalledWith('@reviewer check token validation', 'main');
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: /Roster \(4\)/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Switch model for @reviewer/i }));
+    const modelInput = screen.getByLabelText(/Target model for @reviewer/i);
+    fireEvent.change(modelInput, { target: { value: 'grok-4' } });
+    fireEvent.click(screen.getByRole('button', { name: /Apply switch for @reviewer/i }));
+    await waitFor(() => {
+      expect(onSwitchModel).toHaveBeenCalledWith('reviewer', 'grok-4', 'grok');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Kill @parser/i }));
+    await waitFor(() => {
+      expect(onKillWorker).toHaveBeenCalledWith('parser');
+    });
   });
 });

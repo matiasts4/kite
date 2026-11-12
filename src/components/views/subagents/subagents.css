@@ -617,6 +617,144 @@
   font-size: var(--text-caption, 11px);
 }
 
+.subagent-inspector__status-actions,
+.swarm-roster-card__btn-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subagent-stop-btn,
+.swarm-roster-card__kill-btn {
+  height: var(--control-row, 28px);
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--danger-ink) 45%, var(--control-stroke));
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--danger-ink) 10%, var(--control-fill));
+  color: var(--danger-ink);
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+}
+
+.subagent-stop-btn:hover:not(:disabled),
+.swarm-roster-card__kill-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-ink) 18%, var(--control-fill-hover));
+}
+
+.subagent-badge--interactive {
+  height: var(--control-row, 28px);
+  border: 1px solid var(--control-stroke);
+  background: var(--control-fill);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.subagent-badge--interactive:hover:not(:disabled) {
+  background: var(--control-fill-hover);
+}
+
+.subagent-badge--interactive:disabled,
+.subagent-stop-btn:disabled,
+.swarm-roster-card__kill-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.swarm-roster-card__switch-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.swarm-roster-card__select,
+.swarm-roster-card__input {
+  height: var(--control-row, 28px);
+  padding: 0 8px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--control-radius, 8px);
+  background: var(--block-fill);
+  color: var(--text-primary);
+  font-size: var(--text-caption, 11px);
+  min-width: 0;
+}
+
+.swarm-roster-card__input {
+  flex: 1 1 120px;
+}
+
+.subagent-inspector__composer,
+.swarm-board__composer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--separator);
+  background: var(--pane);
+  flex: none;
+}
+
+.swarm-board__channel-select {
+  height: var(--vl-control-md, 32px);
+  padding: 0 8px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--control-radius, 8px);
+  background: var(--block-fill);
+  color: var(--text-primary);
+  font-size: var(--text-caption, 11px);
+  flex: none;
+}
+
+.subagent-inspector__composer-input,
+.swarm-board__composer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--vl-control-md, 32px);
+  padding: 0 10px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--control-radius, 8px);
+  background: var(--block-fill);
+  color: var(--text-primary);
+  font-size: var(--text-row, 12px);
+}
+
+.subagent-inspector__composer-submit,
+.swarm-board__composer-submit {
+  height: var(--vl-control-md, 32px);
+  padding: 0 12px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--control-radius, 8px);
+  background: var(--selected-fill);
+  color: var(--text-primary);
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  flex: none;
+}
+
+.subagent-inspector__composer-submit:hover:not(:disabled),
+.swarm-board__composer-submit:hover:not(:disabled) {
+  background: var(--control-fill-hover);
+}
+
+.subagent-inspector__composer-submit:disabled,
+.swarm-board__composer-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.subagent-inspector__error {
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid color-mix(in srgb, var(--danger-ink) 45%, transparent);
+  background: color-mix(in srgb, var(--danger-ink) 12%, transparent);
+  color: var(--danger-ink);
+  font-size: var(--text-caption, 11px);
+}
+
 @container (max-width: 380px) {
   .subagent-inspector__header,
   .swarm-board__overview,

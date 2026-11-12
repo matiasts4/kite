@@ -7,11 +7,21 @@ import type { ChatItem } from '../../../types';
 const loadChatThreadMock = vi.fn();
 const getThreadSubagentDetailMock = vi.fn();
 const getThreadSwarmStateMock = vi.fn();
+const sendSubagentMessageMock = vi.fn();
+const stopSubagentRunMock = vi.fn();
+const swarmPostFromUiMock = vi.fn();
+const swarmSwitchWorkerModelMock = vi.fn();
+const swarmKillWorkerFromUiMock = vi.fn();
 
 vi.mock('../../../lib/ipc/chat', () => ({
   loadChatThread: (...args: unknown[]) => loadChatThreadMock(...args),
   getThreadSubagentDetail: (...args: unknown[]) => getThreadSubagentDetailMock(...args),
   getThreadSwarmState: (...args: unknown[]) => getThreadSwarmStateMock(...args),
+  sendSubagentMessage: (...args: unknown[]) => sendSubagentMessageMock(...args),
+  stopSubagentRun: (...args: unknown[]) => stopSubagentRunMock(...args),
+  swarmPostFromUi: (...args: unknown[]) => swarmPostFromUiMock(...args),
+  swarmSwitchWorkerModel: (...args: unknown[]) => swarmSwitchWorkerModelMock(...args),
+  swarmKillWorkerFromUi: (...args: unknown[]) => swarmKillWorkerFromUiMock(...args),
 }));
 
 function makeItem(overrides: Partial<ChatItem> & { id: string; kind: ChatItem['kind'] }): ChatItem {
@@ -249,5 +259,47 @@ describe('SubagentInspectorView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Back to Swarm Roster/i }));
     expect(screen.getByTestId('swarm-board-inspector')).toBeInTheDocument();
+  });
+
+  it('sends follow-up steering messages and stops an active subagent run', async () => {
+    const thread = makeThread();
+    loadChatThreadMock.mockResolvedValueOnce(thread);
+    sendSubagentMessageMock.mockResolvedValueOnce({
+      ok: true,
+      run: { ...thread.subagentRuns![0], status: 'running' },
+    });
+    stopSubagentRunMock.mockResolvedValueOnce({
+      ok: true,
+      run: { ...thread.subagentRuns![0], status: 'killed' },
+    });
+
+    render(
+      <SubagentInspectorView
+        workspaceId="ws-1"
+        selectedThreadId="thread-main-1"
+        requestedTarget={{
+          threadId: 'thread-main-1',
+          subagentId: 'sub-1',
+          mode: 'subagent',
+        }}
+      />,
+    );
+
+    const input = await screen.findByPlaceholderText(/Message Codebase Researcher/i);
+    fireEvent.change(input, { target: { value: 'Check edge case #2' } });
+    fireEvent.submit(screen.getByTestId('subagent-steering-form'));
+
+    await waitFor(() => {
+      expect(sendSubagentMessageMock).toHaveBeenCalledWith(
+        'thread-main-1',
+        'sub-1',
+        'Check edge case #2',
+      );
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Stop subagent/i }));
+    await waitFor(() => {
+      expect(stopSubagentRunMock).toHaveBeenCalledWith('thread-main-1', 'sub-1');
+    });
   });
 });

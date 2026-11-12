@@ -477,7 +477,11 @@ impl ToolCallTracker {
                 entry.status = "failed".to_string();
             }
             entry.kind = "subagent".into();
-            if entry.title.is_empty() || entry.title == eval_name {
+            let clean_title = entry.title.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+            if entry.title.is_empty()
+                || entry.title == eval_name
+                || crate::acp::types::is_shell_wrapper_name(&clean_title)
+            {
                 entry.title = classified_title;
             }
             entry.subagent_meta = Some(merge_subagent_meta(entry.subagent_meta.as_ref(), meta));

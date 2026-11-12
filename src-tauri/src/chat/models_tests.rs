@@ -423,10 +423,14 @@
         assert!(missing_err.contains("missing-binary"));
 
         // Ready provider without a model listing command (e.g. claude) stays flexible
+        // for its own family while still rejecting incompatible cross-vendor model IDs.
         let claude_catalog = json!({
             "provider": "claude",
             "catalogState": "ready",
             "models": []
         });
         assert!(validate_provider_model_with_catalog("claude", "claude-sonnet-4-6", &claude_catalog).is_ok());
+        assert!(validate_provider_model_with_catalog("claude", "grok-code-fast", &claude_catalog).is_err());
+        assert!(model_likely_belongs_to_another_provider("antigravity", "gpt-5-codex"));
+        assert!(!model_likely_belongs_to_another_provider("antigravity", "gpt-oss-120b"));
     }

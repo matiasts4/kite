@@ -1042,13 +1042,18 @@ pub fn validate_provider_model_with_catalog(
                 sample.join(", ")
             ));
         }
+    } else if model_likely_belongs_to_another_provider(canon, model) {
+        return Err(format!(
+            "Model `{model}` does not belong to provider `{canon}`. Run `kite dispatch models {canon}` to inspect supported models or omit `--model`."
+        ));
     }
     Ok(())
 }
 
 pub fn model_likely_belongs_to_another_provider(provider: &str, model: &str) -> bool {
     let canon = canonical_thread_provider_id(provider).unwrap_or(provider);
-    let m = model.trim().to_ascii_lowercase();
+    let raw = model.trim().to_ascii_lowercase();
+    let m = raw.rsplit('/').next().unwrap_or(&raw);
     if m.is_empty() {
         return false;
     }
@@ -1069,7 +1074,7 @@ pub fn model_likely_belongs_to_another_provider(provider: &str, model: &str) -> 
         "claude" => looks_grok || looks_gemini || looks_openai,
         "gemini" => looks_grok || looks_claude || looks_openai,
         "codex" => looks_grok || looks_claude || looks_gemini,
-        "antigravity" => looks_grok,
+        "antigravity" => looks_grok || m.contains("-codex"),
         _ => false,
     }
 }

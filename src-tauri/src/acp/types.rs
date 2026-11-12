@@ -809,7 +809,7 @@ fn parse_output_json(output: Option<&str>) -> Option<Value> {
     None
 }
 
-fn is_shell_wrapper_name(clean_name: &str) -> bool {
+pub(crate) fn is_shell_wrapper_name(clean_name: &str) -> bool {
     matches!(
         clean_name.trim().to_ascii_lowercase().replace(' ', "_").as_str(),
         "run_command"

@@ -252,4 +252,33 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     expect(screen.getByText('Schema Explorer')).toBeInTheDocument();
     expect(screen.getByText('Test Runner')).toBeInTheDocument();
   });
+
+  it('does not mark SwarmActivityCard failed when exitCode is undefined and stays static without board data', () => {
+    const swarmItem: ChatItem = {
+      id: 'sw_unbacked',
+      kind: 'tool',
+      text: '',
+      title: 'Swarm Coordination',
+      detail: '',
+      status: 'completed',
+      streaming: false,
+      exitCode: undefined as unknown as number | null,
+      createdAtUnixMs: Date.now() - 1000,
+      attachments: [],
+      toolKind: 'swarm',
+      swarmMeta: {
+        swarmId: 'sw-empty',
+        action: 'title',
+      },
+    };
+    const { container } = render(
+      <SwarmActivityCard item={swarmItem} threadId="thread-parent" swarmState={null} />,
+    );
+    const card = container.querySelector('[data-swarm-id="sw-empty"]');
+    expect(card).not.toBeNull();
+    expect(card?.tagName).toBe('DIV');
+    expect(card?.className).toContain('chat-subagent-card--completed');
+    expect(card?.className).not.toContain('chat-subagent-card--failed');
+    expect(card?.className).toContain('chat-subagent-card--static');
+  });
 });

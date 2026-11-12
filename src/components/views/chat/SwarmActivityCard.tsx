@@ -32,14 +32,19 @@ export const SwarmActivityCard: React.FC<SwarmActivityCardProps> = ({
   const members = swarmState?.members ?? [];
   const latestPost = swarmState?.posts?.[swarmState.posts.length - 1] ?? null;
   const workingCount = members.filter((m) => m.state === 'working').length;
-  const isFailed = item.status === 'failed' || item.exitCode !== null && item.exitCode !== 0;
+  const isFailed =
+    item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0);
   const isRunning =
     workingCount > 0 ||
     Boolean(item.streaming) ||
     item.status === 'running' ||
     item.status === 'inProgress';
 
-  const isInspectable = Boolean(threadId) && Boolean(swarmState || meta?.swarmId);
+  const isInspectable =
+    Boolean(threadId) &&
+    (members.length > 0 ||
+      (swarmState?.posts?.length ?? 0) > 0 ||
+      (swarmState?.channels?.length ?? 0) > 0);
   const [activeInspection, setActiveInspection] = useState<OpenRightDockSubagentDetail | null>(() =>
     getActiveSubagentInspection(),
   );

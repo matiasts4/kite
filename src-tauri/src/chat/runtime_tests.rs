@@ -1,5 +1,15 @@
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use crate::connections::EndpointVerification;
+    use crate::chat::drivers::declaration;
+    use crate::chat::persistent::PersistentControls;
+    use crate::persist::{notifications, persist, threads, workspace_path};
+    use crate::chat::session::{
+        declared_session_mode, RecipeSnapshot, SendReceipt, SessionManager, SessionMode, SessionSpec,
+    };
+    use crate::chat::utils::{chat_log, clip_argv, now_ms, resolve_bin};
+    use serde_json::{json, Value};
 
     const OPENCODE_GO_CHAT: &str =
         "https://opencode.ai/inference/go/openai/v1/chat/completions";

@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.53] - 2026-11-12
+
+> Modularización y optimización arquitectónica
+
+### Changed
+- modularización de 15 módulos monolíticos de backend en submódulos cohesivos
+- descomposición de páginas complejas en frontend React
+- encapsulamiento de estado y extracción de módulos spawn y codec en terminal
+
+---
+
 ## [0.1.52] - 2026-11-11
 
 > Thread Voice Mode, Operator Traces and Archiving Overhaul

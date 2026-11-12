@@ -18,6 +18,26 @@ export type {
 
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
+  {
+    version: '0.1.53',
+    tag: 'v0.1.53',
+    date: 'Nov 12, 2026',
+    title: 'Modularización y optimización arquitectónica',
+    items: [
+      {
+        kind: 'changed',
+        description: 'modularización de 15 módulos monolíticos de backend en submódulos cohesivos',
+      },
+      {
+        kind: 'changed',
+        description: 'descomposición de páginas complejas en frontend React',
+      },
+      {
+        kind: 'changed',
+        description: 'encapsulamiento de estado y extracción de módulos spawn y codec en terminal',
+      },
+    ],
+  },
   ...RELEASES_RECENT,
   ...RELEASES_EARLY,
 ];

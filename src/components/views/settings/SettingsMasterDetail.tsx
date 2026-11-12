@@ -93,7 +93,7 @@ export function SettingsMasterDetailList({
   };
 
   return (
-    <div className="qt-providers-sidebar__scroll" aria-label={label}>
+    <div role="group" className="qt-providers-sidebar__scroll" aria-label={label}>
       {items.map((item, index) => {
         const selected = item.id === selectedId;
         return (

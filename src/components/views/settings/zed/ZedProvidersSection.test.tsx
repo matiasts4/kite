@@ -40,7 +40,7 @@ const buildProps = (config: OperatorConfig) => ({
   onSyncCloudflareModels: vi.fn(),
 });
 
-const providerGroup = () => screen.getByRole('group', { name: 'Proveedor IA' });
+const providerGroup = () => screen.getByRole('group', { name: 'Proveedores del asistente' });
 
 describe('ZedProvidersSection selector + single panel', () => {
   beforeEach(() => {
@@ -55,13 +55,12 @@ describe('ZedProvidersSection selector + single panel', () => {
 
     const chips = within(providerGroup()).getAllByRole('button');
     expect(chips).toHaveLength(6);
-    expect(within(providerGroup()).getByRole('button', { name: 'OpenCode Go' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
+    expect(within(providerGroup()).getByRole('button', { name: /OpenCode Go/ })).toHaveAttribute(
+      'aria-current',
+      'page'
     );
-    expect(within(providerGroup()).getByRole('button', { name: 'Vercel AI' })).toHaveAttribute(
-      'aria-pressed',
-      'false'
+    expect(within(providerGroup()).getByRole('button', { name: /Vercel AI/ })).not.toHaveAttribute(
+      'aria-current'
     );
 
     expect(screen.getByText('API Key de OpenCode Go (opcional)')).toBeInTheDocument();
@@ -74,7 +73,7 @@ describe('ZedProvidersSection selector + single panel', () => {
     const { rerender } = render(<ZedProvidersSection {...props} />);
     await waitFor(() => expect(listZedChatConnections).toHaveBeenCalled());
 
-    await user.click(within(providerGroup()).getByRole('button', { name: 'Vercel AI' }));
+    await user.click(within(providerGroup()).getByRole('button', { name: /Vercel AI/ }));
     expect(props.onFieldChange).toHaveBeenCalledWith('activeProvider', 'vercel');
 
     rerender(
@@ -86,9 +85,9 @@ describe('ZedProvidersSection selector + single panel', () => {
 
     expect(screen.getByText('Vercel AI Gateway API Key')).toBeInTheDocument();
     expect(screen.queryByText('API Key de OpenCode Go (opcional)')).not.toBeInTheDocument();
-    expect(within(providerGroup()).getByRole('button', { name: 'Vercel AI' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
+    expect(within(providerGroup()).getByRole('button', { name: /Vercel AI/ })).toHaveAttribute(
+      'aria-current',
+      'page'
     );
   });
 

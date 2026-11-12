@@ -457,68 +457,25 @@ pub(crate) fn running_process_names() -> Option<Vec<String>> {
 }
 
 pub(crate) fn is_blocking_process(provider: &str, name: &str) -> bool {
-    // Note: CLI processes (agy.exe, claude.exe, codex.exe) are automatically
-    // terminated and respawned during rotation. Only standalone external IDEs
-    // (e.g. Antigravity IDE window) that cannot be safely terminated remain here.
+    // Only standalone external IDEs (e.g. Antigravity IDE window) outside Kite's PTY
+    // ownership remain blocking; Kite-owned PTY processes are quiesced cleanly.
     match canon_provider(provider).as_str() {
         "agy" => matches!(name, "antigravity" | "antigravity.exe"),
         _ => false,
     }
 }
 
-/// Automatically terminates any running background or terminal CLI processes
-/// for this provider so they release locks on auth and session files before rotation.
-pub fn terminate_provider_cli_processes(provider: &str) {
-    let canon = canon_provider(provider);
-    #[cfg(windows)]
-    {
-        let image_names: Vec<&str> = match canon.as_str() {
-            "agy" => vec!["agy.exe", "language_server_windows_x64.exe"],
-            "claude" => vec!["claude.exe"],
-            "codex" => vec!["codex.exe"],
-            "grok" => vec!["grok.exe"],
-            "opencode" => vec!["opencode.exe"],
-            _ => Vec::new(),
-        };
-
-        if !image_names.is_empty() {
-            let mut args: Vec<&str> = vec!["/F", "/T"];
-            for img in &image_names {
-                args.push("/IM");
-                args.push(img);
-            }
-            let _ = crate::hidden_exec::run(
-                std::path::Path::new("taskkill.exe"),
-                &args,
-                std::time::Duration::from_millis(400),
-            );
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let pattern = match canon.as_str() {
-            "agy" => "agy",
-            "claude" => "claude",
-            "codex" => "codex",
-            "grok" => "grok",
-            "opencode" => "opencode",
-            _ => "",
-        };
-        if !pattern.is_empty() {
-            let _ = std::process::Command::new("pkill")
-                .args(["-9", "-f", pattern])
-                .output();
-        }
-    }
-    // Brief sleep to allow OS file handles to be released
-    std::thread::sleep(std::time::Duration::from_millis(50));
-}
-
-/// Err(message) when a client that owns the session files is running.
-/// If the process list is unavailable the check is skipped (best effort).
-pub(crate) fn ensure_provider_idle(provider: &str) -> Result<(), String> {
-    let Some(names) = running_process_names() else {
-        return Ok(());
+/// Fail-closed check ensuring external processes (e.g., standalone Antigravity IDE)
+/// are not holding locks on auth/SQLite files.
+pub(crate) fn ensure_provider_idle_with(
+    provider: &str,
+    process_names: Option<Vec<String>>,
+) -> Result<(), String> {
+    let Some(names) = process_names else {
+        return Err(
+            "No se pudo verificar si hay procesos externos abiertos del proveedor. Cierra manualmente la aplicación externa e intenta nuevamente."
+                .to_string(),
+        );
     };
     let mut busy: Vec<String> = names
         .into_iter()
@@ -535,6 +492,12 @@ pub(crate) fn ensure_provider_idle(provider: &str) -> Result<(), String> {
             busy.join(", ")
         ))
     }
+}
+
+/// Err(message) when an external client that owns session/IDE files is running,
+/// or when process enumeration fails (fail-closed).
+pub(crate) fn ensure_provider_idle(provider: &str) -> Result<(), String> {
+    ensure_provider_idle_with(provider, running_process_names())
 }
 
 // ---------------------------------------------------------------------------

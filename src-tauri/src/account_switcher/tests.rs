@@ -435,3 +435,25 @@ fn test_gemini_cli_mappings_stay_distinct_from_agy() {
     assert!(gemini_dests.contains(&"oauth_creds.json"));
     assert!(gemini_dests.contains(&"google_accounts.json"));
 }
+
+#[test]
+fn test_ensure_provider_idle_fails_closed_when_process_enum_unavailable() {
+    use super::storage::ensure_provider_idle_with;
+
+    let err = ensure_provider_idle_with("agy", None)
+        .expect_err("process enumeration failure must fail closed instead of Ok(())");
+    assert!(!err.is_empty());
+
+    let blocking = ensure_provider_idle_with(
+        "agy",
+        Some(vec!["powershell.exe".to_string(), "antigravity.exe".to_string()]),
+    )
+    .expect_err("external Antigravity IDE process must block switch");
+    assert!(blocking.contains("antigravity.exe"));
+
+    ensure_provider_idle_with(
+        "agy",
+        Some(vec!["powershell.exe".to_string(), "codex.exe".to_string()]),
+    )
+    .expect("unrelated CLI or shell processes must not block Antigravity switch");
+}

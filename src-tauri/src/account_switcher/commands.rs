@@ -13,7 +13,7 @@ use super::registry::{
 use super::storage::{
     apply_profile_to_active, copy_atomic, decode_jwt_payload, ensure_provider_idle,
     get_provider_file_mappings, probe_live_provider_identity, snapshot_active_to_profile,
-    terminate_provider_cli_processes, LiveIdentityProbe,
+    LiveIdentityProbe,
 };
 
 pub(crate) fn build_antigravity_auth_telemetry(live_ident: Option<&LiveIdentityProbe>) -> Value {
@@ -400,23 +400,21 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
         return json!({ "success": false, "error": "Profile not found" });
     };
 
-    // 0. Quiesce Kite-managed terminals for this provider so they flush scrollback and release file locks
-    let quiesced_terminals = crate::terminal::quiesce_provider_terminals(&provider);
-
-    // Terminate any CLI processes of this provider so credentials files are completely unlocked
-    terminate_provider_cli_processes(&provider);
-
-    // If external processes outside Kite are still running and blocking:
+    // Preflight: ensure no external client (e.g. Antigravity IDE) locks auth/DB files BEFORE quiescing Kite PTYs.
     if let Err(msg) = ensure_provider_idle(&provider) {
-        let current_label = reg
-            .profiles
-            .iter()
-            .find(|p| same_provider(&p.provider, &provider) && p.is_active)
-            .map(|p| p.label.as_str())
-            .unwrap_or("Actual");
-        crate::terminal::respawn_provider_terminals(&provider, current_label, &quiesced_terminals);
         return json!({ "success": false, "code": "PROVIDER_BUSY", "error": msg });
     }
+
+    // 0. Quiesce only Kite-managed terminals matching `provider`.
+    let quiesced_terminals = crate::terminal::quiesce_provider_terminals(&provider);
+    let targeted_session_ids: Vec<String> = quiesced_terminals
+        .iter()
+        .map(|q| q.session_id.clone())
+        .collect();
+    let skipped_unaffected_count = crate::terminal::get_terminals()
+        .lock()
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     // 1. Persist latest state of active profile before leaving it, with live identity verification
     let live_ident = probe_live_provider_identity(&provider);
@@ -514,7 +512,9 @@ pub fn switch_account_profile_direct(provider: String, account_id: String) -> Va
     json!({
         "success": true,
         "profile": activated_profile,
-        "terminalsRestarted": quiesced_terminals.len()
+        "terminalsRestarted": quiesced_terminals.len(),
+        "targetedSessionIds": targeted_session_ids,
+        "skippedUnaffectedCount": skipped_unaffected_count
     })
 }
 
@@ -1045,18 +1045,23 @@ pub fn prepare_new_account_login_direct(provider: String) -> Value {
         let live_ident = probe_live_provider_identity("agy");
         let previous_email = live_ident.as_ref().map(|i| i.email.clone());
 
+        if let Err(msg) = ensure_provider_idle("agy") {
+            return json!({
+                "success": false,
+                "code": "PROVIDER_BUSY",
+                "error": msg
+            });
+        }
+
         // 1. If active identity exists, snapshot/save it to vault first
         if let Some(ref em) = previous_email {
             let _ = save_current_account_profile_direct("agy".into(), em.clone());
         }
 
-        // 2. Quiesce Kite terminals for agy
+        // 2. Quiesce only Kite-owned terminals for agy (never kill unrelated user processes globally)
         crate::terminal::quiesce_provider_terminals("agy");
 
-        // 3. Terminate running agy CLI processes so credentials are unlocked
-        terminate_provider_cli_processes("agy");
-
-        // 4. Clear generic credential from Windows Credential Manager
+        // 3. Clear generic credential from Windows Credential Manager
         let deleted = crate::quota::delete_antigravity_credential();
 
         // 5. Mark all agy profiles in profiles.json as is_active = false

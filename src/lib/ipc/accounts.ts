@@ -72,10 +72,20 @@ export async function saveCurrentAccountProfile(
   }
 }
 
+export interface SwitchAccountProfileResult {
+  success: boolean;
+  profile?: SavedAccountProfile;
+  code?: string;
+  error?: string;
+  terminalsRestarted?: number;
+  targetedSessionIds?: string[];
+  skippedUnaffectedCount?: number;
+}
+
 export async function switchAccountProfile(
   provider: string,
   accountId: string
-): Promise<{ success: boolean; profile?: SavedAccountProfile; error?: string }> {
+): Promise<SwitchAccountProfileResult> {
   try {
     return await invokeCommand('switch_account_profile', { provider, accountId });
   } catch (err) {

@@ -93,11 +93,6 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
       const res = await switchAccountProfile(provider, id);
       if (res.success && res.profile) {
         setSuccessMsg(`Sesión cambiada exitosamente a «${res.profile.label}».`);
-        window.dispatchEvent(
-          new CustomEvent('kite:terminal-command', {
-            detail: { command: 'restart-agent' },
-          })
-        );
         await fetchProfiles();
         if (onAccountSwitched) {
           onAccountSwitched(res.profile);

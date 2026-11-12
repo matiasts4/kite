@@ -97,11 +97,6 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
       const res = await switchAccountProfile(selectedProvider, profileId);
       if (res.success) {
         setSwitchFeedback('Cuenta activada');
-        window.dispatchEvent(
-          new CustomEvent('kite:terminal-command', {
-            detail: { command: 'restart-agent' },
-          })
-        );
         void onRefresh();
         void fetchAccounts(selectedProvider);
       } else {

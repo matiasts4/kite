@@ -11,7 +11,7 @@ import {
   TERMINAL_APPEARANCE_CHANGED_EVENT,
   type TerminalAppearancePrefs,
 } from '../../lib/terminalAppearancePrefs';
-import { TerminalCanvasSurface } from './TerminalCanvasSurface';
+import { TerminalCanvasSurface, measureTerminalCanvasGrid } from './TerminalCanvasSurface';
 import type { TerminalSurfaceHandle } from './terminal/canvas/terminalCanvasTypes';
 import { TerminalToolbar } from './terminal/TerminalToolbar';
 import { RotateCwIcon, SpinnerIcon } from './terminal/terminalIcons';
@@ -28,6 +28,58 @@ import './terminal.css';
 const TERMINAL_IMPACT_PULSE_MS = 460;
 
 export { releaseTerminal, clipboardImageFormat, extractClipboardImage };
+
+export interface TerminalCommandDetail {
+  sessionId?: string;
+  command?: string;
+  provider?: string;
+  targetProviders?: string[];
+  targetSessionIds?: string[];
+}
+
+function normalizeCommandProvider(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'agy' || normalized === 'antigravity') return 'antigravity';
+  if (normalized === 'claude-code' || normalized === 'claude') return 'claude';
+  return normalized;
+}
+
+export function matchesTerminalCommandScope(
+  detail: TerminalCommandDetail,
+  ctx: {
+    currentSessionId?: string | null;
+    propSessionId?: string | null;
+    engine: string;
+  }
+): boolean {
+  const idTargets = [detail.sessionId, ...(detail.targetSessionIds ?? [])].filter(
+    (v): v is string => typeof v === 'string' && v.trim().length > 0
+  );
+  if (idTargets.length > 0) {
+    return idTargets.some((targetId) => {
+      const addressed = restartedSessions.get(targetId) ?? targetId;
+      return (
+        (ctx.currentSessionId &&
+          (targetId === ctx.currentSessionId || addressed === ctx.currentSessionId)) ||
+        (ctx.propSessionId && targetId === ctx.propSessionId)
+      );
+    });
+  }
+
+  const providerTargets = [detail.provider, ...(detail.targetProviders ?? [])]
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .map(normalizeCommandProvider);
+  if (providerTargets.length > 0) {
+    return providerTargets.includes(normalizeCommandProvider(ctx.engine));
+  }
+
+  // Never trigger restart-agent on an unscoped global broadcast.
+  if (detail.command === 'restart-agent') {
+    return false;
+  }
+
+  return detail.command === 'refresh-all';
+}
 
 export interface TerminalViewProps {
   workspaceId?: string | null;
@@ -187,18 +239,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   useEffect(() => {
     if (chrome !== 'pane') return;
     const onCommand = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string; command?: string }>).detail;
+      const detail = (event as CustomEvent<TerminalCommandDetail>).detail;
       if (!detail) return;
-      const addressed = detail.sessionId ? (restartedSessions.get(detail.sessionId) ?? detail.sessionId) : null;
-      const isTargeted =
-        detail.sessionId &&
-        (detail.sessionId === sessionIdRef.current ||
-          addressed === sessionIdRef.current ||
-          detail.sessionId === propSessionId);
-      const isGlobalAgentRefresh =
-        !detail.sessionId && (detail.command === 'restart-agent' || detail.command === 'refresh-all');
-
-      if (!isTargeted && !isGlobalAgentRefresh) return;
+      if (
+        !matchesTerminalCommandScope(detail, {
+          currentSessionId: sessionIdRef.current,
+          propSessionId,
+          engine,
+        })
+      ) {
+        return;
+      }
 
       if (detail.command === 'restart-agent') {
         const currentId = sessionIdRef.current;
@@ -206,17 +257,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           setStatus('connecting');
           setExitCode(null);
           const owner = terminalOwner(workspaceId, paneIdRef.current, agentIdRef.current);
+          const measured = measureTerminalCanvasGrid(surfaceRef.current, getTerminalAppearancePrefs());
           void invokeCommand<{ attachedToExisting?: boolean; scrollbackBase64?: string }>('attach_terminal', {
             sessionId: currentId,
             owner,
             engine,
             workspaceId,
             paneId: paneIdRef.current,
-            columns: 80,
-            rows: 24,
+            columns: measured.cols,
+            rows: measured.rows,
+            mode: 'snapshot_bin',
+            live: true,
           })
             .then(() => {
               setStatus('running');
+              surfaceHandleRef.current?.fit();
             })
             .catch(() => {
               void startSession(engine);

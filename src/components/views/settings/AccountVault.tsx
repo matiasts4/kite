@@ -94,11 +94,6 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
             ? ` (${restartedCount} terminal${restartedCount > 1 ? 'es' : ''} actualizada${restartedCount > 1 ? 's' : ''})`
             : '';
         setNotice(`Sesión cambiada a «${res.profile.label}»${terminalNotice}.`);
-        window.dispatchEvent(
-          new CustomEvent('kite:terminal-command', {
-            detail: { command: 'restart-agent' },
-          })
-        );
         void refresh();
         onChanged?.();
       } else {

@@ -14,7 +14,7 @@ use crate::chat::drivers::{declaration, DriverDeclaration, DriverProbe, SystemDr
 use crate::chat::runtime::bounded_notice;
 use crate::chat::session::{SessionTransport, TransportEvent, TransportSpec};
 use crate::chat::utils::resolve_bin;
-use crate::hidden_exec::{spawn_streaming, HiddenChild};
+use crate::hidden_exec::{spawn_streaming_with_owned_env, HiddenChild};
 
 use super::controls::{
     frame_schema, push_bounded, read_tail, tail_detail, verify_driver_version,
@@ -374,7 +374,8 @@ impl SessionTransport for AntigravitySession {
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let cwd = spec.working_directory.as_deref().map(Path::new);
 
-        let mut child = spawn_streaming(&program, &args_refs, cwd).map_err(|error| {
+        let mut child = spawn_streaming_with_owned_env(&program, &args_refs, cwd, &spec.extra_env)
+            .map_err(|error| {
             format!(
                 "could not start the antigravity session with {}: {error}",
                 program.display()

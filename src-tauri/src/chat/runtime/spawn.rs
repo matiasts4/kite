@@ -21,6 +21,77 @@ use super::turn::{
     pump_persistent_session, starts_new_session,
 };
 
+pub fn compose_thread_dispatch_env(
+    thread_id: &str,
+    workspace_id: Option<&str>,
+    skill_path: &Path,
+    bin_dir: &Path,
+    program_path: Option<&Path>,
+    inherited_path: &str,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("KITE_DISPATCH".to_string(), "1".to_string()),
+        ("KITE_ADDRESS".to_string(), format!("thread:{thread_id}")),
+        ("KITE_THREAD_ID".to_string(), thread_id.to_string()),
+        (
+            "KITE_SKILL_FILE".to_string(),
+            skill_path.display().to_string(),
+        ),
+        (
+            "AGY_CLI_DISABLE_AUTO_UPDATE".to_string(),
+            "true".to_string(),
+        ),
+    ];
+    if let Some(ws) = workspace_id.map(str::trim).filter(|s| !s.is_empty()) {
+        env.push(("KITE_WORKSPACE_ID".to_string(), ws.to_string()));
+    }
+
+    let bin_str = bin_dir.display().to_string();
+    let norm_bin = bin_str.trim_end_matches(['\\', '/']);
+    let mut path_parts: Vec<String> = Vec::new();
+    if !norm_bin.is_empty() {
+        path_parts.push(bin_str.clone());
+    }
+    if let Some(parent) = program_path.and_then(|p| p.parent()) {
+        let p_str = parent.display().to_string();
+        let norm_p = p_str.trim_end_matches(['\\', '/']);
+        if !norm_p.is_empty()
+            && !norm_p.eq_ignore_ascii_case(norm_bin)
+            && !inherited_path.to_lowercase().contains(&norm_p.to_lowercase())
+        {
+            path_parts.push(p_str);
+        }
+    }
+    for segment in std::env::split_paths(inherited_path) {
+        let seg_str = segment.display().to_string();
+        let norm_seg = seg_str.trim_end_matches(['\\', '/']);
+        if !norm_seg.is_empty() && !norm_seg.eq_ignore_ascii_case(norm_bin) {
+            path_parts.push(seg_str);
+        }
+    }
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    env.push(("PATH".to_string(), path_parts.join(sep)));
+    env
+}
+
+pub fn build_thread_dispatch_env(
+    thread_id: &str,
+    workspace_id: Option<&str>,
+    program_path: Option<&Path>,
+) -> Vec<(String, String)> {
+    let skill = crate::dispatch::cli::install_dispatch_skill();
+    let bin = crate::dispatch::cli::install_kite_shim();
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    compose_thread_dispatch_env(
+        thread_id,
+        workspace_id,
+        &skill,
+        &bin,
+        program_path,
+        &inherited,
+    )
+}
+
 pub fn launch_provider(
     thread_id: String,
     run_id: String,
@@ -118,6 +189,11 @@ pub fn launch_provider(
                     plan.endpoint.verified_endpoint(),
                     plan.connection_id.as_deref().unwrap_or("none"),
                 ));
+                let dispatch_env = build_thread_dispatch_env(
+                    &thread_id,
+                    workspace_id.as_deref(),
+                    Some(&plan.program),
+                );
                 let persistent_enabled = persistent_sessions_enabled();
                 let mut fallback_notice_emitted = false;
                 if send_route(&provider, persistent_enabled) == SendRoute::Persistent {
@@ -133,8 +209,10 @@ pub fn launch_provider(
                             mode: SessionMode::OneShot,
                             recipe: recipe.clone(),
                             resume_handle: provider_session_id.clone(),
+                            extra_env: Vec::new(),
                         }
-                        .with_declared_mode(&declared, persistent_enabled);
+                        .with_declared_mode(&declared, persistent_enabled)
+                        .with_extra_env(dispatch_env.clone());
                         let first_session = {
                             let manager = session_manager().lock().unwrap();
                             starts_new_session(manager.status(&thread_id).map(|record| record.state))
@@ -250,7 +328,12 @@ pub fn launch_provider(
                     return;
                 }
                 let args_refs: Vec<&str> = plan.args.iter().map(|s| s.as_str()).collect();
-                match crate::hidden_exec::spawn_streaming(&plan.program, &args_refs, Some(&cwd)) {
+                match crate::hidden_exec::spawn_streaming_with_owned_env(
+                    &plan.program,
+                    &args_refs,
+                    Some(&cwd),
+                    &dispatch_env,
+                ) {
                     Ok(child) => stream_child(thread_id, run_id, assistant_id, child),
                     Err(err) => finish_run(&run_id, false, false, &format!("{provider} failed to start: {err}")),
                 }

@@ -15,7 +15,7 @@ use crate::chat::drivers::{declaration, DriverProbe, SystemDriverProbe};
 use crate::chat::runtime::bounded_notice;
 use crate::chat::session::{SessionTransport, TransportEvent, TransportSpec};
 use crate::chat::utils::resolve_bin;
-use crate::hidden_exec::{spawn_streaming, HiddenChild};
+use crate::hidden_exec::{spawn_streaming_with_owned_env, HiddenChild};
 
 use super::antigravity::ParsedLine;
 use super::controls::{
@@ -628,7 +628,8 @@ impl SessionTransport for GrokSession {
         let (program, args) = self.checked_launch(spec)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let cwd = spec.working_directory.as_deref().map(Path::new);
-        let mut child = spawn_streaming(&program, &args_refs, cwd).map_err(|error| {
+        let mut child = spawn_streaming_with_owned_env(&program, &args_refs, cwd, &spec.extra_env)
+            .map_err(|error| {
             format!(
                 "could not start the grok session with {}: {error}",
                 program.display()

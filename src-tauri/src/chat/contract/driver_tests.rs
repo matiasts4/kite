@@ -160,6 +160,7 @@ fn only_a_served_wire_can_keep_a_session() {
         state: SessionState::Running,
         recipe: None,
         resume_handle: Some("provider-handle-1".to_string()),
+        extra_env: Vec::new(),
         started_at_ms: 0,
         last_active_at_ms: 0,
         next_sequence: 0,

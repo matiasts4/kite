@@ -429,6 +429,7 @@ pub fn start_turn_with_binding(
         started_at_ms: now_ms(),
         routine_id: routine_id.map(|id| id.to_string()),
         delivered_through: 0,
+        file_baselines: std::collections::HashMap::new(),
     };
     push_event(&mut run, json!({ "kind": "status", "status": "running" }));
     push_event(&mut run, json!({ "kind": "upsert", "item": user_item }));
@@ -528,6 +529,17 @@ pub fn read_turn_updates(run_id: &str, after_sequence: u64, wait_ms: u64) -> Val
     }
 }
 
+pub fn is_turn_running(thread_id: &str) -> bool {
+    let Ok(live) = live_turns().lock() else {
+        return false;
+    };
+    live.by_thread
+        .get(thread_id)
+        .and_then(|run_id| live.runs.get(run_id))
+        .map(|run| !run.finished && !run.closing)
+        .unwrap_or(false)
+}
+
 pub fn cancel_turn(thread_id: &str) {
     chat_log(&format!("cancel_turn: requested for thread={}", thread_id));
     let run_id = {
@@ -536,6 +548,9 @@ pub fn cancel_turn(thread_id: &str) {
     };
     let Some(run_id) = run_id else {
         chat_log(&format!("cancel_turn: no live run for thread={}", thread_id));
+        if let Ok(mut manager) = session_manager().lock() {
+            let _ = manager.interrupt(thread_id);
+        }
         return;
     };
     let child = {

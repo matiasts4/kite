@@ -113,6 +113,7 @@ pub struct SessionSpec {
     /// own account and configuration.
     pub recipe: Option<RecipeSnapshot>,
     pub resume_handle: Option<String>,
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl SessionSpec {
@@ -130,6 +131,11 @@ impl SessionSpec {
 
     pub fn with_resume_handle(mut self, resume_handle: Option<String>) -> Self {
         self.resume_handle = resume_handle;
+        self
+    }
+
+    pub fn with_extra_env(mut self, extra_env: Vec<(String, String)>) -> Self {
+        self.extra_env = extra_env;
         self
     }
 }
@@ -164,6 +170,7 @@ pub struct SessionRecord {
     pub recipe: Option<RecipeSnapshot>,
     /// Only ever set from a value the provider returned.
     pub resume_handle: Option<String>,
+    pub extra_env: Vec<(String, String)>,
     pub started_at_ms: i64,
     pub last_active_at_ms: i64,
     pub next_sequence: u64,
@@ -289,6 +296,7 @@ pub struct TransportSpec {
     /// Proof that the recipe was fixed before the spawn, not after it.
     pub recipe_revision: Option<String>,
     pub resume_handle: Option<String>,
+    pub extra_env: Vec<(String, String)>,
 }
 
 /// Raw events a driver normalizes onto [`SessionEvent`].
@@ -511,6 +519,7 @@ impl SessionManager {
             state: initial_state,
             recipe: spec.recipe,
             resume_handle: spec.resume_handle,
+            extra_env: spec.extra_env,
             started_at_ms: now,
             last_active_at_ms: now,
             next_sequence: 0,
@@ -987,6 +996,7 @@ fn spawn_once(session: &mut ManagedSession, resume_handle: Option<String>) -> Re
         mode: session.record.mode,
         recipe_revision: session.record.recipe.as_ref().map(|recipe| recipe.revision.clone()),
         resume_handle,
+        extra_env: session.record.extra_env.clone(),
     };
     if let Err(reason) = session.transport.spawn(&spec) {
         session.record.state = SessionState::Failed;

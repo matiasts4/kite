@@ -269,6 +269,9 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
 
     live_cv().notify_all();
     persist();
+    if !thread_id.is_empty() {
+        crate::dispatch_wire::on_thread_settled(&thread_id);
+    }
     chat_log(&format!("finish_run: completed cleanly for run_id={}", run_id));
 }
 

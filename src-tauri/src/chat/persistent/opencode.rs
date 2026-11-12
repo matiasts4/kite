@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::chat::drivers::{declaration, DriverProbe, SystemDriverProbe};
 use crate::chat::session::{SessionTransport, TransportEvent, TransportSpec};
 use crate::chat::utils::resolve_bin;
-use crate::hidden_exec::{spawn_streaming, HiddenChild};
+use crate::hidden_exec::{spawn_streaming_with_owned_env, HiddenChild};
 
 use super::controls::{
     push_bounded, read_tail, tail_detail, verify_driver_version, OPENCODE_DRIVER,
@@ -205,6 +205,7 @@ pub struct OpenCodeServerSession {
     program: Option<PathBuf>,
     probe: Box<dyn DriverProbe>,
     working_directory: Option<PathBuf>,
+    extra_env: Vec<(String, String)>,
     server: Option<HiddenChild>,
     server_streams: Option<JoinHandle<()>>,
     server_eof: Arc<AtomicBool>,
@@ -248,6 +249,7 @@ impl OpenCodeServerSession {
             program,
             probe,
             working_directory: None,
+            extra_env: Vec::new(),
             server: None,
             server_streams: None,
             server_eof: Arc::new(AtomicBool::new(true)),
@@ -344,7 +346,8 @@ impl SessionTransport for OpenCodeServerSession {
         let working_directory = spec.working_directory.as_deref().map(PathBuf::from);
         let cwd = working_directory.as_deref();
 
-        let mut child = spawn_streaming(&program, &args_refs, cwd).map_err(|error| {
+        let mut child = spawn_streaming_with_owned_env(&program, &args_refs, cwd, &spec.extra_env)
+            .map_err(|error| {
             format!(
                 "could not start the opencode server with {}: {error}",
                 program.display()
@@ -355,6 +358,7 @@ impl SessionTransport for OpenCodeServerSession {
 
         self.program = Some(program);
         self.working_directory = working_directory;
+        self.extra_env = spec.extra_env.clone();
         self.server = Some(child);
         self.port = Some(port);
         self.session_key = spec.resume_handle.clone().or_else(|| Some(spec.session_id.clone()));
@@ -407,8 +411,13 @@ impl SessionTransport for OpenCodeServerSession {
 
         let args = opencode_turn_args_with_model(port, &session_key, prompt, self.model_arg.as_deref());
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let mut child = spawn_streaming(&program, &args_refs, self.working_directory.as_deref())
-            .map_err(|error| {
+        let mut child = spawn_streaming_with_owned_env(
+            &program,
+            &args_refs,
+            self.working_directory.as_deref(),
+            &self.extra_env,
+        )
+        .map_err(|error| {
                 format!(
                     "could not write the turn to the opencode server with {}: {error}",
                     program.display()

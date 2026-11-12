@@ -448,6 +448,7 @@
             mode: SessionMode::OneShot,
             recipe: None,
             resume_handle: None,
+            extra_env: Vec::new(),
         };
         manager.attach(spec, Box::new(transport.clone())).unwrap();
         manager.start("thread-1").unwrap();

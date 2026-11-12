@@ -82,6 +82,7 @@ impl Port for LivePort {
                 let _ = crate::terminal::terminate_terminal_sync(json!({ "sessionId": id }));
             }
             Family::Thread => {
+                crate::chat::cancel_turn(id);
                 if let Ok(mut manager) = crate::chat::session_manager().lock() {
                     let _ = manager.interrupt(id);
                 }
@@ -301,26 +302,107 @@ pub fn publish_thread(svc: &mut Service<LivePort>, thread_id: &str) {
     let _ = svc.publish_reported(&address, state, kind, now_ms(), now_ms());
 }
 
+pub fn on_thread_settled(thread_id: &str) {
+    if thread_id.trim().is_empty() {
+        return;
+    }
+    // `LivePort::stop` invokes `cancel_turn` -> `finish_run` while holding
+    // `service()`, so non-blocking `try_lock` avoids self-deadlock and falls
+    // back to a short worker thread when another caller holds the mutex.
+    if let Ok(mut svc) = service().try_lock() {
+        publish_thread(&mut svc, thread_id);
+    } else {
+        let tid = thread_id.to_string();
+        std::thread::spawn(move || {
+            if let Ok(mut svc) = service().lock() {
+                publish_thread(&mut svc, &tid);
+            }
+        });
+    }
+}
+
 pub fn thread_presence(thread_id: &str) -> (PresenceState, Option<BlockKind>) {
-    let Ok(manager) = crate::chat::session_manager().lock() else {
-        return (PresenceState::Idle, None);
-    };
-    let Some(record) = manager.status(thread_id) else {
-        return (PresenceState::Idle, None);
-    };
-    if !record.pending_approvals.is_empty() || record.state == crate::chat::SessionState::Waiting {
+    let persisted = crate::persist::threads()
+        .lock()
+        .ok()
+        .and_then(|list| {
+            list.iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+                .map(|t| {
+                    let has_approval = t
+                        .get("pendingApproval")
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                    let has_input = t
+                        .get("pendingUserInput")
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                    let status = t
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let has_items = t
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .map(|arr| !arr.is_empty())
+                        .unwrap_or(false);
+                    (has_approval, has_input, status, has_items)
+                })
+        });
+
+    let live_running = crate::chat::is_turn_running(thread_id);
+    let session_info = crate::chat::session_manager().lock().ok().and_then(|manager| {
+        manager
+            .status(thread_id)
+            .map(|record| (record.state, !record.pending_approvals.is_empty()))
+    });
+
+    if persisted.as_ref().map(|p| p.0).unwrap_or(false)
+        || session_info
+            .map(|(state, pending)| pending || state == crate::chat::SessionState::Waiting)
+            .unwrap_or(false)
+        || persisted.as_ref().map(|p| p.2.as_str()) == Some("waiting")
+    {
         return (PresenceState::Blocked, Some(BlockKind::Permission));
     }
-    let state = match record.state {
-        crate::chat::SessionState::Running
-        | crate::chat::SessionState::Starting
-        | crate::chat::SessionState::Resurrecting => PresenceState::Working,
-        crate::chat::SessionState::Completed => PresenceState::Done,
-        crate::chat::SessionState::Failed => PresenceState::Error,
-        crate::chat::SessionState::Closed => PresenceState::Gone,
-        _ => PresenceState::Idle,
-    };
-    (state, None)
+
+    if persisted.as_ref().map(|p| p.1).unwrap_or(false) {
+        return (PresenceState::Blocked, Some(BlockKind::Question));
+    }
+
+    if live_running
+        || matches!(
+            session_info.map(|(state, _)| state),
+            Some(
+                crate::chat::SessionState::Running
+                    | crate::chat::SessionState::Starting
+                    | crate::chat::SessionState::Resurrecting
+            )
+        )
+        || persisted.as_ref().map(|p| p.2.as_str()) == Some("running")
+    {
+        return (PresenceState::Working, None);
+    }
+
+    if session_info.map(|(state, _)| state) == Some(crate::chat::SessionState::Closed) {
+        return (PresenceState::Gone, None);
+    }
+
+    if session_info.map(|(state, _)| state) == Some(crate::chat::SessionState::Failed)
+        || persisted.as_ref().map(|p| p.2.as_str()) == Some("error")
+    {
+        return (PresenceState::Error, None);
+    }
+
+    if session_info.map(|(state, _)| state) == Some(crate::chat::SessionState::Completed)
+        || (persisted.as_ref().map(|p| p.2.as_str()) == Some("idle")
+            && persisted.as_ref().map(|p| p.3).unwrap_or(false))
+    {
+        return (PresenceState::Done, None);
+    }
+
+    (PresenceState::Idle, None)
 }
 
 pub fn live_thread_for_profile(profile: &str) -> Option<String> {

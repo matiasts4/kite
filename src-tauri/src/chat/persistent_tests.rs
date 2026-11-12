@@ -26,6 +26,7 @@
             mode: SessionMode::Persistent,
             recipe_revision: Some("r1".to_string()),
             resume_handle: None,
+            extra_env: Vec::new(),
         }
     }
 
@@ -357,6 +358,7 @@
             mode: SessionMode::Persistent,
             recipe: None,
             resume_handle: None,
+            extra_env: Vec::new(),
         }
     }
 

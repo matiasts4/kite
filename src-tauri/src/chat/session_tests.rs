@@ -21,6 +21,7 @@ fn spec(thread_id: &str, mode: SessionMode, recipe: Option<RecipeSnapshot>) -> S
         mode,
         recipe,
         resume_handle: None,
+        extra_env: Vec::new(),
     }
 }
 

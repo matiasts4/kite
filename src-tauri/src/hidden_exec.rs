@@ -149,14 +149,39 @@ pub fn spawn_streaming(
     args: &[&str],
     cwd: Option<&Path>,
 ) -> std::io::Result<HiddenChild> {
+    spawn_streaming_with_env(program, args, cwd, &[])
+}
+
+/// Spawns `program` with `args` attached to a hidden console and child-scoped
+/// environment overrides without mutating the parent process environment.
+pub fn spawn_streaming_with_env(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+) -> std::io::Result<HiddenChild> {
     #[cfg(windows)]
     {
-        windows_impl::spawn_streaming(program, args, cwd)
+        windows_impl::spawn_streaming_with_env(program, args, cwd, extra_env)
     }
     #[cfg(not(windows))]
     {
-        portable_impl::spawn_streaming(program, args, cwd)
+        portable_impl::spawn_streaming_with_env(program, args, cwd, extra_env)
     }
+}
+
+/// Owned-pair wrapper around [`spawn_streaming_with_env`].
+pub fn spawn_streaming_with_owned_env(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    extra_env: &[(String, String)],
+) -> std::io::Result<HiddenChild> {
+    let borrowed: Vec<(&str, &str)> = extra_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    spawn_streaming_with_env(program, args, cwd, &borrowed)
 }
 
 #[cfg(windows)]
@@ -176,6 +201,7 @@ mod windows_impl {
     const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
     const SW_HIDE: u16 = 0;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
     const WAIT_TIMEOUT: u32 = 0x0000_0102;
     pub(super) const WAIT_INFINITE: u32 = 0xFFFF_FFFF;
     const GENERIC_READ: u32 = 0x8000_0000;
@@ -506,12 +532,66 @@ mod windows_impl {
         }
     }
 
-    pub(super) fn spawn_streaming(
+    pub(super) fn build_windows_environment_block(
+        base: Vec<(String, String)>,
+        extra_env: &[(&str, &str)],
+    ) -> Vec<u16> {
+        let mut merged: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+        for (key, value) in base {
+            let clean_key: String = key.chars().filter(|&ch| ch != '\0').collect();
+            if clean_key.is_empty() {
+                continue;
+            }
+            let clean_val: String = value.chars().filter(|&ch| ch != '\0').collect();
+            merged.insert(clean_key.to_lowercase(), (clean_key, clean_val));
+        }
+        merged
+            .entry("agy_cli_disable_auto_update".to_string())
+            .or_insert_with(|| {
+                (
+                    "AGY_CLI_DISABLE_AUTO_UPDATE".to_string(),
+                    "true".to_string(),
+                )
+            });
+        for &(key, value) in extra_env {
+            let clean_key: String = key.chars().filter(|&ch| ch != '\0').collect();
+            if clean_key.trim().is_empty() {
+                continue;
+            }
+            let clean_val: String = value.chars().filter(|&ch| ch != '\0').collect();
+            merged.insert(clean_key.to_lowercase(), (clean_key, clean_val));
+        }
+
+        let mut block = Vec::new();
+        for (_, (key, value)) in merged {
+            block.extend(key.encode_utf16());
+            block.push(b'=' as u16);
+            block.extend(value.encode_utf16());
+            block.push(0);
+        }
+        if block.is_empty() {
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
+    pub(super) fn spawn_streaming_with_env(
         program: &Path,
         args: &[&str],
         cwd: Option<&Path>,
+        extra_env: &[(&str, &str)],
     ) -> io::Result<super::HiddenChild> {
-        std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+        let base_env: Vec<(String, String)> = std::env::vars_os()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let mut env_block = build_windows_environment_block(base_env, extra_env);
         unsafe {
             let mut attributes = SecurityAttributes {
                 n_length: std::mem::size_of::<SecurityAttributes>() as u32,
@@ -569,8 +649,8 @@ mod windows_impl {
                 null_mut(),
                 null_mut(),
                 1,
-                CREATE_NO_WINDOW,
-                null_mut(),
+                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                env_block.as_mut_ptr() as *mut c_void,
                 cwd_ptr,
                 &mut startup,
                 &mut process_info,
@@ -649,15 +729,22 @@ mod portable_impl {
         })
     }
 
-    pub(super) fn spawn_streaming(
+    pub(super) fn spawn_streaming_with_env(
         program: &Path,
         args: &[&str],
         cwd: Option<&Path>,
+        extra_env: &[(&str, &str)],
     ) -> io::Result<super::HiddenChild> {
         let mut cmd = Command::new(program);
         cmd.args(args);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
+        }
+        cmd.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+        for &(key, value) in extra_env {
+            if !key.trim().is_empty() {
+                cmd.env(key, value);
+            }
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -737,5 +824,66 @@ mod tests {
         let code = child.wait().unwrap();
         assert_eq!(code, 0);
         assert!(text.contains("streaming-test-ok"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_environment_block_overrides_case_insensitively_and_sorts() {
+        let base = vec![
+            ("Path".to_string(), r"C:\Windows\System32".to_string()),
+            ("Z_KEEP".to_string(), "1".to_string()),
+        ];
+        let block = super::windows_impl::build_windows_environment_block(
+            base,
+            &[
+                ("PATH", r"C:\Kite\bin;C:\Windows\System32"),
+                ("KITE_DISPATCH", "1"),
+            ],
+        );
+        // Must end with double null terminator.
+        assert!(block.ends_with(&[0, 0]));
+        let decoded = String::from_utf16_lossy(&block);
+        let entries: Vec<&str> = decoded
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                "AGY_CLI_DISABLE_AUTO_UPDATE=true",
+                "KITE_DISPATCH=1",
+                r"PATH=C:\Kite\bin;C:\Windows\System32",
+                "Z_KEEP=1",
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_streaming_with_env_injects_vars_without_mutating_parent_env() {
+        use std::io::Read;
+        let sentinel_key = "KITE_TEST_CHILD_ONLY_SENTINEL";
+        assert!(
+            std::env::var_os(sentinel_key).is_none(),
+            "test expects sentinel var to be absent in parent"
+        );
+        let mut child = spawn_streaming_with_env(
+            Path::new("cmd.exe"),
+            &["/c", "echo %KITE_TEST_CHILD_ONLY_SENTINEL%"],
+            None,
+            &[(sentinel_key, "child-scoped-value-42")],
+        )
+        .expect("streaming child with env should start");
+        let mut text = String::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_string(&mut text).unwrap();
+        }
+        let code = child.wait().unwrap();
+        assert_eq!(code, 0);
+        assert!(text.contains("child-scoped-value-42"), "got stdout: {text:?}");
+        assert!(
+            std::env::var_os(sentinel_key).is_none(),
+            "child extra_env must never mutate parent process environment"
+        );
     }
 }

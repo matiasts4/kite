@@ -179,7 +179,7 @@ Checks: unit test in `src-tauri/src/dispatch/cli.rs` asserting that the generate
 
 ## Tasks
 
-- [ ] **T1 — Inject `KITE_DISPATCH=1`, `KITE_ADDRESS=thread:<id>`, and CLI `PATH` into Thread spawns and unify one-shot/persistent thread presence in `protocol.rs`.** `S1`. Route: inline or bounded worker.
+- [x] **T1 — Inject `KITE_DISPATCH=1`, `KITE_ADDRESS=thread:<id>`, and CLI `PATH` into Thread spawns and unify one-shot/persistent thread presence in `protocol.rs`.** `S1`. Route: inline (`src-tauri/src/hidden_exec.rs`, `src-tauri/src/chat/session.rs`, `src-tauri/src/chat/runtime/`, `src-tauri/src/chat/persistent/`, `src-tauri/src/dispatch_wire/protocol.rs`).
   Update `src-tauri/src/chat/runtime/spawn.rs`, `src-tauri/src/chat/persistent/`, and `src-tauri/src/dispatch_wire/protocol.rs` (`publish_thread`, `kill`, `interrupt`) so every Thread provider can invoke `kite dispatch` and reports live `Working` / `Blocked` / `Done` states.
 - [ ] **T2 — Implement cross-provider `kite dispatch run --via thread` (`--provider`, `--model`, `--effort`, `--role`, `--workspace`, `--wait`) in `cli.rs`, `ops.rs`, and `protocol.rs`.** `S2`. Route: inline or bounded worker.
   Wire `Port::start_thread` to create child `ChatThread`s, provision git worktrees for `share`/`branch` modes, link `SubagentRun` items into the parent turn, and stream live updates to `SubagentActivityCard` and `RightDock`.

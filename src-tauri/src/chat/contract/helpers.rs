@@ -93,6 +93,7 @@ pub fn session_spec(
         mode,
         recipe,
         resume_handle: None,
+        extra_env: Vec::new(),
     }
 }
 
@@ -104,6 +105,7 @@ pub fn transport_spec(driver: &str) -> TransportSpec {
         mode: SessionMode::Persistent,
         recipe_revision: Some("r1".to_string()),
         resume_handle: None,
+        extra_env: Vec::new(),
     }
 }
 

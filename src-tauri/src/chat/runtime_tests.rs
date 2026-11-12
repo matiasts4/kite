@@ -76,6 +76,7 @@
                 started_at_ms: now_ms(),
                 routine_id: None,
                 delivered_through: 0,
+                file_baselines: std::collections::HashMap::new(),
             });
             live.by_thread.insert(probe.thread_id.to_string(), probe.run_id.to_string());
         }
@@ -462,6 +463,7 @@
             mode: SessionMode::Persistent,
             recipe: None,
             resume_handle: None,
+            extra_env: Vec::new(),
         }
     }
 
@@ -864,4 +866,51 @@
 
         let mut items = threads().lock().unwrap();
         items.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(thread_id));
+    }
+
+    #[test]
+    fn compose_thread_dispatch_env_injects_dispatch_address_workspace_skill_and_bin_path() {
+        let with_ws = compose_thread_dispatch_env(
+            "thread-abc-123",
+            Some("ws-xyz"),
+            std::path::Path::new("C:/Kite/skills/kite-dispatch/SKILL.md"),
+            std::path::Path::new("C:/Kite/bin"),
+            Some(std::path::Path::new("C:/Tools/agy/agy.exe")),
+            "C:\\Windows\\System32",
+        );
+        let map: std::collections::HashMap<String, String> = with_ws.into_iter().collect();
+        assert_eq!(map.get("KITE_DISPATCH").map(String::as_str), Some("1"));
+        assert_eq!(
+            map.get("KITE_ADDRESS").map(String::as_str),
+            Some("thread:thread-abc-123")
+        );
+        assert_eq!(
+            map.get("KITE_THREAD_ID").map(String::as_str),
+            Some("thread-abc-123")
+        );
+        assert_eq!(map.get("KITE_WORKSPACE_ID").map(String::as_str), Some("ws-xyz"));
+        assert!(map
+            .get("KITE_SKILL_FILE")
+            .map(|s| s.ends_with("SKILL.md"))
+            .unwrap_or(false));
+        assert_eq!(
+            map.get("AGY_CLI_DISABLE_AUTO_UPDATE").map(String::as_str),
+            Some("true")
+        );
+        let path_val = map.get("PATH").expect("PATH must be present");
+        let first_segment = std::env::split_paths(path_val).next().expect("first PATH entry");
+        assert_eq!(first_segment, std::path::PathBuf::from("C:/Kite/bin"));
+
+        let without_ws = compose_thread_dispatch_env(
+            "thread-abc-123",
+            None,
+            std::path::Path::new("C:/Kite/skills/kite-dispatch/SKILL.md"),
+            std::path::Path::new("C:/Kite/bin"),
+            None,
+            "",
+        );
+        assert!(
+            without_ws.iter().all(|(k, _)| k != "KITE_WORKSPACE_ID"),
+            "KITE_WORKSPACE_ID must be omitted when unbound"
+        );
     }

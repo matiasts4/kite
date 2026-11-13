@@ -1,9 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { openSettingsTab } from '../../../lib/settingsNav';
 import {
   listDetectedCliAccounts,
   type DetectedCliAccount,
 } from '../../../lib/ipc';
+import {
+  canonicalVaultProvider,
+  resolveLiveAccountEmail,
+} from '../../../lib/accounts/accountVaultStore';
+import { useAccountVault } from '../../../lib/accounts/useAccountVault';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { AccountSwitcherModal } from '../../quota/AccountSwitcherModal';
 import { MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
@@ -35,13 +40,10 @@ export const AccountTab: React.FC<AccountTabProps> = ({
   const [detectedAccounts, setDetectedAccounts] = useState<DetectedCliAccount[]>([]);
   const [loadingDetected, setLoadingDetected] = useState(false);
   const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
+  const antigravityVault = useAccountVault('antigravity', { autoLoad: false });
   const avatarLetter = (accountName || 'K').trim().charAt(0).toUpperCase();
 
-  useEffect(() => {
-    void loadDetectedAccounts();
-  }, []);
-
-  const loadDetectedAccounts = async () => {
+  const loadDetectedAccounts = useCallback(async () => {
     setLoadingDetected(true);
     try {
       const accounts = await listDetectedCliAccounts();
@@ -51,7 +53,19 @@ export const AccountTab: React.FC<AccountTabProps> = ({
     } finally {
       setLoadingDetected(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void loadDetectedAccounts();
+  }, [loadDetectedAccounts]);
+
+  useEffect(() => {
+    const onAccountsChanged = () => {
+      void loadDetectedAccounts();
+    };
+    window.addEventListener('kite:accounts-changed', onAccountsChanged);
+    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+  }, [loadDetectedAccounts]);
 
   return (
     <>
@@ -120,6 +134,11 @@ export const AccountTab: React.FC<AccountTabProps> = ({
           {detectedAccounts.map((acc) => {
             const isAuth = acc.authState === 'authenticated';
             const isInstalled = acc.authState !== 'not_installed';
+            const liveVaultLabel =
+              canonicalVaultProvider(acc.provider) === 'antigravity' && antigravityVault.hasLoadedOnce
+                ? resolveLiveAccountEmail(antigravityVault)
+                : null;
+            const resolvedAccountLabel = liveVaultLabel || acc.accountLabel;
 
             return (
               <div
@@ -167,8 +186,8 @@ export const AccountTab: React.FC<AccountTabProps> = ({
                     </div>
 
                     <p style={{ margin: '3px 0 0', fontSize: '12px', color: isAuth ? 'var(--text-primary)' : 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {acc.accountLabel ? (
-                        <strong>{acc.accountLabel}</strong>
+                      {resolvedAccountLabel ? (
+                        <strong>{resolvedAccountLabel}</strong>
                       ) : (
                         <span>Sin sesión activa configurada en la CLI</span>
                       )}

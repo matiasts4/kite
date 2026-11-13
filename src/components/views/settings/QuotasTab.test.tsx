@@ -59,6 +59,12 @@ vi.mock('../../../lib/ipc', () => ({
     },
   }),
   listSavedAccounts: vi.fn().mockResolvedValue([]),
+  listSavedAccountsFull: vi.fn().mockResolvedValue({
+    profiles: [],
+    unregisteredLiveSession: null,
+    authTelemetry: null,
+  }),
+  invokeCommand: vi.fn().mockResolvedValue(undefined),
   listDetectedCliAccounts: vi.fn().mockResolvedValue([
     {
       provider: 'antigravity',

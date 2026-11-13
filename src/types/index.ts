@@ -334,6 +334,22 @@ export interface SavedAccountProfile {
   primaryRemainingPercent: number | null;
   primaryResetAt: string | null;
   timeUntilResetMs: number | null;
+  credentialStatus?: 'valid' | 'expired_no_refresh' | 'missing_tokens' | 'corrupt' | 'missing_file' | string | null;
+  hasRefreshToken?: boolean;
+}
+
+export interface AntigravityAuthTelemetry {
+  authMode: 'oauth' | 'api_key_override' | 'none' | string;
+  authModeLabel?: string | null;
+  cliEmail?: string | null;
+  credEmail?: string | null;
+  ideEmail?: string | null;
+  splitBrainWarning?: boolean | string | null;
+  splitBrainMessage?: string | null;
+  hasRefreshToken?: boolean;
+  expiresAtMs?: number | null;
+  hasExplicitApiKeyOverride?: boolean;
+  ambientGeminiApiKeyDetected?: boolean;
 }
 
 export interface ContinuationSuggestion {

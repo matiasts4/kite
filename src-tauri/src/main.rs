@@ -678,6 +678,7 @@ fn main() {
             cancel_account_login_flow,
             probe_live_account_login_status,
             delete_account_profile,
+            rename_account_profile,
             get_active_account_profile,
             recommend_continuation_targets,
             get_handoff_preview,

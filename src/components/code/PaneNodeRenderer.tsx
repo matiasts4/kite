@@ -49,6 +49,7 @@ export interface PaneNodeRendererProps {
   onResumePrevious?: (leafId: string, engine: string, title?: string) => void;
   onRegisterTerminalSlot?: (leafId: string, el: HTMLDivElement | null) => void;
   onDragGripPointerDown?: (leafId: string, e: React.PointerEvent) => void;
+  onOpenAccountSwitcher?: (provider: string) => void;
 }
 
 export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
@@ -87,6 +88,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
   onResumePrevious,
   onRegisterTerminalSlot,
   onDragGripPointerDown,
+  onOpenAccountSwitcher,
 }) => {
   const registerSlotRef = React.useRef(onRegisterTerminalSlot);
   registerSlotRef.current = onRegisterTerminalSlot;
@@ -164,6 +166,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
           onNewSession={onNewSession}
           onPointerDownHeader={() => onFocusLeaf(node.id)}
           onDragGripPointerDown={onDragGripPointerDown ? (e) => onDragGripPointerDown(node.id, e) : undefined}
+          onOpenAccountSwitcher={onOpenAccountSwitcher}
           onTerminalCommand={(cmd) => {
             if (occupant.kind === 'terminal') {
               window.dispatchEvent(
@@ -289,6 +292,7 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
               onResumePrevious={onResumePrevious}
               onRegisterTerminalSlot={onRegisterTerminalSlot}
               onDragGripPointerDown={onDragGripPointerDown}
+              onOpenAccountSwitcher={onOpenAccountSwitcher}
             />
           </div>
           {idx < node.children.length - 1 && (

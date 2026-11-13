@@ -23,7 +23,9 @@ import {
   subscriptionQuotaManager,
 } from '../../../lib/quota/quotaManager';
 import { diagnoseProvider } from '../../../lib/quota/providerState';
-import { PROVIDER_CONFIGS_ES } from '../../quota/QuotaSettingsModal';
+import { PROVIDER_CONFIGS_ES } from '../../../config/quotaProviderMetadata';
+import { useAccountVault } from '../../../lib/accounts/useAccountVault';
+import { resolveLiveAccountEmail } from '../../../lib/accounts/accountVaultStore';
 import {
   clearOpenCodeApiKey,
   saveOpenCodeApiKey,
@@ -122,6 +124,15 @@ export const QuotasTab: React.FC = () => {
     }
   }, []);
 
+  const refreshCliAccounts = useCallback(async () => {
+    try {
+      const accounts = await listDetectedCliAccounts();
+      setCliAccounts(accounts);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   useEffect(() => {
     void refreshCredentials();
   }, [refreshCredentials]);
@@ -140,6 +151,15 @@ export const QuotasTab: React.FC = () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const onAccountsChanged = () => {
+      void refreshCliAccounts();
+      void refreshCredentials();
+    };
+    window.addEventListener('kite:accounts-changed', onAccountsChanged);
+    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+  }, [refreshCliAccounts, refreshCredentials]);
 
   useEffect(() => {
     const handleTerminalUpdate = () => {
@@ -312,6 +332,10 @@ export const QuotasTab: React.FC = () => {
   };
 
   const activeProvider = selectedProviderId ? selectedProviderId : null;
+  const selectedVault = useAccountVault(activeProvider || 'antigravity', { autoLoad: false });
+  const vaultLiveEmail = selectedVault.hasLoadedOnce
+    ? resolveLiveAccountEmail(selectedVault)
+    : null;
   const activeQuota = activeProvider ? quotas[activeProvider] : undefined;
   const activeSession = activeProvider ? detectedSessions[activeProvider] : undefined;
   const activeDiag = diagnoseProvider(activeQuota);
@@ -603,7 +627,9 @@ export const QuotasTab: React.FC = () => {
                     <div className="qt-spec-card">
                       <span className="qt-spec-card__label">Cuenta detectada</span>
                       <span className="qt-spec-card__value">
-                        {activeSession?.email
+                        {vaultLiveEmail
+                          ? vaultLiveEmail
+                          : activeSession?.email
                           ? activeSession.email
                           : activeSession?.accountLabel
                           ? activeSession.accountLabel

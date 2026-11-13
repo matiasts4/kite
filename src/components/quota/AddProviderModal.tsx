@@ -10,7 +10,7 @@ import {
 } from '../../lib/quota/types';
 import { diagnoseProvider } from '../../lib/quota/providerState';
 import { ENGINE_METADATA } from '../views/agents/engineMetadata';
-import { PROVIDER_CONFIGS_ES } from './QuotaSettingsModal';
+import { PROVIDER_CONFIGS_ES } from '../../config/quotaProviderMetadata';
 import { type ProviderDetectedSession } from '../../lib/quota/sessionDetection';
 import { getProviderConnectionMeta } from '../../lib/quota/connectionMethods';
 import { XIcon } from '../views/settings/icons';

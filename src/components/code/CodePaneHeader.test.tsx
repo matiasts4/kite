@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CodePaneHeader } from './CodePaneHeader';
-import type { PaneOccupant } from './types';
+import type { PaneOccupant, PaneOccupantTerminal } from './types';
 
 describe('CodePaneHeader - Behavioral Tests', () => {
   const terminalOccupant: PaneOccupant = {
@@ -519,5 +519,141 @@ describe('CodePaneHeader - Behavioral Tests', () => {
     );
 
     expect(screen.queryByTestId('pane-drag-grip')).toBeNull();
+  });
+
+  it('renders Antigravity account attribution pill on antigravity/agy terminal panes and hides it on others', async () => {
+    const user = userEvent.setup();
+    const onOpenSwitcher = vi.fn();
+    const eventSpy = vi.fn();
+    window.addEventListener('kite:open-account-switcher', eventSpy);
+
+    const antigravityOccupant: PaneOccupantTerminal = {
+      kind: 'terminal',
+      sessionId: 'sess-agy',
+      label: 'Orion',
+      engine: 'antigravity',
+      runtime: { engine: 'antigravity', displayName: 'Antigravity', agentName: 'Orion' },
+    };
+    const codexOccupant: PaneOccupantTerminal = {
+      kind: 'terminal',
+      sessionId: 'sess-codex',
+      label: 'Atlas',
+      engine: 'codex',
+      runtime: { engine: 'codex', displayName: 'Codex', agentName: 'Atlas' },
+    };
+
+    const { rerender } = render(
+      <CodePaneHeader
+        nodeId="leaf-agy"
+        occupant={antigravityOccupant}
+        displayName="Orion"
+        workspaceName="Core App"
+        canSwap={false}
+        isFullscreen={false}
+        isMenuOpen={false}
+        paneMenuKind={null}
+        renamingLeafId={null}
+        renameValue=""
+        availableEngines={[]}
+        onOpenMenu={vi.fn()}
+        onCloseMenu={vi.fn()}
+        onToggleFullscreen={vi.fn()}
+        onClosePane={vi.fn()}
+        onSplit={vi.fn()}
+        onSwap={vi.fn()}
+        onExtractToTab={vi.fn()}
+        onEqualize={vi.fn()}
+        onStartRename={vi.fn()}
+        onChangeRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        onLaunchTerminal={vi.fn()}
+        onLaunchAgent={vi.fn()}
+        onNewTab={vi.fn()}
+        onNewSession={vi.fn()}
+        onPointerDownHeader={vi.fn()}
+        onTerminalCommand={vi.fn()}
+        onOpenAccountSwitcher={onOpenSwitcher}
+      />
+    );
+
+    const pill = screen.getByTestId('pane-account-pill');
+    expect(pill).toBeInTheDocument();
+    await user.click(pill);
+    expect(onOpenSwitcher).toHaveBeenCalledWith('antigravity');
+
+    // Without callback, falls back to window event
+    rerender(
+      <CodePaneHeader
+        nodeId="leaf-agy"
+        occupant={{ ...antigravityOccupant, engine: 'agy' }}
+        displayName="Orion"
+        workspaceName="Core App"
+        canSwap={false}
+        isFullscreen={false}
+        isMenuOpen={false}
+        paneMenuKind={null}
+        renamingLeafId={null}
+        renameValue=""
+        availableEngines={[]}
+        onOpenMenu={vi.fn()}
+        onCloseMenu={vi.fn()}
+        onToggleFullscreen={vi.fn()}
+        onClosePane={vi.fn()}
+        onSplit={vi.fn()}
+        onSwap={vi.fn()}
+        onExtractToTab={vi.fn()}
+        onEqualize={vi.fn()}
+        onStartRename={vi.fn()}
+        onChangeRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        onLaunchTerminal={vi.fn()}
+        onLaunchAgent={vi.fn()}
+        onNewTab={vi.fn()}
+        onNewSession={vi.fn()}
+        onPointerDownHeader={vi.fn()}
+        onTerminalCommand={vi.fn()}
+      />
+    );
+    await user.click(screen.getByTestId('pane-account-pill'));
+    expect(eventSpy).toHaveBeenCalledTimes(1);
+
+    // Non-antigravity terminal hides the pill
+    rerender(
+      <CodePaneHeader
+        nodeId="leaf-codex"
+        occupant={codexOccupant}
+        displayName="Atlas"
+        workspaceName="Core App"
+        canSwap={false}
+        isFullscreen={false}
+        isMenuOpen={false}
+        paneMenuKind={null}
+        renamingLeafId={null}
+        renameValue=""
+        availableEngines={[]}
+        onOpenMenu={vi.fn()}
+        onCloseMenu={vi.fn()}
+        onToggleFullscreen={vi.fn()}
+        onClosePane={vi.fn()}
+        onSplit={vi.fn()}
+        onSwap={vi.fn()}
+        onExtractToTab={vi.fn()}
+        onEqualize={vi.fn()}
+        onStartRename={vi.fn()}
+        onChangeRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        onLaunchTerminal={vi.fn()}
+        onLaunchAgent={vi.fn()}
+        onNewTab={vi.fn()}
+        onNewSession={vi.fn()}
+        onPointerDownHeader={vi.fn()}
+        onTerminalCommand={vi.fn()}
+      />
+    );
+    expect(screen.queryByTestId('pane-account-pill')).toBeNull();
+    window.removeEventListener('kite:open-account-switcher', eventSpy);
   });
 });

@@ -20,26 +20,26 @@ use super::storage::{
     LiveAntigravityCredStore, LiveIdentityProbe,
 };
 
-pub(crate) fn build_antigravity_auth_telemetry(live_ident: Option<&LiveIdentityProbe>) -> Value {
-    let cred_ident = crate::quota::read_antigravity_credential();
-    let ide_ident = crate::quota::read_antigravity_ide_identity();
-    let explicit_api_key = crate::credentials::resolve_explicit_antigravity_api_key().is_some();
-    let ambient_gemini_env = std::env::var("GEMINI_API_KEY")
-        .ok()
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
+pub(crate) fn build_antigravity_auth_telemetry_from_parts(
+    cred_details: Option<&crate::quota::AntigravityCredentialIdentity>,
+    ide_email: Option<&str>,
+    explicit_api_key: bool,
+    ambient_gemini_env: bool,
+) -> Value {
+    let cred_email = cred_details
+        .map(|d| d.email.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let (auth_mode, auth_mode_label) = if explicit_api_key {
         ("api_key_override", "API Key (Anulación explícita)")
-    } else if cred_ident.is_some() || live_ident.is_some() {
+    } else if cred_email.is_some() {
         ("oauth", "OAuth (Google)")
     } else {
         ("none", "Sin sesión")
     };
 
-    let cred_email = cred_ident.as_ref().map(|(e, _)| e.clone());
-    let ide_email = ide_ident.as_ref().map(|(e, _)| e.clone());
-    let split_brain_warning = match (&cred_email, &ide_email) {
+    let ide_email_opt = ide_email.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let split_brain_message = match (&cred_email, &ide_email_opt) {
         (Some(c), Some(i)) if !c.eq_ignore_ascii_case(i) => Some(format!(
             "Credencial del sistema ({c}) no coincide con el estado del IDE ({i}). Cambia de cuenta o vuelve a guardar para sincronizar ambos."
         )),
@@ -49,15 +49,74 @@ pub(crate) fn build_antigravity_auth_telemetry(live_ident: Option<&LiveIdentityP
         _ => None,
     };
 
+    let has_refresh_token = cred_details.map(|d| d.has_refresh_token).unwrap_or(false);
+    let expires_at_ms = cred_details
+        .and_then(|d| d.expiry.as_deref())
+        .and_then(|raw| {
+            raw.trim()
+                .parse::<i64>()
+                .ok()
+                .or_else(|| crate::quota::parse_rfc3339_ms(raw))
+        });
+
     json!({
         "authMode": auth_mode,
         "authModeLabel": auth_mode_label,
+        "cliEmail": cred_email,
         "credEmail": cred_email,
-        "ideEmail": ide_email,
-        "splitBrainWarning": split_brain_warning,
+        "ideEmail": ide_email_opt,
+        "splitBrainWarning": split_brain_message.is_some(),
+        "splitBrainMessage": split_brain_message,
+        "hasRefreshToken": has_refresh_token,
+        "expiresAtMs": expires_at_ms,
         "hasExplicitApiKeyOverride": explicit_api_key,
         "ambientGeminiApiKeyDetected": ambient_gemini_env
     })
+}
+
+pub(crate) fn build_antigravity_auth_telemetry(live_ident: Option<&LiveIdentityProbe>) -> Value {
+    let raw_cred = crate::quota::read_antigravity_raw_credential();
+    let parsed_cred = raw_cred
+        .as_deref()
+        .and_then(crate::quota::parse_antigravity_credential_blob);
+    let fallback_cred_ident = parsed_cred.or_else(|| {
+        crate::quota::read_antigravity_credential().map(|(email, name)| {
+            crate::quota::AntigravityCredentialIdentity {
+                email,
+                name,
+                auth_method: None,
+                has_access_token: false,
+                has_refresh_token: false,
+                expiry: None,
+                source: "gemini:antigravity".to_string(),
+            }
+        })
+    }).or_else(|| {
+        live_ident
+            .filter(|i| i.source != "Antigravity IDE")
+            .map(|i| crate::quota::AntigravityCredentialIdentity {
+                email: i.email.clone(),
+                name: i.name.clone(),
+                auth_method: None,
+                has_access_token: false,
+                has_refresh_token: false,
+                expiry: None,
+                source: i.source.clone(),
+            })
+    });
+    let ide_ident = crate::quota::read_antigravity_ide_identity();
+    let explicit_api_key = crate::credentials::resolve_explicit_antigravity_api_key().is_some();
+    let ambient_gemini_env = std::env::var("GEMINI_API_KEY")
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    build_antigravity_auth_telemetry_from_parts(
+        fallback_cred_ident.as_ref(),
+        ide_ident.as_ref().map(|(e, _)| e.as_str()),
+        explicit_api_key,
+        ambient_gemini_env,
+    )
 }
 
 pub(crate) fn reconcile_live_identity_with_registry(
@@ -700,12 +759,20 @@ pub fn switch_account_profile_direct_with_options(
         account_id, activated_profile.label, provider, quiesced_terminals.len()
     ));
 
+    let auth_telemetry = if canon == "agy" {
+        let post_ident = probe_live_provider_identity("agy");
+        build_antigravity_auth_telemetry(post_ident.as_ref())
+    } else {
+        Value::Null
+    };
+
     json!({
         "success": true,
         "profile": activated_profile,
         "terminalsRestarted": quiesced_terminals.len(),
         "targetedSessionIds": targeted_session_ids,
-        "skippedUnaffectedCount": skipped_unaffected_count
+        "skippedUnaffectedCount": skipped_unaffected_count,
+        "authTelemetry": auth_telemetry
     })
 }
 
@@ -785,6 +852,79 @@ pub fn delete_account_profile_impl(request: Option<Value>) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     delete_account_profile_direct(provider, account_id)
+}
+
+pub fn rename_account_profile_with(
+    root: &Path,
+    provider: &str,
+    account_id: &str,
+    label: String,
+) -> Value {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return json!({
+            "success": false,
+            "error": "El nombre del perfil no puede estar vacío."
+        });
+    }
+
+    let canon_p = canon_provider(provider);
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let mut reg = load_registry_from(root);
+
+    let Some(idx) = reg
+        .profiles
+        .iter()
+        .position(|p| same_provider(&p.provider, &canon_p) && p.id == account_id)
+    else {
+        return json!({ "success": false, "error": "Profile not found" });
+    };
+
+    reg.profiles[idx].label = trimmed.to_string();
+    hydrate_profile_credential_health(root, std::slice::from_mut(&mut reg.profiles[idx]));
+    let updated_profile = reg.profiles[idx].clone();
+
+    if let Err(err) = save_registry_to(root, &reg) {
+        return json!({ "success": false, "error": err });
+    }
+
+    log_trace(&format!(
+        "account_switcher: Renamed profile {} ({}) for provider {}",
+        account_id, updated_profile.label, canon_p
+    ));
+
+    json!({
+        "success": true,
+        "profile": updated_profile
+    })
+}
+
+pub fn rename_account_profile_direct(
+    provider: String,
+    account_id: String,
+    label: String,
+) -> Value {
+    rename_account_profile_with(&profiles_root(), &provider, &account_id, label)
+}
+
+pub fn rename_account_profile_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("agy")
+        .to_string();
+    let account_id = req
+        .and_then(|r| r.get("accountId").or_else(|| r.get("account_id")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let label = req
+        .and_then(|r| r.get("label"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    rename_account_profile_direct(provider, account_id, label)
 }
 
 pub fn get_active_account_profile_direct(provider: &str) -> Value {

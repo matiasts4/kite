@@ -43,6 +43,11 @@ pub fn delete_account_profile(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub fn rename_account_profile(request: Option<Value>) -> Value {
+    commands::rename_account_profile_impl(request)
+}
+
+#[tauri::command]
 pub fn get_active_account_profile(request: Option<Value>) -> Value {
     commands::get_active_account_profile_impl(request)
 }

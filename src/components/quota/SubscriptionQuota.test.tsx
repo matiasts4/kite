@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SubscriptionQuotaBadge } from './SubscriptionQuotaBadge';
 import { SubscriptionQuotaPopover } from './SubscriptionQuotaPopover';
+import { resetAccountVaultStoreForTest } from '../../lib/accounts/accountVaultStore';
 import { DEFAULT_QUOTA_PREFERENCES, PROVIDERS, QUOTA_SETUP_VERSION } from '../../lib/quota/types';
 
 const PREFS_STORAGE_KEY = 'kite_quota_preferences';
@@ -70,11 +71,32 @@ vi.mock('../../lib/ipc', () => ({
     },
   }),
   isTauriEnvironment: vi.fn().mockReturnValue(true),
+  listSavedAccountsFull: vi.fn().mockResolvedValue({
+    profiles: [],
+    unregisteredLiveSession: null,
+    authTelemetry: null,
+  }),
+  saveCurrentAccountProfile: vi.fn().mockResolvedValue({
+    success: true,
+    profile: {
+      id: 'saved-live',
+      provider: 'antigravity',
+      label: 'personal@kite.local',
+      email: 'personal@kite.local',
+      isActive: true,
+      credentialStatus: 'valid',
+      hasRefreshToken: true,
+    },
+  }),
+  switchAccountProfile: vi.fn().mockResolvedValue({ success: true }),
+  renameAccountProfile: vi.fn().mockResolvedValue({ success: true }),
+  deleteAccountProfile: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 describe('Subscription Quota UI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetAccountVaultStoreForTest();
     localStorage.clear();
     seedQuotaPreferences([PROVIDERS.ANTIGRAVITY]);
   });
@@ -277,24 +299,76 @@ describe('Subscription Quota UI', () => {
     expect(diagnoseProvider(grokPrivacy).statusLabel).toBe('Atención requerida');
   });
 
-  it('renders QuotaSettingsModal with fast toggles and bulk action buttons', async () => {
-    const { QuotaSettingsModal } = await import('./QuotaSettingsModal');
+  it('proactively loads saved accounts, syncs active email identity, and supports 1-click save in popover', async () => {
+    const user = userEvent.setup();
+    const ipc = await import('../../lib/ipc');
+    vi.mocked(ipc.listSavedAccountsFull).mockResolvedValueOnce({
+      profiles: [],
+      unregisteredLiveSession: {
+        provider: 'antigravity',
+        email: 'personal@kite.local',
+        planName: 'Google AI Pro',
+      },
+      authTelemetry: {
+        authMode: 'oauth',
+        cliEmail: 'personal@kite.local',
+      },
+    });
+
     render(
-      <QuotaSettingsModal
-        isOpen={true}
+      <SubscriptionQuotaPopover
+        allQuotas={{
+          antigravity: {
+            providerId: 'antigravity',
+            displayName: 'Antigravity',
+            isAvailable: true,
+            isAuth: true,
+            primaryUsagePercent: 15,
+            primaryRemainingPercent: 85,
+            primaryResetAt: null,
+            timeUntilResetMs: null,
+            windows: [
+              {
+                name: 'Gemini Pro',
+                usagePercent: 15,
+                remainingFraction: 0.85,
+                resetsAt: null,
+                timeUntilResetMs: null,
+                isExhausted: false,
+              },
+            ],
+            metadata: {
+              email: 'stale@kite.local',
+            },
+            lastUpdatedMs: Date.now(),
+            error: null,
+          },
+        }}
+        selectedProvider={PROVIDERS.ANTIGRAVITY}
+        onSelectProvider={vi.fn()}
+        onRefresh={vi.fn()}
         onClose={vi.fn()}
-        allQuotas={{}}
+        prefs={{
+          ...DEFAULT_QUOTA_PREFERENCES,
+          setupVersion: QUOTA_SETUP_VERSION,
+          enabledProviders: [PROVIDERS.ANTIGRAVITY],
+        }}
       />
     );
 
-    // Bulk buttons
-    expect(screen.getByRole('button', { name: /todos/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /ninguno/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /solo activos/i })).toBeInTheDocument();
+    // Proactively loaded without needing to click "Cambiar cuenta"
+    expect(ipc.listSavedAccountsFull).toHaveBeenCalledWith('antigravity');
+    expect((await screen.findAllByText('personal@kite.local')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('stale@kite.local')).toBeNull();
 
-    // Fast switches
-    const switches = screen.getAllByRole('switch');
-    expect(switches.length).toBeGreaterThanOrEqual(10);
+    // Expanding switcher lets the user save directly in 1 click instead of navigating to Settings
+    await user.click(screen.getByRole('button', { name: /^cambiar cuenta$/i }));
+    const saveBtn = await screen.findByRole('button', { name: /^Guardar$/i });
+    await user.click(saveBtn);
+    expect(ipc.saveCurrentAccountProfile).toHaveBeenCalledWith(
+      'antigravity',
+      'personal@kite.local'
+    );
   });
 });
 

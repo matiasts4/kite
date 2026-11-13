@@ -1,23 +1,33 @@
-import type { SavedAccountProfile } from '../../types';
+import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../types';
 import { invokeCommand, isTauriEnvironment } from './core';
+
+export type { AntigravityAuthTelemetry };
+
+export interface UnregisteredLiveSession {
+  provider: string;
+  email: string;
+  name?: string | null;
+  source?: string | null;
+  planName?: string | null;
+  primaryRemainingPercent?: number | null;
+  primaryResetAt?: string | null;
+  timeUntilResetMs?: number | null;
+}
 
 export interface ListSavedAccountsResult {
   profiles: SavedAccountProfile[];
-  unregisteredLiveSession?: {
-    provider: string;
-    email: string;
-    name?: string | null;
-    source?: string | null;
-    planName?: string | null;
-    primaryRemainingPercent?: number | null;
-    primaryResetAt?: string | null;
-    timeUntilResetMs?: number | null;
-  } | null;
+  unregisteredLiveSession?: UnregisteredLiveSession | null;
+  authTelemetry?: AntigravityAuthTelemetry | null;
 }
 
 export async function listSavedAccounts(provider?: string): Promise<SavedAccountProfile[]> {
   try {
-    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[]; unregisteredLiveSession?: any }>('list_saved_accounts', { provider });
+    const res = await invokeCommand<{
+      schemaVersion: number;
+      profiles: SavedAccountProfile[];
+      unregisteredLiveSession?: UnregisteredLiveSession | null;
+      authTelemetry?: AntigravityAuthTelemetry | null;
+    }>('list_saved_accounts', { provider });
     return res?.profiles || [];
   } catch (err) {
     console.warn('[IPC] listSavedAccounts failed:', err);
@@ -27,14 +37,20 @@ export async function listSavedAccounts(provider?: string): Promise<SavedAccount
 
 export async function listSavedAccountsFull(provider?: string): Promise<ListSavedAccountsResult> {
   try {
-    const res = await invokeCommand<{ schemaVersion: number; profiles: SavedAccountProfile[]; unregisteredLiveSession?: any }>('list_saved_accounts', { provider });
+    const res = await invokeCommand<{
+      schemaVersion: number;
+      profiles: SavedAccountProfile[];
+      unregisteredLiveSession?: UnregisteredLiveSession | null;
+      authTelemetry?: AntigravityAuthTelemetry | null;
+    }>('list_saved_accounts', { provider });
     return {
       profiles: res?.profiles || [],
       unregisteredLiveSession: res?.unregisteredLiveSession || null,
+      authTelemetry: res?.authTelemetry ?? null,
     };
   } catch (err) {
     console.warn('[IPC] listSavedAccountsFull failed:', err);
-    return { profiles: [] };
+    return { profiles: [], unregisteredLiveSession: null, authTelemetry: null };
   }
 }
 
@@ -102,6 +118,7 @@ export interface SwitchAccountProfileResult {
   busySessions?: ProviderSessionSummary[];
   managedIdleCount?: number;
   unaffectedTerminalsCount?: number;
+  authTelemetry?: AntigravityAuthTelemetry | null;
 }
 
 export async function inspectProviderSessions(
@@ -146,6 +163,19 @@ export async function deleteAccountProfile(
   } catch (err) {
     console.error('[IPC] deleteAccountProfile failed:', err);
     return { success: false, error: String(err) };
+  }
+}
+
+export async function renameAccountProfile(
+  provider: string,
+  accountId: string,
+  label: string
+): Promise<{ success: boolean; profile?: SavedAccountProfile; error?: string }> {
+  try {
+    return await invokeCommand('rename_account_profile', { provider, accountId, label });
+  } catch (err: any) {
+    console.error('[IPC] renameAccountProfile failed:', err);
+    return { success: false, error: err?.message || String(err) };
   }
 }
 

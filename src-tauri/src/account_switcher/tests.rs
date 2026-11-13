@@ -1290,3 +1290,101 @@ fn test_consecutive_start_account_login_flow_preserves_original_rollback_and_cle
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_rename_account_profile_validates_label_hydrates_health_and_persists() {
+    use super::commands::rename_account_profile_with;
+    use super::registry::save_registry_to;
+
+    let dir = std::env::temp_dir().join(format!("kite-rename-test-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let prof_dir = root.join("agy").join("acc-rename-1");
+    fs::create_dir_all(&prof_dir).unwrap();
+    fs::write(
+        prof_dir.join("gemini_antigravity_cred.json"),
+        r#"{"token":{"access_token":"ya29.valid","refresh_token":"1//valid"},"id_token_email":"user@example.com"}"#,
+    )
+    .unwrap();
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![SavedAccountProfile {
+            id: "acc-rename-1".to_string(),
+            provider: "agy".to_string(),
+            label: "Old Name".to_string(),
+            email: Some("user@example.com".to_string()),
+            plan_name: Some("Google AI Pro".to_string()),
+            is_active: true,
+            last_used_unix_ms: 1234,
+            primary_remaining_percent: Some(85.0),
+            primary_reset_at: None,
+            time_until_reset_ms: None,
+            credential_status: None,
+            has_refresh_token: false,
+        }],
+    };
+    save_registry_to(&root, &reg).unwrap();
+
+    // 1. Rejects empty / whitespace-only labels without modifying persisted label
+    let empty_res = rename_account_profile_with(&root, "antigravity", "acc-rename-1", "   ".to_string());
+    assert_eq!(empty_res["success"], false);
+    assert!(empty_res["error"].as_str().unwrap_or("").contains("vacío"));
+    assert_eq!(load_registry_from(&root).profiles[0].label, "Old Name");
+
+    // 2. Rejects unknown profile ID cleanly
+    let missing_res = rename_account_profile_with(&root, "antigravity", "missing-id", "New Label".to_string());
+    assert_eq!(missing_res["success"], false);
+
+    // 3. Renames cleanly via "antigravity" alias, trims whitespace, hydrates health, and persists to disk
+    let ok_res = rename_account_profile_with(&root, "antigravity", "acc-rename-1", "  Trabajo Pro  ".to_string());
+    assert_eq!(ok_res["success"], true);
+    assert_eq!(ok_res["profile"]["label"], "Trabajo Pro");
+    assert_eq!(ok_res["profile"]["credentialStatus"], "valid");
+    assert_eq!(ok_res["profile"]["hasRefreshToken"], true);
+
+    let reloaded = load_registry_from(&root);
+    assert_eq!(reloaded.profiles.len(), 1);
+    assert_eq!(reloaded.profiles[0].label, "Trabajo Pro");
+    assert_eq!(reloaded.profiles[0].credential_status.as_deref(), Some("valid"));
+    assert!(reloaded.profiles[0].has_refresh_token);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_antigravity_auth_telemetry_exposes_cli_ide_split_brain_and_expiry() {
+    use super::commands::build_antigravity_auth_telemetry_from_parts;
+
+    let raw_cred = r#"{
+        "token": {
+            "access_token": "ya29.abc",
+            "refresh_token": "1//xyz",
+            "expiry": "2026-10-30T19:13:14.500Z"
+        },
+        "id_token_email": "cli@example.com"
+    }"#;
+    let parsed_ident = crate::quota::parse_antigravity_credential_blob(raw_cred);
+    let telemetry = build_antigravity_auth_telemetry_from_parts(
+        parsed_ident.as_ref(),
+        Some("ide@example.com"),
+        false,
+        false,
+    );
+
+    assert_eq!(telemetry["authMode"], "oauth");
+    assert_eq!(telemetry["cliEmail"], "cli@example.com");
+    assert_eq!(telemetry["credEmail"], "cli@example.com");
+    assert_eq!(telemetry["ideEmail"], "ide@example.com");
+    assert_eq!(telemetry["splitBrainWarning"], true);
+    assert!(telemetry["splitBrainMessage"].as_str().unwrap_or("").contains("cli@example.com"));
+    assert_eq!(telemetry["hasRefreshToken"], true);
+    assert!(telemetry["expiresAtMs"].as_i64().is_some());
+
+    let aligned = build_antigravity_auth_telemetry_from_parts(
+        parsed_ident.as_ref(),
+        Some("CLI@example.com"),
+        false,
+        false,
+    );
+    assert_eq!(aligned["splitBrainWarning"], false);
+    assert!(aligned["splitBrainMessage"].is_null());
+}

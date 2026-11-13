@@ -1,18 +1,29 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
+import '../views/settings/quotas-tab.css';
 import type { SavedAccountProfile } from '../../types';
-import {
-  listSavedAccountsFull,
-  saveCurrentAccountProfile,
-  switchAccountProfile,
-  deleteAccountProfile,
-} from '../../lib/ipc';
 import {
   guidedLoginCoordinator,
   isSameAccountProvider,
   useGuidedLoginState,
 } from '../../lib/accounts/guidedLoginCoordinator';
+import {
+  canonicalVaultProvider,
+  formatSplitBrainDetail,
+  isSplitBrainActive,
+  quotaKeyForProvider,
+} from '../../lib/accounts/accountVaultStore';
+import { useAccountVault } from '../../lib/accounts/useAccountVault';
+import { subscriptionQuotaManager } from '../../lib/quota/quotaManager';
+import type { ProviderQuotaStatus } from '../../lib/quota/types';
+import {
+  AccountConfirmDialogs,
+  PencilIcon,
+  RefreshSmallIcon,
+  resolveAuthModeLabel,
+  resolveCredentialHealthBadge,
+} from '../accounts/AccountVaultUI';
 import { surfaceMotion } from '../../motion/standard/surfaces';
 import { springs, tweens } from '../../motion/standard/tokens';
 import { BrandLogo } from '../ui/BrandLogo';
@@ -33,19 +44,18 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
   onClose,
   onAccountSwitched,
 }) => {
-  const [profiles, setProfiles] = useState<SavedAccountProfile[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [unregisteredLiveSession, setUnregisteredLiveSession] = useState<{
-    email: string;
-    planName?: string | null;
-  } | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState('');
+  const [refreshingQuota, setRefreshingQuota] = useState(false);
+  const [liveQuotas, setLiveQuotas] = useState<Record<string, ProviderQuotaStatus>>(() =>
+    typeof subscriptionQuotaManager?.getAllQuotas === 'function'
+      ? subscriptionQuotaManager.getAllQuotas()
+      : {}
+  );
 
+  const vault = useAccountVault(provider, { autoLoad: isOpen });
   const loginState = useGuidedLoginState(isOpen);
   const matchesLoginProvider = isSameAccountProvider(loginState.provider, provider);
   const isConnectingNew =
@@ -57,121 +67,76 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
   const titleId = useId();
   const descId = useId();
 
-  const fetchProfiles = async () => {
-    setLoading(true);
-    setErrorMsg(null);
-    try {
-      const data = await listSavedAccountsFull(provider);
-      setProfiles(data.profiles || []);
-      setUnregisteredLiveSession(
-        data.unregisteredLiveSession
-          ? {
-              email: data.unregisteredLiveSession.email,
-              planName: data.unregisteredLiveSession.planName,
-            }
-          : null
-      );
-    } catch {
-      setErrorMsg('Error al cargar las cuentas guardadas');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (isOpen) {
-      void fetchProfiles();
-      setSuccessMsg(null);
-      setErrorMsg(null);
-      setShowAddForm(false);
-      setNewLabel('');
-    }
-  }, [isOpen, provider]);
-
   useEffect(() => {
     if (!isOpen) return;
-    const onAccountsChanged = () => {
-      void fetchProfiles();
-    };
-    window.addEventListener('kite:accounts-changed', onAccountsChanged);
-    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+    setShowAddForm(false);
+    setNewLabel('');
+    setEditingId(null);
+    setEditingLabel('');
+    vault.clearFeedback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, provider]);
 
+  useEffect(() => {
+    if (!isOpen || typeof subscriptionQuotaManager?.subscribe !== 'function') return;
+    return subscriptionQuotaManager.subscribe((data) => setLiveQuotas(data));
+  }, [isOpen]);
+
+  const hasSubDialogOpen = Boolean(
+    vault.deleteConfirmProfile || vault.busyConfirm || vault.overwritePrompt
+  );
+
   const handleSwitch = async (id: string) => {
-    if (switchingId) return;
-    setSwitchingId(id);
-    setErrorMsg(null);
-    setSuccessMsg(null);
-    // Optimistically reflect active account immediately for instantaneous visual feedback
-    setProfiles((prev) =>
-      prev.map((p) => ({
-        ...p,
-        isActive: p.id === id,
-      }))
-    );
-    try {
-      const res = await switchAccountProfile(provider, id);
-      if (res.success && res.profile) {
-        setSuccessMsg(`Sesión cambiada exitosamente a «${res.profile.label}».`);
-        await fetchProfiles();
-        if (onAccountSwitched) {
-          onAccountSwitched(res.profile);
-        }
-      } else {
-        setErrorMsg(res.error || 'No se pudo cambiar la sesión.');
-        await fetchProfiles();
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Error al cambiar cuenta');
-      await fetchProfiles();
-    } finally {
-      setSwitchingId(null);
+    const res = await vault.switchAccount(id);
+    if (res.success && res.profile) {
+      onAccountSwitched?.(res.profile);
     }
   };
 
   const handleSaveCurrent = async (overrideLabel?: string) => {
-    if (isSaving) return;
-    setIsSaving(true);
-    setErrorMsg(null);
-    setSuccessMsg(null);
-    try {
-      const label = overrideLabel || newLabel.trim() || `Cuenta ${profiles.length + 1}`;
-      const res = await saveCurrentAccountProfile(provider, label);
-      if (res.success && res.profile) {
-        setSuccessMsg(`Sesión actual guardada como «${res.profile.label}».`);
-        setNewLabel('');
-        setShowAddForm(false);
-        await fetchProfiles();
-      } else {
-        setErrorMsg(res.error || 'No se pudo guardar la sesión actual.');
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Error al guardar la sesión actual');
-    } finally {
-      setIsSaving(false);
+    const res = await vault.saveCurrentAccount(
+      overrideLabel ?? newLabel,
+      { source: overrideLabel ? 'unregistered' : 'manual' }
+    );
+    if (res.success) {
+      setNewLabel('');
+      setShowAddForm(false);
     }
   };
 
   const handleConnectNewAccount = async () => {
     if (isConnectingNew) return;
-    setErrorMsg(null);
-    setSuccessMsg(null);
+    vault.clearFeedback();
     await guidedLoginCoordinator.start(provider);
   };
 
-  const handleDelete = async (id: string, e: React.MouseEvent) => {
+  const handleStartRename = (prof: SavedAccountProfile, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm('¿Seguro que deseas eliminar este perfil guardado de la bóveda?')) return;
+    setEditingId(prof.id);
+    setEditingLabel(prof.label);
+  };
+
+  const handleCommitRename = async (accountId: string) => {
+    const res = await vault.renameProfile(accountId, editingLabel);
+    if (res.success) {
+      setEditingId(null);
+      setEditingLabel('');
+    }
+  };
+
+  const handleRefreshActiveQuota = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (refreshingQuota) return;
+    setRefreshingQuota(true);
     try {
-      await deleteAccountProfile(provider, id);
-      await fetchProfiles();
-    } catch {
-      setErrorMsg('Error al eliminar la cuenta');
+      await vault.refreshQuota();
+    } finally {
+      setRefreshingQuota(false);
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && !hasSubDialogOpen) {
       e.preventDefault();
       e.stopPropagation();
       onClose();
@@ -179,7 +144,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || hasSubDialogOpen) return;
     const handleWindowKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -190,9 +155,15 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     };
     window.addEventListener('keydown', handleWindowKey, true);
     return () => window.removeEventListener('keydown', handleWindowKey, true);
-  }, [isOpen, onClose]);
+  }, [isOpen, hasSubDialogOpen, onClose]);
 
   if (!isOpen) return null;
+
+  const canon = canonicalVaultProvider(provider);
+  const activeLiveQuota = liveQuotas[quotaKeyForProvider(canon)];
+  const authModeLabel = canon === 'antigravity' ? resolveAuthModeLabel(vault.authTelemetry) : null;
+  const splitBrain = canon === 'antigravity' && isSplitBrainActive(vault.authTelemetry);
+  const splitBrainDetail = splitBrain ? formatSplitBrainDetail(vault.authTelemetry) : null;
 
   const content = (
     <motion.div
@@ -217,6 +188,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descId}
+        style={{ borderRadius: 'var(--dialog-radius, 14px)' }}
       >
         {/* Header */}
         <header className="qt-modal-header">
@@ -245,15 +217,58 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
 
         {/* Content Body */}
         <div className="qt-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {errorMsg ? (
-            <div className="qt-banner" data-tone="error">
-              {errorMsg}
+          {vault.error ? (
+            <div
+              className="qt-banner"
+              data-tone="error"
+              role="alert"
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}
+            >
+              <span>{vault.error}</span>
+              <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+                {vault.lastFailedSwitch?.code === 'INVALID_TARGET_PROFILE' ? (
+                  <button
+                    type="button"
+                    className="qt-button qt-button--primary"
+                    onClick={() => void handleConnectNewAccount()}
+                  >
+                    Reautenticar
+                  </button>
+                ) : null}
+                {vault.lastFailedSwitch ? (
+                  <button
+                    type="button"
+                    className="qt-button"
+                    onClick={() => void handleSwitch(vault.lastFailedSwitch!.accountId)}
+                  >
+                    Reintentar
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
-          {successMsg ? (
+          {vault.notice ? (
             <div className="qt-banner" data-tone="ok">
-              {successMsg}
+              {vault.notice}
+            </div>
+          ) : null}
+
+          {splitBrain ? (
+            <div className="qt-account__split-box">
+              <span>{splitBrainDetail || 'El IDE apunta a otra cuenta.'}</span>
+              <button
+                type="button"
+                className="qt-button"
+                disabled={Boolean(vault.switchingId)}
+                onClick={async () => {
+                  await vault.alignIde();
+                  const nextActive = vault.profiles.find((p) => p.isActive);
+                  if (nextActive) onAccountSwitched?.(nextActive);
+                }}
+              >
+                Alinear IDE
+              </button>
             </div>
           ) : null}
 
@@ -320,7 +335,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
           ) : null}
 
           {/* Unregistered live session banner */}
-          {unregisteredLiveSession ? (
+          {vault.unregisteredLiveSession ? (
             <div
               className="qt-banner"
               data-tone="warn"
@@ -335,7 +350,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
             >
               <div>
                 <strong style={{ fontSize: '12px' }}>Sesión activa no guardada:</strong>{' '}
-                <code style={{ fontSize: '12px' }}>{unregisteredLiveSession.email}</code>
+                <code style={{ fontSize: '12px' }}>{vault.unregisteredLiveSession.email}</code>
                 <div style={{ fontSize: '11px', opacity: 0.85, marginTop: '2px' }}>
                   Esta cuenta está en uso en tu sistema pero aún no está registrada en la bóveda.
                 </div>
@@ -344,8 +359,8 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
                 type="button"
                 className="qt-button qt-button--primary"
                 style={{ height: '28px', whiteSpace: 'nowrap' }}
-                disabled={isSaving}
-                onClick={() => handleSaveCurrent(unregisteredLiveSession.email)}
+                disabled={vault.saving}
+                onClick={() => void handleSaveCurrent(vault.unregisteredLiveSession!.email)}
               >
                 Guardar en bóveda
               </button>
@@ -354,11 +369,11 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
 
           {/* Accounts List */}
           <div className="qt-accounts-modal-list">
-            {loading ? (
+            {vault.loading && vault.profiles.length === 0 ? (
               <div className="qt-empty" style={{ padding: '24px 0' }}>
                 Cargando perfiles guardados…
               </div>
-            ) : profiles.length === 0 ? (
+            ) : vault.profiles.length === 0 ? (
               <div className="qt-empty">
                 <strong>No tienes cuentas guardadas en la bóveda todavía</strong>
                 <span>
@@ -366,11 +381,19 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
                 </span>
               </div>
             ) : (
-              profiles.map((prof) => {
+              vault.profiles.map((prof) => {
                 const isCurrent = prof.isActive;
-                const isSwitching = switchingId === prof.id;
+                const isSwitching = vault.switchingId === prof.id;
+                const isEditing = editingId === prof.id;
+                const health = resolveCredentialHealthBadge(prof);
+                const livePct =
+                  isCurrent && activeLiveQuota?.isAvailable && activeLiveQuota.primaryRemainingPercent != null
+                    ? Math.round(activeLiveQuota.primaryRemainingPercent)
+                    : null;
                 const remPct =
-                  prof.primaryRemainingPercent !== null && prof.primaryRemainingPercent !== undefined
+                  livePct !== null
+                    ? livePct
+                    : prof.primaryRemainingPercent !== null && prof.primaryRemainingPercent !== undefined
                     ? Math.round(prof.primaryRemainingPercent)
                     : null;
 
@@ -379,7 +402,7 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
                     key={prof.id}
                     className="qt-account-row"
                     data-active={isCurrent ? '' : undefined}
-                    onClick={() => !isCurrent && handleSwitch(prof.id)}
+                    onClick={() => !isCurrent && !isEditing && !vault.switchingId && void handleSwitch(prof.id)}
                   >
                     <div className="qt-account-row__main">
                       <div className="qt-account-row__avatar-container">
@@ -392,14 +415,69 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
                       </div>
 
                       <div className="qt-account-row__details">
-                        <div className="qt-account-row__name-line">
-                          <span className="qt-account-row__label">{prof.label}</span>
-                          {isCurrent ? (
-                            <span className="qt-chip" data-tone="ok">
-                              Activa
-                            </span>
-                          ) : null}
-                        </div>
+                        {isEditing ? (
+                          <form
+                            className="qt-account__rename-row"
+                            onClick={(e) => e.stopPropagation()}
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              void handleCommitRename(prof.id);
+                            }}
+                          >
+                            <input
+                              type="text"
+                              className="qt-input qt-input--md"
+                              aria-label={`Nuevo nombre para ${prof.label}`}
+                              value={editingLabel}
+                              autoFocus
+                              onChange={(e) => setEditingLabel(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.stopPropagation();
+                                  setEditingId(null);
+                                }
+                              }}
+                            />
+                            <button
+                              type="submit"
+                              className="qt-button qt-button--primary"
+                              disabled={vault.renamingId === prof.id}
+                            >
+                              Guardar
+                            </button>
+                            <button
+                              type="button"
+                              className="qt-button"
+                              onClick={() => setEditingId(null)}
+                            >
+                              Cancelar
+                            </button>
+                          </form>
+                        ) : (
+                          <div className="qt-account-row__name-line">
+                            <span className="qt-account-row__label">{prof.label}</span>
+                            {isCurrent ? (
+                              <span className="qt-chip" data-tone="ok">
+                                Activa
+                              </span>
+                            ) : null}
+                            {health ? (
+                              <span className="qt-chip" data-tone={health.tone}>
+                                {health.label}
+                              </span>
+                            ) : null}
+                            {isCurrent && authModeLabel ? (
+                              <span className="qt-chip" data-tone="info">
+                                {authModeLabel}
+                              </span>
+                            ) : null}
+                            {isCurrent && splitBrain ? (
+                              <span className="qt-chip" data-tone="warn">
+                                IDE desincronizada
+                              </span>
+                            ) : null}
+                          </div>
+                        )}
                         <div className="qt-account-row__sub-line">
                           {prof.email ? <span>{prof.email}</span> : <span>Sin correo detectado</span>}
                           {prof.planName ? <span>· {prof.planName}</span> : null}
@@ -420,24 +498,48 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
                         </div>
                       ) : null}
 
-                      {!isCurrent ? (
+                      {isCurrent ? (
+                        <button
+                          type="button"
+                          className="qt-icon-button"
+                          disabled={refreshingQuota}
+                          onClick={(e) => void handleRefreshActiveQuota(e)}
+                          title="Actualizar cuota en vivo"
+                          aria-label="Actualizar cuota"
+                        >
+                          <RefreshSmallIcon size={12} />
+                        </button>
+                      ) : (
                         <button
                           type="button"
                           className="qt-button"
-                          disabled={isSwitching}
+                          disabled={isSwitching || Boolean(vault.switchingId)}
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleSwitch(prof.id);
+                            void handleSwitch(prof.id);
                           }}
                         >
-                          {isSwitching ? 'Cambiando…' : 'Activar'}
+                          {isSwitching ? 'Cambiando y verificando...' : 'Activar'}
                         </button>
-                      ) : null}
+                      )}
 
                       <button
                         type="button"
                         className="qt-icon-button"
-                        onClick={(e) => handleDelete(prof.id, e)}
+                        onClick={(e) => handleStartRename(prof, e)}
+                        title="Renombrar perfil"
+                        aria-label={`Renombrar perfil ${prof.label}`}
+                      >
+                        <PencilIcon size={12} />
+                      </button>
+
+                      <button
+                        type="button"
+                        className="qt-icon-button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          vault.requestDeleteProfile(prof);
+                        }}
                         title="Eliminar de la bóveda"
                         aria-label="Eliminar cuenta"
                       >
@@ -464,27 +566,30 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
               </div>
               <input
                 type="text"
-                className="qt-input"
+                className="qt-input qt-input--md"
                 placeholder="Nombre o etiqueta (ej. Google Pro Personal, Claude Team)..."
                 value={newLabel}
                 onChange={(e) => setNewLabel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void handleSaveCurrent();
+                }}
                 autoFocus
               />
               <div className="qt-save-card__actions">
                 <button
                   type="button"
-                  className="qt-button"
+                  className="qt-button qt-button--md"
                   onClick={() => setShowAddForm(false)}
                 >
                   Cancelar
                 </button>
                 <button
                   type="button"
-                  className="qt-button qt-button--primary"
-                  disabled={isSaving}
-                  onClick={() => handleSaveCurrent()}
+                  className="qt-button qt-button--primary qt-button--md"
+                  disabled={vault.saving}
+                  onClick={() => void handleSaveCurrent()}
                 >
-                  {isSaving ? 'Guardando…' : 'Guardar sesión actual'}
+                  {vault.saving ? 'Guardando…' : 'Guardar sesión actual'}
                 </button>
               </div>
             </div>
@@ -492,17 +597,17 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
               <button
                 type="button"
-                className="qt-button"
-                style={{ height: '32px', whiteSpace: 'nowrap' }}
+                className="qt-button qt-button--md"
+                style={{ whiteSpace: 'nowrap' }}
                 disabled={isConnectingNew}
-                onClick={handleConnectNewAccount}
+                onClick={() => void handleConnectNewAccount()}
               >
                 {isConnectingNew ? 'Preparando...' : '+ Conectar nueva cuenta'}
               </button>
               <button
                 type="button"
                 className="qt-save-trigger"
-                style={{ flex: 1, margin: 0 }}
+                style={{ flex: 1, margin: 0, height: '32px', padding: '0 12px', borderRadius: 'var(--control-radius, 8px)' }}
                 onClick={() => setShowAddForm(true)}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -519,11 +624,11 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
         <footer className="qt-modal-footer">
           <div className="qt-modal-footer__count">
             <span className="qt-hint">
-              {profiles.length} cuenta{profiles.length === 1 ? '' : 's'} guardada{profiles.length === 1 ? '' : 's'} en este equipo
+              {vault.profiles.length} cuenta{vault.profiles.length === 1 ? '' : 's'} guardada{vault.profiles.length === 1 ? '' : 's'} en este equipo
             </span>
           </div>
           <div className="qt-modal-footer__actions">
-            <button type="button" className="qt-button" onClick={onClose}>
+            <button type="button" className="qt-button qt-button--md" onClick={onClose}>
               Cerrar
             </button>
           </div>
@@ -533,9 +638,46 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
   );
 
   if (typeof document === 'undefined') return null;
+  const portalTarget = document.querySelector('.app-frame--scaled') ?? document.body;
 
-  return createPortal(
-    <AnimatePresence>{isOpen ? content : null}</AnimatePresence>,
-    document.querySelector('.app-frame--scaled') ?? document.body
+  return (
+    <>
+      {createPortal(
+        <AnimatePresence>{isOpen ? content : null}</AnimatePresence>,
+        portalTarget
+      )}
+      <AccountConfirmDialogs
+        busyConfirm={vault.busyConfirm}
+        deleteConfirmProfile={vault.deleteConfirmProfile}
+        overwritePrompt={vault.overwritePrompt}
+        saving={vault.saving}
+        deletingId={vault.deletingId}
+        switchingId={vault.switchingId}
+        onConfirmBusy={async () => {
+          const res = await vault.confirmBusySwitch();
+          if (res?.success && res.profile) {
+            onAccountSwitched?.(res.profile);
+          }
+        }}
+        onCancelBusy={vault.cancelBusySwitch}
+        onConfirmDelete={vault.confirmDeleteProfile}
+        onCancelDelete={vault.cancelDeleteProfile}
+        onConfirmOverwriteUpdate={async () => {
+          const res = await vault.confirmOverwriteUpdate();
+          if (res.success) {
+            setNewLabel('');
+            setShowAddForm(false);
+          }
+        }}
+        onConfirmOverwriteRename={async () => {
+          const res = await vault.confirmOverwriteRename();
+          if (res.success) {
+            setNewLabel('');
+            setShowAddForm(false);
+          }
+        }}
+        onCancelOverwrite={vault.cancelOverwritePrompt}
+      />
+    </>
   );
 };

@@ -1,16 +1,24 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import type { SavedAccountProfile } from '../../../types';
-import {
-  deleteAccountProfile,
-  listSavedAccountsFull,
-  saveCurrentAccountProfile,
-  switchAccountProfile,
-} from '../../../lib/ipc';
+import React, { useEffect, useState } from 'react';
 import {
   guidedLoginCoordinator,
   isSameAccountProvider,
   useGuidedLoginState,
 } from '../../../lib/accounts/guidedLoginCoordinator';
+import {
+  formatSplitBrainDetail,
+  isSplitBrainActive,
+  quotaKeyForProvider,
+} from '../../../lib/accounts/accountVaultStore';
+import { useAccountVault } from '../../../lib/accounts/useAccountVault';
+import { subscriptionQuotaManager } from '../../../lib/quota/quotaManager';
+import type { ProviderQuotaStatus } from '../../../lib/quota/types';
+import {
+  AccountConfirmDialogs,
+  PencilIcon,
+  RefreshSmallIcon,
+  resolveAuthModeLabel,
+  resolveCredentialHealthBadge,
+} from '../../accounts/AccountVaultUI';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { SparklesIcon } from './icons';
 
@@ -41,18 +49,17 @@ export interface AccountVaultProps {
 
 export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
   const [provider, setProvider] = useState<string>(MULTI_ACCOUNT_PROVIDERS[0].id);
-  const [profiles, setProfiles] = useState<SavedAccountProfile[]>([]);
-  const [unregisteredSession, setUnregisteredSession] = useState<{
-    email: string;
-    planName?: string | null;
-  } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [label, setLabel] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState('');
+  const [refreshingQuota, setRefreshingQuota] = useState(false);
+  const [liveQuotas, setLiveQuotas] = useState<Record<string, ProviderQuotaStatus>>(() =>
+    typeof subscriptionQuotaManager?.getAllQuotas === 'function'
+      ? subscriptionQuotaManager.getAllQuotas()
+      : {}
+  );
 
+  const vault = useAccountVault(provider, { autoLoad: true });
   const loginState = useGuidedLoginState();
   const matchesLoginProvider = isSameAccountProvider(loginState.provider, provider);
   const isConnectingNew =
@@ -63,104 +70,72 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
 
   const providerLabel = MULTI_ACCOUNT_PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await listSavedAccountsFull(provider);
-      setProfiles(res.profiles || []);
-      setUnregisteredSession(
-        res.unregisteredLiveSession ? { email: res.unregisteredLiveSession.email, planName: res.unregisteredLiveSession.planName } : null
-      );
-    } catch {
-      setError('No se pudieron cargar las cuentas guardadas.');
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    setEditingId(null);
+    setEditingLabel('');
+    vault.clearFeedback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
   useEffect(() => {
-    setError(null);
-    setNotice(null);
-    void refresh();
-  }, [refresh]);
+    if (typeof subscriptionQuotaManager?.subscribe !== 'function') return;
+    return subscriptionQuotaManager.subscribe((data) => setLiveQuotas(data));
+  }, []);
 
-  useEffect(() => {
-    const onAccountsChanged = () => {
-      void refresh();
-    };
-    window.addEventListener('kite:accounts-changed', onAccountsChanged);
-    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
-  }, [refresh]);
-
-  const handleSwitch = async (id: string) => {
-    if (switchingId) return;
-    setSwitchingId(id);
-    setError(null);
-    setNotice(null);
-    // Optimistically reflect active account immediately for instantaneous visual feedback
-    setProfiles((prev) =>
-      prev.map((p) => ({
-        ...p,
-        isActive: p.id === id,
-      }))
-    );
-    try {
-      const res = await switchAccountProfile(provider, id);
-      if (res.success && res.profile) {
-        const restartedCount = (res as any).terminalsRestarted ?? 0;
-        const terminalNotice =
-          restartedCount > 0
-            ? ` (${restartedCount} terminal${restartedCount > 1 ? 'es' : ''} actualizada${restartedCount > 1 ? 's' : ''})`
-            : '';
-        setNotice(`Sesión cambiada a «${res.profile.label}»${terminalNotice}.`);
-        void refresh();
-        onChanged?.();
-      } else {
-        setError(res.error || 'No se pudo cambiar la sesión.');
-        await refresh();
-      }
-    } catch (err: any) {
-      setError(err?.message || 'Error al cambiar cuenta');
-      await refresh();
-    } finally {
-      setSwitchingId(null);
+  const handleSwitch = async (id: string, opts?: { force?: boolean }) => {
+    const res = await vault.switchAccount(id, opts);
+    if (res.success) {
+      onChanged?.();
     }
   };
 
   const handleSave = async (overrideLabel?: string) => {
-    if (saving) return;
-    setSaving(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const profileName = overrideLabel || label.trim() || `Cuenta ${profiles.length + 1}`;
-      const res = await saveCurrentAccountProfile(provider, profileName);
-      if (res.success && res.profile) {
-        setNotice(`Sesión actual guardada como «${res.profile.label}».`);
-        setLabel('');
-        void refresh();
-        onChanged?.();
-      } else {
-        setError(res.error || 'No se pudo guardar la sesión actual.');
-      }
-    } finally {
-      setSaving(false);
+    const res = await vault.saveCurrentAccount(
+      overrideLabel ?? label,
+      { source: overrideLabel ? 'unregistered' : 'manual' }
+    );
+    if (res.success) {
+      if (!overrideLabel) setLabel('');
+      onChanged?.();
     }
   };
 
   const handleConnectNewAccount = async () => {
     if (isConnectingNew) return;
-    setError(null);
-    setNotice(null);
+    vault.clearFeedback();
     await guidedLoginCoordinator.start(provider);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!window.confirm('¿Eliminar este perfil guardado de la bóveda?')) return;
-    await deleteAccountProfile(provider, id);
-    await refresh();
-    onChanged?.();
+  const handleStartRename = (id: string, currentLabel: string) => {
+    setEditingId(id);
+    setEditingLabel(currentLabel);
   };
+
+  const handleCommitRename = async (id: string) => {
+    const res = await vault.renameProfile(id, editingLabel);
+    if (res.success) {
+      setEditingId(null);
+      setEditingLabel('');
+      onChanged?.();
+    }
+  };
+
+  const handleRefreshActiveQuota = async () => {
+    if (refreshingQuota) return;
+    setRefreshingQuota(true);
+    try {
+      await vault.refreshQuota();
+      onChanged?.();
+    } finally {
+      setRefreshingQuota(false);
+    }
+  };
+
+  const activeLiveQuota = liveQuotas[quotaKeyForProvider(provider)];
+  const authModeLabel =
+    provider === 'antigravity' ? resolveAuthModeLabel(vault.authTelemetry) : null;
+  const splitBrain = provider === 'antigravity' && isSplitBrainActive(vault.authTelemetry);
+  const splitBrainDetail = splitBrain ? formatSplitBrainDetail(vault.authTelemetry) : null;
 
   return (
     <div className="qt-vault">
@@ -181,8 +156,37 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
         ))}
       </div>
 
-      {error ? <div className="qt-banner" data-tone="error">{error}</div> : null}
-      {notice ? <div className="qt-banner" data-tone="ok">{notice}</div> : null}
+      {vault.error ? (
+        <div
+          className="qt-banner"
+          data-tone="error"
+          role="alert"
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
+        >
+          <span>{vault.error}</span>
+          <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+            {vault.lastFailedSwitch?.code === 'INVALID_TARGET_PROFILE' ? (
+              <button
+                type="button"
+                className="qt-button qt-button--primary"
+                onClick={() => void handleConnectNewAccount()}
+              >
+                Reautenticar
+              </button>
+            ) : null}
+            {vault.lastFailedSwitch ? (
+              <button
+                type="button"
+                className="qt-button"
+                onClick={() => void handleSwitch(vault.lastFailedSwitch!.accountId)}
+              >
+                Reintentar
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {vault.notice ? <div className="qt-banner" data-tone="ok">{vault.notice}</div> : null}
 
       {matchesLoginProvider && loginState.phase === 'waiting' ? (
         <div
@@ -244,43 +248,63 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
         </div>
       ) : null}
 
-      {unregisteredSession ? (
+      {vault.unregisteredLiveSession ? (
         <div className="qt-banner" data-tone="warn" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
           <div>
             <strong style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
               <SparklesIcon size={13} />
               <span>Sesión en uso no registrada:</span>
             </strong>{' '}
-            <code>{unregisteredSession.email}</code>
+            <code>{vault.unregisteredLiveSession.email}</code>
             <div style={{ fontSize: '11px', opacity: 0.85, marginTop: '2px' }}>
               Esta cuenta está activa en tu sistema operativo pero aún no la has guardado en la bóveda de {providerLabel}.
             </div>
           </div>
           <button
             type="button"
-            className="qt-button qt-button--primary"
+            className="qt-button qt-button--primary qt-button--md"
             style={{ whiteSpace: 'nowrap' }}
-            disabled={saving}
-            onClick={() => handleSave(unregisteredSession.email)}
+            disabled={vault.saving}
+            onClick={() => void handleSave(vault.unregisteredLiveSession!.email)}
           >
             Guardar en bóveda
           </button>
         </div>
       ) : null}
 
-      {loading && profiles.length === 0 ? (
+      {vault.loading && vault.profiles.length === 0 ? (
         <div className="qt-empty">Cargando cuentas…</div>
-      ) : profiles.length === 0 ? (
+      ) : vault.profiles.length === 0 ? (
         <div className="qt-empty">
           <strong>Aún no hay cuentas de {providerLabel} en la bóveda.</strong>
           <span>Guarda la sesión con la que estás trabajando para empezar a rotar cuentas en un clic.</span>
         </div>
       ) : (
         <div className="qt-accounts">
-          {profiles.map((prof) => {
+          {vault.profiles.map((prof) => {
+            const isEditing = editingId === prof.id;
+            const isSwitching = vault.switchingId === prof.id;
+            const health = resolveCredentialHealthBadge(prof);
+            // Never copy active account's live quota onto inactive cards.
+            const livePct =
+              prof.isActive && activeLiveQuota?.isAvailable && activeLiveQuota.primaryRemainingPercent != null
+                ? Math.round(activeLiveQuota.primaryRemainingPercent)
+                : null;
             const pct =
-              prof.primaryRemainingPercent != null ? Math.round(prof.primaryRemainingPercent) : null;
-            const reset = formatReset(prof.timeUntilResetMs, prof.primaryResetAt);
+              livePct !== null
+                ? livePct
+                : prof.primaryRemainingPercent != null
+                ? Math.round(prof.primaryRemainingPercent)
+                : null;
+            const reset = formatReset(
+              prof.isActive && activeLiveQuota?.timeUntilResetMs != null
+                ? activeLiveQuota.timeUntilResetMs
+                : prof.timeUntilResetMs,
+              prof.isActive && activeLiveQuota?.primaryResetAt
+                ? activeLiveQuota.primaryResetAt
+                : prof.primaryResetAt
+            );
+
             return (
               <article key={prof.id} className="qt-account" data-active={prof.isActive ? '' : undefined}>
                 <header className="qt-account__head">
@@ -293,15 +317,94 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
                     </span>
                   </div>
                   <div className="qt-account__id">
-                    <div className="qt-account__name">
-                      <span>{prof.label}</span>
-                      {prof.isActive ? <span className="qt-chip" data-tone="ok">Activa</span> : null}
-                    </div>
+                    {isEditing ? (
+                      <form
+                        className="qt-account__rename-row"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleCommitRename(prof.id);
+                        }}
+                      >
+                        <input
+                          type="text"
+                          className="qt-input qt-input--md"
+                          aria-label={`Nuevo nombre para ${prof.label}`}
+                          value={editingLabel}
+                          autoFocus
+                          onChange={(e) => setEditingLabel(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.stopPropagation();
+                              setEditingId(null);
+                            }
+                          }}
+                        />
+                        <button
+                          type="submit"
+                          className="qt-button qt-button--primary"
+                          disabled={vault.renamingId === prof.id}
+                        >
+                          Guardar
+                        </button>
+                        <button
+                          type="button"
+                          className="qt-button"
+                          onClick={() => setEditingId(null)}
+                        >
+                          Cancelar
+                        </button>
+                      </form>
+                    ) : (
+                      <div className="qt-account__name">
+                        <span>{prof.label}</span>
+                        <button
+                          type="button"
+                          className="qt-icon-button"
+                          aria-label={`Renombrar perfil ${prof.label}`}
+                          title="Renombrar perfil"
+                          onClick={() => handleStartRename(prof.id, prof.label)}
+                        >
+                          <PencilIcon size={12} />
+                        </button>
+                        {prof.isActive ? <span className="qt-chip" data-tone="ok">Activa</span> : null}
+                      </div>
+                    )}
                     <div className="qt-account__meta">{prof.email || 'Sin correo detectado'}</div>
                   </div>
                 </header>
 
-                {prof.planName ? <div className="qt-account__plan">{prof.planName}</div> : null}
+                <div className="qt-account__badges">
+                  {prof.planName ? <div className="qt-account__plan">{prof.planName}</div> : null}
+                  {health ? (
+                    <span className="qt-chip" data-tone={health.tone}>
+                      {health.label}
+                    </span>
+                  ) : null}
+                  {prof.isActive && authModeLabel ? (
+                    <span className="qt-chip" data-tone="info">
+                      {authModeLabel}
+                    </span>
+                  ) : null}
+                  {prof.isActive && splitBrain ? (
+                    <span className="qt-chip" data-tone="warn">
+                      IDE desincronizada
+                    </span>
+                  ) : null}
+                </div>
+
+                {prof.isActive && splitBrain ? (
+                  <div className="qt-account__split-box">
+                    <span>{splitBrainDetail || 'El IDE apunta a otra sesión.'}</span>
+                    <button
+                      type="button"
+                      className="qt-button"
+                      disabled={Boolean(vault.switchingId)}
+                      onClick={() => void vault.alignIde()}
+                    >
+                      Alinear IDE
+                    </button>
+                  </div>
+                ) : null}
 
                 <div className="qt-account__quota">
                   {pct !== null ? (
@@ -309,6 +412,19 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
                       <div className="qt-account__quota-row">
                         <span className="qt-account__pct" data-tone={toneFor(pct)}>{pct}%</span>
                         <span className="qt-account__hint">disponible</span>
+                        {prof.isActive ? (
+                          <button
+                            type="button"
+                            className="qt-icon-button"
+                            style={{ marginLeft: 'auto' }}
+                            disabled={refreshingQuota}
+                            aria-label="Actualizar cuota"
+                            title="Actualizar cuota en vivo"
+                            onClick={() => void handleRefreshActiveQuota()}
+                          >
+                            <RefreshSmallIcon size={12} />
+                          </button>
+                        ) : null}
                       </div>
                       <div className="qt-meter" data-tone={toneFor(pct)}>
                         <span style={{ width: `${Math.max(2, pct)}%` }} />
@@ -316,28 +432,60 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
                       {reset ? <div className="qt-account__hint">{reset}</div> : null}
                     </>
                   ) : (
-                    <div className="qt-account__hint">Cuota no disponible todavía</div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                      <span className="qt-account__hint">
+                        {prof.isActive
+                          ? 'Cuota no disponible todavía'
+                          : 'Activa esta cuenta para consultar su cuota en vivo'}
+                      </span>
+                      {prof.isActive ? (
+                        <button
+                          type="button"
+                          className="qt-icon-button"
+                          disabled={refreshingQuota}
+                          aria-label="Actualizar cuota"
+                          title="Actualizar cuota en vivo"
+                          onClick={() => void handleRefreshActiveQuota()}
+                        >
+                          <RefreshSmallIcon size={12} />
+                        </button>
+                      ) : null}
+                    </div>
                   )}
                 </div>
 
                 <footer className="qt-account__actions">
                   {prof.isActive ? (
-                    <span className="qt-account__hint">En uso ahora</span>
+                    <span className="qt-account__hint">
+                      {isSwitching ? 'Cambiando y verificando...' : 'En uso ahora'}
+                    </span>
                   ) : (
-                    <button
-                      type="button"
-                      className="qt-button qt-button--primary"
-                      disabled={switchingId === prof.id}
-                      onClick={() => handleSwitch(prof.id)}
-                    >
-                      {switchingId === prof.id ? 'Cambiando…' : 'Activar'}
-                    </button>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="qt-button qt-button--primary"
+                        disabled={isSwitching || Boolean(vault.switchingId)}
+                        onClick={() => void handleSwitch(prof.id)}
+                      >
+                        {isSwitching ? 'Cambiando y verificando...' : 'Activar'}
+                      </button>
+                      {health?.needsReauth ? (
+                        <button
+                          type="button"
+                          className="qt-button"
+                          disabled={isConnectingNew}
+                          onClick={() => void handleConnectNewAccount()}
+                        >
+                          Reautenticar
+                        </button>
+                      ) : null}
+                    </div>
                   )}
                   <button
                     type="button"
                     className="qt-button qt-button--ghost"
-                    onClick={() => handleDelete(prof.id)}
-                    title="Eliminar perfil"
+                    onClick={() => vault.requestDeleteProfile(prof)}
+                    title="Eliminar perfil guardado"
                   >
                     Eliminar
                   </button>
@@ -355,7 +503,7 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center', width: '100%' }}>
           <input
-            className="qt-input"
+            className="qt-input qt-input--md"
             type="text"
             style={{ flex: 1 }}
             placeholder="Nombre de la cuenta (ej. Google Pro Personal)"
@@ -367,17 +515,17 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
           />
           <button
             type="button"
-            className="qt-button qt-button--primary"
-            style={{ height: '32px', whiteSpace: 'nowrap' }}
-            disabled={saving}
+            className="qt-button qt-button--primary qt-button--md"
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={vault.saving}
             onClick={() => void handleSave()}
           >
-            {saving ? 'Guardando…' : 'Guardar sesión'}
+            {vault.saving ? 'Guardando…' : 'Guardar sesión'}
           </button>
           <button
             type="button"
-            className="qt-button"
-            style={{ height: '32px', whiteSpace: 'nowrap' }}
+            className="qt-button qt-button--md"
+            style={{ whiteSpace: 'nowrap' }}
             disabled={isConnectingNew}
             onClick={() => void handleConnectNewAccount()}
           >
@@ -390,13 +538,47 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
         <details className="qt-howto">
           <summary>¿Cómo agrego otra cuenta de Antigravity?</summary>
           <ol>
-            <li>Abre <strong>Antigravity IDE</strong> e inicia sesión con tu otra cuenta de Google AI Pro.</li>
-            <li>Cierra Antigravity para liberar los archivos de sesión.</li>
-            <li>Vuelve aquí, escribe un nombre y pulsa <strong>Guardar sesión</strong>.</li>
+            <li>Pulsa <strong>+ Conectar nueva cuenta</strong> para abrir una terminal guiada con <code>agy acp --login</code>.</li>
+            <li>Completa el inicio de sesión en tu navegador; Kite verificará los tokens OAuth y guardará la cuenta automáticamente.</li>
+            <li>Si cancelas el proceso, Kite restaurará tu sesión anterior automáticamente para no interrumpir tu trabajo.</li>
           </ol>
           <p>El inicio de sesión se hace una sola vez por cuenta; después rotas en un clic, sin proxies externos.</p>
         </details>
       ) : null}
+
+      <AccountConfirmDialogs
+        busyConfirm={vault.busyConfirm}
+        deleteConfirmProfile={vault.deleteConfirmProfile}
+        overwritePrompt={vault.overwritePrompt}
+        saving={vault.saving}
+        deletingId={vault.deletingId}
+        switchingId={vault.switchingId}
+        onConfirmBusy={async () => {
+          const res = await vault.confirmBusySwitch();
+          if (res?.success) onChanged?.();
+        }}
+        onCancelBusy={vault.cancelBusySwitch}
+        onConfirmDelete={async () => {
+          const res = await vault.confirmDeleteProfile();
+          if (res.success) onChanged?.();
+        }}
+        onCancelDelete={vault.cancelDeleteProfile}
+        onConfirmOverwriteUpdate={async () => {
+          const res = await vault.confirmOverwriteUpdate();
+          if (res.success) {
+            setLabel('');
+            onChanged?.();
+          }
+        }}
+        onConfirmOverwriteRename={async () => {
+          const res = await vault.confirmOverwriteRename();
+          if (res.success) {
+            setLabel('');
+            onChanged?.();
+          }
+        }}
+        onCancelOverwrite={vault.cancelOverwritePrompt}
+      />
     </div>
   );
 };

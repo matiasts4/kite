@@ -11,6 +11,8 @@ import { CODE_LAUNCH_ENGINES } from './engineCatalog';
 import { CodePaneNewMenu } from './CodePaneMenu';
 import { PaneNodeRenderer, type TerminalStatus } from './PaneNodeRenderer';
 import { AgentPaneResumeModal } from '../modals/AgentPaneResumeModal';
+import { AccountSwitcherModal } from '../quota/AccountSwitcherModal';
+import { subscriptionQuotaManager } from '../../lib/quota/quotaManager';
 import { FolderIcon, PlusIcon } from './codeIcons';
 import { getAllLeaves, findLeaf, type PaneDropEdge } from './treeUtils';
 import { PaneDragOverlay } from './PaneDragOverlay';
@@ -96,6 +98,22 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     engine: string;
     title?: string;
   } | null>(null);
+  const [accountSwitcherProvider, setAccountSwitcherProvider] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const onOpenSwitcher = (e: Event) => {
+      const prov = (e as CustomEvent<{ provider?: string }>)?.detail?.provider || 'antigravity';
+      setAccountSwitcherProvider({
+        id: prov,
+        label: prov === 'antigravity' ? 'Antigravity' : prov,
+      });
+    };
+    window.addEventListener('kite:open-account-switcher', onOpenSwitcher);
+    return () => window.removeEventListener('kite:open-account-switcher', onOpenSwitcher);
+  }, []);
 
   const {
     layout,
@@ -415,6 +433,12 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         }}
         onRegisterTerminalSlot={handleRegisterTerminalSlot}
         onDragGripPointerDown={handlePaneDragStart}
+        onOpenAccountSwitcher={(prov) =>
+          setAccountSwitcherProvider({
+            id: prov,
+            label: prov === 'antigravity' ? 'Antigravity' : prov,
+          })
+        }
       />
     );
   };
@@ -582,6 +606,19 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           onStartFresh={() => {
             handleApplyPaneSessionKey(resumeModalPane.paneId, globalThis.crypto.randomUUID());
             setResumeModalPane(null);
+          }}
+        />
+      )}
+      {accountSwitcherProvider && (
+        <AccountSwitcherModal
+          provider={accountSwitcherProvider.id}
+          providerLabel={accountSwitcherProvider.label}
+          isOpen={true}
+          onClose={() => setAccountSwitcherProvider(null)}
+          onAccountSwitched={() => {
+            if (typeof subscriptionQuotaManager?.fetchAll === 'function') {
+              void subscriptionQuotaManager.fetchAll(true);
+            }
           }}
         />
       )}

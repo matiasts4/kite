@@ -10,8 +10,9 @@ import {
 import { diagnoseProvider } from '../../lib/quota/providerState';
 import { saveQuotaPreferences } from '../../lib/quota/quotaManager';
 import { openSettingsTab } from '../../lib/settingsNav';
-import { listSavedAccountsFull, switchAccountProfile } from '../../lib/ipc';
-import type { SavedAccountProfile } from '../../types';
+import { guidedLoginCoordinator } from '../../lib/accounts/guidedLoginCoordinator';
+import { useAccountVault } from '../../lib/accounts/useAccountVault';
+import { AccountConfirmDialogs } from '../accounts/AccountVaultUI';
 import { MOTION_EXIT_MS } from '../../motion/contract';
 import { surfaceMotion } from '../../motion/standard/surfaces';
 import { QuotaPopoverHeader } from './popover/QuotaPopoverHeader';
@@ -45,14 +46,11 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   const popoverRef = useRef<HTMLDivElement>(null);
   const accountsDropdownRef = useRef<HTMLDivElement>(null);
   const [isAccountsExpanded, setIsAccountsExpanded] = useState(false);
-  const [savedAccounts, setSavedAccounts] = useState<SavedAccountProfile[]>([]);
-  const [unregisteredLiveSession, setUnregisteredLiveSession] = useState<{
-    email: string;
-    planName?: string | null;
-  } | null>(null);
-  const [loadingAccounts, setLoadingAccounts] = useState(false);
-  const [switchingAccountId, setSwitchingAccountId] = useState<string | null>(null);
-  const [switchFeedback, setSwitchFeedback] = useState<string | null>(null);
+
+  const vault = useAccountVault(selectedProvider, { autoLoad: phase === 'in' });
+  const hasSubDialogOpen = Boolean(
+    vault.busyConfirm || vault.deleteConfirmProfile || vault.overwritePrompt
+  );
 
   const handleOpenSettings = (providerId?: string) => {
     onClose();
@@ -63,50 +61,29 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     setIsAccountsExpanded((prev) => !prev);
   };
 
-  const fetchAccounts = useCallback(async (prov: string) => {
-    setLoadingAccounts(true);
-    setSwitchFeedback(null);
-    try {
-      const res = await listSavedAccountsFull(prov);
-      setSavedAccounts(res.profiles || []);
-      setUnregisteredLiveSession(
-        res.unregisteredLiveSession
-          ? {
-              email: res.unregisteredLiveSession.email,
-              planName: res.unregisteredLiveSession.planName,
-            }
-          : null
-      );
-    } catch {
-      setSavedAccounts([]);
-    } finally {
-      setLoadingAccounts(false);
-    }
-  }, []);
-
   useEffect(() => {
-    if (isAccountsExpanded) {
-      void fetchAccounts(selectedProvider);
-    }
-  }, [isAccountsExpanded, selectedProvider, fetchAccounts]);
+    vault.clearFeedback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProvider]);
 
   const handleSwitchAccount = async (profileId: string) => {
-    setSwitchingAccountId(profileId);
-    setSwitchFeedback(null);
-    try {
-      const res = await switchAccountProfile(selectedProvider, profileId);
-      if (res.success) {
-        setSwitchFeedback('Cuenta activada');
-        void onRefresh();
-        void fetchAccounts(selectedProvider);
-      } else {
-        setSwitchFeedback(res.error || 'Error al cambiar cuenta');
-      }
-    } catch (err: any) {
-      setSwitchFeedback(err?.message || 'Error al cambiar cuenta');
-    } finally {
-      setSwitchingAccountId(null);
+    const res = await vault.switchAccount(profileId);
+    if (res.success) {
+      void onRefresh();
     }
+  };
+
+  const handleSaveCurrent = async (label?: string) => {
+    const res = await vault.saveCurrentAccount(label, { source: 'popover' });
+    if (res.success) {
+      void onRefresh();
+    }
+    return res.success;
+  };
+
+  const handleRenameProfile = async (profileId: string, label: string) => {
+    const res = await vault.renameProfile(profileId, label);
+    return res.success;
   };
 
   const currentQuota = allQuotas[selectedProvider] || null;
@@ -174,6 +151,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
   // Close on outside click
   useEffect(() => {
     const handlePointerDown = (e: MouseEvent) => {
+      if (hasSubDialogOpen) return;
       const target = e.target as HTMLElement;
       if (isAccountsExpanded && accountsDropdownRef.current && !accountsDropdownRef.current.contains(target)) {
         if (!target.closest('.subscription-quota-account-toggle')) {
@@ -189,7 +167,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     };
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [onClose, isAccountsExpanded]);
+  }, [onClose, isAccountsExpanded, hasSubDialogOpen]);
 
   const popoverNode = (
     <motion.div
@@ -247,14 +225,25 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         diagnostic={diagnostic}
         remPct={remPct}
         resetCountdown={resetCountdown}
-        savedAccounts={savedAccounts}
-        unregisteredLiveSession={unregisteredLiveSession}
+        savedAccounts={vault.profiles}
+        unregisteredLiveSession={vault.unregisteredLiveSession}
+        authTelemetry={vault.authTelemetry}
         isAccountsExpanded={isAccountsExpanded}
         accountsDropdownRef={accountsDropdownRef}
-        switchFeedback={switchFeedback}
-        loadingAccounts={loadingAccounts}
-        switchingAccountId={switchingAccountId}
+        switchFeedback={vault.error || vault.notice}
+        isErrorFeedback={Boolean(vault.error)}
+        loadingAccounts={vault.loading}
+        switchingAccountId={vault.switchingId}
+        saving={vault.saving}
+        renamingId={vault.renamingId}
+        lastFailedSwitch={vault.lastFailedSwitch}
         onSwitchAccount={handleSwitchAccount}
+        onSaveCurrent={handleSaveCurrent}
+        onRenameProfile={handleRenameProfile}
+        onAlignIde={vault.alignIde}
+        onReauth={() => {
+          void guidedLoginCoordinator.start(selectedProvider);
+        }}
         onOpenSettings={handleOpenSettings}
         onToggleAccounts={toggleAccountsExpanded}
       />
@@ -320,8 +309,36 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     </motion.div>
   );
 
-  return createPortal(
-    <AnimatePresence>{phase === 'in' && popoverNode}</AnimatePresence>,
-    document.body
+  return (
+    <>
+      {createPortal(
+        <AnimatePresence>{phase === 'in' && popoverNode}</AnimatePresence>,
+        document.body
+      )}
+      <AccountConfirmDialogs
+        busyConfirm={vault.busyConfirm}
+        deleteConfirmProfile={vault.deleteConfirmProfile}
+        overwritePrompt={vault.overwritePrompt}
+        saving={vault.saving}
+        deletingId={vault.deletingId}
+        switchingId={vault.switchingId}
+        onConfirmBusy={async () => {
+          const res = await vault.confirmBusySwitch();
+          if (res?.success) void onRefresh();
+        }}
+        onCancelBusy={vault.cancelBusySwitch}
+        onConfirmDelete={vault.confirmDeleteProfile}
+        onCancelDelete={vault.cancelDeleteProfile}
+        onConfirmOverwriteUpdate={async () => {
+          const res = await vault.confirmOverwriteUpdate();
+          if (res.success) void onRefresh();
+        }}
+        onConfirmOverwriteRename={async () => {
+          const res = await vault.confirmOverwriteRename();
+          if (res.success) void onRefresh();
+        }}
+        onCancelOverwrite={vault.cancelOverwritePrompt}
+      />
+    </>
   );
 };

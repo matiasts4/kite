@@ -1,5 +1,16 @@
-import React from 'react';
-import type { SavedAccountProfile } from '../../types';
+import React, { useState } from 'react';
+import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../types';
+import {
+  canonicalVaultProvider,
+  formatSplitBrainDetail,
+  isSplitBrainActive,
+  type FailedSwitchState,
+} from '../../lib/accounts/accountVaultStore';
+import {
+  PencilIcon,
+  resolveAuthModeLabel,
+  resolveCredentialHealthBadge,
+} from '../accounts/AccountVaultUI';
 
 export interface QuotaAccountSwitcherProps {
   isAccountsExpanded: boolean;
@@ -8,11 +19,20 @@ export interface QuotaAccountSwitcherProps {
     email: string;
     planName?: string | null;
   } | null;
+  authTelemetry?: AntigravityAuthTelemetry | null;
   switchFeedback: string | null;
+  isErrorFeedback?: boolean;
   loadingAccounts: boolean;
   savedAccounts: SavedAccountProfile[];
   switchingAccountId: string | null;
+  saving?: boolean;
+  renamingId?: string | null;
+  lastFailedSwitch?: FailedSwitchState | null;
   onSwitchAccount: (profileId: string) => Promise<void>;
+  onSaveCurrent?: (label?: string) => Promise<boolean>;
+  onRenameProfile?: (profileId: string, label: string) => Promise<boolean>;
+  onAlignIde?: () => Promise<void>;
+  onReauth?: () => void;
   onOpenSettings: (providerId: string) => void;
   selectedProvider: string;
   onToggleAccounts: () => void;
@@ -22,15 +42,63 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
   isAccountsExpanded,
   accountsDropdownRef,
   unregisteredLiveSession,
+  authTelemetry,
   switchFeedback,
+  isErrorFeedback = false,
   loadingAccounts,
   savedAccounts,
   switchingAccountId,
+  saving = false,
+  renamingId = null,
+  lastFailedSwitch = null,
   onSwitchAccount,
+  onSaveCurrent,
+  onRenameProfile,
+  onAlignIde,
+  onReauth,
   onOpenSettings,
   selectedProvider,
   onToggleAccounts,
 }) => {
+  const [saveLabel, setSaveLabel] = useState('');
+  const [showSaveRow, setShowSaveRow] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState('');
+
+  const canon = canonicalVaultProvider(selectedProvider);
+  const splitBrain = canon === 'antigravity' && isSplitBrainActive(authTelemetry);
+  const splitBrainDetail = splitBrain ? formatSplitBrainDetail(authTelemetry) : null;
+  const authModeLabel = canon === 'antigravity' ? resolveAuthModeLabel(authTelemetry) : null;
+
+  const handleSaveUnregistered = async () => {
+    if (!unregisteredLiveSession) return;
+    if (onSaveCurrent) {
+      await onSaveCurrent(unregisteredLiveSession.email);
+      return;
+    }
+    onOpenSettings(selectedProvider);
+  };
+
+  const handleManualSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onSaveCurrent) return;
+    const ok = await onSaveCurrent(saveLabel);
+    if (ok) {
+      setSaveLabel('');
+      setShowSaveRow(false);
+    }
+  };
+
+  const handleCommitRename = async (accountId: string, e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onRenameProfile) return;
+    const ok = await onRenameProfile(accountId, editingLabel);
+    if (ok) {
+      setEditingId(null);
+      setEditingLabel('');
+    }
+  };
+
   return (
     <>
       <button
@@ -92,11 +160,49 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
             padding: '8px',
             display: 'flex',
             flexDirection: 'column',
-            gap: '4px',
-            maxHeight: '230px',
+            gap: '6px',
+            maxHeight: '280px',
             overflowY: 'auto',
           }}
         >
+          {splitBrain && (
+            <div
+              style={{
+                fontSize: '10.5px',
+                padding: '6px 8px',
+                borderRadius: 'var(--vl-radius-sm, 6px)',
+                backgroundColor: 'var(--warning-tint)',
+                color: 'var(--warning-text)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '6px',
+              }}
+            >
+              <span>IDE desincronizada: {splitBrainDetail}</span>
+              {onAlignIde && (
+                <button
+                  type="button"
+                  disabled={Boolean(switchingAccountId)}
+                  onClick={() => void onAlignIde()}
+                  style={{
+                    background: 'var(--chip-fill)',
+                    border: '1px solid var(--block-stroke)',
+                    borderRadius: 'var(--vl-radius-xs, 4px)',
+                    color: 'var(--text-primary)',
+                    padding: '2px 7px',
+                    fontSize: '10px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  Alinear IDE
+                </button>
+              )}
+            </div>
+          )}
+
           {unregisteredLiveSession && (
             <div
               style={{
@@ -109,25 +215,26 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '4px',
-                marginBottom: '4px',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontWeight: 600 }}>Sesión no guardada:</span>
                 <button
                   type="button"
-                  onClick={() => onOpenSettings(selectedProvider)}
+                  disabled={saving}
+                  onClick={() => void handleSaveUnregistered()}
                   style={{
                     background: 'var(--accent)',
                     color: '#fff',
                     border: 'none',
                     borderRadius: 'var(--vl-radius-xs, 4px)',
-                    padding: '2px 6px',
-                    fontSize: '10px',
-                    cursor: 'pointer',
+                    padding: '3px 8px',
+                    fontSize: '10.5px',
+                    fontWeight: 600,
+                    cursor: saving ? 'default' : 'pointer',
                   }}
                 >
-                  Guardar
+                  {saving ? 'Guardando...' : 'Guardar'}
                 </button>
               </div>
               <code style={{ fontSize: '10px' }}>{unregisteredLiveSession.email}</code>
@@ -136,27 +243,111 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
 
           {switchFeedback && (
             <div
+              role={isErrorFeedback ? 'alert' : undefined}
               style={{
                 fontSize: '10.5px',
-                padding: '3px 6px',
+                padding: '5px 7px',
                 borderRadius: 'var(--vl-radius-xs, 4px)',
-                backgroundColor: switchFeedback.includes('Error') ? 'rgba(239, 68, 68, 0.15)' : 'var(--accent-tint)',
-                color: switchFeedback.includes('Error') ? 'var(--warning-text, #ef4444)' : 'var(--accent)',
+                backgroundColor:
+                  isErrorFeedback || switchFeedback.includes('Error')
+                    ? 'var(--danger-fill)'
+                    : 'var(--accent-tint)',
+                color:
+                  isErrorFeedback || switchFeedback.includes('Error')
+                    ? 'var(--danger-ink)'
+                    : 'var(--accent)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '6px',
               }}
             >
-              {switchFeedback}
+              <span>{switchFeedback}</span>
+              {isErrorFeedback && lastFailedSwitch && (
+                <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+                  {lastFailedSwitch.code === 'INVALID_TARGET_PROFILE' && onReauth && (
+                    <button
+                      type="button"
+                      onClick={onReauth}
+                      style={{
+                        background: 'var(--accent)',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 'var(--vl-radius-xs, 4px)',
+                        padding: '2px 6px',
+                        fontSize: '10px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Reautenticar
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void onSwitchAccount(lastFailedSwitch.accountId)}
+                    style={{
+                      background: 'var(--chip-fill)',
+                      color: 'var(--text-primary)',
+                      border: '1px solid var(--block-stroke)',
+                      borderRadius: 'var(--vl-radius-xs, 4px)',
+                      padding: '2px 6px',
+                      fontSize: '10px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Reintentar
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
-          {loadingAccounts ? (
+          {loadingAccounts && savedAccounts.length === 0 ? (
             <div style={{ fontSize: '11px', color: 'var(--text-secondary)', padding: '6px 2px' }}>
               Cargando cuentas guardadas...
             </div>
           ) : savedAccounts.length === 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 0' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '4px 0' }}>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                 No hay otras cuentas guardadas para este proveedor.
               </span>
+              {onSaveCurrent && (
+                <form onSubmit={(e) => void handleManualSave(e)} style={{ display: 'flex', gap: '6px' }}>
+                  <input
+                    type="text"
+                    placeholder="Nombre del perfil..."
+                    value={saveLabel}
+                    onChange={(e) => setSaveLabel(e.target.value)}
+                    style={{
+                      flex: 1,
+                      height: '32px',
+                      padding: '0 8px',
+                      borderRadius: 'var(--control-radius, 8px)',
+                      border: '1px solid var(--block-stroke)',
+                      background: 'var(--composer, var(--block-fill))',
+                      color: 'var(--text-primary)',
+                      fontSize: '11px',
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    style={{
+                      height: '32px',
+                      padding: '0 10px',
+                      borderRadius: 'var(--control-radius, 8px)',
+                      border: 'none',
+                      background: 'var(--accent)',
+                      color: '#fff',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {saving ? 'Guardando...' : 'Guardar sesión'}
+                  </button>
+                </form>
+              )}
               <button
                 type="button"
                 onClick={() => onOpenSettings(selectedProvider)}
@@ -175,10 +366,12 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
               </button>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '180px', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '190px', overflowY: 'auto' }}>
               {savedAccounts.map((acc) => {
                 const isCurrentActive = acc.isActive;
                 const isSwitching = switchingAccountId === acc.id;
+                const isEditing = editingId === acc.id;
+                const health = resolveCredentialHealthBadge(acc);
 
                 return (
                   <div
@@ -188,42 +381,120 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
                       alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '5px 8px',
-                      borderRadius: 'var(--vl-radius-xs, 4px)',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
                       backgroundColor: isCurrentActive ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
                       border: isCurrentActive ? '1px solid var(--block-stroke)' : '1px solid transparent',
                       gap: '6px',
                     }}
                   >
                     <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                        <span
-                          style={{
-                            fontWeight: 600,
-                            fontSize: '11px',
-                            color: isCurrentActive ? 'var(--accent)' : 'var(--text-primary)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
+                      {isEditing ? (
+                        <form
+                          onSubmit={(e) => void handleCommitRename(acc.id, e)}
+                          style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
                         >
-                          {acc.label || acc.email}
-                        </span>
-                        {isCurrentActive && (
-                          <span
+                          <input
+                            type="text"
+                            aria-label={`Nuevo nombre para ${acc.label}`}
+                            value={editingLabel}
+                            autoFocus
+                            onChange={(e) => setEditingLabel(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') {
+                                e.stopPropagation();
+                                setEditingId(null);
+                              }
+                            }}
                             style={{
-                              fontSize: '8px',
-                              padding: '0 4px',
-                              borderRadius: '3px',
-                              backgroundColor: 'var(--accent-tint)',
-                              color: 'var(--accent)',
-                              fontWeight: 700,
-                              textTransform: 'uppercase',
+                              flex: 1,
+                              minWidth: 0,
+                              height: '26px',
+                              padding: '0 6px',
+                              borderRadius: 'var(--vl-radius-xs, 4px)',
+                              border: '1px solid var(--block-stroke)',
+                              background: 'var(--composer, var(--block-fill))',
+                              color: 'var(--text-primary)',
+                              fontSize: '11px',
+                            }}
+                          />
+                          <button
+                            type="submit"
+                            disabled={renamingId === acc.id}
+                            style={{
+                              height: '26px',
+                              padding: '0 7px',
+                              borderRadius: 'var(--vl-radius-xs, 4px)',
+                              border: 'none',
+                              background: 'var(--accent)',
+                              color: '#fff',
+                              fontSize: '10px',
+                              cursor: 'pointer',
                             }}
                           >
-                            Activa
+                            Guardar
+                          </button>
+                        </form>
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                          <span
+                            style={{
+                              fontWeight: 600,
+                              fontSize: '11px',
+                              color: isCurrentActive ? 'var(--accent)' : 'var(--text-primary)',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {acc.label || acc.email}
                           </span>
-                        )}
-                      </div>
+                          {isCurrentActive && (
+                            <span
+                              style={{
+                                fontSize: '8px',
+                                padding: '0 4px',
+                                borderRadius: 'var(--vl-radius-xs, 4px)',
+                                backgroundColor: 'var(--accent-tint)',
+                                color: 'var(--accent)',
+                                fontWeight: 700,
+                                textTransform: 'uppercase',
+                              }}
+                            >
+                              Activa
+                            </span>
+                          )}
+                          {health && (
+                            <span
+                              style={{
+                                fontSize: '8.5px',
+                                padding: '0 4px',
+                                borderRadius: 'var(--vl-radius-xs, 4px)',
+                                backgroundColor:
+                                  health.tone === 'ok'
+                                    ? 'color-mix(in srgb, var(--status-running) 18%, transparent)'
+                                    : 'var(--danger-fill)',
+                                color: health.tone === 'ok' ? 'var(--status-running)' : 'var(--danger-ink)',
+                                fontWeight: 600,
+                              }}
+                            >
+                              {health.label}
+                            </span>
+                          )}
+                          {isCurrentActive && authModeLabel && (
+                            <span
+                              style={{
+                                fontSize: '8.5px',
+                                padding: '0 4px',
+                                borderRadius: 'var(--vl-radius-xs, 4px)',
+                                backgroundColor: 'var(--chip-fill)',
+                                color: 'var(--text-secondary)',
+                              }}
+                            >
+                              {authModeLabel}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {acc.email && acc.label && acc.email !== acc.label && (
                         <span style={{ fontSize: '9.5px', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {acc.email}
@@ -231,40 +502,128 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
                       )}
                     </div>
 
-                    <button
-                      type="button"
-                      disabled={isCurrentActive || isSwitching}
-                      onClick={() => onSwitchAccount(acc.id)}
-                      style={{
-                        padding: '3px 7px',
-                        borderRadius: 'var(--vl-radius-xs, 4px)',
-                        fontSize: '10px',
-                        fontWeight: 600,
-                        backgroundColor: isCurrentActive
-                          ? 'transparent'
-                          : 'var(--accent-tint, rgba(92, 143, 255, 0.15))',
-                        color: isCurrentActive ? 'var(--text-secondary)' : 'var(--accent, #5c8fff)',
-                        border: isCurrentActive ? 'none' : '1px solid var(--accent-tint-strong)',
-                        cursor: isCurrentActive || isSwitching ? 'default' : 'pointer',
-                        flexShrink: 0,
-                      }}
-                    >
-                      {isSwitching ? 'Cambiando...' : isCurrentActive ? 'En uso' : 'Usar'}
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                      {onRenameProfile && !isEditing && (
+                        <button
+                          type="button"
+                          aria-label={`Renombrar perfil ${acc.label}`}
+                          title="Renombrar perfil"
+                          onClick={() => {
+                            setEditingId(acc.id);
+                            setEditingLabel(acc.label);
+                          }}
+                          style={{
+                            width: '26px',
+                            height: '26px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            borderRadius: 'var(--vl-radius-xs, 4px)',
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'var(--text-secondary)',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <PencilIcon size={11} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={isCurrentActive || isSwitching || Boolean(switchingAccountId)}
+                        onClick={() => void onSwitchAccount(acc.id)}
+                        style={{
+                          height: '26px',
+                          padding: '0 8px',
+                          borderRadius: 'var(--vl-radius-xs, 4px)',
+                          fontSize: '10px',
+                          fontWeight: 600,
+                          backgroundColor: isCurrentActive
+                            ? 'transparent'
+                            : 'var(--accent-tint, rgba(92, 143, 255, 0.15))',
+                          color: isCurrentActive ? 'var(--text-secondary)' : 'var(--accent, #5c8fff)',
+                          border: isCurrentActive ? 'none' : '1px solid var(--accent-tint-strong)',
+                          cursor: isCurrentActive || isSwitching ? 'default' : 'pointer',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {isSwitching ? 'Cambiando y verificando...' : isCurrentActive ? 'En uso' : 'Usar'}
+                      </button>
+                    </div>
                   </div>
                 );
               })}
+
+              {onSaveCurrent && showSaveRow && (
+                <form
+                  onSubmit={(e) => void handleManualSave(e)}
+                  style={{ display: 'flex', gap: '4px', marginTop: '4px' }}
+                >
+                  <input
+                    type="text"
+                    placeholder="Nombre del perfil..."
+                    value={saveLabel}
+                    onChange={(e) => setSaveLabel(e.target.value)}
+                    autoFocus
+                    style={{
+                      flex: 1,
+                      height: '32px',
+                      padding: '0 8px',
+                      borderRadius: 'var(--control-radius, 8px)',
+                      border: '1px solid var(--block-stroke)',
+                      background: 'var(--composer, var(--block-fill))',
+                      color: 'var(--text-primary)',
+                      fontSize: '11px',
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    style={{
+                      height: '32px',
+                      padding: '0 10px',
+                      borderRadius: 'var(--control-radius, 8px)',
+                      border: 'none',
+                      background: 'var(--accent)',
+                      color: '#fff',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {saving ? 'Guardando...' : 'Guardar'}
+                  </button>
+                </form>
+              )}
 
               <div
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'flex-end',
+                  justifyContent: 'space-between',
                   paddingTop: '4px',
                   borderTop: '1px dashed var(--block-stroke)',
                   marginTop: '2px',
+                  gap: '8px',
                 }}
               >
+                {onSaveCurrent ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowSaveRow((prev) => !prev)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      color: 'var(--accent)',
+                      fontSize: '10.5px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {showSaveRow ? 'Cancelar' : '+ Guardar sesión actual'}
+                  </button>
+                ) : <span />}
                 <button
                   type="button"
                   onClick={() => onOpenSettings(selectedProvider)}

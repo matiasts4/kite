@@ -5,7 +5,8 @@ import { BrandLogo } from '../../views/agents/engineMetadata';
 import { QuotaProgressRing } from '../QuotaProgressRing';
 import { QuotaAccountSwitcher } from '../QuotaAccountSwitcher';
 import { formatDetailedReset } from '../../../lib/quota/useResetCountdownClock';
-import type { SavedAccountProfile } from '../../../types';
+import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../../types';
+import type { FailedSwitchState } from '../../../lib/accounts/accountVaultStore';
 
 export interface QuotaPopoverContentProps {
   activeIdsCount: number;
@@ -20,12 +21,21 @@ export interface QuotaPopoverContentProps {
   resetCountdown: string | null;
   savedAccounts: SavedAccountProfile[];
   unregisteredLiveSession: { email: string; planName?: string | null } | null;
+  authTelemetry?: AntigravityAuthTelemetry | null;
   isAccountsExpanded: boolean;
   accountsDropdownRef: React.RefObject<HTMLDivElement | null>;
   switchFeedback: string | null;
+  isErrorFeedback?: boolean;
   loadingAccounts: boolean;
   switchingAccountId: string | null;
+  saving?: boolean;
+  renamingId?: string | null;
+  lastFailedSwitch?: FailedSwitchState | null;
   onSwitchAccount: (profileId: string) => Promise<void>;
+  onSaveCurrent?: (label?: string) => Promise<boolean>;
+  onRenameProfile?: (profileId: string, label: string) => Promise<boolean>;
+  onAlignIde?: () => Promise<void>;
+  onReauth?: () => void;
   onOpenSettings: (providerId?: string) => void;
   onToggleAccounts: () => void;
 }
@@ -39,15 +49,96 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
   resetCountdown,
   savedAccounts,
   unregisteredLiveSession,
+  authTelemetry = null,
   isAccountsExpanded,
   accountsDropdownRef,
   switchFeedback,
+  isErrorFeedback = false,
   loadingAccounts,
   switchingAccountId,
+  saving = false,
+  renamingId = null,
+  lastFailedSwitch = null,
   onSwitchAccount,
+  onSaveCurrent,
+  onRenameProfile,
+  onAlignIde,
+  onReauth,
   onOpenSettings,
   onToggleAccounts,
 }) => {
+  const resolvedActiveEmail =
+    savedAccounts.find((a) => a.isActive)?.email ||
+    unregisteredLiveSession?.email ||
+    authTelemetry?.cliEmail ||
+    authTelemetry?.credEmail ||
+    (currentQuota?.metadata?.email ? String(currentQuota.metadata.email) : null) ||
+    'Sesión nativa activa';
+
+  const accountSwitcherBar = (
+    <div
+      style={{
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '7px 10px',
+        borderRadius: 'var(--control-radius, 8px)',
+        backgroundColor: 'var(--block-fill)',
+        border: '1px solid var(--block-stroke)',
+        marginTop: '4px',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '8px',
+          width: '100%',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
+          <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
+          <span
+            style={{
+              fontSize: '11px',
+              fontWeight: 600,
+              color: 'var(--text-primary)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={resolvedActiveEmail}
+          >
+            {resolvedActiveEmail}
+          </span>
+        </div>
+        <QuotaAccountSwitcher
+          isAccountsExpanded={isAccountsExpanded}
+          accountsDropdownRef={accountsDropdownRef}
+          unregisteredLiveSession={unregisteredLiveSession}
+          authTelemetry={authTelemetry}
+          switchFeedback={switchFeedback}
+          isErrorFeedback={isErrorFeedback}
+          loadingAccounts={loadingAccounts}
+          savedAccounts={savedAccounts}
+          switchingAccountId={switchingAccountId}
+          saving={saving}
+          renamingId={renamingId}
+          lastFailedSwitch={lastFailedSwitch}
+          onSwitchAccount={onSwitchAccount}
+          onSaveCurrent={onSaveCurrent}
+          onRenameProfile={onRenameProfile}
+          onAlignIde={onAlignIde}
+          onReauth={onReauth}
+          onOpenSettings={onOpenSettings}
+          selectedProvider={selectedProvider}
+          onToggleAccounts={onToggleAccounts}
+        />
+      </div>
+    </div>
+  );
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', overflowY: 'auto' }}>
       {activeIdsCount === 0 ? (
@@ -209,7 +300,7 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                       Plan: {currentQuota.metadata.planType}
                     </span>
                   )}
-                  {currentQuota.metadata.email && (
+                  {(currentQuota.metadata.email || resolvedActiveEmail !== 'Sesión nativa activa') && (
                     <span
                       style={{
                         fontSize: '10px',
@@ -220,71 +311,16 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                         border: '1px solid var(--block-stroke)',
                       }}
                     >
-                      {currentQuota.metadata.email}
+                      {resolvedActiveEmail !== 'Sesión nativa activa'
+                        ? resolvedActiveEmail
+                        : String(currentQuota.metadata.email)}
                     </span>
                   )}
                 </div>
               )}
 
               {/* Account Switcher Bar */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  padding: '7px 10px',
-                  borderRadius: 'var(--control-radius, 8px)',
-                  backgroundColor: 'var(--block-fill)',
-                  border: '1px solid var(--block-stroke)',
-                  marginTop: '4px',
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '8px',
-                    width: '100%',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
-                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
-                    <span
-                      style={{
-                        fontSize: '11px',
-                        fontWeight: 600,
-                        color: 'var(--text-primary)',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                      title={(() => {
-                        const emailDisplay =
-                          savedAccounts.find((a) => a.isActive)?.email ??
-                          unregisteredLiveSession?.email ??
-                          (currentQuota.metadata?.email ? String(currentQuota.metadata.email) : null);
-                        return emailDisplay || 'Sesión nativa activa';
-                      })()}
-                    >
-                      {currentQuota.metadata?.email ? String(currentQuota.metadata.email) : 'Sesión nativa activa'}
-                    </span>
-                  </div>
-                  <QuotaAccountSwitcher
-                    isAccountsExpanded={isAccountsExpanded}
-                    accountsDropdownRef={accountsDropdownRef}
-                    unregisteredLiveSession={unregisteredLiveSession}
-                    switchFeedback={switchFeedback}
-                    loadingAccounts={loadingAccounts}
-                    savedAccounts={savedAccounts}
-                    switchingAccountId={switchingAccountId}
-                    onSwitchAccount={onSwitchAccount}
-                    onOpenSettings={onOpenSettings}
-                    selectedProvider={selectedProvider}
-                    onToggleAccounts={onToggleAccounts}
-                  />
-                </div>
-              </div>
+              {accountSwitcherBar}
 
               {/* Individual windows breakdown */}
               {currentQuota.windows && currentQuota.windows.length > 0 && (
@@ -358,7 +394,7 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                             height: '4px',
                             width: '100%',
                             backgroundColor: 'var(--block-stroke)',
-                            borderRadius: '2px',
+                            borderRadius: '9999px',
                             overflow: 'hidden',
                           }}
                         >
@@ -372,7 +408,7 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                                   : used > 55
                                   ? 'var(--warning-text)'
                                   : 'var(--status-running)',
-                              borderRadius: '2px',
+                              borderRadius: '9999px',
                               transition: 'width 300ms ease',
                             }}
                           />
@@ -591,6 +627,10 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
               </button>
             </div>
           )}
+
+          {diagnostic.state !== 'ok' &&
+            (savedAccounts.length > 0 || Boolean(unregisteredLiveSession)) &&
+            accountSwitcherBar}
         </>
       )}
     </div>

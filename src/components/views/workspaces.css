@@ -689,3 +689,34 @@
   text-align: right;
 }
 
+.code-pane-account-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--control-pane-header, 22px);
+  max-width: 156px;
+  padding: 0 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.28));
+  background: var(--accent-tint, rgba(92, 143, 255, 0.12));
+  color: var(--accent, #5c8fff);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.code-pane-account-pill:hover {
+  background: var(--accent-tint-strong, rgba(92, 143, 255, 0.22));
+}
+
+.code-pane-account-pill > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+

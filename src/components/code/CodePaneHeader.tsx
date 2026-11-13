@@ -11,6 +11,7 @@ import {
 } from './codeIcons';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { CodePaneActionsMenu, CodePaneNewMenu } from './CodePaneMenu';
+import { useAccountVault } from '../../lib/accounts/useAccountVault';
 
 export interface CodePaneHeaderProps {
   nodeId: string;
@@ -45,6 +46,7 @@ export interface CodePaneHeaderProps {
   onTerminalCommand: (cmd: 'font-larger' | 'font-smaller' | 'clear' | 'interrupt' | 'restart') => void;
   onResumePrevious?: () => void;
   onDragGripPointerDown?: (e: React.PointerEvent) => void;
+  onOpenAccountSwitcher?: (provider: string) => void;
 }
 
 export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
@@ -80,10 +82,30 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
   onTerminalCommand,
   onResumePrevious,
   onDragGripPointerDown,
+  onOpenAccountSwitcher,
 }) => {
   const isRenaming = renamingLeafId === nodeId;
   const actionsBtnRef = useRef<HTMLButtonElement | null>(null);
   const newBtnRef = useRef<HTMLButtonElement | null>(null);
+  const paneEngine =
+    occupant.kind === 'terminal'
+      ? (occupant.engine || occupant.runtime?.engine || '').toLowerCase()
+      : '';
+  const isAntigravityTerminal = paneEngine === 'antigravity' || paneEngine === 'agy';
+  const antigravityVault = useAccountVault('antigravity', {
+    autoLoad: isAntigravityTerminal,
+  });
+  const activeAntigravityProfile = isAntigravityTerminal
+    ? antigravityVault.profiles.find((p) => p.isActive)
+    : undefined;
+  const accountAttributionLabel = isAntigravityTerminal
+    ? activeAntigravityProfile?.label ||
+      activeAntigravityProfile?.email ||
+      antigravityVault.unregisteredLiveSession?.email ||
+      antigravityVault.authTelemetry?.cliEmail ||
+      antigravityVault.authTelemetry?.credEmail ||
+      'Cuenta'
+    : null;
   return (
     <header
       className="code-pane-header"
@@ -166,6 +188,31 @@ export const CodePaneHeader: React.FC<CodePaneHeaderProps> = ({
             })()}
             <span className="sr-only">{displayName.replace(/\s*\([^)]*\)\s*$/, '').trim() || displayName}</span>
           </span>
+          {isAntigravityTerminal && accountAttributionLabel && (
+            <button
+              type="button"
+              className="code-pane-account-pill"
+              data-testid="pane-account-pill"
+              title={`Cuenta activa de Antigravity: ${accountAttributionLabel}. Clic para cambiar`}
+              aria-label={`Cuenta activa de Antigravity: ${accountAttributionLabel}`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onOpenAccountSwitcher) {
+                  onOpenAccountSwitcher('antigravity');
+                } else if (typeof window !== 'undefined') {
+                  window.dispatchEvent(
+                    new CustomEvent('kite:open-account-switcher', {
+                      detail: { provider: 'antigravity' },
+                    })
+                  );
+                }
+              }}
+            >
+              <span aria-hidden="true">✦</span>
+              <span>{accountAttributionLabel}</span>
+            </button>
+          )}
         </>
       )}
 

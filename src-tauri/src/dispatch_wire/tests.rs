@@ -857,3 +857,69 @@ fn argv_envelope_reports_descriptive_errors_for_invalid_provider_and_serves_prov
     assert!(text.contains("grok"), "got: {text}");
     assert!(text.contains("codex"), "got: {text}");
 }
+
+#[test]
+fn live_thread_for_profile_skips_side_chats_and_agent_children() {
+    use crate::chat::session::{ScriptedTransport, SessionMode, SessionSpec};
+    use crate::persist::threads;
+
+    let profile = format!("prof-iso-{}", uuid::Uuid::new_v4().simple());
+    let side_id = format!("side-{}", uuid::Uuid::new_v4().simple());
+    let child_id = format!("child-{}", uuid::Uuid::new_v4().simple());
+    let main_id = format!("main-{}", uuid::Uuid::new_v4().simple());
+
+    {
+        let mut mgr = crate::chat::session_manager().lock().unwrap();
+        for tid in [&side_id, &child_id, &main_id] {
+            let spec = SessionSpec {
+                thread_id: tid.clone(),
+                driver: "grok".to_string(),
+                connection_id: None,
+                working_directory: None,
+                mode: SessionMode::Persistent,
+                recipe: None,
+                resume_handle: None,
+                extra_env: Vec::new(),
+            };
+            mgr.attach(spec, Box::new(ScriptedTransport::new())).unwrap();
+        }
+    }
+
+    {
+        let mut list = threads().lock().unwrap();
+        list.push(json!({
+            "id": side_id,
+            "profileId": profile,
+            "sideChat": true,
+        }));
+        list.push(json!({
+            "id": child_id,
+            "profileId": profile,
+            "startedByAgent": true,
+            "parentThreadId": "parent-root",
+        }));
+    }
+    assert_eq!(super::protocol::live_thread_for_profile(&profile), None);
+
+    threads().lock().unwrap().push(json!({
+        "id": main_id,
+        "profileId": profile,
+    }));
+    assert_eq!(
+        super::protocol::live_thread_for_profile(&profile).as_deref(),
+        Some(main_id.as_str())
+    );
+
+    if let Ok(mut mgr) = crate::chat::session_manager().lock() {
+        for tid in [&side_id, &child_id, &main_id] {
+            let _ = mgr.stop(tid);
+        }
+    }
+    threads()
+        .lock()
+        .unwrap()
+        .retain(|t| {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            id != side_id && id != child_id && id != main_id
+        });
+}

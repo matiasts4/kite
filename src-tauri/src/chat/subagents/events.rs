@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::acp::{
-    build_acp_tool_call, extract_mentions, merge_subagent_meta, AcpStreamEvent, SubagentMeta,
-    SwarmMeta,
+    build_acp_tool_call, extract_mentions, merge_subagent_meta, merge_swarm_meta, AcpStreamEvent,
+    SubagentMeta, SwarmMeta,
 };
 use crate::chat::models::default_mode;
 use crate::chat::runtime::{live_cv, live_turns, push_event};
@@ -44,9 +44,192 @@ pub fn emit_swarm_event(thread_id: &str, state: &SwarmState) {
 }
 
 
+pub(super) fn emit_subagent_steps_event(thread_id: &str, subagent_id: &str, run: &Value) {
+    emit_subagent_event(json!({
+        "kind": "subagentStepsUpdated",
+        "threadId": thread_id,
+        "subagentId": subagent_id,
+        "childThreadId": run.get("childThreadId").cloned().unwrap_or(Value::Null),
+        "items": run.get("items").cloned().unwrap_or_else(|| json!([])),
+        "stepCount": run.get("stepCount").cloned().unwrap_or_else(|| json!(0)),
+        "latestActivity": run.get("latestActivity").cloned().unwrap_or(Value::Null),
+        "status": run.get("status").cloned().unwrap_or_else(|| json!("running")),
+        "model": run.get("model").cloned().unwrap_or(Value::Null),
+        "provider": run.get("provider").cloned().unwrap_or(Value::Null),
+    }));
+}
+
+pub fn is_generic_tool_field(key: &str, val: &str) -> bool {
+    let trimmed = val.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("tool")
+        || trimmed.eq_ignore_ascii_case("dynamictoolcall")
+    {
+        return true;
+    }
+    match key {
+        "toolKind" => matches!(trimmed, "dynamicToolCall" | "unknown" | "other"),
+        "title" => trimmed.eq_ignore_ascii_case("dynamic tool call"),
+        _ => false,
+    }
+}
+
 pub(super) fn upsert_nested_item(list: &mut Vec<Value>, item: &Value) {
+    let mut normalized = item.clone();
+    let append_delta = normalized
+        .as_object_mut()
+        .and_then(|obj| obj.remove("_appendDelta"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let kind = normalized
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    if kind == "tool" || kind == "command" {
+        for prev in list.iter_mut() {
+            if matches!(
+                prev.get("kind").and_then(Value::as_str),
+                Some("assistant" | "reasoning")
+            ) && prev.get("streaming").and_then(Value::as_bool) == Some(true)
+            {
+                prev["streaming"] = json!(false);
+            }
+        }
+    }
+
+    let has_intervening_tool = |from_idx: usize| -> bool {
+        list.get(from_idx + 1..)
+            .unwrap_or(&[])
+            .iter()
+            .any(|later| {
+                matches!(
+                    later.get("kind").and_then(Value::as_str),
+                    Some("tool" | "command")
+                )
+            })
+    };
+
+    if append_delta && matches!(kind.as_str(), "assistant" | "reasoning") {
+        let delta = normalized.get("text").and_then(Value::as_str).unwrap_or("");
+        if delta.is_empty() {
+            return;
+        }
+        let target_id = normalized
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let seg_prefix = format!("{target_id}#seg");
+        let is_unkeyed_stream = target_id.ends_with("_stream_msg")
+            || target_id.ends_with("_stream_thought");
+        let existing_pos = if !is_unkeyed_stream && !target_id.is_empty() {
+            list.iter().rposition(|ex| {
+                let ex_id = ex.get("id").and_then(Value::as_str).unwrap_or("");
+                (ex_id == target_id || ex_id.starts_with(&seg_prefix))
+                    && ex.get("kind").and_then(Value::as_str) == Some(kind.as_str())
+                    && ex.get("streaming").and_then(Value::as_bool) == Some(true)
+            })
+            .filter(|&pos| !has_intervening_tool(pos))
+        } else {
+            list.last()
+                .filter(|ex| {
+                    ex.get("kind").and_then(Value::as_str) == Some(kind.as_str())
+                        && ex.get("streaming").and_then(Value::as_bool) == Some(true)
+                })
+                .map(|_| list.len() - 1)
+        };
+        if let Some(pos) = existing_pos {
+            let slot = &mut list[pos];
+            let existing_text = slot.get("text").and_then(Value::as_str).unwrap_or("");
+            slot["text"] = json!(format!("{existing_text}{delta}"));
+            if let Some(streaming) = normalized.get("streaming").and_then(Value::as_bool) {
+                slot["streaming"] = json!(streaming);
+            }
+            return;
+        }
+        if is_unkeyed_stream
+            || (!target_id.is_empty()
+                && list.iter().any(|ex| {
+                    let ex_id = ex.get("id").and_then(Value::as_str).unwrap_or("");
+                    ex_id == target_id || ex_id.starts_with(&seg_prefix)
+                }))
+        {
+            normalized["id"] = json!(format!("{target_id}#seg{}", list.len()));
+        }
+        list.push(normalized);
+        return;
+    }
+
+    let id = normalized
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let seg_prefix = format!("{id}#seg");
+    if let Some(pos) = list.iter().rposition(|ex| {
+        if id.is_empty() {
+            return false;
+        }
+        let ex_id = ex.get("id").and_then(Value::as_str).unwrap_or("");
+        ex_id == id || ex_id.starts_with(&seg_prefix)
+    }) {
+        if matches!(kind.as_str(), "assistant" | "reasoning") && has_intervening_tool(pos) {
+            normalized["id"] = json!(format!("{id}#seg{}", list.len()));
+            list.push(normalized);
+            return;
+        }
+        let slot = &mut list[pos];
+        if let (Some(ex_obj), Some(new_obj)) = (slot.as_object_mut(), normalized.as_object()) {
+            for (k, v) in new_obj {
+                if v.is_null() {
+                    continue;
+                }
+                if let Some(new_str) = v.as_str() {
+                    if is_generic_tool_field(k, new_str)
+                        && ex_obj
+                            .get(k)
+                            .and_then(Value::as_str)
+                            .is_some_and(|old| !is_generic_tool_field(k, old))
+                    {
+                        continue;
+                    }
+                }
+                if k == "subagentMeta" {
+                    if let (Some(old_sub), Some(new_sub)) = (
+                        ex_obj
+                            .get("subagentMeta")
+                            .and_then(|val| serde_json::from_value::<SubagentMeta>(val.clone()).ok()),
+                        serde_json::from_value::<SubagentMeta>(v.clone()).ok(),
+                    ) {
+                        if let Ok(merged) = serde_json::to_value(merge_subagent_meta(Some(&old_sub), new_sub)) {
+                            ex_obj.insert(k.clone(), merged);
+                            continue;
+                        }
+                    }
+                }
+                if k == "swarmMeta" {
+                    if let (Some(old_swarm), Some(new_swarm)) = (
+                        ex_obj
+                            .get("swarmMeta")
+                            .and_then(|val| serde_json::from_value::<SwarmMeta>(val.clone()).ok()),
+                        serde_json::from_value::<SwarmMeta>(v.clone()).ok(),
+                    ) {
+                        if let Ok(merged) = serde_json::to_value(merge_swarm_meta(Some(&old_swarm), new_swarm)) {
+                            ex_obj.insert(k.clone(), merged);
+                            continue;
+                        }
+                    }
+                }
+                ex_obj.insert(k.clone(), v.clone());
+            }
+            return;
+        }
+    }
+
     let mut temp = json!({ "items": std::mem::take(list) });
-    upsert_item(&mut temp, item);
+    upsert_item(&mut temp, &normalized);
     if let Some(arr) = temp.get_mut("items").and_then(|v| v.as_array_mut()) {
         *list = std::mem::take(arr);
     }

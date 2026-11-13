@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ pub type SwarmTurnLauncher<'a> = &'a dyn Fn(&str, &str) -> Result<(), String>;
 pub(super) struct WaitChannel {
     pub(super) condvar: (Mutex<u64>, Condvar),
     pub(super) notify: Notify,
+    pub(super) active_coordinator_waiters: AtomicUsize,
 }
 
 impl WaitChannel {
@@ -34,6 +36,7 @@ impl WaitChannel {
         Self {
             condvar: (Mutex::new(0), Condvar::new()),
             notify: Notify::new(),
+            active_coordinator_waiters: AtomicUsize::new(0),
         }
     }
 }
@@ -267,12 +270,39 @@ pub(super) fn coordinator_matches_post(post: &SwarmBoardPost) -> bool {
         return false;
     }
     let text_lower = post.text.to_ascii_lowercase();
-    if text_lower.contains("[stall]") || text_lower.contains("[done]") {
+    if text_lower.contains("[stall]")
+        || text_lower.contains("[done]")
+        || text_lower.contains("[blocked]")
+    {
         return true;
     }
     post.mentions
         .iter()
         .any(|m| m.eq_ignore_ascii_case("@coordinator") || m.eq_ignore_ascii_case("@all"))
+}
+
+pub(super) fn is_coordinator_busy(coord_tid: &str) -> bool {
+    let live_busy = crate::chat::runtime::live_turns()
+        .lock()
+        .ok()
+        .is_some_and(|live| {
+            live.by_thread
+                .get(coord_tid)
+                .and_then(|run_id| live.runs.get(run_id))
+                .is_some_and(|run| !run.finished && !run.closing)
+        });
+    if live_busy {
+        return true;
+    }
+    threads()
+        .lock()
+        .ok()
+        .is_some_and(|all| {
+            all.iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(coord_tid))
+                .and_then(|t| t.get("status").and_then(Value::as_str))
+                == Some("running")
+        })
 }
 
 pub(super) fn format_posts(posts: &[&SwarmBoardPost]) -> String {
@@ -341,5 +371,23 @@ pub(super) fn build_worker_wakeup_prompt(title: &str, member: &SwarmMember, post
         You are @{}. New board messages woke you up. Reply on the board via `kite dispatch swarm post \"@coordinator ...\"` when finished or blocked.\n\n\
         Unread Board Posts:\n{}",
         title, max_seq, member.name, formatted
+    )
+}
+
+pub(super) fn build_coordinator_wakeup_prompt(state: &SwarmState, posts: &[SwarmBoardPost]) -> String {
+    let refs: Vec<&SwarmBoardPost> = posts.iter().collect();
+    let formatted = format_posts(&refs);
+    let max_seq = posts.iter().map(|p| p.seq).max().unwrap_or(state.last_coordinator_wake_seq);
+    format!(
+        "[Swarm Coordinator Wakeup — \"{}\" ({}) | head #{}]\n\
+        Workers posted new updates requiring coordinator attention. Review them, inspect worker output or diffs if needed, respond on the board (`kite dispatch swarm post ...`) or wait for further updates (`kite dispatch swarm wait --since {} --mentions-only`).\n\n\
+        Unread Board Posts:\n{}\n\n\
+        Swarm Status:\n{}",
+        state.title,
+        state.swarm_id,
+        max_seq,
+        max_seq,
+        formatted,
+        format_status(state),
     )
 }

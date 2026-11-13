@@ -230,7 +230,7 @@ pub fn dispatch_wait(request: Option<Value>) -> Value {
         address: request.get("address").and_then(Value::as_str).map(|s| s.to_string()),
         until,
         children,
-        timeout_ms: request.get("timeoutMs").and_then(Value::as_u64).unwrap_or(0),
+        timeout_ms: request.get("timeoutMs").and_then(Value::as_u64).unwrap_or(30_000),
     };
     serde_json::to_value(execute_command(&request, &command, &id)).unwrap_or(Value::Null)
 }

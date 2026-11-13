@@ -89,9 +89,9 @@ pub(super) fn parse_nested_frame_items(subagent_id: &str, id_hint: &str, frame: 
                             output,
                             None,
                             None,
-                            Some("dynamicToolCall".to_string()),
-                            Some(String::new()),
-                            Some(String::new()),
+                            None,
+                            None,
+                            None,
                             None,
                             Some(subagent_id.to_string()),
                         );
@@ -108,13 +108,17 @@ pub(super) fn parse_nested_frame_items(subagent_id: &str, id_hint: &str, frame: 
         if let Some(ev) = crate::acp::parse_acp_stream_line("nested", id_hint, &line) {
             match ev {
                 AcpStreamEvent::ToolUpdate { tool } => out.push(acp_tool_to_chat_item(&tool)),
-                AcpStreamEvent::ContentDelta { text } if !text.trim().is_empty() => {
+                AcpStreamEvent::ContentDelta { text } if !text.is_empty() => {
                     let item_id = format!("sub_{subagent_id}_{id_hint}_msg");
-                    out.push(chat_item(&item_id, "assistant", &text, false));
+                    let mut item = chat_item(&item_id, "assistant", &text, true);
+                    item["_appendDelta"] = json!(true);
+                    out.push(item);
                 }
-                AcpStreamEvent::ThoughtDelta { text, is_done, .. } if !text.trim().is_empty() => {
+                AcpStreamEvent::ThoughtDelta { text, is_done, .. } if !text.is_empty() => {
                     let item_id = format!("sub_{subagent_id}_{id_hint}_thought");
-                    out.push(chat_item(&item_id, "reasoning", &text, !is_done));
+                    let mut item = chat_item(&item_id, "reasoning", &text, !is_done);
+                    item["_appendDelta"] = json!(true);
+                    out.push(item);
                 }
                 _ => {}
             }
@@ -123,13 +127,37 @@ pub(super) fn parse_nested_frame_items(subagent_id: &str, id_hint: &str, frame: 
     out
 }
 
+pub(super) fn extract_nested_frame_hint(frame: &Value) -> String {
+    if let Some(id) = frame
+        .pointer("/message/id")
+        .or_else(|| frame.get("id"))
+        .or_else(|| frame.get("message_id"))
+        .or_else(|| frame.get("messageId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return id.to_string();
+    }
+    if let Some(step) = frame
+        .pointer("/step_update/step_index")
+        .and_then(Value::as_i64)
+    {
+        return format!("step_{step}");
+    }
+    if let Some(idx) = frame.pointer("/index").and_then(Value::as_i64) {
+        return format!("idx_{idx}");
+    }
+    "stream".to_string()
+}
+
 pub fn ingest_nested_subagent_frame(
     thread_id: &str,
     parent_run_id: &str,
     parent_tool_use_id: &str,
     frame: &Value,
 ) -> bool {
-    let hint = now_ms().to_string();
+    let hint = extract_nested_frame_hint(frame);
     let nested_items = parse_nested_frame_items(parent_tool_use_id, &hint, frame);
     if nested_items.is_empty() {
         return false;
@@ -229,12 +257,17 @@ pub fn ingest_nested_subagent_frame(
     }
 
     if let Some(run) = updated_run {
+        let sub_id = run
+            .get("subagentId")
+            .and_then(Value::as_str)
+            .unwrap_or(parent_tool_use_id);
         emit_subagent_event(json!({
             "kind": "subagentRunUpdated",
             "threadId": thread_id,
-            "subagentId": run.get("subagentId"),
+            "subagentId": sub_id,
             "run": run,
         }));
+        emit_subagent_steps_event(thread_id, sub_id, &run);
     }
     true
 }

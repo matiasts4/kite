@@ -10,7 +10,7 @@ pub(super) fn parse_address_command<'a>(
     build: impl FnOnce(String) -> Command,
 ) -> Result<Command, DispatchError> {
     let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
-    if address.starts_with("--") || items.next().is_some() {
+    if address.starts_with('-') || items.next().is_some() {
         return Err(DispatchError::BadArgs);
     }
     Ok(build(address))
@@ -20,7 +20,7 @@ pub(super) fn parse_keys<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<Command, DispatchError> {
     let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
-    if address.starts_with("--") {
+    if address.starts_with('-') {
         return Err(DispatchError::BadArgs);
     }
     let keys: Vec<String> = items.map(|part| part.to_string()).collect();
@@ -34,25 +34,36 @@ pub(super) fn parse_send<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<Command, DispatchError> {
     let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    if address.starts_with('-') {
+        return Err(DispatchError::BadArgs);
+    }
     let mut body = None;
     let mut file = None;
     let mut force = false;
     let mut only_ready = false;
     let mut allow_queue = true;
     while let Some(next) = items.next() {
-        match next {
-            "--file" => file = Some(need(items)?),
-            "--force" => force = true,
+        let (flag, inline_val) = parse_run::split_flag(next);
+        match flag {
+            "--file" => file = Some(need_flag(items, inline_val)?),
+            "--force" if inline_val.is_none() => force = true,
             "--if" => {
-                if items.next() != Some("ready") {
+                if need_flag(items, inline_val)? != "ready" {
                     return Err(DispatchError::BadArgs);
                 }
                 only_ready = true;
                 allow_queue = false;
             }
-            "--queue" => allow_queue = true,
-            "--no-queue" => allow_queue = false,
-            other if body.is_none() && !other.starts_with("--") => body = Some(other.to_string()),
+            "--queue" if inline_val.is_none() => allow_queue = true,
+            "--no-queue" if inline_val.is_none() => allow_queue = false,
+            "--" if inline_val.is_none() && body.is_none() => {
+                body = items.next().map(|part| part.to_string());
+                if items.next().is_some() {
+                    return Err(DispatchError::BadArgs);
+                }
+            }
+            _ if next.starts_with('-') => return Err(DispatchError::BadArgs),
+            other if body.is_none() => body = Some(other.to_string()),
             _ => return Err(DispatchError::BadArgs),
         }
     }
@@ -77,25 +88,30 @@ pub(super) fn parse_wait<'a>(
     let mut children = None;
     let mut timeout_ms = 30_000;
     while let Some(next) = items.next() {
-        match next {
+        let (flag, inline_val) = parse_run::split_flag(next);
+        match flag {
             "--until" => {
-                let raw = need(items)?;
+                let raw = need_flag(items, inline_val)?;
                 until = raw
                     .split(',')
                     .map(|part| PresenceState::parse(part.trim()).ok_or(DispatchError::BadArgs))
                     .collect::<Result<Vec<_>, _>>()?;
             }
-            "--timeout" => {
-                timeout_ms = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+            "--timeout-ms" | "--timeout" => {
+                timeout_ms = need_flag(items, inline_val)?
+                    .parse()
+                    .map_err(|_| DispatchError::BadArgs)?;
             }
             "--children" => {
-                children = Some(match items.next() {
-                    Some("all") => ChildrenMode::All,
-                    Some("any") => ChildrenMode::Any,
+                let mode_val = need_flag(items, inline_val)?;
+                children = Some(match mode_val.as_str() {
+                    "all" => ChildrenMode::All,
+                    "any" => ChildrenMode::Any,
                     _ => return Err(DispatchError::BadArgs),
                 });
             }
-            other if address.is_none() && !other.starts_with("--") => address = Some(other.to_string()),
+            _ if next.starts_with('-') => return Err(DispatchError::BadArgs),
+            other if address.is_none() => address = Some(other.to_string()),
             _ => return Err(DispatchError::BadArgs),
         }
     }
@@ -111,12 +127,20 @@ pub(super) fn parse_read<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<Command, DispatchError> {
     let address = items.next().ok_or(DispatchError::BadArgs)?.to_string();
+    if address.starts_with('-') {
+        return Err(DispatchError::BadArgs);
+    }
     let mut lines = 80;
     let mut last_assistant = false;
     while let Some(next) = items.next() {
-        match next {
-            "--lines" => lines = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?,
-            "--last" => last_assistant = true,
+        let (flag, inline_val) = parse_run::split_flag(next);
+        match flag {
+            "--lines" => {
+                lines = need_flag(items, inline_val)?
+                    .parse()
+                    .map_err(|_| DispatchError::BadArgs)?;
+            }
+            "--last" if inline_val.is_none() => last_assistant = true,
             _ => return Err(DispatchError::BadArgs),
         }
     }
@@ -135,11 +159,12 @@ pub(super) fn parse_report<'a>(
     let mut body = None;
     let mut file = None;
     while let Some(next) = items.next() {
-        match next {
-            "--to" => to = Some(need(items)?),
-            "--from" => from = Some(need(items)?),
-            "--body" => body = Some(need(items)?),
-            "--file" => file = Some(need(items)?),
+        let (flag, inline_val) = parse_run::split_flag(next);
+        match flag {
+            "--to" => to = Some(need_flag(items, inline_val)?),
+            "--from" => from = Some(need_flag(items, inline_val)?),
+            "--body" => body = Some(need_flag(items, inline_val)?),
+            "--file" => file = Some(need_flag(items, inline_val)?),
             _ => return Err(DispatchError::BadArgs),
         }
     }
@@ -168,10 +193,13 @@ pub(super) fn parse_swarm_detailed<'a>(
             let mut title = None;
             let mut positionals: Vec<String> = Vec::new();
             while let Some(next) = items.next() {
-                match next {
-                    "--title" => title = Some(need_detailed(items, "--title")?),
-                    other if other.starts_with('-') => {
-                        return Err(bad_args(format!("Unknown flag `{other}` for `swarm title`.")))
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--title" => {
+                        title = Some(parse_run::need_flag_detailed(items, "--title", inline_val)?)
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(bad_args(format!("Unknown flag `{next}` for `swarm title`.")))
                     }
                     other => positionals.push(other.to_string()),
                 }
@@ -197,19 +225,24 @@ pub(super) fn parse_swarm_detailed<'a>(
             let mut brief = None;
             let mut positionals: Vec<String> = Vec::new();
             while let Some(next) = items.next() {
-                match next {
-                    "--name" => name = Some(need_detailed(items, "--name")?),
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--name" => {
+                        name = Some(parse_run::need_flag_detailed(items, "--name", inline_val)?)
+                    }
                     "--provider" => {
-                        let raw = need_detailed(items, "--provider")?;
+                        let raw = parse_run::need_flag_detailed(items, "--provider", inline_val)?;
                         provider = Some(
                             canonical_thread_provider(&raw)
                                 .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?
                                 .to_string(),
                         );
                     }
-                    "--model" => model = Some(need_detailed(items, "--model")?),
+                    "--model" => {
+                        model = Some(parse_run::need_flag_detailed(items, "--model", inline_val)?)
+                    }
                     "--effort" => {
-                        let raw = need_detailed(items, "--effort")?;
+                        let raw = parse_run::need_flag_detailed(items, "--effort", inline_val)?;
                         effort = Some(normalize_effort(&raw).ok_or_else(|| {
                             bad_args(format!(
                                 "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
@@ -217,7 +250,7 @@ pub(super) fn parse_swarm_detailed<'a>(
                         })?);
                     }
                     "--workspace" => {
-                        let raw = need_detailed(items, "--workspace")?;
+                        let raw = parse_run::need_flag_detailed(items, "--workspace", inline_val)?;
                         workspace = Some(normalize_workspace_mode(&raw).ok_or_else(|| {
                             bad_args(format!(
                                 "Invalid `--workspace` mode `{raw}`. Allowed: inherit, share, branch."
@@ -225,7 +258,7 @@ pub(super) fn parse_swarm_detailed<'a>(
                         })?);
                     }
                     "--channels" | "--channel" => {
-                        let csv = need_detailed(items, next)?;
+                        let csv = parse_run::need_flag_detailed(items, flag, inline_val)?;
                         for part in csv.split(',') {
                             let ch = part.trim().trim_start_matches('#').to_ascii_lowercase();
                             if !ch.is_empty() && !channels.contains(&ch) {
@@ -233,12 +266,20 @@ pub(super) fn parse_swarm_detailed<'a>(
                             }
                         }
                     }
-                    "--fork" => fork = Some(need_detailed(items, "--fork")?),
-                    "--role" => role = Some(need_detailed(items, "--role")?),
-                    "--brief" => brief = Some(need_detailed(items, "--brief")?),
-                    "--" => positionals.extend(items.by_ref().map(|p| p.to_string())),
-                    other if other.starts_with('-') => {
-                        return Err(bad_args(format!("Unknown flag `{other}` for `swarm add`.")))
+                    "--fork" => {
+                        fork = Some(parse_run::need_flag_detailed(items, "--fork", inline_val)?)
+                    }
+                    "--role" => {
+                        role = Some(parse_run::need_flag_detailed(items, "--role", inline_val)?)
+                    }
+                    "--brief" => {
+                        brief = Some(parse_run::need_flag_detailed(items, "--brief", inline_val)?)
+                    }
+                    "--" if inline_val.is_none() => {
+                        positionals.extend(items.by_ref().map(|p| p.to_string()))
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(bad_args(format!("Unknown flag `{next}` for `swarm add`.")))
                     }
                     other => positionals.push(other.to_string()),
                 }
@@ -272,28 +313,33 @@ pub(super) fn parse_swarm_detailed<'a>(
             let mut model = None;
             let mut effort = None;
             while let Some(next) = items.next() {
-                match next {
-                    "--name" => name = Some(need_detailed(items, "--name")?),
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--name" => {
+                        name = Some(parse_run::need_flag_detailed(items, "--name", inline_val)?)
+                    }
                     "--provider" => {
-                        let raw = need_detailed(items, "--provider")?;
+                        let raw = parse_run::need_flag_detailed(items, "--provider", inline_val)?;
                         provider = Some(
                             canonical_thread_provider(&raw)
                                 .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?
                                 .to_string(),
                         );
                     }
-                    "--model" => model = Some(need_detailed(items, "--model")?),
+                    "--model" => {
+                        model = Some(parse_run::need_flag_detailed(items, "--model", inline_val)?)
+                    }
                     "--effort" => {
-                        let raw = need_detailed(items, "--effort")?;
+                        let raw = parse_run::need_flag_detailed(items, "--effort", inline_val)?;
                         effort = Some(normalize_effort(&raw).ok_or_else(|| {
                             bad_args(format!(
                                 "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
                             ))
                         })?);
                     }
-                    other => {
+                    _ => {
                         return Err(bad_args(format!(
-                            "Unknown flag `{other}` for `swarm model`."
+                            "Unknown flag `{next}` for `swarm model`."
                         )))
                     }
                 }
@@ -328,18 +374,21 @@ pub(super) fn parse_swarm_rest<'a>(
             let mut text = None;
             let mut positionals: Vec<String> = Vec::new();
             while let Some(next) = items.next() {
-                match next {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
                     "--channel" => {
                         channel = Some(
-                            need(items)?
+                            need_flag(items, inline_val)?
                                 .trim()
                                 .trim_start_matches('#')
                                 .to_ascii_lowercase(),
                         )
                     }
-                    "--message" | "--body" => text = Some(need(items)?),
-                    "--" => positionals.extend(items.by_ref().map(|p| p.to_string())),
-                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    "--message" | "--body" => text = Some(need_flag(items, inline_val)?),
+                    "--" if inline_val.is_none() => {
+                        positionals.extend(items.by_ref().map(|p| p.to_string()))
+                    }
+                    _ if next.starts_with('-') => return Err(DispatchError::BadArgs),
                     other => positionals.push(other.to_string()),
                 }
             }
@@ -359,12 +408,20 @@ pub(super) fn parse_swarm_rest<'a>(
             let mut since = 0u64;
             let mut channel = None;
             while let Some(next) = items.next() {
-                match next {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
                     "--since" => {
-                        since = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                        since = need_flag(items, inline_val)?
+                            .parse()
+                            .map_err(|_| DispatchError::BadArgs)?;
                     }
                     "--channel" => {
-                        channel = Some(need(items)?.trim().trim_start_matches('#').to_string());
+                        channel = Some(
+                            need_flag(items, inline_val)?
+                                .trim()
+                                .trim_start_matches('#')
+                                .to_string(),
+                        );
                     }
                     _ => return Err(DispatchError::BadArgs),
                 }
@@ -376,12 +433,17 @@ pub(super) fn parse_swarm_rest<'a>(
             let mut mentions_only = false;
             let mut timeout_ms = 60_000u64;
             while let Some(next) = items.next() {
-                match next {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
                     "--since" => {
-                        since = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                        since = need_flag(items, inline_val)?
+                            .parse()
+                            .map_err(|_| DispatchError::BadArgs)?;
                     }
-                    "--mentions-only" => {
-                        if let Some(&peek) = items.peek() {
+                    "--mentions" | "--mentions-only" => {
+                        if let Some(val) = inline_val {
+                            mentions_only = parse_bool_flag(val)?;
+                        } else if let Some(&peek) = items.peek() {
                             if !peek.starts_with('-') {
                                 mentions_only = parse_bool_flag(items.next().unwrap())?;
                             } else {
@@ -392,7 +454,9 @@ pub(super) fn parse_swarm_rest<'a>(
                         }
                     }
                     "--timeout-ms" | "--timeout" => {
-                        timeout_ms = need(items)?.parse().map_err(|_| DispatchError::BadArgs)?;
+                        timeout_ms = need_flag(items, inline_val)?
+                            .parse()
+                            .map_err(|_| DispatchError::BadArgs)?;
                     }
                     _ => return Err(DispatchError::BadArgs),
                 }
@@ -413,9 +477,10 @@ pub(super) fn parse_swarm_rest<'a>(
             let mut name = None;
             let mut positionals: Vec<String> = Vec::new();
             while let Some(next) = items.next() {
-                match next {
-                    "--name" => name = Some(need(items)?),
-                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--name" => name = Some(need_flag(items, inline_val)?),
+                    _ if next.starts_with('-') => return Err(DispatchError::BadArgs),
                     other => positionals.push(other.to_string()),
                 }
             }
@@ -440,20 +505,26 @@ pub(super) fn parse_swarm_rest<'a>(
             let mut member = None;
             let mut positionals: Vec<String> = Vec::new();
             while let Some(next) = items.next() {
-                match next {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
                     "--channel" => {
                         channel = Some(
-                            need(items)?
+                            need_flag(items, inline_val)?
                                 .trim()
                                 .trim_start_matches('#')
                                 .to_ascii_lowercase(),
                         );
                     }
-                    "--topic" => topic = Some(need(items)?),
+                    "--topic" => topic = Some(need_flag(items, inline_val)?),
                     "--name" => {
-                        member = Some(need(items)?.trim().trim_start_matches('@').to_string())
+                        member = Some(
+                            need_flag(items, inline_val)?
+                                .trim()
+                                .trim_start_matches('@')
+                                .to_string(),
+                        )
                     }
-                    other if other.starts_with('-') => return Err(DispatchError::BadArgs),
+                    _ if next.starts_with('-') => return Err(DispatchError::BadArgs),
                     other => positionals.push(other.to_string()),
                 }
             }
@@ -480,8 +551,22 @@ pub(super) fn need<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<String, DispatchError> {
     match items.next() {
-        Some(value) if !value.starts_with("--") => Ok(value.to_string()),
+        Some(value) if !value.starts_with('-') => Ok(value.to_string()),
         _ => Err(DispatchError::BadArgs),
     }
+}
+
+pub(super) fn need_flag<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    inline_val: Option<&str>,
+) -> Result<String, DispatchError> {
+    if let Some(val) = inline_val {
+        return if val.is_empty() {
+            Err(DispatchError::BadArgs)
+        } else {
+            Ok(val.to_string())
+        };
+    }
+    need(items)
 }
 

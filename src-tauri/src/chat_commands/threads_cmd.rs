@@ -194,13 +194,89 @@ pub fn update_chat_configuration(request: Option<Value>) -> Value {
     configure_thread(thread_id, req.unwrap_or(&Value::Null))
 }
 
+fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
+    let raw_meta: std::collections::HashMap<String, (bool, bool, bool, String, bool)> = threads()
+        .lock()
+        .ok()
+        .map(|all| {
+            all.iter()
+                .filter_map(|t| {
+                    let id = t.get("id").and_then(Value::as_str)?.to_string();
+                    let side_chat = t.get("sideChat").and_then(Value::as_bool).unwrap_or(false);
+                    let started_by_agent = t
+                        .get("startedByAgent")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let has_parent = t
+                        .get("parentThreadId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| !p.trim().is_empty());
+                    let status = t
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("idle")
+                        .to_string();
+                    let has_approval = t
+                        .get("pendingApproval")
+                        .is_some_and(|v| !v.is_null());
+                    Some((id, (side_chat, started_by_agent, has_parent, status, has_approval)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(arr) = res.get_mut("summaries").and_then(Value::as_array_mut) {
+        arr.retain(|s| {
+            let id = s.get("id").and_then(Value::as_str).unwrap_or("");
+            let raw = raw_meta.get(id);
+            let side_chat = s
+                .get("sideChat")
+                .and_then(Value::as_bool)
+                .or_else(|| raw.map(|r| r.0))
+                .unwrap_or(false);
+            let started_by_agent = s
+                .get("startedByAgent")
+                .and_then(Value::as_bool)
+                .or_else(|| raw.map(|r| r.1))
+                .unwrap_or(false);
+            let has_parent = s
+                .get("parentThreadId")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !p.trim().is_empty())
+                || raw.is_some_and(|r| r.2);
+
+            if is_agent_chat {
+                return !side_chat && !(started_by_agent && has_parent);
+            }
+
+            if !side_chat && !(started_by_agent && has_parent) {
+                return true;
+            }
+            let status = s
+                .get("status")
+                .and_then(Value::as_str)
+                .or_else(|| raw.map(|r| r.3.as_str()))
+                .unwrap_or("idle");
+            let has_pending_approval = s
+                .get("pendingApproval")
+                .is_some_and(|v| !v.is_null())
+                || raw.is_some_and(|r| r.4);
+            started_by_agent
+                && has_parent
+                && (matches!(status, "running" | "waiting" | "pendingApproval")
+                    || has_pending_approval)
+        });
+    }
+    res
+}
+
 pub fn list_chat_summaries(_request: Option<Value>) -> Value {
-    history(None)
+    filter_flat_history(history(None), false)
 }
 
 pub fn list_agent_chat_summaries(request: Option<Value>) -> Value {
     let agent_id = body(&request).and_then(|req| req.get("agentId")).and_then(|v| v.as_str());
-    history(agent_id)
+    filter_flat_history(history(agent_id), true)
 }
 
 pub(super) const ARCHIVE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -322,7 +398,7 @@ pub fn archive_chat_thread(request: Option<Value>) -> Value {
     }
     json!({
         "deleted": true,
-        "history": history(None)
+        "history": filter_flat_history(history(None), false)
     })
 }
 
@@ -333,7 +409,7 @@ pub fn archive_agent_chat_thread(request: Option<Value>) -> Value {
     let agent_id = body(&request).and_then(|req| req.get("agentId")).and_then(|v| v.as_str());
     json!({
         "deleted": true,
-        "history": history(agent_id)
+        "history": filter_flat_history(history(agent_id), true)
     })
 }
 
@@ -341,7 +417,7 @@ pub fn delete_chat_thread(request: Option<Value>) -> Value {
     forget_thread(&request);
     json!({
         "deleted": true,
-        "history": history(None)
+        "history": filter_flat_history(history(None), false)
     })
 }
 
@@ -350,7 +426,7 @@ pub fn delete_agent_chat_thread(request: Option<Value>) -> Value {
     let agent_id = body(&request).and_then(|req| req.get("agentId")).and_then(|v| v.as_str());
     json!({
         "deleted": true,
-        "history": history(agent_id)
+        "history": filter_flat_history(history(agent_id), true)
     })
 }
 
@@ -388,4 +464,91 @@ pub fn reorder_agent_chat_tabs(request: Option<Value>) -> Value {
     }
     persist();
     Value::Null
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_history_filtering_excludes_side_chats_and_settled_children() {
+        let agent_id = format!("prof-flat-{}", Uuid::new_v4().simple());
+        let side_tid = format!("side-{}", Uuid::new_v4().simple());
+        let settled_child_tid = format!("child-idle-{}", Uuid::new_v4().simple());
+        let active_child_tid = format!("child-run-{}", Uuid::new_v4().simple());
+        let top_tid = format!("top-{}", Uuid::new_v4().simple());
+
+        {
+            let mut all = threads().lock().unwrap();
+            all.push(json!({
+                "id": side_tid,
+                "title": "Side Chat",
+                "profileId": agent_id,
+                "provider": "grok",
+                "status": "running",
+                "sideChat": true,
+                "startedByAgent": false,
+                "updatedAtUnixMs": 100
+            }));
+            all.push(json!({
+                "id": settled_child_tid,
+                "title": "Settled Subagent",
+                "profileId": agent_id,
+                "provider": "grok",
+                "status": "idle",
+                "sideChat": true,
+                "startedByAgent": true,
+                "parentThreadId": top_tid,
+                "updatedAtUnixMs": 200
+            }));
+            all.push(json!({
+                "id": active_child_tid,
+                "title": "Active Subagent",
+                "profileId": agent_id,
+                "provider": "grok",
+                "status": "running",
+                "sideChat": true,
+                "startedByAgent": true,
+                "parentThreadId": top_tid,
+                "updatedAtUnixMs": 300
+            }));
+            all.push(json!({
+                "id": top_tid,
+                "title": "Top Thread",
+                "profileId": agent_id,
+                "provider": "antigravity",
+                "status": "idle",
+                "updatedAtUnixMs": 400
+            }));
+        }
+
+        let top_res = list_chat_summaries(None);
+        let top_ids: Vec<&str> = top_res["summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(!top_ids.contains(&side_tid.as_str()), "ids={top_ids:?}");
+        assert!(!top_ids.contains(&settled_child_tid.as_str()), "ids={top_ids:?}");
+        assert!(top_ids.contains(&active_child_tid.as_str()), "ids={top_ids:?}");
+        assert!(top_ids.contains(&top_tid.as_str()), "ids={top_ids:?}");
+
+        let agent_res = list_agent_chat_summaries(Some(json!({ "agentId": agent_id })));
+        let agent_ids: Vec<&str> = agent_res["summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(!agent_ids.contains(&side_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&settled_child_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&active_child_tid.as_str()), "ids={agent_ids:?}");
+        assert!(agent_ids.contains(&top_tid.as_str()), "ids={agent_ids:?}");
+
+        threads().lock().unwrap().retain(|t| {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            id != side_tid && id != settled_child_tid && id != active_child_tid && id != top_tid
+        });
+    }
 }

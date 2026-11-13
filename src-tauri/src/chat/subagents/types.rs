@@ -102,6 +102,8 @@ pub struct SwarmState {
     pub posts: Vec<SwarmBoardPost>,
     #[serde(default)]
     pub channels: Vec<SwarmChannel>,
+    #[serde(default)]
+    pub last_coordinator_wake_seq: u64,
 }
 
 impl SwarmState {
@@ -117,6 +119,7 @@ impl SwarmState {
                 topic: None,
                 archived: false,
             }],
+            last_coordinator_wake_seq: 0,
         }
     }
 }

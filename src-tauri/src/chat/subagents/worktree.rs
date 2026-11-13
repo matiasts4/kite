@@ -62,26 +62,11 @@ pub fn provision_subagent_worktree(
     Ok(wt_path)
 }
 
-pub(crate) fn try_remove_clean_worktree(child_thread_id: &str) {
-    let wt_info = threads().lock().ok().and_then(|all| {
-        let child = all
-            .iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_thread_id))?;
-        let wt = child.get("worktreePath").and_then(Value::as_str)?.to_string();
-        let ws_mode = child
-            .get("workspaceMode")
-            .and_then(Value::as_str)
-            .unwrap_or("inherit")
-            .to_string();
-        Some((wt, ws_mode))
-    });
-    let Some((wt_str, ws_mode)) = wt_info else {
-        return;
-    };
-    if !matches!(ws_mode.as_str(), "share" | "branch") {
+pub(crate) fn try_remove_clean_worktree_path(wt_str: &str, ws_mode: &str) {
+    if !matches!(ws_mode, "share" | "branch") {
         return;
     }
-    let wt_path = PathBuf::from(&wt_str);
+    let wt_path = PathBuf::from(wt_str);
     if !wt_path.exists() {
         return;
     }
@@ -100,5 +85,24 @@ pub(crate) fn try_remove_clean_worktree(child_thread_id: &str) {
     else {
         return;
     };
-    let _ = crate::git::run_git(parent_repo, &["worktree", "remove", &wt_str]);
+    let _ = crate::git::run_git(parent_repo, &["worktree", "remove", wt_str]);
+}
+
+pub(crate) fn try_remove_clean_worktree(child_thread_id: &str) {
+    let wt_info = threads().lock().ok().and_then(|all| {
+        let child = all
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_thread_id))?;
+        let wt = child.get("worktreePath").and_then(Value::as_str)?.to_string();
+        let ws_mode = child
+            .get("workspaceMode")
+            .and_then(Value::as_str)
+            .unwrap_or("inherit")
+            .to_string();
+        Some((wt, ws_mode))
+    });
+    let Some((wt_str, ws_mode)) = wt_info else {
+        return;
+    };
+    try_remove_clean_worktree_path(&wt_str, &ws_mode);
 }

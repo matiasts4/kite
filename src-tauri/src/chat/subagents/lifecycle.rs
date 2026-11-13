@@ -62,8 +62,8 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
     };
 
     let (parent_tid, child_status, child_items, child_model, child_provider) = snapshot;
-    let (step_count, latest_activity) = summarize_run_progress(&child_items);
-    let run_status = if crate::chat::kill_registry::is_thread_killed(child_thread_id) {
+    let is_killed = crate::chat::kill_registry::is_thread_killed(child_thread_id);
+    let run_status = if is_killed {
         "killed"
     } else {
         match child_status.as_str() {
@@ -83,6 +83,7 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
 
     let mut emitted_run: Option<Value> = None;
     let mut updated_tool_item: Option<Value> = None;
+    let mut should_persist = is_terminal;
 
     {
         let Ok(mut all_threads) = threads().lock() else {
@@ -94,11 +95,33 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
         {
             let mut matched_sub_id: Option<String> = None;
             let mut matched_call_id: Option<String> = None;
+            let mut synced_step_count = 0usize;
+            let mut synced_latest_activity: Option<String> = None;
             if let Some(runs) = parent.get_mut("subagentRuns").and_then(Value::as_array_mut) {
                 if let Some(run) = runs.iter_mut().find(|r| {
                     r.get("childThreadId").and_then(Value::as_str) == Some(child_thread_id)
                         || r.get("subagentId").and_then(Value::as_str) == Some(child_thread_id)
                 }) {
+                    let initial_prompt = run.get("prompt").and_then(Value::as_str).map(str::to_string);
+                    let filtered_items =
+                        filter_subagent_stream_items(&child_items, initial_prompt.as_deref());
+                    let (step_count, computed_latest) = summarize_run_progress(&filtered_items);
+                    let prev_status = run
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if prev_status != run_status {
+                        should_persist = true;
+                    }
+                    let latest_activity = if is_killed {
+                        Some("Stopped by user".to_string())
+                    } else {
+                        computed_latest
+                    };
+                    synced_step_count = step_count;
+                    synced_latest_activity = latest_activity.clone();
+
                     matched_sub_id = run
                         .get("subagentId")
                         .and_then(Value::as_str)
@@ -107,6 +130,7 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                         .get("parentToolCallId")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    run["items"] = Value::Array(filtered_items);
                     run["status"] = json!(run_status);
                     run["stepCount"] = json!(step_count);
                     if let Some(ref latest) = latest_activity {
@@ -124,6 +148,11 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                     }
                     emitted_run = Some(run.clone());
                 }
+            }
+            if matched_sub_id.is_none() {
+                let (_, fallback_latest) = summarize_run_progress(&child_items);
+                synced_latest_activity = fallback_latest;
+                synced_step_count = summarize_run_progress(&child_items).0;
             }
             if let Some(items) = parent.get_mut("items").and_then(Value::as_array_mut) {
                 if let Some(target) = items.iter_mut().find(|it| {
@@ -146,8 +175,8 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                         );
                         meta.insert("childThreadId".to_string(), json!(child_thread_id));
                         meta.insert("status".to_string(), json!(run_status));
-                        meta.insert("stepCount".to_string(), json!(step_count));
-                        if let Some(ref latest) = latest_activity {
+                        meta.insert("stepCount".to_string(), json!(synced_step_count));
+                        if let Some(ref latest) = synced_latest_activity {
                             meta.insert("latestActivity".to_string(), json!(latest));
                         }
                         if let Some(ref m) = child_model {
@@ -177,12 +206,21 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
     }
 
     if let Some(run) = emitted_run {
+        let sub_id = run
+            .get("subagentId")
+            .and_then(Value::as_str)
+            .unwrap_or(child_thread_id)
+            .to_string();
         emit_subagent_event(json!({
             "kind": "subagentRunUpdated",
             "threadId": parent_tid,
-            "subagentId": run.get("subagentId"),
+            "subagentId": sub_id,
             "run": run,
         }));
+        emit_subagent_steps_event(&parent_tid, &sub_id, &run);
+    }
+    if should_persist {
+        persist();
     }
 }
 
@@ -303,7 +341,7 @@ pub fn send_subagent_message_with_launcher(
     crate::chat::kill_registry::clear_thread_killed(&child_tid);
     let launch_res = match launcher {
         Some(f) => f(&child_tid, trimmed),
-        None => crate::chat::kill_registry::launch_child_thread_turn(&child_tid, trimmed),
+        None => crate::chat::kill_registry::resume_child_thread_turn(&child_tid, trimmed),
     };
     if let Err(err) = launch_res {
         if let Ok(mut all) = threads().lock() {
@@ -343,7 +381,8 @@ pub fn steer_subagent_thread(
 }
 
 pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Value, String> {
-    let (child_tid, _tool_call_id) = {
+    let mut did_kill = false;
+    let (child_tid, existing_status, settled_detail, already_settled_nat) = {
         let all = threads()
             .lock()
             .map_err(|_| "threads lock poisoned".to_string())?;
@@ -366,18 +405,53 @@ pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Valu
         else {
             return Err("Subagent run not found".to_string());
         };
-        (
-            run.get("childThreadId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            run.get("parentToolCallId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        )
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("running")
+            .to_string();
+        let detail = if matches!(status.as_str(), "completed" | "failed" | "killed") {
+            Some(run.clone())
+        } else {
+            None
+        };
+        let cid = run
+            .get("childThreadId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let settled_naturally = if matches!(status.as_str(), "completed" | "failed" | "killed") {
+            false
+        } else if let Some(ref child_id) = cid {
+            let outcome = crate::chat::kill_registry::try_mark_thread_killed(child_id);
+            if outcome == crate::chat::kill_registry::MarkKillOutcome::AlreadySettled {
+                true
+            } else {
+                did_kill = true;
+                false
+            }
+        } else {
+            false
+        };
+        (cid, status, detail, settled_naturally)
     };
 
+    if already_settled_nat {
+        if let Some(ref cid) = child_tid {
+            sync_child_thread_to_parent(cid);
+        }
+        return Ok(build_subagent_detail(thread_id, subagent_id)
+            .or(settled_detail)
+            .unwrap_or(Value::Null));
+    }
+
+    // Never clobber an already-settled subagent run with "killed" / "Stopped by user".
+    if matches!(existing_status.as_str(), "completed" | "failed" | "killed") {
+        return Ok(build_subagent_detail(thread_id, subagent_id)
+            .or(settled_detail)
+            .unwrap_or(Value::Null));
+    }
+
     if let Some(ref cid) = child_tid {
-        crate::chat::kill_registry::mark_thread_killed(cid);
         crate::chat::cancel_turn(cid);
         if let Ok(mut manager) = crate::chat::session_manager().lock() {
             let already_closed = manager
@@ -391,19 +465,12 @@ pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Valu
 
     let now = now_ms();
     let mut updated_run: Option<Value> = None;
+    let mut already_settled_in_race = false;
+    let mut should_clear_killed = false;
     {
         let mut all = threads()
             .lock()
             .map_err(|_| "threads lock poisoned".to_string())?;
-        if let Some(ref cid) = child_tid {
-            if let Some(child) = all
-                .iter_mut()
-                .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
-            {
-                child["status"] = json!("idle");
-                touch(child);
-            }
-        }
         if let Some(parent) = all
             .iter_mut()
             .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
@@ -415,51 +482,88 @@ pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Valu
                         || r.get("parentToolCallId").and_then(Value::as_str) == Some(subagent_id)
                         || r.get("childThreadId").and_then(Value::as_str) == Some(subagent_id)
                 }) {
-                    matched_call = run
-                        .get("parentToolCallId")
+                    let current_status = run
+                        .get("status")
                         .and_then(Value::as_str)
-                        .map(str::to_string);
-                    run["status"] = json!("killed");
-                    run["latestActivity"] = json!("Stopped by user");
-                    run["updatedAtUnixMs"] = json!(now);
-                    run["completedAtUnixMs"] = json!(now);
-                    updated_run = Some(run.clone());
-                }
-            }
-            if let Some(ref call_id) = matched_call {
-                if let Some(items) = parent.get_mut("items").and_then(Value::as_array_mut) {
-                    if let Some(item) = items
-                        .iter_mut()
-                        .find(|it| it.get("id").and_then(Value::as_str) == Some(call_id.as_str()))
+                        .unwrap_or("running");
+                    if matches!(current_status, "completed" | "failed")
+                        || (!did_kill && current_status == "killed")
                     {
-                        item["status"] = json!("error");
-                        if let Some(meta) =
-                            item.get_mut("subagentMeta").and_then(Value::as_object_mut)
-                        {
-                            meta.insert("status".to_string(), json!("killed"));
-                            meta.insert(
-                                "latestActivity".to_string(),
-                                json!("Stopped by user"),
-                            );
-                        }
+                        already_settled_in_race = true;
+                        should_clear_killed = current_status != "killed";
+                        updated_run = Some(run.clone());
+                    } else {
+                        matched_call = run
+                            .get("parentToolCallId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        run["status"] = json!("killed");
+                        run["latestActivity"] = json!("Stopped by user");
+                        run["updatedAtUnixMs"] = json!(now);
+                        run["completedAtUnixMs"] = json!(now);
+                        updated_run = Some(run.clone());
                     }
                 }
             }
-            touch(parent);
+            if !already_settled_in_race {
+                if let Some(ref call_id) = matched_call {
+                    if let Some(items) = parent.get_mut("items").and_then(Value::as_array_mut) {
+                        if let Some(item) = items
+                            .iter_mut()
+                            .find(|it| it.get("id").and_then(Value::as_str) == Some(call_id.as_str()))
+                        {
+                            item["status"] = json!("error");
+                            if let Some(meta) =
+                                item.get_mut("subagentMeta").and_then(Value::as_object_mut)
+                            {
+                                meta.insert("status".to_string(), json!("killed"));
+                                meta.insert(
+                                    "latestActivity".to_string(),
+                                    json!("Stopped by user"),
+                                );
+                            }
+                        }
+                    }
+                }
+                touch(parent);
+            }
+        }
+        if !already_settled_in_race {
+            if let Some(ref cid) = child_tid {
+                if let Some(child) = all
+                    .iter_mut()
+                    .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+                {
+                    child["status"] = json!("idle");
+                    touch(child);
+                }
+            }
         }
     }
 
-    persist();
-    if let Some(ref cid) = child_tid {
-        sync_child_thread_to_parent(cid);
+    if should_clear_killed {
+        if let Some(ref cid) = child_tid {
+            crate::chat::kill_registry::clear_thread_killed(cid);
+        }
     }
-    if let Some(ref run) = updated_run {
-        emit_subagent_event(json!({
-            "kind": "subagentRunUpdated",
-            "threadId": thread_id,
-            "subagentId": run.get("subagentId"),
-            "run": run,
-        }));
+
+    if !already_settled_in_race {
+        persist();
+        if let Some(ref cid) = child_tid {
+            sync_child_thread_to_parent(cid);
+        } else if let Some(ref run) = updated_run {
+            let sid = run
+                .get("subagentId")
+                .and_then(Value::as_str)
+                .unwrap_or(subagent_id);
+            emit_subagent_event(json!({
+                "kind": "subagentRunUpdated",
+                "threadId": thread_id,
+                "subagentId": sid,
+                "run": run,
+            }));
+            emit_subagent_steps_event(thread_id, sid, run);
+        }
     }
     Ok(build_subagent_detail(thread_id, subagent_id)
         .or(updated_run)

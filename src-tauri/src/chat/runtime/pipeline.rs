@@ -416,11 +416,24 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
                     None => ex_swarm,
                 });
             }
+            for key in ["toolName", "toolKind", "title", "detail"] {
+                let incoming_generic = item
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_none_or(|s| crate::chat::subagents::is_generic_tool_field(key, s));
+                if incoming_generic {
+                    if let Some(prev_val) = existing
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|s| !crate::chat::subagents::is_generic_tool_field(key, s))
+                    {
+                        item[key] = json!(prev_val);
+                    }
+                }
+            }
             for key in [
                 "createdAtUnixMs",
                 "serverName",
-                "toolName",
-                "detail",
                 "query",
                 "filePath",
                 "addedLines",
@@ -459,7 +472,6 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
             item["swarmMeta"] = v;
         }
     }
-    crate::chat::checkpoints::maybe_fill_turn_tool_diff(thread_id, run_id, &mut item, streaming);
     {
         let mut live = live_turns().lock().unwrap();
         if let Some(run) = live.runs.get_mut(run_id) {
@@ -477,6 +489,8 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
             touch(thread);
         }
     }
+    // Schedule diff calculation only after thread["items"] holds the item so kite-diff-worker can patch it reliably.
+    crate::chat::checkpoints::schedule_turn_tool_diff(thread_id, run_id, &item, streaming);
     if item.get("subagentMeta").is_some() {
         crate::chat::subagents::record_subagent_tool_call(thread_id, &item);
     }

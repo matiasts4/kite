@@ -53,6 +53,9 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     let final_item = chat_item(&assistant_id, "assistant", &assistant_text, false);
     let mut waiting_for_permission = false;
 
+    // Drain any queued/active non-blocking diffs for this turn before snapshotting thread items and settling.
+    crate::chat::checkpoints::flush_run_diffs(run_id, std::time::Duration::from_secs(3));
+
     if !thread_id.is_empty() {
         let mut items = threads().lock().unwrap();
         if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id.as_str())) {
@@ -76,6 +79,9 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 "error"
             };
             thread["status"] = json!(final_status);
+            if !waiting_for_permission && !stopped {
+                let _ = crate::chat::kill_registry::try_mark_thread_settled(&thread_id);
+            }
 
             if let Some(arr) = thread.get_mut("items").and_then(|v| v.as_array_mut()) {
                 arr.retain(|it| {

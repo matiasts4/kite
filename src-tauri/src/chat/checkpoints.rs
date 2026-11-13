@@ -59,6 +59,17 @@ pub fn record_checkpoint_ref(thread: &mut Value, ref_name: &str) {
 
 /// The workspace folder for a thread, when one is registered and present.
 pub fn workspace_dir(thread: &Value) -> Option<PathBuf> {
+    if let Some(dir) = thread
+        .get("worktreePath")
+        .or_else(|| thread.get("workingDirectory"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+    {
+        return Some(dir);
+    }
     let id = thread
         .get("workspaceId")
         .and_then(Value::as_str)
@@ -242,29 +253,190 @@ pub fn resolve_worktree_file_diff(
 
 /// Populates missing `addedLines`/`removedLines` on a file-changing tool item by diffing
 /// against this turn's checkpoint (or cached pre-edit disk baseline).
-pub fn maybe_fill_turn_tool_diff(thread_id: &str, run_id: &str, item: &mut Value, is_streaming: bool) {
+fn should_compute_turn_tool_diff(item: &Value, is_streaming: bool) -> Option<String> {
     let tool_kind = item.get("toolKind").and_then(Value::as_str).unwrap_or("");
     if !matches!(tool_kind, "fileChange" | "edit" | "delete" | "move") {
-        return;
+        return None;
     }
     if !is_streaming {
         let status = item.get("status").and_then(Value::as_str).unwrap_or("");
         if status != "completed" {
-            return;
+            return None;
         }
         let has_counts = item.get("addedLines").and_then(Value::as_u64).is_some()
             && item.get("removedLines").and_then(Value::as_u64).is_some();
         if has_counts {
-            return;
+            return None;
         }
     }
-    let Some(file_path) = item
-        .get("filePath")
+    item.get("filePath")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-    else {
+}
+
+struct DiffJob {
+    thread_id: String,
+    run_id: String,
+    item: Value,
+    is_streaming: bool,
+}
+
+struct DiffWorkerQueue {
+    jobs: std::collections::VecDeque<DiffJob>,
+    active_run_id: Option<String>,
+}
+
+type DiffQueueState = (std::sync::Mutex<DiffWorkerQueue>, std::sync::Condvar);
+
+fn diff_worker_queue() -> &'static DiffQueueState {
+    static QUEUE: std::sync::OnceLock<DiffQueueState> = std::sync::OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let state = (
+            std::sync::Mutex::new(DiffWorkerQueue {
+                jobs: std::collections::VecDeque::new(),
+                active_run_id: None,
+            }),
+            std::sync::Condvar::new(),
+        );
+        let _ = std::thread::Builder::new()
+            .name("kite-diff-worker".to_string())
+            .spawn(run_diff_worker);
+        state
+    })
+}
+
+fn run_diff_worker() {
+    let (lock, cv) = diff_worker_queue();
+    loop {
+        let job = {
+            let mut state = lock.lock().unwrap();
+            while state.jobs.is_empty() {
+                state = cv.wait(state).unwrap();
+            }
+            let job = state.jobs.pop_front().unwrap();
+            state.active_run_id = Some(job.run_id.clone());
+            job
+        };
+        process_diff_job(job);
+        {
+            let mut state = lock.lock().unwrap();
+            state.active_run_id = None;
+            cv.notify_all();
+        }
+    }
+}
+
+/// Waits briefly until queued or active async diff jobs for `run_id` settle.
+pub fn flush_run_diffs(run_id: &str, timeout: std::time::Duration) {
+    let (lock, cv) = diff_worker_queue();
+    let deadline = std::time::Instant::now() + timeout;
+    let mut state = lock.lock().unwrap();
+    loop {
+        let pending_for_run = state.active_run_id.as_deref() == Some(run_id)
+            || state.jobs.iter().any(|entry| entry.run_id == run_id);
+        if !pending_for_run {
+            break;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let (guard, _) = cv.wait_timeout(state, remaining).unwrap();
+        state = guard;
+    }
+}
+
+fn process_diff_job(job: DiffJob) {
+    let mut updated = job.item.clone();
+    maybe_fill_turn_tool_diff(&job.thread_id, &job.run_id, &mut updated, job.is_streaming);
+    let added = updated.get("addedLines").cloned();
+    let removed = updated.get("removedLines").cloned();
+    if added.is_none() && removed.is_none() {
+        return;
+    }
+    let Some(item_id) = updated.get("id").and_then(Value::as_str) else {
+        return;
+    };
+
+    let mut patched_item: Option<Value> = None;
+    {
+        let mut all_threads = crate::persist::threads().lock().unwrap();
+        if let Some(thread) = all_threads
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(job.thread_id.as_str()))
+        {
+            if let Some(items) = thread.get_mut("items").and_then(Value::as_array_mut) {
+                if let Some(target) = items
+                    .iter_mut()
+                    .find(|it| it.get("id").and_then(Value::as_str) == Some(item_id))
+                {
+                    let changed = target.get("addedLines") != added.as_ref()
+                        || target.get("removedLines") != removed.as_ref();
+                    if changed {
+                        if let Some(ref val) = added {
+                            target["addedLines"] = val.clone();
+                        }
+                        if let Some(ref val) = removed {
+                            target["removedLines"] = val.clone();
+                        }
+                        patched_item = Some(target.clone());
+                        crate::chat::threads::touch(thread);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(patched) = patched_item {
+        {
+            let mut live = crate::chat::runtime::live_turns().lock().unwrap();
+            if let Some(run) = live.runs.get_mut(&job.run_id) {
+                crate::chat::runtime::push_event(
+                    run,
+                    serde_json::json!({ "kind": "upsert", "item": patched }),
+                );
+            }
+        }
+        crate::chat::runtime::live_cv().notify_all();
+        crate::chat::subagents::sync_child_thread_to_parent(&job.thread_id);
+        if !job.is_streaming {
+            crate::persist::persist();
+        }
+    }
+}
+
+pub fn schedule_turn_tool_diff(thread_id: &str, run_id: &str, item: &Value, is_streaming: bool) {
+    if should_compute_turn_tool_diff(item, is_streaming).is_none() {
+        return;
+    }
+    let Some(item_id) = item.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let (lock, cv) = diff_worker_queue();
+    let mut state = lock.lock().unwrap();
+    if let Some(existing) = state.jobs.iter_mut().find(|entry| {
+        entry.thread_id == thread_id
+            && entry.run_id == run_id
+            && entry.item.get("id").and_then(Value::as_str) == Some(item_id)
+    }) {
+        existing.item = item.clone();
+        existing.is_streaming = is_streaming;
+    } else {
+        state.jobs.push_back(DiffJob {
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+            item: item.clone(),
+            is_streaming,
+        });
+    }
+    cv.notify_all();
+}
+
+pub fn maybe_fill_turn_tool_diff(thread_id: &str, run_id: &str, item: &mut Value, is_streaming: bool) {
+    let Some(file_path) = should_compute_turn_tool_diff(item, is_streaming) else {
         return;
     };
 
@@ -955,5 +1127,54 @@ mod tests {
             ),
             Some((3, 0))
         );
+    }
+
+    #[test]
+    fn async_diff_worker_patches_inserted_item_and_flushes_before_finish() {
+        if skip_without_git("async diff flush test") {
+            return;
+        }
+        let dir = TempDir::new("async-diff-flush");
+        init_repo(dir.path());
+        commit_file(dir.path(), "src.txt", "line1\n", "base");
+        let thread_id = format!("t-diff-{}", uuid::Uuid::new_v4().simple());
+        let run_id = format!("r-diff-{}", uuid::Uuid::new_v4().simple());
+        let ref_name = capture_turn_checkpoint(dir.path(), &thread_id, &run_id)
+            .expect("checkpoint");
+        let file_path = dir.path().join("src.txt");
+        fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+
+        let item = serde_json::json!({
+            "id": "call_edit_1",
+            "kind": "tool",
+            "toolKind": "edit",
+            "toolName": "write_file",
+            "filePath": file_path.to_string_lossy().to_string(),
+            "status": "completed"
+        });
+        crate::persist::threads().lock().unwrap().push(serde_json::json!({
+            "id": thread_id,
+            "workingDirectory": dir.path().to_string_lossy().to_string(),
+            "checkpointRef": ref_name,
+            "items": [item.clone()],
+        }));
+
+        schedule_turn_tool_diff(&thread_id, &run_id, &item, false);
+        flush_run_diffs(&run_id, std::time::Duration::from_secs(3));
+
+        let stored = crate::persist::threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == thread_id)
+            .cloned()
+            .unwrap();
+        crate::persist::threads()
+            .lock()
+            .unwrap()
+            .retain(|t| t["id"] != thread_id);
+
+        assert_eq!(stored["items"][0]["addedLines"], 2);
+        assert_eq!(stored["items"][0]["removedLines"], 0);
     }
 }

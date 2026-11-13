@@ -560,3 +560,163 @@ fn providers_and_models_commands_parse_and_skill_has_no_legacy_model_literals() 
     }
 }
 
+#[test]
+fn cli_parses_equals_flags_timeout_ms_and_rejects_short_flag_typos() {
+    let run_cmd = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "run",
+        "--via=thread",
+        "--provider=grok",
+        "--model=grok-code-fast",
+        "--effort=low",
+        "--workspace=share",
+        "--timeout-ms=12000",
+        "--wait",
+        "Audit parser",
+    ]))
+    .expect("run --flag=value must parse");
+    match run_cmd {
+        Command::Run {
+            via,
+            provider,
+            model,
+            effort,
+            workspace,
+            wait,
+            timeout_ms,
+            task,
+            ..
+        } => {
+            assert_eq!(via, Family::Thread);
+            assert_eq!(provider.as_deref(), Some("grok"));
+            assert_eq!(model.as_deref(), Some("grok-code-fast"));
+            assert_eq!(effort.as_deref(), Some("low"));
+            assert_eq!(workspace.as_deref(), Some("share"));
+            assert!(wait);
+            assert_eq!(timeout_ms, Some(12_000));
+            assert_eq!(task.as_deref(), Some("Audit parser"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    let wait_cmd = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "wait",
+        "thread:abc",
+        "--until=idle",
+        "--timeout-ms=4500",
+        "--children=all",
+    ]))
+    .expect("wait --timeout-ms=4500 must parse");
+    assert_eq!(
+        wait_cmd,
+        Command::Wait {
+            address: Some("thread:abc".into()),
+            until: vec![PresenceState::Idle],
+            children: Some(ChildrenMode::All),
+            timeout_ms: 4500,
+        }
+    );
+
+    let swarm_add = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "swarm",
+        "add",
+        "--name=reviewer",
+        "--provider=codex",
+        "--brief=Inspect API",
+    ]))
+    .expect("swarm add --flag=value must parse");
+    assert!(matches!(swarm_add, Command::Swarm(SwarmCommand::Add { .. })));
+
+    let swarm_wait = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "swarm",
+        "wait",
+        "--since=2",
+        "--timeout-ms=8000",
+        "--mentions-only=true",
+    ]))
+    .expect("swarm wait --flag=value must parse");
+    assert_eq!(
+        swarm_wait,
+        Command::Swarm(SwarmCommand::Wait {
+            since: 2,
+            mentions_only: true,
+            timeout_ms: 8000,
+        })
+    );
+
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "send", "thread:abc", "-f", "foo"])),
+        Err(DispatchError::BadArgs)
+    );
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "wait", "-t", "10"])),
+        Err(DispatchError::BadArgs)
+    );
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "models", "--provider=grok"])),
+        Ok(Command::Models {
+            provider: Some("grok".to_string()),
+            refresh: false,
+        })
+    );
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "ls", "--bogus"])),
+        Err(DispatchError::BadArgs)
+    );
+    assert_eq!(
+        parse_args(&owned(&[
+            "kite",
+            "dispatch",
+            "run",
+            "--via",
+            "thread",
+            "--model",
+            "-x",
+            "hi"
+        ])),
+        Err(DispatchError::BadArgs)
+    );
+    assert_eq!(
+        crate::dispatch::cli_wire::blocking_wait_ms(&owned(&[
+            "kite",
+            "dispatch",
+            "wait",
+            "thread:a",
+            "--timeout",
+            "1000",
+            "--timeout-ms=7500",
+        ])),
+        Some(7500)
+    );
+    assert_eq!(
+        crate::dispatch::cli_wire::blocking_run_wait_ms(&owned(&[
+            "kite",
+            "dispatch",
+            "run",
+            "--wait",
+            "--timeout-ms=4000",
+            "--timeout",
+            "9000",
+            "task",
+        ])),
+        Some(9000)
+    );
+    for flag in ["--mentions", "--mentions-only"] {
+        assert_eq!(
+            parse_args(&owned(&["kite", "dispatch", "swarm", "wait", "--since", "3", flag])),
+            Ok(Command::Swarm(SwarmCommand::Wait {
+                since: 3,
+                mentions_only: true,
+                timeout_ms: 60_000,
+            }))
+        );
+    }
+}
+

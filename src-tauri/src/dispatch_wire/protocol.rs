@@ -586,6 +586,17 @@ pub fn live_thread_for_profile(profile: &str) -> Option<String> {
         if thread.get("archivedAtUnixMs").and_then(Value::as_i64).is_some() {
             continue;
         }
+        if thread.get("sideChat").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let started_by_agent = thread.get("startedByAgent").and_then(Value::as_bool) == Some(true);
+        let has_parent = thread
+            .get("parentThreadId")
+            .and_then(Value::as_str)
+            .is_some_and(|p| !p.trim().is_empty());
+        if started_by_agent && has_parent {
+            continue;
+        }
         let id = thread.get("id").and_then(Value::as_str)?;
         let attached = crate::chat::session_manager()
             .lock()

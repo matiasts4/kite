@@ -102,9 +102,9 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                             if is_error { "failed".into() } else { "completed".into() },
                             output,
                             None, None,
-                            Some("dynamicToolCall".to_string()),
-                            Some(String::new()),
-                            Some(String::new()),
+                            None,
+                            None,
+                            None,
                             None, None,
                         );
                         record_acp_tool_update(thread_id, run_id, tool);
@@ -637,22 +637,19 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
             .cloned()
     };
     if let Some(ex) = existing {
-        if tool.name.trim().is_empty() {
-            if let Some(v) = ex.get("toolName").and_then(Value::as_str) {
-                item["toolName"] = json!(v);
-            }
-            if let Some(v) = ex.get("toolKind").and_then(Value::as_str) {
-                item["toolKind"] = json!(v);
-            }
-        }
-        if tool.title.trim().is_empty() {
-            if let Some(v) = ex.get("title").and_then(Value::as_str) {
-                item["title"] = json!(v);
-            }
-        }
-        if tool.detail.trim().is_empty() {
-            if let Some(v) = ex.get("detail").and_then(Value::as_str) {
-                item["detail"] = json!(v);
+        for key in ["toolName", "toolKind", "title", "detail"] {
+            let incoming_generic = item
+                .get(key)
+                .and_then(Value::as_str)
+                .is_none_or(|s| crate::chat::subagents::is_generic_tool_field(key, s));
+            if incoming_generic {
+                if let Some(prev_val) = ex
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !crate::chat::subagents::is_generic_tool_field(key, s))
+                {
+                    item[key] = json!(prev_val);
+                }
             }
         }
         if tool.output.is_none() {
@@ -663,6 +660,7 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
             }
         }
         for key in [
+            "createdAtUnixMs",
             "serverName",
             "command",
             "filePath",
@@ -707,8 +705,6 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
         }
     }
 
-    crate::chat::checkpoints::maybe_fill_turn_tool_diff(thread_id, run_id, &mut item, streaming);
-
     {
         let mut live = live_turns().lock().unwrap();
         if let Some(run) = live.runs.get_mut(run_id) {
@@ -726,6 +722,8 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
             touch(thread);
         }
     }
+    // Schedule diff calculation only after thread["items"] holds the item so kite-diff-worker can patch it reliably.
+    crate::chat::checkpoints::schedule_turn_tool_diff(thread_id, run_id, &item, streaming);
     if item.get("subagentMeta").is_some() {
         crate::chat::subagents::record_subagent_tool_call(thread_id, &item);
     }

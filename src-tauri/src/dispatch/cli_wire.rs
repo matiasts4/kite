@@ -203,17 +203,43 @@ fn strip_cli_prefix(args: &[String]) -> &[String] {
     &args[start..]
 }
 
+fn last_timeout_flag_ms(tokens: &[&str]) -> Option<u64> {
+    let mut last: Option<u64> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if tok == "--" {
+            break;
+        }
+        if tok == "--timeout" || tok == "--timeout-ms" {
+            if let Some(raw) = tokens.get(i + 1) {
+                if let Ok(ms) = raw.parse::<u64>() {
+                    last = Some(ms);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(raw) = tok
+            .strip_prefix("--timeout-ms=")
+            .or_else(|| tok.strip_prefix("--timeout="))
+        {
+            if let Ok(ms) = raw.parse::<u64>() {
+                last = Some(ms);
+            }
+        }
+        i += 1;
+    }
+    last
+}
+
 pub fn blocking_wait_ms(args: &[String]) -> Option<u64> {
     let slice = strip_cli_prefix(args);
     if slice.first().map(String::as_str) != Some("wait") {
         return None;
     }
     let tokens: Vec<&str> = slice[1..].iter().map(String::as_str).collect();
-    let timeout = flag_value(&tokens, "--timeout")
-        .or_else(|| flag_value(&tokens, "--timeout-ms"))
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(30_000);
-    Some(timeout)
+    Some(last_timeout_flag_ms(&tokens).unwrap_or(30_000))
 }
 
 pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
@@ -225,11 +251,7 @@ pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
     if !has_flag(&tokens, "--wait") {
         return None;
     }
-    let timeout = flag_value(&tokens, "--timeout-ms")
-        .or_else(|| flag_value(&tokens, "--timeout"))
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(300_000);
-    Some(timeout)
+    Some(last_timeout_flag_ms(&tokens).unwrap_or(300_000))
 }
 
 pub fn should_prefer_gui_endpoint(args: &[String], kite_address_env: Option<&str>) -> bool {

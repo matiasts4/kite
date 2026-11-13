@@ -416,8 +416,13 @@ fn stopped_worker_model_switch_resumes_working_and_keeps_history() {
     assert_eq!(state.members[0].state, "working");
     assert_eq!(state.members[0].provider.as_deref(), Some("gemini"));
     assert_eq!(state.members[0].model.as_deref(), Some("gemini-2.5-flash"));
-    assert_eq!(launches.lock().unwrap().len(), 2);
-    assert!(launches.lock().unwrap()[1].1.contains("Swarm Failover Resume"));
+    {
+        let calls = launches.lock().unwrap();
+        assert_eq!(calls.len(), 3, "calls={calls:?}");
+        assert_eq!(calls[1].0, coord_id, "silent failure must wake coordinator");
+        assert_eq!(calls[2].0, worker_cid, "failover switch must resume worker");
+        assert!(calls[2].1.contains("Swarm Failover Resume"));
+    }
 
     let all = threads().lock().unwrap();
     let w = all.iter().find(|t| t["id"] == worker_cid).unwrap();
@@ -538,6 +543,195 @@ fn swarm_worker_metadata_channel_priority_subagent_linkage_and_sync_wait() {
     .unwrap();
     let wait_out = handle.join().unwrap().unwrap();
     assert!(wait_out.contains("[done] checked"), "wait_out={wait_out}");
+
+    crate::chat::threads::remove_thread(&worker_cid);
+}
+
+#[test]
+fn coordinator_auto_wake_fires_when_idle_skips_when_waiting_and_matches_blocked() {
+    use crate::chat::subagents::SwarmBoardPost;
+    use crate::chat::utils::now_ms;
+    assert!(coordinator_matches_post(&SwarmBoardPost {
+        seq: 1,
+        author: "worker-a".into(),
+        channel: "main".into(),
+        text: "[blocked] waiting on migration decision".into(),
+        mentions: vec![],
+        created_at_unix_ms: 10,
+    }));
+
+    let coord_id = format!("swarm-coord-wake-{}", uuid::Uuid::new_v4().simple());
+    let scratch = std::env::temp_dir().join(format!(
+        "kite-swarm-coord-wake-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&scratch).unwrap();
+    let _guard = CleanupSwarmThread(coord_id.clone(), scratch.clone());
+
+    let coord = blank_thread(&coord_id, None, "Main Coord", "antigravity", None);
+    threads().lock().unwrap().push(coord);
+
+    let coord_addr = format!("thread:{coord_id}");
+    let cwd_str = scratch.to_string_lossy().to_string();
+    let launches: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let launches_ref = std::sync::Arc::clone(&launches);
+    let launcher_fn = move |tid: &str, prompt: &str| -> Result<(), String> {
+        launches_ref
+            .lock()
+            .unwrap()
+            .push((tid.to_string(), prompt.to_string()));
+        Ok(())
+    };
+
+    execute_swarm_action(
+        &SwarmCommand::Add {
+            name: "worker-a".into(),
+            provider: Some("grok".into()),
+            model: None,
+            effort: None,
+            workspace: Some("inherit".into()),
+            channels: vec!["main".into()],
+            fork: None,
+            role: None,
+            brief: "Check module".into(),
+        },
+        &coord_addr,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    )
+    .unwrap();
+    let worker_cid = load_swarm_state(&coord_id, Some(&cwd_str)).0.members[0]
+        .child_thread_id
+        .clone()
+        .unwrap();
+
+    // 1. Worker posts [blocked] while coordinator is idle and not waiting => auto-wake fires for coordinator.
+    execute_swarm_action(
+        &SwarmCommand::Post {
+            channel: None,
+            text: "[blocked] Need schema decision".into(),
+        },
+        &format!("thread:{worker_cid}"),
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    )
+    .unwrap();
+    {
+        let calls = launches.lock().unwrap();
+        assert_eq!(calls.len(), 2, "calls={calls:?}");
+        assert_eq!(calls[1].0, coord_id);
+        assert!(calls[1].1.contains("[blocked] Need schema decision"));
+    }
+
+    // 2. While coordinator has an active turn, post must NOT double-wake; settling worker later wakes once idle.
+    let run_id = format!("run-busy-{}", uuid::Uuid::new_v4().simple());
+    {
+        use crate::chat::runtime::state::{live_turns, TurnRun};
+        let mut live = live_turns().lock().unwrap();
+        live.by_thread.insert(coord_id.clone(), run_id.clone());
+        live.runs.insert(
+            run_id.clone(),
+            TurnRun {
+                revision: "1".into(),
+                events: Vec::new(),
+                next_sequence: 0,
+                assistant_id: "asst".into(),
+                assistant_text: String::new(),
+                child: None,
+                stdin: None,
+                closing: false,
+                finished: false,
+                started_at_ms: now_ms(),
+                routine_id: None,
+                delivered_through: 0,
+                file_baselines: std::collections::HashMap::new(),
+            },
+        );
+    }
+    execute_swarm_action(
+        &SwarmCommand::Post {
+            channel: None,
+            text: "@coordinator intermediate update".into(),
+        },
+        &format!("thread:{worker_cid}"),
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    )
+    .unwrap();
+    assert_eq!(launches.lock().unwrap().len(), 2);
+
+    // Clear coordinator live turn, then settle worker -> wakes idle coordinator for unread post.
+    {
+        use crate::chat::runtime::state::live_turns;
+        let mut live = live_turns().lock().unwrap();
+        live.by_thread.remove(&coord_id);
+        live.runs.remove(&run_id);
+    }
+    on_worker_turn_settled_with_launcher(&worker_cid, true, Some(&launcher_fn));
+    {
+        let calls = launches.lock().unwrap();
+        assert_eq!(calls.len(), 3, "calls={calls:?}");
+        assert_eq!(calls[2].0, coord_id);
+        assert!(calls[2].1.contains("intermediate update"));
+    }
+
+    // 3. While coordinator is actively in execute_swarm_wait, auto-wake must NOT launch a second turn.
+    let waiter_coord = coord_id.clone();
+    let head_seq = load_swarm_state(&coord_id, Some(&cwd_str))
+        .0
+        .last_coordinator_wake_seq;
+    let handle = std::thread::spawn(move || {
+        execute_swarm_wait(&waiter_coord, "coordinator", head_seq, true, 5_000)
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    execute_swarm_action(
+        &SwarmCommand::Post {
+            channel: None,
+            text: "@coordinator [done] all fixed".into(),
+        },
+        &format!("thread:{worker_cid}"),
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    )
+    .unwrap();
+    let waited = handle.join().unwrap().unwrap();
+    assert!(waited.contains("[done] all fixed"), "waited={waited}");
+    assert_eq!(launches.lock().unwrap().len(), 3);
+
+    // 4. Coordinator settles own turn while unread @coordinator posts exist -> auto-wake delivers them,
+    // and launch failure rolls back last_coordinator_wake_seq.
+    let before_fail_count = launches.lock().unwrap().len();
+    execute_swarm_action(
+        &SwarmCommand::Post {
+            channel: None,
+            text: "@coordinator follow-up while coord busy".into(),
+        },
+        &format!("thread:{worker_cid}"),
+        Some(&cwd_str),
+        Some(&|_tid: &str, _prompt: &str| Err("simulated launch error".to_string())),
+    )
+    .unwrap();
+    let head_seq = load_swarm_state(&coord_id, Some(&cwd_str))
+        .0
+        .posts
+        .last()
+        .unwrap()
+        .seq;
+    assert!(
+        load_swarm_state(&coord_id, Some(&cwd_str))
+            .0
+            .last_coordinator_wake_seq
+            < head_seq,
+        "failed launch must roll back wake cursor"
+    );
+    // Settling coordinator now drains unread @coordinator posts on coordinator thread.
+    on_worker_turn_settled_with_launcher(&coord_id, true, Some(&launcher_fn));
+    {
+        let calls = launches.lock().unwrap();
+        assert_eq!(calls.len(), before_fail_count + 1);
+        assert!(calls.last().unwrap().1.contains("follow-up while coord busy"));
+    }
 
     crate::chat::threads::remove_thread(&worker_cid);
 }

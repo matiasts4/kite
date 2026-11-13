@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -31,14 +32,26 @@ pub(super) fn invoke_launcher(
     child_thread_id: &str,
     prompt: &str,
 ) -> Result<(), String> {
+    if crate::chat::kill_registry::is_thread_killed(child_thread_id) {
+        return Err("member thread was killed".to_string());
+    }
     match launcher {
         Some(f) => f(child_thread_id, prompt),
         None => default_turn_launcher(child_thread_id, prompt),
     }
 }
 
+pub(super) struct PreparedSwarmWorker {
+    pub(super) child_id: String,
+    pub(super) child_thread: Value,
+    pub(super) provider: String,
+    pub(super) model: Option<String>,
+    pub(super) worktree_path: Option<String>,
+    pub(super) workspace_mode: String,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_swarm_member_thread(
+pub(super) fn prepare_swarm_member_thread(
     coord_thread_id: &str,
     swarm_id: &str,
     name: &str,
@@ -50,7 +63,7 @@ pub(super) fn spawn_swarm_member_thread(
     fork_source: Option<&str>,
     fork_source_thread_id: Option<&str>,
     fallback_cwd: Option<&str>,
-) -> Result<(String, String, Option<String>, Option<String>), DispatchError> {
+) -> Result<PreparedSwarmWorker, DispatchError> {
     let (coord_provider, coord_model, coord_ws_id, coord_cwd) = threads()
         .lock()
         .ok()
@@ -173,6 +186,7 @@ pub(super) fn spawn_swarm_member_thread(
         .or_else(|| fallback_cwd.map(str::to_string))
         .filter(|s| !s.trim().is_empty());
     let mut final_cwd = base_cwd.clone();
+    let mut worktree_path: Option<String> = None;
     if workspace_mode == "share" || workspace_mode == "branch" {
         let base_str = base_cwd.ok_or(DispatchError::PathRejected)?;
         let base_path = PathBuf::from(&base_str);
@@ -182,17 +196,78 @@ pub(super) fn spawn_swarm_member_thread(
         let wt_str = wt_path.to_string_lossy().to_string();
         child["worktreePath"] = json!(wt_str);
         child["workingDirectory"] = json!(wt_str);
+        worktree_path = Some(wt_str.clone());
         final_cwd = Some(wt_str);
     } else if let Some(ref dir) = final_cwd {
         child["workingDirectory"] = json!(dir);
     }
 
     let final_model = child.get("model").and_then(Value::as_str).map(str::to_string);
-    if let Ok(mut all) = threads().lock() {
-        all.push(child);
+    let _ = final_cwd;
+    Ok(PreparedSwarmWorker {
+        child_id,
+        child_thread: child,
+        provider,
+        model: final_model,
+        worktree_path,
+        workspace_mode: workspace_mode.to_string(),
+    })
+}
+
+pub(super) fn maybe_wake_idle_coordinator(
+    coord_tid: &str,
+    cwd: Option<&str>,
+    launcher: Option<SwarmTurnLauncher<'_>>,
+) {
+    #[cfg(test)]
+    if launcher.is_none() {
+        return;
     }
 
-    Ok((child_id, provider, final_model, final_cwd))
+    let channel = wait_channel_for(coord_tid);
+    if crate::chat::kill_registry::is_thread_killed(coord_tid) || is_coordinator_busy(coord_tid) {
+        return;
+    }
+
+    let wake_plan: Option<(u64, u64, String)> = {
+        let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
+        if channel.active_coordinator_waiters.load(Ordering::SeqCst) > 0 {
+            return;
+        }
+        let (mut state, path) = load_swarm_state(coord_tid, cwd);
+        let unread: Vec<SwarmBoardPost> = state
+            .posts
+            .iter()
+            .filter(|p| p.seq > state.last_coordinator_wake_seq && coordinator_matches_post(p))
+            .cloned()
+            .collect();
+        if unread.is_empty() {
+            None
+        } else {
+            let prev_seq = state.last_coordinator_wake_seq;
+            let max_seq = unread
+                .iter()
+                .map(|p| p.seq)
+                .max()
+                .unwrap_or(prev_seq);
+            let next_seq = prev_seq.max(max_seq);
+            state.last_coordinator_wake_seq = next_seq;
+            let prompt = build_coordinator_wakeup_prompt(&state, &unread);
+            save_and_broadcast_swarm(coord_tid, &path, &state);
+            Some((prev_seq, next_seq, prompt))
+        }
+    };
+
+    if let Some((prev_seq, next_seq, prompt)) = wake_plan {
+        if invoke_launcher(launcher, coord_tid, &prompt).is_err() {
+            let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let (mut state, path) = load_swarm_state(coord_tid, cwd);
+            if state.last_coordinator_wake_seq == next_seq {
+                state.last_coordinator_wake_seq = prev_seq;
+                save_and_broadcast_swarm(coord_tid, &path, &state);
+            }
+        }
+    }
 }
 
 pub fn on_worker_turn_settled_with_launcher(
@@ -200,21 +275,31 @@ pub fn on_worker_turn_settled_with_launcher(
     ok: bool,
     launcher: Option<SwarmTurnLauncher<'_>>,
 ) {
-    let swarm_ref = threads().lock().ok().and_then(|all| {
-        let child = all
-            .iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_thread_id))?;
-        let coord_tid = child
-            .get("swarmParentThreadId")
-            .and_then(Value::as_str)?
-            .to_string();
-        let member_name = child
-            .get("swarmMemberName")
-            .and_then(Value::as_str)?
-            .to_string();
-        Some((coord_tid, member_name))
-    });
+    let (swarm_ref, owns_swarm) = threads()
+        .lock()
+        .ok()
+        .map(|all| {
+            let Some(thread) = all
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(child_thread_id))
+            else {
+                return (None, false);
+            };
+            if let (Some(parent), Some(member)) = (
+                thread.get("swarmParentThreadId").and_then(Value::as_str),
+                thread.get("swarmMemberName").and_then(Value::as_str),
+            ) {
+                return (Some((parent.to_string(), member.to_string())), false);
+            }
+            let owns = thread.get("swarmState").is_some() || thread.get("swarmId").is_some();
+            (None, owns)
+        })
+        .unwrap_or((None, false));
+
     let Some((coord_tid, member_name)) = swarm_ref else {
+        if owns_swarm {
+            maybe_wake_idle_coordinator(child_thread_id, None, launcher);
+        }
         return;
     };
 
@@ -231,6 +316,7 @@ pub fn on_worker_turn_settled_with_launcher(
         if state.members[idx].state == "killed" {
             return;
         }
+        let prev_state = state.members[idx].state.clone();
         let unread_matching: Vec<SwarmBoardPost> = if ok && state.members[idx].pending_wake {
             state
                 .posts
@@ -260,6 +346,39 @@ pub fn on_worker_turn_settled_with_launcher(
             next_turn = Some((child_thread_id.to_string(), wake_prompt));
         } else {
             state.members[idx].state = if ok { "waiting" } else { "stopped" }.to_string();
+            let has_unread_coord = state
+                .posts
+                .iter()
+                .any(|p| p.seq > state.last_coordinator_wake_seq && coordinator_matches_post(p));
+            let other_working = state
+                .members
+                .iter()
+                .enumerate()
+                .any(|(i, m)| i != idx && m.state == "working");
+            // Post a synthetic blocker/completion notice if a worker stopped unexpectedly or the last active worker settled without posting.
+            if !has_unread_coord
+                && prev_state == "working"
+                && (!ok || !other_working)
+            {
+                let note = if ok {
+                    format!(
+                        "@coordinator [done] All active workers settled (last settled: @{member_name})."
+                    )
+                } else {
+                    format!(
+                        "@coordinator [blocked] Worker @{member_name} stopped without posting to the board."
+                    )
+                };
+                let seq = next_seq(&state);
+                state.posts.push(SwarmBoardPost {
+                    seq,
+                    author: member_name.clone(),
+                    channel: "main".to_string(),
+                    mentions: extract_mentions(&note),
+                    text: note,
+                    created_at_unix_ms: now_ms(),
+                });
+            }
         }
         save_and_broadcast_swarm(&coord_tid, &path, &state);
         next_turn
@@ -279,6 +398,8 @@ pub fn on_worker_turn_settled_with_launcher(
             }
             save_and_broadcast_swarm(&coord_tid, &path, &state);
         }
+    } else {
+        maybe_wake_idle_coordinator(&coord_tid, None, launcher);
     }
 }
 

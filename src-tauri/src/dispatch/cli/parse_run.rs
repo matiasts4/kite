@@ -31,8 +31,20 @@ pub fn parse_args_detailed(args: &[String]) -> Result<Command, (DispatchError, S
         .next()
         .ok_or_else(|| bad_args("Missing dispatch subcommand. Run `kite dispatch skill` for commands."))?;
     match sub {
-        "ls" => Ok(Command::Ls),
-        "programs" => Ok(Command::Programs),
+        "ls" => {
+            if let Some(extra) = items.next() {
+                return Err(bad_args(format!("Unexpected argument `{extra}` for `ls`.")));
+            }
+            Ok(Command::Ls)
+        }
+        "programs" => {
+            if let Some(extra) = items.next() {
+                return Err(bad_args(format!(
+                    "Unexpected argument `{extra}` for `programs`."
+                )));
+            }
+            Ok(Command::Programs)
+        }
         "providers" => {
             let mut refresh = false;
             while let Some(next) = items.next() {
@@ -51,20 +63,18 @@ pub fn parse_args_detailed(args: &[String]) -> Result<Command, (DispatchError, S
             let mut provider = None;
             let mut refresh = false;
             while let Some(next) = items.next() {
-                match next {
-                    "--refresh" => refresh = true,
+                let (flag, inline_val) = split_flag(next);
+                match flag {
+                    "--refresh" if inline_val.is_none() => refresh = true,
                     "--provider" => {
-                        let raw = items
-                            .next()
-                            .filter(|v| !v.starts_with("--"))
-                            .ok_or_else(|| bad_args("Missing value for `--provider`."))?;
-                        let canon = canonical_thread_provider(raw)
-                            .ok_or_else(|| bad_args(unknown_provider_message(raw)))?;
+                        let raw = need_flag_detailed(&mut items, "--provider", inline_val)?;
+                        let canon = canonical_thread_provider(&raw)
+                            .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?;
                         provider = Some(canon.to_string());
                     }
-                    other if other.starts_with('-') => {
+                    _ if next.starts_with('-') => {
                         return Err(bad_args(format!(
-                            "Unknown flag `{other}` for `models`. Supported: --provider <name>, --refresh."
+                            "Unknown flag `{next}` for `models`. Supported: --provider <name>, --refresh."
                         )))
                     }
                     other if provider.is_none() => {
@@ -81,7 +91,16 @@ pub fn parse_args_detailed(args: &[String]) -> Result<Command, (DispatchError, S
             }
             Ok(Command::Models { provider, refresh })
         }
-        "skill" | "help" | "--help" | "-h" => Ok(Command::Skill),
+        "skill" | "help" | "--help" | "-h" => {
+            for next in items {
+                if next.starts_with('-') {
+                    return Err(bad_args(format!(
+                        "Unknown flag `{next}` for `{sub}`. Run `kite dispatch skill` with no flags."
+                    )));
+                }
+            }
+            Ok(Command::Skill)
+        }
         "run" => parse_run_detailed(&mut items),
         "send" => parse_send(&mut items).map_err(|e| (e, "Invalid `send` arguments.".into())),
         "wait" => parse_wait(&mut items).map_err(|e| (e, "Invalid `wait` arguments.".into())),
@@ -161,14 +180,38 @@ pub fn normalize_effort(raw: &str) -> Option<String> {
     }
 }
 
+pub(super) fn split_flag(token: &str) -> (&str, Option<&str>) {
+    if token.starts_with("--") {
+        if let Some((flag, val)) = token.split_once('=') {
+            return (flag, Some(val));
+        }
+    }
+    (token, None)
+}
+
 pub(super) fn need_detailed<'a>(
     items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     flag: &str,
 ) -> Result<String, (DispatchError, String)> {
     match items.next() {
-        Some(value) if !value.starts_with("--") => Ok(value.to_string()),
+        Some(value) if !value.starts_with('-') => Ok(value.to_string()),
         _ => Err(bad_args(format!("Missing value for flag `{flag}`."))),
     }
+}
+
+pub(super) fn need_flag_detailed<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    flag: &str,
+    inline_val: Option<&str>,
+) -> Result<String, (DispatchError, String)> {
+    if let Some(val) = inline_val {
+        return if val.is_empty() {
+            Err(bad_args(format!("Missing value for flag `{flag}`.")))
+        } else {
+            Ok(val.to_string())
+        };
+    }
+    need_detailed(items, flag)
 }
 
 pub(super) fn parse_run_detailed<'a>(
@@ -194,33 +237,34 @@ pub(super) fn parse_run_detailed<'a>(
     let mut pane = false;
     let mut program = None;
     let mut positionals: Vec<String> = Vec::new();
-    while let Some(flag) = items.next() {
+    while let Some(raw_tok) = items.next() {
+        let (flag, inline_val) = split_flag(raw_tok);
         match flag {
             "--via" => {
-                via = match items.next() {
-                    Some("terminal") => Family::Terminal,
-                    Some("thread") => Family::Thread,
+                let raw_val = need_flag_detailed(items, "--via", inline_val)?;
+                via = match raw_val.as_str() {
+                    "terminal" => Family::Terminal,
+                    "thread" => Family::Thread,
                     other => {
                         return Err(bad_args(format!(
-                            "Invalid `--via` value `{}` (expected `thread` or `terminal`).",
-                            other.unwrap_or("<missing>")
+                            "Invalid `--via` value `{other}` (expected `thread` or `terminal`)."
                         )))
                     }
                 };
                 explicit_via = true;
             }
-            "--engine" => engine = Some(need_detailed(items, "--engine")?),
+            "--engine" => engine = Some(need_flag_detailed(items, "--engine", inline_val)?),
             "--provider" => {
-                let raw = need_detailed(items, "--provider")?;
+                let raw = need_flag_detailed(items, "--provider", inline_val)?;
                 provider = Some(
                     canonical_thread_provider(&raw)
                         .ok_or_else(|| bad_args(unknown_provider_message(&raw)))?
                         .to_string(),
                 );
             }
-            "--model" => model = Some(need_detailed(items, "--model")?),
+            "--model" => model = Some(need_flag_detailed(items, "--model", inline_val)?),
             "--effort" => {
-                let raw = need_detailed(items, "--effort")?;
+                let raw = need_flag_detailed(items, "--effort", inline_val)?;
                 effort = Some(normalize_effort(&raw).ok_or_else(|| {
                     bad_args(format!(
                         "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
@@ -228,7 +272,7 @@ pub(super) fn parse_run_detailed<'a>(
                 })?);
             }
             "--workspace" => {
-                let raw = need_detailed(items, "--workspace")?;
+                let raw = need_flag_detailed(items, "--workspace", inline_val)?;
                 workspace = Some(normalize_workspace_mode(&raw).ok_or_else(|| {
                     bad_args(format!(
                         "Invalid `--workspace` mode `{raw}`. Allowed: inherit, share, branch."
@@ -236,30 +280,32 @@ pub(super) fn parse_run_detailed<'a>(
                 })?);
             }
             "--name" => {
-                name = Some(need_detailed(items, "--name")?);
+                name = Some(need_flag_detailed(items, "--name", inline_val)?);
                 explicit_name = true;
             }
-            "--parent" => parent = Some(need_detailed(items, "--parent")?),
+            "--parent" => parent = Some(need_flag_detailed(items, "--parent", inline_val)?),
             "--role" => {
-                role = Some(need_detailed(items, "--role")?);
+                role = Some(need_flag_detailed(items, "--role", inline_val)?);
                 explicit_role = true;
             }
-            "--file" => file = Some(need_detailed(items, "--file")?),
-            "--wait" => wait = true,
+            "--file" => file = Some(need_flag_detailed(items, "--file", inline_val)?),
+            "--wait" if inline_val.is_none() => wait = true,
             "--timeout-ms" | "--timeout" => {
-                let raw = need_detailed(items, flag)?;
+                let raw = need_flag_detailed(items, flag, inline_val)?;
                 timeout_ms = Some(
                     raw.parse()
                         .map_err(|_| bad_args(format!("Invalid `{flag}` integer `{raw}`.")))?,
                 );
             }
-            "--outlive" => outlive = true,
-            "--hidden" => hidden = true,
-            "--pane" => pane = true,
-            "--" => positionals.extend(items.by_ref().map(|part| part.to_string())),
-            other if other.starts_with('-') => {
+            "--outlive" if inline_val.is_none() => outlive = true,
+            "--hidden" if inline_val.is_none() => hidden = true,
+            "--pane" if inline_val.is_none() => pane = true,
+            "--" if inline_val.is_none() => {
+                positionals.extend(items.by_ref().map(|part| part.to_string()))
+            }
+            _ if raw_tok.starts_with('-') => {
                 return Err(bad_args(format!(
-                    "Unknown flag `{other}` for `run`. Run `kite dispatch skill` for valid flags."
+                    "Unknown flag `{raw_tok}` for `run`. Run `kite dispatch skill` for valid flags."
                 )))
             }
             other => positionals.push(other.to_string()),

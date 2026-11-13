@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::acp::{acp_tool_from_update, build_acp_tool_call, classify_tool_metadata, AcpToolCall};
 pub use super::approval::*;
 
-#[path = "turn_pipeline.rs"]
+#[path = "turn_pipeline/mod.rs"]
 mod pipeline;
 pub use pipeline::*;
 

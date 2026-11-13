@@ -1,4 +1,5 @@
     use super::*;
+    use serde_json::json;
 
     fn ids(raw: &str) -> Vec<String> {
         parse_opencode_models(raw)

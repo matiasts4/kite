@@ -281,10 +281,12 @@ describe('Unified Multi-Account Lifecycle & Cross-Surface Sync (S6.1 & S6.2)', (
 
     const quotasWrap = screen.getByTestId('quotas-tab-wrap');
     const accountWrap = screen.getByTestId('account-tab-wrap');
+    const popoverDialog = screen.getByRole('dialog', { name: /Cuotas de suscripción IA/i });
 
     expect(await within(quotasWrap).findByText('Personal')).toBeInTheDocument();
     expect(screen.getByTestId('pane-account-pill')).toHaveTextContent('Personal');
     expect(await within(accountWrap).findByText('personal@kite.local')).toBeInTheDocument();
+    expect(within(popoverDialog).getAllByText('personal@kite.local').length).toBeGreaterThanOrEqual(2);
 
     // Inactive card in AccountVault does NOT copy active account's 90% quota
     expect(
@@ -297,8 +299,10 @@ describe('Unified Multi-Account Lifecycle & Cross-Surface Sync (S6.1 & S6.2)', (
 
     await waitFor(() => {
       expect(screen.getByTestId('pane-account-pill')).toHaveTextContent('Work');
+      expect(within(popoverDialog).getAllByText('work@kite.local').length).toBeGreaterThanOrEqual(2);
     });
     expect(await within(accountWrap).findByText('work@kite.local')).toBeInTheDocument();
+    expect(within(popoverDialog).queryByText('personal@kite.local')).not.toBeInTheDocument();
     expect(within(quotasWrap).getAllByText('work@kite.local').length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText('work@kite.local').length).toBeGreaterThanOrEqual(3);
   });

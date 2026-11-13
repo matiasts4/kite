@@ -1388,3 +1388,305 @@ fn test_build_antigravity_auth_telemetry_exposes_cli_ide_split_brain_and_expiry(
     assert_eq!(aligned["splitBrainWarning"], false);
     assert!(aligned["splitBrainMessage"].is_null());
 }
+
+#[test]
+fn test_save_account_profile_with_creates_updates_dedups_and_preserves_custom_label() {
+    use super::commands::save_account_profile_with;
+    use super::quota::LiveQuota;
+    use super::storage::LiveIdentityProbe;
+
+    let dir = std::env::temp_dir().join(format!("kite-save-prof-e2e-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let live_dir = dir.join("live");
+    fs::create_dir_all(&live_dir).unwrap();
+    let live_pbtxt = live_dir.join("antigravity_state.pbtxt");
+    fs::write(&live_pbtxt, "pbtxt-alpha").unwrap();
+
+    let db_path = dir.join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "antigravityAuthStatus",
+                r#"{"email":"alpha@example.com","name":"Alpha User"}"#
+            ],
+        )
+        .unwrap();
+    }
+
+    let mappings = vec![FileMapping {
+        source: live_pbtxt.clone(),
+        rel_dest: "antigravity_state.pbtxt",
+    }];
+    let cred_alpha = r#"{"token":{"access_token":"ya29.alpha","refresh_token":"1//alpha"},"id_token_email":"alpha@example.com"}"#;
+    let store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(Some(cred_alpha.to_string())),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+
+    let ident = LiveIdentityProbe {
+        provider: "agy".to_string(),
+        email: "alpha@example.com".to_string(),
+        name: Some("Alpha User".to_string()),
+        source: "oauth".to_string(),
+    };
+    let quota_first = LiveQuota {
+        percent: 88.0,
+        reset_at: Some("19:00".to_string()),
+        until_ms: Some(1_800_000),
+        email: Some("alpha@example.com".to_string()),
+        plan: Some("Google AI Pro".to_string()),
+    };
+
+    let first = save_account_profile_with(
+        &root,
+        "antigravity",
+        "Personal Pro".to_string(),
+        &mappings,
+        Some(&db_path),
+        &store,
+        Some(ident.clone()),
+        Some(quota_first),
+    );
+    assert_eq!(first["success"], json!(true));
+    let prof_id = first["profile"]["id"].as_str().unwrap().to_string();
+    assert_eq!(first["profile"]["label"], json!("Personal Pro"));
+    assert_eq!(first["profile"]["email"], json!("alpha@example.com"));
+    assert_eq!(first["profile"]["credentialStatus"], json!("valid"));
+    assert_eq!(first["profile"]["hasRefreshToken"], json!(true));
+    assert_eq!(first["profile"]["isActive"], json!(true));
+    assert!(root.join("agy").join(&prof_id).join("gemini_antigravity_cred.json").is_file());
+    assert!(root.join("agy").join(&prof_id).join("ide_auth_state.json").is_file());
+    assert_eq!(
+        fs::read_to_string(root.join("agy").join(&prof_id).join("antigravity_state.pbtxt")).unwrap(),
+        "pbtxt-alpha"
+    );
+
+    // Re-saving same email with raw email label (auto-save) must deduplicate and keep custom label
+    let quota_updated = LiveQuota {
+        percent: 72.5,
+        reset_at: Some("20:00".to_string()),
+        until_ms: Some(900_000),
+        email: Some("ALPHA@example.com".to_string()),
+        plan: Some("Google AI Pro".to_string()),
+    };
+    let second = save_account_profile_with(
+        &root,
+        "agy",
+        "alpha@example.com".to_string(),
+        &mappings,
+        Some(&db_path),
+        &store,
+        Some(ident),
+        Some(quota_updated),
+    );
+    assert_eq!(second["success"], json!(true));
+    assert_eq!(second["profile"]["id"], json!(prof_id));
+    assert_eq!(second["profile"]["label"], json!("Personal Pro"));
+    assert_eq!(second["profile"]["primaryRemainingPercent"], json!(72.5));
+
+    let reg = load_registry_from(&root);
+    assert_eq!(reg.profiles.len(), 1);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_end_to_end_switch_preflight_apply_and_tokenless_rejection_preserves_active_state() {
+    use super::commands::{save_account_profile_with, switch_preflight_check_with};
+    use super::storage::LiveIdentityProbe;
+    use crate::terminal::{ProviderSessionSummary, ProviderSessionsInspection};
+
+    let dir = std::env::temp_dir().join(format!("kite-switch-e2e-{}", Uuid::new_v4()));
+    let root = dir.join("vault");
+    let live_dir = dir.join("live");
+    fs::create_dir_all(&live_dir).unwrap();
+    let live_pbtxt = live_dir.join("antigravity_state.pbtxt");
+
+    let db_path = dir.join("state.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let mappings = vec![FileMapping {
+        source: live_pbtxt.clone(),
+        rel_dest: "antigravity_state.pbtxt",
+    }];
+    let cred_a = r#"{"token":{"access_token":"ya29.acctA","refresh_token":"1//acctA"},"id_token_email":"a@example.com"}"#;
+    let cred_b = r#"{"token":{"access_token":"ya29.acctB","refresh_token":"1//acctB"},"id_token_email":"b@example.com"}"#;
+    let store = MockAgyCredStore {
+        read_value: std::cell::RefCell::new(Some(cred_a.to_string())),
+        forced_readback: std::cell::RefCell::new(None),
+        write_error: None,
+    };
+
+    let set_ide_email = |email: &str| {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "antigravityAuthStatus",
+                format!(r#"{{"email":"{email}","name":"User"}}"#)
+            ],
+        )
+        .unwrap();
+    };
+
+    // Save Account A
+    fs::write(&live_pbtxt, "pbtxt-a").unwrap();
+    set_ide_email("a@example.com");
+    let res_a = save_account_profile_with(
+        &root,
+        "agy",
+        "Account A".to_string(),
+        &mappings,
+        Some(&db_path),
+        &store,
+        Some(LiveIdentityProbe {
+            provider: "agy".to_string(),
+            email: "a@example.com".to_string(),
+            name: None,
+            source: "oauth".to_string(),
+        }),
+        None,
+    );
+    assert_eq!(res_a["success"], json!(true));
+    let id_a = res_a["profile"]["id"].as_str().unwrap().to_string();
+
+    // Save Account B (becomes currently active live account)
+    *store.read_value.borrow_mut() = Some(cred_b.to_string());
+    fs::write(&live_pbtxt, "pbtxt-b").unwrap();
+    set_ide_email("b@example.com");
+    let res_b = save_account_profile_with(
+        &root,
+        "agy",
+        "Account B".to_string(),
+        &mappings,
+        Some(&db_path),
+        &store,
+        Some(LiveIdentityProbe {
+            provider: "agy".to_string(),
+            email: "b@example.com".to_string(),
+            name: None,
+            source: "oauth".to_string(),
+        }),
+        None,
+    );
+    assert_eq!(res_b["success"], json!(true));
+    let id_b = res_b["profile"]["id"].as_str().unwrap().to_string();
+
+    // Create a tokenless Account C directory (not switchable)
+    let broken_dir = root.join("agy").join("prof-tokenless");
+    fs::create_dir_all(&broken_dir).unwrap();
+    fs::write(broken_dir.join("antigravity_state.pbtxt"), "pbtxt-c").unwrap();
+    fs::write(
+        broken_dir.join("gemini_antigravity_cred.json"),
+        r#"{"id_token_email":"broken@example.com"}"#,
+    )
+    .unwrap();
+
+    let busy_inspection = ProviderSessionsInspection {
+        managed_idle: Vec::new(),
+        managed_busy: vec![ProviderSessionSummary {
+            session_id: "term-1".to_string(),
+            engine: "antigravity".to_string(),
+            workspace_id: None,
+            pane_id: None,
+            cwd: "/repo".to_string(),
+            busy: true,
+            reasons: vec!["recent_output".to_string()],
+            last_output_age_ms: Some(120),
+            presentation_live: true,
+        }],
+        external_blocking: Vec::new(),
+        unaffected_terminals_count: 2,
+    };
+    let idle_inspection = ProviderSessionsInspection::default();
+
+    // Preflight 1: tokenless profile rejected BEFORE busy / process checks
+    let pre_broken = switch_preflight_check_with(
+        &root,
+        "agy",
+        "prof-tokenless",
+        true,
+        Ok(()),
+        &idle_inspection,
+    )
+    .expect("tokenless profile must fail preflight");
+    assert_eq!(pre_broken["code"], json!("INVALID_TARGET_PROFILE"));
+
+    // Preflight 2: external IDE lock rejected
+    let pre_locked = switch_preflight_check_with(
+        &root,
+        "agy",
+        &id_a,
+        true,
+        Err("IDE process running".to_string()),
+        &idle_inspection,
+    )
+    .expect("locked provider must fail preflight");
+    assert_eq!(pre_locked["code"], json!("PROVIDER_BUSY"));
+
+    // Preflight 3: busy Kite terminal requires force=true
+    let pre_busy = switch_preflight_check_with(
+        &root,
+        "agy",
+        &id_a,
+        false,
+        Ok(()),
+        &busy_inspection,
+    )
+    .expect("busy terminal without force must return CONFIRM_BUSY_TERMINALS");
+    assert_eq!(pre_busy["code"], json!("CONFIRM_BUSY_TERMINALS"));
+    assert_eq!(pre_busy["unaffectedTerminalsCount"], json!(2));
+
+    // Preflight 4: force=true passes
+    assert!(
+        switch_preflight_check_with(&root, "agy", &id_a, true, Ok(()), &busy_inspection)
+            .is_none()
+    );
+
+    // Apply Account A (B -> A swap) and verify all persisted surfaces + IDE state.vscdb
+    apply_profile_to_active_with(&root, "agy", &id_a, &mappings, Some(&db_path), &store)
+        .expect("switch B -> A must succeed");
+    assert_eq!(fs::read_to_string(&live_pbtxt).unwrap(), "pbtxt-a");
+    let active_cred_after = store.read_value.borrow().clone().unwrap();
+    assert!(active_cred_after.contains("ya29.acctA"));
+    assert!(active_cred_after.contains("a@example.com"));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let auth_after_a: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(auth_after_a.contains("a@example.com"));
+
+    // Corrupt B's saved credential to missing tokens and ensure attempting apply leaves A completely intact
+    fs::write(
+        root.join("agy").join(&id_b).join("gemini_antigravity_cred.json"),
+        r#"{"id_token_email":"b@example.com"}"#,
+    )
+    .unwrap();
+    let err_apply_tokenless =
+        apply_profile_to_active_with(&root, "agy", &id_b, &mappings, Some(&db_path), &store)
+            .expect_err("tokenless target must fail apply");
+    assert!(!err_apply_tokenless.is_empty());
+    assert_eq!(fs::read_to_string(&live_pbtxt).unwrap(), "pbtxt-a");
+    assert!(store.read_value.borrow().as_deref().unwrap().contains("ya29.acctA"));
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -29,7 +29,10 @@ pub fn terminal_scrollback_dir() -> std::path::PathBuf {
     dir
 }
 
-pub fn scrollback_path_for_session(session_id: &str) -> std::path::PathBuf {
+pub fn scrollback_path_for_session_in(
+    scrollback_dir: Option<&std::path::Path>,
+    session_id: &str,
+) -> std::path::PathBuf {
     let safe_id: String = session_id
         .chars()
         .map(|c| {
@@ -40,11 +43,21 @@ pub fn scrollback_path_for_session(session_id: &str) -> std::path::PathBuf {
             }
         })
         .collect();
-    terminal_scrollback_dir().join(format!("{}.scrollback", safe_id))
+    let dir = scrollback_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(terminal_scrollback_dir);
+    dir.join(format!("{}.scrollback", safe_id))
 }
 
-pub fn read_scrollback_file(session_id: &str) -> Option<Vec<u8>> {
-    let path = scrollback_path_for_session(session_id);
+pub fn scrollback_path_for_session(session_id: &str) -> std::path::PathBuf {
+    scrollback_path_for_session_in(None, session_id)
+}
+
+pub fn read_scrollback_file_in(
+    scrollback_dir: Option<&std::path::Path>,
+    session_id: &str,
+) -> Option<Vec<u8>> {
+    let path = scrollback_path_for_session_in(scrollback_dir, session_id);
     if path.is_file() {
         std::fs::read(&path).ok().filter(|b| !b.is_empty())
     } else {
@@ -52,9 +65,21 @@ pub fn read_scrollback_file(session_id: &str) -> Option<Vec<u8>> {
     }
 }
 
-pub fn write_scrollback_file(session_id: &str, bytes: &[u8]) {
-    let path = scrollback_path_for_session(session_id);
+pub fn read_scrollback_file(session_id: &str) -> Option<Vec<u8>> {
+    read_scrollback_file_in(None, session_id)
+}
+
+pub fn write_scrollback_file_in(
+    scrollback_dir: Option<&std::path::Path>,
+    session_id: &str,
+    bytes: &[u8],
+) {
+    let path = scrollback_path_for_session_in(scrollback_dir, session_id);
     let _ = std::fs::write(path, bytes);
+}
+
+pub fn write_scrollback_file(session_id: &str, bytes: &[u8]) {
+    write_scrollback_file_in(None, session_id, bytes);
 }
 
 pub fn delete_scrollback_file(session_id: &str) {
@@ -62,7 +87,8 @@ pub fn delete_scrollback_file(session_id: &str) {
     let _ = std::fs::remove_file(path);
 }
 
-pub fn snapshot_scrollback_for_attach(
+pub fn snapshot_scrollback_for_attach_in(
+    scrollback_dir: Option<&std::path::Path>,
     session_id: &str,
     inst: &crate::terminal::TerminalInstance,
     preserve_unread_buffer: bool,
@@ -80,7 +106,7 @@ pub fn snapshot_scrollback_for_attach(
     }
     if let Some(sb) = sb_guard {
         if had_pending && !sb.is_empty() {
-            write_scrollback_file(session_id, &sb);
+            write_scrollback_file_in(scrollback_dir, session_id, &sb);
         }
         if sb.is_empty() {
             None
@@ -90,6 +116,14 @@ pub fn snapshot_scrollback_for_attach(
     } else {
         None
     }
+}
+
+pub fn snapshot_scrollback_for_attach(
+    session_id: &str,
+    inst: &crate::terminal::TerminalInstance,
+    preserve_unread_buffer: bool,
+) -> Option<Vec<u8>> {
+    snapshot_scrollback_for_attach_in(None, session_id, inst, preserve_unread_buffer)
 }
 
 pub fn plain_terminal_text(bytes: &[u8]) -> String {

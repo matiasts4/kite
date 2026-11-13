@@ -1,5 +1,4 @@
-use crate::persist::{body, db_connection};
-use rusqlite::params;
+use crate::persist::{app_state_get, app_state_set, body};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -20,26 +19,6 @@ fn request_id(request: &Option<Value>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(NIL_REQUEST)
         .to_string()
-}
-
-fn app_state_get(key: &str) -> Option<String> {
-    db_connection()
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT value FROM app_state WHERE key = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .ok()
-}
-
-fn app_state_set(key: &str, value: &str) {
-    let _ = db_connection().lock().unwrap().execute(
-        "INSERT INTO app_state (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    );
 }
 
 fn default_settings() -> Value {

@@ -1,5 +1,4 @@
-use crate::persist::{body, db_connection, notifications, persist, revision_counter};
-use rusqlite::params;
+use crate::persist::{app_state_get, app_state_set_checked, body, notifications, persist, revision_counter};
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
@@ -57,20 +56,15 @@ fn center_from_stored(value: &Value) -> NotificationCenter {
 }
 
 fn load_center() -> NotificationCenter {
-    let stored = db_connection().lock().unwrap().query_row(
-        "SELECT value FROM app_state WHERE key = 'notificationCenter'",
-        [],
-        |row| row.get::<_, String>(0),
-    );
-    match stored {
-        Ok(raw) => serde_json::from_str::<Value>(&raw)
+    match app_state_get("notificationCenter") {
+        Some(raw) => serde_json::from_str::<Value>(&raw)
             .map(|value| center_from_stored(&value))
             .unwrap_or_else(|_| NotificationCenter {
                 authorization: "notDetermined".into(),
                 preferences: default_preferences(),
                 persistence_error: None,
             }),
-        Err(_) => NotificationCenter {
+        None => NotificationCenter {
             authorization: "notDetermined".into(),
             preferences: default_preferences(),
             persistence_error: None,
@@ -89,12 +83,7 @@ fn save_center(center: &NotificationCenter) -> Option<String> {
         "preferences": center.preferences
     })
     .to_string();
-    let result = db_connection().lock().unwrap().execute(
-        "INSERT INTO app_state (key, value) VALUES ('notificationCenter', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![payload],
-    );
-    match result {
+    match app_state_set_checked("notificationCenter", &payload) {
         Ok(_) => None,
         Err(error) => Some(format!("Notification settings could not be saved: {error}")),
     }

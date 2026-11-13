@@ -344,19 +344,7 @@ fn build_worker_wakeup_prompt(title: &str, member: &SwarmMember, posts: &[SwarmB
 }
 
 pub fn default_turn_launcher(child_thread_id: &str, prompt: &str) -> Result<(), String> {
-    crate::dispatch_wire::protocol::clear_thread_killed(child_thread_id);
-    let profile_id = threads().lock().ok().and_then(|list| {
-        list.iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_thread_id))
-            .and_then(|t| t.get("profileId").and_then(Value::as_str))
-            .map(str::to_string)
-    });
-    let value = crate::chat::start_turn(child_thread_id, profile_id.as_deref(), prompt, Vec::new(), None);
-    if let Some(err) = value.get("error").and_then(Value::as_str) {
-        Err(err.to_string())
-    } else {
-        Ok(())
-    }
+    crate::chat::kill_registry::launch_child_thread_turn(child_thread_id, prompt)
 }
 
 fn invoke_launcher(
@@ -958,7 +946,7 @@ pub fn execute_swarm_action(
                 save_and_broadcast_swarm(&coord_tid, &path, &state);
 
                 if let Some(cid) = child_tid {
-                    crate::dispatch_wire::protocol::mark_thread_killed(&cid);
+                    crate::chat::kill_registry::mark_thread_killed(&cid);
                     pending_kills.push(cid);
                 }
                 Ok(format!("killed @{name}"))

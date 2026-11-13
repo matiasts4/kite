@@ -381,7 +381,14 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
 }
 
 pub fn query_agy_models_cli() -> Option<Vec<Value>> {
-    let program = resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"])?;
+    let local_app_data = std::env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::quota::utils::user_home_dir().join("AppData").join("Local"));
+    let fallback_agy = local_app_data.join("agy").join("bin").join("agy.exe");
+    let fallback_str = fallback_agy.to_string_lossy().into_owned();
+    let program = resolve_bin("agy", &[fallback_str.as_str()])?;
     if std::env::var("AGY_CLI_DISABLE_AUTO_UPDATE").is_err() {
         std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
     }

@@ -3,6 +3,7 @@ pub mod checkpoints;
 pub mod contract;
 pub mod drivers;
 pub mod event_log;
+pub mod kill_registry;
 pub mod models;
 pub mod normalize;
 pub mod persistent;

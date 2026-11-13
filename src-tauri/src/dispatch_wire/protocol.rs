@@ -33,30 +33,7 @@ fn next_publish_seq() -> u64 {
     }
 }
 
-fn killed_threads() -> &'static Mutex<HashSet<String>> {
-    static KILLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    KILLED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-pub fn mark_thread_killed(thread_id: &str) {
-    if let Ok(mut set) = killed_threads().lock() {
-        set.insert(thread_id.to_string());
-    }
-}
-
-pub fn clear_thread_killed(thread_id: &str) {
-    if let Ok(mut set) = killed_threads().lock() {
-        set.remove(thread_id);
-    }
-}
-
-pub(crate) fn is_thread_killed(thread_id: &str) -> bool {
-    killed_threads()
-        .lock()
-        .ok()
-        .map(|set| set.contains(thread_id))
-        .unwrap_or(false)
-}
+pub use crate::chat::kill_registry::{clear_thread_killed, is_thread_killed, mark_thread_killed};
 
 pub struct LivePort;
 

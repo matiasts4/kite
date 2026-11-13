@@ -76,8 +76,19 @@ pub fn app_data_folder() -> &'static str {
 }
 
 pub fn roaming_app_dir() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
-    PathBuf::from(base).join(app_data_folder())
+    let base = std::env::var("APPDATA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+                .unwrap_or_else(|| std::env::temp_dir().join("kite-appdata"))
+        });
+    base.join(app_data_folder())
 }
 
 pub fn db_path() -> PathBuf {
@@ -929,6 +940,31 @@ pub fn load_grid() -> Value {
 
 pub fn body<'a>(request: &'a Option<Value>) -> Option<&'a Value> {
     request.as_ref().map(|value| value.get("request").unwrap_or(value))
+}
+
+pub fn app_state_get(key: &str) -> Option<String> {
+    db_connection()
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT value FROM app_state WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok()
+}
+
+pub fn app_state_set_checked(key: &str, value: &str) -> Result<(), rusqlite::Error> {
+    db_connection().lock().unwrap().execute(
+        "INSERT INTO app_state (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn app_state_set(key: &str, value: &str) {
+    let _ = app_state_set_checked(key, value);
 }
 
 #[cfg(test)]

@@ -179,7 +179,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                             .or_else(|| params.get("prompt"))
                             .or_else(|| params.get("CommandLine"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("El agente solicita permiso para ejecutar esta acción.");
+                            .unwrap_or("The agent requests permission to perform this action.");
                         let risk = if command.is_some() {
                             "command"
                         } else if file_path.is_some() {

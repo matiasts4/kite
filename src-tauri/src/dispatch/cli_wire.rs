@@ -17,8 +17,19 @@ pub fn app_data_folder() -> &'static str {
 }
 
 pub fn roaming_app_dir() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
-    PathBuf::from(base).join(app_data_folder())
+    let base = std::env::var("APPDATA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+                .unwrap_or_else(|| std::env::temp_dir().join("kite-appdata"))
+        });
+    base.join(app_data_folder())
 }
 
 pub fn endpoint_path() -> PathBuf {

@@ -1962,7 +1962,7 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
 
     let (parent_tid, child_status, child_items, child_model, child_provider) = snapshot;
     let (step_count, latest_activity) = summarize_run_progress(&child_items);
-    let run_status = if crate::dispatch_wire::protocol::is_thread_killed(child_thread_id) {
+    let run_status = if crate::chat::kill_registry::is_thread_killed(child_thread_id) {
         "killed"
     } else {
         match child_status.as_str() {
@@ -2199,10 +2199,10 @@ pub fn send_subagent_message_with_launcher(
         }));
     }
 
-    crate::dispatch_wire::protocol::clear_thread_killed(&child_tid);
+    crate::chat::kill_registry::clear_thread_killed(&child_tid);
     let launch_res = match launcher {
         Some(f) => f(&child_tid, trimmed),
-        None => crate::chat::swarm::default_turn_launcher(&child_tid, trimmed),
+        None => crate::chat::kill_registry::launch_child_thread_turn(&child_tid, trimmed),
     };
     if let Err(err) = launch_res {
         if let Ok(mut all) = threads().lock() {
@@ -2276,7 +2276,7 @@ pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Valu
     };
 
     if let Some(ref cid) = child_tid {
-        crate::dispatch_wire::protocol::mark_thread_killed(cid);
+        crate::chat::kill_registry::mark_thread_killed(cid);
         crate::chat::cancel_turn(cid);
         if let Ok(mut manager) = crate::chat::session_manager().lock() {
             let already_closed = manager
@@ -2563,7 +2563,7 @@ mod tests {
         let stopped = cancel_subagent_thread(&parent_id, "sub_steer_1").unwrap();
         assert_eq!(stopped["status"], "killed");
         assert_eq!(stopped["latestActivity"], "Stopped by user");
-        crate::dispatch_wire::protocol::clear_thread_killed(&child_id);
+        crate::chat::kill_registry::clear_thread_killed(&child_id);
     }
 
     #[test]

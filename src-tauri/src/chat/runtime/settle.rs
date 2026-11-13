@@ -194,8 +194,8 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                     let handoff_item = json!({
                         "id": format!("qho_{}", Uuid::new_v4().simple()),
                         "kind": "quotaHandoff",
-                        "text": format!("Se ha detectado agotamiento de cuota en {}: {}", current_provider, reason),
-                        "title": "Límite de cuota alcanzado",
+                        "text": format!("Quota exhausted on {}: {}", current_provider, reason),
+                        "title": "Quota limit reached",
                         "detail": Value::Null,
                         "status": "ready",
                         "streaming": false,
@@ -385,7 +385,7 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
             let msg = res
                 .get("error")
                 .and_then(|v| v.as_str())
-                .unwrap_or("No se pudo cambiar de cuenta.")
+                .unwrap_or("Could not switch accounts.")
                 .to_string();
             return Err(msg);
         }

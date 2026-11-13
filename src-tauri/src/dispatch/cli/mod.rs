@@ -16,5 +16,4 @@ pub use parse_run::*;
 pub use types::*;
 
 #[cfg(test)]
-#[path = "../cli_tests.rs"]
 mod tests;

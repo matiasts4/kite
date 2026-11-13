@@ -15,8 +15,8 @@ fn normalizes_paths_and_file_uris_consistently() {
 fn computes_claude_project_slug_accurately() {
     assert_eq!(claude_project_slug(r"E:\kite"), "E--kite");
     assert_eq!(
-        claude_project_slug(r"\\?\C:\Users\PC\my_repo"),
-        "C--Users-PC-my-repo"
+        claude_project_slug(r"\\?\C:\Users\dev\my_repo"),
+        "C--Users-dev-my-repo"
     );
 }
 

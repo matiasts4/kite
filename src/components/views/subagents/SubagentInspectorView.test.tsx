@@ -345,4 +345,88 @@ describe('SubagentInspectorView', () => {
     expect(screen.getByText('No steps captured before failure')).toBeInTheDocument();
     expect(screen.queryByText(/Waiting for subagent steps/i)).toBeNull();
   });
+
+  it('deduplicates shell-wrapper and child-thread runs, hides single-run selector pills, and filters notice frames out of the step stream', async () => {
+    const traceThread = makeThread({
+      subagentRuns: [
+        {
+          subagentId: 't_shell_wrapper',
+          parentThreadId: 'thread-main-1',
+          parentToolCallId: 't_shell_wrapper',
+          role: 'Package.json Reviewer',
+          typeName: 'grok',
+          provider: 'grok',
+          model: 'grok-4.7-build-fast',
+          workspaceMode: 'inherit',
+          status: 'completed',
+          prompt: 'Summarize package.json scripts in 3 bullets.',
+          stepCount: 0,
+          startedAtUnixMs: Date.now() - 30_000,
+          updatedAtUnixMs: Date.now() - 2_000,
+          items: [],
+        },
+        {
+          subagentId: 'b52770b2',
+          parentThreadId: 'thread-main-1',
+          parentToolCallId: 't_shell_wrapper',
+          childThreadId: 'b52770b2',
+          role: 'Package.json Reviewer',
+          typeName: 'grok',
+          provider: 'grok',
+          model: 'grok-4.7-build-fast',
+          workspaceMode: 'inherit',
+          status: 'completed',
+          prompt: 'Summarize package.json scripts in 3 bullets.',
+          stepCount: 2,
+          startedAtUnixMs: Date.now() - 28_000,
+          updatedAtUnixMs: Date.now() - 1_000,
+          items: [
+            makeItem({
+              id: 'u-initial',
+              kind: 'user',
+              text: '[Subagent Role: Package.json Reviewer]\nSummarize package.json scripts in 3 bullets.',
+            }),
+            makeItem({
+              id: 'notice-1',
+              kind: 'notice' as ChatItem['kind'],
+              text: 'grok sent an unknown frame (schema=jsonrpc,method,params)',
+            }),
+            makeItem({
+              id: 'notice-2',
+              kind: 'notice' as ChatItem['kind'],
+              text: 'grok sent an unknown frame (schema=jsonrpc,method,params)',
+            }),
+            makeItem({
+              id: 'r-1',
+              kind: 'reasoning',
+              text: 'Reviewing package.json in root to identify dev and test scripts.',
+            }),
+            makeItem({
+              id: 'a-1',
+              kind: 'assistant',
+              text: '- **Dev**: `dev` starts Vite.\n- **Test**: `test` runs Vitest.',
+            }),
+          ],
+        },
+      ],
+      swarmState: null,
+    });
+    loadChatThreadMock.mockResolvedValueOnce(traceThread);
+
+    const { container } = render(
+      <SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-main-1" />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Package.json Reviewer')).toBeInTheDocument();
+    });
+
+    expect(container.querySelector('.subagent-inspector__selector-strip')).toBeNull();
+    expect(screen.queryByText('Tool')).toBeNull();
+    expect(screen.queryByText(/grok sent an unknown frame/i)).toBeNull();
+    expect(
+      screen.getByText('Reviewing package.json in root to identify dev and test scripts.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/starts Vite/i)).toBeInTheDocument();
+  });
 });

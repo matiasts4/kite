@@ -1638,7 +1638,7 @@
 }
 
 .chat-subagent-card-wrap {
-  margin: 2px 0;
+  margin: 4px 0;
   width: 100%;
 }
 
@@ -1647,12 +1647,12 @@
   min-height: var(--vl-control-md, 32px);
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 6px 10px;
+  gap: 3px;
+  padding: 7px 10px;
   text-align: left;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid transparent;
-  background: transparent;
+  border: 1px solid var(--block-stroke);
+  background: color-mix(in srgb, var(--block-fill) 45%, transparent);
   color: var(--text-primary);
   cursor: pointer;
   transition: background var(--duration-ink) var(--ease-ink), border-color var(--duration-ink) var(--ease-ink);
@@ -1660,7 +1660,7 @@
 
 .chat-subagent-card:hover:not(.chat-subagent-card--static) {
   background: var(--hover-fill);
-  border-color: var(--block-stroke);
+  border-color: var(--control-stroke-hover, var(--block-stroke));
 }
 
 .chat-subagent-card--static {
@@ -1668,23 +1668,24 @@
 }
 
 .chat-subagent-card--running {
-  background: color-mix(in srgb, var(--block-fill) 60%, transparent);
-  border-color: var(--block-stroke);
+  background: color-mix(in srgb, var(--block-fill) 72%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--block-stroke));
 }
 
 .chat-subagent-card--failed {
-  border-color: color-mix(in srgb, var(--danger-ink) 28%, transparent);
+  border-color: color-mix(in srgb, var(--danger-ink) 32%, transparent);
+  background: color-mix(in srgb, var(--danger-ink) 5%, transparent);
 }
 
 .chat-subagent-card--active {
   background: var(--selected-fill);
-  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
 }
 
 .chat-subagent-card__header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
   flex-wrap: nowrap;
 }
@@ -1707,11 +1708,15 @@
   color: var(--accent);
 }
 
+.chat-subagent-card--completed .chat-subagent-card__icon {
+  color: #22c55e;
+}
+
 .chat-subagent-card__title {
   font-size: var(--text-row);
-  font-weight: var(--weight-medium, 500);
+  font-weight: var(--weight-semibold, 600);
   color: var(--text-primary);
-  max-width: 220px;
+  max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

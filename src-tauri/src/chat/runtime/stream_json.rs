@@ -534,12 +534,57 @@ pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str
         open_headless_permission(thread_id, run_id, &permission);
         return;
     }
+    let (has_tool_after_assistant, has_subagent_after_assistant) = {
+        let items = threads().lock().unwrap();
+        items
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+            .and_then(|t| t.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|list| {
+                let pos = list
+                    .iter()
+                    .position(|it| it.get("id").and_then(Value::as_str) == Some(assistant_id))?;
+                let after = &list[pos + 1..];
+                let any_tool = after.iter().any(|it| {
+                    matches!(
+                        it.get("kind").and_then(Value::as_str),
+                        Some("tool" | "command")
+                    )
+                });
+                let any_subagent = after.iter().any(|it| {
+                    matches!(
+                        it.get("toolKind").and_then(Value::as_str),
+                        Some("subagent" | "swarm")
+                    ) || it.get("subagentMeta").is_some()
+                        || it.get("swarmMeta").is_some()
+                });
+                Some((any_tool, any_subagent))
+            })
+            .unwrap_or((false, false))
+    };
+
+    let mut first_post_tool_chunk = has_tool_after_assistant;
     for chunk in chars_chunks(&clean, 8000) {
         let appended = {
             let mut live = live_turns().lock().unwrap();
             let Some(run) = live.runs.get_mut(run_id) else { return };
             if run.closing || run.finished {
                 return;
+            }
+            if first_post_tool_chunk && !run.assistant_text.is_empty() {
+                first_post_tool_chunk = false;
+                let lower = run.assistant_text.to_ascii_lowercase();
+                let is_waiting_narration = has_subagent_after_assistant
+                    && (lower.contains("esperando")
+                        || lower.contains("waiting for")
+                        || lower.contains("lancé el subagente")
+                        || lower.contains("lance el subagente"));
+                if is_waiting_narration {
+                    run.assistant_text.clear();
+                } else if !run.assistant_text.ends_with('\n') && !chunk.starts_with('\n') {
+                    run.assistant_text.push_str("\n\n");
+                }
             }
             if run.assistant_text.chars().count() >= 200_000 {
                 return;

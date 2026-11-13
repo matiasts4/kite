@@ -78,12 +78,18 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
             thread["status"] = json!(final_status);
 
             if let Some(arr) = thread.get_mut("items").and_then(|v| v.as_array_mut()) {
+                arr.retain(|it| {
+                    !(it.get("kind").and_then(|v| v.as_str()) == Some("note")
+                        && it.get("text").and_then(|v| v.as_str())
+                            == Some(super::turn::QUIET_TURN_NOTE_TEXT))
+                });
                 for it in arr.iter_mut() {
                     if it.get("streaming").and_then(|v| v.as_bool()) == Some(true) {
                         it["streaming"] = json!(false);
                     }
                 }
             }
+            crate::chat::subagents::reconcile_duplicate_subagent_state(thread);
 
             let title = thread.get("title").and_then(|v| v.as_str()).unwrap_or("");
             if matches!(title, "New Chat" | "New Agent Chat" | "Chat" | "") {

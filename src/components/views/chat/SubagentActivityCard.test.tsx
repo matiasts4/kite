@@ -281,4 +281,70 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     expect(card?.className).not.toContain('chat-subagent-card--failed');
     expect(card?.className).toContain('chat-subagent-card--static');
   });
+
+  it('deduplicates shell-wrapper and child-thread subagent items into a single inspectable card without raw CLI strings', () => {
+    const items: ChatItem[] = [
+      {
+        id: 't_shell_wrapper',
+        kind: 'tool',
+        text: '',
+        title: 'Package.json Reviewer',
+        detail: '$ kite dispatch run --via thread --provider grok --role "Package.json Reviewer"',
+        status: 'completed',
+        streaming: false,
+        exitCode: 0,
+        durationSeconds: 30,
+        createdAtUnixMs: 1000,
+        attachments: [],
+        toolKind: 'subagent',
+        subagentMeta: {
+          subagentId: 't_shell_wrapper',
+          action: 'spawn',
+          role: 'Package.json Reviewer',
+          provider: 'grok',
+          model: 'grok-4.7-build-fast',
+          workspaceMode: 'inherit',
+          prompt: 'Summarize package.json scripts in 3 bullets.',
+          status: 'completed',
+          stepCount: 0,
+        },
+      },
+      {
+        id: 'dispatch-subagent-b52770b2',
+        kind: 'tool',
+        text: '',
+        title: 'Package.json Reviewer',
+        detail: 'Summarize package.json scripts in 3 bullets.',
+        status: 'completed',
+        streaming: false,
+        exitCode: 0,
+        durationSeconds: 28,
+        createdAtUnixMs: 1100,
+        attachments: [],
+        toolKind: 'subagent',
+        subagentMeta: {
+          subagentId: 'b52770b2',
+          childThreadId: 'b52770b2',
+          action: 'spawn',
+          role: 'Package.json Reviewer',
+          provider: 'grok',
+          model: 'grok-4.7-build-fast',
+          workspaceMode: 'inherit',
+          prompt: 'Summarize package.json scripts in 3 bullets.',
+          latestActivity: 'Reading package.json in project root',
+          status: 'completed',
+          stepCount: 3,
+        },
+      },
+    ];
+
+    const { container } = render(
+      <SubagentGroupRow items={items} threadId="thread-parent" workspaceId="ws-1" />,
+    );
+    expect(screen.queryByText(/Started 2 subagents/i)).toBeNull();
+    expect(container.querySelectorAll('.chat-subagent-card')).toHaveLength(1);
+    expect(screen.getByText('Package.json Reviewer')).toBeInTheDocument();
+    expect(screen.getByText('Reading package.json in project root')).toBeInTheDocument();
+    expect(screen.queryByText(/\$ kite dispatch/i)).toBeNull();
+  });
 });

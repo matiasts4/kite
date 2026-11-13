@@ -196,7 +196,17 @@ pub fn acp_tool_to_chat_item(tool: &crate::acp::AcpToolCall) -> Value {
     let output_str = tool.output.as_deref().unwrap_or("");
     let mut item = chat_item(&tool.id, "tool", output_str, is_streaming);
     item["title"] = json!(if tool.title.is_empty() { tool.name.clone() } else { tool.title.clone() });
-    item["detail"] = json!(tool.detail);
+    let resolved_detail = if tool.tool_kind == "subagent"
+        && (tool.detail.trim_start().starts_with('$') || tool.detail.contains("kite dispatch"))
+    {
+        tool.subagent_meta
+            .as_ref()
+            .and_then(|m| m.prompt.clone())
+            .unwrap_or_default()
+    } else {
+        tool.detail.clone()
+    };
+    item["detail"] = json!(resolved_detail);
     item["status"] = json!(tool.status);
     item["toolName"] = json!(tool.name);
     item["toolKind"] = json!(tool.tool_kind);
@@ -232,6 +242,32 @@ pub fn acp_tool_to_chat_item(tool: &crate::acp::AcpToolCall) -> Value {
         item["parentToolUseId"] = json!(pid);
     }
     item
+}
+
+pub fn filter_subagent_stream_items(items: &[Value], initial_prompt: Option<&str>) -> Vec<Value> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(idx, it)| {
+            let kind = it.get("kind").and_then(Value::as_str).unwrap_or("");
+            if kind == "notice" || kind == "note" {
+                return false;
+            }
+            if *idx == 0 && kind == "user" {
+                let text = it.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                if text.starts_with("[Subagent Role:")
+                    || initial_prompt
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .is_some_and(|p| text == p)
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|(_, it)| it.clone())
+        .collect()
 }
 
 fn summarize_run_progress(items: &[Value]) -> (usize, Option<String>) {
@@ -503,6 +539,214 @@ fn sync_parent_tool_item_progress(
     Some(target.clone())
 }
 
+pub fn has_active_child_subagent(thread_id: &str) -> bool {
+    let Ok(all_threads) = threads().lock() else {
+        return false;
+    };
+    let Some(thread) = all_threads
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+    else {
+        return false;
+    };
+    thread
+        .get("subagentRuns")
+        .and_then(Value::as_array)
+        .is_some_and(|runs| {
+            runs.iter().any(|r| {
+                matches!(
+                    r.get("status").and_then(Value::as_str),
+                    Some("running" | "waiting" | "inProgress" | "pending")
+                )
+            })
+        })
+}
+
+pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
+    if let Some(runs) = thread.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+        let backed_keys: Vec<(String, String, String, String)> = runs
+            .iter()
+            .filter_map(|r| {
+                let cid = r.get("childThreadId").and_then(Value::as_str)?.trim();
+                if cid.is_empty() {
+                    return None;
+                }
+                let sid = r
+                    .get("subagentId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(cid)
+                    .to_string();
+                let role = r
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let prompt = r
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                Some((cid.to_string(), sid, role, prompt))
+            })
+            .collect();
+
+        let mut claimed_call_for_cid: Vec<(String, String)> = Vec::new();
+        runs.retain(|r| {
+            let has_cid = r
+                .get("childThreadId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            let has_uri = r
+                .get("transcriptUri")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            let has_items = r
+                .get("items")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty());
+            if has_cid || has_uri || has_items {
+                return true;
+            }
+            let r_role = r.get("role").and_then(Value::as_str).unwrap_or("").trim();
+            let r_prompt = r.get("prompt").and_then(Value::as_str).unwrap_or("").trim();
+            let r_call = r
+                .get("parentToolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some((cid, _, _, _)) = backed_keys.iter().find(|(_, _, b_role, b_prompt)| {
+                (!r_prompt.is_empty() && r_prompt == b_prompt)
+                    || (!r_role.is_empty() && r_role == b_role)
+            }) {
+                if !r_call.is_empty() && !r_call.starts_with("dispatch-subagent-") {
+                    claimed_call_for_cid.push((cid.clone(), r_call));
+                }
+                return false;
+            }
+            true
+        });
+
+        for (cid, call_id) in claimed_call_for_cid {
+            if let Some(run) = runs
+                .iter_mut()
+                .find(|r| r.get("childThreadId").and_then(Value::as_str) == Some(cid.as_str()))
+            {
+                let cur = run
+                    .get("parentToolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if cur.is_empty() || cur.starts_with("dispatch-subagent-") {
+                    run["parentToolCallId"] = json!(call_id);
+                }
+            }
+        }
+    }
+
+    if let Some(items) = thread.get_mut("items").and_then(Value::as_array_mut) {
+        for it in items.iter_mut() {
+            if it.get("toolKind").and_then(Value::as_str) == Some("subagent") {
+                let detail = it.get("detail").and_then(Value::as_str).unwrap_or("");
+                if detail.trim_start().starts_with('$') || detail.contains("kite dispatch") {
+                    let prompt = it
+                        .pointer("/subagentMeta/prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    it["detail"] = json!(prompt);
+                }
+            }
+        }
+
+        // If both a provider tool item (`t_...`) and a synthetic `dispatch-subagent-<cid>` item
+        // exist for the same subagent run, fold the synthetic item's metadata into the provider
+        // tool item and drop the duplicate synthetic item.
+        let synthetic: Vec<(usize, Value)> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                it.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("dispatch-subagent-"))
+            })
+            .map(|(i, it)| (i, it.clone()))
+            .collect();
+
+        let mut drop_ids: Vec<String> = Vec::new();
+        for (_, syn) in &synthetic {
+            let syn_id = syn.get("id").and_then(Value::as_str).unwrap_or("");
+            let syn_cid = syn
+                .pointer("/subagentMeta/childThreadId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let syn_role = syn
+                .pointer("/subagentMeta/role")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let syn_prompt = syn
+                .pointer("/subagentMeta/prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+
+            if let Some(host_item) = items.iter_mut().find(|it| {
+                let id = it.get("id").and_then(Value::as_str).unwrap_or("");
+                if id.starts_with("dispatch-subagent-")
+                    || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
+                {
+                    return false;
+                }
+                let it_cid = it
+                    .pointer("/subagentMeta/childThreadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !syn_cid.is_empty() && it_cid == syn_cid {
+                    return true;
+                }
+                if it_cid.is_empty() {
+                    let it_role = it
+                        .pointer("/subagentMeta/role")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let it_prompt = it
+                        .pointer("/subagentMeta/prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    return (!syn_prompt.is_empty() && it_prompt == syn_prompt)
+                        || (!syn_role.is_empty() && it_role == syn_role);
+                }
+                false
+            }) {
+                if let Some(title) = syn.get("title").and_then(Value::as_str) {
+                    if !title.is_empty() {
+                        host_item["title"] = json!(title);
+                    }
+                }
+                if !syn_prompt.is_empty() {
+                    host_item["detail"] = json!(syn_prompt);
+                }
+                if let Some(syn_meta) = syn.get("subagentMeta") {
+                    host_item["subagentMeta"] = syn_meta.clone();
+                }
+                if let Some(syn_status) = syn.get("status").and_then(Value::as_str) {
+                    host_item["status"] = json!(syn_status);
+                }
+                drop_ids.push(syn_id.to_string());
+            }
+        }
+        if !drop_ids.is_empty() {
+            items.retain(|it| {
+                let id = it.get("id").and_then(Value::as_str).unwrap_or("");
+                !drop_ids.iter().any(|d| d == id)
+            });
+        }
+    }
+}
+
 pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
     let Some(meta_val) = tool_item.get("subagentMeta") else {
         return;
@@ -546,6 +790,25 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
             let pos = runs.iter().position(|r| {
                 r.get("subagentId").and_then(Value::as_str) == Some(meta.subagent_id.as_str())
                     || r.get("parentToolCallId").and_then(Value::as_str) == Some(tool_call_id.as_str())
+                    || (meta.child_thread_id.is_some()
+                        && r.get("childThreadId").and_then(Value::as_str)
+                            == meta.child_thread_id.as_deref())
+                    || (r.get("childThreadId").and_then(Value::as_str).is_none()
+                        && meta.child_thread_id.is_some()
+                        && ((meta.prompt.as_deref().is_some_and(|p| {
+                            !p.trim().is_empty()
+                                && r.get("prompt").and_then(Value::as_str).map(str::trim)
+                                    == Some(p.trim())
+                        })) || (!meta.role.is_empty()
+                            && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()))))
+                    || (r.get("childThreadId").and_then(Value::as_str).is_some()
+                        && meta.child_thread_id.is_none()
+                        && ((meta.prompt.as_deref().is_some_and(|p| {
+                            !p.trim().is_empty()
+                                && r.get("prompt").and_then(Value::as_str).map(str::trim)
+                                    == Some(p.trim())
+                        })) || (!meta.role.is_empty()
+                            && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()))))
             });
             let is_terminal = matches!(meta.status.as_str(), "completed" | "failed" | "killed");
             if let Some(idx) = pos {
@@ -553,7 +816,14 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
                 let existing_meta = serde_json::from_value::<SubagentMeta>(run.clone()).ok();
                 let merged = merge_subagent_meta(existing_meta.as_ref(), meta.clone());
                 run["subagentId"] = json!(merged.subagent_id);
-                run["parentToolCallId"] = json!(tool_call_id);
+                if !tool_call_id.starts_with("dispatch-subagent-")
+                    || run
+                        .get("parentToolCallId")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                {
+                    run["parentToolCallId"] = json!(tool_call_id);
+                }
                 run["role"] = json!(merged.role);
                 if let Some(ref t) = merged.type_name {
                     run["typeName"] = json!(t);
@@ -619,6 +889,7 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
                     emitted_run = Some(val);
                 }
             }
+            reconcile_duplicate_subagent_state(thread);
             touch(thread);
         }
     }
@@ -1075,6 +1346,7 @@ pub fn build_subagent_detail(thread_id: &str, subagent_id: &str) -> Option<Value
 
     let child_tid = run.get("childThreadId").and_then(Value::as_str).map(str::to_string);
     let uri = run.get("transcriptUri").and_then(Value::as_str).map(str::to_string);
+    let initial_prompt = run.get("prompt").and_then(Value::as_str).map(str::to_string);
 
     if let Some(cid) = child_tid {
         if let Some(child) = all_threads
@@ -1082,13 +1354,13 @@ pub fn build_subagent_detail(thread_id: &str, subagent_id: &str) -> Option<Value
             .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
         {
             if let Some(child_items) = child.get("items").and_then(Value::as_array) {
-                if !child_items.is_empty() {
-                    run["items"] = Value::Array(child_items.clone());
-                    let (steps, latest) = summarize_run_progress(child_items);
-                    run["stepCount"] = json!(steps);
-                    if let Some(l) = latest {
-                        run["latestActivity"] = json!(l);
-                    }
+                let filtered =
+                    filter_subagent_stream_items(child_items, initial_prompt.as_deref());
+                run["items"] = Value::Array(filtered.clone());
+                let (steps, latest) = summarize_run_progress(&filtered);
+                run["stepCount"] = json!(steps);
+                if let Some(l) = latest {
+                    run["latestActivity"] = json!(l);
                 }
             }
             if let Some(status) = child.get("status").and_then(Value::as_str) {
@@ -1119,8 +1391,10 @@ pub fn build_subagent_detail(thread_id: &str, subagent_id: &str) -> Option<Value
                     for it in &parsed {
                         upsert_nested_item(&mut items, it);
                     }
-                    let (steps, latest) = summarize_run_progress(&items);
-                    run["items"] = Value::Array(items);
+                    let filtered =
+                        filter_subagent_stream_items(&items, initial_prompt.as_deref());
+                    let (steps, latest) = summarize_run_progress(&filtered);
+                    run["items"] = Value::Array(filtered);
                     run["stepCount"] = json!(steps);
                     if let Some(l) = latest {
                         run["latestActivity"] = json!(l);
@@ -1128,6 +1402,11 @@ pub fn build_subagent_detail(thread_id: &str, subagent_id: &str) -> Option<Value
                 }
             }
         }
+    }
+
+    if let Some(existing_items) = run.get("items").and_then(Value::as_array).cloned() {
+        let filtered = filter_subagent_stream_items(&existing_items, initial_prompt.as_deref());
+        run["items"] = Value::Array(filtered);
     }
 
     Some(run)
@@ -1537,7 +1816,54 @@ pub fn spawn_child_subagent_thread(
         all_threads.push(child);
     }
 
-    let tool_call_id = format!("dispatch-subagent-{child_id}");
+    let claimed_tool_id = params.parent_thread_id.as_deref().and_then(|pid| {
+        let all_threads = threads().lock().ok()?;
+        let parent = all_threads
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))?;
+        let items = parent.get("items").and_then(Value::as_array)?;
+        let target_role = params.role.as_deref().map(str::trim).unwrap_or("");
+        let target_prompt = params.task.trim();
+        items
+            .iter()
+            .rev()
+            .find(|it| {
+                let id = it.get("id").and_then(Value::as_str).unwrap_or("");
+                if id.is_empty()
+                    || id.starts_with("dispatch-subagent-")
+                    || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
+                {
+                    return false;
+                }
+                let has_cid = it
+                    .pointer("/subagentMeta/childThreadId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty());
+                if has_cid {
+                    return false;
+                }
+                let it_role = it
+                    .pointer("/subagentMeta/role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let it_prompt = it
+                    .pointer("/subagentMeta/prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let is_live = matches!(
+                    it.get("status").and_then(Value::as_str),
+                    Some("running" | "inProgress" | "pending" | "in_progress")
+                );
+                (!target_prompt.is_empty() && it_prompt == target_prompt)
+                    || (!target_role.is_empty() && it_role == target_role)
+                    || is_live
+            })
+            .and_then(|it| it.get("id").and_then(Value::as_str).map(str::to_string))
+    });
+
+    let tool_call_id = claimed_tool_id.unwrap_or_else(|| format!("dispatch-subagent-{child_id}"));
     let tool_item = json!({
         "id": tool_call_id,
         "kind": "tool",
@@ -1568,6 +1894,7 @@ pub fn spawn_child_subagent_thread(
                 .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))
             {
                 upsert_item(parent, &tool_item);
+                reconcile_duplicate_subagent_state(parent);
                 touch(parent);
             }
         }
@@ -1665,6 +1992,7 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
             .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_tid.as_str()))
         {
             let mut matched_sub_id: Option<String> = None;
+            let mut matched_call_id: Option<String> = None;
             if let Some(runs) = parent.get_mut("subagentRuns").and_then(Value::as_array_mut) {
                 if let Some(run) = runs.iter_mut().find(|r| {
                     r.get("childThreadId").and_then(Value::as_str) == Some(child_thread_id)
@@ -1672,6 +2000,10 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                 }) {
                     matched_sub_id = run
                         .get("subagentId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    matched_call_id = run
+                        .get("parentToolCallId")
                         .and_then(Value::as_str)
                         .map(str::to_string);
                     run["status"] = json!(run_status);
@@ -1698,12 +2030,20 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                         == Some(child_thread_id)
                         || it.pointer("/subagentMeta/subagentId").and_then(Value::as_str)
                             == Some(matched_sub_id.as_deref().unwrap_or(child_thread_id))
+                        || (matched_call_id.is_some()
+                            && it.get("id").and_then(Value::as_str)
+                                == matched_call_id.as_deref())
                 }) {
                     target["status"] = json!(tool_status);
                     if let Some(meta) = target
                         .get_mut("subagentMeta")
                         .and_then(Value::as_object_mut)
                     {
+                        meta.insert(
+                            "subagentId".to_string(),
+                            json!(matched_sub_id.as_deref().unwrap_or(child_thread_id)),
+                        );
+                        meta.insert("childThreadId".to_string(), json!(child_thread_id));
                         meta.insert("status".to_string(), json!(run_status));
                         meta.insert("stepCount".to_string(), json!(step_count));
                         if let Some(ref latest) = latest_activity {
@@ -1719,6 +2059,7 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                     updated_tool_item = Some(target.clone());
                 }
             }
+            reconcile_duplicate_subagent_state(parent);
             touch(parent);
         }
     }

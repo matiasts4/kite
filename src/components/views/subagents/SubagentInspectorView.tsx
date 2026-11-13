@@ -10,9 +10,11 @@ import {
 import type { OpenRightDockSubagentDetail } from '../../../lib/subagentNav';
 import { setActiveSubagentInspection } from '../../../lib/subagentNav';
 import { tweens } from '../../../motion/standard/tokens';
-import type { SubagentRun, SwarmMember } from '../../../types';
+import type { ChatItem, SubagentRun, SwarmMember } from '../../../types';
+import { ActivityGlyph } from '../chat/activityGlyph';
 import { ChatWorkEntry } from '../chat/ChatItemRow';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
+import { dedupeSubagentRuns } from '../chat/SubagentActivityCard';
 import { formatDurationLabel, formatWorkingClock } from '../chat/activityPresentation';
 import {
   applySubagentEvent,
@@ -57,6 +59,30 @@ function runStatusLabel(run: SubagentRun, nowUnixMs: number): string {
     return `${prefix} · ${formatDurationLabel(durSec)}`;
   }
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+export function filterInspectorSteps(
+  items?: ChatItem[] | null,
+  initialPrompt?: string | null,
+): ChatItem[] {
+  if (!items || items.length === 0) return [];
+  const promptTrim = (initialPrompt ?? '').trim();
+  return items.filter((item, idx) => {
+    const rawKind = String(item.kind ?? '');
+    if (rawKind === 'notice' || rawKind === 'note') return false;
+    if (item.kind === 'user') {
+      const text = (item.text ?? '').trim();
+      if (
+        idx === 0 ||
+        text.startsWith('[Subagent Role:') ||
+        (promptTrim.length > 0 && text === promptTrim)
+      ) {
+        return false;
+      }
+    }
+    if (item.kind === 'reasoning' && !(item.text ?? '').trim()) return false;
+    return true;
+  });
 }
 
 export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
@@ -159,7 +185,10 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     };
   }, [activeThreadId]);
 
-  const runs = thread?.subagentRuns ?? [];
+  const runs = useMemo(
+    () => dedupeSubagentRuns(thread?.subagentRuns),
+    [thread?.subagentRuns],
+  );
   const swarmState = thread?.swarmState ?? null;
 
   // Keep dock tab badge synced whenever inspected thread updates
@@ -187,6 +216,11 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     return runs[0];
   }, [runs, selectedSubagentId]);
 
+  const visibleSteps = useMemo(
+    () => filterInspectorSteps(activeRun?.items, activeRun?.prompt),
+    [activeRun?.items, activeRun?.prompt],
+  );
+
   useEffect(() => {
     if (!thread) return;
     if (mode === 'swarm' && swarmState) {
@@ -210,7 +244,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   // Hydrate missing steps on demand via getThreadSubagentDetail / getThreadSwarmState
   useEffect(() => {
     if (!thread || !activeRun) return;
-    if ((activeRun.items?.length ?? 0) > 0) return;
+    if (visibleSteps.length > 0) return;
     let cancelled = false;
     void getThreadSubagentDetail(thread.id, activeRun.subagentId)
       .then((detail) => {
@@ -229,7 +263,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [thread?.id, activeRun?.subagentId, activeRun?.items?.length]);
+  }, [thread?.id, activeRun?.subagentId, visibleSteps.length]);
 
   useEffect(() => {
     if (!thread || !swarmState || swarmState.posts.length > 0) return;
@@ -262,7 +296,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   }, [activeRunRunning]);
 
   // Auto-scroll to latest step unless manually scrolled up
-  const stepCount = activeRun?.items?.length ?? 0;
+  const stepCount = visibleSteps.length;
   useEffect(() => {
     if (mode !== 'subagent' || !atBottomRef.current) return;
     const el = streamRef.current;
@@ -272,11 +306,10 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
 
   // Mark newly observed steps so only new steps play entrance reveal
   useEffect(() => {
-    const items = activeRun?.items ?? [];
-    for (const item of items) {
+    for (const item of visibleSteps) {
       seenStepIdsRef.current.add(item.id);
     }
-  }, [activeRun?.items]);
+  }, [visibleSteps]);
 
   const parentModelLabel = formatInspectorModelName(thread?.model, thread?.provider);
   const hasRuns = runs.length > 0;
@@ -434,7 +467,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
           )}
         </div>
 
-        {mode === 'subagent' && hasRuns && (
+        {mode === 'subagent' && hasRuns && (runs.length > 1 || (fromSwarmRoster && hasSwarm)) && (
           <div className="subagent-inspector__selector-strip" role="navigation" aria-label="Subagent selector">
             {fromSwarmRoster && hasSwarm && (
               <button
@@ -448,25 +481,26 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                 ← Back to Swarm Roster
               </button>
             )}
-            {runs.map((run) => {
-              const selected = activeRun?.subagentId === run.subagentId;
-              const shortModel = formatInspectorModelName(run.model, run.provider);
-              return (
-                <button
-                  key={run.subagentId}
-                  type="button"
-                  className={`subagent-inspector__selector-pill${selected ? ' subagent-inspector__selector-pill--active' : ''}`}
-                  onClick={() => {
-                    setSelectedSubagentId(run.subagentId);
-                    setBriefExpanded(false);
-                  }}
-                >
-                  <span className={`subagent-dot ${runStatusDotClass(run.status)}`} />
-                  <span>{run.role || run.typeName || run.subagentId}</span>
-                  <span className="subagent-badge">{shortModel}</span>
-                </button>
-              );
-            })}
+            {runs.length > 1 &&
+              runs.map((run) => {
+                const selected = activeRun?.subagentId === run.subagentId;
+                const shortModel = formatInspectorModelName(run.model, run.provider);
+                return (
+                  <button
+                    key={run.subagentId}
+                    type="button"
+                    className={`subagent-inspector__selector-pill${selected ? ' subagent-inspector__selector-pill--active' : ''}`}
+                    onClick={() => {
+                      setSelectedSubagentId(run.subagentId);
+                      setBriefExpanded(false);
+                    }}
+                  >
+                    <span className={`subagent-dot ${runStatusDotClass(run.status)}`} />
+                    <span>{run.role || run.typeName || run.subagentId}</span>
+                    <span className="subagent-badge">{shortModel}</span>
+                  </button>
+                );
+              })}
           </div>
         )}
       </div>
@@ -497,9 +531,10 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
               <div className="subagent-inspector__role">
                 <span className={`subagent-dot ${runStatusDotClass(activeRun.status)}`} />
                 <span>{activeRun.role || 'Subagent'}</span>
-                {activeRun.typeName && (
-                  <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
-                )}
+                {activeRun.typeName &&
+                  activeRun.typeName.toLowerCase() !== (activeRun.provider ?? '').toLowerCase() && (
+                    <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
+                  )}
               </div>
               <div className="subagent-inspector__status-actions">
                 <span className="subagent-inspector__status-text">
@@ -580,7 +615,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                 setAutoScrollPaused(!nearBottom);
               }}
             >
-              {(activeRun.items ?? []).length === 0 ? (
+              {visibleSteps.length === 0 ? (
                 <div className="subagent-inspector__empty">
                   {activeRun.status?.toLowerCase() === 'failed' ? (
                     <>
@@ -606,22 +641,38 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                   )}
                 </div>
               ) : (
-                (activeRun.items ?? []).map((step) => {
+                visibleSteps.map((step) => {
                   const isNew = !seenStepIdsRef.current.has(step.id);
-                  const isTextMessage = step.kind === 'assistant' || step.kind === 'user';
                   return (
                     <motion.div
                       key={step.id}
-                      className="subagent-inspector__step"
+                      className={`subagent-inspector__step subagent-inspector__step--${step.kind}`}
                       initial={isNew && !reduceMotion ? { opacity: 0, y: 4 } : false}
                       animate={{ opacity: 1, y: 0 }}
                       transition={reduceMotion ? tweens.instant : tweens.reveal}
                     >
-                      {isTextMessage ? (
-                        <MarkdownMessage
-                          text={step.text}
-                          workspaceId={workspaceId}
-                        />
+                      {step.kind === 'assistant' ? (
+                        <div className="subagent-inspector__response">
+                          <MarkdownMessage
+                            text={step.text}
+                            workspaceId={workspaceId}
+                          />
+                        </div>
+                      ) : step.kind === 'user' ? (
+                        <div className="subagent-inspector__user-msg">
+                          <MarkdownMessage
+                            text={step.text}
+                            workspaceId={workspaceId}
+                          />
+                        </div>
+                      ) : step.kind === 'reasoning' ? (
+                        <div className="subagent-inspector__thought">
+                          <span className="subagent-inspector__thought-head">
+                            <ActivityGlyph item={step} size={14} />
+                            <span>Thought</span>
+                          </span>
+                          <p className="subagent-inspector__thought-body">{step.text}</p>
+                        </div>
                       ) : (
                         <ChatWorkEntry
                           item={step}

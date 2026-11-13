@@ -409,6 +409,12 @@ pub fn thread_tail(thread_id: &str) -> String {
         return String::new();
     };
     list.iter()
+        .filter(|item| {
+            !matches!(
+                item.get("kind").and_then(Value::as_str),
+                Some("notice" | "note")
+            )
+        })
         .filter_map(|item| item.get("text").and_then(Value::as_str))
         .filter(|text| !text.trim().is_empty())
         .collect::<Vec<_>>()

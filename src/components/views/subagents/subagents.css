@@ -12,8 +12,8 @@
 .subagent-inspector__header {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2, 8px);
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--separator);
   flex: none;
 }
@@ -31,17 +31,18 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: var(--vl-control-md, 32px);
+  height: var(--control-row, 28px);
   max-width: 100%;
-  padding: 0 10px;
-  border: 1px solid var(--block-stroke);
+  padding: 0 8px;
+  border: 1px solid transparent;
   border-radius: var(--control-radius, 8px);
-  background: var(--block-fill);
+  background: transparent;
   color: var(--text-secondary);
-  font-size: var(--text-row, 12px);
+  font-size: var(--text-caption, 11px);
   font-weight: var(--weight-medium, 500);
   cursor: pointer;
   transition: background-color var(--duration-ink, 0.12s) var(--ease-out),
+    border-color var(--duration-ink, 0.12s) var(--ease-out),
     color var(--duration-ink, 0.12s) var(--ease-out);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -50,6 +51,7 @@
 
 .subagent-inspector__parent-link:hover {
   background: var(--hover-fill);
+  border-color: var(--block-stroke);
   color: var(--text-primary);
 }
 
@@ -342,6 +344,54 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.subagent-inspector__thought {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--block-stroke);
+  color: var(--text-tertiary);
+  font-size: var(--text-caption, 11px);
+  line-height: 1.45;
+}
+
+.subagent-inspector__thought-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--weight-medium, 500);
+  color: var(--text-secondary);
+}
+
+.subagent-inspector__thought-body {
+  margin: 0;
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.subagent-inspector__response {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--block-stroke);
+  border-radius: var(--card-radius, 12px);
+  background: color-mix(in srgb, var(--block-fill) 65%, transparent);
+  color: var(--text-primary);
+  font-size: var(--text-row, 12px);
+  line-height: var(--leading-body, 19px);
+}
+
+.subagent-inspector__user-msg {
+  align-self: flex-end;
+  max-width: 88%;
+  padding: 8px 12px;
+  border: 1px solid var(--block-stroke);
+  border-radius: var(--card-radius, 12px);
+  background: var(--selected-fill);
+  color: var(--text-primary);
+  font-size: var(--text-row, 12px);
 }
 
 .subagent-inspector__jump-latest {

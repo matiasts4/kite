@@ -555,8 +555,16 @@ pub fn upsert_item(thread: &mut Value, item: &Value) {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .len();
+        let has_tools_after = list[pos + 1..].iter().any(|later| {
+            matches!(
+                later.get("kind").and_then(|v| v.as_str()),
+                Some("tool" | "command")
+            )
+        });
+        let is_streaming_update =
+            item.get("streaming").and_then(|v| v.as_bool()) == Some(true) && new_text_len > 0;
         let move_assistant_to_tail = item.get("kind").and_then(|v| v.as_str()) == Some("assistant")
-            && new_text_len > prev_text_len
+            && (new_text_len > prev_text_len || (has_tools_after && is_streaming_update))
             && pos + 1 < list.len()
             && !list[pos + 1..]
                 .iter()

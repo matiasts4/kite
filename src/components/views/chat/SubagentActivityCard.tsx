@@ -55,6 +55,144 @@ function extractFailureSummary(text?: string | null): string {
   return raw;
 }
 
+function isRunBacked(run?: SubagentRun | null): boolean {
+  if (!run) return false;
+  return Boolean(
+    run.childThreadId ||
+      run.transcriptUri ||
+      (Array.isArray(run.items) && run.items.length > 0),
+  );
+}
+
+function isSubagentItemBacked(item: ChatItem): boolean {
+  const meta = item.subagentMeta;
+  return Boolean(
+    meta?.childThreadId ||
+      meta?.transcriptUri ||
+      item.id.startsWith('dispatch-subagent-'),
+  );
+}
+
+export function dedupeSubagentRuns(runs?: SubagentRun[] | null): SubagentRun[] {
+  if (!runs || runs.length <= 1) return runs ? [...runs] : [];
+  const result: SubagentRun[] = [];
+  for (const candidate of runs) {
+    const candBacked = isRunBacked(candidate);
+    const candRole = (candidate.role || '').trim().toLowerCase();
+    const candPrompt = (candidate.prompt || '').trim();
+    const existingIdx = result.findIndex((r) => {
+      if (r.subagentId === candidate.subagentId) return true;
+      if (r.childThreadId && candidate.childThreadId && r.childThreadId === candidate.childThreadId) {
+        return true;
+      }
+      if (
+        (r.parentToolCallId && r.parentToolCallId === candidate.subagentId) ||
+        (candidate.parentToolCallId && candidate.parentToolCallId === r.subagentId)
+      ) {
+        return true;
+      }
+      const rBacked = isRunBacked(r);
+      if (rBacked !== candBacked) {
+        const rRole = (r.role || '').trim().toLowerCase();
+        const rPrompt = (r.prompt || '').trim();
+        const roleMatch =
+          !rRole ||
+          !candRole ||
+          rRole === candRole ||
+          rRole === 'subagent' ||
+          candRole === 'subagent';
+        const promptMatch = !rPrompt || !candPrompt || rPrompt === candPrompt;
+        if (roleMatch && promptMatch && (rRole === candRole || (rPrompt && rPrompt === candPrompt))) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (existingIdx === -1) {
+      result.push(candidate);
+    } else if (candBacked && !isRunBacked(result[existingIdx])) {
+      result[existingIdx] = {
+        ...result[existingIdx],
+        ...candidate,
+        parentToolCallId: candidate.parentToolCallId ?? result[existingIdx].parentToolCallId,
+      };
+    }
+  }
+  return result;
+}
+
+export function dedupeSubagentItems(items: ChatItem[]): ChatItem[] {
+  if (items.length <= 1) return items;
+  const result: ChatItem[] = [];
+  for (const candidate of items) {
+    const candBacked = isSubagentItemBacked(candidate);
+    const candMeta = candidate.subagentMeta;
+    const candRole = (candMeta?.role || candidate.title || '').trim().toLowerCase();
+    const candPrompt = (candMeta?.prompt || '').trim();
+
+    const existingIdx = result.findIndex((existing) => {
+      const exMeta = existing.subagentMeta;
+      if (existing.id === candidate.id) return true;
+      if (exMeta?.subagentId && candMeta?.subagentId && exMeta.subagentId === candMeta.subagentId) {
+        return true;
+      }
+      if (
+        exMeta?.childThreadId &&
+        candMeta?.childThreadId &&
+        exMeta.childThreadId === candMeta.childThreadId
+      ) {
+        return true;
+      }
+      const exBacked = isSubagentItemBacked(existing);
+      if (exBacked !== candBacked) {
+        const exRole = (exMeta?.role || existing.title || '').trim().toLowerCase();
+        const exPrompt = (exMeta?.prompt || '').trim();
+        const roleMatch =
+          !exRole ||
+          !candRole ||
+          exRole === candRole ||
+          exRole === 'subagent' ||
+          candRole === 'subagent';
+        const promptMatch = !exPrompt || !candPrompt || exPrompt === candPrompt;
+        if (roleMatch && promptMatch && (exRole === candRole || (exPrompt && exPrompt === candPrompt))) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (existingIdx === -1) {
+      result.push(candidate);
+    } else if (candBacked && !isSubagentItemBacked(result[existingIdx])) {
+      const prev = result[existingIdx];
+      result[existingIdx] = {
+        ...candidate,
+        durationSeconds: candidate.durationSeconds ?? prev.durationSeconds,
+      };
+    } else if (!candBacked && isSubagentItemBacked(result[existingIdx])) {
+      const prev = result[existingIdx];
+      if (!prev.durationSeconds && candidate.durationSeconds) {
+        result[existingIdx] = {
+          ...prev,
+          durationSeconds: candidate.durationSeconds,
+        };
+      }
+    }
+  }
+  return result;
+}
+
+function isRawDispatchCommand(text?: string | null): boolean {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed) return false;
+  return (
+    trimmed.startsWith('$') ||
+    trimmed.includes('kite dispatch ') ||
+    trimmed.includes('kite-code dispatch ')
+  );
+}
+
 function isItemRunning(item: ChatItem, run?: SubagentRun | null): boolean {
   const rawStatus = (run?.status || item.subagentMeta?.status || item.status || 'running').toLowerCase();
   return (
@@ -122,17 +260,24 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
           ? Math.max(0, (nowMs - startedAt) / 1000)
           : 0;
 
-  const stepCount = Math.max(run?.stepCount ?? 0, meta?.stepCount ?? 0, run?.items?.length ?? 0);
+  const meaningfulRunSteps = (run?.items ?? []).filter(
+    (it) => it.kind === 'tool' || it.kind === 'command' || it.kind === 'reasoning',
+  ).length;
+  const stepCount = Math.max(run?.stepCount ?? 0, meta?.stepCount ?? 0, meaningfulRunSteps);
   const promptExcerpt = (run?.prompt || meta?.prompt || '').trim();
+  const safeDetail = isRawDispatchCommand(item.detail) ? '' : item.detail || '';
+  const safeActivity = isRawDispatchCommand(run?.latestActivity || meta?.latestActivity)
+    ? ''
+    : run?.latestActivity || meta?.latestActivity || '';
   const secondaryRaw = isFailed
-    ? run?.latestActivity ||
-      meta?.latestActivity ||
+    ? safeActivity ||
       extractFailureSummary(item.text) ||
-      item.detail ||
+      safeDetail ||
+      promptExcerpt ||
       ''
-    : run?.latestActivity || meta?.latestActivity || item.detail || '';
+    : safeActivity || safeDetail || promptExcerpt || '';
   const secondaryLine = secondaryRaw.trim();
-  const inlineSummary = promptExcerpt && promptExcerpt !== secondaryLine ? promptExcerpt : '';
+  const showWorkspacePill = Boolean(workspaceMode && workspaceMode !== 'inherit');
 
   const statusClass = isRunning
     ? 'chat-subagent-card--running'
@@ -164,15 +309,12 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
           )}
         </span>
         <span className="chat-subagent-card__title">{role}</span>
-        {inlineSummary ? (
-          <span className="chat-subagent-card__summary">{inlineSummary}</span>
-        ) : null}
         {modelLabel ? (
           <span className="chat-subagent-card__pill chat-subagent-card__pill--model">
             {modelLabel}
           </span>
         ) : null}
-        {workspaceMode ? (
+        {showWorkspacePill && workspaceMode ? (
           <span className={`chat-subagent-card__pill chat-subagent-card__pill--ws-${workspaceMode}`}>
             {workspaceMode}
           </span>
@@ -275,9 +417,11 @@ export const SubagentGroupRow: React.FC<{
   subagentRuns?: SubagentRun[] | null;
   enterFor?: (id: string) => boolean;
 }> = ({ items, threadId, workspaceId = null, subagentRuns = null, enterFor }) => {
-  const resolvedRuns = items.map((it) => matchSubagentRun(it, subagentRuns));
-  const runningCount = items.filter((it, idx) => isItemRunning(it, resolvedRuns[idx])).length;
-  const failedCount = items.filter((it, idx) => isItemFailed(it, resolvedRuns[idx])).length;
+  const dedupedRuns = dedupeSubagentRuns(subagentRuns);
+  const dedupedItems = dedupeSubagentItems(items);
+  const resolvedRuns = dedupedItems.map((it) => matchSubagentRun(it, dedupedRuns));
+  const runningCount = dedupedItems.filter((it, idx) => isItemRunning(it, resolvedRuns[idx])).length;
+  const failedCount = dedupedItems.filter((it, idx) => isItemFailed(it, resolvedRuns[idx])).length;
   const anyRunning = runningCount > 0;
   const [expanded, setExpanded] = useState(anyRunning);
 
@@ -287,9 +431,22 @@ export const SubagentGroupRow: React.FC<{
     }
   }, [anyRunning]);
 
+  if (dedupedItems.length === 1) {
+    const single = dedupedItems[0];
+    return (
+      <SubagentActivityCard
+        item={single}
+        threadId={threadId}
+        workspaceId={workspaceId}
+        run={resolvedRuns[0]}
+        enter={enterFor?.(single.id) ?? false}
+      />
+    );
+  }
+
   const title = anyRunning
     ? `${runningCount} subagent${runningCount === 1 ? '' : 's'} running`
-    : `Started ${items.length} subagents`;
+    : `Started ${dedupedItems.length} subagents`;
 
   return (
     <div
@@ -314,7 +471,7 @@ export const SubagentGroupRow: React.FC<{
           </span>
         ) : null}
         <span className="chat-subagent-card__spacer" />
-        <span className="chat-subagent-card__steps">{items.length} total</span>
+        <span className="chat-subagent-card__steps">{dedupedItems.length} total</span>
         {anyRunning ? <span aria-hidden="true" className="chat-working-pulse" /> : null}
         <span
           aria-hidden="true"
@@ -326,7 +483,7 @@ export const SubagentGroupRow: React.FC<{
 
       {expanded && (
         <div className="chat-subagent-group__items">
-          {items.map((item, idx) => (
+          {dedupedItems.map((item, idx) => (
             <SubagentActivityCard
               key={item.id}
               item={item}

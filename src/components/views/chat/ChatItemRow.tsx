@@ -11,7 +11,11 @@ import {
   PencilIcon,
 } from './ChatIcons';
 import type { ChatItem, SubagentRun, SwarmState } from '../../../types';
-import { SubagentActivityCard } from './SubagentActivityCard';
+import {
+  dedupeSubagentItems,
+  dedupeSubagentRuns,
+  SubagentActivityCard,
+} from './SubagentActivityCard';
 import { SwarmActivityCard } from './SwarmActivityCard';
 import { ActivityGlyph } from './activityGlyph';
 import {
@@ -115,14 +119,15 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   };
 
   const flushSubagents = () => {
-    if (currentSubagents.length >= 2) {
+    const deduped = dedupeSubagentItems(currentSubagents);
+    if (deduped.length >= 2) {
       result.push({
         kind: 'subagentGroup',
-        id: `subagents-${currentSubagents[0]?.id ?? result.length}`,
-        items: currentSubagents,
+        id: `subagents-${deduped[0]?.id ?? result.length}`,
+        items: deduped,
       });
-    } else if (currentSubagents.length === 1) {
-      result.push({ kind: 'item', item: currentSubagents[0] });
+    } else if (deduped.length === 1) {
+      result.push({ kind: 'item', item: deduped[0] });
     }
     currentSubagents = [];
   };
@@ -374,7 +379,7 @@ export const ChatWorkEntry: React.FC<{
             <section aria-label="Operation details" id={id}>
               {hasDiff ? (
                 <div className="chat-work-entry__diff">
-                  <UnifiedDiffView diff={bodyText} />
+                  <UnifiedDiffView diff={bodyText} filePath={openPath ?? undefined} />
                 </div>
               ) : (
                 <pre>{bodyText}</pre>
@@ -752,7 +757,15 @@ export const ChatItemRow: React.FC<{
         }
         return true;
       })
-      .join('\n');
+      .join('\n')
+      .replace(
+        /^Lancé el subagente[^\n.]*\.\s*Estoy esperando su respuesta\.\s+(?=El subagente\b)/i,
+        '',
+      )
+      .replace(
+        /^I launched the subagent[^\n.]*\.\s*Waiting for its response\.\s+(?=The subagent\b)/i,
+        '',
+      );
 
     return (
       <motion.div
@@ -866,11 +879,17 @@ export const ChatItemRow: React.FC<{
   // Tool / Command Work Row (rendered individually if not grouped)
   if (item.kind === 'tool' || item.kind === 'command') {
     if (item.toolKind === 'subagent' || item.subagentMeta) {
+      const dedupedRuns = dedupeSubagentRuns(subagentRuns);
       const matchedRun =
-        subagentRuns?.find(
+        dedupedRuns.find(
           (r) =>
             (item.subagentMeta?.subagentId && r.subagentId === item.subagentMeta.subagentId) ||
-            r.parentToolCallId === item.id
+            (item.subagentMeta?.childThreadId && r.childThreadId === item.subagentMeta.childThreadId) ||
+            r.parentToolCallId === item.id ||
+            (item.subagentMeta?.role &&
+              r.role &&
+              r.role.trim().toLowerCase() === item.subagentMeta.role.trim().toLowerCase() &&
+              dedupedRuns.length === 1),
         ) ?? null;
       return (
         <SubagentActivityCard
@@ -911,6 +930,12 @@ export const ChatItemRow: React.FC<{
 
   // Note Row
   if (item.kind === 'note') {
+    if (
+      !item.streaming &&
+      item.text.trim() === 'The provider has not sent an update. Stop the turn if this stays quiet.'
+    ) {
+      return null;
+    }
     return <p className="chat-turn chat-turn--note chat-note-row">{item.text}</p>;
   }
 

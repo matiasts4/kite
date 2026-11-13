@@ -165,6 +165,30 @@ pub fn write_session_frame(thread_id: &str, line: &str) -> bool {
         .is_some()
 }
 
+pub const QUIET_TURN_NOTE_TEXT: &str =
+    "The provider has not sent an update. Stop the turn if this stays quiet.";
+
+pub fn prune_quiet_turn_note(thread_id: &str) {
+    let Ok(mut all_threads) = threads().lock() else {
+        return;
+    };
+    if let Some(thread) = all_threads
+        .iter_mut()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+    {
+        if let Some(arr) = thread.get_mut("items").and_then(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|it| {
+                !(it.get("kind").and_then(Value::as_str) == Some("note")
+                    && it.get("text").and_then(Value::as_str) == Some(QUIET_TURN_NOTE_TEXT))
+            });
+            if arr.len() != before {
+                touch(thread);
+            }
+        }
+    }
+}
+
 /// Reads a lasting session's normalized events into the live chat run. The
 /// pump stops at a completed turn, a provider exit, a failure, or a run the
 /// user already finished.
@@ -182,17 +206,18 @@ pub fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: 
                 (events, handle)
             };
             if events.is_empty() {
-                if !quiet_noted && last_progress.elapsed() >= Duration::from_secs(20) {
-                    emit_note_item(
-                        &thread_id,
-                        &run_id,
-                        "The provider has not sent an update. Stop the turn if this stays quiet.",
-                    );
+                if crate::chat::subagents::has_active_child_subagent(&thread_id) {
+                    last_progress = Instant::now();
+                } else if !quiet_noted && last_progress.elapsed() >= Duration::from_secs(20) {
+                    emit_note_item(&thread_id, &run_id, QUIET_TURN_NOTE_TEXT);
                     quiet_noted = true;
                 }
             } else {
                 last_progress = Instant::now();
-                quiet_noted = false;
+                if quiet_noted {
+                    prune_quiet_turn_note(&thread_id);
+                    quiet_noted = false;
+                }
             }
             if let Some(h) = handle.as_deref() {
                 sync_thread_provider_session_id(&thread_id, Some(h));

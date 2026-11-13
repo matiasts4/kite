@@ -936,21 +936,48 @@ pub fn extract_subagent_meta(
         }
     }
 
-    let out_sub_id = parsed_out.as_ref().and_then(|o| {
-        lookup_text(
-            o,
-            &[
-                "conversationId",
-                "conversation_id",
-                "subagentId",
-                "subagent_id",
-                "childThreadId",
-                "threadId",
-                "session_id",
-                "sessionId",
-            ],
-        )
-    });
+    let extracted_thread_target = parsed_out
+        .as_ref()
+        .and_then(|o| lookup_text(o, &["target"]))
+        .and_then(|t| t.strip_prefix("thread:").map(str::to_string))
+        .or_else(|| {
+            output.and_then(|raw| {
+                if let Some(pos) = raw.find("[subagent_id: thread:") {
+                    let rest = &raw[pos + "[subagent_id: thread:".len()..];
+                    rest.find(']')
+                        .map(|end| rest[..end].trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else if let Some(pos) = raw.find("started thread:") {
+                    let rest = &raw[pos + "started thread:".len()..];
+                    let token: String = rest
+                        .chars()
+                        .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '}' && *c != ']')
+                        .collect();
+                    (!token.is_empty()).then_some(token)
+                } else {
+                    None
+                }
+            })
+        });
+
+    let out_sub_id = parsed_out
+        .as_ref()
+        .and_then(|o| {
+            lookup_text(
+                o,
+                &[
+                    "conversationId",
+                    "conversation_id",
+                    "subagentId",
+                    "subagent_id",
+                    "childThreadId",
+                    "threadId",
+                    "session_id",
+                    "sessionId",
+                ],
+            )
+        })
+        .or_else(|| extracted_thread_target.clone());
     let param_sub_id = lookup_text(
         params,
         &[
@@ -979,7 +1006,8 @@ pub fn extract_subagent_meta(
     let child_thread_id = parsed_out
         .as_ref()
         .and_then(|o| lookup_text(o, &["childThreadId", "child_thread_id", "threadId"]))
-        .or_else(|| lookup_text(params, &["childThreadId", "child_thread_id"]));
+        .or_else(|| lookup_text(params, &["childThreadId", "child_thread_id"]))
+        .or(extracted_thread_target);
     let transcript_uri = parsed_out
         .as_ref()
         .and_then(|o| {
@@ -1169,11 +1197,16 @@ pub fn extract_swarm_meta(
 
 pub fn merge_subagent_meta(existing: Option<&SubagentMeta>, mut incoming: SubagentMeta) -> SubagentMeta {
     if let Some(prev) = existing {
+        let is_fallback_tool_id = |id: &str| {
+            id.is_empty()
+                || id.starts_with("call")
+                || id.starts_with("tool")
+                || id.starts_with("t_")
+        };
         if incoming.subagent_id.is_empty() || incoming.subagent_id == prev.subagent_id {
             // Keep prev if incoming only had a fallback tool id while prev resolved conversationId.
-        } else if !prev.subagent_id.starts_with("call")
-            && !prev.subagent_id.starts_with("tool")
-            && incoming.subagent_id.starts_with("tool")
+        } else if (prev.child_thread_id.is_some() && incoming.child_thread_id.is_none())
+            || (!is_fallback_tool_id(&prev.subagent_id) && is_fallback_tool_id(&incoming.subagent_id))
         {
             incoming.subagent_id = prev.subagent_id.clone();
         }

@@ -43,7 +43,7 @@ pub fn query_operator_agent(request: Value) -> Value {
 
     let (bin, args) = match engine {
         "antigravity" | "agy" => {
-            let bin = match resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]) {
+            let bin = match crate::chat::utils::resolve_agy_bin() {
                 Some(b) => b,
                 None => {
                     return json!({
@@ -81,10 +81,7 @@ pub fn query_operator_agent(request: Value) -> Value {
             (bin, args)
         }
         "codex" => {
-            let bin = match resolve_bin("codex", &[
-                r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
-                r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
-            ]) {
+            let bin = match crate::chat::utils::resolve_codex_bin() {
                 Some(b) => b,
                 None => {
                     return json!({

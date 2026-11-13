@@ -258,7 +258,7 @@ fn error_detail(value: &Value) -> String {
 /// Resolves the observed launcher. A missing binary is a hard error: the caller
 /// falls back to one command per turn instead of pretending a session exists.
 pub fn resolve_antigravity_program() -> Result<PathBuf, String> {
-    resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]).ok_or_else(|| {
+    crate::chat::utils::resolve_agy_bin().ok_or_else(|| {
         "Antigravity CLI (agy) is not installed; a lasting session cannot start without it"
             .to_string()
     })

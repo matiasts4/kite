@@ -1,13 +1,12 @@
 pub const MAX_SCROLLBACK_BYTES: usize = 256 * 1024;
 
 pub fn terminal_scrollback_dir() -> std::path::PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
     let folder = if cfg!(debug_assertions) {
         "Kite Code Dev"
     } else {
         "Kite Code"
     };
-    let dir = std::path::PathBuf::from(base).join(folder).join("terminals");
+    let dir = crate::chat::utils::user_roaming_appdata_dir().join(folder).join("terminals");
     let _ = std::fs::create_dir_all(&dir);
     static PRUNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     PRUNED.get_or_init(|| {

@@ -372,18 +372,13 @@ pub fn list_available_providers() -> Vec<&'static str> {
     let mut available = Vec::new();
     let home = crate::quota::utils::user_home_dir();
     let grok_path = home.join(".grok").join("bin").join("grok.exe");
-    let codex_path = home.join("AppData").join("Local").join("Programs").join("OpenAI").join("Codex").join("bin").join("codex.exe");
     let natives = crate::chat::persistent::opencode_native_paths();
     let opencode_fallbacks: Vec<&str> = natives.iter().map(String::as_str).collect();
 
-    if resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe"]).is_some() {
+    if crate::chat::utils::resolve_agy_bin().is_some() {
         available.push("Antigravity");
     }
-    if resolve_bin("codex", &[
-        r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
-        r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
-        &codex_path.to_string_lossy(),
-    ]).is_some() {
+    if crate::chat::utils::resolve_codex_bin().is_some() {
         available.push("Codex");
     }
     if resolve_bin("claude", &[]).is_some() {
@@ -726,20 +721,16 @@ pub fn resolve_spawn_program(provider: &str) -> Result<PathBuf, String> {
     let home = crate::quota::utils::user_home_dir();
     let program = match provider {
         "antigravity" | "agy" => {
-            let agy_user = home.join("AppData").join("Local").join("agy").join("bin").join("agy.exe");
-            resolve_bin("agy", &[r"C:\Users\PC\AppData\Local\agy\bin\agy.exe", &agy_user.to_string_lossy()]).ok_or_else(|| {
+            crate::chat::utils::resolve_agy_bin().ok_or_else(|| {
                 let avail = list_available_providers().join(", ");
                 format!("Antigravity CLI (agy) is not installed. Available providers: {avail}")
             })?
         }
         "claude" => {
-            let appdata_npm = std::env::var("APPDATA")
-                .map(|a| PathBuf::from(a).join("npm").join("claude.cmd"))
-                .ok();
-            let mut fallbacks = Vec::new();
-            if let Some(ref p) = appdata_npm {
-                fallbacks.push(p.to_string_lossy().to_string());
-            }
+            let appdata_npm = crate::chat::utils::user_roaming_appdata_dir()
+                .join("npm")
+                .join("claude.cmd");
+            let mut fallbacks = vec![appdata_npm.to_string_lossy().to_string()];
             fallbacks.push(home.join(".local").join("bin").join("claude.exe").to_string_lossy().to_string());
             let fb_refs: Vec<&str> = fallbacks.iter().map(String::as_str).collect();
             resolve_bin("claude", &fb_refs).ok_or_else(|| {
@@ -752,12 +743,7 @@ pub fn resolve_spawn_program(provider: &str) -> Result<PathBuf, String> {
             })?
         }
         "codex" => {
-            let codex_user = home.join("AppData").join("Local").join("Programs").join("OpenAI").join("Codex").join("bin").join("codex.exe");
-            resolve_bin("codex", &[
-                r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
-                r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
-                &codex_user.to_string_lossy(),
-            ]).ok_or_else(|| {
+            crate::chat::utils::resolve_codex_bin().ok_or_else(|| {
                 let avail = list_available_providers().join(", ");
                 format!("Codex is not installed. Available providers: {avail}")
             })?

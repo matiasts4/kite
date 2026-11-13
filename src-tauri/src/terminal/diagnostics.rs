@@ -11,13 +11,12 @@ pub fn log_dec2026_timeouts(session_id: &str, notes: Vec<crate::vt_engine::Dec20
 }
 
 pub fn terminal_log_dir() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Local".into());
     let folder = if cfg!(debug_assertions) {
         "Kite Code Dev"
     } else {
         "Kite Code"
     };
-    let dir = std::path::PathBuf::from(base).join(folder);
+    let dir = crate::chat::utils::user_local_appdata_dir().join(folder);
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

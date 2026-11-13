@@ -1,13 +1,12 @@
 use std::io::Write;
 
 fn log_path() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Local".into());
     let folder = if cfg!(debug_assertions) {
         "Kite Code Dev"
     } else {
         "Kite Code"
     };
-    let path = std::path::PathBuf::from(base).join(folder).join("app.log");
+    let path = crate::chat::utils::user_local_appdata_dir().join(folder).join("app.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

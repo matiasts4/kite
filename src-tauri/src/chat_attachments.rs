@@ -25,8 +25,7 @@ fn attachment_segment(id: &str) -> bool {
 }
 
 fn attachment_root() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
-    PathBuf::from(base)
+    crate::chat::utils::user_roaming_appdata_dir()
         .join(crate::persist::app_data_folder())
         .join("chat-attachments")
 }

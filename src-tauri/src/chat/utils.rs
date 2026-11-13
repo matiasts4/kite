@@ -2,13 +2,44 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn user_home_dir() -> PathBuf {
-    if let Ok(profile) = std::env::var("USERPROFILE") {
+    if let Some(profile) = std::env::var("USERPROFILE").ok().filter(|v| !v.trim().is_empty()) {
         PathBuf::from(profile)
-    } else if let Ok(home) = std::env::var("HOME") {
+    } else if let Some(home) = std::env::var("HOME").ok().filter(|v| !v.trim().is_empty()) {
         PathBuf::from(home)
     } else {
-        PathBuf::from(".")
+        std::env::temp_dir().join("kite-home")
     }
+}
+
+pub fn user_local_appdata_dir() -> PathBuf {
+    if let Some(local) = std::env::var("LOCALAPPDATA").ok().filter(|v| !v.trim().is_empty()) {
+        PathBuf::from(local)
+    } else {
+        user_home_dir().join("AppData").join("Local")
+    }
+}
+
+pub fn user_roaming_appdata_dir() -> PathBuf {
+    if let Some(roaming) = std::env::var("APPDATA").ok().filter(|v| !v.trim().is_empty()) {
+        PathBuf::from(roaming)
+    } else {
+        user_home_dir().join("AppData").join("Roaming")
+    }
+}
+
+pub fn resolve_agy_bin() -> Option<PathBuf> {
+    let agy_local = user_local_appdata_dir().join("agy").join("bin").join("agy.exe");
+    let local_str = agy_local.to_string_lossy().to_string();
+    resolve_bin("agy", &[&local_str])
+}
+
+pub fn resolve_codex_bin() -> Option<PathBuf> {
+    let local = user_local_appdata_dir();
+    let p1 = local.join("Programs").join("OpenAI").join("Codex").join("bin").join("codex.exe");
+    let p2 = local.join("Programs").join("OpenAI").join("codex.exe");
+    let s1 = p1.to_string_lossy().to_string();
+    let s2 = p2.to_string_lossy().to_string();
+    resolve_bin("codex", &[&s1, &s2])
 }
 
 pub fn now_ms() -> i64 {

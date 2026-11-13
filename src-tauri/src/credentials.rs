@@ -168,13 +168,12 @@ fn sibling_db_path() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
     }
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\PC\AppData\Roaming".into());
     let sibling_folder = if cfg!(debug_assertions) {
         "Kite Code"
     } else {
         "Kite Code Dev"
     };
-    let path = std::path::PathBuf::from(base)
+    let path = crate::chat::utils::user_roaming_appdata_dir()
         .join(sibling_folder)
         .join("kite.sqlite");
     if path.exists() {

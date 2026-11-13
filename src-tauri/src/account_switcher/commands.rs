@@ -1074,10 +1074,7 @@ pub fn list_detected_cli_accounts_impl() -> Value {
 
     // 2. Codex (OpenAI)
     {
-        let bin = crate::chat::resolve_bin("codex", &[
-            r"C:\Users\PC\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe",
-            r"C:\Users\PC\AppData\Local\Programs\OpenAI\codex.exe",
-        ]).map(|p| p.to_string_lossy().to_string());
+        let bin = crate::chat::utils::resolve_codex_bin().map(|p| p.to_string_lossy().to_string());
         let auth_file = home.join(".codex").join("auth.json");
         let mut email: Option<String> = None;
         let mut plan: Option<String> = None;

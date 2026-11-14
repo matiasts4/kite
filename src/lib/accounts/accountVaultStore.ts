@@ -146,6 +146,9 @@ class AccountVaultStore {
   private windowAccountsListener: ((e: Event) => void) | null = null;
   private tauriUnlisten: (() => void) | null = null;
   private tauriListenInit = false;
+  private pendingAccountReloads = new Set<string>();
+  private reloadScheduled = false;
+  private reloadGeneration = 0;
 
   getSnapshot(rawProvider: string): ProviderVaultState {
     const canon = canonicalVaultProvider(rawProvider);
@@ -210,6 +213,30 @@ class AccountVaultStore {
     return next;
   }
 
+  private scheduleAccountReload(providers: Iterable<string>): void {
+    for (const prov of providers) {
+      if (this.listeners.has(prov) || this.states.get(prov)?.hasLoadedOnce) {
+        this.pendingAccountReloads.add(prov);
+      }
+    }
+    if (this.reloadScheduled || this.pendingAccountReloads.size === 0) {
+      return;
+    }
+    this.reloadScheduled = true;
+    const generation = this.reloadGeneration;
+    queueMicrotask(() => {
+      if (generation !== this.reloadGeneration) return;
+      this.reloadScheduled = false;
+      const batch = Array.from(this.pendingAccountReloads);
+      this.pendingAccountReloads.clear();
+      for (const prov of batch) {
+        if (this.listeners.has(prov) || this.states.get(prov)?.hasLoadedOnce) {
+          void this.loadAccounts(prov, { force: true });
+        }
+      }
+    });
+  }
+
   private ensureGlobalListeners(): void {
     if (typeof window !== 'undefined' && !this.globalBound) {
       this.globalBound = true;
@@ -221,11 +248,7 @@ class AccountVaultStore {
         const targetProviders = detail?.provider
           ? [canonicalVaultProvider(detail.provider)]
           : Array.from(new Set([...this.listeners.keys(), ...this.states.keys()]));
-        for (const prov of targetProviders) {
-          if (this.listeners.has(prov) || this.states.get(prov)?.hasLoadedOnce) {
-            void this.loadAccounts(prov, { force: true });
-          }
-        }
+        this.scheduleAccountReload(targetProviders);
       };
       window.addEventListener('kite:accounts-changed', this.windowAccountsListener);
     }
@@ -238,9 +261,7 @@ class AccountVaultStore {
           'terminal://account-rotated',
           (event) => {
             const prov = canonicalVaultProvider(event?.payload?.provider || 'antigravity');
-            if (this.listeners.has(prov) || this.states.get(prov)?.hasLoadedOnce) {
-              void this.loadAccounts(prov, { force: true });
-            }
+            this.scheduleAccountReload([prov]);
           }
         )
       )
@@ -718,6 +739,9 @@ class AccountVaultStore {
   }
 
   resetForTest(): void {
+    this.reloadGeneration += 1;
+    this.reloadScheduled = false;
+    this.pendingAccountReloads.clear();
     this.teardownGlobalListeners();
     this.states.clear();
     this.listeners.clear();

@@ -23,11 +23,22 @@ export function readQuotaCache(): Record<string, ProviderQuotaStatus> {
   return {};
 }
 
-export function saveQuotaCache(cache: Record<string, ProviderQuotaStatus>) {
-  if (typeof window === 'undefined') return;
+function writeStorageIfChanged(key: string, value: unknown): boolean {
+  if (typeof window === 'undefined') return false;
   try {
-    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cache));
-  } catch (_) {}
+    const serialized = JSON.stringify(value);
+    if (localStorage.getItem(key) === serialized) {
+      return false;
+    }
+    localStorage.setItem(key, serialized);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveQuotaCache(cache: Record<string, ProviderQuotaStatus>) {
+  writeStorageIfChanged(CACHE_STORAGE_KEY, cache);
 }
 
 export function readQuotaPreferences(): QuotaPreferences {
@@ -70,10 +81,11 @@ export function saveQuotaPreferences(prefs: Partial<QuotaPreferences>): QuotaPre
       prefs.enabledProviders ?? current.enabledProviders
     ),
   };
-  try {
-    localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify(next));
-    window.dispatchEvent(new CustomEvent(QUOTA_PREFS_CHANGED_EVENT, { detail: next }));
-  } catch (_) {}
+  if (writeStorageIfChanged(PREFS_STORAGE_KEY, next)) {
+    try {
+      window.dispatchEvent(new CustomEvent(QUOTA_PREFS_CHANGED_EVENT, { detail: next }));
+    } catch (_) {}
+  }
   return next;
 }
 
@@ -207,6 +219,9 @@ class SubscriptionQuotaManager {
   private startupTimer: any = null;
   private isPolling = false;
   private inFlightFetch: Promise<Record<string, ProviderQuotaStatus>> | null = null;
+  private queuedForcedPromise: Promise<Record<string, ProviderQuotaStatus>> | null = null;
+  private queuedForcedProviders: string[] | null = null;
+  private hasQueuedForcedAll = false;
   private focusHandler: (() => void) | null = null;
   private focusTimer: any = null;
   private tauriListenerRegistered = false;
@@ -235,13 +250,10 @@ class SubscriptionQuotaManager {
         .then(({ listen }) => {
           listen<Record<string, ProviderQuotaStatus>>('kite://subscription-quotas-updated', (event) => {
             if (event.payload && typeof event.payload === 'object') {
-              for (const [key, val] of Object.entries(event.payload)) {
-                if (val && typeof val === 'object') {
-                  this.cache.set(key, val);
-                }
+              if (this.mergePayloadIntoCache(event.payload)) {
+                saveQuotaCache(this.getAllQuotas());
+                this.notify();
               }
-              saveQuotaCache(this.getAllQuotas());
-              this.notify();
             }
           }).catch(() => {});
         })
@@ -366,6 +378,19 @@ class SubscriptionQuotaManager {
     });
   }
 
+  private mergePayloadIntoCache(payload: Record<string, ProviderQuotaStatus>): boolean {
+    let changed = false;
+    for (const [key, val] of Object.entries(payload)) {
+      if (!val || typeof val !== 'object') continue;
+      const prev = this.cache.get(key);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(val)) {
+        this.cache.set(key, val);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   private async runFetch(
     force: boolean,
     providersOverride?: string[]
@@ -382,18 +407,29 @@ class SubscriptionQuotaManager {
       }
       const data = await getSubscriptionQuotas(force, providers);
       if (data && typeof data === 'object') {
-        for (const [key, val] of Object.entries(data)) {
-          if (val && typeof val === 'object') {
-            this.cache.set(key, val as ProviderQuotaStatus);
-          }
+        if (this.mergePayloadIntoCache(data as Record<string, ProviderQuotaStatus>)) {
+          saveQuotaCache(this.getAllQuotas());
+          this.notify();
         }
-        saveQuotaCache(this.getAllQuotas());
-        this.notify();
       }
     } catch (err) {
       console.warn('[SubscriptionQuotaManager] fetch failed:', err);
     }
     return this.getAllQuotas();
+  }
+
+  private enqueueForcedProviders(providersOverride?: string[]) {
+    if (!providersOverride) {
+      this.hasQueuedForcedAll = true;
+      this.queuedForcedProviders = null;
+      return;
+    }
+    if (this.hasQueuedForcedAll) return;
+    const merged = new Set(this.queuedForcedProviders ?? []);
+    for (const id of providersOverride) {
+      merged.add(id);
+    }
+    this.queuedForcedProviders = Array.from(merged);
   }
 
   fetchAll(
@@ -404,16 +440,21 @@ class SubscriptionQuotaManager {
       if (!force) {
         return this.inFlightFetch;
       }
-      return (async () => {
-        while (this.inFlightFetch) {
-          try {
-            await this.inFlightFetch;
-          } catch {
-            // Prior fetch already logged; proceed to forced refresh.
-          }
-        }
-        return this.fetchAll(true, providersOverride);
-      })();
+      this.enqueueForcedProviders(providersOverride);
+      if (this.queuedForcedPromise) {
+        return this.queuedForcedPromise;
+      }
+      const runQueued = () => {
+        const providers = this.hasQueuedForcedAll
+          ? undefined
+          : (this.queuedForcedProviders ?? undefined);
+        this.queuedForcedPromise = null;
+        this.queuedForcedProviders = null;
+        this.hasQueuedForcedAll = false;
+        return this.fetchAll(true, providers);
+      };
+      this.queuedForcedPromise = this.inFlightFetch.then(runQueued, runQueued);
+      return this.queuedForcedPromise;
     }
 
     let current!: Promise<Record<string, ProviderQuotaStatus>>;

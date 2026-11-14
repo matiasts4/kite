@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './quotas-tab.css';
 import { SettingsMasterDetail } from './SettingsMasterDetail';
 import { AccountVault, MULTI_ACCOUNT_PROVIDERS } from './AccountVault';
@@ -93,11 +93,51 @@ const Switch: React.FC<{ checked: boolean; label: string; onChange: () => void }
   </button>
 );
 
+const QUOTAS_TAB_SWR_KEY = 'kite_quotas_tab_swr_v1';
+
+interface QuotasTabSwrCache {
+  cliAccounts?: DetectedCliAccount[];
+  verifiedConnections?: ConnectionSummary[];
+  vaultCredentials?: Record<string, CredentialStatusItem>;
+}
+
+function readQuotasTabSwrCache(): QuotasTabSwrCache {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(QUOTAS_TAB_SWR_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function patchQuotasTabSwrCache(patch: Partial<QuotasTabSwrCache>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const next = { ...readQuotasTabSwrCache(), ...patch };
+    const serialized = JSON.stringify(next);
+    if (localStorage.getItem(QUOTAS_TAB_SWR_KEY) !== serialized) {
+      localStorage.setItem(QUOTAS_TAB_SWR_KEY, serialized);
+    }
+  } catch {
+    /* ignore storage errors */
+  }
+}
+
 export const QuotasTab: React.FC = () => {
+  const [swrInitial] = useState<QuotasTabSwrCache>(() => readQuotasTabSwrCache());
   const [prefs, setPrefs] = useState<QuotaPreferences>(() => readQuotaPreferences());
   const { summary: updatesSummary } = useAgentUpdates();
-  const [quotas, setQuotas] = useState<Record<string, ProviderQuotaStatus>>({});
-  const [cliAccounts, setCliAccounts] = useState<DetectedCliAccount[]>([]);
+  const [quotas, setQuotas] = useState<Record<string, ProviderQuotaStatus>>(() =>
+    typeof subscriptionQuotaManager?.getAllQuotas === 'function'
+      ? subscriptionQuotaManager.getAllQuotas()
+      : {}
+  );
+  const [cliAccounts, setCliAccounts] = useState<DetectedCliAccount[]>(
+    () => swrInitial.cliAccounts ?? []
+  );
   const [activeTerminals, setActiveTerminals] = useState<ActiveAgentTerminal[]>(() => {
     try {
       return getActiveAgentTerminals();
@@ -112,13 +152,27 @@ export const QuotasTab: React.FC = () => {
   const [openCodeStatus, setOpenCodeStatus] = useState<string | null>(null);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
-  const [verifiedConnections, setVerifiedConnections] = useState<ConnectionSummary[]>([]);
-  const [vaultCredentials, setVaultCredentials] = useState<Record<string, CredentialStatusItem>>({});
+  const [verifiedConnections, setVerifiedConnections] = useState<ConnectionSummary[]>(
+    () => swrInitial.verifiedConnections ?? []
+  );
+  const [vaultCredentials, setVaultCredentials] = useState<Record<string, CredentialStatusItem>>(
+    () => swrInitial.vaultCredentials ?? {}
+  );
+  const prewarmedProvidersRef = useRef<Set<string>>(new Set());
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const refreshCredentials = useCallback(async () => {
     try {
       const creds = await fetchVaultCredentials();
-      setVaultCredentials(creds);
+      patchQuotasTabSwrCache({ vaultCredentials: creds });
+      if (mountedRef.current) setVaultCredentials(creds);
     } catch {
       /* ignore */
     }
@@ -127,7 +181,8 @@ export const QuotasTab: React.FC = () => {
   const refreshCliAccounts = useCallback(async () => {
     try {
       const accounts = await listDetectedCliAccounts();
-      setCliAccounts(accounts);
+      patchQuotasTabSwrCache({ cliAccounts: accounts });
+      if (mountedRef.current) setCliAccounts(accounts);
     } catch {
       /* ignore */
     }
@@ -135,30 +190,40 @@ export const QuotasTab: React.FC = () => {
 
   useEffect(() => {
     void refreshCredentials();
-  }, [refreshCredentials]);
-
-  useEffect(() => subscriptionQuotaManager.subscribe((data) => setQuotas(data)), []);
-
-  useEffect(() => {
+    void refreshCliAccounts();
     let cancelled = false;
     void listQuotaConnections().then((connections) => {
+      patchQuotasTabSwrCache({ verifiedConnections: connections });
       if (!cancelled) setVerifiedConnections(connections);
-    });
-    void listDetectedCliAccounts().then((accounts) => {
-      if (!cancelled) setCliAccounts(accounts);
     });
     return () => {
       cancelled = true;
     };
+  }, [refreshCredentials, refreshCliAccounts]);
+
+  useEffect(() => {
+    if (typeof subscriptionQuotaManager?.subscribe !== 'function') return;
+    return subscriptionQuotaManager.subscribe((data) => setQuotas(data));
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let scheduled = false;
     const onAccountsChanged = () => {
-      void refreshCliAccounts();
-      void refreshCredentials();
+      if (scheduled) return;
+      scheduled = true;
+      queueMicrotask(() => {
+        scheduled = false;
+        if (cancelled) return;
+        void refreshCliAccounts();
+        void refreshCredentials();
+      });
     };
     window.addEventListener('kite:accounts-changed', onAccountsChanged);
-    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+    };
   }, [refreshCliAccounts, refreshCredentials]);
 
   useEffect(() => {
@@ -180,16 +245,6 @@ export const QuotasTab: React.FC = () => {
     window.addEventListener(QUOTA_PREFS_CHANGED_EVENT, handler);
     return () => window.removeEventListener(QUOTA_PREFS_CHANGED_EVENT, handler);
   }, []);
-
-  useEffect(() => {
-    // Prewarm all supported providers so quotas and models are populated across views
-    void subscriptionQuotaManager.fetchAll(false, ALL_SUPPORTED_PROVIDERS).catch(() => undefined);
-  }, []);
-
-  const handleCredentialChanged = async () => {
-    await refreshCredentials();
-    void subscriptionQuotaManager.fetchAll(true);
-  };
 
   const detectedSessions = useMemo(
     () =>
@@ -213,6 +268,28 @@ export const QuotasTab: React.FC = () => {
   }, [detectedSessions, prefs.enabledProviders]);
 
   const enabledIds = useMemo(() => resolveEnabledProviderIds(prefs), [prefs]);
+
+  const prewarmTargetIds = useMemo(() => {
+    const targets = new Set<string>(enabledIds);
+    for (const providerId of ALL_SUPPORTED_PROVIDERS) {
+      const meta = getProviderConnectionMeta(providerId);
+      const credKey = meta?.apiKeyProviderKey ?? providerId;
+      if (vaultCredentials[credKey]?.isConfigured) {
+        targets.add(providerId);
+      }
+    }
+    return Array.from(targets);
+  }, [enabledIds, vaultCredentials]);
+
+  useEffect(() => {
+    // Prewarm only enabled/configured providers instead of probing all 12 supported providers
+    const missing = prewarmTargetIds.filter((id) => !prewarmedProvidersRef.current.has(id));
+    if (missing.length === 0) return;
+    for (const id of missing) {
+      prewarmedProvidersRef.current.add(id);
+    }
+    void subscriptionQuotaManager.fetchAll(false, missing).catch(() => undefined);
+  }, [prewarmTargetIds]);
 
   const fullOrder = useMemo(() => {
     const order = prefs.providerOrder?.length ? prefs.providerOrder : ALL_SUPPORTED_PROVIDERS;
@@ -332,6 +409,11 @@ export const QuotasTab: React.FC = () => {
   };
 
   const activeProvider = selectedProviderId ? selectedProviderId : null;
+  const handleCredentialChanged = async () => {
+    await refreshCredentials();
+    const targets = activeProvider ? [activeProvider] : undefined;
+    void subscriptionQuotaManager.fetchAll(true, targets);
+  };
   const selectedVault = useAccountVault(activeProvider || 'antigravity', { autoLoad: false });
   const vaultLiveEmail = selectedVault.hasLoadedOnce
     ? resolveLiveAccountEmail(selectedVault)
@@ -987,7 +1069,7 @@ export const QuotasTab: React.FC = () => {
           Guarda varias suscripciones y cambia de una a otra en un clic cuando una se agote. Todo queda en
           tu equipo, sin proxies.
         </p>
-        <AccountVault onChanged={() => void subscriptionQuotaManager.fetchAll(true)} />
+        <AccountVault quotas={quotas} />
       </section>
 
       {/* ── Cohesive Modals ──────────────────────────────────────────────── */}
@@ -1006,9 +1088,6 @@ export const QuotasTab: React.FC = () => {
           providerLabel={switcherProvider.label}
           isOpen={!!switcherProvider}
           onClose={() => setSwitcherProvider(null)}
-          onAccountSwitched={() => {
-            void subscriptionQuotaManager.fetchAll(true);
-          }}
         />
       )}
     </>

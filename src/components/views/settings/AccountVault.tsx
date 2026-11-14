@@ -45,18 +45,20 @@ function formatReset(ms?: number | null, resetAt?: string | null): string | null
 
 export interface AccountVaultProps {
   onChanged?: () => void;
+  quotas?: Record<string, ProviderQuotaStatus>;
 }
 
-export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
+export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged, quotas: externalQuotas }) => {
   const [provider, setProvider] = useState<string>(MULTI_ACCOUNT_PROVIDERS[0].id);
   const [label, setLabel] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingLabel, setEditingLabel] = useState('');
   const [refreshingQuota, setRefreshingQuota] = useState(false);
   const [liveQuotas, setLiveQuotas] = useState<Record<string, ProviderQuotaStatus>>(() =>
-    typeof subscriptionQuotaManager?.getAllQuotas === 'function'
+    externalQuotas ??
+    (typeof subscriptionQuotaManager?.getAllQuotas === 'function'
       ? subscriptionQuotaManager.getAllQuotas()
-      : {}
+      : {})
   );
 
   const vault = useAccountVault(provider, { autoLoad: true });
@@ -78,9 +80,10 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
   }, [provider]);
 
   useEffect(() => {
+    if (externalQuotas !== undefined) return;
     if (typeof subscriptionQuotaManager?.subscribe !== 'function') return;
     return subscriptionQuotaManager.subscribe((data) => setLiveQuotas(data));
-  }, []);
+  }, [externalQuotas]);
 
   const handleSwitch = async (id: string, opts?: { force?: boolean }) => {
     const res = await vault.switchAccount(id, opts);
@@ -131,7 +134,8 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged }) => {
     }
   };
 
-  const activeLiveQuota = liveQuotas[quotaKeyForProvider(provider)];
+  const effectiveQuotas = externalQuotas ?? liveQuotas;
+  const activeLiveQuota = effectiveQuotas[quotaKeyForProvider(provider)];
   const authModeLabel =
     provider === 'antigravity' ? resolveAuthModeLabel(vault.authTelemetry) : null;
   const splitBrain = provider === 'antigravity' && isSplitBrainActive(vault.authTelemetry);

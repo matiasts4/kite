@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useId, useEffect } from 'react';
+import React, { useState, useMemo, useId, useEffect, useDeferredValue } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import { surfaceMotion } from '../../motion/standard/surfaces';
@@ -44,8 +44,9 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
     }
   }, [isOpen]);
 
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const filteredProviders = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = deferredSearchQuery.trim().toLowerCase();
     if (!q) return availableProviders;
     return availableProviders.filter((id) => {
       const label = (PROVIDER_LABELS[id] || id).toLowerCase();
@@ -55,7 +56,7 @@ export const AddProviderModal: React.FC<AddProviderModalProps> = ({
       const desc = (cfg?.desc || '').toLowerCase();
       return id.toLowerCase().includes(q) || label.includes(q) || vendor.includes(q) || desc.includes(q);
     });
-  }, [availableProviders, searchQuery]);
+  }, [availableProviders, deferredSearchQuery]);
 
   const detectedCount = useMemo(() => {
     return filteredProviders.filter((id) => {

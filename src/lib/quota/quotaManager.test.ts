@@ -101,4 +101,68 @@ describe('SubscriptionQuotaManager concurrency & lifecycle', () => {
     addSpy.mockRestore();
     removeSpy.mockRestore();
   });
+
+  it('coalesces concurrent forced refreshes behind an active fetch into one follow-up', async () => {
+    const first = deferred<Record<string, any>>();
+    const second = deferred<Record<string, any>>();
+
+    vi.mocked(getSubscriptionQuotas)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const bg = subscriptionQuotaManager.fetchAll(false, [PROVIDERS.ANTIGRAVITY]);
+    const forcedA = subscriptionQuotaManager.fetchAll(true, [PROVIDERS.ANTIGRAVITY]);
+    const forcedB = subscriptionQuotaManager.fetchAll(true, [PROVIDERS.CLAUDE]);
+
+    expect(forcedA).toBe(forcedB);
+    expect(vi.mocked(getSubscriptionQuotas)).toHaveBeenCalledTimes(1);
+
+    first.resolve({});
+    await bg;
+
+    expect(vi.mocked(getSubscriptionQuotas)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(getSubscriptionQuotas)).toHaveBeenNthCalledWith(2, true, [
+      PROVIDERS.ANTIGRAVITY,
+      PROVIDERS.CLAUDE,
+    ]);
+
+    second.resolve({
+      claude: {
+        provider: PROVIDERS.CLAUDE,
+        isAuth: true,
+        primaryRemainingPercent: 90,
+        windows: [],
+        lastUpdatedMs: 123,
+      },
+    });
+    const res = await forcedB;
+    expect(res.claude?.primaryRemainingPercent).toBe(90);
+  });
+
+  it('skips redundant localStorage.setItem writes when quota payload is unchanged', async () => {
+    const payload = {
+      antigravity: {
+        providerId: PROVIDERS.ANTIGRAVITY,
+        displayName: 'Antigravity',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 23,
+        primaryRemainingPercent: 77,
+        windows: [],
+        lastUpdatedMs: 999_500,
+      },
+    };
+    vi.mocked(getSubscriptionQuotas).mockResolvedValue(payload);
+
+    const setItemSpy = vi.spyOn(localStorage, 'setItem');
+    await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.ANTIGRAVITY]);
+    const writesAfterFirst = setItemSpy.mock.calls.filter(([k]) => k === 'kite_quota_cache').length;
+
+    await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.ANTIGRAVITY]);
+    const writesAfterSecond = setItemSpy.mock.calls.filter(([k]) => k === 'kite_quota_cache').length;
+
+    expect(writesAfterFirst).toBe(1);
+    expect(writesAfterSecond).toBe(1);
+    setItemSpy.mockRestore();
+  });
 });

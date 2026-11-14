@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QuotasTab } from './QuotasTab';
-import { DEFAULT_QUOTA_PREFERENCES, PROVIDERS, QUOTA_SETUP_VERSION } from '../../../lib/quota/types';
+import {
+  ALL_SUPPORTED_PROVIDERS,
+  DEFAULT_QUOTA_PREFERENCES,
+  PROVIDERS,
+  QUOTA_SETUP_VERSION,
+} from '../../../lib/quota/types';
 
 const PREFS_STORAGE_KEY = 'kite_quota_preferences';
 
@@ -181,5 +186,43 @@ describe('QuotasTab Component', () => {
     // Click to collapse again
     await user.click(screen.getByRole('button', { name: /ocultar desglose de modelos/i }));
     expect(screen.queryByText('Gemini 3.8 Flash')).not.toBeInTheDocument();
+  });
+
+  it('prewarms only enabled/configured providers on mount instead of all 12 providers', async () => {
+    const ipc = await import('../../../lib/ipc');
+    render(<QuotasTab />);
+
+    await waitFor(() => {
+      expect(ipc.getSubscriptionQuotas).toHaveBeenCalled();
+    });
+
+    const firstCallProviders = vi.mocked(ipc.getSubscriptionQuotas).mock.calls[0]?.[1] as string[];
+    expect(firstCallProviders).toEqual([PROVIDERS.ANTIGRAVITY, PROVIDERS.CLAUDE]);
+    expect(firstCallProviders.length).toBeLessThan(ALL_SUPPORTED_PROVIDERS.length);
+  });
+
+  it('coalesces rapid kite:accounts-changed bursts into a single refresh cycle', async () => {
+    const ipc = await import('../../../lib/ipc');
+    render(<QuotasTab />);
+
+    await waitFor(() => {
+      expect(ipc.listDetectedCliAccounts).toHaveBeenCalledTimes(1);
+      expect(ipc.getProviderCredentials).toHaveBeenCalledTimes(1);
+    });
+
+    vi.mocked(ipc.listDetectedCliAccounts).mockClear();
+    vi.mocked(ipc.getProviderCredentials).mockClear();
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('kite:accounts-changed', { detail: { provider: 'antigravity' } }));
+      window.dispatchEvent(new CustomEvent('kite:accounts-changed', { detail: { provider: 'claude' } }));
+      window.dispatchEvent(new CustomEvent('kite:accounts-changed', { detail: { provider: 'codex' } }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(ipc.listDetectedCliAccounts).toHaveBeenCalledTimes(1);
+      expect(ipc.getProviderCredentials).toHaveBeenCalledTimes(1);
+    });
   });
 });

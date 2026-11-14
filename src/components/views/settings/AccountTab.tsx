@@ -33,11 +33,27 @@ export interface AccountTabProps {
   onOpenPrivacy?: () => void;
 }
 
+const DETECTED_ACCOUNTS_SWR_KEY = 'kite_detected_cli_accounts_swr_v1';
+
+function readCachedDetectedAccounts(): DetectedCliAccount[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(DETECTED_ACCOUNTS_SWR_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export const AccountTab: React.FC<AccountTabProps> = ({
   accountName = 'Kite User',
   accountEmail = 'local@kite.dev',
 }) => {
-  const [detectedAccounts, setDetectedAccounts] = useState<DetectedCliAccount[]>([]);
+  const [detectedAccounts, setDetectedAccounts] = useState<DetectedCliAccount[]>(() =>
+    readCachedDetectedAccounts()
+  );
   const [loadingDetected, setLoadingDetected] = useState(false);
   const [switcherProvider, setSwitcherProvider] = useState<{ id: string; label: string } | null>(null);
   const antigravityVault = useAccountVault('antigravity', { autoLoad: false });
@@ -48,6 +64,14 @@ export const AccountTab: React.FC<AccountTabProps> = ({
     try {
       const accounts = await listDetectedCliAccounts();
       setDetectedAccounts(accounts);
+      try {
+        const serialized = JSON.stringify(accounts);
+        if (localStorage.getItem(DETECTED_ACCOUNTS_SWR_KEY) !== serialized) {
+          localStorage.setItem(DETECTED_ACCOUNTS_SWR_KEY, serialized);
+        }
+      } catch {
+        /* ignore storage errors */
+      }
     } catch (err) {
       console.warn('Error loading detected CLI accounts:', err);
     } finally {
@@ -60,11 +84,23 @@ export const AccountTab: React.FC<AccountTabProps> = ({
   }, [loadDetectedAccounts]);
 
   useEffect(() => {
+    let cancelled = false;
+    let scheduled = false;
     const onAccountsChanged = () => {
-      void loadDetectedAccounts();
+      if (scheduled) return;
+      scheduled = true;
+      queueMicrotask(() => {
+        scheduled = false;
+        if (!cancelled) {
+          void loadDetectedAccounts();
+        }
+      });
     };
     window.addEventListener('kite:accounts-changed', onAccountsChanged);
-    return () => window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:accounts-changed', onAccountsChanged);
+    };
   }, [loadDetectedAccounts]);
 
   return (

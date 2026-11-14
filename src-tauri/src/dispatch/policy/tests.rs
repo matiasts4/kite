@@ -694,3 +694,161 @@ fn thread_run_spawns_child_thread_attaches_and_returns_subagent_id() {
         .unwrap_or_default();
     assert!(row.contains("working"), "row={row}");
 }
+
+#[test]
+fn suppress_parent_notice_on_wait_purges_queued_and_future_child_notices() {
+    let mut svc = service();
+    svc.attach(Family::Thread, "p-wait", None, None, false).unwrap();
+    svc.publish_pane("thread:p-wait", "working", 1, 1_000, None, None)
+        .unwrap();
+    svc.attach(
+        Family::Thread,
+        "c-wait",
+        None,
+        Some("thread:p-wait"),
+        false,
+    )
+    .unwrap();
+    svc.attach(
+        Family::Thread,
+        "c-normal",
+        None,
+        Some("thread:p-wait"),
+        false,
+    )
+    .unwrap();
+    svc.publish_pane("thread:c-wait", "working", 1, 1_100, None, None)
+        .unwrap();
+    svc.publish_pane("thread:c-normal", "working", 1, 1_150, None, None)
+        .unwrap();
+    // Both children settle with Done while parent is working -> both queue notices on thread:p-wait.
+    svc.publish_pane(
+        "thread:c-wait",
+        "done",
+        2,
+        1_200,
+        Some("waited first turn"),
+        None,
+    )
+    .unwrap();
+    svc.publish_pane(
+        "thread:c-normal",
+        "done",
+        2,
+        1_220,
+        Some("normal child done"),
+        None,
+    )
+    .unwrap();
+
+    // Resolving a single-target blocking wait suppresses notices for c-wait and drops its queued notice,
+    // while leaving c-normal's queued notice intact.
+    let wait = svc.wait(WaitInput {
+        id: "w-sup-1".into(),
+        address: Some("thread:c-wait".into()),
+        until: vec![PresenceState::Done],
+        children: None,
+        timeout_ms: 0,
+        started_ms: 1_200,
+        now_ms: 1_250,
+    });
+    assert_eq!(wait.status, ReceiptStatus::Settled);
+    assert!(!wait.submitted);
+
+    // Parent goes idle -> c-normal's queued notice flushes; c-wait's waited notice stays suppressed.
+    svc.publish_pane("thread:p-wait", "idle", 2, 1_300, None, None)
+        .unwrap();
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .any(|w| w.text.contains("from=\"thread:c-normal\"") && w.text.contains("normal child done")),
+        "expected non-waited child c-normal notice to deliver, got: {:?}",
+        svc.port_mut().writes
+    );
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .all(|w| !w.text.contains("waited first turn")),
+        "expected waited turn notice to be purged/suppressed, got: {:?}",
+        svc.port_mut().writes
+    );
+
+    // Parent handles c-normal and becomes idle again (clearing in_flight),
+    // then c-wait re-enters working on a follow-up async turn and settles with Done.
+    svc.publish_pane("thread:p-wait", "working", 3, 1_320, None, None)
+        .unwrap();
+    svc.publish_pane("thread:p-wait", "idle", 4, 1_350, None, None)
+        .unwrap();
+    svc.publish_pane("thread:c-wait", "working", 3, 1_400, None, None)
+        .unwrap();
+    svc.publish_pane(
+        "thread:c-wait",
+        "done",
+        4,
+        1_500,
+        Some("async follow-up turn"),
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .any(|w| w.text.contains("from=\"thread:c-wait\"") && w.text.contains("async follow-up turn")),
+        "expected follow-up async turn on c-wait to notify parent once working resets suppression, got: {:?}",
+        svc.port_mut().writes
+    );
+}
+
+#[test]
+fn children_wait_does_not_suppress_child_notices() {
+    let mut svc = service();
+    svc.attach(Family::Thread, "p-children", None, None, false)
+        .unwrap();
+    svc.publish_pane("thread:p-children", "working", 1, 1_000, None, None)
+        .unwrap();
+    svc.attach(
+        Family::Thread,
+        "c-all-1",
+        None,
+        Some("thread:p-children"),
+        false,
+    )
+    .unwrap();
+    svc.publish_pane("thread:c-all-1", "working", 1, 1_100, None, None)
+        .unwrap();
+    svc.publish_pane(
+        "thread:c-all-1",
+        "done",
+        2,
+        1_200,
+        Some("child via children wait"),
+        None,
+    )
+    .unwrap();
+
+    let wait = svc.wait(WaitInput {
+        id: "w-children-1".into(),
+        address: Some("thread:p-children".into()),
+        until: vec![PresenceState::Done],
+        children: Some(ChildrenMode::All),
+        timeout_ms: 0,
+        started_ms: 1_200,
+        now_ms: 1_250,
+    });
+    assert_eq!(wait.status, ReceiptStatus::Settled);
+
+    svc.publish_pane("thread:p-children", "idle", 2, 1_300, None, None)
+        .unwrap();
+    assert!(
+        svc.port_mut().writes.iter().any(|w| {
+            w.text.contains("from=\"thread:c-all-1\"")
+                && w.text.contains("child via children wait")
+        }),
+        "expected --children wait not to suppress individual child notice, got: {:?}",
+        svc.port_mut().writes
+    );
+}

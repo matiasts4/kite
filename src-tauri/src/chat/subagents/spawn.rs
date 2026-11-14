@@ -242,45 +242,8 @@ pub fn spawn_child_subagent_thread(
             .iter()
             .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))?;
         let items = parent.get("items").and_then(Value::as_array)?;
-        let target_role = params.role.as_deref().map(str::trim).unwrap_or("");
-        let target_prompt = params.task.trim();
-        items
-            .iter()
-            .rev()
-            .find(|it| {
-                let id = it.get("id").and_then(Value::as_str).unwrap_or("");
-                if id.is_empty()
-                    || id.starts_with("dispatch-subagent-")
-                    || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
-                {
-                    return false;
-                }
-                let has_cid = it
-                    .pointer("/subagentMeta/childThreadId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| !s.trim().is_empty());
-                if has_cid {
-                    return false;
-                }
-                let it_role = it
-                    .pointer("/subagentMeta/role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                let it_prompt = it
-                    .pointer("/subagentMeta/prompt")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                let is_live = matches!(
-                    it.get("status").and_then(Value::as_str),
-                    Some("running" | "inProgress" | "pending" | "in_progress")
-                );
-                (!target_prompt.is_empty() && it_prompt == target_prompt)
-                    || (!target_role.is_empty() && it_role == target_role)
-                    || is_live
-            })
-            .and_then(|it| it.get("id").and_then(Value::as_str).map(str::to_string))
+        let target_role = params.role.as_deref().unwrap_or("");
+        find_reclaimable_unbound_subagent_call_id(items, target_role, &params.task)
     });
 
     let tool_call_id = claimed_tool_id.unwrap_or_else(|| format!("dispatch-subagent-{child_id}"));
@@ -336,5 +299,75 @@ pub fn spawn_child_subagent_thread(
         model: final_model,
         working_directory: final_cwd,
     })
+}
+
+pub(crate) fn is_terminal_subagent_item(item: &Value) -> bool {
+    let top_status = item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let meta_status = item
+        .pointer("/subagentMeta/status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    [top_status, meta_status].into_iter().any(|status| {
+        status.eq_ignore_ascii_case("completed")
+            || status.eq_ignore_ascii_case("failed")
+            || status.eq_ignore_ascii_case("error")
+            || status.eq_ignore_ascii_case("killed")
+            || status.eq_ignore_ascii_case("done")
+            || status.eq_ignore_ascii_case("exited")
+    })
+}
+
+pub(crate) fn find_reclaimable_unbound_subagent_call_id(
+    items: &[Value],
+    target_role: &str,
+    target_prompt: &str,
+) -> Option<String> {
+    let target_role = target_role.trim();
+    let target_prompt = target_prompt.trim();
+    items
+        .iter()
+        .rev()
+        .find(|it| {
+            let id = it.get("id").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty()
+                || id.starts_with("dispatch-subagent-")
+                || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
+            {
+                return false;
+            }
+            if is_terminal_subagent_item(it) {
+                return false;
+            }
+            let has_cid = it
+                .pointer("/subagentMeta/childThreadId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            if has_cid {
+                return false;
+            }
+            let it_role = it
+                .pointer("/subagentMeta/role")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let it_prompt = it
+                .pointer("/subagentMeta/prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let is_live = matches!(
+                it.get("status").and_then(Value::as_str),
+                Some("running" | "inProgress" | "pending" | "in_progress")
+            );
+            (!target_prompt.is_empty() && it_prompt == target_prompt)
+                || (!target_role.is_empty() && it_role == target_role)
+                || is_live
+        })
+        .and_then(|it| it.get("id").and_then(Value::as_str).map(str::to_string))
 }
 

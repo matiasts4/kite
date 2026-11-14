@@ -346,7 +346,10 @@ impl SessionTransport for OpenCodeServerSession {
         let working_directory = spec.working_directory.as_deref().map(PathBuf::from);
         let cwd = working_directory.as_deref();
 
-        let mut child = spawn_streaming_with_owned_env(&program, &args_refs, cwd, &spec.extra_env)
+        let mut session_env = spec.extra_env.clone();
+        apply_opencode_password_env_aliases(&mut session_env, |k| std::env::var(k).ok());
+
+        let mut child = spawn_streaming_with_owned_env(&program, &args_refs, cwd, &session_env)
             .map_err(|error| {
             format!(
                 "could not start the opencode server with {}: {error}",
@@ -358,7 +361,7 @@ impl SessionTransport for OpenCodeServerSession {
 
         self.program = Some(program);
         self.working_directory = working_directory;
-        self.extra_env = spec.extra_env.clone();
+        self.extra_env = session_env;
         self.server = Some(child);
         self.port = Some(port);
         self.session_key = spec.resume_handle.clone().or_else(|| Some(spec.session_id.clone()));
@@ -628,3 +631,95 @@ pub fn start_idle_reaper() {
             .expect("failed to spawn chat session reaper thread");
     });
 }
+
+const OPENCODE_PASSWORD_ENV_ALIASES: [&str; 2] =
+    ["OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD"];
+
+pub(crate) fn apply_opencode_password_env_aliases(
+    session_env: &mut Vec<(String, String)>,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) {
+    let resolved_password = OPENCODE_PASSWORD_ENV_ALIASES
+        .iter()
+        .find_map(|alias| {
+            session_env.iter().find_map(|(k, v)| {
+                (k.eq_ignore_ascii_case(alias) && !v.trim().is_empty()).then(|| v.clone())
+            })
+        })
+        .or_else(|| {
+            OPENCODE_PASSWORD_ENV_ALIASES
+                .iter()
+                .find_map(|alias| env_lookup(alias).filter(|v| !v.trim().is_empty()))
+        });
+
+    let Some(password) = resolved_password else {
+        return;
+    };
+
+    for alias in OPENCODE_PASSWORD_ENV_ALIASES {
+        let mut found = false;
+        for (k, existing_val) in session_env.iter_mut() {
+            if k.eq_ignore_ascii_case(alias) {
+                found = true;
+                if existing_val.trim().is_empty() {
+                    *existing_val = password.clone();
+                }
+            }
+        }
+        if !found {
+            session_env.push((alias.to_string(), password.clone()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_opencode_password_env_aliases;
+
+    #[test]
+    fn opencode_password_env_aliases_sync_from_env_and_replace_empty_entries() {
+        let mut env = vec![
+            ("OPENCODE_SERVER_PASSWORD".to_string(), "   ".to_string()),
+            ("OTHER".to_string(), "1".to_string()),
+        ];
+        apply_opencode_password_env_aliases(&mut env, |k| match k {
+            "OPENCODE_PASSWORD" => Some("secret-123".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "OPENCODE_SERVER_PASSWORD".to_string(),
+                    "secret-123".to_string()
+                ),
+                ("OTHER".to_string(), "1".to_string()),
+                ("OPENCODE_PASSWORD".to_string(), "secret-123".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_password_env_aliases_match_case_insensitively_and_ignore_blank_values() {
+        let mut env = vec![("opencode_password".to_string(), "cli-secret".to_string())];
+        apply_opencode_password_env_aliases(&mut env, |_| None);
+        assert_eq!(
+            env,
+            vec![
+                ("opencode_password".to_string(), "cli-secret".to_string()),
+                (
+                    "OPENCODE_SERVER_PASSWORD".to_string(),
+                    "cli-secret".to_string()
+                ),
+            ]
+        );
+
+        let mut blank_only = vec![("OPENCODE_PASSWORD".to_string(), "  \t ".to_string())];
+        apply_opencode_password_env_aliases(&mut blank_only, |_| Some("   ".to_string()));
+        assert_eq!(
+            blank_only,
+            vec![("OPENCODE_PASSWORD".to_string(), "  \t ".to_string())]
+        );
+    }
+}
+

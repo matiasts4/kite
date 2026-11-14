@@ -92,6 +92,12 @@ impl Port for LivePort {
                 let text = crate::chat::subagents::extract_final_assistant_text(id);
                 if text.is_empty() {
                     Ok(thread_tail(id))
+                } else if let Some(failure_msg) = thread_turn_failure_message(id) {
+                    if text.contains(&failure_msg) {
+                        Ok(text)
+                    } else {
+                        Ok(format!("{text}\n\n{failure_msg}"))
+                    }
                 } else {
                     Ok(text)
                 }
@@ -372,6 +378,25 @@ pub fn terminal_tail(session_id: &str) -> String {
     crate::terminal::terminal_recent_text(session_id)
 }
 
+fn turn_failure_message(thread: &Value) -> Option<String> {
+    thread
+        .pointer("/turnFailure/message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn thread_turn_failure_message(thread_id: &str) -> Option<String> {
+    let Ok(items) = crate::persist::threads().lock() else {
+        return None;
+    };
+    items
+        .iter()
+        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+        .and_then(turn_failure_message)
+}
+
 pub fn thread_tail(thread_id: &str) -> String {
     let Ok(items) = crate::persist::threads().lock() else {
         return String::new();
@@ -382,20 +407,35 @@ pub fn thread_tail(thread_id: &str) -> String {
     else {
         return String::new();
     };
-    let Some(list) = thread.get("items").and_then(Value::as_array) else {
-        return String::new();
-    };
-    list.iter()
-        .filter(|item| {
-            !matches!(
-                item.get("kind").and_then(Value::as_str),
-                Some("notice" | "note")
-            )
+    let failure_msg = turn_failure_message(thread);
+    let mut lines: Vec<String> = thread
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter(|item| {
+                    let kind = item.get("kind").and_then(Value::as_str);
+                    if matches!(kind, Some("notice" | "note")) {
+                        return false;
+                    }
+                    if failure_msg.is_some() && kind == Some("user") {
+                        return false;
+                    }
+                    true
+                })
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+                .collect()
         })
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .unwrap_or_default();
+    if let Some(msg) = failure_msg {
+        if !lines.iter().any(|l| l.contains(&msg)) {
+            lines.push(msg);
+        }
+    }
+    lines.join("\n")
 }
 
 pub fn service() -> &'static Mutex<Service<LivePort>> {

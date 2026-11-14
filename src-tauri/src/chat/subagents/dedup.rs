@@ -44,7 +44,7 @@ pub fn has_active_child_subagent(thread_id: &str) -> bool {
 
 pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
     if let Some(runs) = thread.get_mut("subagentRuns").and_then(Value::as_array_mut) {
-        let backed_keys: Vec<(String, String, String, String)> = runs
+        let backed_keys: Vec<(String, String, String, String, String, bool)> = runs
             .iter()
             .filter_map(|r| {
                 let cid = r.get("childThreadId").and_then(Value::as_str)?.trim();
@@ -68,10 +68,21 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                Some((cid.to_string(), sid, role, prompt))
+                let call_id = r
+                    .get("parentToolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let is_terminal = matches!(
+                    r.get("status").and_then(Value::as_str),
+                    Some("completed" | "failed" | "killed")
+                );
+                Some((cid.to_string(), sid, role, prompt, call_id, is_terminal))
             })
             .collect();
 
+        let mut claimed_cids: HashSet<String> = HashSet::new();
         let mut claimed_call_for_cid: Vec<(String, String)> = Vec::new();
         runs.retain(|r| {
             let has_cid = r
@@ -96,10 +107,24 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            if let Some((cid, _, _, _)) = backed_keys.iter().find(|(_, _, b_role, b_prompt)| {
-                (!r_prompt.is_empty() && r_prompt == b_prompt)
-                    || (!r_role.is_empty() && r_role == b_role)
+            let r_is_active = matches!(
+                r.get("status").and_then(Value::as_str),
+                None | Some("running" | "waiting" | "inProgress" | "pending")
+            );
+            if let Some((cid, _, _, _, _, _)) = backed_keys.iter().find(|(b_cid, _, b_role, b_prompt, b_call, b_is_terminal)| {
+                let text_match = (!r_prompt.is_empty() && r_prompt == b_prompt)
+                    || (!r_role.is_empty() && r_role == b_role);
+                if !text_match {
+                    return false;
+                }
+                let exact_call = !r_call.is_empty() && r_call == *b_call;
+                let unbound_b = b_call.is_empty() || b_call.starts_with("dispatch-subagent-");
+                if !exact_call && (!unbound_b || claimed_cids.contains(b_cid) || (r_is_active && *b_is_terminal)) {
+                    return false;
+                }
+                true
             }) {
+                claimed_cids.insert(cid.clone());
                 if !r_call.is_empty() && !r_call.starts_with("dispatch-subagent-") {
                     claimed_call_for_cid.push((cid.clone(), r_call));
                 }
@@ -123,6 +148,23 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
             }
         }
     }
+
+    let bound_calls_by_cid: Vec<(String, String)> = thread
+        .get("subagentRuns")
+        .and_then(Value::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|r| {
+                    let cid = r.get("childThreadId").and_then(Value::as_str)?.trim();
+                    let call = r.get("parentToolCallId").and_then(Value::as_str)?.trim();
+                    if cid.is_empty() || call.is_empty() || call.starts_with("dispatch-subagent-") {
+                        return None;
+                    }
+                    Some((call.to_string(), cid.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     if let Some(items) = thread.get_mut("items").and_then(Value::as_array_mut) {
         for it in items.iter_mut() {
@@ -154,6 +196,7 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
             .collect();
 
         let mut drop_ids: Vec<String> = Vec::new();
+        let mut claimed_host_ids: HashSet<String> = HashSet::new();
         for (_, syn) in &synthetic {
             let syn_id = syn.get("id").and_then(Value::as_str).unwrap_or("");
             let syn_cid = syn
@@ -174,6 +217,7 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
             if let Some(host_item) = items.iter_mut().find(|it| {
                 let id = it.get("id").and_then(Value::as_str).unwrap_or("");
                 if id.starts_with("dispatch-subagent-")
+                    || claimed_host_ids.contains(id)
                     || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
                 {
                     return false;
@@ -185,7 +229,22 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
                 if !syn_cid.is_empty() && it_cid == syn_cid {
                     return true;
                 }
+                if bound_calls_by_cid
+                    .iter()
+                    .any(|(call, cid)| call == id && !syn_cid.is_empty() && cid != syn_cid)
+                {
+                    return false;
+                }
+                if bound_calls_by_cid
+                    .iter()
+                    .any(|(call, cid)| call == id && !syn_cid.is_empty() && cid == syn_cid)
+                {
+                    return true;
+                }
                 if it_cid.is_empty() {
+                    if is_terminal_subagent_item(it) {
+                        return false;
+                    }
                     let it_role = it
                         .pointer("/subagentMeta/role")
                         .and_then(Value::as_str)
@@ -201,6 +260,9 @@ pub fn reconcile_duplicate_subagent_state(thread: &mut Value) {
                 }
                 false
             }) {
+                if let Some(host_id) = host_item.get("id").and_then(Value::as_str) {
+                    claimed_host_ids.insert(host_id.to_string());
+                }
                 if let Some(title) = syn.get("title").and_then(Value::as_str) {
                     if !title.is_empty() {
                         host_item["title"] = json!(title);

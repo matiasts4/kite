@@ -165,6 +165,9 @@ impl<P: Port> Service<P> {
             }
         };
         if resolved {
+            if input.children.is_none() && !address.is_empty() {
+                self.suppress_parent_notice_for(&address);
+            }
             let settled_presence = if input.children.is_none() && !address.is_empty() {
                 self.resolve(&address)
                     .ok()

@@ -572,3 +572,210 @@ fn cancel_subagent_thread_honors_natural_settlement_and_preserves_kill_with_live
     crate::chat::kill_registry::clear_thread_killed(&settled_child);
     crate::chat::kill_registry::clear_thread_killed(&killed_child);
 }
+
+#[test]
+fn sequential_retries_with_identical_role_and_prompt_stay_separate() {
+    let parent_id = format!("parent-retry-{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = CleanupThread(parent_id.clone());
+    let parent = blank_thread(&parent_id, None, "Parent", "antigravity", None);
+    threads().lock().unwrap().push(parent.clone());
+
+    let unbound_failed_item = json!({
+        "id": "call_retry_0_unbound",
+        "kind": "toolCall",
+        "toolKind": "subagent",
+        "toolName": "kite dispatch run",
+        "status": "error",
+        "text": "initial dispatch validation failed",
+        "subagentMeta": {
+            "parentThreadId": parent_id,
+            "role": "Fast Executor",
+            "prompt": "Inspect package.json",
+            "provider": "grok",
+            "model": "grok-4.7",
+            "status": "failed"
+        }
+    });
+    {
+        let mut guard = threads().lock().unwrap();
+        let stored_parent = guard
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+            .unwrap();
+        upsert_item(stored_parent, &unbound_failed_item);
+        let items = stored_parent.get("items").and_then(Value::as_array).unwrap();
+        assert_eq!(
+            super::find_reclaimable_unbound_subagent_call_id(
+                items,
+                "Fast Executor",
+                "Inspect package.json",
+            ),
+            None,
+            "terminal unbound subagent tool calls must never be reclaimed"
+        );
+    }
+
+    for idx in 1..=3 {
+        let sub_id = format!("sub_retry_{idx}");
+        let child_id = format!("child_retry_{idx}_{}", uuid::Uuid::new_v4().simple());
+        let call_id = format!("call_retry_{idx}");
+        let tool_item = json!({
+            "id": call_id,
+            "kind": "toolCall",
+            "toolKind": "subagent",
+            "toolName": "kite dispatch run",
+            "status": "error",
+            "text": format!("attempt {idx} failed"),
+            "subagentMeta": {
+                "subagentId": sub_id,
+                "parentThreadId": parent_id,
+                "childThreadId": child_id,
+                "role": "Fast Executor",
+                "prompt": "Inspect package.json",
+                "provider": "grok",
+                "model": "grok-4.7",
+                "status": "failed"
+            }
+        });
+        record_subagent_tool_call(&parent_id, &tool_item);
+        {
+            let mut guard = threads().lock().unwrap();
+            let stored_parent = guard
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+                .unwrap();
+            upsert_item(stored_parent, &tool_item);
+        }
+
+        // Simulated dispatch-subagent mirror card from subagent card emitter
+        let mirror_item = json!({
+            "id": format!("dispatch-subagent-{child_id}"),
+            "kind": "toolCall",
+            "toolKind": "subagent",
+            "toolName": "Subagent: Fast Executor",
+            "status": "error",
+            "text": format!("attempt {idx} failed"),
+            "subagentMeta": {
+                "subagentId": sub_id,
+                "parentThreadId": parent_id,
+                "childThreadId": child_id,
+                "role": "Fast Executor",
+                "prompt": "Inspect package.json",
+                "provider": "grok",
+                "model": "grok-4.7",
+                "status": "failed"
+            }
+        });
+        {
+            let mut guard = threads().lock().unwrap();
+            let stored_parent = guard
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+                .unwrap();
+            upsert_item(stored_parent, &mirror_item);
+        }
+    }
+
+    let mut stored = {
+        let guard = threads().lock().unwrap();
+        guard
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+            .cloned()
+            .unwrap()
+    };
+    reconcile_duplicate_subagent_state(&mut stored);
+
+    let runs = stored["subagentRuns"].as_array().expect("subagentRuns array");
+    assert_eq!(runs.len(), 3, "sequential retries must not collapse: {runs:?}");
+    let items = stored["items"].as_array().expect("items array");
+    let dispatch_items = items
+        .iter()
+        .filter(|it| {
+            it.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("dispatch-subagent-"))
+        })
+        .count();
+    let real_items = items
+        .iter()
+        .filter(|it| {
+            it.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("call_retry_"))
+        })
+        .count();
+    assert_eq!(real_items, 4, "terminal unbound retry and all 3 real tool call items must remain separate");
+    let unbound_zero = items
+        .iter()
+        .find(|it| it.get("id").and_then(Value::as_str) == Some("call_retry_0_unbound"))
+        .expect("unbound failed card must still exist");
+    assert!(
+        unbound_zero
+            .pointer("/subagentMeta/childThreadId")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.trim().is_empty()),
+        "reconcile_duplicate_subagent_state must not hijack a terminal unbound item: {unbound_zero:?}"
+    );
+    assert_eq!(
+        dispatch_items, 0,
+        "mirror cards with matching childThreadId should fold cleanly into their bound real tool calls"
+    );
+}
+
+#[test]
+fn sync_child_thread_to_parent_surfaces_turn_failure_message() {
+    let parent_id = format!("parent-fail-{}", uuid::Uuid::new_v4().simple());
+    let child_id = format!("child-fail-{}", uuid::Uuid::new_v4().simple());
+    let _c1 = CleanupThread(parent_id.clone());
+    let _c2 = CleanupThread(child_id.clone());
+
+    let mut parent = blank_thread(&parent_id, None, "Parent", "antigravity", None);
+    parent["subagentRuns"] = json!([{
+        "subagentId": "sub_fail_1",
+        "parentThreadId": parent_id,
+        "childThreadId": child_id,
+        "role": "Fast Executor",
+        "status": "running",
+        "stepCount": 0,
+        "items": [],
+        "startedAtUnixMs": 100,
+        "updatedAtUnixMs": 100
+    }]);
+
+    let mut child = blank_thread(&child_id, None, "Child", "grok", None);
+    child["startedByAgent"] = json!(true);
+    child["parentThreadId"] = json!(parent_id);
+    child["status"] = json!("error");
+    child["turnFailure"] = json!({ "message": "Provider rate limit exceeded" });
+    child["items"] = json!([{
+        "id": "u-1",
+        "kind": "user",
+        "text": "Do something quick"
+    }]);
+
+    {
+        let mut guard = threads().lock().unwrap();
+        guard.push(parent);
+        guard.push(child);
+    }
+
+    sync_child_thread_to_parent(&child_id);
+
+    let guard = threads().lock().unwrap();
+    let updated = guard
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+        .unwrap();
+    let run = &updated["subagentRuns"][0];
+    assert_eq!(run["status"], "failed");
+    assert_eq!(run["latestActivity"], "Provider rate limit exceeded");
+    let run_items = run["items"].as_array().expect("run items");
+    assert!(
+        run_items.iter().any(|it| {
+            it.get("kind").and_then(Value::as_str) == Some("error")
+                && it.get("text").and_then(Value::as_str) == Some("Provider rate limit exceeded")
+        }),
+        "expected canonical error item in run items, got: {run_items:?}"
+    );
+}

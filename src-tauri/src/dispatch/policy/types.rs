@@ -42,6 +42,9 @@ pub struct Endpoint {
     pub tail: String,
     /// Last state that already produced a parent notice. Cleared on entry to working.
     pub last_noticed: Option<PresenceState>,
+    /// True when the caller is waiting synchronously via `--wait` or `dispatch wait`,
+    /// suppressing duplicate asynchronous `[kite from=...]` parent wakeup notices.
+    pub suppress_parent_notice: bool,
     pub live: bool,
     pub any_signal: bool,
     pub report_arrived: bool,
@@ -73,6 +76,7 @@ impl Endpoint {
             exit_fact: None,
             tail: String::new(),
             last_noticed: None,
+            suppress_parent_notice: false,
             live: true,
             any_signal: false,
             report_arrived: false,

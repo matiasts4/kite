@@ -176,7 +176,7 @@ pub fn execute<P: Port>(
                     .clone()
                     .or_else(|| loaded_role.as_ref().and_then(|rf| rf.workspace.clone()));
                 let explicit_thread_name = if *explicit_name { name.clone() } else { None };
-                return Ok(service.run(RunInput {
+                let receipt = service.run(RunInput {
                     id: ctx.id.to_string(),
                     via: Family::Thread,
                     engine: effective_provider.clone(),
@@ -197,7 +197,11 @@ pub fn execute<P: Port>(
                     now_ms: ctx.now_ms,
                     hidden: hide_pane,
                     argv: Vec::new(),
-                }));
+                });
+                if *wait && !receipt.address.is_empty() {
+                    service.suppress_parent_notice_for(&receipt.address);
+                }
+                return Ok(receipt);
             }
             let task = combine_task(file_text, task.clone());
             if *explicit_role {

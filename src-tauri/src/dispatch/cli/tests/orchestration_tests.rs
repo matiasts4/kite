@@ -769,6 +769,64 @@ fn compose_manual_and_skill_reflect_configured_stack_and_roles() {
     assert!(!manual.contains("claude/claude-sonnet-4-6"), "disabled stack entry leaked: {manual}");
     assert!(manual.contains("`reviewer` (workspace) [grok/grok-4.7-build-fast]"), "got: {manual}");
     assert!(skill.contains("Configured Subagents Stack & Roles:"), "got: {skill}");
+    assert!(
+        skill.contains("Omit --provider/--model to use the configured Settings -> Subagents default/stack"),
+        "skill frontmatter should prioritize omitting --provider/--model when stack/default is configured: {skill}"
+    );
+    assert!(
+        manual.contains("OMIT `--provider` and `--model`"),
+        "manual should instruct omitting --provider/--model when default/stack is configured: {manual}"
+    );
     assert!(!skill.contains("kite dispatch run <role>"), "must keep --role syntax invariant");
+}
+
+#[test]
+fn cli_execute_run_via_thread_wait_suppresses_child_notice() {
+    let mut svc = Service::new(FakePort::default());
+    svc.attach(Family::Thread, "parent-cli", None, None, false)
+        .unwrap();
+    svc.publish_pane("thread:parent-cli", "working", 1, 1_000, None, None)
+        .unwrap();
+
+    let cmd = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "--wait",
+        "Inspect package.json",
+    ]))
+    .expect("parse run --via thread --wait");
+    let receipt = execute(
+        &mut svc,
+        &cmd,
+        &ExecContext {
+            id: "cli-run-wait-1",
+            caller: Caller::Agent,
+            from: "thread:parent-cli",
+            now_ms: 1_100,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("execute run --via thread --wait");
+    assert_eq!(receipt.status, ReceiptStatus::Submitted);
+    let child_addr = receipt.address.clone();
+
+    svc.publish_pane(&child_addr, "done", 2, 1_200, Some("sync wait result"), None)
+        .unwrap();
+    svc.publish_pane("thread:parent-cli", "idle", 2, 1_300, None, None)
+        .unwrap();
+
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .all(|w| !w.text.contains(&format!("from=\"{child_addr}\""))),
+        "run --via thread --wait should suppress delayed parent notice, got: {:?}",
+        svc.port_mut().writes
+    );
 }
 

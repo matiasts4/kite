@@ -39,6 +39,12 @@ pub(super) fn format_subagent_settings_section(
             .collect();
         out.push(format!("- Curated enabled stack: {}", items.join(", ")));
     }
+    if settings.default_delegation.is_some() || !enabled.is_empty() {
+        out.push(
+            "- IMPORTANT: Do NOT pass `--provider` or `--model` when delegating a normal subagent task; run `kite dispatch run --via thread --role \"<Role Title>\" --workspace inherit --wait \"<task>\"` so Kite automatically uses your configured default delegation above. Only pass `--provider` / `--model` when choosing a specific model from `Curated enabled stack` or when the user explicitly requests one; never probe unconfigured providers."
+                .to_string(),
+        );
+    }
     if !roles.is_empty() {
         let role_lines: Vec<String> = roles
             .iter()
@@ -127,18 +133,21 @@ When `--parent` is omitted and KITE_ADDRESS is `session:`, `thread:`, or `alias:
 `attach` asks the desktop to show that session.
 `kill`, `interrupt`, `keys`, and `attach` work while the destination is working or blocked.
 
-Live Provider & Model Discovery (Run First Before Spawning):
+Live Provider & Model Discovery (Run Before Picking a Custom Provider):
 - Thread providers (`--via thread --provider <name>`): `antigravity`, `grok`, `codex`, `claude`, `cursor`, `opencode`, `gemini` (aliases: `agy`, `claude-code`, `open-code`, `cursor-agent`). Use `programs` only for `--via terminal` CLI tools.
-- NEVER invent, copy, or hardcode legacy or unverified model IDs. Always inspect connected providers and live models first:
+- If `Default lightweight delegation` or `Curated enabled stack` is listed below in `Configured Subagents Stack & Roles`, OMIT `--provider` and `--model` (do NOT run `kite dispatch providers` to hunt for another provider) unless you are picking among multiple enabled stack entries or the user explicitly asked for a different provider/model.
+- When no default/stack is configured or you need live model IDs, inspect connected providers first (never invent or hardcode legacy model IDs):
   kite dispatch providers [--refresh]
   kite dispatch models <provider> [--refresh]
-- If a connected provider's CLI manages models dynamically (`claude`, `gemini`) or when you want the configured default delegation, omit `--model`.
+- If a connected provider's CLI manages models dynamically (`claude`, `gemini`) or when using the configured default delegation, omit `--model`.
 - Use `--override-stack` only when the user explicitly requests a provider/model outside the curated `Settings -> Subagents` stack (`ask` override policy).{config_section}
 
 Cross-provider subagents (`--via thread`):
-- Inside Thread Mode (`KITE_ADDRESS=thread:<id>`), `--via` defaults to `thread` (or pass `--via thread` explicitly). Keep the main orchestrator on a heavy reasoning model and delegate focused tasks to lightweight/fast discovered models across connected providers (`--provider`, `--model`, optional `--effort minimal|low|medium|high|xhigh|max|ultra`).
+- Inside Thread Mode (`KITE_ADDRESS=thread:<id>`), `--via` defaults to `thread` (or pass `--via thread` explicitly). Keep the main orchestrator on a heavy reasoning model and delegate focused tasks to the user's configured default subagent or curated stack (`--provider`, `--model`, optional `--effort minimal|low|medium|high|xhigh|max|ultra`).
 - Always pass a crisp `--role \"<title>\"` (or a configured role slug from `Settings -> Subagents`) and quote prompts cleanly (never embed shell redirections like `2>&1` or pipes as unquoted prompt words).
-- Single blocking call (`--wait` prints the child's final reply and `[subagent_id: thread:<id>]`):
+- Single blocking call using configured default (`--wait` prints the child's final reply and `[subagent_id: thread:<id>]`):
+  kite dispatch run --via thread --role \"Fast Executor\" --workspace inherit --wait \"<task>\"
+- Single blocking call with explicit stack provider/model (when multiple stack entries exist or user requested a specific model):
   kite dispatch run --via thread --provider <provider> [--model <fast_model_id>] --role \"Fast Executor\" --workspace share --wait \"<task>\"
 - Parallel fan-out: launch multiple child threads without `--wait` (use `--workspace share` or `branch` for isolated git worktrees when editing files concurrently; `inherit` shares the workspace), then wait and inspect:
   kite dispatch wait thread:<id>   # or: kite dispatch wait --children all
@@ -204,11 +213,18 @@ pub fn compose_skill_with(
     roles: &[crate::subagent_settings::SubagentRoleRecord],
 ) -> String {
     let manual = compose_manual_with(settings, roles);
+    let has_configured =
+        settings.default_delegation.is_some() || settings.stack.iter().any(|e| e.enabled);
+    let description = if has_configured {
+        "Trigger: kite dispatch, spawn agent, subagent, swarm, KITE_DISPATCH. Omit --provider/--model to use the configured Settings -> Subagents default/stack before probing providers or spawning subagents (--via thread) or swarms."
+    } else {
+        "Trigger: kite dispatch, spawn agent, subagent, swarm, KITE_DISPATCH. Run kite dispatch providers and kite dispatch models <provider> before spawning cross-provider subagents (--via thread) or swarms (kite dispatch swarm)."
+    };
     format!(
         "\
 ---
 name: kite-dispatch
-description: \"Trigger: kite dispatch, spawn agent, subagent, swarm, KITE_DISPATCH. Run kite dispatch providers and kite dispatch models <provider> before spawning cross-provider subagents (--via thread) or swarms (kite dispatch swarm).\"
+description: \"{description}\"
 ---
 
 {manual}"

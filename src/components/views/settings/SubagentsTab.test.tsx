@@ -241,4 +241,42 @@ describe('SubagentsTab', () => {
     expect(await screen.findByText('Delegation Policy & Default')).toBeInTheDocument();
     expect(await screen.findByText('fast-reviewer')).toBeInTheDocument();
   });
+
+  it('auto-populates stack and upgrades allow policy to ask when selecting a default lightweight model on an empty stack', async () => {
+    const user = userEvent.setup();
+    state.settings = {
+      stack: [],
+      defaultDelegation: null as any,
+      overridePolicy: 'allow',
+    };
+    render(<SubagentsTab />);
+
+    const defaultSelectBtn = await screen.findByRole('combobox', {
+      name: 'Default lightweight model',
+    });
+    await user.click(defaultSelectBtn);
+    await user.click(screen.getByText(/gemini-3-flash/));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'save_subagent_settings',
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            overridePolicy: 'ask',
+            defaultDelegation: expect.objectContaining({
+              provider: 'antigravity',
+              model: 'gemini-3-flash',
+            }),
+            stack: [
+              expect.objectContaining({
+                provider: 'antigravity',
+                model: 'gemini-3-flash',
+                enabled: true,
+              }),
+            ],
+          }),
+        })
+      );
+    });
+  });
 });

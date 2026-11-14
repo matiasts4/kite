@@ -19,8 +19,8 @@ pub const SUBAGENT_SETTINGS_KEY: &str = "subagentSettings";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OverridePolicy {
-    #[default]
     Allow,
+    #[default]
     Ask,
     Strict,
 }
@@ -161,7 +161,14 @@ pub fn normalize_settings(input: SubagentSettings) -> Result<SubagentSettings, S
             return Err("Default delegation requires a non-empty model id.".to_string());
         }
         let effort = clean_optional_effort(def.effort.as_deref())?;
-        if !stack.is_empty() {
+        if stack.is_empty() {
+            stack.push(SubagentStackEntry {
+                provider: provider.clone(),
+                model: model.clone(),
+                effort: effort.clone(),
+                enabled: true,
+            });
+        } else {
             let in_enabled_stack = stack.iter().any(|entry| {
                 entry.enabled
                     && entry.provider == provider
@@ -193,6 +200,14 @@ pub fn parse_subagent_settings_json(raw: &str) -> SubagentSettings {
     let Ok(mut parsed) = serde_json::from_str::<SubagentSettings>(raw) else {
         return SubagentSettings::default();
     };
+    // Repair legacy persisted configs where selecting a Default lightweight model left
+    // `stack: []` and `overridePolicy: "allow"`, which silently bypassed enforcement.
+    if parsed.stack.is_empty()
+        && parsed.default_delegation.is_some()
+        && parsed.override_policy == OverridePolicy::Allow
+    {
+        parsed.override_policy = OverridePolicy::Ask;
+    }
     if let Ok(normalized) = normalize_settings(parsed.clone()) {
         return normalized;
     }
@@ -323,6 +338,30 @@ pub fn resolve_thread_selection_defaults(
             );
         }
     }
+    if let (None, Some(ref m)) = (&canon_prov, &model) {
+        if let Some(def) = settings
+            .default_delegation
+            .as_ref()
+            .filter(|d| d.model.eq_ignore_ascii_case(m.trim()))
+        {
+            return (
+                Some(def.provider.clone()),
+                model,
+                effort.or_else(|| def.effort.clone()),
+            );
+        }
+        if let Some(matched) = settings
+            .stack
+            .iter()
+            .find(|e| e.enabled && e.model.eq_ignore_ascii_case(m.trim()))
+        {
+            return (
+                Some(matched.provider.clone()),
+                model,
+                effort.or_else(|| matched.effort.clone()),
+            );
+        }
+    }
     (canon_prov, model, effort)
 }
 
@@ -335,8 +374,23 @@ pub fn check_stack_policy(
     override_stack: bool,
 ) -> Result<(), String> {
     let canon_prov = provider.and_then(canonical_thread_provider_id).or(provider);
-    let enabled: Vec<&SubagentStackEntry> = settings.stack.iter().filter(|e| e.enabled).collect();
-    if enabled.is_empty() {
+    let mut effective_enabled: Vec<SubagentStackEntry> = settings
+        .stack
+        .iter()
+        .filter(|e| e.enabled)
+        .cloned()
+        .collect();
+    if effective_enabled.is_empty() {
+        if let Some(def) = settings.default_delegation.as_ref() {
+            effective_enabled.push(SubagentStackEntry {
+                provider: def.provider.clone(),
+                model: def.model.clone(),
+                effort: def.effort.clone(),
+                enabled: true,
+            });
+        }
+    }
+    if effective_enabled.is_empty() {
         if settings.override_policy == OverridePolicy::Strict {
             return Err(
                 "Subagent model stack has no enabled entries under `strict` override policy. Enable at least one model in Settings -> Subagents."
@@ -347,11 +401,13 @@ pub fn check_stack_policy(
     }
 
     let in_stack = match (canon_prov, model.map(str::trim).filter(|s| !s.is_empty())) {
-        (Some(p), Some(m)) => enabled
+        (Some(p), Some(m)) => effective_enabled
             .iter()
             .any(|e| e.provider == p && e.model.eq_ignore_ascii_case(m)),
-        (Some(p), None) => enabled.iter().any(|e| e.provider == p),
-        (None, Some(m)) => enabled.iter().any(|e| e.model.eq_ignore_ascii_case(m)),
+        (Some(p), None) => effective_enabled.iter().any(|e| e.provider == p),
+        (None, Some(m)) => effective_enabled
+            .iter()
+            .any(|e| e.model.eq_ignore_ascii_case(m)),
         (None, None) => true,
     };
     if in_stack {
@@ -364,6 +420,23 @@ pub fn check_stack_policy(
         (None, Some(m)) => m.to_string(),
         (None, None) => "default".to_string(),
     };
+    let stack_summary: Vec<String> = effective_enabled
+        .iter()
+        .map(|e| format!("{}/{}", e.provider, e.model))
+        .collect();
+    let guidance = match (settings.default_delegation.as_ref(), stack_summary.as_slice()) {
+        (Some(def), _) => format!(
+            "Omit `--provider` and `--model` to use your configured default (`{}/{}`), or pick from the enabled stack: [{}].",
+            def.provider,
+            def.model,
+            stack_summary.join(", ")
+        ),
+        (None, _) => format!(
+            "Omit `--provider` and `--model` to use the enabled stack default (`{}`), or pick from: [{}].",
+            stack_summary.first().map(String::as_str).unwrap_or(""),
+            stack_summary.join(", ")
+        ),
+    };
     match settings.override_policy {
         OverridePolicy::Allow => Ok(()),
         OverridePolicy::Ask => {
@@ -371,12 +444,12 @@ pub fn check_stack_policy(
                 Ok(())
             } else {
                 Err(format!(
-                    "`{target_label}` is outside the configured Subagents stack (override policy: ask). Confirm with the user and retry with `--override-stack`, or pick an enabled stack model via `kite dispatch providers` / `kite dispatch models`."
+                    "`{target_label}` is outside the configured Subagents stack (override policy: ask). {guidance} Confirm with the user before retrying with `--override-stack`."
                 ))
             }
         }
         OverridePolicy::Strict => Err(format!(
-            "`{target_label}` is blocked by Settings -> Subagents (override policy: strict). Only enabled models in the curated stack are permitted."
+            "`{target_label}` is blocked by Settings -> Subagents (override policy: strict). {guidance}"
         )),
     }
 }
@@ -666,6 +739,50 @@ mod tests {
         assert_eq!(loaded.stack.len(), 2);
         assert_eq!(loaded.default_delegation, settings.default_delegation);
         assert_eq!(loaded.override_policy, OverridePolicy::Ask);
+    }
+
+    #[test]
+    fn legacy_default_delegation_with_empty_stack_upgrades_to_ask_and_populates_stack() {
+        assert_eq!(SubagentSettings::default().override_policy, OverridePolicy::Ask);
+
+        let legacy_raw = r#"{
+            "stack": [],
+            "defaultDelegation": {
+                "provider": "antigravity",
+                "model": "gemini-4-hydrogen",
+                "effort": null
+            },
+            "overridePolicy": "allow"
+        }"#;
+        let recovered = parse_subagent_settings_json(legacy_raw);
+        assert_eq!(recovered.override_policy, OverridePolicy::Ask);
+        assert_eq!(recovered.stack.len(), 1);
+        assert_eq!(recovered.stack[0].provider, "antigravity");
+        assert_eq!(recovered.stack[0].model, "gemini-4-hydrogen");
+        assert!(recovered.stack[0].enabled);
+
+        let (prov, model, _effort) = resolve_thread_selection_defaults(
+            &recovered,
+            None,
+            Some("gemini-4-hydrogen".to_string()),
+            None,
+        );
+        assert_eq!(prov.as_deref(), Some("antigravity"));
+        assert_eq!(model.as_deref(), Some("gemini-4-hydrogen"));
+
+        assert!(check_stack_policy(&recovered, Some("antigravity"), Some("gemini-4-hydrogen"), false).is_ok());
+        let err = check_stack_policy(&recovered, Some("grok"), Some("grok-4.7"), false).unwrap_err();
+        assert!(err.contains("--override-stack"), "unexpected error: {err}");
+        assert!(check_stack_policy(&recovered, Some("grok"), Some("grok-4.7"), true).is_ok());
+
+        let mut stack_only = recovered.clone();
+        stack_only.default_delegation = None;
+        let stack_only_err =
+            check_stack_policy(&stack_only, Some("grok"), Some("grok-4.7"), false).unwrap_err();
+        assert!(
+            stack_only_err.contains("Omit `--provider` and `--model` to use the enabled stack default"),
+            "unexpected stack-only error: {stack_only_err}"
+        );
     }
 
     #[test]

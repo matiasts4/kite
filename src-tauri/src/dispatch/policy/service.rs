@@ -388,6 +388,7 @@ impl<P: Port> Service<P> {
                 ep.saw_working = true;
                 ep.sent_report_since_working = false;
                 ep.last_noticed = None;
+                ep.suppress_parent_notice = false;
             }
             if matches!(
                 after,
@@ -424,6 +425,22 @@ impl<P: Port> Service<P> {
         }
     }
 
+    pub fn suppress_parent_notice_for(&mut self, address: &str) {
+        if let Ok(key) = self.resolve(address) {
+            let parent_key = self.endpoints.get(&key).and_then(|ep| ep.parent.clone());
+            if let Some(ep) = self.endpoints.get_mut(&key) {
+                ep.suppress_parent_notice = true;
+            }
+            if let Some(pk) = parent_key {
+                if let Some(parent_ep) = self.endpoints.get_mut(&pk) {
+                    parent_ep
+                        .queue
+                        .retain(|q| q.source.as_deref() != Some(key.as_str()));
+                }
+            }
+        }
+    }
+
     pub(crate) fn maybe_notice(&mut self, key: &str, state: PresenceState, now_ms: u64) {
         if !matches!(
             state,
@@ -433,7 +450,11 @@ impl<P: Port> Service<P> {
         }
         let (family, raw_id) = match self.endpoints.get(key) {
             Some(ep) => {
-                if ep.last_noticed == Some(state) || ep.sent_report_since_working || ep.parent.is_none() {
+                if ep.suppress_parent_notice
+                    || ep.last_noticed == Some(state)
+                    || ep.sent_report_since_working
+                    || ep.parent.is_none()
+                {
                     return;
                 }
                 (ep.family, ep.id.clone())
@@ -449,7 +470,10 @@ impl<P: Port> Service<P> {
                 Some(ep) => ep,
                 None => return,
             };
-            if ep.last_noticed == Some(state) || ep.sent_report_since_working {
+            if ep.suppress_parent_notice
+                || ep.last_noticed == Some(state)
+                || ep.sent_report_since_working
+            {
                 return;
             }
             let Some(parent) = ep.parent.clone() else {

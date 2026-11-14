@@ -1183,3 +1183,60 @@ fn subagent_settings_resolves_workspace_role_defaults_and_enforces_stack_overrid
 
     let _ = std::fs::remove_dir_all(&tmp_ws);
 }
+
+#[test]
+fn thread_tail_prefers_turn_failure_message_over_user_prompt() {
+    let tid = format!("tail-fail-{}", uuid::Uuid::new_v4().simple());
+    let mut thread = crate::chat::threads::blank_thread(&tid, None, "Fail Tail", "grok", None);
+    thread["status"] = json!("error");
+    thread["turnFailure"] = json!({ "message": "Provider rate limit exceeded" });
+    thread["items"] = json!([{
+        "id": "user-1",
+        "kind": "user",
+        "text": "Original user prompt should not mask turnFailure"
+    }]);
+
+    crate::persist::threads().lock().unwrap().push(thread);
+    let tail = super::protocol::thread_tail(&tid);
+    assert!(
+        tail.contains("Provider rate limit exceeded"),
+        "expected turnFailure message in thread_tail, got: {tail}"
+    );
+    assert!(
+        !tail.contains("Original user prompt should not mask turnFailure"),
+        "user prompt should not be returned as failure tail, got: {tail}"
+    );
+
+    {
+        let mut guard = crate::persist::threads().lock().unwrap();
+        let stored = guard
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            .unwrap();
+        crate::chat::threads::upsert_item(
+            stored,
+            &json!({
+                "id": "assistant-partial-1",
+                "kind": "assistant",
+                "text": "Partial stream before error"
+            }),
+        );
+    }
+    let mut live_port = super::protocol::LivePort;
+    let final_resp = crate::dispatch::port::Port::read_final_response(
+        &mut live_port,
+        crate::dispatch::types::Family::Thread,
+        &tid,
+    )
+    .expect("read_final_response");
+    crate::chat::threads::remove_thread(&tid);
+
+    assert!(
+        final_resp.contains("Partial stream before error"),
+        "expected partial assistant text in read_final_response, got: {final_resp}"
+    );
+    assert!(
+        final_resp.contains("Provider rate limit exceeded"),
+        "expected turnFailure message in read_final_response alongside partial assistant text, got: {final_resp}"
+    );
+}

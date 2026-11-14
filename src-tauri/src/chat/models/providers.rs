@@ -444,6 +444,10 @@ pub fn format_providers_text_with_settings(
             "  Subagent stack: {} enabled model(s) | override policy: {policy_str}{def_desc}",
             enabled_stack.len()
         ));
+        lines.push(
+            "  Delegation rule: omit `--provider` and `--model` in `kite dispatch run --via thread` to use your configured default automatically, or choose an enabled `[stack]` model below."
+                .to_string(),
+        );
     }
     for row in rows {
         let provider = row.get("provider").and_then(Value::as_str).unwrap_or("");
@@ -477,7 +481,11 @@ pub fn format_providers_text_with_settings(
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let stack_tag = if !stack_active {
-            String::new()
+            if is_default {
+                " [default]".to_string()
+            } else {
+                String::new()
+            }
         } else if !stack_models.is_empty() {
             let mut tags = vec![format!("stack: {}", stack_models.join(", "))];
             if is_default {
@@ -495,6 +503,8 @@ pub fn format_providers_text_with_settings(
         };
         let detail = if state != "ready" {
             format!("({})", state)
+        } else if stack_active && !in_stack && policy_str != "allow" {
+            "outside configured stack (omit --provider/--model or pick a [stack] model)".to_string()
         } else if count > 0 {
             format!("{count} models (e.g. {})", samples.join(", "))
         } else if !supports {
@@ -528,7 +538,7 @@ pub fn format_models_text_with_settings(
         .unwrap_or_default();
     let enabled_stack: Vec<&crate::subagent_settings::SubagentStackEntry> =
         settings.stack.iter().filter(|e| e.enabled).collect();
-    let stack_active = !enabled_stack.is_empty();
+    let stack_active = !enabled_stack.is_empty() || settings.default_delegation.is_some();
     let policy_note = if stack_active {
         format!(" [stack policy: {}]", settings.override_policy.as_str())
     } else {
@@ -546,6 +556,19 @@ pub fn format_models_text_with_settings(
         "{provider} ({state}, {} models{policy_note}):",
         models.len()
     )];
+    if stack_active {
+        let def_desc = settings
+            .default_delegation
+            .as_ref()
+            .map(|d| format!(" | default delegation: {}/{}", d.provider, d.model))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  Subagent stack: {} enabled model(s) | override policy: {}{def_desc}",
+            enabled_stack.len(),
+            settings.override_policy.as_str()
+        ));
+    }
+    let mut hidden_non_stack = 0usize;
     for entry in models {
         let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty() {
@@ -569,10 +592,22 @@ pub fn format_models_text_with_settings(
         let in_stack = enabled_stack
             .iter()
             .any(|e| e.provider == provider && e.model.eq_ignore_ascii_case(id));
+        if stack_active
+            && !is_default
+            && !in_stack
+            && settings.override_policy == crate::subagent_settings::OverridePolicy::Strict
+        {
+            hidden_non_stack += 1;
+            continue;
+        }
         let stack_badge = if is_default {
             " [default][stack]"
         } else if in_stack {
             " [stack]"
+        } else if stack_active
+            && settings.override_policy == crate::subagent_settings::OverridePolicy::Ask
+        {
+            " [outside stack; requires --override-stack]"
         } else {
             ""
         };
@@ -581,6 +616,11 @@ pub fn format_models_text_with_settings(
         } else {
             lines.push(format!("  {id}{effort_suffix}{stack_badge}"));
         }
+    }
+    if hidden_non_stack > 0 {
+        lines.push(format!(
+            "  ({hidden_non_stack} non-stack models hidden by strict policy)"
+        ));
     }
     lines.join("\n")
 }
@@ -664,9 +704,26 @@ mod tests {
         let models_text = format_models_text_with_settings(&catalog, &settings);
         assert!(models_text.contains("[stack policy: ask]"), "got: {models_text}");
         assert!(
+            models_text.contains("Subagent stack: 2 enabled model(s) | override policy: ask | default delegation: antigravity/gemini-3-flash"),
+            "got: {models_text}"
+        );
+        assert!(
             models_text.contains("gemini-3-flash  (Gemini 3 Flash) [effort: low,medium] [default][stack]"),
             "got: {models_text}"
         );
-        assert!(models_text.contains("claude-sonnet-4-6  (Claude Sonnet 4.6)\n") || models_text.ends_with("claude-sonnet-4-6  (Claude Sonnet 4.6)"));
+        assert!(
+            models_text.contains("claude-sonnet-4-6  (Claude Sonnet 4.6) [outside stack; requires --override-stack]"),
+            "got: {models_text}"
+        );
+
+        let mut strict_settings = settings.clone();
+        strict_settings.override_policy = crate::subagent_settings::OverridePolicy::Strict;
+        let strict_models_text = format_models_text_with_settings(&catalog, &strict_settings);
+        assert!(strict_models_text.contains("[stack policy: strict]"), "got: {strict_models_text}");
+        assert!(!strict_models_text.contains("claude-sonnet-4-6"), "got: {strict_models_text}");
+        assert!(
+            strict_models_text.contains("  (1 non-stack models hidden by strict policy)"),
+            "got: {strict_models_text}"
+        );
     }
 }

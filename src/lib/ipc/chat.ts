@@ -460,7 +460,7 @@ export async function getSubagentSettings(params?: {
   });
   const unwrapped = unwrapSubagentCommandResult(res, 'Failed to load subagent settings');
   return {
-    settings: unwrapped.settings ?? { stack: [], defaultDelegation: null, overridePolicy: 'allow' },
+    settings: unwrapped.settings ?? { stack: [], defaultDelegation: null, overridePolicy: 'ask' },
     providers: Array.isArray(unwrapped.providers) ? unwrapped.providers : [],
     roles: Array.isArray(unwrapped.roles) ? unwrapped.roles : [],
     workspacePath: unwrapped.workspacePath ?? null,

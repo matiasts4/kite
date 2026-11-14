@@ -60,27 +60,40 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
                 .map(str::to_string);
             let runs = thread["subagentRuns"].as_array_mut().unwrap();
             let pos = runs.iter().position(|r| {
+                let r_cid = r.get("childThreadId").and_then(Value::as_str);
+                let r_call = r
+                    .get("parentToolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let r_is_terminal = matches!(
+                    r.get("status").and_then(Value::as_str),
+                    Some("completed" | "failed" | "killed")
+                );
+                let role_or_prompt_matches = (meta.prompt.as_deref().is_some_and(|p| {
+                    !p.trim().is_empty()
+                        && r.get("prompt").and_then(Value::as_str).map(str::trim) == Some(p.trim())
+                })) || (!meta.role.is_empty()
+                    && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()));
+
                 r.get("subagentId").and_then(Value::as_str) == Some(meta.subagent_id.as_str())
-                    || r.get("parentToolCallId").and_then(Value::as_str) == Some(tool_call_id.as_str())
+                    || r_call == tool_call_id.as_str()
                     || (meta.child_thread_id.is_some()
-                        && r.get("childThreadId").and_then(Value::as_str)
-                            == meta.child_thread_id.as_deref())
-                    || (r.get("childThreadId").and_then(Value::as_str).is_none()
+                        && r_cid == meta.child_thread_id.as_deref())
+                    || (!r_is_terminal
+                        && r_cid.is_none()
                         && meta.child_thread_id.is_some()
-                        && ((meta.prompt.as_deref().is_some_and(|p| {
-                            !p.trim().is_empty()
-                                && r.get("prompt").and_then(Value::as_str).map(str::trim)
-                                    == Some(p.trim())
-                        })) || (!meta.role.is_empty()
-                            && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()))))
-                    || (r.get("childThreadId").and_then(Value::as_str).is_some()
+                        && role_or_prompt_matches
+                        && (tool_call_id.starts_with("dispatch-subagent-")
+                            || r_call.is_empty()
+                            || r_call.starts_with("dispatch-subagent-")
+                            || r_call == tool_call_id.as_str()))
+                    || (!r_is_terminal
+                        && r_cid.is_some()
                         && meta.child_thread_id.is_none()
-                        && ((meta.prompt.as_deref().is_some_and(|p| {
-                            !p.trim().is_empty()
-                                && r.get("prompt").and_then(Value::as_str).map(str::trim)
-                                    == Some(p.trim())
-                        })) || (!meta.role.is_empty()
-                            && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()))))
+                        && role_or_prompt_matches
+                        && (r_call.is_empty()
+                            || r_call.starts_with("dispatch-subagent-")
+                            || r_call == tool_call_id.as_str()))
             });
             let is_terminal = matches!(meta.status.as_str(), "completed" | "failed" | "killed");
             if let Some(idx) = pos {

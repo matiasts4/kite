@@ -88,7 +88,7 @@ export const SubagentsTab: React.FC = () => {
   const [settings, setSettings] = useState<SubagentSettings>({
     stack: [],
     defaultDelegation: null,
-    overridePolicy: 'allow',
+    overridePolicy: 'ask',
   });
   const [providers, setProviders] = useState<DiscoveredSubagentProvider[]>([]);
   const [roles, setRoles] = useState<SubagentRoleRecord[]>([]);
@@ -210,12 +210,22 @@ export const SubagentsTab: React.FC = () => {
     };
     const key = entryKey(candidate);
     const existingIdx = settings.stack.findIndex((item) => entryKey(item) === key);
+    const wasEmpty = settings.stack.length === 0;
     const nextStack =
       existingIdx >= 0
         ? settings.stack.map((item, idx) => (idx === existingIdx ? { ...candidate } : item))
         : [...settings.stack, candidate];
     setCustomModel('');
-    void persistSettings({ ...settings, stack: nextStack });
+    void persistSettings({
+      ...settings,
+      stack: nextStack,
+      defaultDelegation:
+        wasEmpty && !settings.defaultDelegation
+          ? { provider: candidate.provider, model: candidate.model, effort: candidate.effort ?? null }
+          : settings.defaultDelegation,
+      overridePolicy:
+        wasEmpty && settings.overridePolicy === 'allow' ? 'ask' : settings.overridePolicy,
+    });
   };
 
   const handleToggleEntry = (idx: number) => {
@@ -263,9 +273,32 @@ export const SubagentsTab: React.FC = () => {
     if (splitAt <= 0) return;
     const provider = id.slice(0, splitAt);
     const model = id.slice(splitAt + 2);
-    const match = settings.stack.find((e) => entryKey(e) === id.toLowerCase() || (e.provider === provider && e.model === model));
+    const matchIdx = settings.stack.findIndex(
+      (e) => entryKey(e) === id.toLowerCase() || (e.provider === provider && e.model === model)
+    );
+    const match = matchIdx >= 0 ? settings.stack[matchIdx] : undefined;
+    const nextStack =
+      matchIdx >= 0
+        ? settings.stack.map((entry, idx) =>
+            idx === matchIdx ? { ...entry, enabled: true } : entry
+          )
+        : [
+            ...settings.stack,
+            {
+              provider,
+              model,
+              effort: null,
+              enabled: true,
+            },
+          ];
+    const nextPolicy =
+      settings.stack.length === 0 && settings.overridePolicy === 'allow'
+        ? 'ask'
+        : settings.overridePolicy;
     void persistSettings({
       ...settings,
+      stack: nextStack,
+      overridePolicy: nextPolicy,
       defaultDelegation: {
         provider,
         model,

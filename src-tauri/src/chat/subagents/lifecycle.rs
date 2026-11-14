@@ -52,16 +52,24 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
             .get("provider")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let child_failure = child
+            .pointer("/turnFailure/message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         (
             parent_tid,
             child_status,
             child_items,
             child_model,
             child_provider,
+            child_failure,
         )
     };
 
-    let (parent_tid, child_status, child_items, child_model, child_provider) = snapshot;
+    let (parent_tid, child_status, child_items, child_model, child_provider, child_failure) =
+        snapshot;
     let is_killed = crate::chat::kill_registry::is_thread_killed(child_thread_id);
     let run_status = if is_killed {
         "killed"
@@ -103,8 +111,32 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                         || r.get("subagentId").and_then(Value::as_str) == Some(child_thread_id)
                 }) {
                     let initial_prompt = run.get("prompt").and_then(Value::as_str).map(str::to_string);
-                    let filtered_items =
+                    let mut filtered_items =
                         filter_subagent_stream_items(&child_items, initial_prompt.as_deref());
+                    if run_status == "failed" {
+                        if let Some(ref failure_msg) = child_failure {
+                            let already_shown = filtered_items.iter().any(|it| {
+                                it.get("text")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|t| t.contains(failure_msg.as_str()))
+                                    || it
+                                        .get("detail")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|d| d.contains(failure_msg.as_str()))
+                            });
+                            if !already_shown {
+                                filtered_items.push(json!({
+                                    "id": format!("subagent-error-{child_thread_id}"),
+                                    "kind": "error",
+                                    "title": "Subagent error",
+                                    "text": failure_msg,
+                                    "detail": failure_msg,
+                                    "status": "error",
+                                    "timestamp": now,
+                                }));
+                            }
+                        }
+                    }
                     let (step_count, computed_latest) = summarize_run_progress(&filtered_items);
                     let prev_status = run
                         .get("status")
@@ -116,6 +148,8 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                     }
                     let latest_activity = if is_killed {
                         Some("Stopped by user".to_string())
+                    } else if run_status == "failed" {
+                        child_failure.clone().or(computed_latest)
                     } else {
                         computed_latest
                     };

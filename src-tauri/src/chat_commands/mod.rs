@@ -18,13 +18,17 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn load_chat_thread(request: Option<Value>) -> Value {
-    threads_cmd::load_chat_thread(request)
+pub async fn load_chat_thread(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || threads_cmd::load_chat_thread(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
-pub fn load_agent_chat_thread(request: Option<Value>) -> Value {
-    threads_cmd::load_agent_chat_thread(request)
+pub async fn load_agent_chat_thread(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || threads_cmd::load_agent_chat_thread(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -63,13 +67,17 @@ pub fn update_chat_configuration(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn list_chat_summaries(_request: Option<Value>) -> Value {
-    threads_cmd::list_chat_summaries(_request)
+pub async fn list_chat_summaries(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || threads_cmd::list_chat_summaries(request))
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "summaries": [] }))
 }
 
 #[tauri::command]
-pub fn list_agent_chat_summaries(request: Option<Value>) -> Value {
-    threads_cmd::list_agent_chat_summaries(request)
+pub async fn list_agent_chat_summaries(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || threads_cmd::list_agent_chat_summaries(request))
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "summaries": [] }))
 }
 
 #[tauri::command]
@@ -113,13 +121,17 @@ pub fn reorder_agent_chat_tabs(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn list_chat_provider_models(request: Option<Value>) -> Value {
-    turns_cmd::list_chat_provider_models(request)
+pub async fn list_chat_provider_models(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || turns_cmd::list_chat_provider_models(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
-pub fn list_provider_agents(request: Option<Value>) -> Value {
-    turns_cmd::list_provider_agents(request)
+pub async fn list_provider_agents(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || turns_cmd::list_provider_agents(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -173,8 +185,10 @@ pub fn respond_chat_user_input(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn load_thread_grid(_request: Option<Value>) -> Value {
-    turns_cmd::load_thread_grid(_request)
+pub async fn load_thread_grid(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || turns_cmd::load_thread_grid(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -208,63 +222,94 @@ pub fn release_chat_attachment(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn get_thread_subagent_detail(request: Option<Value>) -> Value {
-    subagents_ui::get_thread_subagent_detail(request)
+pub async fn get_thread_subagent_detail(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::get_thread_subagent_detail(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
-pub fn get_thread_swarm_state(request: Option<Value>) -> Value {
-    subagents_ui::get_thread_swarm_state(request)
+pub async fn list_all_subagent_runs(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::list_all_subagent_runs(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
-pub fn send_subagent_message(request: Option<Value>) -> Value {
-    subagents_ui::send_subagent_message(request)
+pub async fn get_thread_swarm_state(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::get_thread_swarm_state(request))
+        .await
+        .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
-pub fn stop_subagent_run(request: Option<Value>) -> Value {
-    subagents_ui::stop_subagent_run(request)
+pub async fn send_subagent_message(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::send_subagent_message(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn swarm_post_from_ui(request: Option<Value>) -> Value {
-    subagents_ui::swarm_post_from_ui(request)
+pub async fn stop_subagent_run(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::stop_subagent_run(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn swarm_switch_worker_model(request: Option<Value>) -> Value {
-    subagents_ui::swarm_switch_worker_model(request)
+pub async fn swarm_post_from_ui(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::swarm_post_from_ui(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn swarm_kill_worker_from_ui(request: Option<Value>) -> Value {
-    subagents_ui::swarm_kill_worker_from_ui(request)
+pub async fn swarm_switch_worker_model(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::swarm_switch_worker_model(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn get_subagent_settings(request: Option<Value>) -> Value {
-    subagents_ui::get_subagent_settings(request)
+pub async fn swarm_kill_worker_from_ui(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::swarm_kill_worker_from_ui(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn save_subagent_settings(request: Option<Value>) -> Value {
-    subagents_ui::save_subagent_settings(request)
+pub async fn get_subagent_settings(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::get_subagent_settings(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn list_subagent_roles(request: Option<Value>) -> Value {
-    subagents_ui::list_subagent_roles(request)
+pub async fn save_subagent_settings(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::save_subagent_settings(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn save_subagent_role(request: Option<Value>) -> Value {
-    subagents_ui::save_subagent_role(request)
+pub async fn list_subagent_roles(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::list_subagent_roles(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
-pub fn delete_subagent_role(request: Option<Value>) -> Value {
-    subagents_ui::delete_subagent_role(request)
+pub async fn save_subagent_role(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::save_subagent_role(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
+}
+
+#[tauri::command]
+pub async fn delete_subagent_role(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || subagents_ui::delete_subagent_role(request))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]

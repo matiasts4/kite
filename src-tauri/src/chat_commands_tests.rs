@@ -273,16 +273,23 @@ fn thread_persists_subagent_and_swarm_metadata_and_serves_detail_commands() {
     assert_eq!(child_summary["startedByAgent"], true);
     assert_eq!(child_summary["swarmMemberName"], "reviewer");
 
-    let detail = get_thread_subagent_detail(Some(json!({
+    let detail = subagents_ui::get_thread_subagent_detail(Some(json!({
         "threadId": parent_id,
         "subagentId": "sub_1"
     })));
     assert_eq!(detail["subagentId"], "sub_1");
     assert_eq!(detail["items"].as_array().map(|a| a.len()), Some(1));
 
-    let swarm = get_thread_swarm_state(Some(json!({ "threadId": parent_id })));
+    let swarm = subagents_ui::get_thread_swarm_state(Some(json!({ "threadId": parent_id })));
     assert_eq!(swarm["title"], "Audit Swarm");
     assert_eq!(swarm["members"][0]["name"], "reviewer");
+
+    // Verify async command wrapper roundtrips cleanly too.
+    let detail_async = tauri::async_runtime::block_on(get_thread_subagent_detail(Some(json!({
+        "threadId": parent_id,
+        "subagentId": "sub_1"
+    }))));
+    assert_eq!(detail_async["subagentId"], "sub_1");
 }
 
 #[test]
@@ -353,7 +360,7 @@ fn interactive_subagent_and_swarm_ui_commands_drive_lifecycle() {
     }
 
     // Seed swarm state cleanly
-    let seeded = swarm_post_from_ui(Some(json!({
+    let seeded = subagents_ui::swarm_post_from_ui(Some(json!({
         "threadId": parent_id,
         "channel": "main",
         "message": "Initial board note"
@@ -379,7 +386,7 @@ fn interactive_subagent_and_swarm_ui_commands_drive_lifecycle() {
     }
 
     // Stop active subagent run from UI
-    let stopped = stop_subagent_run(Some(json!({
+    let stopped = subagents_ui::stop_subagent_run(Some(json!({
         "threadId": parent_id,
         "subagentId": "sub_ui_1"
     })));
@@ -387,7 +394,7 @@ fn interactive_subagent_and_swarm_ui_commands_drive_lifecycle() {
     assert_eq!(stopped["run"]["status"], "killed");
 
     // Empty message on send_subagent_message must error cleanly
-    let bad_send = send_subagent_message(Some(json!({
+    let bad_send = subagents_ui::send_subagent_message(Some(json!({
         "threadId": parent_id,
         "subagentId": "sub_ui_1",
         "message": "   "
@@ -395,7 +402,7 @@ fn interactive_subagent_and_swarm_ui_commands_drive_lifecycle() {
     assert!(bad_send.get("error").is_some());
 
     // Invalid provider on switch errors cleanly
-    let bad_switch = swarm_switch_worker_model(Some(json!({
+    let bad_switch = subagents_ui::swarm_switch_worker_model(Some(json!({
         "threadId": parent_id,
         "name": "analyst",
         "provider": "not-a-provider",
@@ -403,16 +410,139 @@ fn interactive_subagent_and_swarm_ui_commands_drive_lifecycle() {
     })));
     assert!(bad_switch.get("error").is_some());
 
-    let bad_kill = swarm_kill_worker_from_ui(Some(json!({
+    let bad_kill = subagents_ui::swarm_kill_worker_from_ui(Some(json!({
         "threadId": parent_id,
         "name": "missing-member"
     })));
     assert!(bad_kill.get("error").is_some());
 
-    let killed = swarm_kill_worker_from_ui(Some(json!({
+    let killed = subagents_ui::swarm_kill_worker_from_ui(Some(json!({
         "threadId": parent_id,
         "name": "analyst"
     })));
     assert_eq!(killed["ok"], true);
     assert_eq!(killed["swarmState"]["members"][0]["state"], "killed");
+}
+
+#[test]
+fn list_all_subagent_runs_groups_active_first_and_excludes_archived() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let ws_a = format!("ws-a-{suffix}");
+    let ws_b = format!("ws-b-{suffix}");
+    let parent_done = format!("parent-done-{suffix}");
+    let parent_live = format!("parent-live-{suffix}");
+    let parent_arch = format!("parent-arch-{suffix}");
+    let child_wait = format!("child-wait-{suffix}");
+    struct MultiCleanup {
+        ids: Vec<String>,
+    }
+    impl Drop for MultiCleanup {
+        fn drop(&mut self) {
+            if let Ok(mut all) = threads().lock() {
+                all.retain(|t| {
+                    let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+                    !self.ids.iter().any(|x| x == id)
+                });
+            }
+        }
+    }
+    let _cleanup = MultiCleanup {
+        ids: vec![
+            parent_done.clone(),
+            parent_live.clone(),
+            parent_arch.clone(),
+            child_wait.clone(),
+        ],
+    };
+
+    {
+        let mut all = threads().lock().unwrap();
+        all.push(json!({
+            "id": parent_done,
+            "title": "Completed Thread",
+            "workspaceId": ws_a,
+            "provider": "claude",
+            "model": "claude-opus-4-6",
+            "subagentRuns": [{
+                "subagentId": format!("sub-done-{suffix}"),
+                "parentThreadId": parent_done,
+                "parentToolCallId": "call-done",
+                "role": "Researcher",
+                "status": "completed",
+                "stepCount": 3,
+                "items": [{ "id": "heavy-1", "kind": "assistant", "text": "huge payload" }],
+                "startedAtUnixMs": 1000,
+                "updatedAtUnixMs": 5000
+            }]
+        }));
+        all.push(json!({
+            "id": child_wait,
+            "title": "Waiting Child",
+            "workspaceId": ws_b,
+            "parentThreadId": parent_live,
+            "startedByAgent": true,
+            "status": "waiting",
+            "provider": "grok",
+            "model": "grok-4.7-build-fast",
+            "pendingApproval": { "id": "apr-1", "title": "Approve tool" }
+        }));
+        all.push(json!({
+            "id": parent_live,
+            "title": "Live Thread",
+            "workspaceId": ws_b,
+            "provider": "gemini",
+            "model": "gemini-3-pro",
+            "subagentRuns": [{
+                "subagentId": format!("sub-wait-{suffix}"),
+                "parentThreadId": parent_live,
+                "parentToolCallId": "call-wait",
+                "childThreadId": child_wait,
+                "role": "Security Auditor",
+                "status": "running",
+                "stepCount": 1,
+                "items": [{ "id": "heavy-2", "kind": "tool", "title": "Read file" }],
+                "startedAtUnixMs": 2000,
+                "updatedAtUnixMs": 3000
+            }]
+        }));
+        all.push(json!({
+            "id": parent_arch,
+            "title": "Archived Thread",
+            "workspaceId": ws_a,
+            "archivedAtUnixMs": 4000,
+            "subagentRuns": [{
+                "subagentId": format!("sub-arch-{suffix}"),
+                "parentThreadId": parent_arch,
+                "parentToolCallId": "call-arch",
+                "role": "Old Agent",
+                "status": "running",
+                "stepCount": 0,
+                "items": [],
+                "startedAtUnixMs": 9000,
+                "updatedAtUnixMs": 9000
+            }]
+        }));
+    }
+
+    let snap_all = subagents_ui::list_all_subagent_runs(Some(json!({ "limit": 500 })));
+    assert_eq!(snap_all["ok"], true);
+    let runs = snap_all["runs"].as_array().expect("runs array");
+    let matching: Vec<&Value> = runs
+        .iter()
+        .filter(|e| {
+            let tid = e.get("threadId").and_then(Value::as_str).unwrap_or("");
+            tid == parent_done || tid == parent_live || tid == parent_arch
+        })
+        .collect();
+    assert_eq!(matching.len(), 2, "archived parent must be excluded");
+    assert_eq!(matching[0]["threadId"], parent_live);
+    assert_eq!(matching[0]["hasPendingApproval"], true);
+    assert_eq!(matching[0]["run"]["status"], "waiting");
+    assert_eq!(matching[0]["run"]["items"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(matching[1]["threadId"], parent_done);
+
+    let snap_ws_a = subagents_ui::list_all_subagent_runs(Some(json!({ "workspaceId": ws_a })));
+    let ws_a_runs = snap_ws_a["runs"].as_array().expect("ws_a runs");
+    assert_eq!(ws_a_runs.len(), 1);
+    assert_eq!(ws_a_runs[0]["threadId"], parent_done);
 }

@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -15,6 +16,8 @@ use crate::logger::log_trace;
 use crate::terminal;
 
 const REGISTRY_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(60);
+const MAX_CONCURRENT_ENGINE_PROBES: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -303,11 +306,21 @@ fn fetch_version_from_npm(pkg_name: &str) -> Option<String> {
     fetch_version_from_json_key(&url, "version")
 }
 
+static MAINTENANCE_HTTP_CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+
+fn maintenance_http_client() -> Option<&'static reqwest::blocking::Client> {
+    MAINTENANCE_HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_millis(3500))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 fn fetch_version_from_json_key(url: &str, key: &str) -> Option<String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(3500))
-        .build()
-        .ok()?;
+    let client = maintenance_http_client()?;
 
     let resp = client
         .get(url)
@@ -326,79 +339,218 @@ fn fetch_version_from_json_key(url: &str, key: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+pub(crate) struct AgentUpdatesSummaryCache {
+    ttl: Duration,
+    state: Mutex<Option<(Instant, AgentUpdatesSummary)>>,
+    in_flight: Mutex<()>,
+}
+
+impl AgentUpdatesSummaryCache {
+    pub(crate) const fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            state: Mutex::new(None),
+            in_flight: Mutex::new(()),
+        }
+    }
+
+    pub(crate) fn get_or_compute(
+        &self,
+        force_refresh: bool,
+        bypass_time_ttl: bool,
+        compute: impl FnOnce() -> AgentUpdatesSummary,
+    ) -> AgentUpdatesSummary {
+        if !force_refresh && !bypass_time_ttl {
+            let guard = self.state.lock().unwrap();
+            if let Some((cached_at, summary)) = guard.as_ref() {
+                if cached_at.elapsed() < self.ttl {
+                    return summary.clone();
+                }
+            }
+        }
+
+        let _singleflight = self.in_flight.lock().unwrap();
+        if !force_refresh && !bypass_time_ttl {
+            let guard = self.state.lock().unwrap();
+            if let Some((cached_at, summary)) = guard.as_ref() {
+                if cached_at.elapsed() < self.ttl {
+                    return summary.clone();
+                }
+            }
+        }
+
+        let fresh = compute();
+        if !bypass_time_ttl {
+            *self.state.lock().unwrap() = Some((Instant::now(), fresh.clone()));
+        }
+        fresh
+    }
+
+    pub(crate) fn invalidate(&self) {
+        *self.state.lock().unwrap() = None;
+    }
+}
+
+static SUMMARY_CACHE: OnceLock<AgentUpdatesSummaryCache> = OnceLock::new();
+
+fn get_summary_cache() -> &'static AgentUpdatesSummaryCache {
+    SUMMARY_CACHE.get_or_init(|| AgentUpdatesSummaryCache::new(SUMMARY_CACHE_TTL))
+}
+
+pub fn invalidate_summary_cache() {
+    get_summary_cache().invalidate();
+}
+
 pub fn invalidate_remote_cache(engine: &str) {
     if let Ok(mut cache) = get_remote_cache().write() {
         cache.remove(engine);
     }
+    invalidate_summary_cache();
+    crate::chat::models::invalidate_thread_providers_cache();
 }
 
-/// Generates the complete summary of all supported engines and their update advisories.
-pub fn compute_agent_updates_summary(force_refresh: bool) -> AgentUpdatesSummary {
-    let mut advisories = HashMap::new();
-    let mut installed_count = 0;
-    let mut outdated_count = 0;
-    let now = now_unix_ms();
+fn probe_single_engine_advisory(
+    cfg: &EngineConfig,
+    force_refresh: bool,
+    now: i64,
+    read_installed: &(dyn Fn(&str) -> Option<(String, String)> + Sync),
+    check_installed: &(dyn Fn(&str) -> bool + Sync),
+    resolve_program: &(dyn Fn(&str) -> Option<String> + Sync),
+    fetch_remote: &(dyn Fn(&str, bool) -> Option<String> + Sync),
+) -> (bool, bool, AgentUpdateAdvisory) {
+    let installed_info = read_installed(cfg.engine_id);
+    let is_installed = installed_info.is_some() || check_installed(cfg.engine_id);
+    let (current_ver, bin_path) = match installed_info {
+        Some((ver, path)) => (Some(ver), Some(path)),
+        None => (None, resolve_program(cfg.engine_id)),
+    };
 
-    for cfg in SUPPORTED_ENGINES {
-        let installed_info = read_installed_version(cfg.engine_id);
-        let is_installed = installed_info.is_some() || terminal::engine_installed(cfg.engine_id);
-        let (current_ver, bin_path) = match installed_info {
-            Some((ver, path)) => (Some(ver), Some(path)),
-            None => {
-                let path = terminal::resolve_engine_program(cfg.engine_id);
-                (None, path)
+    let latest_ver = if is_installed || force_refresh {
+        fetch_remote(cfg.engine_id, force_refresh)
+    } else {
+        None
+    };
+
+    let mut outdated = false;
+    let state = if !is_installed {
+        "not_installed".to_string()
+    } else if let (Some(cur), Some(lat)) = (&current_ver, &latest_ver) {
+        match compare_semver(cur, lat) {
+            Some(std::cmp::Ordering::Less) => {
+                outdated = true;
+                "outdated".to_string()
             }
-        };
-
-        if is_installed {
-            installed_count += 1;
+            Some(_) => "up_to_date".to_string(),
+            None => "up_to_date".to_string(),
         }
+    } else {
+        // Binary exists, latest version not yet fetched or check failed
+        "up_to_date".to_string()
+    };
 
-        let latest_ver = if is_installed || force_refresh {
-            fetch_latest_remote_version(cfg.engine_id, force_refresh)
-        } else {
-            None
-        };
+    let advisory = AgentUpdateAdvisory {
+        engine: cfg.engine_id.to_string(),
+        display_name: cfg.display_name.to_string(),
+        state,
+        current_version: current_ver,
+        latest_version: latest_ver,
+        update_command: cfg.update_cmd.to_string(),
+        install_command: Some(cfg.install_cmd.to_string()),
+        binary_path: bin_path,
+        checked_at_unix_ms: now,
+    };
+    (is_installed, outdated, advisory)
+}
 
-        let state = if !is_installed {
-            "not_installed".to_string()
-        } else if let (Some(cur), Some(lat)) = (&current_ver, &latest_ver) {
-            match compare_semver(cur, lat) {
-                Some(std::cmp::Ordering::Less) => {
-                    outdated_count += 1;
-                    "outdated".to_string()
-                }
-                Some(_) => "up_to_date".to_string(),
-                None => "up_to_date".to_string(),
+fn compute_agent_updates_summary_with(
+    engines: &[EngineConfig],
+    max_concurrency: usize,
+    force_refresh: bool,
+    read_installed: &(dyn Fn(&str) -> Option<(String, String)> + Sync),
+    check_installed: &(dyn Fn(&str) -> bool + Sync),
+    resolve_program: &(dyn Fn(&str) -> Option<String> + Sync),
+    fetch_remote: &(dyn Fn(&str, bool) -> Option<String> + Sync),
+) -> AgentUpdatesSummary {
+    let now = now_unix_ms();
+    let total_supported = engines.len();
+    let next_idx = AtomicUsize::new(0);
+    let worker_count = max_concurrency.max(1).min(total_supported.max(1));
+
+    let per_worker: Vec<Vec<(String, bool, bool, AgentUpdateAdvisory)>> =
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..worker_count)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut local = Vec::new();
+                        loop {
+                            let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                            if idx >= engines.len() {
+                                break;
+                            }
+                            let cfg = &engines[idx];
+                            let (installed, outdated, advisory) = probe_single_engine_advisory(
+                                cfg,
+                                force_refresh,
+                                now,
+                                read_installed,
+                                check_installed,
+                                resolve_program,
+                                fetch_remote,
+                            );
+                            local.push((cfg.engine_id.to_string(), installed, outdated, advisory));
+                        }
+                        local
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+
+    let mut advisories = HashMap::with_capacity(total_supported);
+    let mut installed_count = 0usize;
+    let mut outdated_count = 0usize;
+    for chunk in per_worker {
+        for (engine_id, installed, outdated, advisory) in chunk {
+            if installed {
+                installed_count += 1;
             }
-        } else {
-            // Binary exists, latest version not yet fetched or check failed
-            "up_to_date".to_string()
-        };
-
-        advisories.insert(
-            cfg.engine_id.to_string(),
-            AgentUpdateAdvisory {
-                engine: cfg.engine_id.to_string(),
-                display_name: cfg.display_name.to_string(),
-                state,
-                current_version: current_ver,
-                latest_version: latest_ver,
-                update_command: cfg.update_cmd.to_string(),
-                install_command: Some(cfg.install_cmd.to_string()),
-                binary_path: bin_path,
-                checked_at_unix_ms: now,
-            },
-        );
+            if outdated {
+                outdated_count += 1;
+            }
+            advisories.insert(engine_id, advisory);
+        }
     }
 
     AgentUpdatesSummary {
-        total_supported: SUPPORTED_ENGINES.len(),
+        total_supported,
         installed_count,
         outdated_count,
         advisories,
         last_checked_unix_ms: now,
     }
+}
+
+fn compute_agent_updates_summary_uncached(force_refresh: bool) -> AgentUpdatesSummary {
+    compute_agent_updates_summary_with(
+        SUPPORTED_ENGINES,
+        MAX_CONCURRENT_ENGINE_PROBES,
+        force_refresh,
+        &read_installed_version,
+        &terminal::engine_installed,
+        &terminal::resolve_engine_program,
+        &fetch_latest_remote_version,
+    )
+}
+
+/// Generates the complete summary of all supported engines and their update advisories.
+pub fn compute_agent_updates_summary(force_refresh: bool) -> AgentUpdatesSummary {
+    get_summary_cache().get_or_compute(force_refresh, cfg!(test), || {
+        compute_agent_updates_summary_uncached(force_refresh)
+    })
 }
 
 // ── Background Tool Execution ──────────────────────────────────────────────────
@@ -516,6 +668,7 @@ pub fn execute_tool_job_background(
                 if success {
                     // Invalidate caches and broadcast fresh summary
                     invalidate_remote_cache(&engine);
+                    crate::account_switcher::invalidate_detected_cli_accounts_cache();
                     let summary = compute_agent_updates_summary(true);
                     let _ = app.emit("agent:updates-summary-changed", &summary);
                 }
@@ -540,8 +693,9 @@ fn extract_payload(req: &Option<serde_json::Value>) -> Option<&serde_json::Value
     req.as_ref().map(|v| v.get("request").unwrap_or(v))
 }
 
-#[tauri::command]
-pub fn get_agent_updates_summary(request: Option<serde_json::Value>) -> Result<AgentUpdatesSummary, String> {
+pub fn get_agent_updates_summary_direct(
+    request: Option<serde_json::Value>,
+) -> Result<AgentUpdatesSummary, String> {
     let force_refresh = extract_payload(&request)
         .and_then(|b| b.get("forceRefresh"))
         .and_then(|v| v.as_bool())
@@ -550,7 +704,18 @@ pub fn get_agent_updates_summary(request: Option<serde_json::Value>) -> Result<A
 }
 
 #[tauri::command]
-pub fn start_agent_tool_job(app: AppHandle, request: Option<serde_json::Value>) -> Result<ToolJobProgress, String> {
+pub async fn get_agent_updates_summary(
+    request: Option<serde_json::Value>,
+) -> Result<AgentUpdatesSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || get_agent_updates_summary_direct(request))
+        .await
+        .map_err(|e| format!("agent updates task failed: {e}"))?
+}
+
+pub fn start_agent_tool_job_direct(
+    app: AppHandle,
+    request: Option<serde_json::Value>,
+) -> Result<ToolJobProgress, String> {
     let payload = extract_payload(&request);
     let engine = payload
         .and_then(|b| b.get("engine"))
@@ -592,13 +757,28 @@ pub fn start_agent_tool_job(app: AppHandle, request: Option<serde_json::Value>) 
 }
 
 #[tauri::command]
-pub fn get_active_agent_tool_jobs() -> Vec<ToolJobProgress> {
+pub async fn start_agent_tool_job(
+    app: AppHandle,
+    request: Option<serde_json::Value>,
+) -> Result<ToolJobProgress, String> {
+    tauri::async_runtime::spawn_blocking(move || start_agent_tool_job_direct(app, request))
+        .await
+        .map_err(|e| format!("start agent tool job failed: {e}"))?
+}
+
+pub fn get_active_agent_tool_jobs_direct() -> Vec<ToolJobProgress> {
     let jobs = get_active_jobs().lock().unwrap();
     jobs.values().cloned().collect()
 }
 
 #[tauri::command]
-pub fn cancel_agent_tool_job(request: Option<serde_json::Value>) -> Result<(), String> {
+pub async fn get_active_agent_tool_jobs() -> Vec<ToolJobProgress> {
+    tauri::async_runtime::spawn_blocking(get_active_agent_tool_jobs_direct)
+        .await
+        .unwrap_or_default()
+}
+
+pub fn cancel_agent_tool_job_direct(request: Option<serde_json::Value>) -> Result<(), String> {
     let payload = extract_payload(&request);
     let job_id = payload
         .and_then(|b| b.get("jobId").or_else(|| b.get("job_id")))
@@ -619,6 +799,13 @@ pub fn cancel_agent_tool_job(request: Option<serde_json::Value>) -> Result<(), S
     }
 }
 
+#[tauri::command]
+pub async fn cancel_agent_tool_job(request: Option<serde_json::Value>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || cancel_agent_tool_job_direct(request))
+        .await
+        .map_err(|e| format!("cancel agent tool job failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +820,82 @@ mod tests {
         assert_eq!(compare_semver("1.4.5", "1.4.12"), Some(std::cmp::Ordering::Less));
         assert_eq!(compare_semver("1.4.12", "1.4.5"), Some(std::cmp::Ordering::Greater));
         assert_eq!(compare_semver("1.0.70", "1.0.70"), Some(std::cmp::Ordering::Equal));
+    }
+
+    #[test]
+    fn summary_probes_engines_with_bounded_concurrency_and_caches_until_invalidated() {
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let probe_calls = AtomicUsize::new(0);
+        let engines = &SUPPORTED_ENGINES[..6.min(SUPPORTED_ENGINES.len())];
+
+        let summary = compute_agent_updates_summary_with(
+            engines,
+            3,
+            false,
+            &|engine_id| {
+                let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(cur, Ordering::SeqCst);
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(15));
+                active.fetch_sub(1, Ordering::SeqCst);
+                if engine_id == engines[0].engine_id {
+                    Some(("1.0.0".to_string(), "/bin/agent0".to_string()))
+                } else {
+                    None
+                }
+            },
+            &|_| false,
+            &|_| None,
+            &|engine_id, _| {
+                if engine_id == engines[0].engine_id {
+                    Some("1.1.0".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+
+        assert_eq!(summary.total_supported, engines.len());
+        assert_eq!(summary.installed_count, 1);
+        assert_eq!(summary.outdated_count, 1);
+        assert_eq!(probe_calls.load(Ordering::SeqCst), engines.len());
+        assert!(peak.load(Ordering::SeqCst) <= 3);
+        assert!(peak.load(Ordering::SeqCst) >= 2, "probes should run concurrently");
+
+        // Cache hit, force_refresh refresh, write invalidation, and test bypass behavior.
+        let cache = AgentUpdatesSummaryCache::new(Duration::from_secs(60));
+        let compute_count = AtomicUsize::new(0);
+        let _ = cache.get_or_compute(false, false, || {
+            let n = compute_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut s = summary.clone();
+            s.last_checked_unix_ms = n as i64;
+            s
+        });
+        let cached = cache.get_or_compute(false, false, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            summary.clone()
+        });
+        assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+        assert_eq!(cached.last_checked_unix_ms, 1);
+
+        let forced = cache.get_or_compute(true, false, || {
+            let n = compute_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut s = summary.clone();
+            s.last_checked_unix_ms = n as i64;
+            s
+        });
+        assert_eq!(compute_count.load(Ordering::SeqCst), 2);
+        assert_eq!(forced.last_checked_unix_ms, 2);
+
+        cache.invalidate();
+        let after_inv = cache.get_or_compute(false, false, || {
+            let n = compute_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut s = summary.clone();
+            s.last_checked_unix_ms = n as i64;
+            s
+        });
+        assert_eq!(compute_count.load(Ordering::SeqCst), 3);
+        assert_eq!(after_inv.last_checked_unix_ms, 3);
     }
 }

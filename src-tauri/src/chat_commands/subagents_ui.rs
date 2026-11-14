@@ -27,6 +27,21 @@ pub fn get_thread_subagent_detail(request: Option<Value>) -> Value {
     crate::chat::subagents::build_subagent_detail(tid, sid).unwrap_or(Value::Null)
 }
 
+pub fn list_all_subagent_runs(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let workspace_id = req
+        .and_then(|r| r.get("workspaceId").or_else(|| r.get("workspace_id")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let limit = req
+        .and_then(|r| r.get("limit"))
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(120);
+    crate::chat::subagents::list_all_subagent_runs_snapshot(workspace_id, limit)
+}
+
 pub fn get_thread_swarm_state(request: Option<Value>) -> Value {
     let req = body(&request);
     let Some(tid) = req
@@ -327,6 +342,7 @@ pub fn save_subagent_settings(request: Option<Value>) -> Value {
         };
     match crate::subagent_settings::save_subagent_settings(parsed) {
         Ok(settings) => {
+            crate::chat::models::invalidate_thread_providers_cache();
             let discovery =
                 crate::chat::models::discover_thread_providers_with_settings(
                     false,

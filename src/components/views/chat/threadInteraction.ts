@@ -307,3 +307,158 @@ export function compactSendText(provider: string): '/compact' | null {
   if (provider === 'codex' || provider === 'claude') return '/compact';
   return null;
 }
+
+export interface RosterChildCandidate {
+  id: string;
+  title?: string;
+  provider?: string;
+  status?: string;
+  updatedAtUnixMs?: number;
+  parentThreadId?: string | null;
+  startedByAgent?: boolean;
+  sideChat?: boolean;
+  subagentRole?: string | null;
+  swarmId?: string | null;
+  swarmMemberName?: string | null;
+  pendingApproval?: unknown | null;
+  pendingUserInput?: unknown | null;
+}
+
+export type ChildAttentionKind = 'approval' | 'input' | 'running' | 'blocked';
+
+export function isActiveOrAttentionChild(thread: RosterChildCandidate): boolean {
+  if (!thread.parentThreadId || thread.parentThreadId === thread.id) return false;
+  if (!thread.startedByAgent && !thread.sideChat) return false;
+  if (Boolean(thread.pendingApproval) || Boolean(thread.pendingUserInput)) return true;
+  return thread.status === 'running' || thread.status === 'waiting' || thread.status === 'pendingApproval';
+}
+
+export function classifyChildAttention(thread: RosterChildCandidate): ChildAttentionKind {
+  if (thread.pendingApproval) return 'approval';
+  if (thread.pendingUserInput) return 'input';
+  if (thread.status === 'running') return 'running';
+  return 'blocked';
+}
+
+export function childAttentionLabel(kind: ChildAttentionKind): string {
+  switch (kind) {
+    case 'approval':
+      return 'Needs approval';
+    case 'input':
+      return 'Needs input';
+    case 'running':
+      return 'Running';
+    case 'blocked':
+      return 'Blocked';
+  }
+}
+
+function childAttentionPriority(kind: ChildAttentionKind): number {
+  switch (kind) {
+    case 'approval':
+      return 0;
+    case 'input':
+      return 1;
+    case 'running':
+      return 2;
+    case 'blocked':
+      return 3;
+  }
+}
+
+export function groupActiveChildrenByParent<T extends RosterChildCandidate>(
+  threads: T[],
+): Map<string, T[]> {
+  const byParent = new Map<string, T[]>();
+  const seen = new Set<string>();
+  for (const thread of threads) {
+    if (!isActiveOrAttentionChild(thread)) continue;
+    const parentId = thread.parentThreadId!;
+    if (seen.has(thread.id)) continue;
+    seen.add(thread.id);
+    const list = byParent.get(parentId) ?? [];
+    list.push(thread);
+    byParent.set(parentId, list);
+  }
+  for (const list of byParent.values()) {
+    list.sort((a, b) => {
+      const pDiff =
+        childAttentionPriority(classifyChildAttention(a)) -
+        childAttentionPriority(classifyChildAttention(b));
+      if (pDiff !== 0) return pDiff;
+      return (b.updatedAtUnixMs ?? 0) - (a.updatedAtUnixMs ?? 0);
+    });
+  }
+  return byParent;
+}
+
+export interface ParentThreadRollup {
+  effectiveStatus: string | undefined;
+  runningCount: number;
+  attentionCount: number;
+  hasApproval: boolean;
+  hasInput: boolean;
+  hasBlocked: boolean;
+  rollupBadge: string | null;
+}
+
+export function parentThreadRollupStatus(
+  parent: { status?: string },
+  activeChildren: RosterChildCandidate[],
+): ParentThreadRollup {
+  if (activeChildren.length === 0) {
+    return {
+      effectiveStatus: parent.status,
+      runningCount: 0,
+      attentionCount: 0,
+      hasApproval: false,
+      hasInput: false,
+      hasBlocked: false,
+      rollupBadge: null,
+    };
+  }
+  let runningCount = 0;
+  let hasApproval = false;
+  let hasInput = false;
+  let hasBlocked = false;
+  let attentionCount = 0;
+  for (const child of activeChildren) {
+    const kind = classifyChildAttention(child);
+    if (kind === 'running') {
+      runningCount += 1;
+    } else {
+      attentionCount += 1;
+      if (kind === 'approval') hasApproval = true;
+      else if (kind === 'input') hasInput = true;
+      else hasBlocked = true;
+    }
+  }
+  const effectiveStatus =
+    parent.status === 'error'
+      ? 'error'
+      : hasApproval || hasInput || hasBlocked
+        ? 'waiting'
+        : runningCount > 0 || parent.status === 'running'
+          ? 'running'
+          : parent.status;
+  const rollupBadge = hasApproval
+    ? attentionCount > 1
+      ? `${attentionCount} need approval`
+      : 'Needs approval'
+    : hasInput
+      ? 'Needs input'
+      : hasBlocked
+        ? `${attentionCount} blocked`
+        : runningCount === 1
+          ? '1 subagent'
+          : `${runningCount} subagents`;
+  return {
+    effectiveStatus,
+    runningCount,
+    attentionCount,
+    hasApproval,
+    hasInput,
+    hasBlocked,
+    rollupBadge,
+  };
+}

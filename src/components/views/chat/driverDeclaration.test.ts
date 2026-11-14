@@ -13,7 +13,7 @@ describe('resolveEffortChoicesForModel', () => {
     ).toBeNull();
   });
 
-  it('maps multi-tier effort variants correctly with Spanish labels', () => {
+  it('maps multi-tier effort variants correctly with English labels', () => {
     const model: ModelOption = {
       id: 'google/antigravity-gemini-3-flash',
       name: 'Gemini 3 Flash',
@@ -26,12 +26,12 @@ describe('resolveEffortChoicesForModel', () => {
     expect(resolved).not.toBeNull();
     expect(resolved!.choices).toHaveLength(6);
     expect(resolved!.choices.map((c) => c.label)).toEqual([
-      'Mínimo',
-      'Bajo',
-      'Medio',
-      'Alto',
-      'Muy Alto',
-      'Máximo',
+      'Minimal',
+      'Low',
+      'Medium',
+      'High',
+      'Very High',
+      'Max',
     ]);
     expect(resolved!.defaultEffort).toBe('xhigh');
   });
@@ -48,7 +48,7 @@ describe('resolveEffortChoicesForModel', () => {
     const resolved = resolveEffortChoicesForModel(model);
     expect(resolved).not.toBeNull();
     expect(resolved!.choices).toHaveLength(2);
-    expect(resolved!.choices.map((c) => c.label)).toEqual(['Bajo', 'Máximo']);
+    expect(resolved!.choices.map((c) => c.label)).toEqual(['Low', 'Max']);
     expect(resolved!.defaultEffort).toBe('max');
   });
 
@@ -78,8 +78,8 @@ describe('resolveEffortChoicesForModel', () => {
       supportsEffort: true,
       effortLevels: ['low', 'ultra'],
     });
-    expect(ultra!.choices.map((choice) => choice.label)).toEqual(['Bajo', 'Ultra']);
-    expect(ultra!.choices[1]?.detail).toBe('Razonamiento ultra para el techo del modelo');
+    expect(ultra!.choices.map((choice) => choice.label)).toEqual(['Low', 'Ultra']);
+    expect(ultra!.choices[1]?.detail).toBe('Ultra reasoning pushed to the model ceiling');
 
     expect(
       resolveEffortChoicesForModel({

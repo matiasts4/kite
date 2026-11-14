@@ -194,8 +194,17 @@ pub fn update_chat_configuration(request: Option<Value>) -> Value {
     configure_thread(thread_id, req.unwrap_or(&Value::Null))
 }
 
+struct FlatThreadMeta {
+    side_chat: bool,
+    started_by_agent: bool,
+    has_parent: bool,
+    status: String,
+    has_approval: bool,
+    has_user_input: bool,
+}
+
 fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
-    let raw_meta: std::collections::HashMap<String, (bool, bool, bool, String, bool)> = threads()
+    let raw_meta: std::collections::HashMap<String, FlatThreadMeta> = threads()
         .lock()
         .ok()
         .map(|all| {
@@ -219,7 +228,20 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
                     let has_approval = t
                         .get("pendingApproval")
                         .is_some_and(|v| !v.is_null());
-                    Some((id, (side_chat, started_by_agent, has_parent, status, has_approval)))
+                    let has_user_input = t
+                        .get("pendingUserInput")
+                        .is_some_and(|v| !v.is_null());
+                    Some((
+                        id,
+                        FlatThreadMeta {
+                            side_chat,
+                            started_by_agent,
+                            has_parent,
+                            status,
+                            has_approval,
+                            has_user_input,
+                        },
+                    ))
                 })
                 .collect()
         })
@@ -232,18 +254,18 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
             let side_chat = s
                 .get("sideChat")
                 .and_then(Value::as_bool)
-                .or_else(|| raw.map(|r| r.0))
+                .or_else(|| raw.map(|r| r.side_chat))
                 .unwrap_or(false);
             let started_by_agent = s
                 .get("startedByAgent")
                 .and_then(Value::as_bool)
-                .or_else(|| raw.map(|r| r.1))
+                .or_else(|| raw.map(|r| r.started_by_agent))
                 .unwrap_or(false);
             let has_parent = s
                 .get("parentThreadId")
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.trim().is_empty())
-                || raw.is_some_and(|r| r.2);
+                || raw.is_some_and(|r| r.has_parent);
 
             if is_agent_chat {
                 return !side_chat && !(started_by_agent && has_parent);
@@ -255,16 +277,21 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
             let status = s
                 .get("status")
                 .and_then(Value::as_str)
-                .or_else(|| raw.map(|r| r.3.as_str()))
+                .or_else(|| raw.map(|r| r.status.as_str()))
                 .unwrap_or("idle");
             let has_pending_approval = s
                 .get("pendingApproval")
                 .is_some_and(|v| !v.is_null())
-                || raw.is_some_and(|r| r.4);
-            started_by_agent
-                && has_parent
+                || raw.is_some_and(|r| r.has_approval);
+            let has_pending_user_input = s
+                .get("pendingUserInput")
+                .is_some_and(|v| !v.is_null())
+                || raw.is_some_and(|r| r.has_user_input);
+            has_parent
+                && (started_by_agent || side_chat)
                 && (matches!(status, "running" | "waiting" | "pendingApproval")
-                    || has_pending_approval)
+                    || has_pending_approval
+                    || has_pending_user_input)
         });
     }
     res
@@ -476,6 +503,7 @@ mod tests {
         let side_tid = format!("side-{}", Uuid::new_v4().simple());
         let settled_child_tid = format!("child-idle-{}", Uuid::new_v4().simple());
         let active_child_tid = format!("child-run-{}", Uuid::new_v4().simple());
+        let input_child_tid = format!("child-input-{}", Uuid::new_v4().simple());
         let top_tid = format!("top-{}", Uuid::new_v4().simple());
 
         {
@@ -513,6 +541,18 @@ mod tests {
                 "updatedAtUnixMs": 300
             }));
             all.push(json!({
+                "id": input_child_tid,
+                "title": "Input Child",
+                "profileId": agent_id,
+                "provider": "codex",
+                "status": "idle",
+                "sideChat": true,
+                "startedByAgent": false,
+                "parentThreadId": top_tid,
+                "pendingUserInput": { "requestId": "req-1", "questions": [] },
+                "updatedAtUnixMs": 350
+            }));
+            all.push(json!({
                 "id": top_tid,
                 "title": "Top Thread",
                 "profileId": agent_id,
@@ -532,6 +572,7 @@ mod tests {
         assert!(!top_ids.contains(&side_tid.as_str()), "ids={top_ids:?}");
         assert!(!top_ids.contains(&settled_child_tid.as_str()), "ids={top_ids:?}");
         assert!(top_ids.contains(&active_child_tid.as_str()), "ids={top_ids:?}");
+        assert!(top_ids.contains(&input_child_tid.as_str()), "ids={top_ids:?}");
         assert!(top_ids.contains(&top_tid.as_str()), "ids={top_ids:?}");
 
         let agent_res = list_agent_chat_summaries(Some(json!({ "agentId": agent_id })));
@@ -544,11 +585,16 @@ mod tests {
         assert!(!agent_ids.contains(&side_tid.as_str()), "ids={agent_ids:?}");
         assert!(!agent_ids.contains(&settled_child_tid.as_str()), "ids={agent_ids:?}");
         assert!(!agent_ids.contains(&active_child_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&input_child_tid.as_str()), "ids={agent_ids:?}");
         assert!(agent_ids.contains(&top_tid.as_str()), "ids={agent_ids:?}");
 
         threads().lock().unwrap().retain(|t| {
             let id = t.get("id").and_then(Value::as_str).unwrap_or("");
-            id != side_tid && id != settled_child_tid && id != active_child_tid && id != top_tid
+            id != side_tid
+                && id != settled_child_tid
+                && id != active_child_tid
+                && id != input_child_tid
+                && id != top_tid
         });
     }
 }

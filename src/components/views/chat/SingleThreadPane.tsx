@@ -104,6 +104,11 @@ export interface SingleThreadPaneProps {
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
   onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null; workspaceId?: string | null }) => void;
   onApprovalDecision: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
+  onChildApprovalDecision?: (
+    childThreadId: string,
+    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
+    reqId: string
+  ) => void;
   embedded?: boolean;
 }
 
@@ -153,6 +158,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   onDropdownToggle: _onDropdownToggle,
   onUpdateConfig,
   onApprovalDecision,
+  onChildApprovalDecision,
   isRefreshingModels,
   onRefreshModels,
 }) => {
@@ -701,7 +707,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             {childApprovals(thread.id, knownThreadsList).map((child) => (
               <div key={child.threadId} className="child-thread-approval rounded-card" aria-label={child.title}>
                 <strong>{child.title}</strong>
-                <ChatApprovalCard approval={child.approval} onDecision={onApprovalDecision} />
+                <ChatApprovalCard
+                  approval={child.approval}
+                  onDecision={(decision, reqId) =>
+                    onChildApprovalDecision
+                      ? onChildApprovalDecision(child.threadId, decision, reqId)
+                      : onApprovalDecision(decision, reqId)
+                  }
+                />
               </div>
             ))}
             {directNotice ? <p role="status">{directNotice}</p> : null}

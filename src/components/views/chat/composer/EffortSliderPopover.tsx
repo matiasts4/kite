@@ -9,7 +9,7 @@ import React, {
 import { createPortal } from 'react-dom';
 import { composerMenuStyle } from './composerMenu';
 import { DriverDeclaration, DriverChoice } from '../../../../lib/session/types';
-import { SPANISH_EFFORT_LABELS } from '../types';
+import { DEFAULT_EFFORT_CHOICES, EFFORT_LABELS } from '../types';
 import { ChevronRightIcon } from '../ChatIcons';
 import { resolveEffortGlyph } from '../effortGlyph';
 import { ComposerControl, ComposerControlChevron } from './ComposerControl';
@@ -67,10 +67,8 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
       return declaration.effort;
     }
     return [
-      { id: 'low', label: 'Bajo', detail: 'Respuestas rápidas con razonamiento enfocado' },
-      { id: 'medium', label: 'Medio', detail: 'Razonamiento balanceado para tareas cotidianas' },
-      { id: 'high', label: 'Alto', detail: 'Razonamiento profundo y análisis exhaustivo' },
-      { id: 'max', label: 'Máximo', detail: 'Capacidad máxima de computación y verificación formal' },
+      ...DEFAULT_EFFORT_CHOICES,
+      { id: 'max', label: 'Max', detail: 'Maximum compute budget and formal verification' },
     ];
   }, [declaration.effort]);
 
@@ -97,7 +95,7 @@ export const EffortSliderPopover: React.FC<EffortSliderPopoverProps> = ({
   const displayIndex = optimisticIndex !== null ? optimisticIndex : activeIndex;
   const activeStep = steps[displayIndex] || steps[0];
   const activeLabel =
-    SPANISH_EFFORT_LABELS[activeStep.id.toLowerCase()] || activeStep.label;
+    EFFORT_LABELS[activeStep.id.toLowerCase()] || activeStep.label;
 
   const stepRatio = steps.length > 1 ? displayIndex / (steps.length - 1) : 0.5;
 

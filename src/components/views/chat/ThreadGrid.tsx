@@ -411,6 +411,9 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                 onDropdownToggle={(type) => onDropdownToggle(tid, type)}
                 onUpdateConfig={(patch) => onUpdateConfig(tid, patch)}
                 onApprovalDecision={(decision, reqId) => onApprovalDecision(tid, decision, reqId)}
+                onChildApprovalDecision={(childTid, decision, reqId) =>
+                  onApprovalDecision(childTid, decision, reqId)
+                }
               />
             </div>
           );

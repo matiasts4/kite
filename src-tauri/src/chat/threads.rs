@@ -474,7 +474,16 @@ pub fn summary_of(thread: &Value) -> Option<Value> {
         })
         .unwrap_or_else(|| (false, "sleeping".to_string()));
 
-    let is_settled = !is_warm && status_str != "running";
+    let has_pending_approval = thread
+        .get("pendingApproval")
+        .is_some_and(|v| !v.is_null());
+    let has_pending_user_input = thread
+        .get("pendingUserInput")
+        .is_some_and(|v| !v.is_null());
+    let is_settled = !is_warm
+        && !matches!(status_str, "running" | "waiting" | "pendingApproval")
+        && !has_pending_approval
+        && !has_pending_user_input;
 
     Some(json!({
         "id": thread_id,
@@ -496,9 +505,12 @@ pub fn summary_of(thread: &Value) -> Option<Value> {
         "workspaceMode": thread.get("workspaceMode").cloned().unwrap_or(Value::Null),
         "swarmId": thread.get("swarmId").cloned().unwrap_or(Value::Null),
         "swarmMemberName": thread.get("swarmMemberName").cloned().unwrap_or(Value::Null),
+        "pendingApproval": thread.get("pendingApproval").cloned().unwrap_or(Value::Null),
+        "pendingUserInput": thread.get("pendingUserInput").cloned().unwrap_or(Value::Null),
         "createdAtUnixMs": thread.get("createdAtUnixMs").cloned().unwrap_or(json!(now_ms())),
         "updatedAtUnixMs": thread.get("updatedAtUnixMs").cloned().unwrap_or(json!(now_ms()))
     }))
+}
 }
 
 pub fn remove_thread(thread_id: &str) -> Value {

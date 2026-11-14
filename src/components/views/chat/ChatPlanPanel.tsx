@@ -191,10 +191,10 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
             type="button"
             className="secondary-button action-button--row chat-plan-panel__action"
             disabled={isBusy}
-            title="Delegar la especificación técnica a un subagente en terminal sin Git worktrees"
+            title="Delegate the technical specification to a terminal subagent without Git worktrees"
             onClick={() => setShowSubagentMenu((v) => !v)}
           >
-            Delegar ODD ▾
+            Delegate ODD ▾
           </button>
           {showSubagentMenu && (
             <div
@@ -221,7 +221,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
                   borderBottom: '1px solid var(--border-subtle, #333)',
                 }}
               >
-                Elegir subagente
+                Choose subagent
               </div>
               {[
                 { id: 'grok', name: 'Grok Build' },

@@ -25,6 +25,26 @@ export interface ChatThreadSummary {
   workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
   swarmId?: string | null;
   swarmMemberName?: string | null;
+  pendingApproval?: {
+    requestId?: string;
+    toolName?: string;
+    kind?: string;
+    reason?: string | null;
+    command?: string | null;
+    filePath?: string | null;
+    [key: string]: unknown;
+  } | null;
+  pendingUserInput?: {
+    requestId?: string;
+    questions?: Array<{
+      id: string;
+      header: string;
+      options: string[];
+      allowCustomAnswer?: boolean;
+      allowAttachments?: boolean;
+      multiSelect?: boolean;
+    }>;
+  } | null;
 }
 
 export interface WorkspaceSessionPaneInfo {

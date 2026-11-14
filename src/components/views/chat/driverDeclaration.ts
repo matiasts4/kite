@@ -2,10 +2,10 @@ import type { DriverDeclaration, DriverChoice } from '../../../lib/session/types
 import type { WorkModeOption } from './hooks/useChatAgents';
 import {
   AUTOMATIC_MODEL_ID,
+  EFFORT_LABELS,
+  EFFORT_DETAILS,
   MODE_LABELS,
   PROVIDER_CATALOG,
-  SPANISH_EFFORT_LABELS,
-  SPANISH_EFFORT_DETAILS,
   type ChatProvider,
   type EffortChoice,
   type ModelOption,
@@ -55,13 +55,13 @@ export function resolveEffortChoicesForModel(
     const choices: DriverChoice[] = model.effortLevels.map((lvl) => {
       if (typeof lvl === 'string') {
         const key = lvl.toLowerCase();
-        const label = SPANISH_EFFORT_LABELS[key] || lvl.charAt(0).toUpperCase() + lvl.slice(1);
-        const detail = SPANISH_EFFORT_DETAILS[key] || `${lvl} reasoning effort`;
+        const label = EFFORT_LABELS[key] || lvl.charAt(0).toUpperCase() + lvl.slice(1);
+        const detail = EFFORT_DETAILS[key] || `${lvl} reasoning effort`;
         return { id: lvl, label, detail };
       }
       const key = lvl.id.toLowerCase();
-      const label = lvl.label || SPANISH_EFFORT_LABELS[key] || lvl.id.charAt(0).toUpperCase() + lvl.id.slice(1);
-      const detail = lvl.detail || SPANISH_EFFORT_DETAILS[key] || `${lvl.id} reasoning effort`;
+      const label = lvl.label || EFFORT_LABELS[key] || lvl.id.charAt(0).toUpperCase() + lvl.id.slice(1);
+      const detail = lvl.detail || EFFORT_DETAILS[key] || `${lvl.id} reasoning effort`;
       return { id: lvl.id, label, detail };
     });
 
@@ -97,8 +97,8 @@ export function resolveEffortChoicesForModel(
 
   const choices: DriverChoice[] = tierIds.map((id) => ({
     id,
-    label: SPANISH_EFFORT_LABELS[id] || id.charAt(0).toUpperCase() + id.slice(1),
-    detail: SPANISH_EFFORT_DETAILS[id] || `${id} reasoning effort`,
+    label: EFFORT_LABELS[id] || id.charAt(0).toUpperCase() + id.slice(1),
+    detail: EFFORT_DETAILS[id] || `${id} reasoning effort`,
   }));
 
   const defaultEffort = choices.find((c) => c.id === 'medium')?.id || choices[0]?.id || 'medium';

@@ -17,8 +17,11 @@ import {
   TrashIcon,
 } from './sidebarIcons';
 import { BrandLogo } from '../ui/BrandLogo';
+import { ActiveChildRows } from './ActiveChildRows';
 import {
+  groupActiveChildrenByParent,
   isFailedThread,
+  parentThreadRollupStatus,
   recordShelfUndo,
   shelfFor,
   shelfPlacement,
@@ -153,6 +156,7 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
     () => new Set(workspaces.map((w) => w.id))
   );
+  const [collapsedChildGroups, setCollapsedChildGroups] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     setExpandedWorkspaces((prev) => {
@@ -179,8 +183,22 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   const menuTargetId = contextMenuTargetId ?? activeContextMenuTargetId;
   const now = Date.now();
   const query = searchQuery.trim().toLowerCase();
+  const activeChildrenByParent = React.useMemo(
+    () => groupActiveChildrenByParent(threads),
+    [threads]
+  );
+  const effectiveThreadForShelf = (thread: RosterThread): RosterThread => {
+    const activeChildren = activeChildrenByParent.get(thread.id) ?? [];
+    if (activeChildren.length === 0) return thread;
+    const rollup = parentThreadRollupStatus(thread, activeChildren);
+    return {
+      ...thread,
+      status: (rollup.effectiveStatus as RosterThread['status']) ?? thread.status,
+      isSettled: false,
+    };
+  };
   const visibleThreads = visibleRosterThreads(threads).filter((thread) => matchesThreadSearch(thread, query));
-  const shelfOf = (thread: RosterThread) => rosterShelf(thread, now);
+  const shelfOf = (thread: RosterThread) => rosterShelf(effectiveThreadForShelf(thread), now);
 
   const pinnedThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'pinned');
   const workingThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'working');
@@ -366,8 +384,13 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
     const isSelected = thread.id === selectedThreadId;
     const isPinned = thread.isPinned || thread.pinned;
     const isMenuOpen = menuTargetId === thread.id;
-    const trailingText = formatThreadTrailing(thread);
-    const trailingMod = getTrailingModifier(thread.status);
+    const activeChildren = activeChildrenByParent.get(thread.id) ?? [];
+    const rollup = parentThreadRollupStatus(thread, activeChildren);
+    const effectiveStatus = (rollup.effectiveStatus as ChatThreadSummary['status']) ?? thread.status;
+    const trailingText =
+      rollup.rollupBadge ?? formatThreadTrailing({ ...thread, status: effectiveStatus });
+    const trailingMod = getTrailingModifier(effectiveStatus);
+    const childrenExpanded = activeChildren.length > 0 && !collapsedChildGroups.has(thread.id);
 
     if (renamingThreadId === thread.id) {
       return (
@@ -411,7 +434,7 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       );
     }
 
-    const isSettled = isThreadSettled(thread);
+    const isSettled = activeChildren.length > 0 ? false : isThreadSettled(thread);
 
     const rowClassName = `chat-thread-row${isSelected ? ' chat-thread-row--selected' : ''}${
       nested ? ' chat-thread-row--nested' : ''
@@ -431,14 +454,17 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           onContextMenu={(e) => handleOpenThreadMenu(thread, e)}
           title={folderName ? `${thread.title} · ${folderName}` : thread.title}
         >
-          <i aria-hidden="true" className={getStatusDotClass(thread.status, thread.sessionState, thread.isWarm)} />
+          <i
+            aria-hidden="true"
+            className={getStatusDotClass(effectiveStatus, thread.sessionState, thread.isWarm)}
+          />
           <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title}</span>
           {thread.unread && <i aria-hidden="true" className="chat-thread-row__unread" />}
           <span
             aria-hidden="true"
             className={`chat-thread-row__trailing${trailingMod}${
-              thread.status === 'running' ? ' chat-working-live' : ''
+              effectiveStatus === 'running' ? ' chat-working-live' : ''
             }`}
           >
             {trailingText}
@@ -446,6 +472,36 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
         </button>
 
         <span className="chat-thread-row__actions">
+          {activeChildren.length > 0 && (
+            <button
+              type="button"
+              className="chat-thread-row__children-toggle"
+              aria-expanded={childrenExpanded}
+              aria-label={
+                childrenExpanded
+                  ? `Collapse subagents for ${thread.title}`
+                  : `Expand subagents for ${thread.title}`
+              }
+              title={childrenExpanded ? 'Hide active subagents' : 'Show active subagents'}
+              onClick={(event) => {
+                event.stopPropagation();
+                setCollapsedChildGroups((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(thread.id)) next.delete(thread.id);
+                  else next.add(thread.id);
+                  return next;
+                });
+              }}
+            >
+              <ChevronRightIcon
+                size={11}
+                style={{
+                  transform: childrenExpanded ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 120ms ease',
+                }}
+              />
+            </button>
+          )}
           {onRegenerateTitle && isSelected ? (
             <button
               type="button"
@@ -487,10 +543,24 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       </>
     );
 
+    const nestedChildrenList = childrenExpanded ? (
+      <ActiveChildRows
+        parentId={thread.id}
+        parentTitle={thread.title}
+        workspaceId={thread.workspaceId}
+        childrenList={activeChildren}
+        selectedThreadId={selectedThreadId}
+        onSelectParent={onSelectThread}
+      />
+    ) : null;
+
     if (MotionGlobalConfig.skipAnimations) {
       return (
-        <div key={thread.id} className={rowClassName} data-thread-id={thread.id}>
-          {row}
+        <div key={thread.id} className="chat-thread-item">
+          <div className={rowClassName} data-thread-id={thread.id}>
+            {row}
+          </div>
+          {nestedChildrenList}
         </div>
       );
     }
@@ -500,10 +570,12 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
         layout
         transition={springs.reflow}
         key={thread.id}
-        className={rowClassName}
-        data-thread-id={thread.id}
+        className="chat-thread-item"
       >
-        {row}
+        <div className={rowClassName} data-thread-id={thread.id}>
+          {row}
+        </div>
+        {nestedChildrenList}
       </motion.div>
     );
   };

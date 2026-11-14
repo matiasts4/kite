@@ -15,11 +15,11 @@ function isFilePathCandidate(text: string): boolean {
   if (/^file:\/\//i.test(trimmed)) return true;
   if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return true;
   if (/^(\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])/.test(trimmed)) return true;
-  if (/^[a-zA-Z0-9_.-]+\.(?:ts|tsx|js|jsx|json|md|mdx|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?$/i.test(trimmed)) return true;
+  if (/^[a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|json|js|mdx|md|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?$/i.test(trimmed)) return true;
   return false;
 }
 
-const PATH_REGEX = /((?:file:\/\/[^\s"'`<>]+|[a-zA-Z]:[\\/][^\s"'`<>()]+|(?:\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])[^\s"'`<>()]+|[a-zA-Z0-9_.-]+\.(?:ts|tsx|js|jsx|json|md|mdx|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?))/gi;
+const PATH_REGEX = /((?:file:\/\/[^\s"'`<>]+|[a-zA-Z]:[\\/][^\s"'`<>()]+|(?:\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])[^\s"'`<>()]+|[a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|json|js|mdx|md|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?))/gi;
 
 function renderPlainTextWithPaths(text: string, baseKey: string | number, workspaceId?: string | null): React.ReactNode {
   const parts = text.split(PATH_REGEX);
@@ -31,7 +31,7 @@ function renderPlainTextWithPaths(text: string, baseKey: string | number, worksp
         <span
           key={`${baseKey}-p-${pIdx}`}
           className="md-path"
-          title="Ctrl + Click para previsualizar archivo"
+          title="Ctrl + Click to preview file"
           onClick={(e) => {
             if ((e.ctrlKey || e.metaKey) && e.button === 0) {
               e.preventDefault();
@@ -68,7 +68,7 @@ const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => 
           type="button"
           className="md-codeblock__copy"
           onClick={() => {
-            void toast.copy(code, `Copiado bloque ${lang || 'código'}`);
+            void toast.copy(code, `Copied ${lang || 'code'} block`);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
           }}

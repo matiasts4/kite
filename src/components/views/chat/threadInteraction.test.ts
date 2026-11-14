@@ -620,13 +620,13 @@ describe('file restore on the thread row', () => {
       onApprovalDecision: () => undefined,
     };
     const view = render(createElement(SingleThreadPane, { thread, ...props }));
-    fireEvent.click(screen.getByTitle('Editar desde aquí'));
-    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeDisabled();
+    fireEvent.click(screen.getByTitle('Edit from here'));
+    expect(screen.getByRole('button', { name: 'Restore files too' })).toBeDisabled();
     view.rerender(createElement(SingleThreadPane, {
       thread: { ...thread, isolatedCheckout: true, providerCanRewind: true },
       ...props,
     }));
-    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Restore files too' })).toBeEnabled();
   });
 
   it('invokes onNewThread without passing click event arguments', () => {

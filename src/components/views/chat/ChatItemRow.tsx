@@ -50,6 +50,45 @@ import {
   type CitationPayload,
 } from './citationChip';
 
+const QUIET_NOTICE_RE =
+  /(?:^|\n|\s*)The provider has not sent an update\.\s*(?:Stop the turn if this stays quiet\.)?\s*/gi;
+
+const LAUNCH_PREAMBLE_RE =
+  /^\s*(?:Lancé el subagente[\s\S]*?Estoy esperando su respuesta\.?|I launched the subagent[\s\S]*?Waiting for its response\.?)(?:\s+|(?=\n))/i;
+
+export function sanitizeAssistantProtocolText(rawText: string): string {
+  const withoutProtocolBlobs = rawText
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        if (
+          trimmed.includes('"type"') &&
+          (trimmed.includes('"step-finish"') ||
+            trimmed.includes('"step_finish"') ||
+            trimmed.includes('"tool-call"') ||
+            trimmed.includes('"tokens"') ||
+            trimmed.includes('"sessionID"'))
+        ) {
+          return false;
+        }
+      }
+      return true;
+    })
+    .join('\n');
+
+  let cleaned = withoutProtocolBlobs;
+  const withoutQuiet = cleaned.replace(QUIET_NOTICE_RE, '\n').trim();
+  if (withoutQuiet.length > 0) {
+    cleaned = withoutQuiet;
+  }
+  const withoutLaunchPreamble = cleaned.replace(LAUNCH_PREAMBLE_RE, '');
+  if (withoutLaunchPreamble.trim().length > 0) {
+    cleaned = withoutLaunchPreamble;
+  }
+  return cleaned;
+}
+
 export function userMessageFolds(text: string): boolean {
   return text.length > 500 || text.split('\n').length > 12;
 }
@@ -616,7 +655,7 @@ export const ChatItemRow: React.FC<{
           <button
             type="button"
             className="chat-turn__action-btn"
-            title={copiedUser ? 'Copiado!' : 'Copiar mensaje'}
+            title={copiedUser ? 'Copied!' : 'Copy message'}
             onClick={() => {
               navigator.clipboard?.writeText(expandCitations(item.text));
               setCopiedUser(true);
@@ -624,21 +663,21 @@ export const ChatItemRow: React.FC<{
             }}
           >
             {copiedUser ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
-            <span>Copiar</span>
+            <span>{copiedUser ? 'Copied' : 'Copy'}</span>
           </button>
           {onEditUserMessage && (
             <button
               type="button"
               className="chat-turn__action-btn"
-              title="Editar desde aquí"
+              title="Edit from here"
               onClick={() => setRewindOpen((open) => !open)}
             >
               <PencilIcon size={12} />
-              <span>Editar desde aquí</span>
+              <span>Edit from here</span>
             </button>
           )}
           {rewindOpen && onEditUserMessage ? (
-            <div className="chat-rewind" role="dialog" aria-label="Editar desde aquí">
+            <div className="chat-rewind" role="dialog" aria-label="Edit from here">
               <button
                 type="button"
                 onClick={() => {
@@ -649,7 +688,7 @@ export const ChatItemRow: React.FC<{
                   });
                 }}
               >
-                Revertir y mantener cambios en archivos
+                Rewind and keep file changes
               </button>
               <button
                 type="button"
@@ -675,7 +714,7 @@ export const ChatItemRow: React.FC<{
                     });
                 }}
               >
-                Revertir archivos también
+                Restore files too
               </button>
               {restoreError ? <p role="alert">{restoreError}</p> : null}
             </div>
@@ -725,7 +764,7 @@ export const ChatItemRow: React.FC<{
             className="chat-user-row__toggle"
             onClick={() => setFolded((v) => !v)}
           >
-            {folded ? 'Mostrar más' : 'Mostrar menos'}
+            {folded ? 'Show more' : 'Show less'}
           </button>
         )}
       </motion.article>
@@ -738,34 +777,7 @@ export const ChatItemRow: React.FC<{
       ? item.text.replace('<proposed_plan>', '\n').replace('</proposed_plan>', '\n')
       : item.text;
 
-    // Filter out any leaked protocol JSON blobs (e.g. {"type":"step-finish",...})
-    const cleanText = rawText
-      .split('\n')
-      .filter((line) => {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          if (
-            trimmed.includes('"type"') &&
-            (trimmed.includes('"step-finish"') ||
-              trimmed.includes('"step_finish"') ||
-              trimmed.includes('"tool-call"') ||
-              trimmed.includes('"tokens"') ||
-              trimmed.includes('"sessionID"'))
-          ) {
-            return false;
-          }
-        }
-        return true;
-      })
-      .join('\n')
-      .replace(
-        /^Lancé el subagente[^\n.]*\.\s*Estoy esperando su respuesta\.\s+(?=El subagente\b)/i,
-        '',
-      )
-      .replace(
-        /^I launched the subagent[^\n.]*\.\s*Waiting for its response\.\s+(?=The subagent\b)/i,
-        '',
-      );
+    const cleanText = sanitizeAssistantProtocolText(rawText);
 
     return (
       <motion.div
@@ -805,13 +817,13 @@ export const ChatItemRow: React.FC<{
                   setCitation(null);
                 }}
               >
-                Citar en el compositor
+                Quote in composer
               </button>
             )}
             <button
               type="button"
               className="chat-turn__action-btn"
-              title={copiedAssistant ? 'Copiado!' : 'Copiar respuesta'}
+              title={copiedAssistant ? 'Copied!' : 'Copy response'}
               onClick={() => {
                 navigator.clipboard?.writeText(cleanText);
                 setCopiedAssistant(true);
@@ -819,7 +831,7 @@ export const ChatItemRow: React.FC<{
               }}
             >
               {copiedAssistant ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
-              <span>{copiedAssistant ? 'Copiado' : 'Copiar'}</span>
+              <span>{copiedAssistant ? 'Copied' : 'Copy'}</span>
             </button>
           </div>
         )}

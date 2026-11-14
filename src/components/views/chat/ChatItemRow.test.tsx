@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
 import type { ChatItem } from '../../../types';
@@ -45,17 +45,17 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     const message = screen.getByText('Explica cómo funciona la arquitectura de agentes');
     expect(message).toBeInTheDocument();
     expect(message.closest('article')).toHaveClass('chat-user-row--bubble');
-    const copyBtn = screen.getByTitle('Copiar mensaje');
+    const copyBtn = screen.getByTitle('Copy message');
     expect(copyBtn).toBeInTheDocument();
-    const editBtn = screen.getByTitle('Editar desde aquí');
+    const editBtn = screen.getByTitle('Edit from here');
     expect(editBtn).toBeInTheDocument();
 
     fireEvent.click(editBtn);
     expect(onEdit).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: 'Editar desde aquí' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Revertir y mantener cambios en archivos' }));
+    expect(screen.getByRole('dialog', { name: 'Edit from here' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Rewind and keep file changes' }));
     expect(onEdit).toHaveBeenCalledWith('Explica cómo funciona la arquitectura de agentes');
-    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Restore files too' })).toBeDisabled();
 
     fireEvent.click(copyBtn);
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Explica cómo funciona la arquitectura de agentes');
@@ -63,9 +63,9 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
 
   it('cleans leaked protocol JSON from assistant messages', () => {
     const rawAssistantText = [
-      'Aquí está la respuesta a tu consulta:',
+      'Here is the answer to your question:',
       '{"type":"step-finish","reason":"tool-calls","tokens":{"input":120,"output":40}}',
-      'Y la conclusión del análisis.',
+      'And the analysis conclusion.',
     ].join('\n');
 
     const item = mockItem({
@@ -76,16 +76,46 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
 
     render(<ChatItemRow item={item} />);
 
-    expect(screen.getByText(/Aquí está la respuesta a tu consulta:/)).toBeInTheDocument();
-    expect(screen.getByText(/Y la conclusión del análisis./)).toBeInTheDocument();
+    expect(screen.getByText(/Here is the answer to your question:/)).toBeInTheDocument();
+    expect(screen.getByText(/And the analysis conclusion./)).toBeInTheDocument();
     expect(screen.queryByText(/step-finish/)).not.toBeInTheDocument();
 
-    const copyBtn = screen.getByTitle('Copiar respuesta');
+    const copyBtn = screen.getByTitle('Copy response');
     expect(copyBtn).toBeInTheDocument();
     fireEvent.click(copyBtn);
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-      'Aquí está la respuesta a tu consulta:\nY la conclusión del análisis.'
+      'Here is the answer to your question:\nAnd the analysis conclusion.'
     );
+  });
+
+  it('suppresses multi-sentence dotted waiting prose once follow-up text arrives, while keeping standalone notices', () => {
+    const leaked = [
+      'The provider has not sent an update. Stop the turn if this stays quiet.',
+      '',
+      'Lancé el subagente con grok (grok-4.7-build-fast) para revisar package.json. Estoy esperando su respuesta. El subagente revisó package.json y devolvió este resumen.',
+    ].join('\n');
+
+    const { container, rerender } = render(
+      <ChatItemRow item={mockItem({ id: 'a-wait-1', kind: 'assistant', text: leaked })} />,
+    );
+    expect(screen.queryByText(/Stop the turn if this stays quiet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Estoy esperando su respuesta/i)).not.toBeInTheDocument();
+    expect(container.querySelector('.md-body')?.textContent).toContain(
+      'El subagente revisó package.json y devolvió este resumen.'
+    );
+
+    rerender(
+      <ChatItemRow
+        item={mockItem({
+          id: 'a-wait-2',
+          kind: 'assistant',
+          text: 'The provider has not sent an update. Stop the turn if this stays quiet.',
+        })}
+      />,
+    );
+    expect(
+      screen.getByText('The provider has not sent an update. Stop the turn if this stays quiet.'),
+    ).toBeInTheDocument();
   });
 
   it('offers to cite a selected passage from one assistant response', () => {
@@ -106,17 +136,17 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     selection?.removeAllRanges();
     selection?.addRange(range);
     fireEvent.mouseUp(passage);
-    fireEvent.click(screen.getByRole('button', { name: 'Citar en el compositor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Quote in composer' }));
     expect(selection?.toString()).toBe('');
   });
 
   it('keeps file restore disabled unless the thread can restore files', () => {
     const item = mockItem({ id: 'u3', kind: 'user', text: 'rewrite this' });
     const { rerender } = render(<ChatItemRow item={item} onEditUserMessage={vi.fn()} />);
-    fireEvent.click(screen.getByTitle('Editar desde aquí'));
-    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeDisabled();
+    fireEvent.click(screen.getByTitle('Edit from here'));
+    expect(screen.getByRole('button', { name: 'Restore files too' })).toBeDisabled();
     rerender(<ChatItemRow item={item} onEditUserMessage={vi.fn()} fileRestoreEnabled />);
-    expect(screen.getByRole('button', { name: 'Revertir archivos también' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Restore files too' })).toBeEnabled();
   });
 
   it('does not call restore when file restore is off', () => {
@@ -130,8 +160,8 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
         onRestoreFiles={onRestore}
       />,
     );
-    fireEvent.click(screen.getByTitle('Editar desde aquí'));
-    fireEvent.click(screen.getByRole('button', { name: 'Revertir archivos también' }));
+    fireEvent.click(screen.getByTitle('Edit from here'));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore files too' }));
     expect(onRestore).not.toHaveBeenCalled();
   });
 
@@ -142,8 +172,8 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
     render(
       <ChatItemRow item={item} onEditUserMessage={onEdit} fileRestoreEnabled onRestoreFiles={onRestore} />,
     );
-    fireEvent.click(screen.getByTitle('Editar desde aquí'));
-    fireEvent.click(screen.getByRole('button', { name: 'Revertir archivos también' }));
+    fireEvent.click(screen.getByTitle('Edit from here'));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore files too' }));
     expect(await screen.findByText('The provider cannot rewind this conversation.')).toBeInTheDocument();
     expect(screen.queryByText(/files changed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/archivos restaurados/i)).not.toBeInTheDocument();

@@ -253,4 +253,76 @@ describe('ThreadRoster live shelves', () => {
     // Archived count badge is shown
     expect(screen.getByRole('button', { name: /Archived threads, 5 archived/ })).toBeInTheDocument();
   });
+
+  it('nests active and approval-needing sideChat children under parent with rollup and 1-click dock nav, hiding settled children', () => {
+    const onSelect = vi.fn();
+    const dockEvents: CustomEvent[] = [];
+    const listener = (ev: Event) => dockEvents.push(ev as CustomEvent);
+    window.addEventListener('kite:open-right-dock-subagent', listener);
+    try {
+      render(
+        <ThreadRoster
+          threads={[
+            thread({ id: 'parent-1', title: 'Main Orchestrator', status: 'idle', isSettled: true }),
+            thread({
+              id: 'child-run',
+              title: 'Inspector Worker',
+              subagentRole: 'Codebase Scout',
+              provider: 'grok',
+              status: 'running',
+              parentThreadId: 'parent-1',
+              startedByAgent: true,
+              sideChat: true,
+            }),
+            thread({
+              id: 'child-apr',
+              title: 'Approval Child',
+              subagentRole: 'Permission Check',
+              provider: 'codex',
+              status: 'idle',
+              parentThreadId: 'parent-1',
+              startedByAgent: false,
+              sideChat: true,
+              pendingApproval: { requestId: 'apr-99' },
+            }),
+            thread({
+              id: 'child-settled',
+              title: 'Finished Subagent',
+              subagentRole: 'Done Worker',
+              provider: 'grok',
+              status: 'idle',
+              parentThreadId: 'parent-1',
+              startedByAgent: true,
+              sideChat: true,
+            }),
+          ]}
+          selectedThreadId="other-thread"
+          onSelectThread={onSelect}
+        />,
+      );
+
+      // Top-level settled child stays hidden; active children nest under parent with approval rollup
+      expect(screen.queryByText('Finished Subagent')).not.toBeInTheDocument();
+      expect(screen.queryByText('Done Worker')).not.toBeInTheDocument();
+
+      const parentRow = screen.getByRole('button', { name: /Main Orchestrator, Needs approval/i });
+      expect(parentRow).toBeInTheDocument();
+
+      const childAprBtn = screen.getByRole('button', { name: 'Permission Check, Needs approval' });
+      const childRunBtn = screen.getByRole('button', { name: 'Codebase Scout, Running' });
+      expect(childAprBtn).toBeInTheDocument();
+      expect(childRunBtn).toBeInTheDocument();
+
+      fireEvent.click(childRunBtn);
+      expect(onSelect).toHaveBeenCalledWith('parent-1');
+      expect(dockEvents).toHaveLength(1);
+      expect(dockEvents[0].detail).toMatchObject({
+        threadId: 'parent-1',
+        childThreadId: 'child-run',
+        mode: 'subagent',
+      });
+    } finally {
+      window.removeEventListener('kite:open-right-dock-subagent', listener);
+    }
+  });
 });

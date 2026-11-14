@@ -110,23 +110,27 @@ function renderPane(partial: {
 }
 
 describe('child approvals', () => {
-  it('surfaces a child approval labeled with the child title', () => {
+  it('surfaces a child approval including sideChat subagent children labeled with the child title', () => {
     expect(childApprovals('parent', [
       { id: 'child', title: 'Reviewer', parentThreadId: 'parent', pendingApproval: approval },
       { id: 'other', title: 'Nope', parentThreadId: 'else', pendingApproval: approval },
       { id: 'quiet', title: 'Quiet', parentThreadId: 'parent', pendingApproval: null },
       { id: 'side', title: 'Side', parentThreadId: 'parent', pendingApproval: approval, sideChat: true },
-    ])).toEqual([{ threadId: 'child', title: 'Reviewer', approval }]);
+    ])).toEqual([
+      { threadId: 'child', title: 'Reviewer', approval },
+      { threadId: 'side', title: 'Side', approval },
+    ]);
   });
 
-  it('stops every child subagent and still stops the parent', () => {
+  it('stops active child subagents including sideChat children and still stops the parent', () => {
     expect(childStopIds('parent', [
       { id: 'c1', parentThreadId: 'parent' },
       { id: 'c2', parentThreadId: 'parent', pendingApproval: null },
-      { id: 'side', parentThreadId: 'parent', sideChat: true },
+      { id: 'side', parentThreadId: 'parent', sideChat: true, status: 'running' },
+      { id: 'done', parentThreadId: 'parent', sideChat: true, status: 'completed' },
       { id: 'other', parentThreadId: 'nope' },
       { id: 'parent', parentThreadId: 'parent' },
-    ])).toEqual(['c1', 'c2']);
+    ])).toEqual(['c1', 'c2', 'side']);
 
     const onStop = vi.fn();
     const onStopThread = vi.fn();
@@ -135,15 +139,17 @@ describe('child approvals', () => {
       onStop,
       onStopThread,
       knownThreadsList: [
-        thread({ id: 'c1', title: 'Child', parentThreadId: 'thread-1' }),
-        thread({ id: 'other', title: 'Other', parentThreadId: 'elsewhere' }),
-        thread({ id: 'side', title: 'Side', parentThreadId: 'thread-1', sideChat: true }),
+        thread({ id: 'c1', title: 'Child', parentThreadId: 'thread-1', status: 'running' }),
+        thread({ id: 'other', title: 'Other', parentThreadId: 'elsewhere', status: 'running' }),
+        thread({ id: 'side', title: 'Side', parentThreadId: 'thread-1', sideChat: true, status: 'running' }),
+        thread({ id: 'settled', title: 'Done', parentThreadId: 'thread-1', sideChat: true, status: 'idle' }),
       ],
     });
     fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
     expect(onStop).toHaveBeenCalledTimes(1);
-    expect(onStopThread).toHaveBeenCalledTimes(1);
+    expect(onStopThread).toHaveBeenCalledTimes(2);
     expect(onStopThread).toHaveBeenCalledWith('c1');
+    expect(onStopThread).toHaveBeenCalledWith('side');
   });
 
   it('answers the child approval from the parent composer area', () => {

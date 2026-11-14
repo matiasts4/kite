@@ -3,6 +3,7 @@ import type { ApprovalRequest } from './types';
 export interface ChildThreadRef {
   id: string;
   title?: string | null;
+  status?: string | null;
   parentThreadId?: string | null;
   pendingApproval?: ApprovalRequest | null;
   sideChat?: boolean;
@@ -15,9 +16,11 @@ export interface ChildApprovalRow {
   approval: ApprovalRequest;
 }
 
+const SETTLED_CHILD_STATUSES = new Set(['idle', 'completed', 'error', 'killed']);
+
 export function childApprovals(parentId: string, threads: ChildThreadRef[]): ChildApprovalRow[] {
   return threads.flatMap((thread) => {
-    if (thread.sideChat || thread.id === parentId) return [];
+    if (thread.id === parentId) return [];
     if (thread.parentThreadId !== parentId || !thread.pendingApproval) return [];
     return [{
       threadId: thread.id,
@@ -29,7 +32,11 @@ export function childApprovals(parentId: string, threads: ChildThreadRef[]): Chi
 
 export function childStopIds(parentId: string, threads: ChildThreadRef[]): string[] {
   return threads
-    .filter((thread) => thread.parentThreadId === parentId && thread.id !== parentId && thread.sideChat !== true)
+    .filter((thread) => {
+      if (thread.parentThreadId !== parentId || thread.id === parentId) return false;
+      if (!thread.status) return true;
+      return !SETTLED_CHILD_STATUSES.has(thread.status) || Boolean(thread.pendingApproval);
+    })
     .map((thread) => thread.id);
 }
 

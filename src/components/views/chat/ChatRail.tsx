@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ExtendedChatThread } from './types';
 import {
+  groupActiveChildrenByParent,
   isFailedThread,
+  parentThreadRollupStatus,
   recordShelfUndo,
   shelfPlacement,
   sidebarThreads,
@@ -21,6 +23,7 @@ import {
 } from './ChatIcons';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { BrandLogo } from '../../ui/BrandLogo';
+import { ActiveChildRows } from '../../sidebar/ActiveChildRows';
 
 export interface ChatRailProps {
   threads: ExtendedChatThread[];
@@ -83,6 +86,8 @@ export const ChatRail: React.FC<ChatRailProps> = ({
   const [shelfUndo, setShelfUndo] = useState<ShelfUndo | null>(null);
   const undoRef = useRef<ShelfUndo | null>(null);
   const listedThreads = useMemo(() => sidebarThreads(threads), [threads]);
+  const activeChildrenByParent = useMemo(() => groupActiveChildrenByParent(threads), [threads]);
+  const [collapsedChildGroups, setCollapsedChildGroups] = useState<Set<string>>(() => new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState('');
   const [showArchivedModal, setShowArchivedModal] = useState(false);
@@ -98,13 +103,28 @@ export const ChatRail: React.FC<ChatRailProps> = ({
     );
   }, [listedThreads, searchQuery]);
 
+  const effectiveThreads = useMemo(
+    () =>
+      filteredThreads.map((t) => {
+        const children = activeChildrenByParent.get(t.id) ?? [];
+        if (children.length === 0) return t;
+        const rollup = parentThreadRollupStatus(t, children);
+        return {
+          ...t,
+          status: (rollup.effectiveStatus as ExtendedChatThread['status']) ?? t.status,
+          isSettled: false,
+        };
+      }),
+    [filteredThreads, activeChildrenByParent]
+  );
+
   const pinnedThreads = useMemo(
-    () => filteredThreads.filter((t) => t.pinned),
-    [filteredThreads]
+    () => effectiveThreads.filter((t) => t.pinned),
+    [effectiveThreads]
   );
   const recentThreads = useMemo(
-    () => filteredThreads.filter((t) => !t.pinned),
-    [filteredThreads]
+    () => effectiveThreads.filter((t) => !t.pinned),
+    [effectiveThreads]
   );
 
   const activeRecentThreads = useMemo(
@@ -204,7 +224,10 @@ export const ChatRail: React.FC<ChatRailProps> = ({
 
   const renderThreadRow = (thread: ExtendedChatThread) => {
     const isSelected = thread.id === selectedThreadId;
-    const trailingLabel = formatThreadTrailing(thread);
+    const activeChildren = activeChildrenByParent.get(thread.id) ?? [];
+    const rollup = parentThreadRollupStatus(thread, activeChildren);
+    const trailingLabel = rollup.rollupBadge ?? formatThreadTrailing(thread);
+    const childrenExpanded = activeChildren.length > 0 && !collapsedChildGroups.has(thread.id);
 
     if (editingId === thread.id) {
       return (
@@ -257,74 +280,115 @@ export const ChatRail: React.FC<ChatRailProps> = ({
         ? 'chat-thread-row__trailing chat-thread-row__trailing--failed'
         : 'chat-thread-row__trailing';
 
-    const settled = isThreadSettled(thread);
+    const settled = activeChildren.length > 0 ? false : isThreadSettled(thread);
 
     return (
-      <div
-        key={thread.id}
-        className={`chat-thread-row ${isSelected ? 'chat-thread-row--selected' : ''}${settled ? ' chat-thread-row--settled' : ''}`}
-        data-thread-id={thread.id}
-      >
-        <button
-          type="button"
-          aria-current={isSelected ? 'page' : undefined}
-          className="chat-thread-row__select"
-          onClick={() => onSelectThread(thread.id)}
-          onDoubleClick={(e) => startRename(thread, e)}
-          title={`${thread.title} (${thread.provider})`}
+      <div key={thread.id} className="chat-thread-item">
+        <div
+          className={`chat-thread-row ${isSelected ? 'chat-thread-row--selected' : ''}${settled ? ' chat-thread-row--settled' : ''}`}
+          data-thread-id={thread.id}
         >
-          <i aria-hidden="true" className={dotClass} />
-          <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
-          <span className="chat-thread-row__title">{thread.title || 'Untitled'}</span>
-          <span
-            aria-hidden="true"
-            className={`${trailingClass}${thread.status === 'running' ? ' chat-working-live' : ''}`}
+          <button
+            type="button"
+            aria-current={isSelected ? 'page' : undefined}
+            className="chat-thread-row__select"
+            onClick={() => onSelectThread(thread.id)}
+            onDoubleClick={(e) => startRename(thread, e)}
+            title={`${thread.title} (${thread.provider})`}
           >
-            {trailingLabel}
-          </span>
-        </button>
+            <i aria-hidden="true" className={dotClass} />
+            <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
+            <span className="chat-thread-row__title">{thread.title || 'Untitled'}</span>
+            <span
+              aria-hidden="true"
+              className={`${trailingClass}${thread.status === 'running' ? ' chat-working-live' : ''}`}
+            >
+              {trailingLabel}
+            </span>
+          </button>
 
-        <span className="chat-thread-row__actions">
-          {onRegenerateTitle && isSelected ? (
+          <span className="chat-thread-row__actions">
+            {activeChildren.length > 0 && (
+              <button
+                type="button"
+                className="chat-thread-row__children-toggle"
+                aria-expanded={childrenExpanded}
+                aria-label={
+                  childrenExpanded
+                    ? `Collapse subagents for ${thread.title}`
+                    : `Expand subagents for ${thread.title}`
+                }
+                title={childrenExpanded ? 'Hide active subagents' : 'Show active subagents'}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCollapsedChildGroups((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(thread.id)) next.delete(thread.id);
+                    else next.add(thread.id);
+                    return next;
+                  });
+                }}
+              >
+                <ChevronRightIcon
+                  size={10}
+                  style={{
+                    transform: childrenExpanded ? 'rotate(90deg)' : 'none',
+                    transition: 'transform 120ms ease',
+                  }}
+                />
+              </button>
+            )}
+            {onRegenerateTitle && isSelected ? (
+              <button
+                type="button"
+                disabled={disabled || titlePending}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (disabled || titlePending) return;
+                  onRegenerateTitle(thread.id);
+                }}
+              >
+                Regenerate title
+              </button>
+            ) : null}
             <button
               type="button"
-              disabled={disabled || titlePending}
-              onClick={(event) => {
-                event.stopPropagation();
-                if (disabled || titlePending) return;
-                onRegenerateTitle(thread.id);
+              aria-label={thread.pinned ? `Unpin ${thread.title}` : `Pin ${thread.title}`}
+              disabled={disabled}
+              onClick={(e) => {
+                e.stopPropagation();
+                rememberUndo(thread.pinned ? 'Unpin' : 'Pin', thread);
+                onPinThread(thread.id, !thread.pinned);
               }}
+              title={thread.pinned ? 'Unpin' : 'Pin to Top'}
             >
-              Regenerate title
+              <PinIcon size={11} fill={thread.pinned ? 'currentColor' : 'none'} />
             </button>
-          ) : null}
-          <button
-            type="button"
-            aria-label={thread.pinned ? `Unpin ${thread.title}` : `Pin ${thread.title}`}
-            disabled={disabled}
-            onClick={(e) => {
-              e.stopPropagation();
-              rememberUndo(thread.pinned ? 'Unpin' : 'Pin', thread);
-              onPinThread(thread.id, !thread.pinned);
-            }}
-            title={thread.pinned ? 'Unpin' : 'Pin to Top'}
-          >
-            <PinIcon size={11} fill={thread.pinned ? 'currentColor' : 'none'} />
-          </button>
-          <button
-            type="button"
-            aria-label={`Archive ${thread.title}`}
-            disabled={disabled}
-            onClick={(e) => {
-              e.stopPropagation();
-              rememberUndo('Archive', thread);
-              onArchiveThread(thread.id);
-            }}
-            title="Archive"
-          >
-            <ArchiveIcon size={11} />
-          </button>
-        </span>
+            <button
+              type="button"
+              aria-label={`Archive ${thread.title}`}
+              disabled={disabled}
+              onClick={(e) => {
+                e.stopPropagation();
+                rememberUndo('Archive', thread);
+                onArchiveThread(thread.id);
+              }}
+              title="Archive"
+            >
+              <ArchiveIcon size={11} />
+            </button>
+          </span>
+        </div>
+        {childrenExpanded && (
+          <ActiveChildRows
+            parentId={thread.id}
+            parentTitle={thread.title || 'Untitled'}
+            workspaceId={thread.workspaceId}
+            childrenList={activeChildren}
+            selectedThreadId={selectedThreadId}
+            onSelectParent={onSelectThread}
+          />
+        )}
       </div>
     );
   };

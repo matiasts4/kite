@@ -50,36 +50,36 @@ export interface EffortChoice {
   detail?: string;
 }
 
-export const SPANISH_EFFORT_LABELS: Record<string, string> = {
-  none: 'Desactivado',
-  minimal: 'Mínimo',
-  low: 'Bajo',
-  medium: 'Medio',
-  high: 'Alto',
-  xhigh: 'Muy Alto',
-  'extra-high': 'Muy Alto',
-  'very-high': 'Muy Alto',
-  max: 'Máximo',
+export const EFFORT_LABELS: Record<string, string> = {
+  none: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Very High',
+  'extra-high': 'Very High',
+  'very-high': 'Very High',
+  max: 'Max',
   ultra: 'Ultra',
 };
 
-export const SPANISH_EFFORT_DETAILS: Record<string, string> = {
-  none: 'Sin razonamiento adicional',
-  minimal: 'Razonamiento ultrarrápido para respuestas directas',
-  low: 'Respuestas rápidas con razonamiento enfocado',
-  medium: 'Razonamiento balanceado para tareas cotidianas',
-  high: 'Razonamiento profundo y análisis exhaustivo',
-  xhigh: 'Razonamiento intensivo y verificación en múltiples pasos',
-  'extra-high': 'Razonamiento intensivo y verificación en múltiples pasos',
-  'very-high': 'Razonamiento intensivo y verificación en múltiples pasos',
-  max: 'Capacidad máxima de computación y verificación formal',
-  ultra: 'Razonamiento ultra para el techo del modelo',
+export const EFFORT_DETAILS: Record<string, string> = {
+  none: 'No extra reasoning budget',
+  minimal: 'Fastest minimal reasoning for direct answers',
+  low: 'Quick responses with focused reasoning',
+  medium: 'Balanced reasoning for everyday tasks',
+  high: 'Deep reasoning and thorough analysis',
+  xhigh: 'Intensive multi-step reasoning and verification',
+  'extra-high': 'Intensive multi-step reasoning and verification',
+  'very-high': 'Intensive multi-step reasoning and verification',
+  max: 'Maximum compute budget and formal verification',
+  ultra: 'Ultra reasoning pushed to the model ceiling',
 };
 
 export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
-  { id: 'low', label: 'Bajo', detail: 'Respuestas rápidas con razonamiento enfocado' },
-  { id: 'medium', label: 'Medio', detail: 'Razonamiento balanceado para tareas cotidianas' },
-  { id: 'high', label: 'Alto', detail: 'Razonamiento profundo y análisis exhaustivo' },
+  { id: 'low', label: 'Low', detail: 'Quick responses with focused reasoning' },
+  { id: 'medium', label: 'Medium', detail: 'Balanced reasoning for everyday tasks' },
+  { id: 'high', label: 'High', detail: 'Deep reasoning and thorough analysis' },
 ];
 
 export interface ExtendedChatThread extends ChatThread {

@@ -151,4 +151,29 @@ describe('useAgentPluginCoverage', () => {
     expect(result.current.agents.length).toBeGreaterThan(0);
     expect(result.current.agents[0].name).toBe('Orion');
   });
+
+  it('skips redundant N+1 load_agent_profile IPCs when listAgentProfiles includes disabledPluginIds and only loads missing entries', async () => {
+    vi.mocked(ipc.listAgentProfiles).mockResolvedValueOnce(mockAgents);
+
+    const { result } = renderHook(() => useAgentPluginCoverage());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.loading).toBe(false);
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('load_agent_profile', expect.anything());
+
+    vi.clearAllMocks();
+    const partialAgent = { ...mockAgents[0], disabledPluginIds: undefined as any };
+    vi.mocked(ipc.listAgentProfiles).mockResolvedValueOnce([partialAgent, mockAgents[1]]);
+    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce({ disabledPluginIds: ['linear'] });
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(ipc.invokeCommand).toHaveBeenCalledTimes(1);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('load_agent_profile', { agentId: 'agent-1' });
+    expect(result.current.isPluginEnabledForAgent('agent-1', 'linear')).toBe(false);
+  });
 });

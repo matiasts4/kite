@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { OFFICIAL_PLUGINS } from './catalog';
 import type { PluginAction, PluginConnection, PluginConnectionState } from './types';
 
+export const PLUGIN_CONNECTIONS_POLL_MS = 15_000;
+
 export interface UsePluginConnectionsResult {
   connections: PluginConnection[];
   ready: boolean;
@@ -109,43 +111,60 @@ export const usePluginConnections = (): UsePluginConnectionsResult => {
 
   const connectionsRef = useRef<PluginConnection[]>(connections);
   connectionsRef.current = connections;
+  const inFlightFetchRef = useRef<Promise<void> | null>(null);
 
   const fetchConnections = useCallback(async () => {
-    if (!isTauri()) {
-      const fallbackList = getFallbackConnections();
-      setConnections((prev) => (areConnectionsEqual(prev, fallbackList) ? prev : fallbackList));
-      setReady(true);
-      return;
+    if (inFlightFetchRef.current) {
+      return inFlightFetchRef.current;
     }
 
-    try {
-      const raw = await invoke<any>('plugin_connections');
-      const list: PluginConnection[] = Array.isArray(raw)
-        ? raw
-        : Array.isArray(raw?.connections)
-          ? raw.connections
-          : [];
-      setConnections((prev) => (areConnectionsEqual(prev, list) ? prev : list));
-      setError(null);
-    } catch (err: any) {
-      const errMsg = err?.message || String(err);
-      if (errMsg.includes('__TAURI_INTERNALS__') || errMsg.includes('not running in Tauri')) {
+    let run!: Promise<void>;
+    run = (async () => {
+      if (!isTauri()) {
         const fallbackList = getFallbackConnections();
         setConnections((prev) => (areConnectionsEqual(prev, fallbackList) ? prev : fallbackList));
-      } else {
-        setError(errMsg);
+        setReady(true);
+        return;
       }
-    } finally {
-      setReady(true);
-    }
+
+      try {
+        const raw = await invoke<any>('plugin_connections');
+        const list: PluginConnection[] = Array.isArray(raw)
+          ? raw
+          : Array.isArray(raw?.connections)
+            ? raw.connections
+            : [];
+        setConnections((prev) => (areConnectionsEqual(prev, list) ? prev : list));
+        setError(null);
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        if (errMsg.includes('__TAURI_INTERNALS__') || errMsg.includes('not running in Tauri')) {
+          const fallbackList = getFallbackConnections();
+          setConnections((prev) => (areConnectionsEqual(prev, fallbackList) ? prev : fallbackList));
+        } else {
+          setError(errMsg);
+        }
+      } finally {
+        setReady(true);
+        if (inFlightFetchRef.current === run) {
+          inFlightFetchRef.current = null;
+        }
+      }
+    })();
+
+    inFlightFetchRef.current = run;
+    return run;
   }, []);
 
   useEffect(() => {
     let isMounted = true;
 
     const poll = async () => {
-      if (typeof document !== 'undefined' && typeof document.hasFocus === 'function') {
-        if (!document.hasFocus()) {
+      if (typeof document !== 'undefined') {
+        if (document.hidden) {
+          return;
+        }
+        if (typeof document.hasFocus === 'function' && !document.hasFocus()) {
           return;
         }
       }
@@ -158,14 +177,22 @@ export const usePluginConnections = (): UsePluginConnectionsResult => {
 
     const intervalId = setInterval(() => {
       poll();
-    }, 2000);
+    }, PLUGIN_CONNECTIONS_POLL_MS);
 
     const handleFocus = () => {
       poll();
     };
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        poll();
+      }
+    };
 
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', handleFocus);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
     }
 
     return () => {
@@ -173,6 +200,9 @@ export const usePluginConnections = (): UsePluginConnectionsResult => {
       clearInterval(intervalId);
       if (typeof window !== 'undefined') {
         window.removeEventListener('focus', handleFocus);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
     };
   }, [fetchConnections]);

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { usePluginConnections, areConnectionsEqual } from './usePluginConnections';
+import {
+  PLUGIN_CONNECTIONS_POLL_MS,
+  usePluginConnections,
+  areConnectionsEqual,
+} from './usePluginConnections';
 import { invoke } from '@tauri-apps/api/core';
 import type { PluginConnection } from './types';
 
@@ -42,7 +46,7 @@ describe('usePluginConnections', () => {
     expect(result.current.connections).toEqual(mockConnections);
   });
 
-  it('polls every 2000ms when document.hasFocus() is true', async () => {
+  it('polls at gentle idle interval (15000ms) when visible and focused', async () => {
     mockInvoke.mockResolvedValue([]);
 
     renderHook(() => usePluginConnections());
@@ -52,22 +56,29 @@ describe('usePluginConnections', () => {
     });
     expect(mockInvoke).toHaveBeenCalledTimes(1);
 
-    // Fast-forward 2000ms
+    // Must not poll after old 2000ms interval
     await act(async () => {
       vi.advanceTimersByTime(2000);
       await Promise.resolve();
     });
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    // Fast-forward remainder to 15000ms
+    await act(async () => {
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS - 2000);
+      await Promise.resolve();
+    });
     expect(mockInvoke).toHaveBeenCalledTimes(2);
 
-    // Fast-forward another 2000ms
+    // Fast-forward another 15000ms
     await act(async () => {
-      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
       await Promise.resolve();
     });
     expect(mockInvoke).toHaveBeenCalledTimes(3);
   });
 
-  it('suspends polling when window loses focus (document.hasFocus is false)', async () => {
+  it('suspends polling when document.hidden is true or window loses focus', async () => {
     mockInvoke.mockResolvedValue([]);
 
     renderHook(() => usePluginConnections());
@@ -77,18 +88,27 @@ describe('usePluginConnections', () => {
     });
     expect(mockInvoke).toHaveBeenCalledTimes(1);
 
+    // Document hidden skips interval polls
+    const hiddenSpy = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    await act(async () => {
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
+      await Promise.resolve();
+    });
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    hiddenSpy.mockRestore();
+
     // Document loses focus
     vi.spyOn(document, 'hasFocus').mockReturnValue(false);
 
     await act(async () => {
-      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
       await Promise.resolve();
     });
     // Should NOT have polled again
     expect(mockInvoke).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      vi.advanceTimersByTime(4000);
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS * 2);
       await Promise.resolve();
     });
     expect(mockInvoke).toHaveBeenCalledTimes(1);
@@ -97,6 +117,38 @@ describe('usePluginConnections', () => {
     vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     await act(async () => {
       window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('prevents overlapping polls while a previous fetch is still in flight', async () => {
+    let resolveFirst!: (value: PluginConnection[]) => void;
+    const pendingPromise = new Promise<PluginConnection[]>((resolve) => {
+      resolveFirst = resolve;
+    });
+    mockInvoke.mockReturnValueOnce(pendingPromise);
+
+    renderHook(() => usePluginConnections());
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    // Advance past poll interval AND dispatch focus while first request is still pending
+    await act(async () => {
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    // Resolve first request; subsequent interval poll proceeds normally
+    mockInvoke.mockResolvedValueOnce([]);
+    await act(async () => {
+      resolveFirst([]);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
       await Promise.resolve();
     });
     expect(mockInvoke).toHaveBeenCalledTimes(2);
@@ -125,7 +177,7 @@ describe('usePluginConnections', () => {
     mockInvoke.mockResolvedValueOnce(listB);
 
     await act(async () => {
-      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
       await Promise.resolve();
     });
 
@@ -140,7 +192,7 @@ describe('usePluginConnections', () => {
     mockInvoke.mockResolvedValueOnce(listC);
 
     await act(async () => {
-      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(PLUGIN_CONNECTIONS_POLL_MS);
       await Promise.resolve();
     });
 

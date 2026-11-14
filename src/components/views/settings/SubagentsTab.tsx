@@ -84,23 +84,53 @@ function entryKey(entry: Pick<SubagentStackEntry, 'provider' | 'model'>): string
   return `${entry.provider}::${entry.model.toLowerCase()}`;
 }
 
+interface CachedSubagentSnapshot {
+  settings: SubagentSettings;
+  providers: DiscoveredSubagentProvider[];
+  roles: SubagentRoleRecord[];
+  workspacePath: string | null;
+}
+
+let cachedSnapshot: CachedSubagentSnapshot | null = null;
+const cachedModelsByProvider = new Map<string, ChatProviderModelOption[]>();
+
+export function resetSubagentsTabCacheForTest(): void {
+  cachedSnapshot = null;
+  cachedModelsByProvider.clear();
+}
+
 export const SubagentsTab: React.FC = () => {
-  const [settings, setSettings] = useState<SubagentSettings>({
-    stack: [],
-    defaultDelegation: null,
-    overridePolicy: 'ask',
-  });
-  const [providers, setProviders] = useState<DiscoveredSubagentProvider[]>([]);
-  const [roles, setRoles] = useState<SubagentRoleRecord[]>([]);
-  const [workspacePath, setWorkspacePath] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState<SubagentSettings>(
+    () =>
+      cachedSnapshot?.settings ?? {
+        stack: [],
+        defaultDelegation: null,
+        overridePolicy: 'ask',
+      }
+  );
+  const [providers, setProviders] = useState<DiscoveredSubagentProvider[]>(
+    () => cachedSnapshot?.providers ?? []
+  );
+  const [roles, setRoles] = useState<SubagentRoleRecord[]>(() => cachedSnapshot?.roles ?? []);
+  const [workspacePath, setWorkspacePath] = useState<string | null>(
+    () => cachedSnapshot?.workspacePath ?? null
+  );
+  const [loading, setLoading] = useState(() => cachedSnapshot === null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [selectedProvider, setSelectedProvider] = useState('grok');
-  const [providerModels, setProviderModels] = useState<ChatProviderModelOption[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState(() => {
+    const initialProviders = cachedSnapshot?.providers ?? [];
+    const firstReady = initialProviders.find((p) => p.state === 'ready');
+    return firstReady?.provider ?? initialProviders[0]?.provider ?? 'grok';
+  });
+  const [providerModels, setProviderModels] = useState<ChatProviderModelOption[]>(
+    () => cachedModelsByProvider.get(selectedProvider) ?? []
+  );
   const [loadingModels, setLoadingModels] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string>(CUSTOM_MODEL_SENTINEL);
+  const [selectedModel, setSelectedModel] = useState<string>(
+    () => cachedModelsByProvider.get(selectedProvider)?.[0]?.id ?? CUSTOM_MODEL_SENTINEL
+  );
   const [customModel, setCustomModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState<string>(AUTO_SENTINEL);
 
@@ -113,10 +143,17 @@ export const SubagentsTab: React.FC = () => {
       roles: SubagentRoleRecord[];
       workspacePath?: string | null;
     }) => {
+      const normalizedWorkspace = snap.workspacePath ?? null;
+      cachedSnapshot = {
+        settings: snap.settings,
+        providers: snap.providers,
+        roles: snap.roles,
+        workspacePath: normalizedWorkspace,
+      };
       setSettings(snap.settings);
       setProviders(snap.providers);
       setRoles(snap.roles);
-      setWorkspacePath(snap.workspacePath ?? null);
+      setWorkspacePath(normalizedWorkspace);
       setSelectedProvider((prev) => {
         if (snap.providers.some((p) => p.provider === prev)) return prev;
         const firstReady = snap.providers.find((p) => p.state === 'ready');
@@ -128,7 +165,9 @@ export const SubagentsTab: React.FC = () => {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
+    if (cachedSnapshot === null) {
+      setLoading(true);
+    }
     getSubagentSettings()
       .then((snap) => {
         if (!active) return;
@@ -150,19 +189,31 @@ export const SubagentsTab: React.FC = () => {
   const fetchModelsForProvider = useCallback(
     async (provider: string, forceRefresh = false) => {
       if (!provider) return;
-      setLoadingModels(true);
+      const cached = cachedModelsByProvider.get(provider);
+      if (cached && !forceRefresh) {
+        setProviderModels(cached);
+        setSelectedModel((prev) =>
+          cached.some((m) => m.id === prev) ? prev : (cached[0]?.id ?? CUSTOM_MODEL_SENTINEL)
+        );
+      } else {
+        setLoadingModels(true);
+      }
       try {
         const res = await listChatProviderModels(provider, forceRefresh);
         const list = res.models ?? [];
+        cachedModelsByProvider.set(provider, list);
         setProviderModels(list);
-        if (list.length > 0) {
-          setSelectedModel(list[0].id);
-        } else {
+        setSelectedModel((prev) => {
+          if (prev !== CUSTOM_MODEL_SENTINEL && list.some((m) => m.id === prev)) {
+            return prev;
+          }
+          return list.length > 0 ? list[0].id : CUSTOM_MODEL_SENTINEL;
+        });
+      } catch {
+        if (!cached) {
+          setProviderModels([]);
           setSelectedModel(CUSTOM_MODEL_SENTINEL);
         }
-      } catch {
-        setProviderModels([]);
-        setSelectedModel(CUSTOM_MODEL_SENTINEL);
       } finally {
         setLoadingModels(false);
       }

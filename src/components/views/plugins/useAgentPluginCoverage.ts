@@ -54,57 +54,83 @@ export function useAgentPluginCoverage(): AgentPluginCoverage {
   disabledMapRef.current = disabledMap;
   const agentsRef = useRef<AgentProfile[]>(agents);
   agentsRef.current = agents;
+  const inFlightCoverageRef = useRef<Promise<void> | null>(null);
+  const profileDisabledCacheRef = useRef<Map<string, string[]>>(new Map());
 
-  const fetchCoverage = useCallback(async () => {
-    setLoading(true);
-    let loadedAgents: AgentProfile[] = [];
-
-    try {
-      const result = await listAgentProfiles();
-      if (Array.isArray(result) && result.length > 0) {
-        loadedAgents = result;
-      } else {
-        loadedAgents = getFallbackAgents();
-      }
-    } catch {
-      loadedAgents = getFallbackAgents();
+  const fetchCoverage = useCallback((force = false): Promise<void> => {
+    if (inFlightCoverageRef.current && !force) {
+      return inFlightCoverageRef.current;
     }
 
-    const nextDisabledMap: Record<string, string[]> = {};
+    const run = (async () => {
+      setLoading(true);
+      let loadedAgents: AgentProfile[] = [];
 
-    await Promise.allSettled(
-      loadedAgents.map(async (agent) => {
-        try {
-          const detail = await invokeCommand<any>('load_agent_profile', { agentId: agent.id });
-          const disabled = Array.isArray(detail?.disabledPluginIds)
-            ? detail.disabledPluginIds
-            : Array.isArray(detail?.disabledPluginIDs)
-              ? detail.disabledPluginIDs
-              : Array.isArray(agent.disabledPluginIds)
-                ? agent.disabledPluginIds
-                : [];
-          nextDisabledMap[agent.id] = disabled;
-        } catch {
-          nextDisabledMap[agent.id] = Array.isArray(agent.disabledPluginIds)
-            ? agent.disabledPluginIds
-            : [];
+      try {
+        const result = await listAgentProfiles();
+        if (Array.isArray(result) && result.length > 0) {
+          loadedAgents = result;
+        } else {
+          loadedAgents = getFallbackAgents();
         }
-      })
-    );
+      } catch {
+        loadedAgents = getFallbackAgents();
+      }
 
-    const updatedAgents = loadedAgents.map((agent) => ({
-      ...agent,
-      disabledPluginIds: nextDisabledMap[agent.id] ?? [],
-    }));
+      const nextDisabledMap: Record<string, string[]> = {};
+      const agentsNeedingProfileLoad: AgentProfile[] = [];
 
-    setAgents(updatedAgents);
-    setDisabledMap(nextDisabledMap);
-    setLoading(false);
-    setError(null);
+      for (const agent of loadedAgents) {
+        if (Array.isArray(agent.disabledPluginIds)) {
+          nextDisabledMap[agent.id] = agent.disabledPluginIds;
+          profileDisabledCacheRef.current.set(agent.id, agent.disabledPluginIds);
+        } else if (!force && profileDisabledCacheRef.current.has(agent.id)) {
+          nextDisabledMap[agent.id] = profileDisabledCacheRef.current.get(agent.id) ?? [];
+        } else {
+          agentsNeedingProfileLoad.push(agent);
+        }
+      }
+
+      if (agentsNeedingProfileLoad.length > 0) {
+        await Promise.allSettled(
+          agentsNeedingProfileLoad.map(async (agent) => {
+            try {
+              const detail = await invokeCommand<any>('load_agent_profile', { agentId: agent.id });
+              const disabled = Array.isArray(detail?.disabledPluginIds)
+                ? detail.disabledPluginIds
+                : Array.isArray(detail?.disabledPluginIDs)
+                  ? detail.disabledPluginIDs
+                  : [];
+              nextDisabledMap[agent.id] = disabled;
+              profileDisabledCacheRef.current.set(agent.id, disabled);
+            } catch {
+              nextDisabledMap[agent.id] = profileDisabledCacheRef.current.get(agent.id) ?? [];
+            }
+          })
+        );
+      }
+
+      const updatedAgents = loadedAgents.map((agent) => ({
+        ...agent,
+        disabledPluginIds: nextDisabledMap[agent.id] ?? [],
+      }));
+
+      setAgents(updatedAgents);
+      setDisabledMap(nextDisabledMap);
+      setLoading(false);
+      setError(null);
+    })().finally(() => {
+      if (inFlightCoverageRef.current === run) {
+        inFlightCoverageRef.current = null;
+      }
+    });
+
+    inFlightCoverageRef.current = run;
+    return run;
   }, []);
 
   useEffect(() => {
-    fetchCoverage();
+    void fetchCoverage();
   }, [fetchCoverage]);
 
   const isPluginEnabledForAgent = useCallback(
@@ -140,6 +166,7 @@ export function useAgentPluginCoverage(): AgentPluginCoverage {
       );
 
       // Optimistic update
+      profileDisabledCacheRef.current.set(agentId, nextDisabled);
       setDisabledMap(nextMap);
       setAgents(nextAgents);
       setError(null);
@@ -159,6 +186,7 @@ export function useAgentPluginCoverage(): AgentPluginCoverage {
         }
       } catch (err: any) {
         // Rollback on failure
+        profileDisabledCacheRef.current.set(agentId, prevDisabledMap[agentId] ?? []);
         setDisabledMap(prevDisabledMap);
         setAgents(prevAgents);
         const msg = err instanceof Error ? err.message : String(err);
@@ -169,6 +197,8 @@ export function useAgentPluginCoverage(): AgentPluginCoverage {
     []
   );
 
+  const refresh = useCallback(() => fetchCoverage(true), [fetchCoverage]);
+
   return {
     agents,
     loading,
@@ -176,6 +206,6 @@ export function useAgentPluginCoverage(): AgentPluginCoverage {
     isPluginEnabledForAgent,
     activeAgentsForPlugin,
     togglePluginForAgent,
-    refresh: fetchCoverage,
+    refresh,
   };
 }

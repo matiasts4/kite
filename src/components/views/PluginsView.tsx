@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useDeferredValue } from 'react';
 import type {
   ActivePlugin,
   OfficialPlugin,
@@ -106,9 +106,10 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
   }, [connectionsMap]);
 
   // Live search filtering across name, vendor, summary
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const filteredPlugins = useMemo(() => {
-    return filterPlugins(sortedPlugins, searchQuery, selectedCategory, statusFilter, connectionsMap);
-  }, [sortedPlugins, searchQuery, selectedCategory, statusFilter, connectionsMap]);
+    return filterPlugins(sortedPlugins, deferredSearchQuery, selectedCategory, statusFilter, connectionsMap);
+  }, [sortedPlugins, deferredSearchQuery, selectedCategory, statusFilter, connectionsMap]);
 
   const handleToggleFromDrawer = useCallback(
     (plugin: ActivePlugin) => {

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { AnimatePresence, motion } from 'motion/react';
+import React, { useMemo, useState } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
+import { tweens } from '../../../motion/standard/tokens';
 import {
   RefreshCwIcon,
   SparklesIcon,
@@ -33,11 +34,18 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
   onCheckUpdate,
   onUpdateAndRestart,
 }) => {
-  const releases: ReleaseNote[] = getReleases(currentVersion, updateInfo);
+  const reduceMotion = useReducedMotion();
+  const releases: ReleaseNote[] = useMemo(
+    () => getReleases(currentVersion, updateInfo),
+    [currentVersion, updateInfo]
+  );
   const initialVisible = 2;
   const revealStep = 5;
   const [visibleCount, setVisibleCount] = useState(initialVisible);
-  const visibleReleases = releases.slice(0, visibleCount);
+  const visibleReleases = useMemo(
+    () => releases.slice(0, visibleCount),
+    [releases, visibleCount]
+  );
   const remaining = Math.max(0, releases.length - visibleReleases.length);
 
   const renderKindIcon = (kind: ReleaseItem['kind']) => {
@@ -129,16 +137,14 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
       </section>
 
       {/* 2. Chronological Release Ledger */}
-      <AnimatePresence initial={false}>
       {visibleReleases.map((rel) => (
         <motion.section
           key={rel.version}
           aria-label={`Kite Code ${rel.version}`}
           className="settings-changelog__release"
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: 'auto' }}
-          exit={{ opacity: 0, height: 0 }}
-          style={{ overflow: 'hidden' }}
+          initial={reduceMotion ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={reduceMotion ? tweens.instant : tweens.fade}
         >
           <div
             className="settings-changelog__heading"
@@ -198,7 +204,6 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
           </div>
         </motion.section>
       ))}
-      </AnimatePresence>
       {remaining > 0 || visibleCount > initialVisible ? (
         <div className="settings-changelog__pager">
           {remaining > 0 ? (

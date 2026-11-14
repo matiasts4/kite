@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useDeferredValue, useRef } from 'react';
 import { SelectMenu } from '../../ui/SelectMenu';
 import type { TelemetryPrefs, TelemetryIdentity } from './types';
 import {
@@ -30,6 +30,16 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const deferredRunIdFilter = useDeferredValue(runIdFilter);
+  const deferredProviderFilter = useDeferredValue(providerFilter);
+  const deferredModelFilter = useDeferredValue(modelFilter);
+  const deferredTaskTypeFilter = useDeferredValue(taskTypeFilter);
+  const deferredOutcomeFilter = useDeferredValue(outcomeFilter);
+  const deferredMinLatency = useDeferredValue(minLatency);
+  const deferredMaxLatency = useDeferredValue(maxLatency);
+  const deferredDateFilter = useDeferredValue(dateFilter);
 
   useEffect(() => {
     // Refresh runs on mount and listen to runLedger events
@@ -37,35 +47,60 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
     const unsubscribe = runLedger.subscribe(() => {
       setRuns(runLedger.getRuns());
     });
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (exportTimerRef.current) clearTimeout(exportTimerRef.current);
+    };
   }, []);
 
   const filteredRuns = useMemo(() => {
+    const qRunId = deferredRunIdFilter.trim().toLowerCase();
+    const qProvider = deferredProviderFilter !== 'all' ? deferredProviderFilter.toLowerCase() : '';
+    const qModel = deferredModelFilter.trim().toLowerCase();
+    const qTaskType = deferredTaskTypeFilter !== 'all' ? deferredTaskTypeFilter.toLowerCase() : '';
+    const hasMinLatency = deferredMinLatency.trim().length > 0;
+    const minLatencyNum = hasMinLatency ? Number(deferredMinLatency) : 0;
+    const hasMaxLatency = deferredMaxLatency.trim().length > 0;
+    const maxLatencyNum = hasMaxLatency ? Number(deferredMaxLatency) : 0;
+
+    if (
+      !qRunId &&
+      !qProvider &&
+      !qModel &&
+      !qTaskType &&
+      deferredOutcomeFilter === 'all' &&
+      !hasMinLatency &&
+      !hasMaxLatency &&
+      !deferredDateFilter
+    ) {
+      return runs;
+    }
+
     return runs.filter((r) => {
-      if (runIdFilter.trim() && !r.runId.toLowerCase().includes(runIdFilter.trim().toLowerCase())) {
+      if (qRunId && !r.runId.toLowerCase().includes(qRunId)) {
         return false;
       }
-      if (providerFilter !== 'all' && (!r.provider || !r.provider.toLowerCase().includes(providerFilter.toLowerCase()))) {
+      if (qProvider && (!r.provider || !r.provider.toLowerCase().includes(qProvider))) {
         return false;
       }
-      if (modelFilter.trim() && (!r.model || !r.model.toLowerCase().includes(modelFilter.trim().toLowerCase()))) {
+      if (qModel && (!r.model || !r.model.toLowerCase().includes(qModel))) {
         return false;
       }
-      if (taskTypeFilter !== 'all' && (!r.taskType || !r.taskType.toLowerCase().includes(taskTypeFilter.toLowerCase()))) {
+      if (qTaskType && (!r.taskType || !r.taskType.toLowerCase().includes(qTaskType))) {
         return false;
       }
-      if (outcomeFilter !== 'all' && r.outcome !== outcomeFilter) {
+      if (deferredOutcomeFilter !== 'all' && r.outcome !== deferredOutcomeFilter) {
         return false;
       }
-      if (minLatency.trim() && (r.durationMs || 0) < Number(minLatency)) {
+      if (hasMinLatency && (r.durationMs || 0) < minLatencyNum) {
         return false;
       }
-      if (maxLatency.trim() && (r.durationMs || 0) > Number(maxLatency)) {
+      if (hasMaxLatency && (r.durationMs || 0) > maxLatencyNum) {
         return false;
       }
-      if (dateFilter) {
+      if (deferredDateFilter) {
         const runDate = new Date(r.startedAt).toISOString().slice(0, 10);
-        if (runDate !== dateFilter) {
+        if (runDate !== deferredDateFilter) {
           return false;
         }
       }
@@ -73,25 +108,25 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
     });
   }, [
     runs,
-    runIdFilter,
-    providerFilter,
-    modelFilter,
-    taskTypeFilter,
-    outcomeFilter,
-    minLatency,
-    maxLatency,
-    dateFilter,
+    deferredRunIdFilter,
+    deferredProviderFilter,
+    deferredModelFilter,
+    deferredTaskTypeFilter,
+    deferredOutcomeFilter,
+    deferredMinLatency,
+    deferredMaxLatency,
+    deferredDateFilter,
   ]);
 
-  const stats = useMemo(() => {
-    return runLedger.getLatencyPercentiles(filteredRuns);
+  const { stats, successRate } = useMemo(() => {
+    const latencyStats = runLedger.getLatencyPercentiles(filteredRuns);
+    let successes = 0;
+    for (const r of filteredRuns) {
+      if (r.outcome === 'success') successes += 1;
+    }
+    const rate = filteredRuns.length > 0 ? Math.round((successes / filteredRuns.length) * 100) : 100;
+    return { stats: latencyStats, successRate: rate };
   }, [filteredRuns]);
-
-  const successCount = useMemo(() => {
-    return filteredRuns.filter((r) => r.outcome === 'success').length;
-  }, [filteredRuns]);
-
-  const successRate = filteredRuns.length > 0 ? Math.round((successCount / filteredRuns.length) * 100) : 100;
 
   const handleExport = (format: 'json' | 'jsonl') => {
     const data = format === 'jsonl'
@@ -113,7 +148,8 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
       setExportMessage(`Historial copiado al portapapeles.`);
     }
 
-    setTimeout(() => setExportMessage(null), 3000);
+    if (exportTimerRef.current) clearTimeout(exportTimerRef.current);
+    exportTimerRef.current = setTimeout(() => setExportMessage(null), 3000);
   };
 
   const handleClearHistory = () => {

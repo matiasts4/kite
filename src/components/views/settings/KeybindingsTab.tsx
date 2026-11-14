@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useDeferredValue } from 'react';
 import {
   getShortcuts,
   saveShortcut,
@@ -15,9 +15,12 @@ export interface KeybindingsTabProps {
   platform?: SupportedPlatform;
 }
 
+const SHORTCUT_CATEGORIES: ShortcutCategory[] = ['Navigation', 'Modes', 'Terminal & Code', 'Voice'];
+
 export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPlatform }) => {
   const platform = propPlatform || getPlatform();
   const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query);
   const [shortcuts, setShortcuts] = useState<ShortcutItem[]>(() => getShortcuts(platform));
   const [editingShortcut, setEditingShortcut] = useState<ShortcutItem | null>(null);
 
@@ -37,8 +40,8 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
   }, [shortcuts]);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return shortcuts;
-    const q = query.toLowerCase();
+    const q = deferredQuery.trim().toLowerCase();
+    if (!q) return shortcuts;
     return shortcuts.filter((k) => {
       const activeKeys = k.customKeys || k.defaultKeys;
       const formatted = formatKeyCombination(activeKeys, platform).toLowerCase();
@@ -50,9 +53,14 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
         formatted.includes(q)
       );
     });
-  }, [shortcuts, query, platform]);
+  }, [shortcuts, deferredQuery, platform]);
 
-  const categories: ShortcutCategory[] = ['Navigation', 'Modes', 'Terminal & Code', 'Voice'];
+  const groupedCategories = useMemo(() => {
+    return SHORTCUT_CATEGORIES.map((category) => ({
+      category,
+      items: filtered.filter((k) => k.category === category),
+    })).filter((group) => group.items.length > 0);
+  }, [filtered]);
 
   const handleSave = (id: string, keys: string[]) => {
     saveShortcut(id, keys, platform);
@@ -110,10 +118,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
         </div>
       </section>
 
-      {categories.map((cat) => {
-        const items = filtered.filter((k) => k.category === cat);
-        if (items.length === 0) return null;
-        return (
+      {groupedCategories.map(({ category: cat, items }) => (
           <section key={cat} className="settings-group">
             <h2 className="settings-group__title">{cat}</h2>
             <div className="ui-card">
@@ -215,8 +220,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
               })}
             </div>
           </section>
-        );
-      })}
+      ))}
 
       <ShortcutRecordModal
         isOpen={editingShortcut !== null}

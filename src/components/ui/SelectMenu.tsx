@@ -132,6 +132,16 @@ function overlayMenuZIndex(element: HTMLElement): number {
   return Math.max(MENU_Z, max + OVERLAY_LIFT);
 }
 
+interface CoordsState {
+  left: number;
+  top: number;
+  width: number;
+  origin: 'top' | 'bottom';
+  room: number;
+  zIndex: number;
+  portalHost: HTMLElement;
+}
+
 function getAnchoredGeometry(element: HTMLElement) {
   const scaledHost = element.closest('.app-frame--scaled') as HTMLElement | null;
   const hostRect = scaledHost?.getBoundingClientRect();
@@ -140,6 +150,9 @@ function getAnchoredGeometry(element: HTMLElement) {
   const originX = hostRect?.left ?? 0;
   const originY = hostRect?.top ?? 0;
   const rect = element.getBoundingClientRect();
+  const winWidth = window.innerWidth;
+  const winHeight = window.innerHeight;
+  const zIndex = overlayMenuZIndex(element);
 
   return {
     bounds: {
@@ -153,11 +166,12 @@ function getAnchoredGeometry(element: HTMLElement) {
     viewport: {
       left: -originX / scale,
       top: -originY / scale,
-      right: (window.innerWidth - originX) / scale,
-      bottom: (window.innerHeight - originY) / scale,
-      width: window.innerWidth / scale,
-      height: window.innerHeight / scale,
+      right: (winWidth - originX) / scale,
+      bottom: (winHeight - originY) / scale,
+      width: winWidth / scale,
+      height: winHeight / scale,
     },
+    zIndex,
     portalHost: scaledHost ?? document.body,
   };
 }
@@ -195,17 +209,13 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const [coords, setCoords] = useState<{
-    left: number;
-    top: number;
-    width: number;
-    origin: 'top' | 'bottom';
-    room: number;
-  } | null>(null);
+  const [coords, setCoords] = useState<CoordsState | null>(null);
   const [panelEl, setPanelEl] = useState<HTMLDivElement | null>(null);
 
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const rowsRef = useRef<HTMLDivElement | null>(null);
+  const rafIdRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const openRef = useRef(isOpen);
   openRef.current = isOpen;
@@ -258,7 +268,13 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     const trigger = triggerRef.current;
     if (!trigger) return;
 
-    const { bounds, viewport } = getAnchoredGeometry(trigger);
+    // Batch all layout reads (trigger rect, viewport, panel/rows geometry) before updating state.
+    const { bounds, viewport, zIndex, portalHost } = getAnchoredGeometry(trigger);
+    const panelOffsetHeight = panelEl ? panelEl.offsetHeight : 0;
+    const rowsEl = rowsRef.current;
+    const rowsClientHeight = rowsEl ? rowsEl.clientHeight : 0;
+    const rowsScrollHeight = rowsEl ? rowsEl.scrollHeight : 0;
+
     const width = Math.max(bounds.width, MIN_WIDTH);
     const left = Math.max(
       viewport.left + EDGE_PADDING,
@@ -270,19 +286,15 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 
     let panelHeight = 0;
     if (panelEl) {
-      const prevMaxHeight = panelEl.style.maxHeight;
-      const prevRowsMax = panelEl.style.getPropertyValue('--select-menu-rows-max');
-      panelEl.style.maxHeight = 'none';
-      panelEl.style.setProperty(
-        '--select-menu-rows-max',
-        Number.isFinite(maxRowsHeightRef.current) ? `${maxRowsHeightRef.current}px` : 'none'
-      );
-      panelHeight = panelEl.offsetHeight;
-      panelEl.style.maxHeight = prevMaxHeight;
-      if (prevRowsMax) {
-        panelEl.style.setProperty('--select-menu-rows-max', prevRowsMax);
+      if (rowsEl) {
+        const maxRows = maxRowsHeightRef.current;
+        const desiredRowsHeight = Number.isFinite(maxRows)
+          ? Math.min(rowsScrollHeight, maxRows)
+          : rowsScrollHeight;
+        const chromeHeight = Math.max(0, panelOffsetHeight - rowsClientHeight);
+        panelHeight = chromeHeight + desiredRowsHeight;
       } else {
-        panelEl.style.removeProperty('--select-menu-rows-max');
+        panelHeight = panelOffsetHeight;
       }
     } else {
       panelHeight = spaceBelow < 200 && spaceAbove > spaceBelow ? Math.min(spaceAbove, 180) : 0;
@@ -295,14 +307,18 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
       ? Math.max(viewport.top + EDGE_PADDING, bounds.top - MARGIN_BOTTOM - Math.min(panelHeight || room, room))
       : bounds.bottom + GAP;
 
+    const origin: 'top' | 'bottom' = placeAbove ? 'bottom' : 'top';
+
     setCoords((prev) => {
       if (
         prev &&
         prev.left === left &&
         prev.top === top &&
         prev.width === width &&
-        prev.origin === (placeAbove ? 'bottom' : 'top') &&
-        prev.room === room
+        prev.origin === origin &&
+        prev.room === room &&
+        prev.zIndex === zIndex &&
+        prev.portalHost === portalHost
       ) {
         return prev;
       }
@@ -310,11 +326,25 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
         left,
         top,
         width,
-        origin: placeAbove ? 'bottom' : 'top',
+        origin,
         room,
+        zIndex,
+        portalHost,
       };
     });
   }, [panelEl]);
+
+  const schedulePositionUpdate = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      window.cancelAnimationFrame(rafIdRef.current);
+    }
+    rafIdRef.current = window.requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      if (openRef.current) {
+        updatePosition();
+      }
+    });
+  }, [updatePosition]);
 
   useLayoutEffect(() => {
     if (isOpen) {
@@ -324,13 +354,19 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 
   useLayoutEffect(() => {
     if (!isOpen || !panelEl || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(updatePosition);
+    const ro = new ResizeObserver(schedulePositionUpdate);
     ro.observe(panelEl);
     if (triggerRef.current) ro.observe(triggerRef.current);
     const scaledHost = triggerRef.current?.closest('.app-frame--scaled');
     if (scaledHost) ro.observe(scaledHost);
-    return () => ro.disconnect();
-  }, [isOpen, panelEl, updatePosition]);
+    return () => {
+      ro.disconnect();
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+    };
+  }, [isOpen, panelEl, schedulePositionUpdate]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -348,20 +384,30 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     };
 
     const handleBlur = () => closeMenu(false);
-    const handleReposition = () => updatePosition();
+    const handleScroll = (e: Event) => {
+      const target = e.target as Node | null;
+      if (target && panelRef.current?.contains(target)) {
+        return;
+      }
+      schedulePositionUpdate();
+    };
 
     window.addEventListener('pointerdown', handlePointerDown);
     window.addEventListener('blur', handleBlur);
-    window.addEventListener('resize', handleReposition);
-    window.addEventListener('scroll', handleReposition, true);
+    window.addEventListener('resize', schedulePositionUpdate);
+    window.addEventListener('scroll', handleScroll, true);
 
     return () => {
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
       window.removeEventListener('pointerdown', handlePointerDown);
       window.removeEventListener('blur', handleBlur);
-      window.removeEventListener('resize', handleReposition);
-      window.removeEventListener('scroll', handleReposition, true);
+      window.removeEventListener('resize', schedulePositionUpdate);
+      window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [isOpen, closeMenu, updatePosition]);
+  }, [isOpen, closeMenu, schedulePositionUpdate]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -437,8 +483,6 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     }
   };
 
-  const portalHost = triggerRef.current ? getAnchoredGeometry(triggerRef.current).portalHost : document.body;
-
   const effectiveMaxRowsHeight = coords ? Math.min(maxRowsHeight, coords.room) : maxRowsHeight;
 
   return (
@@ -503,7 +547,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
                 }`}
                 style={{
                   position: 'fixed',
-                  zIndex: triggerRef.current ? overlayMenuZIndex(triggerRef.current) : MENU_Z,
+                  zIndex: coords.zIndex,
                   left: `${coords.left}px`,
                   top: `${coords.top}px`,
                   width: `${coords.width}px`,
@@ -563,7 +607,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
                   </div>
                 ) : null}
 
-                <div className="select-menu__rows" role="listbox">
+                <div ref={rowsRef} className="select-menu__rows" role="listbox">
                   {filteredRows.map((row) => {
                     const isSelected = row.id === value;
                     const isHighlighted = row.id === highlightedId;
@@ -646,7 +690,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
               </motion.div>
             ) : null}
           </AnimatePresence>,
-          portalHost
+          coords.portalHost
         )}
     </>
   );

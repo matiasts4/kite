@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { KeybindingsTab } from './KeybindingsTab';
 import { saveShortcut, resetAllShortcuts } from '../../../lib/shortcuts/shortcutsRegistry';
 
@@ -61,5 +61,25 @@ describe('KeybindingsTab', () => {
 
     expect(screen.queryByText('Personalizado')).toBeNull();
     expect(screen.queryByText('X')).toBeNull();
+  });
+
+  it('filters by key sequence and restores all categories when cleared', async () => {
+    render(<KeybindingsTab platform="windows" />);
+
+    const searchInput = screen.getByPlaceholderText(/Buscar atajos/) as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: 'Agent mode' } });
+    expect(searchInput.value).toBe('Agent mode');
+
+    await waitFor(() => {
+      expect(screen.getByText('Switch to Agent mode')).toBeDefined();
+      expect(screen.queryByText('Toggle lateral sidebar')).toBeNull();
+    });
+
+    fireEvent.change(searchInput, { target: { value: '' } });
+
+    await waitFor(() => {
+      expect(screen.getByText('Toggle lateral sidebar')).toBeDefined();
+      expect(screen.getByText('Switch to Agent mode')).toBeDefined();
+    });
   });
 });

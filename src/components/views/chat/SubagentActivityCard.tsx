@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import type { ChatItem, SubagentRun } from '../../../types';
 import { BotIcon, CheckIcon, ChevronRightIcon, CloseIcon } from './ChatIcons';
-import { formatDurationLabel, formatWorkingClock } from './activityPresentation';
+import { LiveElapsedClock } from './LiveElapsedClock';
 import { prefersReducedMotion } from '../../../motion/contract';
 import { tweens } from '../../../motion/standard/tokens';
 import {
@@ -193,6 +193,22 @@ function isRawDispatchCommand(text?: string | null): boolean {
   );
 }
 
+export function plainPreviewLine(raw?: string | null): string {
+  const text = (raw ?? '').trim();
+  if (!text) return '';
+  return text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^[ \t]*>[ \t]?/gm, '')
+    .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+[.)])[ \t]+/gm, '')
+    .replace(/```[^`\n]*\n?/g, ' ')
+    .replace(/`+/g, '')
+    .replace(/\*\*|__|~~/g, '')
+    .replace(/(^|[^\w])[*_]([^*_\r\n]+)[*_](?![\w])/g, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function isItemRunning(item: ChatItem, run?: SubagentRun | null): boolean {
   const rawStatus = (run?.status || item.subagentMeta?.status || item.status || 'running').toLowerCase();
   return (
@@ -202,6 +218,11 @@ function isItemRunning(item: ChatItem, run?: SubagentRun | null): boolean {
     rawStatus === 'in_progress' ||
     rawStatus === 'pending'
   );
+}
+
+function isItemBlocked(item: ChatItem, run?: SubagentRun | null): boolean {
+  const rawStatus = (run?.status || item.subagentMeta?.status || item.status || '').toLowerCase();
+  return rawStatus === 'waiting' || rawStatus === 'needsinput' || rawStatus === 'blocked';
 }
 
 function isItemFailed(item: ChatItem, run?: SubagentRun | null): boolean {
@@ -223,7 +244,8 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
   const modelLabel = formatShortModelLabel(run?.model ?? meta?.model, run?.provider ?? meta?.provider);
   const workspaceMode = run?.workspaceMode ?? meta?.workspaceMode ?? null;
   const rawStatus = (run?.status || meta?.status || item.status || 'running').toLowerCase();
-  const isRunning = isItemRunning(item, run);
+  const isBlocked = isItemBlocked(item, run);
+  const isRunning = !isBlocked && isItemRunning(item, run);
   const isFailed = isItemFailed(item, run);
   const isBacked = Boolean(
     childThreadId ||
@@ -243,23 +265,6 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
   );
 
   const startedAt = run?.startedAtUnixMs || item.createdAtUnixMs || 0;
-  const [nowMs, setNowMs] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!isRunning) return;
-    const timer = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [isRunning]);
-
-  const elapsedSeconds =
-    !isRunning && typeof item.durationSeconds === 'number' && item.durationSeconds > 0
-      ? item.durationSeconds
-      : !isRunning && run?.completedAtUnixMs && startedAt > 0
-        ? Math.max(0, (run.completedAtUnixMs - startedAt) / 1000)
-        : startedAt > 0
-          ? Math.max(0, (nowMs - startedAt) / 1000)
-          : 0;
-
   const meaningfulRunSteps = (run?.items ?? []).filter(
     (it) => it.kind === 'tool' || it.kind === 'command' || it.kind === 'reasoning',
   ).length;
@@ -276,14 +281,16 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
       promptExcerpt ||
       ''
     : safeActivity || safeDetail || promptExcerpt || '';
-  const secondaryLine = secondaryRaw.trim();
+  const secondaryLine = plainPreviewLine(secondaryRaw);
   const showWorkspacePill = Boolean(workspaceMode && workspaceMode !== 'inherit');
 
-  const statusClass = isRunning
-    ? 'chat-subagent-card--running'
-    : isFailed
-      ? 'chat-subagent-card--failed'
-      : 'chat-subagent-card--completed';
+  const statusClass = isBlocked
+    ? 'chat-subagent-card--waiting'
+    : isRunning
+      ? 'chat-subagent-card--running'
+      : isFailed
+        ? 'chat-subagent-card--failed'
+        : 'chat-subagent-card--completed';
 
   const handleOpen = () => {
     if (!isInspectable || !threadId) return;
@@ -321,12 +328,20 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
         ) : null}
         <span className="chat-subagent-card__spacer" />
         <span className="chat-subagent-card__telemetry">
-          {isRunning ? (
+          {isBlocked ? (
+            <span className="chat-subagent-card__state chat-subagent-card__state--waiting">
+              <span>Waiting</span>
+            </span>
+          ) : isRunning ? (
             <>
               <span aria-hidden="true" className="chat-working-pulse" />
-              <span className="chat-subagent-card__clock">
-                {startedAt > 0 ? formatWorkingClock(elapsedSeconds) : 'Live'}
-              </span>
+              <LiveElapsedClock
+                className="chat-subagent-card__clock"
+                running={true}
+                startedAtUnixMs={startedAt}
+                format="clock"
+                idleLabel="Live"
+              />
             </>
           ) : isFailed ? (
             <span className="chat-subagent-card__state chat-subagent-card__state--failed">
@@ -334,9 +349,14 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
             </span>
           ) : (
             <span className="chat-subagent-card__state chat-subagent-card__state--done">
-              <span>
-                {elapsedSeconds > 0 ? formatDurationLabel(elapsedSeconds) : 'Done'}
-              </span>
+              <LiveElapsedClock
+                running={false}
+                startedAtUnixMs={startedAt}
+                completedAtUnixMs={run?.completedAtUnixMs}
+                durationSeconds={item.durationSeconds}
+                format="duration"
+                idleLabel="Done"
+              />
             </span>
           )}
           {stepCount > 0 ? (
@@ -421,15 +441,17 @@ export const SubagentGroupRow: React.FC<{
   const dedupedItems = dedupeSubagentItems(items);
   const resolvedRuns = dedupedItems.map((it) => matchSubagentRun(it, dedupedRuns));
   const runningCount = dedupedItems.filter((it, idx) => isItemRunning(it, resolvedRuns[idx])).length;
+  const blockedCount = dedupedItems.filter((it, idx) => isItemBlocked(it, resolvedRuns[idx])).length;
   const failedCount = dedupedItems.filter((it, idx) => isItemFailed(it, resolvedRuns[idx])).length;
+  const anyActiveOrBlocked = runningCount > 0 || blockedCount > 0;
   const anyRunning = runningCount > 0;
-  const [expanded, setExpanded] = useState(anyRunning);
+  const [expanded, setExpanded] = useState(anyActiveOrBlocked);
 
   useEffect(() => {
-    if (anyRunning) {
+    if (anyActiveOrBlocked) {
       setExpanded(true);
     }
-  }, [anyRunning]);
+  }, [anyActiveOrBlocked]);
 
   if (dedupedItems.length === 1) {
     const single = dedupedItems[0];

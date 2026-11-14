@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import type { ChatItem, SwarmState } from '../../../types';
 import { BotIcon, CheckIcon, ChevronRightIcon, CloseIcon } from './ChatIcons';
+import { plainPreviewLine } from './SubagentActivityCard';
 import { prefersReducedMotion } from '../../../motion/contract';
 import { tweens } from '../../../motion/standard/tokens';
 import {
@@ -67,7 +68,9 @@ export const SwarmActivityCard: React.FC<SwarmActivityCardProps> = ({
   const postSeq = latestPost?.seq ?? meta?.seq ?? null;
   const postAuthor = latestPost?.author || meta?.memberName || null;
   const postChannel = latestPost?.channel || meta?.channel || 'main';
-  const postBody = (latestPost?.text || meta?.postText || meta?.brief || item.detail || item.text || '').trim();
+  const postBody = plainPreviewLine(
+    latestPost?.text || meta?.postText || meta?.brief || item.detail || item.text || '',
+  );
   const shownMembers = members.slice(0, 4);
   const extraMembers = Math.max(0, members.length - shownMembers.length);
 

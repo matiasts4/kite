@@ -1,27 +1,29 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import {
   getThreadSubagentDetail,
   getThreadSwarmState,
   loadChatThread,
+  respondChatApproval,
   sendSubagentMessage,
   stopSubagentRun,
 } from '../../../lib/ipc/chat';
 import type { OpenRightDockSubagentDetail } from '../../../lib/subagentNav';
 import { setActiveSubagentInspection } from '../../../lib/subagentNav';
 import { tweens } from '../../../motion/standard/tokens';
-import type { ChatItem, SubagentRun, SwarmMember } from '../../../types';
+import type { ChatItem, SwarmMember } from '../../../types';
 import { ActivityGlyph } from '../chat/activityGlyph';
-import { ChatWorkEntry } from '../chat/ChatItemRow';
+import { ChatApprovalCard } from '../chat/ChatApprovalCard';
+import { ChatWorkEntry, ChatWorkGroup, groupTranscriptRows } from '../chat/ChatItemRow';
+import { LiveElapsedClock } from '../chat/LiveElapsedClock';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
-import { dedupeSubagentRuns } from '../chat/SubagentActivityCard';
-import { formatDurationLabel, formatWorkingClock } from '../chat/activityPresentation';
+import { dedupeSubagentRuns, SubagentGroupRow } from '../chat/SubagentActivityCard';
 import {
   applySubagentEvent,
   countRunningSubagents,
   type ChatSubagentEventPayload,
 } from '../chat/hooks/useSubagentEvents';
-import type { ExtendedChatThread } from '../chat/types';
+import type { ApprovalRequest, ExtendedChatThread } from '../chat/types';
 import { SwarmBoardInspector, formatInspectorModelName } from './SwarmBoardInspector';
 import './subagents.css';
 
@@ -33,31 +35,30 @@ export interface SubagentInspectorViewProps {
 
 type InspectorMode = 'subagent' | 'swarm';
 
+function isRunBlocked(status?: string | null): boolean {
+  const s = (status ?? '').toLowerCase();
+  return s === 'waiting' || s === 'needsinput' || s === 'blocked';
+}
+
 function isRunActive(status?: string | null): boolean {
   const s = (status ?? '').toLowerCase();
-  return s === 'running' || s === 'queued' || s === 'pending' || s === 'waiting';
+  return s === 'running' || s === 'queued' || s === 'pending' || isRunBlocked(s);
 }
 
 function runStatusDotClass(status?: string | null): string {
   const s = (status ?? '').toLowerCase();
+  if (isRunBlocked(s)) return 'subagent-dot--waiting';
   if (isRunActive(s)) return 'subagent-dot--running';
   if (s === 'completed' || s === 'done' || s === 'ok') return 'subagent-dot--completed';
   if (s === 'failed' || s === 'error' || s === 'killed') return 'subagent-dot--failed';
   return '';
 }
 
-function runStatusLabel(run: SubagentRun, nowUnixMs: number): string {
-  if (isRunActive(run.status)) {
-    const startMs = run.startedAtUnixMs ?? nowUnixMs;
-    const sec = Math.max(0, Math.floor((nowUnixMs - startMs) / 1000));
-    return `Working · ${formatWorkingClock(sec)}`;
-  }
-  const s = (run.status ?? 'completed').toLowerCase();
-  if (run.startedAtUnixMs && run.updatedAtUnixMs && run.updatedAtUnixMs >= run.startedAtUnixMs) {
-    const durSec = (run.updatedAtUnixMs - run.startedAtUnixMs) / 1000;
-    const prefix = s === 'failed' ? 'Failed' : s === 'killed' ? 'Killed' : 'Completed';
-    return `${prefix} · ${formatDurationLabel(durSec)}`;
-  }
+function settledPrefixLabel(status?: string | null): string {
+  const s = (status ?? 'completed').toLowerCase();
+  if (s === 'failed' || s === 'error') return 'Failed';
+  if (s === 'killed' || s === 'cancelled') return 'Killed';
+  if (s === 'completed' || s === 'done' || s === 'ok') return 'Completed';
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
@@ -98,9 +99,10 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   const [mode, setMode] = useState<InspectorMode>('subagent');
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [fromSwarmRoster, setFromSwarmRoster] = useState(false);
-  const [briefExpanded, setBriefExpanded] = useState(false);
+  const [briefOverride, setBriefOverride] = useState<{ runId: string; expanded: boolean } | null>(null);
   const [autoScrollPaused, setAutoScrollPaused] = useState(false);
-  const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
+  const [childApproval, setChildApproval] = useState<ApprovalRequest | null>(null);
+  const [resolvingApproval, setResolvingApproval] = useState(false);
   const [steeringText, setSteeringText] = useState('');
   const [sendingSteering, setSendingSteering] = useState(false);
   const [stoppingRun, setStoppingRun] = useState(false);
@@ -109,6 +111,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   const streamRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
   const seenStepIdsRef = useRef<Set<string>>(new Set());
+  const hydratedKeyRef = useRef<string | null>(null);
 
   // Apply explicit navigation requests immediately
   useEffect(() => {
@@ -123,7 +126,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
       }
       setFromSwarmRoster(false);
     }
-    setBriefExpanded(false);
+    setBriefOverride(null);
   }, [requestedTarget]);
 
   // Hydrate active thread subagents + swarm from backend
@@ -136,7 +139,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     setLoading(true);
     void loadChatThread(activeThreadId)
       .then((loaded) => {
-        if (cancelled) return;
+        if (cancelled || !loaded) return;
         setThread(loaded);
         if (!requestedTarget && !loaded.subagentRuns?.length && loaded.swarmState) {
           setMode('swarm');
@@ -154,7 +157,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     };
   }, [activeThreadId, requestedTarget]);
 
-  // Live updates via Tauri chat-subagent-event
+  // Live updates via Tauri chat-subagent-event and chat-swarm-event
   useEffect(() => {
     if (
       !activeThreadId ||
@@ -163,25 +166,38 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     ) {
       return;
     }
-    let unlisten: (() => void) | undefined;
+    let unlistenSub: (() => void) | undefined;
+    let unlistenSwarm: (() => void) | undefined;
     let cancelled = false;
+    const handleEvent = (payload: ChatSubagentEventPayload | undefined) => {
+      if (!payload || payload.threadId !== activeThreadId) return;
+      setThread((prev) => (prev ? applySubagentEvent(prev, payload) : prev));
+    };
     void import('@tauri-apps/api/event')
-      .then(({ listen }) =>
-        listen<ChatSubagentEventPayload>('chat-subagent-event', (event) => {
-          const payload = event.payload;
-          if (!payload || payload.threadId !== activeThreadId) return;
-          setThread((prev) => (prev ? applySubagentEvent(prev, payload) : prev));
-        }),
-      )
-      .then((stop) => {
-        if (cancelled) stop();
-        else unlisten = stop;
+      .then(async ({ listen }) => {
+        const stopSub = await listen<ChatSubagentEventPayload>('chat-subagent-event', (event) => {
+          handleEvent(event.payload);
+        });
+        if (cancelled) {
+          stopSub();
+          return;
+        }
+        unlistenSub = stopSub;
+        const stopSwarm = await listen<ChatSubagentEventPayload>('chat-swarm-event', (event) => {
+          handleEvent(event.payload);
+        });
+        if (cancelled) {
+          stopSwarm();
+          return;
+        }
+        unlistenSwarm = stopSwarm;
       })
       .catch(() => undefined);
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenSub?.();
+      unlistenSwarm?.();
     };
   }, [activeThreadId]);
 
@@ -221,6 +237,13 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     [activeRun?.items, activeRun?.prompt],
   );
 
+  const groupedRows = useMemo(() => groupTranscriptRows(visibleSteps), [visibleSteps]);
+
+  const briefExpanded =
+    briefOverride && activeRun && briefOverride.runId === activeRun.subagentId
+      ? briefOverride.expanded
+      : visibleSteps.length === 0;
+
   useEffect(() => {
     if (!thread) return;
     if (mode === 'swarm' && swarmState) {
@@ -241,10 +264,17 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     }
   }, [thread?.id, mode, swarmState?.swarmId, activeRun?.subagentId, activeRun?.childThreadId, workspaceId]);
 
-  // Hydrate missing steps on demand via getThreadSubagentDetail / getThreadSwarmState
+  // Hydrate missing steps on demand via getThreadSubagentDetail without stalling after step 1
+  const hydratedItemCount = activeRun?.items?.length ?? 0;
+  const reportedStepCount = activeRun?.stepCount ?? 0;
   useEffect(() => {
     if (!thread || !activeRun) return;
-    if (visibleSteps.length > 0) return;
+    const needsHydration =
+      visibleSteps.length === 0 || reportedStepCount > hydratedItemCount;
+    if (!needsHydration) return;
+    const hydrationKey = `${thread.id}:${activeRun.subagentId}:${activeRun.status ?? ''}:${reportedStepCount}:${hydratedItemCount}:${activeRun.updatedAtUnixMs ?? 0}`;
+    if (hydratedKeyRef.current === hydrationKey) return;
+    hydratedKeyRef.current = hydrationKey;
     let cancelled = false;
     void getThreadSubagentDetail(thread.id, activeRun.subagentId)
       .then((detail) => {
@@ -263,7 +293,36 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [thread?.id, activeRun?.subagentId, visibleSteps.length]);
+  }, [
+    thread?.id,
+    activeRun?.subagentId,
+    activeRun?.status,
+    activeRun?.updatedAtUnixMs,
+    reportedStepCount,
+    hydratedItemCount,
+    visibleSteps.length,
+  ]);
+
+  // Hydrate inline child pendingApproval when the active child run is waiting for approval
+  useEffect(() => {
+    const childTid = activeRun?.childThreadId;
+    if (!childTid || !isRunBlocked(activeRun?.status)) {
+      setChildApproval(null);
+      return;
+    }
+    let cancelled = false;
+    void loadChatThread(childTid)
+      .then((loaded) => {
+        if (cancelled || !loaded) return;
+        setChildApproval(loaded.pendingApproval ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setChildApproval(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRun?.childThreadId, activeRun?.status, activeRun?.updatedAtUnixMs]);
 
   useEffect(() => {
     if (!thread || !swarmState || swarmState.posts.length > 0) return;
@@ -287,13 +346,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     };
   }, [thread?.id, swarmState?.swarmId]);
 
-  // Live clock tick when current subagent is running
   const activeRunRunning = activeRun ? isRunActive(activeRun.status) : false;
-  useEffect(() => {
-    if (!activeRunRunning) return;
-    const id = window.setInterval(() => setNowUnixMs(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [activeRunRunning]);
 
   // Auto-scroll to latest step unless manually scrolled up
   const stepCount = visibleSteps.length;
@@ -382,6 +435,48 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     }
   };
 
+  const handlePopOutChildThread = () => {
+    if (!activeRun?.childThreadId) return;
+    window.dispatchEvent(
+      new CustomEvent('kite:select-thread', {
+        detail: { threadId: activeRun.childThreadId },
+      }),
+    );
+  };
+
+  const handleChildApprovalDecision = useCallback(
+    async (
+      decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
+      requestId: string,
+    ) => {
+      const childTid = activeRun?.childThreadId;
+      if (!childTid || !thread || resolvingApproval) return;
+      setResolvingApproval(true);
+      setActionError(null);
+      try {
+        await respondChatApproval(childTid, decision, requestId);
+        setChildApproval(null);
+        const detail = await getThreadSubagentDetail(thread.id, activeRun.subagentId);
+        if (detail) {
+          setThread((prev) =>
+            prev
+              ? applySubagentEvent(prev, {
+                  kind: 'subagentRunUpdated',
+                  threadId: prev.id,
+                  run: detail,
+                })
+              : prev,
+          );
+        }
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : 'Failed to resolve child approval');
+      } finally {
+        setResolvingApproval(false);
+      }
+    },
+    [activeRun?.childThreadId, activeRun?.subagentId, thread, resolvingApproval],
+  );
+
   const handleInspectWorker = (member: SwarmMember) => {
     const matched = runs.find(
       (r) =>
@@ -394,7 +489,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
       setSelectedSubagentId(targetId);
       setFromSwarmRoster(true);
       setMode('subagent');
-      setBriefExpanded(false);
+      setBriefOverride(null);
     }
   };
 
@@ -431,41 +526,123 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
             </button>
           )}
 
-          {hasSwarm && (
-            <div
-              className="subagent-inspector__segmented"
-              role="tablist"
-              aria-label="Inspector mode"
-            >
-              {hasRuns && (
+          <div className="subagent-inspector__top-actions">
+            {mode === 'subagent' && activeRun?.childThreadId && (
+              <button
+                type="button"
+                className="subagent-inspector__popout-btn"
+                onClick={handlePopOutChildThread}
+                aria-label="Open subagent thread in main pane"
+                title="Open subagent conversation in main pane"
+              >
+                Open thread
+              </button>
+            )}
+
+            {hasSwarm && (
+              <div
+                className="subagent-inspector__segmented"
+                role="tablist"
+                aria-label="Inspector mode"
+              >
+                {hasRuns && (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === 'subagent'}
+                    className={`subagent-inspector__segment-btn${mode === 'subagent' ? ' subagent-inspector__segment-btn--active' : ''}`}
+                    onClick={() => {
+                      setMode('subagent');
+                      setFromSwarmRoster(false);
+                    }}
+                  >
+                    Subagent
+                  </button>
+                )}
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={mode === 'subagent'}
-                  className={`subagent-inspector__segment-btn${mode === 'subagent' ? ' subagent-inspector__segment-btn--active' : ''}`}
+                  aria-selected={mode === 'swarm'}
+                  className={`subagent-inspector__segment-btn${mode === 'swarm' ? ' subagent-inspector__segment-btn--active' : ''}`}
                   onClick={() => {
-                    setMode('subagent');
+                    setMode('swarm');
                     setFromSwarmRoster(false);
                   }}
                 >
-                  Subagent
+                  Swarm Board
                 </button>
-              )}
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === 'swarm'}
-                className={`subagent-inspector__segment-btn${mode === 'swarm' ? ' subagent-inspector__segment-btn--active' : ''}`}
-                onClick={() => {
-                  setMode('swarm');
-                  setFromSwarmRoster(false);
-                }}
-              >
-                Swarm Board
-              </button>
-            </div>
-          )}
+              </div>
+            )}
+          </div>
         </div>
+
+        {mode === 'subagent' && activeRun && (
+          <div className="subagent-inspector__identity-row">
+            <div className="subagent-inspector__meta-title-row">
+              <div className="subagent-inspector__role">
+                <span className={`subagent-dot ${runStatusDotClass(activeRun.status)}`} />
+                <span>{activeRun.role || 'Subagent'}</span>
+                {activeRun.typeName &&
+                  activeRun.typeName.toLowerCase() !== (activeRun.provider ?? '').toLowerCase() && (
+                    <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
+                  )}
+              </div>
+              <div className="subagent-inspector__status-actions">
+                {isRunBlocked(activeRun.status) ? (
+                  <span className="subagent-inspector__status-text subagent-inspector__status-text--waiting">
+                    Waiting for approval
+                  </span>
+                ) : isRunActive(activeRun.status) ? (
+                  <LiveElapsedClock
+                    className="subagent-inspector__status-text"
+                    running={true}
+                    startedAtUnixMs={activeRun.startedAtUnixMs}
+                    prefix="Working · "
+                    format="clock"
+                    idleLabel="Working…"
+                  />
+                ) : (
+                  <LiveElapsedClock
+                    className="subagent-inspector__status-text"
+                    running={false}
+                    startedAtUnixMs={activeRun.startedAtUnixMs}
+                    completedAtUnixMs={activeRun.updatedAtUnixMs ?? null}
+                    prefix={`${settledPrefixLabel(activeRun.status)} · `}
+                    format="duration"
+                    idleLabel={settledPrefixLabel(activeRun.status)}
+                  />
+                )}
+                {isRunActive(activeRun.status) && (
+                  <button
+                    type="button"
+                    className="subagent-stop-btn"
+                    aria-label="Stop subagent"
+                    disabled={stoppingRun}
+                    onClick={() => void handleStopActiveRun()}
+                  >
+                    Stop
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="subagent-inspector__meta-subtitle">
+              <span
+                data-testid="subagent-model-hierarchy"
+                aria-label="Main to Subagent model hierarchy"
+              >
+                Main: {parentModelLabel} ➔ Subagent:{' '}
+                {formatInspectorModelName(activeRun.model, activeRun.provider)}
+              </span>
+              {activeRun.workspaceMode && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>{activeRun.workspaceMode}</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {mode === 'subagent' && hasRuns && (runs.length > 1 || (fromSwarmRoster && hasSwarm)) && (
           <div className="subagent-inspector__selector-strip" role="navigation" aria-label="Subagent selector">
@@ -492,7 +669,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                     className={`subagent-inspector__selector-pill${selected ? ' subagent-inspector__selector-pill--active' : ''}`}
                     onClick={() => {
                       setSelectedSubagentId(run.subagentId);
-                      setBriefExpanded(false);
+                      setBriefOverride(null);
                     }}
                   >
                     <span className={`subagent-dot ${runStatusDotClass(run.status)}`} />
@@ -526,50 +703,6 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
         />
       ) : activeRun ? (
         <>
-          <div className="subagent-inspector__meta-banner">
-            <div className="subagent-inspector__meta-title-row">
-              <div className="subagent-inspector__role">
-                <span className={`subagent-dot ${runStatusDotClass(activeRun.status)}`} />
-                <span>{activeRun.role || 'Subagent'}</span>
-                {activeRun.typeName &&
-                  activeRun.typeName.toLowerCase() !== (activeRun.provider ?? '').toLowerCase() && (
-                    <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
-                  )}
-              </div>
-              <div className="subagent-inspector__status-actions">
-                <span className="subagent-inspector__status-text">
-                  {runStatusLabel(activeRun, nowUnixMs)}
-                </span>
-                {isRunActive(activeRun.status) && (
-                  <button
-                    type="button"
-                    className="subagent-stop-btn"
-                    aria-label="Stop subagent"
-                    disabled={stoppingRun}
-                    onClick={() => void handleStopActiveRun()}
-                  >
-                    Stop
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="subagent-inspector__meta-subtitle">
-              <span
-                data-testid="subagent-model-hierarchy"
-                aria-label="Main to Subagent model hierarchy"
-              >
-                Main: {parentModelLabel} ➔ Subagent:{' '}
-                {formatInspectorModelName(activeRun.model, activeRun.provider)}
-              </span>
-              {activeRun.workspaceMode && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>{activeRun.workspaceMode}</span>
-                </>
-              )}
-            </div>
-          </div>
 
           {activeRun.status?.toLowerCase() === 'failed' && (
             <div
@@ -591,7 +724,9 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                 type="button"
                 className="subagent-brief-card__toggle"
                 aria-expanded={briefExpanded}
-                onClick={() => setBriefExpanded((v) => !v)}
+                onClick={() =>
+                  setBriefOverride({ runId: activeRun.subagentId, expanded: !briefExpanded })
+                }
               >
                 <span>Task Brief</span>
                 <span>{briefExpanded ? 'Collapse' : 'Expand'}</span>
@@ -641,7 +776,37 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                   )}
                 </div>
               ) : (
-                visibleSteps.map((step) => {
+                groupedRows.map((row) => {
+                  if (row.kind === 'work') {
+                    const isNewGroup = row.items.some((it) => !seenStepIdsRef.current.has(it.id));
+                    return (
+                      <motion.div
+                        key={row.id}
+                        className="subagent-inspector__step subagent-inspector__step--work"
+                        initial={isNewGroup && !reduceMotion ? { opacity: 0, y: 4 } : false}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={reduceMotion ? tweens.instant : tweens.reveal}
+                      >
+                        <ChatWorkGroup
+                          items={row.items}
+                          running={activeRunRunning}
+                          enterFor={(id) => !seenStepIdsRef.current.has(id)}
+                        />
+                      </motion.div>
+                    );
+                  }
+                  if (row.kind === 'subagentGroup') {
+                    return (
+                      <SubagentGroupRow
+                        key={row.id}
+                        items={row.items}
+                        threadId={activeRun.childThreadId ?? thread?.id}
+                        workspaceId={workspaceId}
+                        enterFor={(id) => !seenStepIdsRef.current.has(id)}
+                      />
+                    );
+                  }
+                  const step = row.item;
                   const isNew = !seenStepIdsRef.current.has(step.id);
                   return (
                     <motion.div
@@ -683,6 +848,15 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
                     </motion.div>
                   );
                 })
+              )}
+              {childApproval && (
+                <div className="subagent-inspector__approval-wrap" data-testid="subagent-child-approval">
+                  <ChatApprovalCard
+                    approval={childApproval}
+                    busy={resolvingApproval}
+                    onDecision={(decision, reqId) => void handleChildApprovalDecision(decision, reqId)}
+                  />
+                </div>
               )}
             </div>
 

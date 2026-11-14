@@ -549,6 +549,7 @@ pub fn project_approval(thread_id: &str, run_id: &str, request_id: &str, tool_na
     live_cv().notify_all();
     set_thread_field(thread_id, "pendingApproval", approval_val);
     set_thread_field(thread_id, "status", json!("waiting"));
+    crate::chat::subagents::sync_child_thread_to_parent(thread_id);
 }
 
 pub fn project_plan(thread_id: &str, run_id: &str, title: &str, status: &str, body: &str) {

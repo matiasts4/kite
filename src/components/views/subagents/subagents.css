@@ -55,6 +55,50 @@
   color: var(--text-primary);
 }
 
+.subagent-inspector__top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.subagent-inspector__popout-btn {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-row, 28px);
+  padding: 0 9px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--control-radius, 8px);
+  background: var(--control-fill);
+  color: var(--text-secondary);
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--duration-ink, 0.12s) var(--ease-out),
+    color var(--duration-ink, 0.12s) var(--ease-out);
+}
+
+.subagent-inspector__popout-btn:hover {
+  background: var(--control-fill-hover);
+  color: var(--text-primary);
+}
+
+.subagent-inspector__identity-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.subagent-inspector__status-text--waiting {
+  color: var(--warning, var(--brand-amber));
+}
+
+.subagent-inspector__approval-wrap {
+  margin-top: 4px;
+}
+
 .subagent-inspector__segmented {
   display: inline-flex;
   align-items: center;
@@ -259,7 +303,11 @@
 }
 
 .subagent-dot--completed {
-  background: #22c55e;
+  background: var(--status-running);
+}
+
+.subagent-dot--waiting {
+  background: var(--warning, var(--brand-amber));
 }
 
 .subagent-dot--failed {

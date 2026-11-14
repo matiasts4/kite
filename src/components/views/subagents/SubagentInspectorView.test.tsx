@@ -9,6 +9,7 @@ const getThreadSubagentDetailMock = vi.fn();
 const getThreadSwarmStateMock = vi.fn();
 const sendSubagentMessageMock = vi.fn();
 const stopSubagentRunMock = vi.fn();
+const respondChatApprovalMock = vi.fn();
 const swarmPostFromUiMock = vi.fn();
 const swarmSwitchWorkerModelMock = vi.fn();
 const swarmKillWorkerFromUiMock = vi.fn();
@@ -19,6 +20,7 @@ vi.mock('../../../lib/ipc/chat', () => ({
   getThreadSwarmState: (...args: unknown[]) => getThreadSwarmStateMock(...args),
   sendSubagentMessage: (...args: unknown[]) => sendSubagentMessageMock(...args),
   stopSubagentRun: (...args: unknown[]) => stopSubagentRunMock(...args),
+  respondChatApproval: (...args: unknown[]) => respondChatApprovalMock(...args),
   swarmPostFromUi: (...args: unknown[]) => swarmPostFromUiMock(...args),
   swarmSwitchWorkerModel: (...args: unknown[]) => swarmSwitchWorkerModelMock(...args),
   swarmKillWorkerFromUi: (...args: unknown[]) => swarmKillWorkerFromUiMock(...args),
@@ -428,5 +430,134 @@ describe('SubagentInspectorView', () => {
       screen.getByText('Reviewing package.json in root to identify dev and test scripts.'),
     ).toBeInTheDocument();
     expect(screen.getByText(/starts Vite/i)).toBeInTheDocument();
+  });
+
+  it('groups consecutive settled work steps, keeps empty Task Brief expanded until steps arrive, and hydrates past step 1', async () => {
+    const stepOneRun = {
+      subagentId: 'sub-stream-1',
+      parentThreadId: 'thread-main-1',
+      parentToolCallId: 'call-stream-1',
+      childThreadId: 'child-stream-1',
+      role: 'Deep Auditor',
+      provider: 'gemini',
+      model: 'gemini-3-flash',
+      workspaceMode: 'inherit',
+      status: 'running',
+      prompt: 'Audit auth middleware and summarize findings.',
+      stepCount: 2,
+      startedAtUnixMs: Date.now() - 10_000,
+      updatedAtUnixMs: Date.now() - 2_000,
+      items: [
+        makeItem({
+          id: 's1',
+          kind: 'tool',
+          title: 'Read auth.ts',
+          toolKind: 'read',
+          filePath: 'src/auth.ts',
+          status: 'completed',
+        }),
+      ],
+    };
+    const caughtUpRun = {
+      ...stepOneRun,
+      status: 'completed',
+      stepCount: 2,
+      items: [
+        ...stepOneRun.items,
+        makeItem({
+          id: 's2',
+          kind: 'command',
+          title: 'vitest run auth.test.ts',
+          toolKind: 'commandExecution',
+          status: 'completed',
+          exitCode: 0,
+        }),
+      ],
+    };
+
+    loadChatThreadMock.mockResolvedValueOnce(
+      makeThread({ subagentRuns: [stepOneRun], swarmState: null }),
+    );
+    getThreadSubagentDetailMock.mockResolvedValueOnce(caughtUpRun);
+
+    const selectEvents: CustomEvent[] = [];
+    const listener = (e: Event) => selectEvents.push(e as CustomEvent);
+    window.addEventListener('kite:select-thread', listener);
+
+    const { container } = render(
+      <SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-main-1" />,
+    );
+
+    await waitFor(() => {
+      expect(getThreadSubagentDetailMock).toHaveBeenCalledWith('thread-main-1', 'sub-stream-1');
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('.chat-work-group__toggle')).not.toBeNull();
+    });
+
+    const popOutBtn = screen.getByRole('button', { name: /Open subagent thread in main pane/i });
+    fireEvent.click(popOutBtn);
+    expect(selectEvents).toHaveLength(1);
+    expect(selectEvents[0].detail).toEqual({ threadId: 'child-stream-1' });
+
+    window.removeEventListener('kite:select-thread', listener);
+  });
+
+  it('renders inline child pendingApproval via ChatApprovalCard when child run is waiting and dispatches respondChatApproval', async () => {
+    const waitingParent = makeThread({
+      subagentRuns: [
+        {
+          subagentId: 'sub-wait-1',
+          parentThreadId: 'thread-main-1',
+          parentToolCallId: 'call-wait-1',
+          childThreadId: 'child-wait-1',
+          role: 'Migration Runner',
+          provider: 'claude',
+          model: 'claude-sonnet-4-6',
+          workspaceMode: 'inherit',
+          status: 'waiting',
+          prompt: 'Apply schema check',
+          stepCount: 0,
+          items: [],
+          startedAtUnixMs: Date.now() - 4_000,
+          updatedAtUnixMs: Date.now() - 500,
+        },
+      ],
+      swarmState: null,
+    });
+    const waitingChild = makeThread({
+      id: 'child-wait-1',
+      parentThreadId: 'thread-main-1',
+      pendingApproval: {
+        id: 'apr-child-1',
+        toolName: 'bash',
+        title: 'Run cargo check',
+        detail: 'cargo check --workspace',
+        risk: 'command',
+        impact: 'Runs compiler check',
+      },
+      subagentRuns: [],
+      swarmState: null,
+    });
+
+    loadChatThreadMock
+      .mockResolvedValueOnce(waitingParent)
+      .mockResolvedValueOnce(waitingChild);
+    respondChatApprovalMock.mockResolvedValueOnce(waitingChild);
+
+    render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-main-1" />);
+
+    const briefToggle = await screen.findByRole('button', { name: /Task Brief/i });
+    expect(briefToggle.getAttribute('aria-expanded')).toBe('true');
+
+    const approvalWrap = await screen.findByTestId('subagent-child-approval');
+    expect(approvalWrap).toHaveTextContent('Run cargo check');
+
+    const allowBtn = screen.getByRole('button', { name: /^Allow$/i });
+    fireEvent.click(allowBtn);
+    await waitFor(() => {
+      expect(respondChatApprovalMock).toHaveBeenCalledWith('child-wait-1', 'allowOnce', 'apr-child-1');
+    });
   });
 });

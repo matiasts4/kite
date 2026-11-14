@@ -1708,8 +1708,12 @@
   color: var(--accent);
 }
 
+.chat-subagent-card--waiting .chat-subagent-card__icon {
+  color: var(--warning, var(--brand-amber));
+}
+
 .chat-subagent-card--completed .chat-subagent-card__icon {
-  color: #22c55e;
+  color: var(--status-running);
 }
 
 .chat-subagent-card__title {
@@ -1829,6 +1833,10 @@
 
 .chat-subagent-card__state--done {
   color: var(--status-running);
+}
+
+.chat-subagent-card__state--waiting {
+  color: var(--warning, var(--brand-amber));
 }
 
 .chat-subagent-card__state--failed {

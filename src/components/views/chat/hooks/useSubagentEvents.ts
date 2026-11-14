@@ -13,6 +13,10 @@ export type ChatSubagentEventPayload =
       kind: 'subagentStepsUpdated';
       threadId: string;
       subagentId: string;
+      childThreadId?: string | null;
+      role?: string | null;
+      model?: string | null;
+      provider?: string | null;
       items?: ChatItem[];
       stepCount?: number;
       latestActivity?: string | null;
@@ -85,14 +89,41 @@ export function applySubagentEvent(
   if (payload.kind === 'subagentStepsUpdated' && payload.subagentId) {
     const existingRuns = thread.subagentRuns ?? [];
     const idx = existingRuns.findIndex(
-      (r) => r.subagentId === payload.subagentId || r.parentToolCallId === payload.subagentId
+      (r) =>
+        r.subagentId === payload.subagentId ||
+        r.parentToolCallId === payload.subagentId ||
+        (payload.childThreadId && r.childThreadId === payload.childThreadId)
     );
-    if (idx < 0) return thread;
+    if (idx < 0) {
+      const synthesizedItems = payload.items ?? [];
+      const synthesizedRun: SubagentRun = {
+        subagentId: payload.subagentId,
+        parentThreadId: thread.id,
+        parentToolCallId: payload.subagentId,
+        childThreadId: payload.childThreadId ?? null,
+        role: payload.role ?? payload.subagentId,
+        provider: payload.provider ?? null,
+        model: payload.model ?? null,
+        status: payload.status ?? 'running',
+        stepCount: payload.stepCount ?? synthesizedItems.length,
+        latestActivity: payload.latestActivity ?? null,
+        startedAtUnixMs: payload.updatedAtUnixMs ?? Date.now(),
+        updatedAtUnixMs: payload.updatedAtUnixMs ?? Date.now(),
+        items: synthesizedItems,
+      };
+      return {
+        ...thread,
+        subagentRuns: [...existingRuns, synthesizedRun],
+      };
+    }
     const nextRuns = existingRuns.map((run, i) => {
       if (i !== idx) return run;
       const mergedItems = payload.items ? mergeRunItems(run.items ?? [], payload.items) : run.items ?? [];
       return {
         ...run,
+        childThreadId: payload.childThreadId ?? run.childThreadId,
+        model: payload.model ?? run.model,
+        provider: payload.provider ?? run.provider,
         items: mergedItems,
         stepCount: Math.max(run.stepCount ?? 0, payload.stepCount ?? mergedItems.length),
         latestActivity: payload.latestActivity !== undefined ? payload.latestActivity : run.latestActivity,
@@ -134,37 +165,51 @@ export function useSubagentEvents({
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
       return;
     }
-    let unlisten: (() => void) | undefined;
+    let unlistenSubagent: (() => void) | undefined;
+    let unlistenSwarm: (() => void) | undefined;
     let cancelled = false;
+    const handlePayload = (payload: ChatSubagentEventPayload | undefined) => {
+      if (!isMountedRef.current || !payload?.threadId) return;
+      setThreadsMap((prev) => {
+        const current = prev[payload.threadId];
+        if (!current) return prev;
+        const next = applySubagentEvent(current, payload);
+        if (next !== current && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('kite:subagent-activity-count', {
+              detail: { threadId: payload.threadId, count: countRunningSubagents(next) },
+            })
+          );
+        }
+        return next === current ? prev : { ...prev, [payload.threadId]: next };
+      });
+    };
+
     import('@tauri-apps/api/event')
-      .then(({ listen }) =>
-        listen<ChatSubagentEventPayload>('chat-subagent-event', (event) => {
-          if (!isMountedRef.current || !event.payload?.threadId) return;
-          const payload = event.payload;
-          setThreadsMap((prev) => {
-            const current = prev[payload.threadId];
-            if (!current) return prev;
-            const next = applySubagentEvent(current, payload);
-            if (next !== current && typeof window !== 'undefined') {
-              window.dispatchEvent(
-                new CustomEvent('kite:subagent-activity-count', {
-                  detail: { threadId: payload.threadId, count: countRunningSubagents(next) },
-                })
-              );
-            }
-            return next === current ? prev : { ...prev, [payload.threadId]: next };
-          });
-        })
-      )
-      .then((stop) => {
-        if (cancelled) stop();
-        else unlisten = stop;
+      .then(async ({ listen }) => {
+        const stopSub = await listen<ChatSubagentEventPayload>('chat-subagent-event', (event) => {
+          handlePayload(event.payload);
+        });
+        if (cancelled) {
+          stopSub();
+          return;
+        }
+        unlistenSubagent = stopSub;
+        const stopSwarm = await listen<ChatSubagentEventPayload>('chat-swarm-event', (event) => {
+          handlePayload(event.payload);
+        });
+        if (cancelled) {
+          stopSwarm();
+          return;
+        }
+        unlistenSwarm = stopSwarm;
       })
       .catch(() => undefined);
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenSubagent?.();
+      unlistenSwarm?.();
     };
   }, [setThreadsMap, isMountedRef]);
 }

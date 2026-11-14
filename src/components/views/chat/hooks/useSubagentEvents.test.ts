@@ -85,4 +85,38 @@ describe('applySubagentEvent', () => {
     expect(withSwarm.swarmState?.title).toBe('Parser Fix');
     expect(withSwarm.swarmId).toBe('swarm_1');
   });
+
+  it('synthesizes a subagent run when subagentStepsUpdated arrives before subagentRunUpdated', () => {
+    const base = makeThread();
+    const updated = applySubagentEvent(base, {
+      kind: 'subagentStepsUpdated',
+      threadId: 'thread-1',
+      subagentId: 'sub-early-1',
+      childThreadId: 'child-1',
+      role: 'Explorer',
+      provider: 'gemini',
+      model: 'gemini-3-flash',
+      stepCount: 1,
+      latestActivity: 'Reading Cargo.toml',
+      status: 'running',
+      items: [
+        {
+          id: 'early-step-1',
+          kind: 'tool',
+          title: 'Read Cargo.toml',
+          detail: null,
+          text: '',
+          status: 'completed',
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: 15,
+          attachments: [],
+        },
+      ],
+    });
+    expect(updated.subagentRuns).toHaveLength(1);
+    expect(updated.subagentRuns?.[0]?.childThreadId).toBe('child-1');
+    expect(updated.subagentRuns?.[0]?.role).toBe('Explorer');
+    expect(updated.subagentRuns?.[0]?.items).toHaveLength(1);
+  });
 });

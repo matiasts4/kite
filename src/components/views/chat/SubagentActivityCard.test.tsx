@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { ChatItem } from '../../../types';
-import { SubagentActivityCard, SubagentGroupRow } from './SubagentActivityCard';
+import { plainPreviewLine, SubagentActivityCard, SubagentGroupRow } from './SubagentActivityCard';
 import { SwarmActivityCard } from './SwarmActivityCard';
 import {
   OPEN_RIGHT_DOCK_SUBAGENT_EVENT,
@@ -346,5 +346,76 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     expect(screen.getByText('Package.json Reviewer')).toBeInTheDocument();
     expect(screen.getByText('Reading package.json in project root')).toBeInTheDocument();
     expect(screen.queryByText(/\$ kite dispatch/i)).toBeNull();
+  });
+
+  it('strips markdown punctuation from previews, keeps waiting groups expanded, and ticks elapsed time on DOM ref', () => {
+    vi.useFakeTimers();
+    try {
+      expect(
+        plainPreviewLine('### Summary\n- Checked `package.json` & [**OAuth** flow](https://example.com)'),
+      ).toBe('Summary Checked package.json & OAuth flow');
+
+      const startedAt = Date.now() - 5_000;
+      const items: ChatItem[] = [
+        {
+          id: 'sub_md_1',
+          kind: 'tool',
+          text: '',
+          title: 'Security Reviewer',
+          detail: '- Auditing `src/auth.ts` for **tokens**',
+          status: 'waiting',
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: startedAt,
+          attachments: [],
+          toolKind: 'subagent',
+          subagentMeta: {
+            subagentId: 'sub_md_1',
+            action: 'spawn',
+            role: 'Security Reviewer',
+            status: 'waiting',
+            childThreadId: 'child-wait-1',
+            latestActivity: '- **Blocked**: awaiting `cargo` approval',
+            stepCount: 2,
+          },
+        },
+        {
+          id: 'sub_md_2',
+          kind: 'tool',
+          text: '',
+          title: 'Docs Reviewer',
+          detail: 'Inspecting README.md',
+          status: 'running',
+          streaming: true,
+          exitCode: null,
+          createdAtUnixMs: startedAt,
+          attachments: [],
+          toolKind: 'subagent',
+          subagentMeta: {
+            subagentId: 'sub_md_2',
+            action: 'spawn',
+            role: 'Docs Reviewer',
+            status: 'running',
+            childThreadId: 'child-run-2',
+            latestActivity: 'Reading `README.md`',
+            stepCount: 1,
+          },
+        },
+      ];
+
+      const { container } = render(
+        <SubagentGroupRow items={items} threadId="thread-parent" workspaceId="ws-1" />,
+      );
+
+      expect(screen.getByTestId('subagent-disclosure-group')).toHaveClass('chat-subagent-group--expanded');
+      expect(screen.getByText('Blocked: awaiting cargo approval')).toBeInTheDocument();
+      expect(screen.getByText('Waiting')).toBeInTheDocument();
+      const clock = container.querySelector('.chat-subagent-card__clock');
+      expect(clock?.textContent).toBe('5s');
+      vi.advanceTimersByTime(2000);
+      expect(clock?.textContent).toBe('7s');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

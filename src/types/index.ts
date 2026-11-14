@@ -237,7 +237,7 @@ export interface ChatItem {
   text: string;
   title: string | null;
   detail: string | null;
-  status: 'inProgress' | 'running' | 'pending' | 'completed' | 'failed' | 'ready' | null;
+  status: 'inProgress' | 'running' | 'pending' | 'waiting' | 'completed' | 'failed' | 'ready' | null;
   streaming: boolean;
   exitCode: number | null;
   createdAtUnixMs: number;

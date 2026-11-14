@@ -233,6 +233,7 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                         }
                     }
                 }
+                crate::chat::subagents::sync_child_thread_to_parent(thread_id);
                 persist();
                 return true;
             }
@@ -513,16 +514,19 @@ pub fn open_headless_permission(thread_id: &str, run_id: &str, permission: &str)
         "isRead": false,
         "isWaitingForInput": true
     });
-    let mut notifs = notifications().lock().unwrap();
-    if let Some(pos) = notifs.iter().position(|n| n.get("id").and_then(|v| v.as_str()) == Some(request_id.as_str())) {
-        notifs[pos] = notice;
-    } else {
-        notifs.insert(0, notice);
-        if notifs.len() > 100 {
-            notifs.truncate(100);
+    {
+        let mut notifs = notifications().lock().unwrap();
+        if let Some(pos) = notifs.iter().position(|n| n.get("id").and_then(|v| v.as_str()) == Some(request_id.as_str())) {
+            notifs[pos] = notice;
+        } else {
+            notifs.insert(0, notice);
+            if notifs.len() > 100 {
+                notifs.truncate(100);
+            }
         }
     }
     persist();
+    crate::chat::subagents::sync_child_thread_to_parent(thread_id);
 }
 
 pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str) {

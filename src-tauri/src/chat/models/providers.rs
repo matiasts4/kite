@@ -1,7 +1,9 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+const THREAD_PROVIDERS_CACHE_TTL: Duration = Duration::from_secs(10);
 
 use crate::chat::normalize::catalog_cache_key;
 use crate::chat::utils::{binary_exists, resolve_bin};
@@ -341,67 +343,184 @@ pub fn validate_provider_model_selection(provider: &str, model: &str) -> Result<
     validate_provider_model_with_catalog(canon, model, &catalog)
 }
 
+pub(crate) struct ThreadProvidersCache {
+    ttl: Duration,
+    state: Mutex<Option<(String, Instant, Value)>>,
+    fetch_lock: Mutex<()>,
+}
+
+impl ThreadProvidersCache {
+    pub(crate) const fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            state: Mutex::new(None),
+            fetch_lock: Mutex::new(()),
+        }
+    }
+
+    pub(crate) fn get_or_compute(
+        &self,
+        settings_key: &str,
+        refresh: bool,
+        bypass_time_ttl: bool,
+        compute: impl FnOnce() -> Value,
+    ) -> Value {
+        if !refresh && !bypass_time_ttl {
+            let guard = self.state.lock().unwrap();
+            if let Some((cached_key, cached_at, val)) = guard.as_ref() {
+                if cached_key == settings_key && cached_at.elapsed() < self.ttl {
+                    return val.clone();
+                }
+            }
+        }
+
+        let _singleflight = self.fetch_lock.lock().unwrap();
+        if !refresh && !bypass_time_ttl {
+            let guard = self.state.lock().unwrap();
+            if let Some((cached_key, cached_at, val)) = guard.as_ref() {
+                if cached_key == settings_key && cached_at.elapsed() < self.ttl {
+                    return val.clone();
+                }
+            }
+        }
+
+        let fresh = compute();
+        if !bypass_time_ttl {
+            *self.state.lock().unwrap() =
+                Some((settings_key.to_string(), Instant::now(), fresh.clone()));
+        }
+        fresh
+    }
+
+    pub(crate) fn invalidate(&self) {
+        *self.state.lock().unwrap() = None;
+    }
+}
+
+static THREAD_PROVIDERS_CACHE: OnceLock<ThreadProvidersCache> = OnceLock::new();
+
+fn thread_providers_cache() -> &'static ThreadProvidersCache {
+    THREAD_PROVIDERS_CACHE
+        .get_or_init(|| ThreadProvidersCache::new(THREAD_PROVIDERS_CACHE_TTL))
+}
+
+pub fn invalidate_thread_providers_cache() {
+    thread_providers_cache().invalidate();
+}
+
 pub fn discover_thread_providers(refresh: bool) -> Value {
     let settings = crate::subagent_settings::get_subagent_settings();
     discover_thread_providers_with_settings(refresh, &settings)
 }
 
-pub fn discover_thread_providers_with_settings(
+fn build_thread_provider_row(
+    canon: &str,
+    refresh: bool,
+    enabled_stack: &[&crate::subagent_settings::SubagentStackEntry],
+    stack_active: bool,
+    default_provider: Option<&str>,
+) -> Value {
+    let binary_present = provider_binary_present(canon);
+    let signed_in = provider_signed_in(canon);
+    let state = classify_catalog_availability(binary_present, signed_in);
+    let catalog = if state == "ready" {
+        provider_models(canon, refresh)
+    } else {
+        catalog_payload(canon, &[], false)
+    };
+    let models: Vec<Value> = catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let sample_ids: Vec<String> = models
+        .iter()
+        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+        .take(5)
+        .collect();
+    let stack_models: Vec<String> = enabled_stack
+        .iter()
+        .filter(|e| e.provider == canon)
+        .map(|e| e.model.clone())
+        .collect();
+    let in_stack = !stack_active || !stack_models.is_empty();
+    let is_default_delegation = default_provider == Some(canon);
+    let supports_discovery = !matches!(canon, "claude" | "gemini");
+    json!({
+        "provider": canon,
+        "state": state,
+        "binaryPresent": binary_present,
+        "signedIn": signed_in,
+        "supportsModelDiscovery": supports_discovery,
+        "modelCount": models.len(),
+        "sampleModels": sample_ids,
+        "inStack": in_stack,
+        "stackModels": stack_models,
+        "isDefaultDelegation": is_default_delegation,
+    })
+}
+
+fn discover_thread_providers_with_settings_uncached(
     refresh: bool,
     settings: &crate::subagent_settings::SubagentSettings,
 ) -> Value {
     let enabled_stack: Vec<&crate::subagent_settings::SubagentStackEntry> =
         settings.stack.iter().filter(|e| e.enabled).collect();
     let stack_active = !enabled_stack.is_empty();
-    let mut rows = Vec::with_capacity(THREAD_PROVIDERS.len());
-    for canon in THREAD_PROVIDERS {
-        let binary_present = provider_binary_present(canon);
-        let signed_in = provider_signed_in(canon);
-        let state = classify_catalog_availability(binary_present, signed_in);
-        let catalog = if state == "ready" {
-            provider_models(canon, refresh)
-        } else {
-            catalog_payload(canon, &[], false)
-        };
-        let models: Vec<Value> = catalog
-            .get("models")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let sample_ids: Vec<String> = models
+    let default_provider = settings
+        .default_delegation
+        .as_ref()
+        .map(|d| d.provider.as_str());
+
+    let rows: Vec<Value> = std::thread::scope(|s| {
+        let handles: Vec<_> = THREAD_PROVIDERS
             .iter()
-            .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
-            .take(5)
+            .map(|&canon| {
+                let stack_ref = &enabled_stack;
+                s.spawn(move || {
+                    build_thread_provider_row(
+                        canon,
+                        refresh,
+                        stack_ref,
+                        stack_active,
+                        default_provider,
+                    )
+                })
+            })
             .collect();
-        let stack_models: Vec<String> = enabled_stack
+
+        THREAD_PROVIDERS
             .iter()
-            .filter(|e| e.provider == canon)
-            .map(|e| e.model.clone())
-            .collect();
-        let in_stack = !stack_active || !stack_models.is_empty();
-        let is_default_delegation = settings
-            .default_delegation
-            .as_ref()
-            .is_some_and(|d| d.provider == canon);
-        let supports_discovery = !matches!(canon, "claude" | "gemini");
-        rows.push(json!({
-            "provider": canon,
-            "state": state,
-            "binaryPresent": binary_present,
-            "signedIn": signed_in,
-            "supportsModelDiscovery": supports_discovery,
-            "modelCount": models.len(),
-            "sampleModels": sample_ids,
-            "inStack": in_stack,
-            "stackModels": stack_models,
-            "isDefaultDelegation": is_default_delegation,
-        }));
-    }
+            .zip(handles)
+            .map(|(&canon, handle)| {
+                handle.join().unwrap_or_else(|_| {
+                    build_thread_provider_row(
+                        canon,
+                        refresh,
+                        &enabled_stack,
+                        stack_active,
+                        default_provider,
+                    )
+                })
+            })
+            .collect()
+    });
+
     json!({
         "providers": rows,
         "stackActive": stack_active,
         "overridePolicy": settings.override_policy.as_str(),
         "defaultDelegation": settings.default_delegation,
+    })
+}
+
+pub fn discover_thread_providers_with_settings(
+    refresh: bool,
+    settings: &crate::subagent_settings::SubagentSettings,
+) -> Value {
+    let settings_key = serde_json::to_string(settings).unwrap_or_default();
+    thread_providers_cache().get_or_compute(&settings_key, refresh, cfg!(test), || {
+        discover_thread_providers_with_settings_uncached(refresh, settings)
     })
 }
 

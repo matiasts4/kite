@@ -435,3 +435,49 @@
         assert!(model_likely_belongs_to_another_provider("antigravity", "gpt-5-codex"));
         assert!(!model_likely_belongs_to_another_provider("antigravity", "gpt-oss-120b"));
     }
+
+    #[test]
+    fn thread_providers_cache_hits_keys_by_settings_and_invalidates_on_writes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let cache = ThreadProvidersCache::new(Duration::from_secs(60));
+        let calls = AtomicUsize::new(0);
+
+        let a = cache.get_or_compute("settings-v1", false, false, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({ "call": n })
+        });
+        let b = cache.get_or_compute("settings-v1", false, false, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({ "call": n })
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(a["call"], json!(1));
+        assert_eq!(b["call"], json!(1));
+
+        // Settings fingerprint change invalidates hit automatically.
+        let c = cache.get_or_compute("settings-v2", false, false, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({ "call": n })
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(c["call"], json!(2));
+
+        // Explicit write invalidation clears entry.
+        cache.invalidate();
+        let d = cache.get_or_compute("settings-v2", false, false, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({ "call": n })
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(d["call"], json!(3));
+
+        // Explicit refresh=true recomputes.
+        let e = cache.get_or_compute("settings-v2", true, false, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({ "call": n })
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(e["call"], json!(4));
+    }

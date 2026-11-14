@@ -186,18 +186,29 @@ fn current_settings() -> Value {
     settings_slot().lock().unwrap().clone()
 }
 
-#[tauri::command]
-pub fn read_dictation_availability(_request: Option<Value>) -> Value {
+pub fn read_dictation_availability_direct(_request: Option<Value>) -> Value {
     unavailable_dictation()
 }
 
 #[tauri::command]
-pub fn read_dictation_settings(_request: Option<Value>) -> Value {
+pub async fn read_dictation_availability(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || read_dictation_availability_direct(request))
+        .await
+        .unwrap_or_else(|_| unavailable_dictation())
+}
+
+pub fn read_dictation_settings_direct(_request: Option<Value>) -> Value {
     current_settings()
 }
 
 #[tauri::command]
-pub fn update_dictation_settings(request: Option<Value>) -> Value {
+pub async fn read_dictation_settings(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || read_dictation_settings_direct(request))
+        .await
+        .unwrap_or_else(|_| default_settings())
+}
+
+pub fn update_dictation_settings_direct(request: Option<Value>) -> Value {
     let incoming = request_body(&request)
         .and_then(|value| value.get("settings"))
         .cloned()
@@ -212,7 +223,13 @@ pub fn update_dictation_settings(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn list_dictation_input_devices(_request: Option<Value>) -> Value {
+pub async fn update_dictation_settings(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || update_dictation_settings_direct(request))
+        .await
+        .unwrap_or_else(|_| default_settings())
+}
+
+pub fn list_dictation_input_devices_direct(_request: Option<Value>) -> Value {
     json!({
         "schemaVersion": 1,
         "devices": [],
@@ -221,17 +238,35 @@ pub fn list_dictation_input_devices(_request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn select_dictation_whisper_model(_request: Option<Value>) -> Value {
+pub async fn list_dictation_input_devices(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || list_dictation_input_devices_direct(request))
+        .await
+        .unwrap_or_else(|_| json!({ "schemaVersion": 1, "devices": [], "selectedId": Value::Null }))
+}
+
+pub fn select_dictation_whisper_model_direct(_request: Option<Value>) -> Value {
     unavailable_dictation()
 }
 
 #[tauri::command]
-pub fn request_dictation_permission(_request: Option<Value>) -> Value {
+pub async fn select_dictation_whisper_model(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || select_dictation_whisper_model_direct(request))
+        .await
+        .unwrap_or_else(|_| unavailable_dictation())
+}
+
+pub fn request_dictation_permission_direct(_request: Option<Value>) -> Value {
     unavailable_dictation()
 }
 
 #[tauri::command]
-pub fn start_dictation(request: Option<Value>) -> Value {
+pub async fn request_dictation_permission(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || request_dictation_permission_direct(request))
+        .await
+        .unwrap_or_else(|_| unavailable_dictation())
+}
+
+pub fn start_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     let result = dictation_error(&id);
     dictation_takes().lock().unwrap().insert(id, result.clone());
@@ -239,7 +274,13 @@ pub fn start_dictation(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn read_dictation(request: Option<Value>) -> Value {
+pub async fn start_dictation(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || start_dictation_direct(request))
+        .await
+        .unwrap_or_else(|_| dictation_error("unavailable"))
+}
+
+pub fn read_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     dictation_takes()
         .lock()
@@ -250,31 +291,65 @@ pub fn read_dictation(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn stop_dictation(request: Option<Value>) -> Value {
+pub async fn read_dictation(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || read_dictation_direct(request))
+        .await
+        .unwrap_or_else(|_| dictation_error("unavailable"))
+}
+
+pub fn stop_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     dictation_takes().lock().unwrap().remove(&id);
     Value::Null
 }
 
 #[tauri::command]
-pub fn cancel_dictation(request: Option<Value>) -> Value {
+pub async fn stop_dictation(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || stop_dictation_direct(request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
+pub fn cancel_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     dictation_takes().lock().unwrap().remove(&id);
     Value::Null
 }
 
 #[tauri::command]
-pub fn read_agent_voice_input_availability(_request: Option<Value>) -> Value {
+pub async fn cancel_dictation(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || cancel_dictation_direct(request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
+pub fn read_agent_voice_input_availability_direct(_request: Option<Value>) -> Value {
     unavailable_voice_input()
 }
 
 #[tauri::command]
-pub fn request_agent_voice_input_permission(_request: Option<Value>) -> Value {
+pub async fn read_agent_voice_input_availability(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_agent_voice_input_availability_direct(request)
+    })
+    .await
+    .unwrap_or_else(|_| unavailable_voice_input())
+}
+
+pub fn request_agent_voice_input_permission_direct(_request: Option<Value>) -> Value {
     unavailable_voice_input()
 }
 
 #[tauri::command]
-pub fn read_agent_voice_create(request: Option<Value>) -> Value {
+pub async fn request_agent_voice_input_permission(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || {
+        request_agent_voice_input_permission_direct(request)
+    })
+    .await
+    .unwrap_or_else(|_| unavailable_voice_input())
+}
+
+pub fn read_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     voice_takes()
         .lock()
@@ -285,7 +360,13 @@ pub fn read_agent_voice_create(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn start_agent_voice_create(request: Option<Value>) -> Value {
+pub async fn read_agent_voice_create(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || read_agent_voice_create_direct(request))
+        .await
+        .unwrap_or_else(|_| voice_error("unavailable"))
+}
+
+pub fn start_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     let result = voice_error(&id);
     voice_takes().lock().unwrap().insert(id, result.clone());
@@ -293,21 +374,39 @@ pub fn start_agent_voice_create(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn stop_agent_voice_create(request: Option<Value>) -> Value {
+pub async fn start_agent_voice_create(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || start_agent_voice_create_direct(request))
+        .await
+        .unwrap_or_else(|_| voice_error("unavailable"))
+}
+
+pub fn stop_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     voice_takes().lock().unwrap().remove(&id);
     Value::Null
 }
 
 #[tauri::command]
-pub fn cancel_agent_voice_create(request: Option<Value>) -> Value {
+pub async fn stop_agent_voice_create(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || stop_agent_voice_create_direct(request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
+pub fn cancel_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
     voice_takes().lock().unwrap().remove(&id);
     Value::Null
 }
 
 #[tauri::command]
-pub fn preview_voice_import(request: Option<Value>) -> Value {
+pub async fn cancel_agent_voice_create(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || cancel_agent_voice_create_direct(request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
+pub fn preview_voice_import_direct(request: Option<Value>) -> Value {
     let include_history = request_body(&request)
         .and_then(|value| value.get("includeHistory"))
         .and_then(|value| value.as_bool())
@@ -331,7 +430,13 @@ pub fn preview_voice_import(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn apply_voice_import(request: Option<Value>) -> Value {
+pub async fn preview_voice_import(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || preview_voice_import_direct(request))
+        .await
+        .unwrap_or_else(|_| json!({ "schemaVersion": 1, "sourceFound": false, "hasImportableData": false }))
+}
+
+pub fn apply_voice_import_direct(request: Option<Value>) -> Value {
     let preview_id = request_body(&request)
         .and_then(|value| value.get("previewId"))
         .and_then(|value| value.as_str())
@@ -355,7 +460,13 @@ pub fn apply_voice_import(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn voice_assistant_prompt(request: Option<Value>) -> Value {
+pub async fn apply_voice_import(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || apply_voice_import_direct(request))
+        .await
+        .unwrap_or_else(|_| json!({ "schemaVersion": 1, "didWrite": false }))
+}
+
+pub fn voice_assistant_prompt_direct(request: Option<Value>) -> Value {
     let prompt = request_body(&request)
         .and_then(|value| value.get("prompt"))
         .and_then(|value| value.as_str())
@@ -369,11 +480,24 @@ pub fn voice_assistant_prompt(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn voice_context_read(_request: Option<Value>) -> Value {
+pub async fn voice_assistant_prompt(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_assistant_prompt_direct(request))
+        .await
+        .unwrap_or_else(|_| json!({ "prompt": "Voice is unavailable.", "notes": "Live voice is unavailable. No local engine is installed." }))
+}
+
+pub fn voice_context_read_direct(_request: Option<Value>) -> Value {
     json!({
         "root_version": "0000000000000000000000000000000000000000000000000000000000000000",
         "files": []
     })
+}
+
+#[tauri::command]
+pub async fn voice_context_read(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_context_read_direct(request))
+        .await
+        .unwrap_or_else(|_| json!({ "root_version": "0000000000000000000000000000000000000000000000000000000000000000", "files": [] }))
 }
 
 fn live_unavailable() -> Value {
@@ -384,28 +508,51 @@ fn live_unavailable() -> Value {
     })
 }
 
-#[tauri::command]
-pub fn voice_live_close(_request: Option<Value>) -> Value {
+pub fn voice_live_close_direct(_request: Option<Value>) -> Value {
     live_unavailable()
 }
 
 #[tauri::command]
-pub fn voice_live_connect(_request: Option<Value>) -> Value {
+pub async fn voice_live_close(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_live_close_direct(request))
+        .await
+        .unwrap_or_else(|_| live_unavailable())
+}
+
+pub fn voice_live_connect_direct(_request: Option<Value>) -> Value {
     live_unavailable()
 }
 
 #[tauri::command]
-pub fn voice_live_send(_request: Option<Value>) -> Value {
+pub async fn voice_live_connect(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_live_connect_direct(request))
+        .await
+        .unwrap_or_else(|_| live_unavailable())
+}
+
+pub fn voice_live_send_direct(_request: Option<Value>) -> Value {
     live_unavailable()
 }
 
 #[tauri::command]
-pub fn voice_live_session(_request: Option<Value>) -> Value {
+pub async fn voice_live_send(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_live_send_direct(request))
+        .await
+        .unwrap_or_else(|_| live_unavailable())
+}
+
+pub fn voice_live_session_direct(_request: Option<Value>) -> Value {
     live_unavailable()
 }
 
 #[tauri::command]
-pub fn voice_resolve_work(request: Option<Value>) -> Value {
+pub async fn voice_live_session(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_live_session_direct(request))
+        .await
+        .unwrap_or_else(|_| live_unavailable())
+}
+
+pub fn voice_resolve_work_direct(request: Option<Value>) -> Value {
     let body = request_body(&request);
     let operation_id = body
         .and_then(|value| value.get("operation_id"))
@@ -427,4 +574,37 @@ pub fn voice_resolve_work(request: Option<Value>) -> Value {
         "model": Value::Null,
         "alternatives": []
     })
+}
+
+#[tauri::command]
+pub async fn voice_resolve_work(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || voice_resolve_work_direct(request))
+        .await
+        .unwrap_or_else(|_| {
+            json!({
+                "schema_version": 1,
+                "operation_id": "unavailable",
+                "snapshot_id": "unavailable",
+                "status": "unavailable",
+                "candidate_id": Value::Null,
+                "confidence": Value::Null,
+                "model": Value::Null,
+                "alternatives": []
+            })
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_async_dictation_command_wrapper() {
+        let resolved = tauri::async_runtime::block_on(voice_resolve_work(Some(json!({
+            "operation_id": "op-1",
+            "snapshot_id": "snap-1"
+        }))));
+        assert_eq!(resolved["operation_id"], "op-1");
+        assert_eq!(resolved["snapshot_id"], "snap-1");
+    }
 }

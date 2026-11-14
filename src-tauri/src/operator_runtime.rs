@@ -7,8 +7,7 @@ use crate::hidden_exec;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-#[tauri::command]
-pub fn query_operator_agent(request: Value) -> Value {
+pub fn query_operator_agent_direct(request: Value) -> Value {
     let req = request.get("request").unwrap_or(&request);
 
     let engine = req
@@ -142,6 +141,19 @@ pub fn query_operator_agent(request: Value) -> Value {
             })
         }
     }
+}
+
+#[tauri::command]
+pub async fn query_operator_agent(request: Value) -> Value {
+    tauri::async_runtime::spawn_blocking(move || query_operator_agent_direct(request))
+        .await
+        .unwrap_or_else(|err| {
+            json!({
+                "success": false,
+                "error": format!("Operator runtime join error: {err}"),
+                "latencyMs": 0
+            })
+        })
 }
 
 #[tauri::command]
@@ -410,8 +422,7 @@ fn redact_secrets_native(mut val: Value) -> Value {
     val
 }
 
-#[tauri::command]
-pub fn operator_trace_path() -> Result<String, String> {
+pub fn operator_trace_path_direct() -> Result<String, String> {
     let dir = crate::persist::roaming_app_dir().join("operator-traces");
     if !dir.exists() {
         let _ = std::fs::create_dir_all(&dir);
@@ -420,7 +431,13 @@ pub fn operator_trace_path() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn operator_trace_reveal(_request: Option<Value>) -> Value {
+pub async fn operator_trace_path() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(operator_trace_path_direct)
+        .await
+        .map_err(|e| format!("Failed to join operator trace path task: {e}"))?
+}
+
+pub fn operator_trace_reveal_direct(_request: Option<Value>) -> Value {
     let dir = crate::persist::roaming_app_dir().join("operator-traces");
     let _ = std::fs::create_dir_all(&dir);
     #[cfg(target_os = "windows")]
@@ -433,7 +450,16 @@ pub fn operator_trace_reveal(_request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn operator_trace_append(line: Option<String>, request: Option<Value>) -> Result<(), String> {
+pub async fn operator_trace_reveal(_request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || operator_trace_reveal_direct(_request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
+pub fn operator_trace_append_direct(
+    line: Option<String>,
+    request: Option<Value>,
+) -> Result<(), String> {
     use std::io::Write;
     let line_str = if let Some(l) = line {
         l
@@ -472,18 +498,36 @@ pub fn operator_trace_append(line: Option<String>, request: Option<Value>) -> Re
     Ok(())
 }
 
+#[tauri::command]
+pub async fn operator_trace_append(
+    line: Option<String>,
+    request: Option<Value>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || operator_trace_append_direct(line, request))
+        .await
+        .map_err(|e| format!("Failed to join operator trace append task: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_query_operator_agent_unsupported_engine() {
-        let res = query_operator_agent(json!({
+        let payload = json!({
             "engine": "unknown_ai_engine",
             "prompt": "ping"
-        }));
+        });
+        let res = query_operator_agent_direct(payload.clone());
 
         assert_eq!(res["success"], false);
         assert!(res["error"].as_str().unwrap().contains("no soportado"));
+
+        let async_res = tauri::async_runtime::block_on(query_operator_agent(payload));
+        assert_eq!(async_res["success"], false);
+        assert!(async_res["error"]
+            .as_str()
+            .unwrap()
+            .contains("no soportado"));
     }
 }

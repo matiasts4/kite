@@ -321,8 +321,7 @@ pub fn plugins_config_path(app: &tauri::AppHandle) -> PathBuf {
 
 static STATE_LOCK: Mutex<()> = Mutex::new(());
 
-#[tauri::command]
-pub fn plugin_connections(app: tauri::AppHandle) -> Result<Vec<PluginConnection>, String> {
+pub fn plugin_connections_direct(app: tauri::AppHandle) -> Result<Vec<PluginConnection>, String> {
     let _guard = STATE_LOCK.lock().map_err(|e| format!("State lock poisoned: {e}"))?;
     let path = plugins_state_path(&app);
     let connections = load_connections_from_disk(&path)?;
@@ -333,7 +332,16 @@ pub fn plugin_connections(app: tauri::AppHandle) -> Result<Vec<PluginConnection>
 }
 
 #[tauri::command]
-pub fn plugin_connection_action(app: tauri::AppHandle, request: PluginActionRequest) -> Result<(), String> {
+pub async fn plugin_connections(app: tauri::AppHandle) -> Result<Vec<PluginConnection>, String> {
+    tauri::async_runtime::spawn_blocking(move || plugin_connections_direct(app))
+        .await
+        .map_err(|e| format!("plugin_connections task failed: {e}"))?
+}
+
+pub fn plugin_connection_action_direct(
+    app: tauri::AppHandle,
+    request: PluginActionRequest,
+) -> Result<(), String> {
     let _guard = STATE_LOCK.lock().map_err(|e| format!("State lock poisoned: {e}"))?;
     let path = plugins_state_path(&app);
     let mut connections = load_connections_from_disk(&path)?;
@@ -406,6 +414,16 @@ pub fn plugin_connection_action(app: tauri::AppHandle, request: PluginActionRequ
     Ok(())
 }
 
+#[tauri::command]
+pub async fn plugin_connection_action(
+    app: tauri::AppHandle,
+    request: PluginActionRequest,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || plugin_connection_action_direct(app, request))
+        .await
+        .map_err(|e| format!("plugin_connection_action task failed: {e}"))?
+}
+
 fn extract_plugin_id(request: &Option<Value>) -> Option<String> {
     let val = request.as_ref()?;
     if let Some(s) = val.as_str() {
@@ -432,8 +450,7 @@ pub fn get_plugin_config_from_path(
 }
 
 #[allow(non_snake_case)]
-#[tauri::command]
-pub fn get_plugin_config(
+pub fn get_plugin_config_direct(
     app: tauri::AppHandle,
     request: Option<Value>,
     plugin_id: Option<String>,
@@ -447,6 +464,21 @@ pub fn get_plugin_config(
 
     let path = plugins_config_path(&app);
     get_plugin_config_from_path(&path, &pid)
+}
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn get_plugin_config(
+    app: tauri::AppHandle,
+    request: Option<Value>,
+    plugin_id: Option<String>,
+    pluginId: Option<String>,
+) -> Result<Option<PluginConfig>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        get_plugin_config_direct(app, request, plugin_id, pluginId)
+    })
+    .await
+    .map_err(|e| format!("get_plugin_config task failed: {e}"))?
 }
 
 #[allow(non_snake_case)]
@@ -527,8 +559,7 @@ pub fn save_plugin_config_paths(
 }
 
 #[allow(non_snake_case)]
-#[tauri::command]
-pub fn save_plugin_config(
+pub fn save_plugin_config_direct(
     app: tauri::AppHandle,
     request: Option<Value>,
     plugin_id: Option<String>,
@@ -540,6 +571,22 @@ pub fn save_plugin_config(
     let config_path = plugins_config_path(&app);
     let state_path = plugins_state_path(&app);
     save_plugin_config_paths(&config_path, &state_path, &pid, cfg)
+}
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn save_plugin_config(
+    app: tauri::AppHandle,
+    request: Option<Value>,
+    plugin_id: Option<String>,
+    pluginId: Option<String>,
+    config: Option<PluginConfig>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_plugin_config_direct(app, request, plugin_id, pluginId, config)
+    })
+    .await
+    .map_err(|e| format!("save_plugin_config task failed: {e}"))?
 }
 
 #[cfg(test)]

@@ -98,7 +98,9 @@ fn reload_center() {
 }
 
 pub fn make_notifications_snapshot() -> Value {
-    let notifs = notifications().lock().unwrap();
+    // Clone and drop notifications() before locking revision_counter() or center(),
+    // because persist() acquires revision_counter() before notifications().
+    let notifs = { notifications().lock().unwrap().clone() };
     make_notifications_snapshot_inner(&notifs)
 }
 
@@ -111,30 +113,49 @@ pub fn make_notifications_snapshot_inner(notifs: &[Value]) -> Value {
         .iter()
         .filter(|n| n.get("isWaitingForInput").and_then(|v| v.as_bool()) == Some(true))
         .count();
-    let revision = *revision_counter().lock().unwrap() as i64;
-    let center = center().lock().unwrap();
+    let revision = { *revision_counter().lock().unwrap() as i64 };
+    let (authorization, preferences, persistence_error) = {
+        let center = center().lock().unwrap();
+        (
+            center.authorization.clone(),
+            center.preferences.clone(),
+            center.persistence_error.clone(),
+        )
+    };
     json!({
         "schemaVersion": 1,
         "revision": revision,
         "records": notifs,
         "unreadCount": unread_count,
         "openInputRequestCount": open_input_count,
-        "authorization": center.authorization,
-        "preferences": center.preferences,
-        "persistenceError": center.persistence_error,
+        "authorization": authorization,
+        "preferences": preferences,
+        "persistenceError": persistence_error,
         "archiveReadOnly": false,
         "openRecordId": Value::Null
     })
 }
 
-#[tauri::command]
-pub fn notifications_snapshot(_request: Option<Value>) -> Value {
+pub fn notifications_snapshot_direct(_request: Option<Value>) -> Value {
     make_notifications_snapshot()
 }
 
 #[tauri::command]
-pub fn notifications_poll(_request: Option<Value>) -> Value {
+pub async fn notifications_snapshot(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_snapshot_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_poll_direct(_request: Option<Value>) -> Value {
     make_notifications_snapshot()
+}
+
+#[tauri::command]
+pub async fn notifications_poll(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_poll_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
 }
 
 fn now_ms() -> i64 {
@@ -167,8 +188,7 @@ fn attention_payload(request: &Option<Value>) -> Option<Value> {
     Some(payload)
 }
 
-#[tauri::command]
-pub fn notifications_report_attention(request: Option<Value>) -> Value {
+pub fn notifications_report_attention_direct(request: Option<Value>) -> Value {
     let Some(payload) = attention_payload(&request) else {
         return make_notifications_snapshot();
     };
@@ -248,33 +268,55 @@ pub fn notifications_report_attention(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn notifications_mark_read(request: Option<Value>) -> Value {
+pub async fn notifications_report_attention(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_report_attention_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_mark_read_direct(request: Option<Value>) -> Value {
     let req = body(&request);
     let record_id = req.and_then(|r| r.get("recordId")).and_then(|v| v.as_str()).unwrap_or("");
-    let mut items = notifications().lock().unwrap();
-    if let Some(item) = items.iter_mut().find(|n| n.get("id").and_then(|v| v.as_str()) == Some(record_id)) {
-        item["isRead"] = json!(true);
-    }
-    let snap = make_notifications_snapshot_inner(&items);
-    drop(items);
+    let snapshot_items = {
+        let mut items = notifications().lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|n| n.get("id").and_then(|v| v.as_str()) == Some(record_id)) {
+            item["isRead"] = json!(true);
+        }
+        items.clone()
+    };
+    let snap = make_notifications_snapshot_inner(&snapshot_items);
     persist();
     snap
 }
 
 #[tauri::command]
-pub fn notifications_mark_all_read(_request: Option<Value>) -> Value {
-    let mut items = notifications().lock().unwrap();
-    for item in items.iter_mut() {
-        item["isRead"] = json!(true);
-    }
-    let snap = make_notifications_snapshot_inner(&items);
-    drop(items);
+pub async fn notifications_mark_read(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_mark_read_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_mark_all_read_direct(_request: Option<Value>) -> Value {
+    let snapshot_items = {
+        let mut items = notifications().lock().unwrap();
+        for item in items.iter_mut() {
+            item["isRead"] = json!(true);
+        }
+        items.clone()
+    };
+    let snap = make_notifications_snapshot_inner(&snapshot_items);
     persist();
     snap
 }
 
 #[tauri::command]
-pub fn notifications_mark_reviewed(request: Option<Value>) -> Value {
+pub async fn notifications_mark_all_read(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_mark_all_read_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_mark_reviewed_direct(request: Option<Value>) -> Value {
     let req = body(&request);
     let ids: Vec<String> = if let Some(arr) = req.and_then(|r| r.as_array()) {
         arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
@@ -297,7 +339,13 @@ pub fn notifications_mark_reviewed(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn notifications_request_authorization(_request: Option<Value>) -> Value {
+pub async fn notifications_mark_reviewed(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_mark_reviewed_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_request_authorization_direct(_request: Option<Value>) -> Value {
     let mut current = center().lock().unwrap();
     // Studio has no OS notification channel, so a local request cannot grant banners.
     current.authorization = "denied".into();
@@ -307,13 +355,25 @@ pub fn notifications_request_authorization(_request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn notifications_refresh_authorization(_request: Option<Value>) -> Value {
+pub async fn notifications_request_authorization(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_request_authorization_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_refresh_authorization_direct(_request: Option<Value>) -> Value {
     reload_center();
     make_notifications_snapshot()
 }
 
 #[tauri::command]
-pub fn notifications_set_preferences(request: Option<Value>) -> Value {
+pub async fn notifications_refresh_authorization(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_refresh_authorization_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_set_preferences_direct(request: Option<Value>) -> Value {
     let req = body(&request);
     let mut current = center().lock().unwrap();
     let previous = current.preferences.clone();
@@ -335,7 +395,13 @@ pub fn notifications_set_preferences(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn notifications_open_system_settings(_request: Option<Value>) -> Value {
+pub async fn notifications_set_preferences(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_set_preferences_direct(request))
+        .await
+        .unwrap_or_else(|_| make_notifications_snapshot())
+}
+
+pub fn notifications_open_system_settings_direct(_request: Option<Value>) -> Value {
     #[cfg(windows)]
     {
         #[link(name = "shell32")]
@@ -360,7 +426,13 @@ pub fn notifications_open_system_settings(_request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn notifications_play_sample(_request: Option<Value>) -> Value {
+pub async fn notifications_open_system_settings(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_open_system_settings_direct(request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
+pub fn notifications_play_sample_direct(_request: Option<Value>) -> Value {
     #[cfg(windows)]
     {
         #[link(name = "user32")]
@@ -375,6 +447,13 @@ pub fn notifications_play_sample(_request: Option<Value>) -> Value {
     Value::Null
 }
 
+#[tauri::command]
+pub async fn notifications_play_sample(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_play_sample_direct(request))
+        .await
+        .unwrap_or(Value::Null)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,15 +465,19 @@ mod tests {
         assert!(!records.is_empty());
         let first_id = records[0]["id"].as_str().unwrap().to_string();
 
-        let updated = notifications_mark_read(Some(json!({
+        let updated = notifications_mark_read_direct(Some(json!({
             "request": { "recordId": &first_id }
         })));
         let updated_records = updated["records"].as_array().unwrap();
         let target = updated_records.iter().find(|r| r["id"] == first_id).unwrap();
         assert_eq!(target["isRead"], true);
 
+        // Verify async wrapper returns valid snapshot too.
+        let async_snap = tauri::async_runtime::block_on(notifications_snapshot(None));
+        assert!(async_snap.get("records").is_some());
+
         // Mark all read
-        let all_read = notifications_mark_all_read(None);
+        let all_read = notifications_mark_all_read_direct(None);
         assert_eq!(all_read["unreadCount"], 0);
     }
 

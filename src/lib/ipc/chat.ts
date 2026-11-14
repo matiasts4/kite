@@ -314,6 +314,7 @@ export async function swarmSwitchWorkerModel(
     model: string;
     provider?: string | null;
     effort?: string | null;
+    overrideStack?: boolean;
   }
 ): Promise<{ ok: boolean; swarmState?: import('../../types').SwarmState | null; error?: string }> {
   const res = await invokeCommand<{
@@ -326,6 +327,7 @@ export async function swarmSwitchWorkerModel(
     model: params.model,
     provider: params.provider ?? null,
     effort: params.effort ?? null,
+    overrideStack: params.overrideStack ?? false,
   });
   const unwrapped = unwrapSubagentCommandResult(res, 'Failed to switch worker model');
   return { ok: Boolean(unwrapped.ok ?? true), swarmState: unwrapped.swarmState ?? null };
@@ -345,4 +347,207 @@ export async function swarmKillWorkerFromUi(
   });
   const unwrapped = unwrapSubagentCommandResult(res, 'Failed to kill swarm worker');
   return { ok: Boolean(unwrapped.ok ?? true), swarmState: unwrapped.swarmState ?? null };
+}
+
+export type SubagentOverridePolicy = 'allow' | 'ask' | 'strict';
+
+export interface SubagentStackEntry {
+  provider: string;
+  model: string;
+  effort?: string | null;
+  enabled: boolean;
+}
+
+export interface DefaultSubagentDelegation {
+  provider: string;
+  model: string;
+  effort?: string | null;
+}
+
+export interface SubagentSettings {
+  stack: SubagentStackEntry[];
+  defaultDelegation?: DefaultSubagentDelegation | null;
+  overridePolicy: SubagentOverridePolicy;
+}
+
+export interface DiscoveredSubagentProvider {
+  provider: string;
+  state: 'ready' | 'missing-binary' | 'signed-out' | string;
+  binaryPresent: boolean;
+  signedIn: boolean;
+  supportsModelDiscovery: boolean;
+  modelCount: number;
+  sampleModels: string[];
+  inStack: boolean;
+  stackModels: string[];
+  isDefaultDelegation: boolean;
+}
+
+export interface SubagentRoleRecord {
+  slug: string;
+  scope: 'global' | 'workspace' | string;
+  path: string;
+  command: string;
+  description?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  workspace?: 'inherit' | 'share' | 'branch' | string | null;
+  body: string;
+}
+
+export interface SaveSubagentRoleInput {
+  scope: 'global' | 'workspace';
+  slug: string;
+  command: string;
+  description?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  workspace?: string | null;
+  body: string;
+}
+
+export interface SubagentSettingsSnapshot {
+  settings: SubagentSettings;
+  providers: DiscoveredSubagentProvider[];
+  roles: SubagentRoleRecord[];
+  workspacePath?: string | null;
+}
+
+export interface ChatProviderModelOption {
+  id: string;
+  name?: string;
+  label?: string;
+  defaultEffort?: string | null;
+  effortLevels?: string[];
+}
+
+export async function listChatProviderModels(
+  provider: string,
+  forceRefresh = false
+): Promise<{
+  provider?: string;
+  catalogState?: string;
+  models: ChatProviderModelOption[];
+}> {
+  const res = await invokeCommand<{
+    provider?: string;
+    catalogState?: string;
+    models?: ChatProviderModelOption[];
+  }>('list_chat_provider_models', { provider, forceRefresh });
+  return {
+    provider: res?.provider ?? provider,
+    catalogState: res?.catalogState,
+    models: Array.isArray(res?.models) ? res.models : [],
+  };
+}
+
+export async function getSubagentSettings(params?: {
+  workspacePath?: string | null;
+  workspaceId?: string | null;
+}): Promise<SubagentSettingsSnapshot> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    error?: string;
+    settings?: SubagentSettings;
+    providers?: DiscoveredSubagentProvider[];
+    roles?: SubagentRoleRecord[];
+    workspacePath?: string | null;
+  }>('get_subagent_settings', {
+    workspacePath: params?.workspacePath ?? null,
+    workspaceId: params?.workspaceId ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to load subagent settings');
+  return {
+    settings: unwrapped.settings ?? { stack: [], defaultDelegation: null, overridePolicy: 'allow' },
+    providers: Array.isArray(unwrapped.providers) ? unwrapped.providers : [],
+    roles: Array.isArray(unwrapped.roles) ? unwrapped.roles : [],
+    workspacePath: unwrapped.workspacePath ?? null,
+  };
+}
+
+export async function saveSubagentSettings(
+  settings: SubagentSettings,
+  params?: { workspacePath?: string | null; workspaceId?: string | null }
+): Promise<SubagentSettingsSnapshot> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    error?: string;
+    settings?: SubagentSettings;
+    providers?: DiscoveredSubagentProvider[];
+    roles?: SubagentRoleRecord[];
+    workspacePath?: string | null;
+  }>('save_subagent_settings', {
+    settings,
+    workspacePath: params?.workspacePath ?? null,
+    workspaceId: params?.workspaceId ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to save subagent settings');
+  return {
+    settings: unwrapped.settings ?? settings,
+    providers: Array.isArray(unwrapped.providers) ? unwrapped.providers : [],
+    roles: Array.isArray(unwrapped.roles) ? unwrapped.roles : [],
+    workspacePath: unwrapped.workspacePath ?? null,
+  };
+}
+
+export async function listSubagentRoles(params?: {
+  workspacePath?: string | null;
+  workspaceId?: string | null;
+}): Promise<{ roles: SubagentRoleRecord[]; workspacePath?: string | null }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    error?: string;
+    roles?: SubagentRoleRecord[];
+    workspacePath?: string | null;
+  }>('list_subagent_roles', {
+    workspacePath: params?.workspacePath ?? null,
+    workspaceId: params?.workspaceId ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to list subagent roles');
+  return {
+    roles: Array.isArray(unwrapped.roles) ? unwrapped.roles : [],
+    workspacePath: unwrapped.workspacePath ?? null,
+  };
+}
+
+export async function saveSubagentRole(
+  role: SaveSubagentRoleInput,
+  params?: { workspacePath?: string | null; workspaceId?: string | null }
+): Promise<{ role: SubagentRoleRecord | null; roles: SubagentRoleRecord[] }> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    error?: string;
+    role?: SubagentRoleRecord;
+    roles?: SubagentRoleRecord[];
+  }>('save_subagent_role', {
+    role,
+    workspacePath: params?.workspacePath ?? null,
+    workspaceId: params?.workspaceId ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to save subagent role');
+  return {
+    role: unwrapped.role ?? null,
+    roles: Array.isArray(unwrapped.roles) ? unwrapped.roles : [],
+  };
+}
+
+export async function deleteSubagentRole(
+  scope: 'global' | 'workspace' | string,
+  slug: string,
+  params?: { workspacePath?: string | null; workspaceId?: string | null }
+): Promise<SubagentRoleRecord[]> {
+  const res = await invokeCommand<{
+    ok?: boolean;
+    error?: string;
+    roles?: SubagentRoleRecord[];
+  }>('delete_subagent_role', {
+    scope,
+    slug,
+    workspacePath: params?.workspacePath ?? null,
+    workspaceId: params?.workspaceId ?? null,
+  });
+  const unwrapped = unwrapSubagentCommandResult(res, 'Failed to delete subagent role');
+  return Array.isArray(unwrapped.roles) ? unwrapped.roles : [];
 }

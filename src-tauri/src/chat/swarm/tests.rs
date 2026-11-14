@@ -94,6 +94,7 @@ fn swarm_title_add_mention_wakeup_channel_model_failover_and_kill() {
             channels: Vec::new(),
             fork: None,
             role: None,
+            override_stack: false,
             brief: "invalid".into(),
         },
         &coord_addr,
@@ -113,6 +114,7 @@ fn swarm_title_add_mention_wakeup_channel_model_failover_and_kill() {
             channels: vec!["parser".into()],
             fork: Some("coordinator".into()),
             role: Some("Parser Verifier".into()),
+            override_stack: false,
             brief: "Audit token edge cases".into(),
         },
         &coord_addr,
@@ -133,6 +135,7 @@ fn swarm_title_add_mention_wakeup_channel_model_failover_and_kill() {
             channels: vec!["ui".into()],
             fork: None,
             role: Some("UI Worker".into()),
+            override_stack: false,
             brief: "Polish badge".into(),
         },
         &coord_addr,
@@ -235,6 +238,7 @@ fn swarm_title_add_mention_wakeup_channel_model_failover_and_kill() {
             provider: Some("codex".into()),
             model: "o4-mini".into(),
             effort: Some("high".into()),
+            override_stack: false,
         },
         &coord_addr,
         Some(&cwd_str),
@@ -271,6 +275,7 @@ fn swarm_title_add_mention_wakeup_channel_model_failover_and_kill() {
             channels: Vec::new(),
             fork: None,
             role: None,
+            override_stack: false,
             brief: "reuse".into(),
         },
         &coord_addr,
@@ -303,6 +308,7 @@ async fn swarm_wait_wakes_immediately_on_post_without_polling() {
             channels: vec!["main".into()],
             fork: None,
             role: Some("Verifier".into()),
+            override_stack: false,
             brief: "Check audit".into(),
         },
         &coord_addr,
@@ -375,6 +381,7 @@ fn stopped_worker_model_switch_resumes_working_and_keeps_history() {
             channels: vec!["main".into()],
             fork: None,
             role: Some("Quota Worker".into()),
+            override_stack: false,
             brief: "Audit auth".into(),
         },
         &coord_addr,
@@ -404,6 +411,7 @@ fn stopped_worker_model_switch_resumes_working_and_keeps_history() {
             provider: Some("gemini".into()),
             model: "gemini-2.5-flash".into(),
             effort: Some("medium".into()),
+            override_stack: false,
         },
         &coord_addr,
         Some(&cwd_str),
@@ -461,6 +469,7 @@ fn swarm_worker_metadata_channel_priority_subagent_linkage_and_sync_wait() {
             channels: vec!["parser".into()],
             fork: None,
             role: Some("Parser Specialist".into()),
+            override_stack: false,
             brief: "Inspect lexer".into(),
         },
         &coord_addr,
@@ -594,6 +603,7 @@ fn coordinator_auto_wake_fires_when_idle_skips_when_waiting_and_matches_blocked(
             channels: vec!["main".into()],
             fork: None,
             role: None,
+            override_stack: false,
             brief: "Check module".into(),
         },
         &coord_addr,
@@ -733,5 +743,137 @@ fn coordinator_auto_wake_fires_when_idle_skips_when_waiting_and_matches_blocked(
         assert!(calls.last().unwrap().1.contains("follow-up while coord busy"));
     }
 
+    crate::chat::threads::remove_thread(&worker_cid);
+}
+
+#[test]
+fn swarm_add_injects_role_body_and_model_switch_enforces_stack_policy() {
+    use crate::subagent_settings::{OverridePolicy, SubagentSettings, SubagentStackEntry};
+
+    let coord_id = format!("swarm-role-test-{}", uuid::Uuid::new_v4().simple());
+    let scratch = std::env::temp_dir().join(format!(
+        "kite-swarm-role-test-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let agents_dir = scratch.join(".kite").join("agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::write(
+        agents_dir.join("edge-auditor.md"),
+        "---\ncommand: grok\nprovider: grok\nmodel: grok-4.7-build-fast\neffort: low\nworkspace: inherit\n---\nVerify all boundary conditions strictly.",
+    )
+    .unwrap();
+    let _guard = CleanupSwarmThread(coord_id.clone(), scratch.clone());
+
+    let coord = blank_thread(&coord_id, None, "Main Coord", "antigravity", None);
+    threads().lock().unwrap().push(coord);
+
+    let coord_addr = format!("thread:{coord_id}");
+    let cwd_str = scratch.to_string_lossy().to_string();
+    let launches: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let launches_ref = std::sync::Arc::clone(&launches);
+    let launcher_fn = move |tid: &str, prompt: &str| -> Result<(), String> {
+        launches_ref
+            .lock()
+            .unwrap()
+            .push((tid.to_string(), prompt.to_string()));
+        Ok(())
+    };
+
+    execute_swarm_action(
+        &SwarmCommand::Add {
+            name: "auditor".into(),
+            provider: None,
+            model: None,
+            effort: None,
+            workspace: None,
+            channels: vec!["main".into()],
+            fork: None,
+            role: Some("edge-auditor".into()),
+            override_stack: false,
+            brief: "Check src/main.ts".into(),
+        },
+        &coord_addr,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    )
+    .unwrap();
+
+    {
+        let calls = launches.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].1.contains("Verify all boundary conditions strictly."),
+            "worker initial prompt must include role body: {}",
+            calls[0].1
+        );
+        assert!(calls[0].1.contains("Check src/main.ts"));
+    }
+
+    // Set worker state to waiting so execute_swarm_model_with_settings can inspect stack rules.
+    {
+        let (mut st, path) = load_swarm_state(&coord_id, Some(&cwd_str));
+        st.members[0].state = "waiting".to_string();
+        save_and_broadcast_swarm(&coord_id, &path, &st);
+    }
+
+    let ask_settings = SubagentSettings {
+        stack: vec![SubagentStackEntry {
+            provider: "grok".into(),
+            model: "grok-4.7-build-fast".into(),
+            effort: Some("low".into()),
+            enabled: true,
+        }],
+        default_delegation: None,
+        override_policy: OverridePolicy::Ask,
+    };
+
+    assert!(execute_swarm_model_with_settings(
+        &coord_id,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+        "auditor",
+        Some("claude"),
+        "claude-sonnet-4-6",
+        None,
+        false,
+        &ask_settings,
+    )
+    .is_err());
+
+    let strict_settings = SubagentSettings {
+        override_policy: OverridePolicy::Strict,
+        ..ask_settings.clone()
+    };
+    assert!(execute_swarm_model_with_settings(
+        &coord_id,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+        "auditor",
+        Some("claude"),
+        "claude-sonnet-4-6",
+        None,
+        true,
+        &strict_settings,
+    )
+    .is_err());
+
+    assert!(execute_swarm_model_with_settings(
+        &coord_id,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+        "auditor",
+        Some("claude"),
+        "claude-sonnet-4-6",
+        None,
+        true,
+        &ask_settings,
+    )
+    .is_ok());
+
+    let worker_cid = load_swarm_state(&coord_id, Some(&cwd_str)).0.members[0]
+        .child_thread_id
+        .clone()
+        .unwrap();
     crate::chat::threads::remove_thread(&worker_cid);
 }

@@ -1,7 +1,79 @@
 use super::*;
 
-pub(super) fn compose_manual() -> String {
+pub(super) fn format_subagent_settings_section(
+    settings: &crate::subagent_settings::SubagentSettings,
+    roles: &[crate::subagent_settings::SubagentRoleRecord],
+) -> String {
+    let enabled: Vec<&crate::subagent_settings::SubagentStackEntry> =
+        settings.stack.iter().filter(|e| e.enabled).collect();
+    if enabled.is_empty()
+        && settings.default_delegation.is_none()
+        && settings.override_policy == crate::subagent_settings::OverridePolicy::Allow
+        && roles.is_empty()
+    {
+        return String::new();
+    }
+    let mut out = vec!["\nConfigured Subagents Stack & Roles:".to_string()];
+    out.push(format!(
+        "- Override policy: `{}` (--override-stack allows explicit user-requested models under `ask`; `strict` only allows curated stack models).",
+        settings.override_policy.as_str()
+    ));
+    if let Some(def) = settings.default_delegation.as_ref() {
+        let eff = def
+            .effort
+            .as_deref()
+            .map(|e| format!(" (effort: {e})"))
+            .unwrap_or_default();
+        out.push(format!(
+            "- Default lightweight delegation: `{}/{}`{eff}",
+            def.provider, def.model
+        ));
+    }
+    if !enabled.is_empty() {
+        let items: Vec<String> = enabled
+            .iter()
+            .map(|e| match e.effort.as_deref() {
+                Some(eff) => format!("{}/{} ({eff})", e.provider, e.model),
+                None => format!("{}/{}", e.provider, e.model),
+            })
+            .collect();
+        out.push(format!("- Curated enabled stack: {}", items.join(", ")));
+    }
+    if !roles.is_empty() {
+        let role_lines: Vec<String> = roles
+            .iter()
+            .map(|r| {
+                let target = match (&r.provider, &r.model) {
+                    (Some(p), Some(m)) => format!(" [{p}/{m}]"),
+                    (Some(p), None) => format!(" [{p}]"),
+                    (None, _) if r.command.eq_ignore_ascii_case("auto") => {
+                        " [inherit stack]".to_string()
+                    }
+                    _ => format!(" [{}]", r.command),
+                };
+                let desc = r
+                    .description
+                    .as_deref()
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default();
+                format!("`{}` ({}){target}{desc}", r.slug, r.scope)
+            })
+            .collect();
+        out.push(format!(
+            "- Role profiles (`--role <slug>`): {}",
+            role_lines.join("; ")
+        ));
+    }
+    out.push(String::new());
+    out.join("\n")
+}
+
+pub fn compose_manual_with(
+    settings: &crate::subagent_settings::SubagentSettings,
+    roles: &[crate::subagent_settings::SubagentRoleRecord],
+) -> String {
     let names = crate::dispatch::programs::lines();
+    let config_section = format_subagent_settings_section(settings, roles);
     format!(
         "\
 Kite Dispatch
@@ -28,11 +100,11 @@ Commands:
   kite dispatch providers [--refresh]
   kite dispatch models [<provider>] [--refresh]
   kite dispatch run <program> \"<task>\"
-  kite dispatch run --via thread --provider <provider> [--model <model>] [--effort <level>] [--role \"<title>\"] [--workspace inherit|share|branch] [--wait] [--timeout-ms <ms>] \"<task>\"
+  kite dispatch run --via thread [--provider <provider>] [--model <model>] [--effort <level>] [--role \"<name_or_title>\"] [--workspace inherit|share|branch] [--override-stack] [--wait] [--timeout-ms <ms>] \"<task>\"
   kite dispatch run --via terminal --engine <engine> --name <alias> [--parent <address>] [--file <path>] [--pane] [--hidden]
   kite dispatch run --role <name> --name <alias> [--file <path>]
   kite dispatch send <address> \"<text>\" [--file <path>] [--if ready] [--force]
-  kite dispatch wait [<address>] [--until idle,done,blocked] [--timeout <ms>] [--children all|any]
+  kite dispatch wait [<address>] [--until idle,done,blocked] [--timeout-ms <ms>] [--children all|any]
   kite dispatch read <address> [--lines 80] [--last]
   kite dispatch report --to <address> --body \"<text>\"
   kite dispatch kill <address>
@@ -60,11 +132,12 @@ Live Provider & Model Discovery (Run First Before Spawning):
 - NEVER invent, copy, or hardcode legacy or unverified model IDs. Always inspect connected providers and live models first:
   kite dispatch providers [--refresh]
   kite dispatch models <provider> [--refresh]
-- If a connected provider's CLI manages models dynamically (`claude`, `gemini`) or when you want the provider default, omit `--model`.
+- If a connected provider's CLI manages models dynamically (`claude`, `gemini`) or when you want the configured default delegation, omit `--model`.
+- Use `--override-stack` only when the user explicitly requests a provider/model outside the curated `Settings -> Subagents` stack (`ask` override policy).{config_section}
 
 Cross-provider subagents (`--via thread`):
 - Inside Thread Mode (`KITE_ADDRESS=thread:<id>`), `--via` defaults to `thread` (or pass `--via thread` explicitly). Keep the main orchestrator on a heavy reasoning model and delegate focused tasks to lightweight/fast discovered models across connected providers (`--provider`, `--model`, optional `--effort minimal|low|medium|high|xhigh|max|ultra`).
-- Always pass a crisp `--role \"<title>\"` and quote prompts cleanly (never embed shell redirections like `2>&1` or pipes as unquoted prompt words).
+- Always pass a crisp `--role \"<title>\"` (or a configured role slug from `Settings -> Subagents`) and quote prompts cleanly (never embed shell redirections like `2>&1` or pipes as unquoted prompt words).
 - Single blocking call (`--wait` prints the child's final reply and `[subagent_id: thread:<id>]`):
   kite dispatch run --via thread --provider <provider> [--model <fast_model_id>] --role \"Fast Executor\" --workspace share --wait \"<task>\"
 - Parallel fan-out: launch multiple child threads without `--wait` (use `--workspace share` or `branch` for isolated git worktrees when editing files concurrently; `inherit` shares the workspace), then wait and inspect:
@@ -74,12 +147,12 @@ Cross-provider subagents (`--via thread`):
 Cross-provider swarm (`kite dispatch swarm`):
 - Coordinate multi-agent teams across providers/models on a monotonic `#seq` board:
   kite dispatch swarm title \"<title>\"
-  kite dispatch swarm add --name <role> [--provider <provider>] [--model <model>] [--effort <level>] [--workspace inherit|share|branch] [--channels <ch1,ch2>] [--fork <member|coordinator>] [--role \"<title>\"] --brief \"<assignment>\"
+  kite dispatch swarm add --name <role> [--provider <provider>] [--model <model>] [--effort <level>] [--workspace inherit|share|branch] [--channels <ch1,ch2>] [--fork <member|coordinator>] [--role \"<title>\"] [--override-stack] --brief \"<assignment>\"
   kite dispatch swarm post [--channel <channel>] \"<message>\"
   kite dispatch swarm read [--since <seq>] [--channel <channel|*>]
   kite dispatch swarm wait [--since <seq>] [--mentions-only] [--timeout-ms <ms>]
   kite dispatch swarm status
-  kite dispatch swarm model --name <role> [--provider <provider>] --model <new_model> [--effort <level>]
+  kite dispatch swarm model --name <role> [--provider <provider>] --model <new_model> [--effort <level>] [--override-stack]
   kite dispatch swarm kill <role>
   kite dispatch swarm channel <create|subscribe|unsubscribe|archive|list> [--channel <name>] [--topic \"<text>\"] [--name <role>]
 - Reactive `@mention` wakeup: `waiting` workers sleep at zero token cost and wake only when a post mentions `@<role>`, `@<prefix>`, `@#<channel>`, or `@all` (e.g. `kite dispatch swarm post \"@verifier check #2\"`). Park without polling using `kite dispatch swarm wait --since <seq>`.
@@ -101,8 +174,36 @@ A stall means the text was submitted and presence did not change. Read before se
     )
 }
 
-pub(super) fn compose_skill() -> String {
-    let manual = manual_text();
+fn active_workspace_path() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    let grid = crate::persist::load_grid();
+    let ws_id = grid
+        .get("grid")
+        .and_then(|g| g.get("activeWorkspaceId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    crate::persist::workspace_path(ws_id).map(std::path::PathBuf::from)
+}
+
+pub(super) fn compose_manual_for_workspace(workspace: Option<&std::path::Path>) -> String {
+    let settings = crate::subagent_settings::get_subagent_settings();
+    let roles = crate::subagent_settings::list_roles(workspace);
+    compose_manual_with(&settings, &roles)
+}
+
+pub(super) fn compose_manual() -> String {
+    let active_ws = active_workspace_path();
+    compose_manual_for_workspace(active_ws.as_deref())
+}
+
+pub fn compose_skill_with(
+    settings: &crate::subagent_settings::SubagentSettings,
+    roles: &[crate::subagent_settings::SubagentRoleRecord],
+) -> String {
+    let manual = compose_manual_with(settings, roles);
     format!(
         "\
 ---
@@ -114,15 +215,23 @@ description: \"Trigger: kite dispatch, spawn agent, subagent, swarm, KITE_DISPAT
     )
 }
 
-
-pub fn manual_text() -> &'static str {
-    static MANUAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MANUAL.get_or_init(compose_manual).as_str()
+pub fn skill_text_for_workspace(workspace: Option<&std::path::Path>) -> String {
+    let settings = crate::subagent_settings::get_subagent_settings();
+    let roles = crate::subagent_settings::list_roles(workspace);
+    compose_skill_with(&settings, &roles)
 }
 
-pub fn skill_text() -> &'static str {
-    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TEXT.get_or_init(compose_skill).as_str()
+pub(super) fn compose_skill() -> String {
+    let active_ws = active_workspace_path();
+    skill_text_for_workspace(active_ws.as_deref())
+}
+
+pub fn manual_text() -> String {
+    compose_manual()
+}
+
+pub fn skill_text() -> String {
+    compose_skill()
 }
 
 /// Strips a leading YAML frontmatter block (`---\n...\n---\n`) when present so

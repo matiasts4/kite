@@ -222,6 +222,7 @@ pub(super) fn parse_swarm_detailed<'a>(
             let mut channels: Vec<String> = Vec::new();
             let mut fork = None;
             let mut role = None;
+            let mut override_stack = false;
             let mut brief = None;
             let mut positionals: Vec<String> = Vec::new();
             while let Some(next) = items.next() {
@@ -272,6 +273,7 @@ pub(super) fn parse_swarm_detailed<'a>(
                     "--role" => {
                         role = Some(parse_run::need_flag_detailed(items, "--role", inline_val)?)
                     }
+                    "--override-stack" if inline_val.is_none() => override_stack = true,
                     "--brief" => {
                         brief = Some(parse_run::need_flag_detailed(items, "--brief", inline_val)?)
                     }
@@ -304,6 +306,7 @@ pub(super) fn parse_swarm_detailed<'a>(
                 channels,
                 fork,
                 role,
+                override_stack,
                 brief: brief_text,
             }
         }
@@ -312,6 +315,7 @@ pub(super) fn parse_swarm_detailed<'a>(
             let mut provider = None;
             let mut model = None;
             let mut effort = None;
+            let mut override_stack = false;
             while let Some(next) = items.next() {
                 let (flag, inline_val) = parse_run::split_flag(next);
                 match flag {
@@ -337,6 +341,7 @@ pub(super) fn parse_swarm_detailed<'a>(
                             ))
                         })?);
                     }
+                    "--override-stack" if inline_val.is_none() => override_stack = true,
                     _ => {
                         return Err(bad_args(format!(
                             "Unknown flag `{next}` for `swarm model`."
@@ -354,6 +359,7 @@ pub(super) fn parse_swarm_detailed<'a>(
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| bad_args("`swarm model` requires `--model <model_id>`."))?,
                 effort,
+                override_stack,
             }
         }
         other => {

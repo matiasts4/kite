@@ -53,6 +53,7 @@ pub mod plugins;
 pub mod agent_maintenance;
 pub mod dispatch;
 pub mod dispatch_wire;
+pub mod subagent_settings;
 pub mod core_wire;
 pub mod core_daemon;
 
@@ -484,6 +485,11 @@ fn main() {
             swarm_post_from_ui,
             swarm_switch_worker_model,
             swarm_kill_worker_from_ui,
+            get_subagent_settings,
+            save_subagent_settings,
+            list_subagent_roles,
+            save_subagent_role,
+            delete_subagent_role,
             opencode_go_credential_status,
             save_opencode_api_key,
             clear_opencode_api_key,

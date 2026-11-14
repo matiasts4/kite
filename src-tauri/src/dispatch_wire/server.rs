@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::dispatch::cli::{
-    self, bad_token_receipt, check_token, offline_receipt, skill_text, ExecContext,
+    self, bad_token_receipt, check_token, offline_receipt, ExecContext,
 };
 use crate::dispatch::role::ensure_sample_role;
 use crate::dispatch::types::{Caller, DispatchError, Family, Receipt};
@@ -251,7 +251,329 @@ fn lookup_swarm_member_provider(from: &str, member_name: &str) -> Option<String>
         .and_then(|m| m.get("provider").and_then(Value::as_str).map(str::to_string))
 }
 
-fn validate_live_command_models(request: &Value, command: &cli::Command) -> Result<(), String> {
+fn thread_workspace_path_by_ref(thread_ref: &str) -> Option<PathBuf> {
+    let tid = thread_ref.strip_prefix("thread:").unwrap_or(thread_ref).trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let all = crate::persist::threads().lock().ok()?;
+    let thread = all
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))?;
+    if let Some(dir) = thread
+        .get("worktreePath")
+        .or_else(|| thread.get("workingDirectory"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(dir));
+    }
+    thread
+        .get("workspaceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(crate::persist::workspace_path)
+        .map(PathBuf::from)
+}
+
+pub(crate) fn resolve_request_workspace_path(request: &Value) -> Option<PathBuf> {
+    if let Some(explicit) = request
+        .get("workspacePath")
+        .or_else(|| request.get("workspace_path"))
+        .or_else(|| request.get("cwd"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(explicit));
+    }
+    if let Some(ws) = request
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && cli::normalize_workspace_mode(s).is_none())
+    {
+        return Some(PathBuf::from(ws));
+    }
+    if let Some(ws_path) = request
+        .get("workspaceId")
+        .or_else(|| request.get("workspace_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(crate::persist::workspace_path)
+    {
+        return Some(PathBuf::from(ws_path));
+    }
+    for key in ["from", "parent"] {
+        if let Some(tref) = request.get(key).and_then(Value::as_str) {
+            if let Some(path) = thread_workspace_path_by_ref(tref) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn effective_run_via(request: &Value, via: Family, explicit_via: bool) -> Family {
+    let from = request.get("from").and_then(Value::as_str).unwrap_or("");
+    if explicit_via {
+        via
+    } else if from.starts_with("thread:") {
+        Family::Thread
+    } else {
+        via
+    }
+}
+
+pub(crate) fn resolve_command_with_subagent_settings(
+    request: &Value,
+    command: &cli::Command,
+    settings: &crate::subagent_settings::SubagentSettings,
+) -> cli::Command {
+    let ws_path = resolve_request_workspace_path(request);
+    let cfg_dir = if cfg!(test) {
+        None
+    } else {
+        Some(crate::persist::roaming_app_dir())
+    };
+    match command.clone() {
+        cli::Command::Run {
+            via,
+            explicit_via,
+            mut engine,
+            mut provider,
+            mut model,
+            mut effort,
+            mut workspace,
+            override_stack,
+            name,
+            explicit_name,
+            parent,
+            outlive,
+            mut role,
+            mut explicit_role,
+            file,
+            task,
+            wait,
+            timeout_ms,
+            hidden,
+            pane,
+            mut program,
+            words,
+        } => {
+            if effective_run_via(request, via, explicit_via) == Family::Thread {
+                if !explicit_role && provider.is_none() && engine.is_none() {
+                    if let Some(word) = program.take() {
+                        if let Some(canon) = cli::canonical_thread_provider(&word) {
+                            provider = Some(canon.to_string());
+                        } else if role.is_none()
+                            && crate::dispatch::role::find_role_across_roots(
+                                cfg_dir.as_deref(),
+                                ws_path.as_deref(),
+                                &word,
+                            )
+                            .is_ok()
+                        {
+                            role = Some(word);
+                            explicit_role = true;
+                        } else {
+                            program = Some(word);
+                        }
+                    }
+                }
+                if provider.is_none() {
+                    provider = engine.clone();
+                }
+                if let Some(ref role_name) = role {
+                    if let Ok(rf) = crate::dispatch::role::find_role_across_roots(
+                        cfg_dir.as_deref(),
+                        ws_path.as_deref(),
+                        role_name,
+                    ) {
+                        if provider.is_none() {
+                            provider = rf
+                                .provider
+                                .as_deref()
+                                .and_then(cli::canonical_thread_provider)
+                                .or_else(|| cli::canonical_thread_provider(&rf.command))
+                                .map(str::to_string);
+                        }
+                        if model.is_none() {
+                            model = rf.model.clone();
+                        }
+                        if effort.is_none() {
+                            effort = rf.effort.clone();
+                        }
+                        if workspace.is_none() {
+                            workspace = rf.workspace.clone();
+                        }
+                    }
+                }
+                let (next_p, next_m, next_e) =
+                    crate::subagent_settings::resolve_thread_selection_defaults(
+                        settings,
+                        provider,
+                        model,
+                        effort,
+                    );
+                provider = next_p;
+                model = next_m;
+                effort = next_e;
+            } else {
+                let role_name = if explicit_role {
+                    role.as_deref()
+                } else {
+                    role.as_deref().or_else(|| {
+                        program.as_deref().filter(|word| {
+                            engine.is_none()
+                                && crate::dispatch::role::find_role_across_roots(
+                                    cfg_dir.as_deref(),
+                                    ws_path.as_deref(),
+                                    word,
+                                )
+                                .is_ok()
+                        })
+                    })
+                };
+                if let Some(rf) = role_name.and_then(|name| {
+                    crate::dispatch::role::find_role_across_roots(
+                        cfg_dir.as_deref(),
+                        ws_path.as_deref(),
+                        name,
+                    )
+                    .ok()
+                }) {
+                    if model.is_none() {
+                        model = rf.model.clone();
+                    }
+                    if effort.is_none() {
+                        effort = rf.effort.clone();
+                    }
+                    if engine.is_none() && rf.command.trim().eq_ignore_ascii_case("auto") {
+                        let role_provider = rf
+                            .provider
+                            .as_deref()
+                            .and_then(cli::canonical_thread_provider)
+                            .map(str::to_string);
+                        let (next_p, next_m, next_e) =
+                            crate::subagent_settings::resolve_thread_selection_defaults(
+                                settings,
+                                role_provider,
+                                model.clone(),
+                                effort.clone(),
+                            );
+                        if let Some(prov) = next_p {
+                            let canonical_eng = crate::dispatch::programs::canonical(&prov)
+                                .unwrap_or(prov.as_str())
+                                .to_string();
+                            engine = Some(canonical_eng);
+                        }
+                        if model.is_none() {
+                            model = next_m;
+                        }
+                        if effort.is_none() {
+                            effort = next_e;
+                        }
+                    }
+                }
+            }
+            cli::Command::Run {
+                via,
+                explicit_via,
+                engine,
+                provider,
+                model,
+                effort,
+                workspace,
+                override_stack,
+                name,
+                explicit_name,
+                parent,
+                outlive,
+                role,
+                explicit_role,
+                file,
+                task,
+                wait,
+                timeout_ms,
+                hidden,
+                pane,
+                program,
+                words,
+            }
+        }
+        cli::Command::Swarm(cli::SwarmCommand::Add {
+            name,
+            mut provider,
+            mut model,
+            mut effort,
+            mut workspace,
+            channels,
+            fork,
+            role,
+            override_stack,
+            brief,
+        }) => {
+            if let Some(ref role_name) = role {
+                if let Ok(rf) = crate::dispatch::role::find_role_across_roots(
+                    cfg_dir.as_deref(),
+                    ws_path.as_deref(),
+                    role_name,
+                ) {
+                    if provider.is_none() {
+                        provider = rf
+                            .provider
+                            .as_deref()
+                            .and_then(cli::canonical_thread_provider)
+                            .or_else(|| cli::canonical_thread_provider(&rf.command))
+                            .map(str::to_string);
+                    }
+                    if model.is_none() {
+                        model = rf.model.clone();
+                    }
+                    if effort.is_none() {
+                        effort = rf.effort.clone();
+                    }
+                    if workspace.is_none() {
+                        workspace = rf.workspace.clone();
+                    }
+                }
+            }
+            let (next_p, next_m, next_e) =
+                crate::subagent_settings::resolve_thread_selection_defaults(
+                    settings,
+                    provider,
+                    model,
+                    effort,
+                );
+            provider = next_p;
+            model = next_m;
+            effort = next_e;
+            cli::Command::Swarm(cli::SwarmCommand::Add {
+                name,
+                provider,
+                model,
+                effort,
+                workspace,
+                channels,
+                fork,
+                role,
+                override_stack,
+                brief,
+            })
+        }
+        other => other,
+    }
+}
+
+pub(crate) fn validate_live_command_models_with_settings(
+    request: &Value,
+    command: &cli::Command,
+    settings: &crate::subagent_settings::SubagentSettings,
+) -> Result<(), String> {
     let from = request.get("from").and_then(Value::as_str).unwrap_or("");
     match command {
         cli::Command::Run {
@@ -260,18 +582,12 @@ fn validate_live_command_models(request: &Value, command: &cli::Command) -> Resu
             engine,
             provider,
             model,
+            override_stack,
             explicit_role,
             program,
             ..
         } => {
-            let effective_via = if *explicit_via {
-                *via
-            } else if from.starts_with("thread:") {
-                Family::Thread
-            } else {
-                *via
-            };
-            if effective_via != Family::Thread {
+            if effective_run_via(request, *via, *explicit_via) != Family::Thread {
                 return Ok(());
             }
             let mut explicit_provider = provider.clone().or_else(|| engine.clone());
@@ -282,10 +598,16 @@ fn validate_live_command_models(request: &Value, command: &cli::Command) -> Resu
                     }
                 }
             }
+            let effective_provider = explicit_provider.clone().or_else(|| lookup_thread_provider(from));
+            crate::subagent_settings::check_stack_policy(
+                settings,
+                effective_provider.as_deref(),
+                model.as_deref(),
+                *override_stack,
+            )?;
             if let Some(ref p) = explicit_provider {
                 crate::chat::models::validate_provider_connection(p)?;
             }
-            let effective_provider = explicit_provider.or_else(|| lookup_thread_provider(from));
             if let Some(ref m) = model {
                 if let Some(ref p) = effective_provider {
                     crate::chat::models::validate_provider_model_selection(p, m)?;
@@ -295,12 +617,21 @@ fn validate_live_command_models(request: &Value, command: &cli::Command) -> Resu
             }
         }
         cli::Command::Swarm(cli::SwarmCommand::Add {
-            provider, model, ..
+            provider,
+            model,
+            override_stack,
+            ..
         }) => {
+            let effective_provider = provider.clone().or_else(|| lookup_thread_provider(from));
+            crate::subagent_settings::check_stack_policy(
+                settings,
+                effective_provider.as_deref(),
+                model.as_deref(),
+                *override_stack,
+            )?;
             if let Some(ref p) = provider {
                 crate::chat::models::validate_provider_connection(p)?;
             }
-            let effective_provider = provider.clone().or_else(|| lookup_thread_provider(from));
             if let Some(ref m) = model {
                 if let Some(ref p) = effective_provider {
                     crate::chat::models::validate_provider_model_selection(p, m)?;
@@ -313,15 +644,22 @@ fn validate_live_command_models(request: &Value, command: &cli::Command) -> Resu
             name,
             provider,
             model,
+            override_stack,
             ..
         }) => {
-            if let Some(ref p) = provider {
-                crate::chat::models::validate_provider_connection(p)?;
-            }
             let effective_provider = provider
                 .clone()
                 .or_else(|| lookup_swarm_member_provider(from, name))
                 .or_else(|| lookup_thread_provider(from));
+            crate::subagent_settings::check_stack_policy(
+                settings,
+                effective_provider.as_deref(),
+                Some(model.as_str()),
+                *override_stack,
+            )?;
+            if let Some(ref p) = provider {
+                crate::chat::models::validate_provider_connection(p)?;
+            }
             if let Some(ref p) = effective_provider {
                 crate::chat::models::validate_provider_model_selection(p, model)?;
             } else if !crate::chat::models::model_id_ok(model) {
@@ -335,7 +673,10 @@ fn validate_live_command_models(request: &Value, command: &cli::Command) -> Resu
 
 fn execute_argv_dispatch(request: &Value, id: &str, argv: &[String]) -> Value {
     match cli::parse_args_detailed(argv) {
-        Ok(cli::Command::Skill) => json!({ "skill": skill_text(), "exit": 0 }),
+        Ok(cli::Command::Skill) => {
+            let ws_path = resolve_request_workspace_path(request);
+            json!({ "skill": cli::skill_text_for_workspace(ws_path.as_deref()), "exit": 0 })
+        }
         Ok(cli::Command::Providers { refresh }) => {
             let discovery = crate::chat::models::discover_thread_providers(refresh);
             let text = crate::chat::models::format_providers_text(&discovery);
@@ -356,12 +697,16 @@ fn execute_argv_dispatch(request: &Value, id: &str, argv: &[String]) -> Value {
             }
         }
         Ok(command) => {
+            let settings = crate::subagent_settings::get_subagent_settings();
+            let command = resolve_command_with_subagent_settings(request, &command, &settings);
             let online = service()
                 .lock()
                 .map(|g| online_flag(&g))
                 .unwrap_or(false);
             if online {
-                if let Err(detail) = validate_live_command_models(request, &command) {
+                if let Err(detail) =
+                    validate_live_command_models_with_settings(request, &command, &settings)
+                {
                     let (code, receipt) =
                         cli::render_detailed_error(id, "dispatch", DispatchError::BadArgs, &detail);
                     return json!({ "exit": code, "receipt": receipt });
@@ -506,7 +851,8 @@ pub fn execute_swarm_command(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .unwrap_or(if caller == Caller::Human { "human" } else { "agent" });
-    let cwd = request.get("workspace").and_then(Value::as_str);
+    let cwd_buf = resolve_request_workspace_path(request);
+    let cwd = cwd_buf.as_ref().and_then(|p| p.to_str());
     match crate::chat::swarm::execute_swarm_action(swarm_cmd, from, cwd, None) {
         Ok(text) => {
             let mut receipt = Receipt::new(
@@ -568,7 +914,7 @@ pub fn execute_command(request: &Value, command: &cli::Command, id: &str) -> Rec
     if crate::dispatch::address::is_caller_endpoint(from) {
         prepare(&mut guard, from, None);
     }
-    let workspace = request.get("workspace").and_then(Value::as_str).map(PathBuf::from);
+    let workspace = resolve_request_workspace_path(request);
     let ctx = ExecContext {
         id,
         caller,
@@ -762,12 +1108,14 @@ fn dispatch_over_core_pipe(args: &[String]) -> Option<Value> {
     };
     // The daemon parses the same argv the loopback endpoint accepts, so an
     // external script keeps dispatching while no GUI window is open (S5).
+    let cwd = std::env::current_dir().ok().map(|path| path.display().to_string());
     let envelope = json!({
         "argv": args,
         "id": uuid::Uuid::new_v4().to_string(),
         "caller": caller,
         "from": std::env::var("KITE_ADDRESS").unwrap_or_default(),
-        "workspace": std::env::current_dir().ok().map(|path| path.display().to_string()),
+        "workspacePath": cwd.clone(),
+        "workspace": cwd,
     });
     crate::core_daemon::send_core_daemon_rpc("agent.dispatch", Some(envelope)).ok()
 }

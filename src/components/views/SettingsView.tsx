@@ -10,6 +10,7 @@ import {
   BellIcon,
   MicIcon,
   AudioWaveformIcon,
+  UsersIcon,
   PuzzleIcon,
   ScrollTextIcon,
   GaugeIcon,
@@ -37,6 +38,7 @@ import {
 } from './settings/types';
 import { GeneralTab } from './settings/GeneralTab';
 import { ChatSettingsTab } from './settings/ChatSettingsTab';
+import { SubagentsTab } from './settings/SubagentsTab';
 import { AppearanceTab } from './settings/AppearanceTab';
 import { VoiceTab } from './settings/VoiceTab';
 import { KeybindingsTab } from './settings/KeybindingsTab';
@@ -60,6 +62,12 @@ const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'terminal', label: 'Terminal', blurb: 'Apariencia, tipografía, motor de renderizado, shell y enlaces web.', icon: SquareTerminalIcon },
   { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
   { id: 'chat', label: 'Chat', blurb: 'Visibilidad de las acciones del hilo.', icon: BellIcon },
+  {
+    id: 'subagents',
+    label: 'Subagents',
+    blurb: 'Curated model stack, default delegation model, override policy, and role profiles.',
+    icon: UsersIcon,
+  },
   { id: 'voice', label: 'Voice & Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
   { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
   { id: 'quotas', label: 'Cuentas y Proveedores', blurb: 'Bóveda de credenciales, cuentas CLI y límites de cuota.', icon: GaugeIcon },
@@ -632,6 +640,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </header>
 
             {activeTab === 'chat' && <ChatSettingsTab />}
+
+            {activeTab === 'subagents' && <SubagentsTab />}
 
             {activeTab === 'general' && (
               <GeneralTab

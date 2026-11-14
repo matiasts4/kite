@@ -159,7 +159,17 @@ impl<P: Port> Service<P> {
                     }
                 }
             }
-            let opening = input.task.clone().unwrap_or_default();
+            let raw_opening = input.task.clone().unwrap_or_default();
+            let opening = match input.role.as_ref() {
+                Some(role) if !role.body.trim().is_empty() => {
+                    if raw_opening.trim().is_empty() {
+                        role.body.trim().to_string()
+                    } else {
+                        format!("{}\n\n{}", role.body.trim(), raw_opening.trim())
+                    }
+                }
+                _ => raw_opening,
+            };
             if opening.chars().count() > BODY_LIMIT {
                 return self.finish(rejected(&input.id, "run", "", DispatchError::BodyTooLarge));
             }
@@ -281,12 +291,38 @@ impl<P: Port> Service<P> {
                 ));
             }
         }
-        let engine = input
+        let role_command = input
             .role
             .as_ref()
-            .map(|role| role.command.clone())
-            .or(input.engine.clone())
-            .or(input.command.clone())
+            .map(|role| role.command.trim())
+            .filter(|cmd| !cmd.is_empty() && !cmd.eq_ignore_ascii_case("auto"))
+            .map(str::to_string);
+        let role_provider_engine = input
+            .role
+            .as_ref()
+            .and_then(|role| role.provider.as_deref())
+            .map(str::trim)
+            .filter(|prov| !prov.is_empty())
+            .map(|prov| programs::canonical(prov).unwrap_or(prov).to_string());
+        if input.role.is_some()
+            && input.engine.is_none()
+            && input.command.is_none()
+            && role_command.is_none()
+            && role_provider_engine.is_none()
+        {
+            return self.finish(rejected(
+                &input.id,
+                "run",
+                "",
+                DispatchError::ProgramNotFound,
+            ));
+        }
+        let engine = input
+            .engine
+            .clone()
+            .or_else(|| role_command.clone())
+            .or_else(|| role_provider_engine.clone())
+            .or_else(|| input.command.clone())
             .unwrap_or_else(|| "powershell".into());
         let opening = if raw {
             String::new()
@@ -314,9 +350,16 @@ impl<P: Port> Service<P> {
         } else {
             birth_prompt(&opening, manual_as_system)
         };
+        let request_command = input.command.clone().or_else(|| {
+            if input.engine.is_some() {
+                None
+            } else {
+                role_command
+            }
+        });
         let started = self.port.start_terminal(&StartRequest {
             engine: engine.clone(),
-            command: input.command.clone().or(input.role.as_ref().map(|r| r.command.clone())),
+            command: request_command,
             name: effective_name.clone(),
             cwd: input.cwd.clone(),
             prompt: prompt.clone(),
@@ -394,29 +437,45 @@ impl<P: Port> Service<P> {
         cwd: Option<String>,
     ) -> Receipt {
         let alias = alias.unwrap_or_else(|| name.to_string());
-        match load_role(config_dir, name) {
-            Ok(role) => self.run(RunInput {
-                id: id.to_string(),
-                via: Family::Terminal,
-                engine: None,
-                provider: None,
-                model: None,
-                effort: None,
-                workspace: None,
-                command: None,
-                name: Some(alias.clone()),
-                parent: parent.map(|s| s.to_string()),
-                outlive,
-                role: Some(role),
-                subagent_role: None,
-                role_missing: false,
-                task,
-                caller,
-                cwd: cwd.clone(),
-                now_ms,
-                hidden,
-                argv: Vec::new(),
-            }),
+        match crate::dispatch::role::find_role_across_roots(
+            Some(config_dir),
+            cwd.as_deref().map(Path::new),
+            name,
+        ) {
+            Ok(role) => {
+                let role_provider = role
+                    .provider
+                    .clone()
+                    .or_else(|| {
+                        crate::chat::models::canonical_thread_provider_id(&role.command)
+                            .map(str::to_string)
+                    });
+                let role_model = role.model.clone();
+                let role_effort = role.effort.clone();
+                let role_workspace = role.workspace.clone();
+                self.run(RunInput {
+                    id: id.to_string(),
+                    via: Family::Terminal,
+                    engine: None,
+                    provider: role_provider,
+                    model: role_model,
+                    effort: role_effort,
+                    workspace: role_workspace,
+                    command: None,
+                    name: Some(alias.clone()),
+                    parent: parent.map(|s| s.to_string()),
+                    outlive,
+                    role: Some(role),
+                    subagent_role: Some(name.to_string()),
+                    role_missing: false,
+                    task,
+                    caller,
+                    cwd: cwd.clone(),
+                    now_ms,
+                    hidden,
+                    argv: Vec::new(),
+                })
+            }
             Err(_) => self.run(RunInput {
                 id: id.to_string(),
                 via: Family::Terminal,

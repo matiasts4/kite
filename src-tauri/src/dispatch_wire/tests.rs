@@ -923,3 +923,263 @@ fn live_thread_for_profile_skips_side_chats_and_agent_children() {
             id != side_id && id != child_id && id != main_id
         });
 }
+
+#[test]
+fn subagent_settings_resolves_workspace_role_defaults_and_enforces_stack_override_policy() {
+    use crate::dispatch::cli::{parse_args, Command};
+    use crate::subagent_settings::{
+        check_stack_policy, DefaultDelegation, OverridePolicy, SubagentSettings, SubagentStackEntry,
+    };
+
+    let tmp_ws = std::env::temp_dir().join(format!(
+        "kite-wire-role-test-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let agents_dir = tmp_ws.join(".kite").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("fast-reviewer.md"),
+        "---\ncommand: grok\nprovider: grok\nmodel: grok-4.7-build-fast\neffort: low\nworkspace: inherit\ndescription: Fast review specialist\n---\nCheck edge cases concisely.",
+    )
+    .unwrap();
+
+    let parsed = parse_args(&[
+        "kite".to_string(),
+        "dispatch".to_string(),
+        "run".to_string(),
+        "--via".to_string(),
+        "thread".to_string(),
+        "--role".to_string(),
+        "fast-reviewer".to_string(),
+        "Inspect src/main.ts".to_string(),
+    ])
+    .expect("parse role run");
+
+    let settings = SubagentSettings {
+        stack: vec![
+            SubagentStackEntry {
+                provider: "antigravity".to_string(),
+                model: "gemini-3-flash".to_string(),
+                effort: Some("medium".to_string()),
+                enabled: true,
+            },
+            SubagentStackEntry {
+                provider: "grok".to_string(),
+                model: "grok-4.7-build-fast".to_string(),
+                effort: Some("low".to_string()),
+                enabled: true,
+            },
+        ],
+        default_delegation: Some(DefaultDelegation {
+            provider: "antigravity".to_string(),
+            model: "gemini-3-flash".to_string(),
+            effort: Some("medium".to_string()),
+        }),
+        override_policy: OverridePolicy::Ask,
+    };
+
+    let req = json!({
+        "from": "thread:main-1",
+        "workspace": tmp_ws.to_string_lossy().to_string(),
+    });
+    let resolved = super::resolve_command_with_subagent_settings(&req, &parsed, &settings);
+    match &resolved {
+        Command::Run {
+            provider,
+            model,
+            effort,
+            workspace,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("grok"));
+            assert_eq!(model.as_deref(), Some("grok-4.7-build-fast"));
+            assert_eq!(effort.as_deref(), Some("low"));
+            assert_eq!(workspace.as_deref(), Some("inherit"));
+        }
+        other => panic!("expected Command::Run, got {other:?}"),
+    }
+
+    assert!(check_stack_policy(&settings, Some("grok"), Some("grok-4.7-build-fast"), false).is_ok());
+    let err = check_stack_policy(&settings, Some("claude"), Some("claude-sonnet-4-6"), false)
+        .expect_err("out-of-stack under ask without override must error");
+    assert!(err.contains("--override-stack"), "got: {err}");
+    assert!(check_stack_policy(&settings, Some("claude"), Some("claude-sonnet-4-6"), true).is_ok());
+
+    let strict_settings = SubagentSettings {
+        override_policy: OverridePolicy::Strict,
+        ..settings.clone()
+    };
+    assert!(check_stack_policy(&strict_settings, Some("claude"), Some("claude-sonnet-4-6"), true).is_err());
+
+    let default_parsed = parse_args(&[
+        "kite".to_string(),
+        "dispatch".to_string(),
+        "run".to_string(),
+        "Inspect build scripts".to_string(),
+    ])
+    .expect("parse default run");
+    let default_resolved =
+        super::resolve_command_with_subagent_settings(&req, &default_parsed, &settings);
+    match default_resolved {
+        Command::Run {
+            provider,
+            model,
+            effort,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("antigravity"));
+            assert_eq!(model.as_deref(), Some("gemini-3-flash"));
+            assert_eq!(effort.as_deref(), Some("medium"));
+        }
+        other => panic!("expected Command::Run, got {other:?}"),
+    }
+
+    // dispatch_run JSON overloading `"workspace": "share"` still resolves workspace path from `from` thread.
+    let parent_tid = format!("wire-parent-{}", uuid::Uuid::new_v4().simple());
+    crate::persist::threads().lock().unwrap().push(json!({
+        "id": parent_tid,
+        "provider": "antigravity",
+        "workingDirectory": tmp_ws.to_string_lossy().to_string(),
+    }));
+    let share_req = json!({
+        "from": format!("thread:{parent_tid}"),
+        "workspace": "share",
+    });
+    assert_eq!(
+        super::server::resolve_request_workspace_path(&share_req).as_deref(),
+        Some(tmp_ws.as_path())
+    );
+    let share_resolved =
+        super::resolve_command_with_subagent_settings(&share_req, &parsed, &settings);
+    match share_resolved {
+        Command::Run {
+            provider,
+            model,
+            workspace,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("grok"));
+            assert_eq!(model.as_deref(), Some("grok-4.7-build-fast"));
+            assert_eq!(workspace.as_deref(), Some("inherit"));
+        }
+        other => panic!("expected Command::Run, got {other:?}"),
+    }
+    crate::persist::threads()
+        .lock()
+        .unwrap()
+        .retain(|t| t.get("id").and_then(Value::as_str) != Some(parent_tid.as_str()));
+
+    // Skill / manual composition includes workspace `.kite/agents/*.md` roles and `--timeout-ms`.
+    let roles = crate::subagent_settings::list_roles(Some(&tmp_ws));
+    let skill = crate::dispatch::cli::compose_skill_with(&settings, &roles);
+    assert!(skill.contains("fast-reviewer"), "skill missing workspace role: {skill}");
+    assert!(skill.contains("--timeout-ms"), "skill missing --timeout-ms flag: {skill}");
+
+    // Roles saved with `command: auto` (Inherit / Stack default) under `--via terminal --role`
+    // resolve engine from stack default or explicit `--engine`, and reject cleanly if unset.
+    std::fs::write(
+        tmp_ws.join(".kite").join("agents").join("auto-role.md"),
+        "---\ncommand: auto\ndescription: Inherit role\n---\n\nCheck inherited role behavior.",
+    )
+    .expect("write auto role");
+
+    let term_auto_parsed = parse_args(&[
+        "kite".to_string(),
+        "dispatch".to_string(),
+        "run".to_string(),
+        "--via".to_string(),
+        "terminal".to_string(),
+        "--role".to_string(),
+        "auto-role".to_string(),
+        "Check terminal inherit".to_string(),
+    ])
+    .expect("parse terminal auto-role");
+    let term_auto_resolved =
+        super::resolve_command_with_subagent_settings(&req, &term_auto_parsed, &settings);
+    match &term_auto_resolved {
+        Command::Run {
+            via,
+            engine,
+            model,
+            effort,
+            ..
+        } => {
+            assert_eq!(*via, Family::Terminal);
+            assert_eq!(engine.as_deref(), Some("antigravity"));
+            assert_eq!(model.as_deref(), Some("gemini-3-flash"));
+            assert_eq!(effort.as_deref(), Some("medium"));
+        }
+        other => panic!("expected Command::Run, got {other:?}"),
+    }
+
+    let cfg_dir = tmp_ws.join(".cfg-test");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let exec_ctx = crate::dispatch::cli::ExecContext {
+        id: "exec-auto-1",
+        from: "",
+        caller: crate::dispatch::types::Caller::Human,
+        mounted: false,
+        config_dir: Some(&cfg_dir),
+        workspace: Some(&tmp_ws),
+        now_ms: 10_000,
+    };
+    let mut svc = crate::dispatch::policy::Service::new(crate::dispatch::port::FakePort::default());
+    let receipt = crate::dispatch::cli::execute(&mut svc, &term_auto_resolved, &exec_ctx)
+        .expect("execute stack-resolved terminal auto-role");
+    assert_eq!(receipt.status, crate::dispatch::types::ReceiptStatus::Submitted);
+    assert_eq!(svc.port_mut().starts.len(), 1);
+    assert_eq!(svc.port_mut().starts[0].engine, "antigravity");
+    assert_eq!(svc.port_mut().starts[0].command, None);
+
+    let term_override_parsed = parse_args(&[
+        "kite".to_string(),
+        "dispatch".to_string(),
+        "run".to_string(),
+        "--via".to_string(),
+        "terminal".to_string(),
+        "--role".to_string(),
+        "auto-role".to_string(),
+        "--engine".to_string(),
+        "codex".to_string(),
+        "Override engine".to_string(),
+    ])
+    .expect("parse terminal auto-role override");
+    let term_override_resolved =
+        super::resolve_command_with_subagent_settings(&req, &term_override_parsed, &settings);
+    let mut svc_override =
+        crate::dispatch::policy::Service::new(crate::dispatch::port::FakePort::default());
+    let exec_ctx2 = crate::dispatch::cli::ExecContext {
+        id: "exec-auto-2",
+        from: "",
+        caller: crate::dispatch::types::Caller::Human,
+        mounted: false,
+        config_dir: Some(&cfg_dir),
+        workspace: Some(&tmp_ws),
+        now_ms: 11_000,
+    };
+    let receipt2 =
+        crate::dispatch::cli::execute(&mut svc_override, &term_override_resolved, &exec_ctx2)
+            .expect("execute explicit engine override with auto-role");
+    assert_eq!(receipt2.status, crate::dispatch::types::ReceiptStatus::Submitted);
+    assert_eq!(svc_override.port_mut().starts[0].engine, "codex");
+    assert_eq!(svc_override.port_mut().starts[0].command, None);
+
+    let mut svc_unset =
+        crate::dispatch::policy::Service::new(crate::dispatch::port::FakePort::default());
+    let exec_ctx3 = crate::dispatch::cli::ExecContext {
+        id: "exec-auto-3",
+        from: "",
+        caller: crate::dispatch::types::Caller::Human,
+        mounted: false,
+        config_dir: Some(&cfg_dir),
+        workspace: Some(&tmp_ws),
+        now_ms: 12_000,
+    };
+    let receipt3 = crate::dispatch::cli::execute(&mut svc_unset, &term_auto_parsed, &exec_ctx3)
+        .expect("execute unresolved auto-role");
+    assert_eq!(receipt3.status, crate::dispatch::types::ReceiptStatus::Rejected);
+    assert_eq!(receipt3.error.as_deref(), Some("program_not_found"));
+    assert!(svc_unset.port_mut().starts.is_empty());
+
+    let _ = std::fs::remove_dir_all(&tmp_ws);
+}

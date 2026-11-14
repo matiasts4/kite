@@ -243,6 +243,31 @@ pub fn swarm_kill_worker_from_ui(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
+pub fn get_subagent_settings(request: Option<Value>) -> Value {
+    subagents_ui::get_subagent_settings(request)
+}
+
+#[tauri::command]
+pub fn save_subagent_settings(request: Option<Value>) -> Value {
+    subagents_ui::save_subagent_settings(request)
+}
+
+#[tauri::command]
+pub fn list_subagent_roles(request: Option<Value>) -> Value {
+    subagents_ui::list_subagent_roles(request)
+}
+
+#[tauri::command]
+pub fn save_subagent_role(request: Option<Value>) -> Value {
+    subagents_ui::save_subagent_role(request)
+}
+
+#[tauri::command]
+pub fn delete_subagent_role(request: Option<Value>) -> Value {
+    subagents_ui::delete_subagent_role(request)
+}
+
+#[tauri::command]
 pub async fn pick_chat_attachments(app: tauri::AppHandle, request: Option<Value>) -> Value {
     attachments_cmd::pick_chat_attachments(app, request).await
 }

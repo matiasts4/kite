@@ -342,6 +342,17 @@ pub fn validate_provider_model_selection(provider: &str, model: &str) -> Result<
 }
 
 pub fn discover_thread_providers(refresh: bool) -> Value {
+    let settings = crate::subagent_settings::get_subagent_settings();
+    discover_thread_providers_with_settings(refresh, &settings)
+}
+
+pub fn discover_thread_providers_with_settings(
+    refresh: bool,
+    settings: &crate::subagent_settings::SubagentSettings,
+) -> Value {
+    let enabled_stack: Vec<&crate::subagent_settings::SubagentStackEntry> =
+        settings.stack.iter().filter(|e| e.enabled).collect();
+    let stack_active = !enabled_stack.is_empty();
     let mut rows = Vec::with_capacity(THREAD_PROVIDERS.len());
     for canon in THREAD_PROVIDERS {
         let binary_present = provider_binary_present(canon);
@@ -362,6 +373,16 @@ pub fn discover_thread_providers(refresh: bool) -> Value {
             .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
             .take(5)
             .collect();
+        let stack_models: Vec<String> = enabled_stack
+            .iter()
+            .filter(|e| e.provider == canon)
+            .map(|e| e.model.clone())
+            .collect();
+        let in_stack = !stack_active || !stack_models.is_empty();
+        let is_default_delegation = settings
+            .default_delegation
+            .as_ref()
+            .is_some_and(|d| d.provider == canon);
         let supports_discovery = !matches!(canon, "claude" | "gemini");
         rows.push(json!({
             "provider": canon,
@@ -371,23 +392,59 @@ pub fn discover_thread_providers(refresh: bool) -> Value {
             "supportsModelDiscovery": supports_discovery,
             "modelCount": models.len(),
             "sampleModels": sample_ids,
+            "inStack": in_stack,
+            "stackModels": stack_models,
+            "isDefaultDelegation": is_default_delegation,
         }));
     }
     json!({
         "providers": rows,
+        "stackActive": stack_active,
+        "overridePolicy": settings.override_policy.as_str(),
+        "defaultDelegation": settings.default_delegation,
     })
 }
 
 pub fn format_providers_text(discovery: &Value) -> String {
+    let settings = crate::subagent_settings::get_subagent_settings();
+    format_providers_text_with_settings(discovery, &settings)
+}
+
+pub fn format_providers_text_with_settings(
+    discovery: &Value,
+    settings: &crate::subagent_settings::SubagentSettings,
+) -> String {
     let rows = discovery
         .get("providers")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let enabled_stack: Vec<&crate::subagent_settings::SubagentStackEntry> =
+        settings.stack.iter().filter(|e| e.enabled).collect();
+    let stack_active = discovery
+        .get("stackActive")
+        .and_then(Value::as_bool)
+        .unwrap_or(!enabled_stack.is_empty());
+    let policy_str = discovery
+        .get("overridePolicy")
+        .and_then(Value::as_str)
+        .unwrap_or(settings.override_policy.as_str());
+
     let mut lines = vec![
         "Thread providers (use with `--via thread --provider <name>` or `kite dispatch swarm add`):"
             .to_string(),
     ];
+    if stack_active || settings.default_delegation.is_some() {
+        let def_desc = settings
+            .default_delegation
+            .as_ref()
+            .map(|d| format!(" | default delegation: {}/{}", d.provider, d.model))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  Subagent stack: {} enabled model(s) | override policy: {policy_str}{def_desc}",
+            enabled_stack.len()
+        ));
+    }
     for row in rows {
         let provider = row.get("provider").and_then(Value::as_str).unwrap_or("");
         let state = row.get("state").and_then(Value::as_str).unwrap_or("unknown");
@@ -401,6 +458,41 @@ pub fn format_providers_text(discovery: &Value) -> String {
             .and_then(Value::as_array)
             .map(|arr| arr.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+        let stack_models: Vec<String> = row
+            .get("stackModels")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let in_stack = row
+            .get("inStack")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let is_default = row
+            .get("isDefaultDelegation")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let stack_tag = if !stack_active {
+            String::new()
+        } else if !stack_models.is_empty() {
+            let mut tags = vec![format!("stack: {}", stack_models.join(", "))];
+            if is_default {
+                tags.push("default".to_string());
+            }
+            format!(" [{}]", tags.join(" | "))
+        } else if !in_stack {
+            match policy_str {
+                "strict" => " [blocked by strict stack]".to_string(),
+                "ask" => " [outside stack; requires --override-stack]".to_string(),
+                _ => " [outside curated stack]".to_string(),
+            }
+        } else {
+            String::new()
+        };
         let detail = if state != "ready" {
             format!("({})", state)
         } else if count > 0 {
@@ -410,12 +502,20 @@ pub fn format_providers_text(discovery: &Value) -> String {
         } else {
             "0 cached models (run with `--refresh` or omit `--model`)".to_string()
         };
-        lines.push(format!("  {provider:<12} {state:<14} {detail}"));
+        lines.push(format!("  {provider:<12} {state:<14} {detail}{stack_tag}"));
     }
     lines.join("\n")
 }
 
 pub fn format_models_text(catalog: &Value) -> String {
+    let settings = crate::subagent_settings::get_subagent_settings();
+    format_models_text_with_settings(catalog, &settings)
+}
+
+pub fn format_models_text_with_settings(
+    catalog: &Value,
+    settings: &crate::subagent_settings::SubagentSettings,
+) -> String {
     let provider = catalog.get("provider").and_then(Value::as_str).unwrap_or("");
     let state = catalog
         .get("catalogState")
@@ -426,15 +526,26 @@ pub fn format_models_text(catalog: &Value) -> String {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let enabled_stack: Vec<&crate::subagent_settings::SubagentStackEntry> =
+        settings.stack.iter().filter(|e| e.enabled).collect();
+    let stack_active = !enabled_stack.is_empty();
+    let policy_note = if stack_active {
+        format!(" [stack policy: {}]", settings.override_policy.as_str())
+    } else {
+        String::new()
+    };
     if models.is_empty() {
         if state != "ready" {
             return format!("{provider} ({state}): provider is unavailable on this machine.");
         }
         return format!(
-            "{provider} (ready): provider CLI manages its default model dynamically; omit `--model` or pass a known account model id."
+            "{provider} (ready{policy_note}): provider CLI manages its default model dynamically; omit `--model` or pass a known account model id."
         );
     }
-    let mut lines = vec![format!("{provider} ({state}, {} models):", models.len())];
+    let mut lines = vec![format!(
+        "{provider} ({state}, {} models{policy_note}):",
+        models.len()
+    )];
     for entry in models {
         let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty() {
@@ -451,11 +562,111 @@ pub fn format_models_text(catalog: &Value) -> String {
         } else {
             format!(" [effort: {}]", efforts.join(","))
         };
-        if name != id {
-            lines.push(format!("  {id}  ({name}){effort_suffix}"));
+        let is_default = settings
+            .default_delegation
+            .as_ref()
+            .is_some_and(|d| d.provider == provider && d.model.eq_ignore_ascii_case(id));
+        let in_stack = enabled_stack
+            .iter()
+            .any(|e| e.provider == provider && e.model.eq_ignore_ascii_case(id));
+        let stack_badge = if is_default {
+            " [default][stack]"
+        } else if in_stack {
+            " [stack]"
         } else {
-            lines.push(format!("  {id}{effort_suffix}"));
+            ""
+        };
+        if name != id {
+            lines.push(format!("  {id}  ({name}){effort_suffix}{stack_badge}"));
+        } else {
+            lines.push(format!("  {id}{effort_suffix}{stack_badge}"));
         }
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subagent_settings::{
+        DefaultDelegation, OverridePolicy, SubagentSettings, SubagentStackEntry,
+    };
+
+    #[test]
+    fn format_providers_and_models_highlight_stack_and_default_badges() {
+        let settings = SubagentSettings {
+            stack: vec![
+                SubagentStackEntry {
+                    provider: "grok".to_string(),
+                    model: "grok-4.7-build-fast".to_string(),
+                    effort: Some("low".to_string()),
+                    enabled: true,
+                },
+                SubagentStackEntry {
+                    provider: "antigravity".to_string(),
+                    model: "gemini-3-flash".to_string(),
+                    effort: None,
+                    enabled: true,
+                },
+            ],
+            default_delegation: Some(DefaultDelegation {
+                provider: "antigravity".to_string(),
+                model: "gemini-3-flash".to_string(),
+                effort: None,
+            }),
+            override_policy: OverridePolicy::Ask,
+        };
+
+        let discovery = json!({
+            "stackActive": true,
+            "overridePolicy": "ask",
+            "providers": [
+                {
+                    "provider": "grok",
+                    "state": "ready",
+                    "supportsModelDiscovery": true,
+                    "sampleModels": ["grok-4.7-build-fast"],
+                    "inStack": true,
+                    "stackModels": ["grok-4.7-build-fast"],
+                    "isDefaultDelegation": false
+                },
+                {
+                    "provider": "claude",
+                    "state": "ready",
+                    "supportsModelDiscovery": false,
+                    "sampleModels": [],
+                    "inStack": false,
+                    "stackModels": [],
+                    "isDefaultDelegation": false
+                }
+            ]
+        });
+        let providers_text = format_providers_text_with_settings(&discovery, &settings);
+        assert!(providers_text.contains("ask"), "got: {providers_text}");
+        assert!(providers_text.contains("grok-4.7-build-fast"), "got: {providers_text}");
+
+        let catalog = json!({
+            "provider": "antigravity",
+            "catalogState": "ready",
+            "models": [
+                {
+                    "id": "gemini-3-flash",
+                    "name": "Gemini 3 Flash",
+                    "effortLevels": ["low", "medium"]
+                },
+                {
+                    "id": "claude-sonnet-4-6",
+                    "name": "Claude Sonnet 4.6",
+                    "effortLevels": []
+                }
+            ]
+        });
+        let models_text = format_models_text_with_settings(&catalog, &settings);
+        assert!(models_text.contains("[stack policy: ask]"), "got: {models_text}");
+        assert!(
+            models_text.contains("gemini-3-flash  (Gemini 3 Flash) [effort: low,medium] [default][stack]"),
+            "got: {models_text}"
+        );
+        assert!(models_text.contains("claude-sonnet-4-6  (Claude Sonnet 4.6)\n") || models_text.ends_with("claude-sonnet-4-6  (Claude Sonnet 4.6)"));
+    }
 }

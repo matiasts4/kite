@@ -25,6 +25,7 @@ pub enum SwarmCommand {
         channels: Vec<String>,
         fork: Option<String>,
         role: Option<String>,
+        override_stack: bool,
         brief: String,
     },
     Post {
@@ -46,6 +47,7 @@ pub enum SwarmCommand {
         provider: Option<String>,
         model: String,
         effort: Option<String>,
+        override_stack: bool,
     },
     Kill {
         name: String,
@@ -78,6 +80,7 @@ pub enum Command {
         model: Option<String>,
         effort: Option<String>,
         workspace: Option<String>,
+        override_stack: bool,
         name: Option<String>,
         explicit_name: bool,
         parent: Option<String>,

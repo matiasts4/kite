@@ -93,9 +93,43 @@ fn execute_swarm_add(
     if !valid_worker_name(name) {
         return Err(DispatchError::BadArgs);
     }
+    let cfg_dir = if cfg!(test) {
+        None
+    } else {
+        Some(crate::persist::roaming_app_dir())
+    };
+    let resolved_role_file = role.and_then(|role_name| {
+        crate::dispatch::role::find_role_across_roots(
+            cfg_dir.as_deref(),
+            cwd.map(std::path::Path::new),
+            role_name,
+        )
+        .ok()
+    });
+    let role_provider = resolved_role_file.as_ref().and_then(|rf| {
+        rf.provider
+            .as_deref()
+            .and_then(crate::chat::models::canonical_thread_provider_id)
+            .or_else(|| crate::chat::models::canonical_thread_provider_id(&rf.command))
+    });
+    let eff_provider_owned = provider.map(str::to_string).or_else(|| role_provider.map(str::to_string));
+    let eff_model_owned = model
+        .map(str::to_string)
+        .or_else(|| resolved_role_file.as_ref().and_then(|rf| rf.model.clone()));
+    let eff_effort_owned = effort
+        .map(str::to_string)
+        .or_else(|| resolved_role_file.as_ref().and_then(|rf| rf.effort.clone()));
+    let eff_workspace_owned = workspace
+        .map(str::to_string)
+        .or_else(|| resolved_role_file.as_ref().and_then(|rf| rf.workspace.clone()));
+    let role_body_owned = resolved_role_file
+        .as_ref()
+        .map(|rf| rf.body.trim().to_string())
+        .filter(|b| !b.is_empty());
+
     let member_channels = normalize_member_channels(channels);
     let primary_channel = member_channels[0].clone();
-    let ws_mode = workspace.unwrap_or("inherit");
+    let ws_mode = eff_workspace_owned.as_deref().unwrap_or("inherit");
 
     // Lock 1: pre-check roster/channels without doing CLI discovery or git worktree I/O.
     let (swarm_id, fork_source_thread_id) = {
@@ -133,9 +167,9 @@ fn execute_swarm_add(
         coord_tid,
         &swarm_id,
         name,
-        provider,
-        model,
-        effort,
+        eff_provider_owned.as_deref(),
+        eff_model_owned.as_deref(),
+        eff_effort_owned.as_deref(),
         ws_mode,
         role,
         fork,
@@ -202,7 +236,7 @@ fn execute_swarm_add(
                     role: member_role.clone(),
                     provider: Some(resolved_provider.clone()),
                     model: resolved_model.clone(),
-                    effort: effort.map(str::to_string),
+                    effort: eff_effort_owned.clone(),
                     workspace_mode: Some(ws_mode.to_string()),
                     state: "working".to_string(),
                     current_activity: None,
@@ -213,7 +247,8 @@ fn execute_swarm_add(
                     last_read_seq: seq,
                     pending_wake: false,
                 };
-                let prompt = build_worker_initial_prompt(&state, &member, &post);
+                let role_pair = role.zip(role_body_owned.as_deref());
+                let prompt = build_worker_initial_prompt(&state, &member, &post, role_pair);
                 state.members.push(member);
                 register_swarm_worker_subagent_run(
                     coord_tid,
@@ -250,7 +285,8 @@ fn execute_swarm_add(
     }
 }
 
-fn execute_swarm_model(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_swarm_model_with_settings(
     coord_tid: &str,
     cwd: Option<&str>,
     launcher: Option<SwarmTurnLauncher<'_>>,
@@ -258,6 +294,8 @@ fn execute_swarm_model(
     provider: Option<&str>,
     model: &str,
     effort: Option<&str>,
+    override_stack: bool,
+    settings: &crate::subagent_settings::SubagentSettings,
 ) -> Result<String, DispatchError> {
     if name.eq_ignore_ascii_case("coordinator") {
         let canon_new = provider
@@ -277,6 +315,13 @@ fn execute_swarm_model(
                     .map(str::to_string)
             })
         };
+        crate::subagent_settings::check_stack_policy(
+            settings,
+            eff_provider.as_deref(),
+            Some(model),
+            override_stack,
+        )
+        .map_err(|_| DispatchError::BadArgs)?;
         if let Some(ref eff_p) = eff_provider {
             crate::chat::models::validate_provider_model_selection(eff_p, model)
                 .map_err(|_| DispatchError::BadArgs)?;
@@ -336,7 +381,14 @@ fn execute_swarm_model(
         canon_new_provider.clone().or_else(|| member.provider.clone())
     };
 
-    // Unlocked check: CLI model discovery can run freely without holding swarm_state_lock.
+    // Unlocked check: stack policy and CLI model discovery run without holding swarm_state_lock.
+    crate::subagent_settings::check_stack_policy(
+        settings,
+        effective_provider.as_deref(),
+        Some(model),
+        override_stack,
+    )
+    .map_err(|_| DispatchError::BadArgs)?;
     if let Some(ref eff_p) = effective_provider {
         crate::chat::models::validate_provider_model_selection(eff_p, model)
             .map_err(|_| DispatchError::BadArgs)?;
@@ -464,6 +516,7 @@ pub fn execute_swarm_action(
         channels,
         fork,
         role,
+        override_stack: _,
         brief,
     } = command
     {
@@ -488,9 +541,11 @@ pub fn execute_swarm_action(
         provider,
         model,
         effort,
+        override_stack,
     } = command
     {
-        return execute_swarm_model(
+        let settings = crate::subagent_settings::get_subagent_settings();
+        return execute_swarm_model_with_settings(
             &coord_tid,
             cwd,
             launcher,
@@ -498,6 +553,8 @@ pub fn execute_swarm_action(
             provider.as_deref(),
             model,
             effort.as_deref(),
+            *override_stack,
+            &settings,
         );
     }
 

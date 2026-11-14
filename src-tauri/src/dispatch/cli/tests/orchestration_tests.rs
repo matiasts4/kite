@@ -417,7 +417,7 @@ fn manual_and_skill_document_cross_provider_subagents_and_swarm() {
 
     assert!(skill.contains("cross-provider subagent"));
     assert!(skill.contains("swarm"));
-    assert_eq!(strip_skill_frontmatter(skill), manual);
+    assert_eq!(strip_skill_frontmatter(&skill), manual);
 
     for required in [
         "--via thread",
@@ -718,5 +718,57 @@ fn cli_parses_equals_flags_timeout_ms_and_rejects_short_flag_typos() {
             }))
         );
     }
+}
+
+#[test]
+fn compose_manual_and_skill_reflect_configured_stack_and_roles() {
+    use crate::subagent_settings::{
+        DefaultDelegation, OverridePolicy, SubagentRoleRecord, SubagentSettings, SubagentStackEntry,
+    };
+
+    let settings = SubagentSettings {
+        stack: vec![
+            SubagentStackEntry {
+                provider: "grok".to_string(),
+                model: "grok-4.7-build-fast".to_string(),
+                effort: Some("low".to_string()),
+                enabled: true,
+            },
+            SubagentStackEntry {
+                provider: "claude".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                effort: None,
+                enabled: false,
+            },
+        ],
+        default_delegation: Some(DefaultDelegation {
+            provider: "grok".to_string(),
+            model: "grok-4.7-build-fast".to_string(),
+            effort: Some("low".to_string()),
+        }),
+        override_policy: OverridePolicy::Ask,
+    };
+    let roles = vec![SubagentRoleRecord {
+        slug: "reviewer".to_string(),
+        scope: "workspace".to_string(),
+        path: ".kite/agents/reviewer.md".to_string(),
+        command: "grok".to_string(),
+        description: Some("Fast code reviewer".to_string()),
+        provider: Some("grok".to_string()),
+        model: Some("grok-4.7-build-fast".to_string()),
+        effort: Some("low".to_string()),
+        workspace: Some("inherit".to_string()),
+        body: "Review carefully.".to_string(),
+    }];
+
+    let manual = compose_manual_with(&settings, &roles);
+    let skill = compose_skill_with(&settings, &roles);
+
+    assert!(manual.contains("Override policy: `ask`"), "got: {manual}");
+    assert!(manual.contains("grok/grok-4.7-build-fast (low)"), "got: {manual}");
+    assert!(!manual.contains("claude/claude-sonnet-4-6"), "disabled stack entry leaked: {manual}");
+    assert!(manual.contains("`reviewer` (workspace) [grok/grok-4.7-build-fast]"), "got: {manual}");
+    assert!(skill.contains("Configured Subagents Stack & Roles:"), "got: {skill}");
+    assert!(!skill.contains("kite dispatch run <role>"), "must keep --role syntax invariant");
 }
 

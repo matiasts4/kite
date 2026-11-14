@@ -344,18 +344,26 @@ pub(super) fn build_worker_initial_prompt(
     state: &SwarmState,
     member: &SwarmMember,
     brief_post: &SwarmBoardPost,
+    role_instructions: Option<(&str, &str)>,
 ) -> String {
+    let role_block = role_instructions
+        .map(|(slug, body)| (slug.trim(), body.trim()))
+        .filter(|(_, body)| !body.is_empty())
+        .map(|(slug, body)| format!("Role Profile (`{slug}`):\n{body}\n\n"))
+        .unwrap_or_default();
     format!(
         "[Swarm Assignment — \"{}\"]\n\
         Roster Handle: @{}\n\
         Subscribed Channels: {}\n\
         Coordination Protocol: You belong to Swarm `{}`. Post progress, questions, blockers (`[stall]`), or completion (`[done]`) back to the board using `kite dispatch swarm post \"@coordinator ...\"` and read updates via `kite dispatch swarm read --since {}`.\n\n\
+        {}\
         Assignment Post #{} [#{}]:\n{}",
         state.title,
         member.name,
         member.channels.join(", "),
         state.swarm_id,
         brief_post.seq,
+        role_block,
         brief_post.seq,
         brief_post.channel,
         member.brief.as_deref().unwrap_or(&brief_post.text),

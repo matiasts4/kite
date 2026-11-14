@@ -7,7 +7,10 @@ use crate::dispatch::presence::PresenceState;
 use crate::dispatch::types::{DispatchError, Family};
 
 use super::protocol::mark_pane_shown;
-use super::server::{direct_op, execute_command};
+use super::server::{
+    direct_op, execute_command, resolve_command_with_subagent_settings,
+    validate_live_command_models_with_settings,
+};
 
 fn req_value(request: Option<Value>) -> Value {
     let Some(request) = request else {
@@ -150,8 +153,14 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
         },
         _ => None,
     };
-    let workspace = match request.get("workspace").and_then(Value::as_str) {
-        Some(raw) if !raw.trim().is_empty() => match cli::normalize_workspace_mode(raw) {
+    let explicit_ws_mode = request
+        .get("workspaceMode")
+        .or_else(|| request.get("workspace_mode"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let workspace = if let Some(raw_mode) = explicit_ws_mode {
+        match cli::normalize_workspace_mode(raw_mode) {
             Some(norm) => Some(norm),
             None => {
                 return serde_json::to_value(&crate::dispatch::types::Receipt::new(
@@ -165,8 +174,27 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
                 ))
                 .unwrap_or(Value::Null);
             }
-        },
-        _ => None,
+        }
+    } else {
+        match request.get("workspace").and_then(Value::as_str) {
+            Some(raw) if !raw.trim().is_empty() => match cli::normalize_workspace_mode(raw) {
+                Some(norm) => Some(norm),
+                None if !raw.contains('/') && !raw.contains('\\') && !raw.contains(':') => {
+                    return serde_json::to_value(&crate::dispatch::types::Receipt::new(
+                        &id,
+                        "run",
+                        crate::dispatch::types::ReceiptStatus::Rejected,
+                        "",
+                        false,
+                        None,
+                        Some(DispatchError::BadArgs.code().into()),
+                    ))
+                    .unwrap_or(Value::Null);
+                }
+                None => None,
+            },
+            _ => None,
+        }
     };
     let command = cli::Command::Run {
         via,
@@ -176,6 +204,10 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
         model,
         effort,
         workspace,
+        override_stack: request
+            .get("overrideStack")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         name: request.get("name").and_then(Value::as_str).map(|s| s.to_string()),
         explicit_name,
         parent: request.get("parent").and_then(Value::as_str).map(|s| s.to_string()),
@@ -201,7 +233,20 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
             })
             .unwrap_or_default(),
     };
-    serde_json::to_value(execute_command(&request, &command, &id)).unwrap_or(Value::Null)
+    let settings = crate::subagent_settings::get_subagent_settings();
+    let resolved = resolve_command_with_subagent_settings(&request, &command, &settings);
+    let online = super::service()
+        .lock()
+        .map(|g| super::online_flag(&g))
+        .unwrap_or(false);
+    if online {
+        if let Err(detail) = validate_live_command_models_with_settings(&request, &resolved, &settings) {
+            let (_, receipt) =
+                cli::render_detailed_error(&id, "run", DispatchError::BadArgs, &detail);
+            return serde_json::to_value(receipt).unwrap_or(Value::Null);
+        }
+    }
+    serde_json::to_value(execute_command(&request, &resolved, &id)).unwrap_or(Value::Null)
 }
 
 pub fn dispatch_wait(request: Option<Value>) -> Value {

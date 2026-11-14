@@ -81,6 +81,7 @@ pub fn execute<P: Port>(
             model,
             effort,
             workspace,
+            override_stack: _,
             name,
             explicit_name,
             parent,
@@ -118,11 +119,21 @@ pub fn execute<P: Port>(
             let hide_pane = !show_pane(*hidden, *pane, ctx.caller);
             if effective_via == Family::Thread {
                 let mut resolved_provider = provider.clone().or_else(|| engine.clone());
+                let mut resolved_role = role.clone();
                 let mut words_vec = words.clone();
                 if let Some(word) = program {
                     if !*explicit_role && resolved_provider.is_none() {
                         if let Some(canon) = canonical_thread_provider(word) {
                             resolved_provider = Some(canon.to_string());
+                        } else if resolved_role.is_none()
+                            && crate::dispatch::role::find_role_across_roots(
+                                ctx.config_dir,
+                                ctx.workspace,
+                                word,
+                            )
+                            .is_ok()
+                        {
+                            resolved_role = Some(word.clone());
                         } else {
                             words_vec.insert(0, word.clone());
                         }
@@ -139,21 +150,46 @@ pub fn execute<P: Port>(
                 if *wait && task.as_deref().map(str::trim).unwrap_or("").is_empty() {
                     return Err(DispatchError::BadArgs);
                 }
+                let loaded_role = resolved_role.as_deref().and_then(|role_name| {
+                    crate::dispatch::role::find_role_across_roots(
+                        ctx.config_dir,
+                        ctx.workspace,
+                        role_name,
+                    )
+                    .ok()
+                });
+                let role_provider = loaded_role.as_ref().and_then(|rf| {
+                    rf.provider
+                        .as_deref()
+                        .and_then(canonical_thread_provider)
+                        .or_else(|| canonical_thread_provider(&rf.command))
+                        .map(str::to_string)
+                });
+                let effective_provider = resolved_provider.or(role_provider);
+                let effective_model = model
+                    .clone()
+                    .or_else(|| loaded_role.as_ref().and_then(|rf| rf.model.clone()));
+                let effective_effort = effort
+                    .clone()
+                    .or_else(|| loaded_role.as_ref().and_then(|rf| rf.effort.clone()));
+                let effective_workspace = workspace
+                    .clone()
+                    .or_else(|| loaded_role.as_ref().and_then(|rf| rf.workspace.clone()));
                 let explicit_thread_name = if *explicit_name { name.clone() } else { None };
                 return Ok(service.run(RunInput {
                     id: ctx.id.to_string(),
                     via: Family::Thread,
-                    engine: resolved_provider.clone(),
-                    provider: resolved_provider,
-                    model: model.clone(),
-                    effort: effort.clone(),
-                    workspace: workspace.clone(),
+                    engine: effective_provider.clone(),
+                    provider: effective_provider,
+                    model: effective_model,
+                    effort: effective_effort,
+                    workspace: effective_workspace,
                     command: None,
                     name: explicit_thread_name,
                     parent,
                     outlive: *outlive,
-                    role: None,
-                    subagent_role: role.clone(),
+                    role: loaded_role,
+                    subagent_role: resolved_role,
                     role_missing: false,
                     task,
                     caller: ctx.caller,
@@ -166,6 +202,40 @@ pub fn execute<P: Port>(
             let task = combine_task(file_text, task.clone());
             if *explicit_role {
                 let role_name = role.as_deref().ok_or(DispatchError::BadArgs)?;
+                if let Ok(resolved_role) = crate::dispatch::role::find_role_across_roots(
+                    ctx.config_dir,
+                    ctx.workspace,
+                    role_name,
+                ) {
+                    let role_provider = resolved_role
+                        .provider
+                        .clone()
+                        .or_else(|| {
+                            canonical_thread_provider(&resolved_role.command).map(str::to_string)
+                        });
+                    return Ok(service.run(RunInput {
+                        id: ctx.id.to_string(),
+                        via: Family::Terminal,
+                        engine: engine.clone(),
+                        provider: role_provider,
+                        model: model.clone().or_else(|| resolved_role.model.clone()),
+                        effort: effort.clone().or_else(|| resolved_role.effort.clone()),
+                        workspace: resolved_role.workspace.clone(),
+                        command: None,
+                        name: Some(name.clone().unwrap_or_else(|| role_name.to_string())),
+                        parent,
+                        outlive: *outlive,
+                        role: Some(resolved_role),
+                        subagent_role: Some(role_name.to_string()),
+                        role_missing: false,
+                        task,
+                        caller: ctx.caller,
+                        cwd,
+                        now_ms: ctx.now_ms,
+                        hidden: hide_pane,
+                        argv: Vec::new(),
+                    }));
+                }
                 let dir = ctx.config_dir.ok_or(DispatchError::RoleNotFound)?;
                 return Ok(service.run_role(
                     ctx.id,
@@ -182,24 +252,40 @@ pub fn execute<P: Port>(
                 ));
             }
             if let Some(word) = program {
-                if let Some(dir) = ctx.config_dir {
-                    if crate::dispatch::address::is_alias_name(word) {
-                        let path = crate::dispatch::role::roles_dir(dir).join(format!("{word}.md"));
-                        if path.is_file() {
-                            return Ok(service.run_role(
-                                ctx.id,
-                                dir,
-                                word,
-                                task,
-                                parent.as_deref(),
-                                ctx.caller,
-                                ctx.now_ms,
-                                name.clone(),
-                                *outlive,
-                                hide_pane,
-                                cwd,
-                            ));
-                        }
+                if crate::dispatch::address::is_alias_name(word) {
+                    if let Ok(resolved_role) = crate::dispatch::role::find_role_across_roots(
+                        ctx.config_dir,
+                        ctx.workspace,
+                        word,
+                    ) {
+                        let role_provider = resolved_role
+                            .provider
+                            .clone()
+                            .or_else(|| {
+                                canonical_thread_provider(&resolved_role.command).map(str::to_string)
+                            });
+                        return Ok(service.run(RunInput {
+                            id: ctx.id.to_string(),
+                            via: Family::Terminal,
+                            engine: engine.clone(),
+                            provider: role_provider,
+                            model: model.clone().or_else(|| resolved_role.model.clone()),
+                            effort: effort.clone().or_else(|| resolved_role.effort.clone()),
+                            workspace: resolved_role.workspace.clone(),
+                            command: None,
+                            name: Some(name.clone().unwrap_or_else(|| word.clone())),
+                            parent,
+                            outlive: *outlive,
+                            role: Some(resolved_role),
+                            subagent_role: Some(word.clone()),
+                            role_missing: false,
+                            task,
+                            caller: ctx.caller,
+                            cwd,
+                            now_ms: ctx.now_ms,
+                            hidden: hide_pane,
+                            argv: Vec::new(),
+                        }));
                     }
                 }
                 let Some(engine_name) = crate::dispatch::programs::canonical(word) else {

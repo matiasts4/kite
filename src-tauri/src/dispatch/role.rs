@@ -10,6 +10,10 @@ use super::types::DispatchError;
 pub struct RoleFile {
     pub command: String,
     pub description: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub workspace: Option<String>,
     pub body: String,
 }
 
@@ -23,13 +27,40 @@ Review the task. Report defects, risks, and a recommendation.
 Do not take irreversible actions. Those wait for the person.
 ";
 
-pub fn parse_role(text: &str) -> Result<RoleFile, DispatchError> {
-    let (header, body) = match text.find("\n\n") {
+fn split_role_header_and_body(text: &str) -> (&str, &str) {
+    let normalized = text.trim_start();
+    if let Some(after_open) = normalized
+        .strip_prefix("---\r\n")
+        .or_else(|| normalized.strip_prefix("---\n"))
+    {
+        if let Some(close_idx) = after_open.find("\n---") {
+            let header = &after_open[..close_idx];
+            let rest = &after_open[close_idx + "\n---".len()..];
+            let body = rest
+                .strip_prefix("\r\n")
+                .or_else(|| rest.strip_prefix('\n'))
+                .unwrap_or(rest)
+                .trim();
+            return (header, body);
+        }
+    }
+    if let Some(idx) = text.find("\r\n\r\n") {
+        return (&text[..idx], text[idx + 4..].trim());
+    }
+    match text.find("\n\n") {
         Some(idx) => (&text[..idx], text[idx + 2..].trim()),
         None => (text.trim(), ""),
-    };
+    }
+}
+
+pub fn parse_role(text: &str) -> Result<RoleFile, DispatchError> {
+    let (header, body) = split_role_header_and_body(text);
     let mut command: Option<String> = None;
     let mut description: Option<String> = None;
+    let mut provider: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
+    let mut workspace: Option<String> = None;
     for line in header.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -38,27 +69,69 @@ pub fn parse_role(text: &str) -> Result<RoleFile, DispatchError> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
+        let value = value.trim();
         match key.trim() {
-            "command" => command = Some(value.trim().to_string()),
-            "description" => {
-                let value = value.trim();
-                if !value.is_empty() {
-                    description = Some(value.to_string());
-                }
-            }
+            "command" if !value.is_empty() => command = Some(value.to_string()),
+            "description" if !value.is_empty() => description = Some(value.to_string()),
+            "provider" if !value.is_empty() => provider = Some(value.to_string()),
+            "model" if !value.is_empty() => model = Some(value.to_string()),
+            "effort" if !value.is_empty() => effort = Some(value.to_string()),
+            "workspace" if !value.is_empty() => workspace = Some(value.to_string()),
             _ => {}
         }
     }
-    let command = command.filter(|c| !c.is_empty()).ok_or(DispatchError::RoleNotFound)?;
+    let command = command
+        .or_else(|| provider.clone())
+        .filter(|c| !c.is_empty())
+        .ok_or(DispatchError::RoleNotFound)?;
     Ok(RoleFile {
         command,
         description,
+        provider,
+        model,
+        effort,
+        workspace,
         body: body.to_string(),
     })
 }
 
+pub fn format_role_markdown(role: &RoleFile) -> String {
+    let mut header = Vec::new();
+    let cmd = if role.command.trim().is_empty() {
+        role.provider.as_deref().unwrap_or("codex")
+    } else {
+        role.command.trim()
+    };
+    header.push(format!("command: {cmd}"));
+    if let Some(desc) = role.description.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        header.push(format!("description: {desc}"));
+    }
+    if let Some(prov) = role.provider.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        header.push(format!("provider: {prov}"));
+    }
+    if let Some(model) = role.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        header.push(format!("model: {model}"));
+    }
+    if let Some(effort) = role.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        header.push(format!("effort: {effort}"));
+    }
+    if let Some(ws) = role.workspace.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        header.push(format!("workspace: {ws}"));
+    }
+    let body = role.body.trim();
+    if body.is_empty() {
+        format!("{}\n", header.join("\n"))
+    } else {
+        format!("{}\n\n{}\n", header.join("\n"), body)
+    }
+}
+
 pub fn roles_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("dispatch").join("roles")
+}
+
+pub fn workspace_agents_dir(workspace_dir: &Path) -> PathBuf {
+    workspace_dir.join(".kite").join("agents")
 }
 
 fn write_sample(dir: &Path, name: &str) -> Result<PathBuf, DispatchError> {
@@ -78,13 +151,55 @@ pub fn ensure_sample_role(config_dir: &Path) -> Result<PathBuf, DispatchError> {
     Ok(reviewer)
 }
 
-pub fn load_role(config_dir: &Path, name: &str) -> Result<RoleFile, DispatchError> {
+pub fn load_role_from_dir(dir: &Path, name: &str) -> Result<RoleFile, DispatchError> {
     if !is_alias_name(name) {
         return Err(DispatchError::RoleNotFound);
     }
-    let path = roles_dir(config_dir).join(format!("{name}.md"));
-    let text = fs::read_to_string(&path).map_err(|_| DispatchError::RoleNotFound)?;
-    parse_role(&text)
+    let exact = dir.join(format!("{name}.md"));
+    if exact.is_file() {
+        let text = fs::read_to_string(&exact).map_err(|_| DispatchError::RoleNotFound)?;
+        return parse_role(&text);
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.eq_ignore_ascii_case(name) {
+                    let text = fs::read_to_string(&path).map_err(|_| DispatchError::RoleNotFound)?;
+                    return parse_role(&text);
+                }
+            }
+        }
+    }
+    Err(DispatchError::RoleNotFound)
+}
+
+pub fn find_role_across_roots(
+    config_dir: Option<&Path>,
+    workspace_dir: Option<&Path>,
+    name: &str,
+) -> Result<RoleFile, DispatchError> {
+    if !is_alias_name(name) {
+        return Err(DispatchError::RoleNotFound);
+    }
+    if let Some(ws) = workspace_dir {
+        if let Ok(role) = load_role_from_dir(&workspace_agents_dir(ws), name) {
+            return Ok(role);
+        }
+    }
+    if let Some(cfg) = config_dir {
+        if let Ok(role) = load_role_from_dir(&roles_dir(cfg), name) {
+            return Ok(role);
+        }
+    }
+    Err(DispatchError::RoleNotFound)
+}
+
+pub fn load_role(config_dir: &Path, name: &str) -> Result<RoleFile, DispatchError> {
+    load_role_from_dir(&roles_dir(config_dir), name)
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ fn skill_mentions_the_gate_the_envelope_and_force() {
     let manual = manual_text();
     assert!(manual.starts_with("Kite Dispatch\n"));
     assert!(!manual.contains("name: kite-dispatch"));
-    assert_eq!(strip_skill_frontmatter(text), manual);
+    assert_eq!(strip_skill_frontmatter(&text), manual);
 }
 
 #[test]
@@ -203,6 +203,7 @@ fn run_inherits_a_session_parent_and_ignores_the_word_human() {
             model: None,
             effort: None,
             workspace: None,
+            override_stack: false,
             name: Some("helper".into()),
             explicit_name: true,
             parent: None,
@@ -248,6 +249,7 @@ fn run_inherits_a_session_parent_and_ignores_the_word_human() {
             model: None,
             effort: None,
             workspace: None,
+            override_stack: false,
             name: Some("solo".into()),
             explicit_name: true,
             parent: None,
@@ -442,4 +444,66 @@ fn explicit_missing_role_stays_role_not_found() {
     assert!(service.port_mut().starts.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn write_shim_skips_copy_when_metadata_matches_and_updates_when_stale() {
+    let root = std::env::temp_dir().join(format!(
+        "kite-shim-meta-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let exe_dir = root.join("exe");
+    let bin_dir = root.join("bin");
+    std::fs::create_dir_all(&exe_dir).unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    let console_name = if cfg!(windows) { "kite.exe" } else { "kite" };
+    let gui_exe = exe_dir.join(if cfg!(windows) { "kite-code.exe" } else { "kite-code" });
+    let src = exe_dir.join(console_name);
+    let dest = bin_dir.join(console_name);
+
+    std::fs::write(&gui_exe, b"gui").unwrap();
+    std::fs::write(&src, b"AAA").unwrap();
+
+    write_shim_to_dir(&bin_dir, &gui_exe);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"AAA");
+
+    // Same length and newer dest mtime: metadata check avoids re-reading/copying src.
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::write(&dest, b"BBB").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&dest)
+        .unwrap()
+        .set_modified(future)
+        .unwrap();
+    write_shim_to_dir(&bin_dir, &gui_exe);
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        b"BBB",
+        "matching length and up-to-date mtime must skip full file comparison and copy"
+    );
+
+    // Different length: must refresh dest from src.
+    std::fs::write(&src, b"AAAA").unwrap();
+    write_shim_to_dir(&bin_dir, &gui_exe);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"AAAA");
+
+    // Same length but newer src mtime: must refresh dest from src.
+    std::fs::write(&src, b"CCCC").unwrap();
+    let even_later = future + std::time::Duration::from_secs(10);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(even_later)
+        .unwrap();
+    write_shim_to_dir(&bin_dir, &gui_exe);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"CCCC");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 

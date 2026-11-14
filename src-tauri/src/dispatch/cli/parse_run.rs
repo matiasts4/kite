@@ -224,6 +224,7 @@ pub(super) fn parse_run_detailed<'a>(
     let mut model = None;
     let mut effort = None;
     let mut workspace = None;
+    let mut override_stack = false;
     let mut name = None;
     let mut explicit_name = false;
     let mut parent = None;
@@ -279,6 +280,7 @@ pub(super) fn parse_run_detailed<'a>(
                     ))
                 })?);
             }
+            "--override-stack" if inline_val.is_none() => override_stack = true,
             "--name" => {
                 name = Some(need_flag_detailed(items, "--name", inline_val)?);
                 explicit_name = true;
@@ -345,6 +347,7 @@ pub(super) fn parse_run_detailed<'a>(
         model,
         effort,
         workspace,
+        override_stack,
         name,
         explicit_name,
         parent,

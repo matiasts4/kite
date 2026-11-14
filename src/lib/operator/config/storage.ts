@@ -41,7 +41,8 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   persona: DEFAULT_ZED_PERSONA,
 };
 
-const CONFIG_STORAGE_KEY = 'kite.operator.providerConfig.v2';
+export const OPERATOR_CONFIG_STORAGE_KEY = 'kite.operator.providerConfig.v2';
+const CONFIG_STORAGE_KEY = OPERATOR_CONFIG_STORAGE_KEY;
 const LEGACY_CONFIG_STORAGE_KEY = 'kite.operator.providerConfig.v1';
 const SEED_VERSION_KEY = 'kite_operator_seed_v4';
 
@@ -136,25 +137,80 @@ export function loadOperatorConfig(): OperatorProviderConfig {
 
 export const getOperatorConfig = loadOperatorConfig;
 
-export function saveOperatorConfig(
-  partialOrFull: Partial<OperatorProviderConfig>
+export const OPERATOR_CONFIG_DEBOUNCE_MS = 350;
+
+export type OperatorConfigPatch = Omit<Partial<OperatorProviderConfig>, 'persona'> & {
+  persona?: Partial<OperatorProviderConfig['persona']>;
+};
+
+let pendingDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingDebouncedPatch: OperatorConfigPatch | null = null;
+let pendingFlushListeners: Array<(saved: OperatorProviderConfig) => void> = [];
+
+function mergeOperatorPatch(
+  base: OperatorConfigPatch,
+  incoming: OperatorConfigPatch
+): OperatorConfigPatch {
+  const mergedPersona =
+    base.persona || incoming.persona
+      ? {
+          ...(base.persona ?? {}),
+          ...(incoming.persona ?? {}),
+        }
+      : undefined;
+  return {
+    ...base,
+    ...incoming,
+    ...(mergedPersona ? { persona: mergedPersona } : {}),
+  };
+}
+
+/**
+ * Pure patch application used by controlled UI state and persistence layers.
+ */
+export function applyOperatorConfigPatch(
+  base: OperatorProviderConfig,
+  patch: OperatorConfigPatch
 ): OperatorProviderConfig {
-  const current = loadOperatorConfig();
-  const merged: OperatorProviderConfig = {
-    ...current,
-    ...partialOrFull,
+  return {
+    ...base,
+    ...patch,
     opencodeBaseUrl: normalizeOpenCodeBaseUrl(
-      partialOrFull.opencodeBaseUrl ?? current.opencodeBaseUrl
+      patch.opencodeBaseUrl ?? base.opencodeBaseUrl
     ),
     persona: {
-      ...current.persona,
-      ...(partialOrFull.persona ?? {}),
+      ...base.persona,
+      ...(patch.persona ?? {}),
     },
   };
+}
+
+function clearPendingDebounceState(): void {
+  if (pendingDebounceTimer !== null) {
+    clearTimeout(pendingDebounceTimer);
+    pendingDebounceTimer = null;
+  }
+}
+
+export function saveOperatorConfig(
+  partialOrFull: OperatorConfigPatch
+): OperatorProviderConfig {
+  clearPendingDebounceState();
+  const pendingPatch = pendingDebouncedPatch;
+  pendingDebouncedPatch = null;
+  const callbacks = pendingFlushListeners;
+  pendingFlushListeners = [];
+
+  const effectivePatch = pendingPatch
+    ? mergeOperatorPatch(pendingPatch, partialOrFull)
+    : partialOrFull;
+
+  const current = loadOperatorConfig();
+  const merged = applyOperatorConfigPatch(current, effectivePatch);
   try {
     localStorage.setItem(SEED_VERSION_KEY, '1');
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(merged));
-    if (partialOrFull.grokTranscriptionApiKey !== undefined) {
+    if (effectivePatch.grokTranscriptionApiKey !== undefined) {
       localStorage.setItem(
         'kite_grok_transcription_api_key',
         (merged.grokTranscriptionApiKey ?? '').trim()
@@ -170,13 +226,13 @@ export function saveOperatorConfig(
           void invokeCommand('save_provider_credential', { provider, key: trimmedNext }).catch(() => undefined);
         }
       };
-      saveCred('opencode', partialOrFull.opencodeApiKey, current.opencodeApiKey);
-      saveCred('grok', partialOrFull.grokApiKey, current.grokApiKey);
-      saveCred('grok_transcription', partialOrFull.grokTranscriptionApiKey, current.grokTranscriptionApiKey);
-      saveCred('vercel', partialOrFull.vercelApiKey, current.vercelApiKey);
-      saveCred('cloudflare', partialOrFull.cloudflareApiToken, current.cloudflareApiToken);
-      saveCred('cloudflare_account_id', partialOrFull.cloudflareAccountId, current.cloudflareAccountId);
-      saveCred('elevenlabs', partialOrFull.elevenlabsApiKey, current.elevenlabsApiKey);
+      saveCred('opencode', effectivePatch.opencodeApiKey, current.opencodeApiKey);
+      saveCred('grok', effectivePatch.grokApiKey, current.grokApiKey);
+      saveCred('grok_transcription', effectivePatch.grokTranscriptionApiKey, current.grokTranscriptionApiKey);
+      saveCred('vercel', effectivePatch.vercelApiKey, current.vercelApiKey);
+      saveCred('cloudflare', effectivePatch.cloudflareApiToken, current.cloudflareApiToken);
+      saveCred('cloudflare_account_id', effectivePatch.cloudflareAccountId, current.cloudflareAccountId);
+      saveCred('elevenlabs', effectivePatch.elevenlabsApiKey, current.elevenlabsApiKey);
 
       const settingsSnapshot = {
         activeProvider: merged.activeProvider,
@@ -217,7 +273,55 @@ export function saveOperatorConfig(
   } catch {
     // ignore storage errors
   }
+  for (const cb of callbacks) {
+    try {
+      cb(merged);
+    } catch {
+      /* ignore listener errors */
+    }
+  }
   return merged;
+}
+
+/**
+ * Flush any pending debounced operator config save immediately (e.g. on blur or unmount).
+ */
+export function flushOperatorConfigSave(): OperatorProviderConfig | null {
+  clearPendingDebounceState();
+  if (!pendingDebouncedPatch) {
+    pendingFlushListeners = [];
+    return null;
+  }
+  const patch = pendingDebouncedPatch;
+  pendingDebouncedPatch = null;
+  return saveOperatorConfig(patch);
+}
+
+/**
+ * Debounce high-frequency operator config writes (localStorage, vault IPC, broadcasts).
+ */
+export function saveOperatorConfigDebounced(
+  partialOrFull: OperatorConfigPatch,
+  delayMs = OPERATOR_CONFIG_DEBOUNCE_MS,
+  onFlushed?: (saved: OperatorProviderConfig) => void
+): void {
+  pendingDebouncedPatch = pendingDebouncedPatch
+    ? mergeOperatorPatch(pendingDebouncedPatch, partialOrFull)
+    : partialOrFull;
+  if (onFlushed) {
+    pendingFlushListeners.push(onFlushed);
+  }
+  clearPendingDebounceState();
+  pendingDebounceTimer = setTimeout(() => {
+    pendingDebounceTimer = null;
+    flushOperatorConfigSave();
+  }, delayMs);
+}
+
+export function resetOperatorConfigDebounceForTest(): void {
+  clearPendingDebounceState();
+  pendingDebouncedPatch = null;
+  pendingFlushListeners = [];
 }
 
 function newOpenCodeSessionId(): string {

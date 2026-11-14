@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { springs, tweens } from '../../../motion/standard/tokens';
 import { ttsNarrator, getAvailableVoices } from '../../../lib/operator/ttsNarrator';
@@ -10,8 +10,12 @@ import {
   DEFAULT_ZED_PERSONA,
   ZedPersonaConfig,
   ZedMemoryNote,
+  OPERATOR_CONFIG_DEBOUNCE_MS,
+  applyOperatorConfigPatch,
+  flushOperatorConfigSave,
   loadOperatorConfig,
   saveOperatorConfig,
+  saveOperatorConfigDebounced,
   syncNativeCredentialsWithVault,
   loadLatencyRecords,
   saveLatencyRecords,
@@ -37,6 +41,35 @@ import { ZedAudioSection } from './zed/ZedAudioSection';
 import { ZedPersonaSection } from './zed/ZedPersonaSection';
 import { ZedMemorySection } from './zed/ZedMemorySection';
 import { BrainIcon, CircleUserRoundIcon, GaugeIcon, GlobeIcon, MicIcon } from './icons';
+
+const DEBOUNCED_CONFIG_KEYS = new Set<keyof OperatorConfig>([
+  'opencodeApiKey',
+  'opencodeBaseUrl',
+  'opencodeModel',
+  'vercelApiKey',
+  'vercelBaseUrl',
+  'vercelModel',
+  'cloudflareAccountId',
+  'cloudflareApiToken',
+  'cloudflareGatewaySlug',
+  'cloudflareBaseUrl',
+  'cloudflareModel',
+  'antigravityModel',
+  'antigravityCommand',
+  'grokApiKey',
+  'grokModel',
+  'grokTranscriptionApiKey',
+  'grokTranscriptionBaseUrl',
+  'grokTranscriptionModel',
+  'elevenlabsApiKey',
+  'elevenlabsVoiceId',
+]);
+
+const DEBOUNCED_PERSONA_KEYS = new Set<keyof ZedPersonaConfig>([
+  'name',
+  'builderCallMe',
+  'standingInstructions',
+]);
 
 type ZedSectionId = 'provider' | 'latency' | 'voice' | 'persona' | 'memory';
 
@@ -128,6 +161,9 @@ export const ZedTab: React.FC = () => {
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [testingVoice, setTestingVoice] = useState(false);
 
+  const isMountedRef = useRef(true);
+  const savedToastTimerRef = useRef<number | null>(null);
+
   const persona: ZedPersonaConfig = config.persona ?? DEFAULT_ZED_PERSONA;
 
   const effectiveOpenCodeModels = useMemo(() => {
@@ -181,20 +217,29 @@ export const ZedTab: React.FC = () => {
   }, [config.cloudflareModel, cloudflareModelsList]);
 
   useEffect(() => {
-    setConfig(loadOperatorConfig());
-    setRecords(loadLatencyRecords());
-    setMemoryNotes(loadZedMemoryNotes());
-
+    isMountedRef.current = true;
     let isMounted = true;
 
     void syncNativeCredentialsWithVault()
       .then((synced) => {
-        if (isMounted) setConfig(synced);
+        if (!isMounted) return;
+        setConfig((prev) => (JSON.stringify(prev) === JSON.stringify(synced) ? prev : synced));
       })
       .catch(() => {});
 
-    const handleConfigUpdated = () => {
-      if (isMounted) setConfig(loadOperatorConfig());
+    const handleConfigUpdated = (event: Event) => {
+      if (!isMounted) return;
+      const detail = (event as CustomEvent<OperatorConfig>)?.detail;
+      if (detail && typeof detail === 'object') {
+        setConfig((prev) =>
+          JSON.stringify(prev) === JSON.stringify(detail) ? prev : detail
+        );
+        return;
+      }
+      setConfig((prev) => {
+        const loaded = loadOperatorConfig();
+        return JSON.stringify(prev) === JSON.stringify(loaded) ? prev : loaded;
+      });
     };
     window.addEventListener('kite:operator-config-updated', handleConfigUpdated);
 
@@ -229,6 +274,12 @@ export const ZedTab: React.FC = () => {
 
     return () => {
       isMounted = false;
+      isMountedRef.current = false;
+      flushOperatorConfigSave();
+      if (savedToastTimerRef.current !== null) {
+        window.clearTimeout(savedToastTimerRef.current);
+        savedToastTimerRef.current = null;
+      }
       window.removeEventListener('kite:operator-config-updated', handleConfigUpdated);
       if (ttsNarrator && typeof ttsNarrator.stop === 'function') {
         ttsNarrator.stop();
@@ -272,14 +323,39 @@ export const ZedTab: React.FC = () => {
     }
   };
 
+  const showSavedToast = useCallback(() => {
+    setSavedToast(true);
+    if (savedToastTimerRef.current !== null) {
+      window.clearTimeout(savedToastTimerRef.current);
+    }
+    savedToastTimerRef.current = window.setTimeout(() => {
+      savedToastTimerRef.current = null;
+      if (isMountedRef.current) {
+        setSavedToast(false);
+      }
+    }, 1800);
+  }, []);
+
   const persistConfig = (next: Partial<OperatorConfig>) => {
     const saved = saveOperatorConfig(next);
     setConfig(saved);
-    setSavedToast(true);
-    window.setTimeout(() => setSavedToast(false), 1800);
+    showSavedToast();
+  };
+
+  const persistConfigDebounced = (patch: Parameters<typeof saveOperatorConfigDebounced>[0]) => {
+    setConfig((prev) => applyOperatorConfigPatch(prev, patch));
+    saveOperatorConfigDebounced(patch, OPERATOR_CONFIG_DEBOUNCE_MS, () => {
+      if (isMountedRef.current) {
+        showSavedToast();
+      }
+    });
   };
 
   const handleFieldChange = <K extends keyof OperatorConfig>(key: K, value: OperatorConfig[K]) => {
+    if (DEBOUNCED_CONFIG_KEYS.has(key)) {
+      persistConfigDebounced({ [key]: value });
+      return;
+    }
     persistConfig({ [key]: value });
   };
 
@@ -287,6 +363,10 @@ export const ZedTab: React.FC = () => {
     key: K,
     value: ZedPersonaConfig[K]
   ) => {
+    if (DEBOUNCED_PERSONA_KEYS.has(key)) {
+      persistConfigDebounced({ persona: { [key]: value } });
+      return;
+    }
     persistConfig({
       persona: {
         ...persona,
@@ -467,7 +547,15 @@ export const ZedTab: React.FC = () => {
     );
 
   const selectSection = (id: ZedSectionId) => {
+    flushOperatorConfigSave();
     setSection(id);
+  };
+
+  const handleFieldBlurCapture = (event: React.FocusEvent<HTMLDivElement>) => {
+    const tag = event.target?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      flushOperatorConfigSave();
+    }
   };
 
   const moveSection = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -493,7 +581,7 @@ export const ZedTab: React.FC = () => {
   };
 
   return (
-    <div className="zed-settings">
+    <div className="zed-settings" onBlurCapture={handleFieldBlurCapture}>
       <ZedHeroCard
         persona={persona}
         config={config}

@@ -47,6 +47,23 @@ function mergeRunItems(existing: ChatItem[], incoming: ChatItem[]): ChatItem[] {
   return next;
 }
 
+/**
+ * Returns whether a subagent or swarm event introduces or updates child thread
+ * lifecycle state that the sidebar and known-threads summary list should sync.
+ */
+export function shouldDispatchThreadsChanged(
+  payload: ChatSubagentEventPayload | undefined
+): boolean {
+  if (!payload?.threadId) return false;
+  if (payload.kind === 'subagentRunUpdated' || payload.kind === 'swarmStateUpdated') {
+    return true;
+  }
+  return (
+    payload.kind === 'subagentStepsUpdated' &&
+    Boolean(payload.status || payload.childThreadId)
+  );
+}
+
 export function applySubagentEvent(
   thread: ExtendedChatThread,
   payload: ChatSubagentEventPayload
@@ -168,8 +185,21 @@ export function useSubagentEvents({
     let unlistenSubagent: (() => void) | undefined;
     let unlistenSwarm: (() => void) | undefined;
     let cancelled = false;
+    let threadsSyncTimer: number | null = null;
+    const scheduleThreadsChanged = () => {
+      if (threadsSyncTimer !== null) return;
+      threadsSyncTimer = window.setTimeout(() => {
+        threadsSyncTimer = null;
+        if (!cancelled && isMountedRef.current && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+        }
+      }, 120);
+    };
     const handlePayload = (payload: ChatSubagentEventPayload | undefined) => {
       if (!isMountedRef.current || !payload?.threadId) return;
+      if (shouldDispatchThreadsChanged(payload)) {
+        scheduleThreadsChanged();
+      }
       setThreadsMap((prev) => {
         const current = prev[payload.threadId];
         if (!current) return prev;
@@ -208,6 +238,10 @@ export function useSubagentEvents({
 
     return () => {
       cancelled = true;
+      if (threadsSyncTimer !== null) {
+        window.clearTimeout(threadsSyncTimer);
+        threadsSyncTimer = null;
+      }
       unlistenSubagent?.();
       unlistenSwarm?.();
     };

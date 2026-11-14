@@ -152,6 +152,65 @@ describe('child approvals', () => {
     expect(onStopThread).toHaveBeenCalledWith('side');
   });
 
+  it('cascades stop to active mid-turn subagentRuns without duplicating known threads', () => {
+    expect(
+      childStopIds(
+        'parent',
+        [
+          { id: 'c1', parentThreadId: 'parent', status: 'running' },
+          { id: 'done', parentThreadId: 'parent', status: 'completed' },
+        ],
+        [
+          { childThreadId: 'c1', status: 'running' },
+          { childThreadId: 'c2', status: 'running' },
+          { childThreadId: 'parent', status: 'running' },
+          { childThreadId: 'settled-run', status: 'completed' },
+        ]
+      )
+    ).toEqual(['c1', 'c2']);
+
+    const onStop = vi.fn();
+    const onStopThread = vi.fn();
+    renderPane({
+      running: true,
+      onStop,
+      onStopThread,
+      knownThreadsList: [],
+      thread: thread({
+        subagentRuns: [
+          {
+            subagentId: 'sub-live',
+            parentThreadId: 'thread-1',
+            parentToolCallId: 'call-live',
+            role: 'Explorer',
+            status: 'running',
+            childThreadId: 'child-live',
+            stepCount: 1,
+            items: [],
+            startedAtUnixMs: 1,
+            updatedAtUnixMs: 2,
+          },
+          {
+            subagentId: 'sub-done',
+            parentThreadId: 'thread-1',
+            parentToolCallId: 'call-done',
+            role: 'Reviewer',
+            status: 'completed',
+            childThreadId: 'child-done',
+            stepCount: 1,
+            items: [],
+            startedAtUnixMs: 1,
+            updatedAtUnixMs: 2,
+          },
+        ],
+      }),
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onStopThread).toHaveBeenCalledTimes(1);
+    expect(onStopThread).toHaveBeenCalledWith('child-live');
+  });
+
   it('answers the child approval from the parent composer area', () => {
     const onApprovalDecision = vi.fn();
     renderPane({

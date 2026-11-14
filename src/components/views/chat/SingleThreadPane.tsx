@@ -229,7 +229,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const stopRunning = () => {
     try {
       if (onStopThread) {
-        for (const id of childStopIds(thread.id, knownThreadsList)) onStopThread(id);
+        for (const id of childStopIds(thread.id, knownThreadsList, thread.subagentRuns)) onStopThread(id);
       }
     } finally {
       onStop();

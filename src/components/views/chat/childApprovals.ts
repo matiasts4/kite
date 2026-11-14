@@ -30,14 +30,31 @@ export function childApprovals(parentId: string, threads: ChildThreadRef[]): Chi
   });
 }
 
-export function childStopIds(parentId: string, threads: ChildThreadRef[]): string[] {
-  return threads
-    .filter((thread) => {
-      if (thread.parentThreadId !== parentId || thread.id === parentId) return false;
-      if (!thread.status) return true;
-      return !SETTLED_CHILD_STATUSES.has(thread.status) || Boolean(thread.pendingApproval);
-    })
-    .map((thread) => thread.id);
+export interface ChildRunStopRef {
+  childThreadId?: string | null;
+  status?: string | null;
+}
+
+export function childStopIds(
+  parentId: string,
+  threads: ChildThreadRef[],
+  subagentRuns?: ChildRunStopRef[] | null
+): string[] {
+  const ids = new Set<string>();
+  for (const thread of threads) {
+    if (thread.parentThreadId !== parentId || thread.id === parentId) continue;
+    if (!thread.status || !SETTLED_CHILD_STATUSES.has(thread.status) || Boolean(thread.pendingApproval)) {
+      ids.add(thread.id);
+    }
+  }
+  for (const run of subagentRuns ?? []) {
+    const childId = run.childThreadId?.trim();
+    if (!childId || childId === parentId) continue;
+    if (!run.status || !SETTLED_CHILD_STATUSES.has(run.status)) {
+      ids.add(childId);
+    }
+  }
+  return Array.from(ids);
 }
 
 export const DIRECT_MESSAGE_NOTICE = 'Message the parent thread.';

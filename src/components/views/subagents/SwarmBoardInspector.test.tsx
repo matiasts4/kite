@@ -195,4 +195,77 @@ describe('SwarmBoardInspector', () => {
       expect(onKillWorker).toHaveBeenCalledWith('parser');
     });
   });
+
+  it('uses SelectMenu for channel and provider selection and wires @coordinator/@all targets', async () => {
+    const onInspectWorker = vi.fn();
+    const onPostMessage = vi.fn().mockResolvedValue(undefined);
+    const onSwitchModel = vi.fn().mockResolvedValue(undefined);
+    const swarmWithBroadcast: SwarmState = {
+      ...sampleSwarm,
+      posts: [
+        ...sampleSwarm.posts,
+        {
+          seq: 4,
+          author: 'parser',
+          channel: 'api',
+          text: 'Status update for @coordinator and @all',
+          mentions: ['coordinator', 'all'],
+          createdAtUnixMs: 1_700_000_010_000,
+        },
+      ],
+    };
+
+    render(
+      <SwarmBoardInspector
+        swarmState={swarmWithBroadcast}
+        parentModelLabel="Opus 4.6"
+        onInspectWorker={onInspectWorker}
+        onPostMessage={onPostMessage}
+        onSwitchModel={onSwitchModel}
+      />,
+    );
+
+    // Filter to #api channel first
+    fireEvent.click(screen.getByRole('button', { name: '#api' }));
+
+    // Clicking inline @all mention pill resets filter to All, focuses composer, and seeds @all
+    const mentionGroup = screen.getByRole('group', { name: /Quick mention targets/i });
+    const inlineAllPills = screen.getAllByRole('button', { name: '@all' });
+    const inlineAll = inlineAllPills.find((btn) => !mentionGroup.contains(btn))!;
+    fireEvent.click(inlineAll);
+
+    const input = screen.getByPlaceholderText(/Post @worker or @all/i) as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe('@all ');
+    expect(screen.getByTestId('swarm-post-1')).toBeInTheDocument();
+
+    // Quick-target @coordinator button prepends @coordinator target
+    const quickCoordinator = screen
+      .getAllByRole('button', { name: '@coordinator' })
+      .find((btn) => mentionGroup.contains(btn))!;
+    fireEvent.click(quickCoordinator);
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe('@coordinator @all ');
+
+    // Choose #api channel using SelectMenu combobox
+    fireEvent.click(screen.getByRole('combobox', { name: /Target swarm channel/i }));
+    fireEvent.click(screen.getByRole('option', { name: '#api' }));
+    fireEvent.submit(screen.getByTestId('swarm-board-composer'));
+    await waitFor(() => {
+      expect(onPostMessage).toHaveBeenCalledWith('@coordinator @all', 'api');
+    });
+
+    // Switch to Roster and choose target provider via SelectMenu
+    fireEvent.click(screen.getByRole('tab', { name: /Roster \(4\)/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Switch model for @reviewer/i }));
+    fireEvent.click(screen.getByRole('combobox', { name: /Target provider for @reviewer/i }));
+    fireEvent.click(screen.getByRole('option', { name: /antigravity/i }));
+    fireEvent.change(screen.getByLabelText(/Target model for @reviewer/i), {
+      target: { value: 'gemini-3-pro' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Apply switch for @reviewer/i }));
+    await waitFor(() => {
+      expect(onSwitchModel).toHaveBeenCalledWith('reviewer', 'gemini-3-pro', 'antigravity');
+    });
+  });
 });

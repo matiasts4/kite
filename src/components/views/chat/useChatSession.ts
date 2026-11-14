@@ -214,6 +214,24 @@ export function useChatSession({
     };
   }, [stageDroppedAttachments]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let seq = 0;
+    const handleThreadsChanged = () => {
+      const mySeq = ++seq;
+      void loadChatSummariesWithFallback(agentId).then((summaries) => {
+        if (!cancelled && isMountedRef.current && mySeq === seq) {
+          setKnownThreadsList(summaries);
+        }
+      });
+    };
+    window.addEventListener('kite:threads-changed', handleThreadsChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:threads-changed', handleThreadsChanged);
+    };
+  }, [agentId, isMountedRef]);
+
   // Initial Load. When the pane is already showing this thread, a later selection
   // update must not reload it and replace the thread the session just opened.
   useEffect(() => {

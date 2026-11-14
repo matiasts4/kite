@@ -4,15 +4,19 @@ import {
   swarmPostFromUi,
   swarmSwitchWorkerModel,
 } from '../../../lib/ipc/chat';
-import type {
-  SubagentRun,
-  SwarmBoardPost,
-  SwarmMember,
-  SwarmState,
-} from '../../../types';
-import { formatShortModelLabel } from '../../../lib/subagentNav';
+import type { SubagentRun, SwarmMember, SwarmState } from '../../../types';
+import { SelectMenu } from '../../ui/SelectMenu';
+import { SwarmActivityGraph } from './SwarmActivityGraph';
+import { SwarmBoardFeed } from './SwarmBoardFeed';
+import {
+  buildSwarmChannels,
+  buildSwarmGraphData,
+  formatInspectorModelName,
+  type SwarmTab,
+} from './swarmBoardHelpers';
+import { SwarmRosterTab } from './SwarmRosterTab';
 
-type SwarmTab = 'feed' | 'roster' | 'graph';
+export { formatInspectorModelName };
 
 export interface SwarmBoardInspectorProps {
   threadId?: string | null;
@@ -30,78 +34,6 @@ export interface SwarmBoardInspectorProps {
   ) => Promise<void> | void;
   onKillWorker?: (name: string) => Promise<void> | void;
 }
-
-export function formatInspectorModelName(
-  model?: string | null,
-  provider?: string | null,
-): string {
-  const m = (model ?? '').trim();
-  const lower = m.toLowerCase();
-  const claudeMatch = lower.match(/claude-(opus|sonnet|haiku)-(\d+)[-.](\d+)/);
-  if (claudeMatch) {
-    const family = claudeMatch[1].charAt(0).toUpperCase() + claudeMatch[1].slice(1);
-    return `${family} ${claudeMatch[2]}.${claudeMatch[3]}`;
-  }
-  const geminiMatch = lower.match(/^gemini-(\d+(?:\.\d+)?)-([a-z-]+)$/);
-  if (geminiMatch) {
-    const tier = geminiMatch[2]
-      .split('-')
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(' ');
-    return `Gemini ${geminiMatch[1]} ${tier}`;
-  }
-  return formatShortModelLabel(model, provider) || provider || 'Default';
-}
-
-function formatPostTime(unixMs?: number | null): string {
-  if (!unixMs || !Number.isFinite(unixMs)) return '';
-  try {
-    return new Date(unixMs).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  } catch {
-    return '';
-  }
-}
-
-function memberStateDescription(
-  member: SwarmMember,
-  matchedRun?: SubagentRun,
-): { dotClass: string; label: string } {
-  const state = (member.state ?? 'waiting').toLowerCase();
-  if (state === 'working') {
-    const activity =
-      member.currentActivity?.trim() ||
-      matchedRun?.latestActivity?.trim() ||
-      'Working';
-    return { dotClass: 'swarm-state-dot--working', label: activity };
-  }
-  if (state === 'stopped') {
-    return {
-      dotClass: 'swarm-state-dot--stopped',
-      label: 'Stopped (wakes on @mention)',
-    };
-  }
-  if (state === 'killed') {
-    return { dotClass: 'swarm-state-dot--killed', label: 'Killed' };
-  }
-  return {
-    dotClass: 'swarm-state-dot--waiting',
-    label: 'Sleeping on board (0 tokens)',
-  };
-}
-
-interface ParsedMentionEdge {
-  seq: number;
-  from: string;
-  to: string;
-  channel: string;
-  isStall: boolean;
-}
-
-const TOKEN_SPLIT_RE = /(@#?[A-Za-z0-9_.-]+|#\d+\b)/g;
 
 export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
   threadId = null,
@@ -127,6 +59,7 @@ export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
   const [switchingWorker, setSwitchingWorker] = useState(false);
   const [killingWorker, setKillingWorker] = useState<string | null>(null);
   const postRefs = useRef<Map<number, HTMLElement>>(new Map());
+  const composerInputRef = useRef<HTMLInputElement>(null);
 
   const members = swarmState.members ?? [];
   const posts = swarmState.posts ?? [];
@@ -204,26 +137,10 @@ export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
     }
   };
 
-  const channels = useMemo(() => {
-    const seen = new Set<string>();
-    const list: string[] = [];
-    for (const ch of swarmState.channels ?? []) {
-      const name = ch.name.replace(/^#/, '');
-      if (name && !seen.has(name)) {
-        seen.add(name);
-        list.push(name);
-      }
-    }
-    for (const post of posts) {
-      const name = (post.channel ?? '').replace(/^#/, '');
-      if (name && !seen.has(name)) {
-        seen.add(name);
-        list.push(name);
-      }
-    }
-    if (!seen.has('main')) list.unshift('main');
-    return list;
-  }, [swarmState.channels, posts]);
+  const channels = useMemo(
+    () => buildSwarmChannels(swarmState.channels, posts),
+    [swarmState.channels, posts],
+  );
 
   const filteredPosts = useMemo(() => {
     if (selectedChannel === 'all') return posts;
@@ -256,78 +173,29 @@ export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
     });
   };
 
-  const renderPostBody = (post: SwarmBoardPost) => {
-    const parts = post.text.split(TOKEN_SPLIT_RE);
-    return parts.map((part, idx) => {
-      if (part.startsWith('@')) {
-        const cleanName = part.replace(/^@#?/, '').toLowerCase();
-        const targetMember = memberByName.get(cleanName);
-        return (
-          <button
-            key={`${post.seq}-m-${idx}`}
-            type="button"
-            className="swarm-mention-pill"
-            onClick={() => {
-              if (targetMember) {
-                onInspectWorker(targetMember);
-              }
-            }}
-          >
-            {part}
-          </button>
-        );
-      }
-      if (/^#\d+$/.test(part)) {
-        const seqNum = Number(part.slice(1));
-        return (
-          <button
-            key={`${post.seq}-s-${idx}`}
-            type="button"
-            className="swarm-seq-pill"
-            onClick={() => scrollToPost(seqNum)}
-          >
-            {part}
-          </button>
-        );
-      }
-      return <React.Fragment key={`${post.seq}-t-${idx}`}>{part}</React.Fragment>;
+  const insertComposerTarget = (rawTarget: string) => {
+    const normalized = rawTarget.startsWith('@') ? rawTarget : `@${rawTarget}`;
+    const clean = normalized.toLowerCase();
+    setActiveTab('feed');
+    if (clean === '@all') {
+      setSelectedChannel('all');
+    }
+    setComposerText((prev) => {
+      const trimmed = prev.trimStart();
+      if (!trimmed) return `${normalized} `;
+      if (trimmed.toLowerCase().startsWith(clean)) return prev;
+      return `${normalized} ${trimmed}`;
+    });
+    composerInputRef.current?.focus();
+    requestAnimationFrame(() => {
+      composerInputRef.current?.focus();
     });
   };
 
-  const graphData = useMemo(() => {
-    const postCountByAuthor = new Map<string, number>();
-    const edges: ParsedMentionEdge[] = [];
-    const stallPosts: SwarmBoardPost[] = [];
-    let batonHolder: string | null = null;
-
-    for (const post of posts) {
-      const author = post.author || 'coordinator';
-      postCountByAuthor.set(author, (postCountByAuthor.get(author) ?? 0) + 1);
-      const isStall = /\[stall\]/i.test(post.text);
-      if (isStall) stallPosts.push(post);
-
-      const matches = post.text.match(/@#?[A-Za-z0-9_.-]+/g) ?? [];
-      for (const rawTarget of matches) {
-        const cleanTarget = rawTarget.replace(/^@#?/, '');
-        if (cleanTarget.toLowerCase() === 'all') continue;
-        edges.push({
-          seq: post.seq,
-          from: `@${author}`,
-          to: `@${cleanTarget}`,
-          channel: (post.channel ?? 'main').replace(/^#/, ''),
-          isStall,
-        });
-        batonHolder = `@${cleanTarget}`;
-      }
-    }
-
-    const activeWorker = members.find((m) => (m.state ?? '').toLowerCase() === 'working');
-    if (activeWorker) {
-      batonHolder = `@${activeWorker.name}`;
-    }
-
-    return { postCountByAuthor, edges, stallPosts, batonHolder };
-  }, [posts, members]);
+  const graphData = useMemo(
+    () => buildSwarmGraphData(posts, members),
+    [posts, members],
+  );
 
   return (
     <div className="swarm-board" data-testid="swarm-board-inspector">
@@ -381,249 +249,50 @@ export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
       </div>
 
       {activeTab === 'feed' && (
-        <>
-          <div className="swarm-board__channels" aria-label="Swarm channels">
-            <button
-              type="button"
-              className={`swarm-channel-pill${selectedChannel === 'all' ? ' swarm-channel-pill--active' : ''}`}
-              onClick={() => setSelectedChannel('all')}
-            >
-              All
-            </button>
-            {channels.map((ch) => (
-              <button
-                key={ch}
-                type="button"
-                className={`swarm-channel-pill${selectedChannel === ch ? ' swarm-channel-pill--active' : ''}`}
-                onClick={() => setSelectedChannel(ch)}
-              >
-                #{ch}
-              </button>
-            ))}
-          </div>
-
-          <div className="swarm-board__scroll">
-            {filteredPosts.length === 0 ? (
-              <div className="subagent-inspector__empty">
-                <strong>No board posts yet</strong>
-                <span>Posts matching this channel will stream here chronologically.</span>
-              </div>
-            ) : (
-              filteredPosts.map((post) => (
-                <article
-                  key={post.seq}
-                  data-testid={`swarm-post-${post.seq}`}
-                  data-swarm-seq={post.seq}
-                  ref={(el) => {
-                    if (el) postRefs.current.set(post.seq, el);
-                    else postRefs.current.delete(post.seq);
-                  }}
-                  className={`swarm-post-card${highlightedSeq === post.seq ? ' swarm-post-card--highlighted' : ''}`}
-                >
-                  <div className="swarm-post-card__meta">
-                    <div className="swarm-post-card__author-group">
-                      <span className="swarm-post-card__seq">#{post.seq}</span>
-                      <span className="swarm-post-card__author">@{post.author}</span>
-                      {post.channel && (
-                        <span className="subagent-badge">
-                          #{post.channel.replace(/^#/, '')}
-                        </span>
-                      )}
-                    </div>
-                    <span className="swarm-post-card__time">
-                      {formatPostTime(post.createdAtUnixMs)}
-                    </span>
-                  </div>
-                  <div className="swarm-post-card__body">{renderPostBody(post)}</div>
-                </article>
-              ))
-            )}
-          </div>
-        </>
+        <SwarmBoardFeed
+          channels={channels}
+          selectedChannel={selectedChannel}
+          onSelectChannel={setSelectedChannel}
+          filteredPosts={filteredPosts}
+          highlightedSeq={highlightedSeq}
+          postRefs={postRefs}
+          memberByName={memberByName}
+          onInspectWorker={onInspectWorker}
+          onInsertTarget={insertComposerTarget}
+          onScrollToPost={scrollToPost}
+        />
       )}
 
       {activeTab === 'roster' && (
-        <div className="swarm-board__scroll">
-          {members.map((member) => {
-            const matchedRun = (subagentRuns ?? []).find(
-              (r) =>
-                r.subagentId === member.subagentId ||
-                r.swarmMemberName?.toLowerCase() === member.name.toLowerCase(),
-            );
-            const stateInfo = memberStateDescription(member, matchedRun);
-            const modelLabel = formatInspectorModelName(member.model, member.provider);
-            return (
-              <div key={member.name} className="swarm-roster-card">
-                <div className="swarm-roster-card__top">
-                  <div className="swarm-post-card__author-group">
-                    <span className="swarm-post-card__author">@{member.name}</span>
-                    {member.state !== 'killed' ? (
-                      <button
-                        type="button"
-                        className="subagent-badge subagent-badge--interactive"
-                        aria-label={`Switch model for @${member.name}`}
-                        disabled={member.state === 'working'}
-                        title={
-                          member.state === 'working'
-                            ? 'Wait until worker is sleeping or stopped to switch model'
-                            : 'Click to hot-swap worker provider or model'
-                        }
-                        onClick={() => {
-                          setEditingWorker((prev) =>
-                            prev === member.name ? null : member.name,
-                          );
-                          setSwitchProvider(member.provider ?? '');
-                          setSwitchModel(member.model ?? '');
-                        }}
-                      >
-                        {modelLabel} ▾
-                      </button>
-                    ) : (
-                      <span className="subagent-badge">{modelLabel}</span>
-                    )}
-                    {member.workspaceMode && (
-                      <span className="subagent-badge">{member.workspaceMode}</span>
-                    )}
-                  </div>
-                  <span className="swarm-state-badge">
-                    <span className={`swarm-state-dot ${stateInfo.dotClass}`} />
-                    <span>{stateInfo.label}</span>
-                  </span>
-                </div>
-                {(member.role || member.brief) && (
-                  <div className="swarm-post-card__body">
-                    {member.role || member.brief}
-                  </div>
-                )}
-                {editingWorker === member.name && (
-                  <div className="swarm-roster-card__switch-panel">
-                    <select
-                      aria-label={`Target provider for @${member.name}`}
-                      className="swarm-roster-card__select"
-                      value={switchProvider}
-                      onChange={(e) => setSwitchProvider(e.target.value)}
-                    >
-                      <option value="">keep provider</option>
-                      <option value="antigravity">antigravity</option>
-                      <option value="claude">claude</option>
-                      <option value="codex">codex</option>
-                      <option value="cursor">cursor</option>
-                      <option value="gemini">gemini</option>
-                      <option value="grok">grok</option>
-                      <option value="opencode">opencode</option>
-                    </select>
-                    <input
-                      type="text"
-                      aria-label={`Target model for @${member.name}`}
-                      className="swarm-roster-card__input"
-                      value={switchModel}
-                      placeholder="Model id…"
-                      onChange={(e) => setSwitchModel(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="swarm-roster-card__inspect-btn"
-                      aria-label={`Apply switch for @${member.name}`}
-                      disabled={!switchModel.trim() || switchingWorker}
-                      onClick={() => void handleApplySwitch(member)}
-                    >
-                      Apply
-                    </button>
-                  </div>
-                )}
-                <div className="swarm-roster-card__actions">
-                  <span className="swarm-post-card__time">
-                    {(member.channels ?? []).map((c) => `#${c.replace(/^#/, '')}`).join(' ')}
-                  </span>
-                  <div className="swarm-roster-card__btn-group">
-                    {member.state !== 'killed' && (
-                      <button
-                        type="button"
-                        className="swarm-roster-card__kill-btn"
-                        aria-label={`Kill @${member.name}`}
-                        disabled={killingWorker === member.name}
-                        onClick={() => void handleKillWorker(member)}
-                      >
-                        Kill
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="swarm-roster-card__inspect-btn"
-                      onClick={() => onInspectWorker(member)}
-                    >
-                      Inspect @{member.name}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <SwarmRosterTab
+          members={members}
+          subagentRuns={subagentRuns}
+          editingWorker={editingWorker}
+          switchProvider={switchProvider}
+          switchModel={switchModel}
+          switchingWorker={switchingWorker}
+          killingWorker={killingWorker}
+          onToggleEditWorker={(member) => {
+            setEditingWorker((prev) => (prev === member.name ? null : member.name));
+            setSwitchProvider(member.provider ?? '');
+            setSwitchModel(member.model ?? '');
+          }}
+          onChangeSwitchProvider={setSwitchProvider}
+          onChangeSwitchModel={setSwitchModel}
+          onApplySwitch={(member) => void handleApplySwitch(member)}
+          onKillWorker={(member) => void handleKillWorker(member)}
+          onInspectWorker={onInspectWorker}
+        />
       )}
 
       {activeTab === 'graph' && (
-        <div className="swarm-board__scroll" data-testid="swarm-activity-graph">
-          {graphData.stallPosts.length > 0 && (
-            <div className="swarm-graph__stall">
-              [stall] flagged on post #{graphData.stallPosts[graphData.stallPosts.length - 1].seq}
-            </div>
-          )}
-          <div className="swarm-graph-card">
-            <div className="swarm-post-card__meta">
-              <span className="swarm-post-card__author">Orchestration Nodes</span>
-              {graphData.batonHolder && (
-                <span className="subagent-badge subagent-badge--hierarchy">
-                  Baton: {graphData.batonHolder}
-                </span>
-              )}
-            </div>
-            <div className="swarm-graph__nodes">
-              <div className="swarm-graph__node">
-                <span className="swarm-state-dot swarm-state-dot--waiting" />
-                <span>Coordinator ({parentModelLabel})</span>
-                <span className="subagent-badge">
-                  {graphData.postCountByAuthor.get('coordinator') ?? 0} posts
-                </span>
-              </div>
-              {members.map((member) => {
-                const stateInfo = memberStateDescription(member);
-                return (
-                  <div key={member.name} className="swarm-graph__node">
-                    <span className={`swarm-state-dot ${stateInfo.dotClass}`} />
-                    <span>@{member.name}</span>
-                    <span className="subagent-badge">
-                      {graphData.postCountByAuthor.get(member.name) ?? 0} posts
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="swarm-graph-card">
-            <span className="swarm-post-card__author">Handoffs & @mentions</span>
-            <div className="swarm-graph__edges">
-              {graphData.edges.length === 0 ? (
-                <span className="swarm-post-card__time">
-                  No @mention edges recorded yet.
-                </span>
-              ) : (
-                graphData.edges.map((edge, idx) => (
-                  <div key={`${edge.seq}-${idx}`} className="swarm-graph__edge">
-                    <span>
-                      {edge.from} ➔ {edge.to}
-                    </span>
-                    <span className="subagent-badge">
-                      #{edge.channel} · #{edge.seq}
-                    </span>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
+        <SwarmActivityGraph
+          members={members}
+          parentModelLabel={parentModelLabel}
+          graphData={graphData}
+        />
       )}
+
       {actionError && (
         <div className="subagent-inspector__error" role="alert">
           {actionError}
@@ -635,33 +304,57 @@ export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
         data-testid="swarm-board-composer"
         onSubmit={(e) => void handleSubmitPost(e)}
       >
-        <select
-          aria-label="Target swarm channel"
-          className="swarm-board__channel-select"
-          value={composerChannel}
-          onChange={(e) => setComposerChannel(e.target.value)}
+        <div
+          className="swarm-board__quick-targets"
+          role="group"
+          aria-label="Quick mention targets"
         >
-          {(channels.length > 0 ? channels : ['main']).map((ch) => (
-            <option key={ch} value={ch}>
-              #{ch}
-            </option>
-          ))}
-        </select>
-        <input
-          type="text"
-          className="swarm-board__composer-input"
-          value={composerText}
-          placeholder="Post @worker or @all to swarm board…"
-          disabled={posting}
-          onChange={(e) => setComposerText(e.target.value)}
-        />
-        <button
-          type="submit"
-          className="swarm-board__composer-submit"
-          disabled={posting || !composerText.trim()}
-        >
-          Post
-        </button>
+          <span className="swarm-board__quick-label">Target:</span>
+          <button
+            type="button"
+            className="swarm-mention-pill"
+            onClick={() => insertComposerTarget('@coordinator')}
+          >
+            @coordinator
+          </button>
+          <button
+            type="button"
+            className="swarm-mention-pill"
+            onClick={() => insertComposerTarget('@all')}
+          >
+            @all
+          </button>
+        </div>
+        <div className="swarm-board__composer-row">
+          <SelectMenu
+            label="Target swarm channel"
+            variant="field"
+            className="swarm-board__channel-select"
+            value={composerChannel}
+            triggerLabel={`#${composerChannel}`}
+            rows={(channels.length > 0 ? channels : ['main']).map((ch) => ({
+              id: ch,
+              title: `#${ch}`,
+            }))}
+            onSelect={(id) => setComposerChannel(id)}
+          />
+          <input
+            ref={composerInputRef}
+            type="text"
+            className="swarm-board__composer-input"
+            value={composerText}
+            placeholder="Post @worker or @all to swarm board…"
+            disabled={posting}
+            onChange={(e) => setComposerText(e.target.value)}
+          />
+          <button
+            type="submit"
+            className="swarm-board__composer-submit"
+            disabled={posting || !composerText.trim()}
+          >
+            Post
+          </button>
+        </div>
       </form>
     </div>
   );

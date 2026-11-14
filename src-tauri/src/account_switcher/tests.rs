@@ -1690,3 +1690,43 @@ fn test_end_to_end_switch_preflight_apply_and_tokenless_rejection_preserves_acti
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_detected_cli_accounts_cache_hits_and_invalidates_on_write() {
+    use super::commands::DetectedCliAccountsCache;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let cache = DetectedCliAccountsCache::new(Duration::from_secs(60));
+    let probes = AtomicUsize::new(0);
+
+    let first = cache.get_or_compute(false, false, || {
+        let count = probes.fetch_add(1, Ordering::SeqCst) + 1;
+        json!({ "schemaVersion": 1, "probeCount": count })
+    });
+    let second = cache.get_or_compute(false, false, || {
+        let count = probes.fetch_add(1, Ordering::SeqCst) + 1;
+        json!({ "schemaVersion": 1, "probeCount": count })
+    });
+
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+    assert_eq!(first["probeCount"], json!(1));
+    assert_eq!(second["probeCount"], json!(1));
+
+    // Write invalidation forces the next read to recompute.
+    cache.invalidate();
+    let third = cache.get_or_compute(false, false, || {
+        let count = probes.fetch_add(1, Ordering::SeqCst) + 1;
+        json!({ "schemaVersion": 1, "probeCount": count })
+    });
+    assert_eq!(probes.load(Ordering::SeqCst), 2);
+    assert_eq!(third["probeCount"], json!(2));
+
+    // When cfg!(test) bypass is requested (bypass_time_ttl = true), cache does not serve stale results.
+    let bypassed = cache.get_or_compute(false, true, || {
+        let count = probes.fetch_add(1, Ordering::SeqCst) + 1;
+        json!({ "schemaVersion": 1, "probeCount": count })
+    });
+    assert_eq!(probes.load(Ordering::SeqCst), 3);
+    assert_eq!(bypassed["probeCount"], json!(3));
+}

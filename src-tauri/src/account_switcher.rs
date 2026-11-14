@@ -23,13 +23,13 @@ pub async fn list_saved_accounts(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn list_detected_cli_accounts() -> Value {
-    commands::list_detected_cli_accounts_impl()
+pub async fn list_detected_cli_accounts() -> Value {
+    commands::list_detected_cli_accounts_impl().await
 }
 
 #[tauri::command]
-pub fn save_current_account_profile(request: Option<Value>) -> Value {
-    commands::save_current_account_profile_impl(request)
+pub async fn save_current_account_profile(request: Option<Value>) -> Value {
+    commands::save_current_account_profile_impl(request).await
 }
 
 #[tauri::command]
@@ -38,23 +38,23 @@ pub async fn switch_account_profile(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn delete_account_profile(request: Option<Value>) -> Value {
-    commands::delete_account_profile_impl(request)
+pub async fn delete_account_profile(request: Option<Value>) -> Value {
+    commands::delete_account_profile_impl(request).await
 }
 
 #[tauri::command]
-pub fn rename_account_profile(request: Option<Value>) -> Value {
-    commands::rename_account_profile_impl(request)
+pub async fn rename_account_profile(request: Option<Value>) -> Value {
+    commands::rename_account_profile_impl(request).await
 }
 
 #[tauri::command]
-pub fn get_active_account_profile(request: Option<Value>) -> Value {
-    commands::get_active_account_profile_impl(request)
+pub async fn get_active_account_profile(request: Option<Value>) -> Value {
+    commands::get_active_account_profile_impl(request).await
 }
 
 #[tauri::command]
-pub fn prepare_new_account_login(request: Option<Value>) -> Value {
-    commands::prepare_new_account_login_impl(request)
+pub async fn prepare_new_account_login(request: Option<Value>) -> Value {
+    commands::prepare_new_account_login_impl(request).await
 }
 
 #[tauri::command]
@@ -73,6 +73,6 @@ pub async fn probe_live_account_login_status(request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn inspect_provider_sessions(request: Option<Value>) -> Value {
-    commands::inspect_provider_sessions_impl(request)
+pub async fn inspect_provider_sessions(request: Option<Value>) -> Value {
+    commands::inspect_provider_sessions_impl(request).await
 }

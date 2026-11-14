@@ -111,10 +111,8 @@ pub fn go_api_key_from(credential: Option<Credential>) -> Option<(String, String
     go_api_key_credential(credential).map(|credential| (credential.token, credential.source))
 }
 
-/// IPC: tells the UI whether a Go credential is already available locally,
-/// without exposing the token to the webview.
-#[tauri::command]
-pub fn opencode_go_credential_status() -> Value {
+/// Synchronous core for reading OpenCode Go credential status.
+pub fn opencode_go_credential_status_direct() -> Value {
     match resolve_opencode_go_api_key() {
         Some((_token, source)) => json!({
             "available": true,
@@ -125,6 +123,15 @@ pub fn opencode_go_credential_status() -> Value {
             "source": null,
         }),
     }
+}
+
+/// IPC: tells the UI whether a Go credential is already available locally,
+/// without exposing the token to the webview.
+#[tauri::command]
+pub async fn opencode_go_credential_status() -> Value {
+    tauri::async_runtime::spawn_blocking(opencode_go_credential_status_direct)
+        .await
+        .unwrap_or_else(|_| json!({ "available": false, "source": null }))
 }
 
 pub fn resolve_credential(home: &Path) -> (Option<Credential>, Vec<String>) {
@@ -551,8 +558,7 @@ pub fn credential_from_value(integration_id: &str, value: &Value, source: String
     None
 }
 
-#[tauri::command]
-pub fn save_opencode_api_key(api_key: String) -> Result<bool, String> {
+pub fn save_opencode_api_key_direct(api_key: String) -> Result<bool, String> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
         return Err("La API key de OpenCode Go no puede estar vacía.".to_string());
@@ -565,15 +571,30 @@ pub fn save_opencode_api_key(api_key: String) -> Result<bool, String> {
     let data = json!({ "apiKey": api_key });
     std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default())
         .map_err(|error| error.to_string())?;
+    crate::chat::models::invalidate_thread_providers_cache();
     Ok(true)
 }
 
 #[tauri::command]
-pub fn clear_opencode_api_key() -> Result<bool, String> {
+pub async fn save_opencode_api_key(api_key: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || save_opencode_api_key_direct(api_key))
+        .await
+        .map_err(|error| format!("opencode credential task failed: {error}"))?
+}
+
+pub fn clear_opencode_api_key_direct() -> Result<bool, String> {
     let home = user_home_dir();
     let path = home.join(".kite").join("opencode-go-quota.json");
     if path.exists() {
         let _ = std::fs::remove_file(path);
     }
+    crate::chat::models::invalidate_thread_providers_cache();
     Ok(true)
+}
+
+#[tauri::command]
+pub async fn clear_opencode_api_key() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(clear_opencode_api_key_direct)
+        .await
+        .map_err(|error| format!("opencode credential task failed: {error}"))?
 }

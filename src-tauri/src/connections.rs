@@ -8,6 +8,7 @@
 use crate::logger::log_trace;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -366,6 +367,18 @@ impl ConnectionRegistry {
         Ok(Self { path, conn })
     }
 
+    pub fn open_if_exists() -> Result<Option<Self>, String> {
+        Self::open_if_exists_at(&appdata_base())
+    }
+
+    pub fn open_if_exists_at(appdata: &Path) -> Result<Option<Self>, String> {
+        let path = registry_path_for(appdata, false);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Self::open_at(appdata).map(Some)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -452,6 +465,31 @@ impl ConnectionRegistry {
             .flatten();
         ciphertext.and_then(|value| crate::credentials::decrypt_secret(&value))
     }
+
+    /// Reads all stored connection secrets in one SQLite query.
+    pub fn get_secrets_map(&self) -> HashMap<String, String> {
+        let mut secrets = HashMap::new();
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT connection_id, ciphertext FROM connection_secrets")
+        else {
+            return secrets;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            return secrets;
+        };
+        for row in rows.flatten() {
+            let (conn_id, ciphertext) = row;
+            if let Some(plain) = crate::credentials::decrypt_secret(&ciphertext)
+                .filter(|k| !k.trim().is_empty())
+            {
+                secrets.insert(conn_id, plain);
+            }
+        }
+        secrets
+    }
 }
 
 /// Drivers whose saved API key also identifies a chat connection in the shared
@@ -521,12 +559,19 @@ pub fn sync_api_key_connection(driver_kind: &str, secret: &str) -> Result<(), St
     persist_api_key_connection(&mut registry, driver_kind, secret)
 }
 
+/// Synchronous core for listing persisted connections.
+pub fn list_connections_direct() -> Result<Vec<ConnectionRecord>, String> {
+    ConnectionRegistry::open()?.list()
+}
+
 /// Read command for both UI builds. It exposes persisted rows as they are; each
 /// surface decides which of its own endpoints is verified, so no driver-wide
 /// flag is added here.
 #[tauri::command]
-pub fn list_connections() -> Result<Vec<ConnectionRecord>, String> {
-    ConnectionRegistry::open()?.list()
+pub async fn list_connections() -> Result<Vec<ConnectionRecord>, String> {
+    tauri::async_runtime::spawn_blocking(list_connections_direct)
+        .await
+        .map_err(|error| format!("connection registry task failed: {error}"))?
 }
 
 #[derive(Debug, Clone, Default)]

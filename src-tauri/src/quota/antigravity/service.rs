@@ -41,15 +41,22 @@ pub fn fetch_antigravity_quota() -> ProviderQuotaStatus {
         org_id: None,
         account_id: None,
     });
-    if google_identity
+    let record_google = google_identity
         .as_ref()
-        .map_or(false, google_identity_is_antigravity_owned)
-    {
-        record_google_oauth_connection(google_connection_identity.as_ref());
-    }
-    if antigravity_api_key_present() {
-        persist_antigravity_connection("api_key", |registry| {
-            record_api_key_selected(registry, &AccountIdentity::default())
+        .map_or(false, google_identity_is_antigravity_owned);
+    let record_api_key = antigravity_api_key_present();
+    if record_google || record_api_key {
+        persist_antigravity_connection("auth_discovery", |registry| {
+            let mut last = None;
+            if record_google {
+                if let Some(identity) = google_connection_identity.as_ref() {
+                    last = Some(record_google_identity_probe(registry, identity)?);
+                }
+            }
+            if record_api_key {
+                last = Some(record_api_key_selected(registry, &AccountIdentity::default())?);
+            }
+            last.ok_or_else(|| "no connection state recorded".to_string())
         });
     }
 
@@ -185,8 +192,10 @@ pub fn fetch_antigravity_quota() -> ProviderQuotaStatus {
                         let cli_identity = google_connection_identity.clone().unwrap_or_default();
                         // A successful CLI quota probe also proves Antigravity is
                         // installed, so shared Google files become attributable.
-                        record_google_oauth_connection(google_connection_identity.as_ref());
                         persist_antigravity_connection("cli_session", |registry| {
+                            if let Some(identity) = google_connection_identity.as_ref() {
+                                let _ = record_google_identity_probe(registry, identity);
+                            }
                             record_cli_quota_probe(registry, &cli_identity)
                         });
                         return status;
@@ -272,8 +281,10 @@ pub fn fetch_antigravity_quota() -> ProviderQuotaStatus {
     } else {
         google_connection_identity.as_ref()
     };
-    record_google_oauth_connection(google_oauth_ref);
     persist_antigravity_connection("local_rpc", |registry| {
+        if let Some(google_identity) = google_oauth_ref {
+            let _ = record_google_identity_probe(registry, google_identity);
+        }
         record_local_rpc_probe(registry, &rpc_identity)
     });
 

@@ -221,11 +221,9 @@ fn build_cache_result(providers: &[&str]) -> Value {
 
 #[tauri::command]
 pub async fn get_subscription_quotas(request: Option<Value>, force: Option<bool>) -> Value {
-    tokio::task::spawn_blocking(move || {
-        get_subscription_quotas_direct(request, force)
-    })
-    .await
-    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    tauri::async_runtime::spawn_blocking(move || get_subscription_quotas_direct(request, force))
+        .await
+        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
 }
 
 pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool>) -> Value {
@@ -310,11 +308,33 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
         if !to_fetch_epochs.is_empty() {
             if !IS_REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 std::thread::spawn(move || {
-                    let mut fresh_entries = Vec::new();
-                    for (p, epoch) in to_fetch_epochs {
-                        let status = fetch_single_provider(&p);
-                        fresh_entries.push((p, epoch, status));
+                    struct RefreshingResetGuard;
+                    impl Drop for RefreshingResetGuard {
+                        fn drop(&mut self) {
+                            IS_REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
                     }
+                    let _reset_guard = RefreshingResetGuard;
+
+                    let fresh_entries: Vec<(String, u64, ProviderQuotaStatus)> =
+                        std::thread::scope(|s| {
+                        let handles: Vec<_> = to_fetch_epochs
+                            .into_iter()
+                            .map(|(p, epoch)| {
+                                s.spawn(move || {
+                                    let status = fetch_single_provider(&p);
+                                    (p, epoch, status)
+                                })
+                            })
+                            .collect();
+
+                        handles
+                            .into_iter()
+                            .filter_map(|handle| handle.join().ok())
+                            .collect()
+                    });
+
+                    #[cfg_attr(test, allow(unused_variables, unused_assignments))]
                     let mut updated_providers: Vec<String> = Vec::new();
                     if let Ok(mut guard) = CACHE.lock() {
                         if let Some(cache) = guard.as_mut() {
@@ -325,7 +345,7 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
                             }
                         }
                     }
-                    IS_REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    drop(_reset_guard);
 
                     // Push live updated quotas ONLY for providers whose cache epoch stayed valid
                     #[cfg(not(test))]

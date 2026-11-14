@@ -7,6 +7,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +151,7 @@ pub fn mask_key_preview(key: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
-/// Ensures the credentials_vault table exists in kite.sqlite
-pub fn ensure_credentials_table() {
-    let conn = db_connection().lock().unwrap();
+fn ensure_credentials_table_conn(conn: &rusqlite::Connection) {
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS credentials_vault (
             provider TEXT PRIMARY KEY,
@@ -161,6 +160,12 @@ pub fn ensure_credentials_table() {
         )",
         [],
     );
+}
+
+/// Ensures the credentials_vault table exists in kite.sqlite
+pub fn ensure_credentials_table() {
+    let conn = db_connection().lock().unwrap();
+    ensure_credentials_table_conn(&conn);
 }
 
 /// Sibling sqlite path (synchronizes Kite Code <-> Kite Code Dev vaults)
@@ -183,75 +188,168 @@ fn sibling_db_path() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Reads a stored credential from the SQLite vault (with fallback to sibling build vault and shared connection registry)
-pub fn get_vault_credential(provider: &str) -> Option<String> {
-    ensure_credentials_table();
-    let direct = {
-        let conn = db_connection().lock().unwrap();
-        let row: Option<String> = conn
-            .query_row(
-                "SELECT ciphertext FROM credentials_vault WHERE provider = ?1",
-                params![provider],
-                |r| r.get(0),
-            )
-            .ok();
-
-        row.and_then(|cipher| decrypt_secret(&cipher))
-            .filter(|k| !k.trim().is_empty())
+fn read_vault_map_from_conn(conn: &rusqlite::Connection) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(mut stmt) = conn.prepare("SELECT provider, ciphertext FROM credentials_vault") else {
+        return map;
     };
+    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+    else {
+        return map;
+    };
+    for row in rows.flatten() {
+        let (provider, cipher) = row;
+        if let Some(plain) = decrypt_secret(&cipher).filter(|k| !k.trim().is_empty()) {
+            map.insert(provider, plain);
+        }
+    }
+    map
+}
 
-    if direct.is_some() {
-        return direct;
+fn upsert_vault_entries_conn(conn: &rusqlite::Connection, entries: &[(String, String)], now: i64) {
+    for (provider, secret) in entries {
+        let trimmed = secret.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let cipher = encrypt_secret(trimmed);
+        let _ = conn.execute(
+            "INSERT INTO credentials_vault (provider, ciphertext, updated_at_unix_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider) DO UPDATE SET
+                ciphertext = excluded.ciphertext,
+                updated_at_unix_ms = excluded.updated_at_unix_ms",
+            params![provider, cipher, now],
+        );
+    }
+}
+
+/// Resolves stored credentials for `providers` in a single pass:
+/// 1. Reads primary vault under a brief lock (never held across fallback opens).
+/// 2. Opens sibling DB at most once if any requested provider is still missing.
+/// 3. Opens shared ConnectionRegistry at most once if any requested provider is still missing.
+/// 4. Batch-backfills fallback hits into the primary vault under a single brief lock.
+fn get_vault_credentials_batch_with<FSib, FReg>(
+    providers: &[&str],
+    primary_mutex: &std::sync::Mutex<rusqlite::Connection>,
+    enable_fallbacks: bool,
+    open_sibling: FSib,
+    open_registry: FReg,
+) -> (HashMap<String, String>, Vec<(String, String)>)
+where
+    FSib: FnOnce() -> Option<rusqlite::Connection>,
+    FReg: FnOnce() -> Option<crate::connections::ConnectionRegistry>,
+{
+    let mut resolved = HashMap::new();
+    if providers.is_empty() {
+        return (resolved, Vec::new());
     }
 
-    if cfg!(test) {
-        return None;
+    let primary_map = {
+        let conn = primary_mutex.lock().unwrap();
+        ensure_credentials_table_conn(&conn);
+        read_vault_map_from_conn(&conn)
+    };
+    for &p in providers {
+        if let Some(val) = primary_map.get(p) {
+            resolved.insert(p.to_string(), val.clone());
+        }
     }
 
-    // Fallback 1: Check sibling build vault (Kite Code <-> Kite Code Dev)
-    if let Some(sib_path) = sibling_db_path() {
-        if let Ok(sib_conn) = rusqlite::Connection::open(&sib_path) {
-            let sib_cipher: Option<String> = sib_conn
-                .query_row(
-                    "SELECT ciphertext FROM credentials_vault WHERE provider = ?1",
-                    params![provider],
-                    |r| r.get(0),
-                )
-                .ok();
-            if let Some(plain) = sib_cipher
-                .and_then(|c| decrypt_secret(&c))
-                .filter(|k| !k.trim().is_empty())
-            {
-                let _ = set_vault_credential(provider, &plain);
-                return Some(plain);
+    if !enable_fallbacks || providers.iter().all(|p| resolved.contains_key(*p)) {
+        return (resolved, Vec::new());
+    }
+
+    let mut backfill_to_primary: Vec<(String, String)> = Vec::new();
+    let mut backfill_to_sibling: Vec<(String, String)> = Vec::new();
+
+    // Fallback 1: Check sibling build vault at most once (Kite Code <-> Kite Code Dev)
+    if let Some(sib_conn) = open_sibling() {
+        let sib_map = read_vault_map_from_conn(&sib_conn);
+        for &p in providers {
+            if !resolved.contains_key(p) {
+                if let Some(plain) = sib_map.get(p) {
+                    resolved.insert(p.to_string(), plain.clone());
+                    backfill_to_primary.push((p.to_string(), plain.clone()));
+                }
             }
         }
     }
 
-    // Fallback 2: Check shared ConnectionRegistry (%APPDATA%\Kite Code\connections\registry.sqlite)
-    if let Ok(registry) = crate::connections::ConnectionRegistry::open() {
-        let conn_id = crate::connections::connection_id_for(
-            provider,
-            "api_key",
-            &crate::connections::AccountIdentity::default(),
-        );
-        if let Some(secret) = registry.get_secret(&conn_id).filter(|k| !k.trim().is_empty()) {
-            let _ = set_vault_credential(provider, &secret);
-            return Some(secret);
+    // Fallback 2: Check shared ConnectionRegistry at most once
+    if providers.iter().any(|p| !resolved.contains_key(*p)) {
+        if let Some(registry) = open_registry() {
+            let reg_secrets = registry.get_secrets_map();
+            let default_identity = crate::connections::AccountIdentity::default();
+            for &p in providers {
+                if !resolved.contains_key(p) {
+                    let conn_id =
+                        crate::connections::connection_id_for(p, "api_key", &default_identity);
+                    if let Some(secret) = reg_secrets.get(&conn_id) {
+                        resolved.insert(p.to_string(), secret.clone());
+                        backfill_to_primary.push((p.to_string(), secret.clone()));
+                        backfill_to_sibling.push((p.to_string(), secret.clone()));
+                    }
+                }
+            }
         }
     }
 
-    None
+    if !backfill_to_primary.is_empty() {
+        let now = now_ms();
+        let conn = primary_mutex.lock().unwrap();
+        ensure_credentials_table_conn(&conn);
+        upsert_vault_entries_conn(&conn, &backfill_to_primary, now);
+    }
+
+    (resolved, backfill_to_sibling)
+}
+
+/// Batch-reads stored credentials for multiple providers with at most one primary lock,
+/// one sibling vault open, and one shared registry open.
+pub fn get_vault_credentials_batch(providers: &[&str]) -> HashMap<String, String> {
+    let sib_path = sibling_db_path();
+    let (resolved, backfill_to_sibling) = get_vault_credentials_batch_with(
+        providers,
+        db_connection(),
+        !cfg!(test),
+        || {
+            sib_path
+                .as_ref()
+                .and_then(|path| rusqlite::Connection::open(path).ok())
+        },
+        || {
+            crate::connections::ConnectionRegistry::open_if_exists()
+                .ok()
+                .flatten()
+        },
+    );
+
+    if !backfill_to_sibling.is_empty() {
+        if let Some(path) = sib_path {
+            if let Ok(sib_conn) = rusqlite::Connection::open(&path) {
+                ensure_credentials_table_conn(&sib_conn);
+                upsert_vault_entries_conn(&sib_conn, &backfill_to_sibling, now_ms());
+            }
+        }
+    }
+
+    resolved
+}
+
+/// Reads a stored credential from the SQLite vault (with fallback to sibling build vault and shared connection registry)
+pub fn get_vault_credential(provider: &str) -> Option<String> {
+    get_vault_credentials_batch(&[provider]).remove(provider)
 }
 
 /// Stores a credential into the SQLite vault with user-bound encryption
 pub fn set_vault_credential(provider: &str, key: &str) -> Result<(), String> {
-    ensure_credentials_table();
     let trimmed = key.trim();
     let now = now_ms();
 
     {
         let conn = db_connection().lock().unwrap();
+        ensure_credentials_table_conn(&conn);
         if trimmed.is_empty() {
             let _ = conn.execute(
                 "DELETE FROM credentials_vault WHERE provider = ?1",
@@ -274,14 +372,7 @@ pub fn set_vault_credential(provider: &str, key: &str) -> Result<(), String> {
     // Mirror credential changes into sibling build database if present
     if let Some(sib_path) = sibling_db_path() {
         if let Ok(sib_conn) = rusqlite::Connection::open(&sib_path) {
-            let _ = sib_conn.execute(
-                "CREATE TABLE IF NOT EXISTS credentials_vault (
-                    provider TEXT PRIMARY KEY,
-                    ciphertext TEXT NOT NULL,
-                    updated_at_unix_ms INTEGER NOT NULL
-                )",
-                [],
-            );
+            ensure_credentials_table_conn(&sib_conn);
             if trimmed.is_empty() {
                 let _ = sib_conn.execute(
                     "DELETE FROM credentials_vault WHERE provider = ?1",
@@ -302,8 +393,8 @@ pub fn set_vault_credential(provider: &str, key: &str) -> Result<(), String> {
     }
 
     // Also mirror deletions into shared connection registry to prevent resurrection
-    if trimmed.is_empty() {
-        if let Ok(mut registry) = crate::connections::ConnectionRegistry::open() {
+    if trimmed.is_empty() && !cfg!(test) {
+        if let Ok(Some(mut registry)) = crate::connections::ConnectionRegistry::open_if_exists() {
             let conn_id = crate::connections::connection_id_for(
                 provider,
                 "api_key",
@@ -318,13 +409,15 @@ pub fn set_vault_credential(provider: &str, key: &str) -> Result<(), String> {
 
 /// Removes a credential from the vault
 pub fn remove_vault_credential(provider: &str) -> Result<(), String> {
-    ensure_credentials_table();
-    let conn = db_connection().lock().unwrap();
-    conn.execute(
-        "DELETE FROM credentials_vault WHERE provider = ?1",
-        params![provider],
-    )
-    .map_err(|e| format!("Failed to delete credential for '{provider}': {e}"))?;
+    {
+        let conn = db_connection().lock().unwrap();
+        ensure_credentials_table_conn(&conn);
+        conn.execute(
+            "DELETE FROM credentials_vault WHERE provider = ?1",
+            params![provider],
+        )
+        .map_err(|e| format!("Failed to delete credential for '{provider}': {e}"))?;
+    }
 
     if let Some(sib_path) = sibling_db_path() {
         if let Ok(sib_conn) = rusqlite::Connection::open(&sib_path) {
@@ -335,13 +428,15 @@ pub fn remove_vault_credential(provider: &str) -> Result<(), String> {
         }
     }
 
-    if let Ok(mut registry) = crate::connections::ConnectionRegistry::open() {
-        let conn_id = crate::connections::connection_id_for(
-            provider,
-            "api_key",
-            &crate::connections::AccountIdentity::default(),
-        );
-        let _ = registry.remove_secret(&conn_id);
+    if !cfg!(test) {
+        if let Ok(Some(mut registry)) = crate::connections::ConnectionRegistry::open_if_exists() {
+            let conn_id = crate::connections::connection_id_for(
+                provider,
+                "api_key",
+                &crate::connections::AccountIdentity::default(),
+            );
+            let _ = registry.remove_secret(&conn_id);
+        }
     }
 
     Ok(())
@@ -432,9 +527,8 @@ pub fn resolve_provider_key(provider: &str) -> Option<String> {
 // Tauri IPC Handlers
 // -----------------------------------------------------------------------------
 
-/// IPC: Get status and previews of all known providers
-#[tauri::command]
-pub fn get_provider_credentials() -> Value {
+/// Synchronous core for reading status and previews of all known providers in one SQLite pass.
+pub fn get_provider_credentials_direct() -> Value {
     let known_providers = [
         "grok",
         "grok_transcription",
@@ -450,12 +544,17 @@ pub fn get_provider_credentials() -> Value {
         "codex",
     ];
 
-    let mut list = Vec::new();
+    let vault_map = get_vault_credentials_batch(&known_providers);
+    let vault_lookup = |provider: &str| vault_map.get(provider).cloned();
+    let env_lookup = |var_name: &str| std::env::var(var_name).ok().filter(|s| !s.trim().is_empty());
+
+    let mut list = Vec::with_capacity(known_providers.len());
     for &p in &known_providers {
-        let (is_configured, source, preview) = match resolve_provider_credential(p) {
-            Some((key, src)) => (true, src, Some(mask_key_preview(&key))),
-            None => (false, CredentialSource::None, None),
-        };
+        let (is_configured, source, preview) =
+            match resolve_provider_credential_with(p, &vault_lookup, &env_lookup) {
+                Some((key, src)) => (true, src, Some(mask_key_preview(&key))),
+                None => (false, CredentialSource::None, None),
+            };
         list.push(CredentialStatus {
             provider: p.to_string(),
             is_configured,
@@ -470,9 +569,16 @@ pub fn get_provider_credentials() -> Value {
     })
 }
 
-/// IPC: Get active key for execution (e.g. Zed Operator)
+/// IPC: Get status and previews of all known providers
 #[tauri::command]
-pub fn get_active_provider_key(request: Option<Value>) -> Value {
+pub async fn get_provider_credentials() -> Value {
+    tauri::async_runtime::spawn_blocking(get_provider_credentials_direct)
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "credentials": [], "error": e.to_string() }))
+}
+
+/// Synchronous core for getting active key for execution (e.g. Zed Operator)
+pub fn get_active_provider_key_direct(request: Option<Value>) -> Value {
     let provider = body(&request)
         .and_then(|b| b.get("provider"))
         .and_then(|v| v.as_str())
@@ -498,9 +604,16 @@ pub fn get_active_provider_key(request: Option<Value>) -> Value {
     }
 }
 
-/// IPC: Save a key into the local SQLite vault
+/// IPC: Get active key for execution (e.g. Zed Operator)
 #[tauri::command]
-pub fn save_provider_credential(request: Option<Value>) -> Value {
+pub async fn get_active_provider_key(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || get_active_provider_key_direct(request))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": e.to_string() }))
+}
+
+/// Synchronous core for saving a key into the local SQLite vault
+pub fn save_provider_credential_direct(request: Option<Value>) -> Value {
     let b = match body(&request) {
         Some(b) => b,
         None => return json!({ "success": false, "error": "Missing request payload" }),
@@ -515,6 +628,7 @@ pub fn save_provider_credential(request: Option<Value>) -> Value {
 
     match set_vault_credential(provider, key) {
         Ok(_) => {
+            crate::chat::models::invalidate_thread_providers_cache();
             // The key is already in the vault; also record the chat connection
             // both builds share. A failure here must not look like a failed
             // save of the key itself.
@@ -537,9 +651,16 @@ pub fn save_provider_credential(request: Option<Value>) -> Value {
     }
 }
 
-/// IPC: Delete a key from the vault
+/// IPC: Save a key into the local SQLite vault
 #[tauri::command]
-pub fn delete_provider_credential(request: Option<Value>) -> Value {
+pub async fn save_provider_credential(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || save_provider_credential_direct(request))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": e.to_string() }))
+}
+
+/// Synchronous core for deleting a key from the vault
+pub fn delete_provider_credential_direct(request: Option<Value>) -> Value {
     let provider = body(&request)
         .and_then(|b| b.get("provider"))
         .and_then(|v| v.as_str())
@@ -550,14 +671,24 @@ pub fn delete_provider_credential(request: Option<Value>) -> Value {
     }
 
     match remove_vault_credential(provider) {
-        Ok(_) => json!({ "success": true, "provider": provider }),
+        Ok(_) => {
+            crate::chat::models::invalidate_thread_providers_cache();
+            json!({ "success": true, "provider": provider })
+        }
         Err(e) => json!({ "success": false, "error": e }),
     }
 }
 
-/// IPC: One-time migration of credentials found in localStorage to the native SQLite vault
+/// IPC: Delete a key from the vault
 #[tauri::command]
-pub fn migrate_localstorage_credentials(request: Option<Value>) -> Value {
+pub async fn delete_provider_credential(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || delete_provider_credential_direct(request))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": e.to_string() }))
+}
+
+/// Synchronous core for migrating credentials found in localStorage to the native SQLite vault
+pub fn migrate_localstorage_credentials_direct(request: Option<Value>) -> Value {
     let b = match body(&request) {
         Some(b) => b,
         None => return json!({ "success": false, "migrated": 0 }),
@@ -568,20 +699,45 @@ pub fn migrate_localstorage_credentials(request: Option<Value>) -> Value {
         None => return json!({ "success": false, "migrated": 0 }),
     };
 
-    let mut migrated = 0;
-    for (k, v) in records {
-        if let Some(val_str) = v.as_str() {
-            let trimmed = val_str.trim();
-            // Only migrate if not empty and not already present in the vault
-            if !trimmed.is_empty() && get_vault_credential(k).is_none() {
-                if set_vault_credential(k, trimmed).is_ok() {
-                    migrated += 1;
-                }
+    let candidates: Vec<(&str, &str)> = records
+        .iter()
+        .filter_map(|(k, v)| {
+            let trimmed = v.as_str()?.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some((k.as_str(), trimmed))
             }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return json!({ "success": true, "migrated": 0 });
+    }
+
+    let keys: Vec<&str> = candidates.iter().map(|(k, _)| *k).collect();
+    let existing = get_vault_credentials_batch(&keys);
+
+    let mut migrated = 0;
+    for (k, trimmed) in candidates {
+        if !existing.contains_key(k) && set_vault_credential(k, trimmed).is_ok() {
+            migrated += 1;
         }
     }
 
+    if migrated > 0 {
+        crate::chat::models::invalidate_thread_providers_cache();
+    }
+
     json!({ "success": true, "migrated": migrated })
+}
+
+/// IPC: One-time migration of credentials found in localStorage to the native SQLite vault
+#[tauri::command]
+pub async fn migrate_localstorage_credentials(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || migrate_localstorage_credentials_direct(request))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "migrated": 0, "error": e.to_string() }))
 }
 
 #[cfg(test)]
@@ -664,5 +820,159 @@ mod tests {
                 .map(|(k, _)| k),
             Some("AIza-explicit-agy-key".to_string())
         );
+    }
+
+    #[test]
+    fn test_batch_vault_resolution_opens_fallbacks_at_most_once_without_holding_primary_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        let primary_db = Mutex::new(rusqlite::Connection::open_in_memory().unwrap());
+        {
+            let conn = primary_db.lock().unwrap();
+            ensure_credentials_table_conn(&conn);
+            let cipher = encrypt_secret("sk-primary-grok-1111");
+            conn.execute(
+                "INSERT INTO credentials_vault (provider, ciphertext, updated_at_unix_ms) VALUES (?1, ?2, ?3)",
+                params!["grok", cipher, 1i64],
+            )
+            .unwrap();
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "kite-cred-batch-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let sibling_path = temp_dir.join("sibling.sqlite");
+        {
+            let sib_conn = rusqlite::Connection::open(&sibling_path).unwrap();
+            ensure_credentials_table_conn(&sib_conn);
+            let cipher = encrypt_secret("ds-sibling-key-2222");
+            sib_conn
+                .execute(
+                    "INSERT INTO credentials_vault (provider, ciphertext, updated_at_unix_ms) VALUES (?1, ?2, ?3)",
+                    params!["deepseek", cipher, 1i64],
+                )
+                .unwrap();
+        }
+
+        let registry_appdata = temp_dir.join("appdata");
+        {
+            let mut reg = crate::connections::ConnectionRegistry::open_at(&registry_appdata).unwrap();
+            let opencode_conn_id = crate::connections::connection_id_for(
+                "opencode",
+                "api_key",
+                &crate::connections::AccountIdentity::default(),
+            );
+            reg.set_secret(&opencode_conn_id, "oc-registry-key-3333").unwrap();
+        }
+
+        let sibling_opens = AtomicUsize::new(0);
+        let registry_opens = AtomicUsize::new(0);
+        let providers = [
+            "grok",
+            "grok_transcription",
+            "opencode",
+            "deepseek",
+            "vercel",
+            "cloudflare",
+            "cloudflare_account_id",
+            "elevenlabs",
+            "gemini",
+            "kimi",
+            "claude",
+            "codex",
+        ];
+
+        let (resolved, to_sibling) = get_vault_credentials_batch_with(
+            &providers,
+            &primary_db,
+            true,
+            || {
+                assert!(
+                    primary_db.try_lock().is_ok(),
+                    "primary DB lock must not be held while opening sibling DB"
+                );
+                sibling_opens.fetch_add(1, Ordering::SeqCst);
+                rusqlite::Connection::open(&sibling_path).ok()
+            },
+            || {
+                assert!(
+                    primary_db.try_lock().is_ok(),
+                    "primary DB lock must not be held while opening ConnectionRegistry"
+                );
+                registry_opens.fetch_add(1, Ordering::SeqCst);
+                crate::connections::ConnectionRegistry::open_if_exists_at(&registry_appdata)
+                    .ok()
+                    .flatten()
+            },
+        );
+
+        assert_eq!(sibling_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(registry_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(resolved.get("grok").map(String::as_str), Some("sk-primary-grok-1111"));
+        assert_eq!(resolved.get("deepseek").map(String::as_str), Some("ds-sibling-key-2222"));
+        assert_eq!(resolved.get("opencode").map(String::as_str), Some("oc-registry-key-3333"));
+        assert_eq!(to_sibling, vec![("opencode".to_string(), "oc-registry-key-3333".to_string())]);
+
+        // Backfilled into primary DB, so subsequent reads need 0 fallback opens.
+        let sibling_opens_2 = AtomicUsize::new(0);
+        let registry_opens_2 = AtomicUsize::new(0);
+        let (resolved_2, _) = get_vault_credentials_batch_with(
+            &["grok", "deepseek", "opencode"],
+            &primary_db,
+            true,
+            || {
+                sibling_opens_2.fetch_add(1, Ordering::SeqCst);
+                rusqlite::Connection::open(&sibling_path).ok()
+            },
+            || {
+                registry_opens_2.fetch_add(1, Ordering::SeqCst);
+                crate::connections::ConnectionRegistry::open_if_exists_at(&registry_appdata)
+                    .ok()
+                    .flatten()
+            },
+        );
+        assert_eq!(sibling_opens_2.load(Ordering::SeqCst), 0);
+        assert_eq!(registry_opens_2.load(Ordering::SeqCst), 0);
+        assert_eq!(resolved_2.get("deepseek").map(String::as_str), Some("ds-sibling-key-2222"));
+        assert_eq!(resolved_2.get("opencode").map(String::as_str), Some("oc-registry-key-3333"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_async_provider_credential_commands_roundtrip() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let test_provider = "test_async_custom_provider_t1";
+        let test_key = "sk-async-vault-test-9999";
+
+        let saved = rt.block_on(save_provider_credential(Some(json!({
+            "provider": test_provider,
+            "key": test_key,
+        }))));
+        assert_eq!(saved.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        let active = rt.block_on(get_active_provider_key(Some(json!({
+            "provider": test_provider,
+        }))));
+        assert_eq!(active.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(active.get("key").and_then(|v| v.as_str()), Some(test_key));
+
+        let all = rt.block_on(get_provider_credentials());
+        assert_eq!(all.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        let deleted = rt.block_on(delete_provider_credential(Some(json!({
+            "provider": test_provider,
+        }))));
+        assert_eq!(deleted.get("success").and_then(|v| v.as_bool()), Some(true));
     }
 }

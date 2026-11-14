@@ -660,3 +660,19 @@ fn a_failed_registry_write_is_reported() {
         "unexpected registry error: {error}"
     );
 }
+
+#[test]
+fn get_secrets_map_returns_all_decrypted_entries_in_one_pass() {
+    let temp = TempAppData::new();
+    let mut registry = ConnectionRegistry::open_at(temp.path()).expect("open shared registry");
+    registry
+        .set_secret("opencode:api_key", "sk-opencode-batch-1")
+        .expect("save opencode secret");
+    registry
+        .set_secret("grok:api_key", "xai-grok-batch-2")
+        .expect("save grok secret");
+
+    let map = registry.get_secrets_map();
+    assert_eq!(map.get("opencode:api_key").map(String::as_str), Some("sk-opencode-batch-1"));
+    assert_eq!(map.get("grok:api_key").map(String::as_str), Some("xai-grok-batch-2"));
+}

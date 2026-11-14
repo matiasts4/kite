@@ -7,16 +7,34 @@ const BROWSER_LANE_API = process.env.KITE_BROWSER_API_URL || 'http://127.0.0.1:1
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
   clearScreen: false,
+  worker: {
+    format: 'es',
+  },
   define:
     mode === 'browser'
       ? {
           'import.meta.env.VITE_KITE_BROWSER_TEST': JSON.stringify('1'),
         }
       : {},
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
   server: {
     host: true,
     port: mode === 'browser' ? 1430 : 1420,
     strictPort: true,
+    watch: {
+      ignored: [
+        '**/src-tauri/target/**',
+        '**/crates/**/target/**',
+        '**/.codegraph/**',
+        '**/.kite/**',
+        '**/test-results/**',
+        '**/bench-results/**',
+        '**/releases/**',
+        '**/dist/**',
+      ],
+    },
     proxy:
       mode === 'browser'
         ? {
@@ -34,9 +52,35 @@ export default defineConfig(({ mode }) => ({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules')) {
-            return 'vendor';
+          if (id.includes('vite/preload-helper') || id.includes('commonjsHelpers')) {
+            return 'vendor-runtime';
           }
+          if (!id.includes('node_modules')) return;
+          if (id.includes('@pierre') || id.includes('shiki')) {
+            return 'vendor-diffs';
+          }
+          if (id.includes('@xterm')) {
+            return 'vendor-xterm';
+          }
+          if (
+            id.includes('mermaid') ||
+            id.includes('cytoscape') ||
+            id.includes('elkjs') ||
+            id.includes('katex') ||
+            id.includes('dagre')
+          ) {
+            return 'vendor-mermaid';
+          }
+          if (/[\\/]node_modules[\\/]motion[\\/]/.test(id) || /[\\/]node_modules[\\/]framer-motion[\\/]/.test(id)) {
+            return 'vendor-motion';
+          }
+          if (id.includes('@tauri-apps')) {
+            return 'vendor-tauri';
+          }
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) {
+            return 'vendor-react';
+          }
+          return undefined;
         },
       },
     },

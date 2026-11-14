@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { DictationAvailability, DictationInputDevice, DictationSettings } from './types';
 import {
   loadOperatorConfig,
@@ -22,6 +22,37 @@ interface VoiceTabProps {
   onRequestMicrophone: () => void;
 }
 
+let vaultSyncDone = false;
+let vaultSyncInFlight: Promise<OperatorConfig> | null = null;
+
+function ensureVaultSyncedOnce(): Promise<OperatorConfig> | null {
+  if (vaultSyncDone) return null;
+  if (!vaultSyncInFlight) {
+    vaultSyncInFlight = syncNativeCredentialsWithVault()
+      .then((synced) => {
+        vaultSyncDone = true;
+        return synced;
+      })
+      .finally(() => {
+        vaultSyncInFlight = null;
+      });
+  }
+  return vaultSyncInFlight;
+}
+
+function readGrokKeyFromConfig(cfg: OperatorConfig): string {
+  try {
+    return (
+      cfg.grokTranscriptionApiKey ||
+      localStorage.getItem('kite_grok_transcription_api_key') ||
+      cfg.grokApiKey ||
+      ''
+    );
+  } catch {
+    return cfg.grokTranscriptionApiKey || cfg.grokApiKey || '';
+  }
+}
+
 export const VoiceTab: React.FC<VoiceTabProps> = ({
   dictationSettings,
   dictationAvailability,
@@ -33,24 +64,18 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
   onChooseWhisperModel,
   onRequestMicrophone,
 }) => {
-  const [operatorCfg, setOperatorCfg] = useState<OperatorConfig>(() => loadOperatorConfig());
-  const [grokKeyInput, setGrokKeyInput] = useState<string>(() => {
-    try {
-      const cfg = loadOperatorConfig();
-      return (
-        cfg.grokTranscriptionApiKey ||
-        localStorage.getItem('kite_grok_transcription_api_key') ||
-        cfg.grokApiKey ||
-        ''
-      );
-    } catch {
-      return '';
-    }
-  });
+  const initialCfgRef = useRef<OperatorConfig | null>(null);
+  if (initialCfgRef.current === null) {
+    initialCfgRef.current = loadOperatorConfig();
+  }
+  const [operatorCfg, setOperatorCfg] = useState<OperatorConfig>(initialCfgRef.current);
+  const [grokKeyInput, setGrokKeyInput] = useState<string>(() =>
+    readGrokKeyFromConfig(initialCfgRef.current!)
+  );
   const [showKey, setShowKey] = useState(false);
   const [savedBadge, setSavedBadge] = useState(false);
   const [elevenKeyInput, setElevenKeyInput] = useState<string>(
-    () => loadOperatorConfig().elevenlabsApiKey || ''
+    () => initialCfgRef.current!.elevenlabsApiKey || ''
   );
   const [showElevenKey, setShowElevenKey] = useState(false);
   const [savedElevenBadge, setSavedElevenBadge] = useState(false);
@@ -68,20 +93,21 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
       return true;
     }
   });
+  const savedBadgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedElevenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let mounted = true;
-    void syncNativeCredentialsWithVault().then((synced) => {
-      if (!mounted) return;
-      setOperatorCfg(synced);
-      const nextGrok =
-        synced.grokTranscriptionApiKey ||
-        localStorage.getItem('kite_grok_transcription_api_key') ||
-        synced.grokApiKey ||
-        '';
-      setGrokKeyInput((prev) => (prev.trim() ? prev : nextGrok));
-      setElevenKeyInput((prev) => (prev.trim() ? prev : synced.elevenlabsApiKey || ''));
-    });
+    const syncPromise = ensureVaultSyncedOnce();
+    if (syncPromise) {
+      void syncPromise.then((synced) => {
+        if (!mounted) return;
+        setOperatorCfg(synced);
+        const nextGrok = readGrokKeyFromConfig(synced);
+        setGrokKeyInput((prev) => (prev.trim() ? prev : nextGrok));
+        setElevenKeyInput((prev) => (prev.trim() ? prev : synced.elevenlabsApiKey || ''));
+      });
+    }
 
     const handleConfigUpdated = (e: Event) => {
       const detail = (e as CustomEvent<OperatorConfig>).detail ?? loadOperatorConfig();
@@ -97,6 +123,8 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
     return () => {
       mounted = false;
       window.removeEventListener('kite:operator-config-updated', handleConfigUpdated);
+      if (savedBadgeTimerRef.current) clearTimeout(savedBadgeTimerRef.current);
+      if (savedElevenTimerRef.current) clearTimeout(savedElevenTimerRef.current);
     };
   }, []);
 
@@ -108,7 +136,8 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
       setOperatorCfg(updated);
       setSavedBadge(true);
       toast.success('Clave API guardada', 'Configuración de dictado y transcripción actualizada en bóveda SQLite.');
-      setTimeout(() => setSavedBadge(false), 2000);
+      if (savedBadgeTimerRef.current) clearTimeout(savedBadgeTimerRef.current);
+      savedBadgeTimerRef.current = setTimeout(() => setSavedBadge(false), 2000);
     } catch {
       toast.error('Error al guardar', 'No se pudo guardar la clave API en almacenamiento local.');
     }
@@ -129,7 +158,8 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
       setOperatorCfg(updated);
       setSavedElevenBadge(true);
       toast.success('Clave de ElevenLabs guardada', 'Síntesis de voz (Texto a Voz) guardada en bóveda SQLite.');
-      setTimeout(() => setSavedElevenBadge(false), 2000);
+      if (savedElevenTimerRef.current) clearTimeout(savedElevenTimerRef.current);
+      savedElevenTimerRef.current = setTimeout(() => setSavedElevenBadge(false), 2000);
     } catch {
       toast.error('Error al guardar', 'No se pudo guardar la clave de ElevenLabs.');
     }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { tweens } from '../../../motion/standard/tokens';
 import './quotas-tab.css';
 
@@ -28,6 +28,8 @@ export const SettingsMasterDetail: React.FC<SettingsMasterDetailProps> = ({
   style,
   className = '',
 }) => {
+  const reduceMotion = useReducedMotion();
+
   return (
     <div
       className={`qt-providers-container settings-master-detail${
@@ -39,11 +41,11 @@ export const SettingsMasterDetail: React.FC<SettingsMasterDetailProps> = ({
       <div className="qt-providers-sidebar">{sidebar}</div>
       <div className="qt-providers-detail" data-flush={flushDetail ? '' : undefined}>
         <motion.div
-          key={detailKey}
+          data-detail-key={detailKey}
           className="settings-master-detail__panel"
-          initial={{ opacity: 0, x: 8 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={tweens.reveal}
+          initial={reduceMotion ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={reduceMotion ? tweens.instant : tweens.fade}
         >
           {detail}
         </motion.div>

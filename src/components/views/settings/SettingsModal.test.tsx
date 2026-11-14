@@ -1,12 +1,48 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { SettingsView, SettingsModal } from '../SettingsView';
+
+const { invokeSpy, defaultInvokeRef } = vi.hoisted(() => ({
+  invokeSpy: vi.fn(),
+  defaultInvokeRef: {
+    fn: null as null | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>),
+  },
+}));
+
+vi.mock('../../../lib/ipc', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../lib/ipc')>();
+  defaultInvokeRef.fn = actual.invokeCommand as (
+    cmd: string,
+    args?: Record<string, unknown>
+  ) => Promise<unknown>;
+  invokeSpy.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+    actual.invokeCommand(cmd, args)
+  );
+  return {
+    ...actual,
+    invokeCommand: invokeSpy,
+  };
+});
+
+import { SettingsView, SettingsModal, resetSettingsDictationCache } from '../SettingsView';
+
+const DICTATION_COMMANDS = new Set([
+  'read_dictation_availability',
+  'read_dictation_settings',
+  'list_dictation_input_devices',
+]);
 
 describe('SettingsModal / SettingsView as Modal', () => {
   beforeEach(() => {
     localStorage.clear();
-    vi.restoreAllMocks();
+    resetSettingsDictationCache();
+    invokeSpy.mockReset();
+    invokeSpy.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (defaultInvokeRef.fn) {
+        return defaultInvokeRef.fn(cmd, args);
+      }
+      return Promise.resolve(undefined);
+    });
   });
 
   it('exports SettingsModal as an alias of SettingsView', () => {
@@ -81,8 +117,11 @@ describe('SettingsModal / SettingsView as Modal', () => {
     const shortcutsTab = screen.getByRole('button', { name: /Shortcuts/i });
     await user.click(shortcutsTab);
 
-    // Header updates to Shortcuts
+    // Header updates to Shortcuts and lazy chunk resolves
     expect(screen.getByRole('heading', { level: 2, name: 'Shortcuts' })).toBeInTheDocument();
+    expect(
+      await screen.findByText('Keyboard Shortcuts', {}, { timeout: 5000 })
+    ).toBeInTheDocument();
   });
 
   it('portals into .app-frame--scaled when present in the DOM', () => {
@@ -107,8 +146,12 @@ describe('SettingsModal / SettingsView as Modal', () => {
     const quotasTab = screen.getByRole('button', { name: /Cuentas y Proveedores/i });
     await user.click(quotasTab);
 
-    // Open AddProviderModal
-    const addBtns = screen.getAllByRole('button', { name: /\+ agregar proveedor/i });
+    // Open AddProviderModal once lazy QuotasTab resolves
+    const addBtns = await screen.findAllByRole(
+      'button',
+      { name: /\+ agregar proveedor/i },
+      { timeout: 5000 }
+    );
     await user.click(addBtns[0]);
 
     // Verify AddProviderModal is in the document
@@ -123,5 +166,101 @@ describe('SettingsModal / SettingsView as Modal', () => {
     // Now that the submodal is closed, pressing Escape closes SettingsModal
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onCloseSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers Voice dictation IPC discovery when closed or opening on non-Voice tabs', async () => {
+    const user = userEvent.setup();
+
+    const { rerender } = render(<SettingsModal isOpen={false} onClose={vi.fn()} />);
+    expect(
+      invokeSpy.mock.calls.filter(([cmd]) => DICTATION_COMMANDS.has(String(cmd)))
+    ).toHaveLength(0);
+
+    rerender(<SettingsModal isOpen={true} onClose={vi.fn()} initialTab="general" />);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 2, name: 'General' })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Cuentas y Proveedores/i }));
+    await screen.findAllByRole('button', { name: /\+ agregar proveedor/i }, { timeout: 5000 });
+
+    expect(
+      invokeSpy.mock.calls.filter(([cmd]) => DICTATION_COMMANDS.has(String(cmd)))
+    ).toHaveLength(0);
+  });
+
+  it('loads Voice dictation IPC once on switching to Voice and reuses cached state on reopen', async () => {
+    const user = userEvent.setup();
+
+    invokeSpy.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'read_dictation_availability') {
+        return Promise.resolve({
+          state: 'available',
+          canRequestPermission: false,
+          canStart: true,
+          guidance: 'Ready',
+          localEngines: [],
+        });
+      }
+      if (cmd === 'read_dictation_settings') {
+        return Promise.resolve({
+          schemaVersion: 1,
+          mode: 'local',
+          localEngine: null,
+          language: 'auto',
+          deviceId: 'mic-1',
+          cuesEnabled: true,
+          shortcut: { kind: 'standard' },
+        });
+      }
+      if (cmd === 'list_dictation_input_devices') {
+        return Promise.resolve({
+          devices: [{ id: 'mic-1', name: 'Studio Mic', isBluetooth: false }],
+          selectedId: 'mic-1',
+        });
+      }
+      return defaultInvokeRef.fn ? defaultInvokeRef.fn(cmd, args) : Promise.resolve(undefined);
+    });
+
+    const { unmount } = render(
+      <SettingsModal isOpen={true} onClose={vi.fn()} initialTab="general" />
+    );
+
+    expect(
+      invokeSpy.mock.calls.filter(([cmd]) => DICTATION_COMMANDS.has(String(cmd)))
+    ).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: /Voice & Dictado/i }));
+
+    await waitFor(
+      () => {
+        const dictationCalls = invokeSpy.mock.calls.map(([cmd]) => String(cmd));
+        expect(dictationCalls.filter((c) => c === 'read_dictation_availability')).toHaveLength(1);
+        expect(dictationCalls.filter((c) => c === 'read_dictation_settings')).toHaveLength(1);
+        expect(dictationCalls.filter((c) => c === 'list_dictation_input_devices')).toHaveLength(1);
+      },
+      { timeout: 5000 }
+    );
+    expect(
+      await screen.findByText('Voice privacy', {}, { timeout: 5000 })
+    ).toBeInTheDocument();
+
+    unmount();
+
+    render(<SettingsModal isOpen={true} onClose={vi.fn()} initialTab="voice" />);
+    expect(
+      await screen.findByText('Voice privacy', {}, { timeout: 5000 })
+    ).toBeInTheDocument();
+
+    const dictationCallsAfterReopen = invokeSpy.mock.calls.map(([cmd]) => String(cmd));
+    expect(
+      dictationCallsAfterReopen.filter((c) => c === 'read_dictation_availability')
+    ).toHaveLength(1);
+    expect(
+      dictationCallsAfterReopen.filter((c) => c === 'read_dictation_settings')
+    ).toHaveLength(1);
+    expect(
+      dictationCallsAfterReopen.filter((c) => c === 'list_dictation_input_devices')
+    ).toHaveLength(1);
   });
 });

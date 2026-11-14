@@ -14,10 +14,12 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders Apariencia y Tipografía section with default values', () => {
+  it('renders Apariencia y Tipografía section with default values', async () => {
     render(<SettingsView />);
 
-    expect(screen.getByText('Apariencia y Tipografía')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Apariencia y Tipografía', undefined, { timeout: 5000 })
+    ).toBeInTheDocument();
     expect(screen.getByText('Motor de renderizado')).toBeInTheDocument();
     expect(screen.getByText('Familia tipográfica')).toBeInTheDocument();
     expect(screen.getByText('Tamaño de fuente')).toBeInTheDocument();
@@ -39,9 +41,10 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     expect(cursorBar).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('keeps GhostGrid as the only terminal renderer', () => {
+  it('keeps GhostGrid as the only terminal renderer', async () => {
     render(<SettingsView />);
 
+    await screen.findByText('Apariencia y Tipografía');
     expect(screen.queryByRole('button', { name: /WebGL/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /DOM · Clásico/i })).not.toBeInTheDocument();
 
@@ -56,7 +59,7 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     const user = userEvent.setup();
     render(<SettingsView />);
 
-    const incBtn = screen.getByRole('button', { name: 'Aumentar tamaño de fuente' });
+    const incBtn = await screen.findByRole('button', { name: 'Aumentar tamaño de fuente' });
     const decBtn = screen.getByRole('button', { name: 'Reducir tamaño de fuente' });
 
     // Step up to 14 px
@@ -84,7 +87,7 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     const user = userEvent.setup();
     render(<SettingsView />);
 
-    const balancedBtn = screen.getByRole('button', { name: /Balanceado \(1\.08\)/i });
+    const balancedBtn = await screen.findByRole('button', { name: /Balanceado \(1\.08\)/i });
     await user.click(balancedBtn);
 
     expect(balancedBtn).toHaveAttribute('aria-pressed', 'true');
@@ -101,7 +104,7 @@ describe('SettingsView — Terminal Appearance & Typography', () => {
     const user = userEvent.setup();
     render(<SettingsView />);
 
-    const blockBtn = screen.getByRole('button', { name: /Bloque/i });
+    const blockBtn = await screen.findByRole('button', { name: /Bloque/i });
     await user.click(blockBtn);
 
     expect(blockBtn).toHaveAttribute('aria-pressed', 'true');

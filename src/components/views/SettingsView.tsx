@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { AnimatePresence, motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { springs, tweens } from '../../motion/standard/tokens';
 import {
   ChevronLeftIcon,
@@ -36,25 +36,202 @@ import {
   DictationInputDevice,
   DictationSettings,
 } from './settings/types';
-import { GeneralTab } from './settings/GeneralTab';
-import { ChatSettingsTab } from './settings/ChatSettingsTab';
-import { SubagentsTab } from './settings/SubagentsTab';
-import { AppearanceTab } from './settings/AppearanceTab';
-import { VoiceTab } from './settings/VoiceTab';
-import { KeybindingsTab } from './settings/KeybindingsTab';
-import { AboutTab } from './settings/AboutTab';
-import { TelemetryTab } from './settings/TelemetryTab';
-import { ChangelogTab } from './settings/ChangelogTab';
-import { QuotasTab } from './settings/QuotasTab';
-import { ZedTab } from './settings/ZedTab';
-import { TerminalTab } from './settings/TerminalTab';
-import { NotificationsTab } from './settings/NotificationsTab';
-import { PluginsView } from './PluginsView';
-import { RoutinesView } from './RoutinesView';
 import { listAudioInputDevices } from '../../lib/operator/voice/zedVoice';
 import { useFilesAutoSavePreference } from '../../lib/filesAutoSavePreference';
 import { useAppUpdater } from '../../hooks/useAppUpdater';
 import './settings.css';
+
+const tabLoaders = {
+  general: () => import('./settings/GeneralTab').then((m) => ({ default: m.GeneralTab })),
+  chat: () => import('./settings/ChatSettingsTab').then((m) => ({ default: m.ChatSettingsTab })),
+  subagents: () => import('./settings/SubagentsTab').then((m) => ({ default: m.SubagentsTab })),
+  appearance: () => import('./settings/AppearanceTab').then((m) => ({ default: m.AppearanceTab })),
+  voice: () => import('./settings/VoiceTab').then((m) => ({ default: m.VoiceTab })),
+  keybindings: () => import('./settings/KeybindingsTab').then((m) => ({ default: m.KeybindingsTab })),
+  about: () => import('./settings/AboutTab').then((m) => ({ default: m.AboutTab })),
+  telemetry: () => import('./settings/TelemetryTab').then((m) => ({ default: m.TelemetryTab })),
+  changelog: () => import('./settings/ChangelogTab').then((m) => ({ default: m.ChangelogTab })),
+  quotas: () => import('./settings/QuotasTab').then((m) => ({ default: m.QuotasTab })),
+  zed: () => import('./settings/ZedTab').then((m) => ({ default: m.ZedTab })),
+  terminal: () => import('./settings/TerminalTab').then((m) => ({ default: m.TerminalTab })),
+  notifications: () => import('./settings/NotificationsTab').then((m) => ({ default: m.NotificationsTab })),
+  plugins: () => import('./PluginsView').then((m) => ({ default: m.PluginsView })),
+  routines: () => import('./RoutinesView').then((m) => ({ default: m.RoutinesView })),
+} as const;
+
+type TabLoaderKey = keyof typeof tabLoaders;
+
+const GeneralTab = lazy(tabLoaders.general);
+const ChatSettingsTab = lazy(tabLoaders.chat);
+const SubagentsTab = lazy(tabLoaders.subagents);
+const AppearanceTab = lazy(tabLoaders.appearance);
+const VoiceTab = lazy(tabLoaders.voice);
+const KeybindingsTab = lazy(tabLoaders.keybindings);
+const AboutTab = lazy(tabLoaders.about);
+const TelemetryTab = lazy(tabLoaders.telemetry);
+const ChangelogTab = lazy(tabLoaders.changelog);
+const QuotasTab = lazy(tabLoaders.quotas);
+const ZedTab = lazy(tabLoaders.zed);
+const TerminalTab = lazy(tabLoaders.terminal);
+const NotificationsTab = lazy(tabLoaders.notifications);
+const PluginsView = lazy(tabLoaders.plugins);
+const RoutinesView = lazy(tabLoaders.routines);
+
+const prefetchedTabs = new Set<TabLoaderKey>();
+
+function resolveTabLoaderKey(tabId: SettingsTabId | string): TabLoaderKey | null {
+  if (tabId === 'customizations') return 'appearance';
+  if (tabId === 'dictation') return 'voice';
+  if (tabId === 'integrations') return 'plugins';
+  return tabId in tabLoaders ? (tabId as TabLoaderKey) : null;
+}
+
+function prefetchTab(tabId: SettingsTabId): void {
+  const key = resolveTabLoaderKey(tabId);
+  if (!key || prefetchedTabs.has(key)) return;
+  prefetchedTabs.add(key);
+  void tabLoaders[key]().catch(() => {
+    prefetchedTabs.delete(key);
+  });
+}
+
+const DEFAULT_DICTATION_AVAILABILITY: DictationAvailability = {
+  state: 'unavailable',
+  canRequestPermission: false,
+  canStart: false,
+  guidance: 'No installed local transcription engine is ready.',
+  localEngines: [],
+};
+
+const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
+  schemaVersion: 1,
+  mode: 'local',
+  localEngine: null,
+  language: 'auto',
+  deviceId: null,
+  cuesEnabled: true,
+  shortcut: { kind: 'standard' },
+};
+
+interface DictationCacheState {
+  loaded: boolean;
+  availability: DictationAvailability;
+  settings: DictationSettings;
+  devices: DictationInputDevice[];
+}
+
+let dictationCache: DictationCacheState = {
+  loaded: false,
+  availability: DEFAULT_DICTATION_AVAILABILITY,
+  settings: DEFAULT_DICTATION_SETTINGS,
+  devices: [],
+};
+
+let dictationLoadInFlight: Promise<DictationCacheState> | null = null;
+
+/** Clears cached dictation state so tests or callers can force fresh Voice IPC discovery. */
+export function resetSettingsDictationCache(): void {
+  dictationCache = {
+    loaded: false,
+    availability: DEFAULT_DICTATION_AVAILABILITY,
+    settings: DEFAULT_DICTATION_SETTINGS,
+    devices: [],
+  };
+  dictationLoadInFlight = null;
+}
+
+async function loadDictationSnapshot(): Promise<DictationCacheState> {
+  if (dictationCache.loaded) return dictationCache;
+  if (dictationLoadInFlight) return dictationLoadInFlight;
+
+  dictationLoadInFlight = (async () => {
+    let nextAvailability = dictationCache.availability;
+    let nextSettings = dictationCache.settings;
+    let nextDevices = dictationCache.devices;
+
+    const [availRes, settingsRes, devicesRes] = await Promise.allSettled([
+      invokeCommand<DictationAvailability>('read_dictation_availability', {
+        supportedSchemaVersion: 1,
+      }),
+      invokeCommand<DictationSettings>('read_dictation_settings', {
+        supportedSchemaVersion: 1,
+      }),
+      invokeCommand<DictationDeviceList>('list_dictation_input_devices', {
+        supportedSchemaVersion: 1,
+      }),
+    ]);
+
+    if (availRes.status === 'fulfilled' && availRes.value) {
+      nextAvailability = availRes.value;
+    } else if (availRes.status === 'rejected') {
+      console.warn('[SettingsView] Error reading dictation availability:', availRes.reason);
+    }
+
+    if (settingsRes.status === 'fulfilled' && settingsRes.value) {
+      nextSettings = settingsRes.value;
+    } else if (settingsRes.status === 'rejected') {
+      console.warn('[SettingsView] Error reading dictation settings:', settingsRes.reason);
+    }
+
+    if (
+      devicesRes.status === 'fulfilled' &&
+      devicesRes.value &&
+      devicesRes.value.devices &&
+      devicesRes.value.devices.length > 0
+    ) {
+      nextDevices = devicesRes.value.devices;
+      if (devicesRes.value.selectedId) {
+        nextSettings = { ...nextSettings, deviceId: devicesRes.value.selectedId };
+      }
+    } else if (devicesRes.status === 'rejected') {
+      console.warn('[SettingsView] Error listing dictation devices:', devicesRes.reason);
+    } else {
+      try {
+        const browserDevices = await listAudioInputDevices();
+        if (browserDevices.length > 0) {
+          nextDevices = browserDevices.map((d) => ({
+            id: d.deviceId,
+            name: d.label,
+            isBluetooth: /bluetooth/i.test(d.label),
+          }));
+          const savedMic = localStorage.getItem('kite_selected_mic_device_id');
+          if (savedMic && savedMic !== 'automatic') {
+            nextSettings = { ...nextSettings, deviceId: savedMic };
+          }
+        }
+      } catch (err) {
+        console.warn('[SettingsView] Error listing dictation devices:', err);
+      }
+    }
+
+    dictationCache = {
+      loaded: true,
+      availability: nextAvailability,
+      settings: nextSettings,
+      devices: nextDevices,
+    };
+    return dictationCache;
+  })().finally(() => {
+    dictationLoadInFlight = null;
+  });
+
+  return dictationLoadInFlight;
+}
+
+const SettingsTabFallback: React.FC = () => (
+  <div
+    className="settings-tab-fallback"
+    role="status"
+    aria-busy="true"
+    aria-label="Loading settings section"
+  >
+    <div className="settings-tab-fallback__card" aria-hidden="true">
+      <span className="settings-tab-fallback__line settings-tab-fallback__line--title" />
+      <span className="settings-tab-fallback__line" />
+      <span className="settings-tab-fallback__line settings-tab-fallback__line--short" />
+    </div>
+  </div>
+);
 
 const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'general', label: 'General', blurb: 'Apariencia, autoguardado y actualizaciones de software.', icon: SettingsIcon },
@@ -119,9 +296,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
     return 'general';
   });
-  const [paneDirection, setPaneDirection] = useState(1);
-  const activeTabRef = useRef(activeTab);
-  activeTabRef.current = activeTab;
+  const reduceMotion = useReducedMotion();
   const [localMode, setLocalMode] = useState<'dark' | 'light'>('dark');
   const [localPalette, setLocalPalette] = useState<string>('kite-dark');
 
@@ -192,29 +367,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     updaterState.status === 'error';
   const updateError = updaterState.status === 'error' ? updaterState.error.message : null;
 
-  // Voice & Dictation IPC state
-  const [dictationAvailability, setDictationAvailability] = useState<DictationAvailability>({
-    state: 'unavailable',
-    canRequestPermission: false,
-    canStart: false,
-    guidance: 'No installed local transcription engine is ready.',
-    localEngines: [],
-  });
-  const [dictationSettings, setDictationSettings] = useState<DictationSettings>({
-    schemaVersion: 1,
-    mode: 'local',
-    localEngine: null,
-    language: 'auto',
-    deviceId: null,
-    cuesEnabled: true,
-    shortcut: { kind: 'standard' },
-  });
-  const [dictationDevices, setDictationDevices] = useState<DictationInputDevice[]>([]);
+  // Voice & Dictation IPC state (initialized from module cache when previously loaded)
+  const [dictationAvailability, setDictationAvailability] = useState<DictationAvailability>(
+    () => dictationCache.availability
+  );
+  const [dictationSettings, setDictationSettings] = useState<DictationSettings>(
+    () => dictationCache.settings
+  );
+  const [dictationDevices, setDictationDevices] = useState<DictationInputDevice[]>(
+    () => dictationCache.devices
+  );
 
-  // Load preferences from localStorage and IPC on mount
   useEffect(() => {
-    let isMounted = true;
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
 
+  // Load preferences from localStorage and register navigation listener on mount
+  useEffect(() => {
     try {
       const savedPalette = readKitePref('palette');
       if (savedPalette) setLocalPalette(savedPalette);
@@ -223,11 +394,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (savedTheme === 'dark' || savedTheme === 'light') setLocalMode(savedTheme);
 
       readShowPaneContext();
-      const savedTabRaw = readKitePref('settingsTab');
-      const savedTab = normalizeLegacySettingsTabId(savedTabRaw);
-      if (savedTab && savedTab !== savedTabRaw) writeKitePref('settingsTab', savedTab);
-      if (savedTab && SETTINGS_TABS.some((t) => t.id === savedTab)) {
-        setActiveTab(savedTab as SettingsTabId);
+      if (!initialTab) {
+        const savedTabRaw = readKitePref('settingsTab');
+        const savedTab = normalizeLegacySettingsTabId(savedTabRaw);
+        if (savedTab && savedTab !== savedTabRaw) writeKitePref('settingsTab', savedTab);
+        if (savedTab && SETTINGS_TABS.some((t) => t.id === savedTab)) {
+          setActiveTab(savedTab as SettingsTabId);
+        }
       }
     } catch {
       // Ignore localStorage errors
@@ -240,71 +413,37 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     };
     window.addEventListener(OPEN_SETTINGS_EVENT, onOpenTab);
 
-    async function loadIpcData() {
-      try {
-        const avail = await invokeCommand<DictationAvailability>('read_dictation_availability', {
-          supportedSchemaVersion: 1,
-        });
-        if (isMounted && avail) {
-          setDictationAvailability(avail);
-        }
-      } catch (err) {
-        console.warn('[SettingsView] Error reading dictation availability:', err);
-      }
+    return () => {
+      window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenTab);
+    };
+  }, [initialTab]);
 
-      try {
-        const dictSettings = await invokeCommand<DictationSettings>('read_dictation_settings', {
-          supportedSchemaVersion: 1,
-        });
-        if (isMounted && dictSettings) {
-          setDictationSettings(dictSettings);
-        }
-      } catch (err) {
-        console.warn('[SettingsView] Error reading dictation settings:', err);
-      }
+  // Defer Voice/Dictation IPC discovery strictly until the modal is open on the Voice tab
+  const isVoiceTab = activeTab === 'voice' || (activeTab as string) === 'dictation';
+  useEffect(() => {
+    if (isOpen === false || !isVoiceTab) return;
 
-      try {
-        const devices = await invokeCommand<DictationDeviceList>('list_dictation_input_devices', {
-          supportedSchemaVersion: 1,
-        });
-        if (isMounted && devices && devices.devices && devices.devices.length > 0) {
-          setDictationDevices(devices.devices);
-          if (devices.selectedId) {
-            setDictationSettings((current) => ({ ...current, deviceId: devices.selectedId }));
-          }
-        } else {
-          const browserDevices = await listAudioInputDevices();
-          if (isMounted && browserDevices.length > 0) {
-            setDictationDevices(
-              browserDevices.map((d) => ({
-                id: d.deviceId,
-                name: d.label,
-                isBluetooth: /bluetooth/i.test(d.label),
-              }))
-            );
-            const savedMic = localStorage.getItem('kite_selected_mic_device_id');
-            if (savedMic && savedMic !== 'automatic') {
-              setDictationSettings((current) => ({ ...current, deviceId: savedMic }));
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('[SettingsView] Error listing dictation devices:', err);
-      }
+    if (dictationCache.loaded) {
+      setDictationAvailability(dictationCache.availability);
+      setDictationSettings(dictationCache.settings);
+      setDictationDevices(dictationCache.devices);
+      return;
     }
 
-    loadIpcData();
+    let isMounted = true;
+    void loadDictationSnapshot().then((snapshot) => {
+      if (!isMounted) return;
+      setDictationAvailability(snapshot.availability);
+      setDictationSettings(snapshot.settings);
+      setDictationDevices(snapshot.devices);
+    });
 
     return () => {
       isMounted = false;
-      window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenTab);
     };
-  }, []);
+  }, [isOpen, isVoiceTab]);
 
   const handleSelectTab = useCallback((tabId: SettingsTabId) => {
-    const next = SETTINGS_TABS.findIndex((tab) => tab.id === tabId);
-    const prev = SETTINGS_TABS.findIndex((tab) => tab.id === activeTabRef.current);
-    setPaneDirection(next >= prev ? 1 : -1);
     setActiveTab(tabId);
     try {
       writeKitePref('settingsTab', tabId);
@@ -408,12 +547,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const saveDictationSettings = async (next: DictationSettings) => {
     setDictationSettings(next);
+    dictationCache = { ...dictationCache, settings: next };
     try {
       const updated = await invokeCommand<DictationSettings>('update_dictation_settings', {
         supportedSchemaVersion: 1,
         settings: next,
       });
-      if (updated) setDictationSettings(updated);
+      if (updated) {
+        setDictationSettings(updated);
+        dictationCache = { ...dictationCache, settings: updated };
+      }
     } catch (err) {
       console.warn('[SettingsView] Failed to update dictation settings:', err);
     }
@@ -445,6 +588,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       });
       if (devices && devices.devices && devices.devices.length > 0) {
         setDictationDevices(devices.devices);
+        dictationCache = { ...dictationCache, devices: devices.devices };
       }
     } catch (err) {
       console.warn('[SettingsView] Failed to refresh dictation devices:', err);
@@ -456,7 +600,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const avail = await invokeCommand<DictationAvailability>('select_dictation_whisper_model', {
         supportedSchemaVersion: 1,
       });
-      if (avail) setDictationAvailability(avail);
+      if (avail) {
+        setDictationAvailability(avail);
+        dictationCache = { ...dictationCache, availability: avail };
+      }
     } catch (err) {
       console.warn('[SettingsView] Failed to choose a Whisper model:', err);
     }
@@ -468,11 +615,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         supportedSchemaVersion: 1,
         requestId: crypto.randomUUID(),
       });
-      if (avail) setDictationAvailability(avail);
+      if (avail) {
+        setDictationAvailability(avail);
+        dictationCache = { ...dictationCache, availability: avail };
+      }
     } catch (err) {
       console.warn('[SettingsView] Failed to request microphone permission:', err);
     }
   };
+
+  if (isOpen === false) {
+    return null;
+  }
 
   // Determine current display tab and metadata
   const currentTab =
@@ -529,6 +683,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     data-settings-nav={tab.id}
                     className={`sidebar-row settings-rail__row${isSelected ? ' sidebar-row--selected' : ''}`}
                     onClick={() => handleSelectTab(tab.id)}
+                    onMouseEnter={() => prefetchTab(tab.id)}
+                    onFocus={() => prefetchTab(tab.id)}
                     onKeyDown={(event) => {
                       if (
                         event.key !== 'ArrowDown' &&
@@ -588,9 +744,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Main Settings Content Pane */}
       <section className="application-settings-pane" data-settings-tab={activeTab}>
         <div className="application-settings scroll-quiet">
-          <AnimatePresence mode="wait" initial={false}>
-          <motion.div
-            key={activeTab}
+          <div
             className={`application-settings__column${
               activeTab === 'plugins' ||
               activeTab === 'quotas' ||
@@ -600,12 +754,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 ? ' application-settings__column--wide'
                 : ''
             }`}
-            initial={{ opacity: 0, x: paneDirection * 12 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: paneDirection * -10 }}
-            transition={tweens.panelIn}
           >
-            {/* Header */}
+            {/* Header stays synchronous across tab switches */}
             <header className="application-settings__heading">
               <span aria-hidden="true" className="application-settings__mark">
                 <ActiveIcon size={18} strokeWidth={1.75} />
@@ -639,121 +789,124 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             </header>
 
-            {activeTab === 'chat' && <ChatSettingsTab />}
+            <Suspense fallback={<SettingsTabFallback />}>
+              <motion.div
+                key={activeTab}
+                className="application-settings__tab-body"
+                initial={reduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={reduceMotion ? tweens.instant : tweens.fade}
+              >
+                {activeTab === 'chat' && <ChatSettingsTab />}
 
-            {activeTab === 'subagents' && <SubagentsTab />}
+                {activeTab === 'subagents' && <SubagentsTab />}
 
-            {activeTab === 'general' && (
-              <GeneralTab
-                autoSaveFiles={autoSaveFiles}
-                automaticUpdates={automaticUpdates}
-                currentVersion={appVersion}
-                isCheckingUpdate={isCheckingUpdate}
-                mode={currentMode}
-                onCheckUpdate={handleCheckUpdate}
-                onUpdateAndRestart={handleUpdateAndRestart}
-                onToggleAutoSave={() => setAutoSaveFiles(!autoSaveFiles)}
-                onToggleAutomaticUpdates={() => setAutomaticUpdates((v) => !v)}
-                onToggleMode={handleToggleMode}
-                onToggleTelemetry={handleToggleTelemetry}
-                telemetryPrefs={telemetryPrefs}
-                updateChecked={updateChecked}
-                updateInfo={updateInfo}
-              />
-            )}
+                {activeTab === 'general' && (
+                  <GeneralTab
+                    autoSaveFiles={autoSaveFiles}
+                    automaticUpdates={automaticUpdates}
+                    currentVersion={appVersion}
+                    isCheckingUpdate={isCheckingUpdate}
+                    mode={currentMode}
+                    onCheckUpdate={handleCheckUpdate}
+                    onUpdateAndRestart={handleUpdateAndRestart}
+                    onToggleAutoSave={() => setAutoSaveFiles(!autoSaveFiles)}
+                    onToggleAutomaticUpdates={() => setAutomaticUpdates((v) => !v)}
+                    onToggleMode={handleToggleMode}
+                    onToggleTelemetry={handleToggleTelemetry}
+                    telemetryPrefs={telemetryPrefs}
+                    updateChecked={updateChecked}
+                    updateInfo={updateInfo}
+                  />
+                )}
 
-            {(activeTab === 'appearance' || activeTab === 'customizations') && (
-              <AppearanceTab
-                mode={currentMode}
-                onSelectTheme={handleSelectTheme}
-                onToggleMode={handleToggleMode}
-                palette={currentPalette}
-              />
-            )}
+                {(activeTab === 'appearance' || activeTab === 'customizations') && (
+                  <AppearanceTab
+                    mode={currentMode}
+                    onSelectTheme={handleSelectTheme}
+                    onToggleMode={handleToggleMode}
+                    palette={currentPalette}
+                  />
+                )}
 
-            {(activeTab === 'voice' || (activeTab as string) === 'dictation') && (
-              <VoiceTab
-                dictationAvailability={dictationAvailability}
-                dictationDevices={dictationDevices}
-                dictationSettings={dictationSettings}
-                onChooseWhisperModel={handleChooseWhisperModel}
-                onRequestMicrophone={handleRequestMicrophone}
-                onResetShortcut={handleResetDictationShortcut}
-                onSelectDevice={handleSelectDictationDevice}
-                onToggleCues={handleToggleCues}
-                onUpdateDictationMode={handleUpdateDictationMode}
-              />
-            )}
+                {(activeTab === 'voice' || (activeTab as string) === 'dictation') && (
+                  <VoiceTab
+                    dictationAvailability={dictationAvailability}
+                    dictationDevices={dictationDevices}
+                    dictationSettings={dictationSettings}
+                    onChooseWhisperModel={handleChooseWhisperModel}
+                    onRequestMicrophone={handleRequestMicrophone}
+                    onResetShortcut={handleResetDictationShortcut}
+                    onSelectDevice={handleSelectDictationDevice}
+                    onToggleCues={handleToggleCues}
+                    onUpdateDictationMode={handleUpdateDictationMode}
+                  />
+                )}
 
-            {activeTab === 'quotas' && <QuotasTab />}
+                {activeTab === 'quotas' && <QuotasTab />}
 
-            {activeTab === 'keybindings' && <KeybindingsTab />}
+                {activeTab === 'keybindings' && <KeybindingsTab />}
 
-            {activeTab === 'about' && (
-              <AboutTab
-                currentVersion={appVersion}
-                isCheckingUpdate={isCheckingUpdate}
-                onCheckUpdate={handleCheckUpdate}
-                onUpdateAndRestart={handleUpdateAndRestart}
-                onOpenWhatsNew={onOpenWhatsNew}
-                onToggleTelemetry={handleToggleTelemetry}
-                telemetryIdentity={telemetryIdentity}
-                telemetryPrefs={telemetryPrefs}
-                updateChecked={updateChecked}
-                updateError={updateError}
-                updateInfo={updateInfo}
-              />
-            )}
+                {activeTab === 'about' && (
+                  <AboutTab
+                    currentVersion={appVersion}
+                    isCheckingUpdate={isCheckingUpdate}
+                    onCheckUpdate={handleCheckUpdate}
+                    onUpdateAndRestart={handleUpdateAndRestart}
+                    onOpenWhatsNew={onOpenWhatsNew}
+                    onToggleTelemetry={handleToggleTelemetry}
+                    telemetryIdentity={telemetryIdentity}
+                    telemetryPrefs={telemetryPrefs}
+                    updateChecked={updateChecked}
+                    updateError={updateError}
+                    updateInfo={updateInfo}
+                  />
+                )}
 
-            {activeTab === 'changelog' && (
-              <ChangelogTab
-                currentVersion={appVersion}
-                isCheckingUpdate={isCheckingUpdate}
-                onCheckUpdate={handleCheckUpdate}
-                onUpdateAndRestart={handleUpdateAndRestart}
-                updateChecked={updateChecked}
-                updateError={updateError}
-                updateInfo={updateInfo}
-              />
-            )}
+                {activeTab === 'changelog' && (
+                  <ChangelogTab
+                    currentVersion={appVersion}
+                    isCheckingUpdate={isCheckingUpdate}
+                    onCheckUpdate={handleCheckUpdate}
+                    onUpdateAndRestart={handleUpdateAndRestart}
+                    updateChecked={updateChecked}
+                    updateError={updateError}
+                    updateInfo={updateInfo}
+                  />
+                )}
 
-            {activeTab === 'telemetry' && (
-              <TelemetryTab
-                onToggleTelemetry={handleToggleTelemetry}
-                telemetryIdentity={telemetryIdentity}
-                telemetryPrefs={telemetryPrefs}
-              />
-            )}
+                {activeTab === 'telemetry' && (
+                  <TelemetryTab
+                    onToggleTelemetry={handleToggleTelemetry}
+                    telemetryIdentity={telemetryIdentity}
+                    telemetryPrefs={telemetryPrefs}
+                  />
+                )}
 
-            {activeTab === 'terminal' && <TerminalTab />}
+                {activeTab === 'terminal' && <TerminalTab />}
 
-            {activeTab === 'notifications' && <NotificationsTab />}
+                {activeTab === 'notifications' && <NotificationsTab />}
 
-            {activeTab === 'zed' && <ZedTab />}
+                {activeTab === 'zed' && <ZedTab />}
 
-            {(activeTab === 'plugins' || (activeTab as string) === 'integrations') && (
-              <section className="settings-group">
-                <PluginsView embedded />
-              </section>
-            )}
+                {(activeTab === 'plugins' || (activeTab as string) === 'integrations') && (
+                  <section className="settings-group">
+                    <PluginsView embedded />
+                  </section>
+                )}
 
-            {activeTab === 'routines' && (
-              <section className="settings-group">
-                <RoutinesView workspaceId={null} />
-              </section>
-            )}
-
-
-          </motion.div>
-          </AnimatePresence>
+                {activeTab === 'routines' && (
+                  <section className="settings-group">
+                    <RoutinesView workspaceId={null} />
+                  </section>
+                )}
+              </motion.div>
+            </Suspense>
+          </div>
         </div>
       </section>
     </div>
   );
-
-  if (isOpen === false) {
-    return null;
-  }
 
   if (embedded) {
     return dialogContent;

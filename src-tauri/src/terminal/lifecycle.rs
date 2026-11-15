@@ -16,7 +16,267 @@ use portable_pty::Child as PtyChild;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub const PTY_EXHAUSTION_DEBOUNCE_MS: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PtyQuotaHealth {
+    pub remaining_percent: f64,
+    pub has_exhausted_window: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PtyExhaustionSessionTracker {
+    pub last_triggered_ms: Option<i64>,
+    pub last_probe_ms: Option<i64>,
+    pub recent_error_frames_ms: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyExhaustionDecision {
+    Debounced,
+    NeedsCorrelationProbe,
+    TriggerAutoSwitch { reason: String },
+}
+
+static PTY_EXHAUSTION_TRACKERS: OnceLock<Mutex<HashMap<String, PtyExhaustionSessionTracker>>> =
+    OnceLock::new();
+
+fn pty_exhaustion_trackers() -> &'static Mutex<HashMap<String, PtyExhaustionSessionTracker>> {
+    PTY_EXHAUSTION_TRACKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn is_agy_engine_label(engine: &str) -> bool {
+    matches!(canonical_agent_engine(engine).as_str(), "antigravity" | "agy")
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn is_in_memory_agy_terminal(inst: &TerminalInstance) -> bool {
+    if is_agy_engine_label(&inst.engine) {
+        return true;
+    }
+    if let Ok(guard) = inst.detected_agent_engine.try_lock() {
+        if let Some(ref detected) = *guard {
+            return is_agy_engine_label(detected);
+        }
+    }
+    false
+}
+
+fn bytes_contain_exhaustion_hint(raw: &[u8]) -> bool {
+    const NEEDLES: &[&[u8]] = &[
+        b"429",
+        b"quota",
+        b"exhaust",
+        b"limit",
+        b"credits",
+        b"tokens",
+    ];
+    NEEDLES
+        .iter()
+        .any(|needle| raw.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle)))
+}
+
+fn line_looks_like_non_error_text(trimmed: &str, lower: &str) -> bool {
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with('+')
+        || trimmed.starts_with('-')
+        || trimmed.starts_with("@@")
+        || lower.starts_with("diff --git")
+    {
+        return true;
+    }
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("# ")
+        || lower.contains(" // ")
+    {
+        return true;
+    }
+    if trimmed.starts_with("$ ") || trimmed.starts_with("> ") || lower.contains("cargo test ") {
+        return true;
+    }
+    if lower.starts_with("test ")
+        && (lower.ends_with("... ok")
+            || lower.ends_with("... failed")
+            || lower.contains("::tests::"))
+    {
+        return true;
+    }
+    if lower.contains("assert!")
+        || lower.contains("assert_eq!")
+        || lower.contains("detect_quota_exhaustion(")
+        || lower.starts_with("let ")
+        || lower.starts_with("const ")
+        || lower.starts_with("pub fn ")
+        || lower.starts_with("fn ")
+        || lower.contains("=>")
+        || (trimmed.contains("= \"") && trimmed.ends_with(';'))
+    {
+        return true;
+    }
+    [".rs:", ".ts:", ".tsx:", ".js:", ".jsx:", ".py:", ".go:"]
+        .iter()
+        .any(|ext| lower.contains(ext))
+}
+
+/// Detects genuine Antigravity CLI/API quota exhaustion error frames in ANSI-stripped
+/// line text while rejecting unified diffs, source code snippets, and test output.
+pub fn detect_agy_pty_cli_exhaustion(ansi_stripped_chunk: &str) -> Option<String> {
+    for raw_line in ansi_stripped_chunk.split(|c| c == '\n' || c == '\r') {
+        let trimmed = raw_line.trim();
+        let lower = trimmed.to_lowercase();
+        if line_looks_like_non_error_text(trimmed, &lower) {
+            continue;
+        }
+        if let Some(reason) = crate::handoff::detect_quota_exhaustion("agy", trimmed) {
+            return Some(reason);
+        }
+        if lower.contains("api error") && lower.contains("429") {
+            return Some("Antigravity: Límite de tasa (API Error 429) alcanzado".to_string());
+        }
+    }
+    None
+}
+
+/// Fast byte-level Antigravity PTY exhaustion detector safe to invoke from `spawn_pty_reader`:
+/// skips ANSI decoding entirely unless exhaustion keywords exist, and preserves line breaks
+/// before running `normalize_terminal_text` so diff/code guards remain accurate.
+pub fn detect_agy_pty_exhaustion_from_bytes(raw_bytes: &[u8]) -> Option<String> {
+    if !bytes_contain_exhaustion_hint(raw_bytes) {
+        return None;
+    }
+    for raw_line in raw_bytes.split(|b| *b == b'\n' || *b == b'\r') {
+        if raw_line.is_empty() {
+            continue;
+        }
+        let normalized = crate::session_resolver::normalize_terminal_text(raw_line);
+        if let Some(reason) = detect_agy_pty_cli_exhaustion(&normalized) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+pub fn evaluate_pty_exhaustion_decision(
+    tracker: &mut PtyExhaustionSessionTracker,
+    reason: &str,
+    cached_quota: Option<PtyQuotaHealth>,
+    threshold_percent: f64,
+    now_ms: i64,
+) -> PtyExhaustionDecision {
+    if let Some(last) = tracker.last_triggered_ms {
+        if now_ms.saturating_sub(last) < PTY_EXHAUSTION_DEBOUNCE_MS {
+            return PtyExhaustionDecision::Debounced;
+        }
+    }
+
+    tracker
+        .recent_error_frames_ms
+        .retain(|ts| now_ms.saturating_sub(*ts) < PTY_EXHAUSTION_DEBOUNCE_MS);
+    tracker.recent_error_frames_ms.push(now_ms);
+
+    let quota_confirmed = match cached_quota {
+        Some(q) => q.has_exhausted_window || q.remaining_percent <= threshold_percent,
+        None => false,
+    };
+
+    if quota_confirmed || tracker.recent_error_frames_ms.len() >= 2 {
+        tracker.last_triggered_ms = Some(now_ms);
+        tracker.recent_error_frames_ms.clear();
+        return PtyExhaustionDecision::TriggerAutoSwitch {
+            reason: reason.to_string(),
+        };
+    }
+
+    tracker.last_probe_ms = Some(now_ms);
+    PtyExhaustionDecision::NeedsCorrelationProbe
+}
+
+#[cfg(not(test))]
+fn maybe_handle_agy_pty_exhaustion(
+    session_id: &str,
+    inst: &TerminalInstance,
+    raw_bytes: &[u8],
+    now_ms: i64,
+) {
+    if !is_in_memory_agy_terminal(inst) {
+        return;
+    }
+    let Some(reason) = detect_agy_pty_exhaustion_from_bytes(raw_bytes) else {
+        return;
+    };
+
+    let policy = crate::account_switcher::get_auto_switch_policy_in(
+        &crate::account_switcher::profiles_root(),
+        "agy",
+    );
+    if !policy.enabled {
+        return;
+    }
+
+    let cached_quota = crate::account_switcher::get_cached_live_quota("agy").map(|q| {
+        let has_exhausted_window = q
+            .windows
+            .iter()
+            .any(|w| w.is_exhausted || w.remaining_percent <= 0.0);
+        PtyQuotaHealth {
+            remaining_percent: q.percent,
+            has_exhausted_window,
+        }
+    });
+
+    let decision = {
+        let mut map = pty_exhaustion_trackers().lock().unwrap();
+        let tracker = map.entry(session_id.to_string()).or_default();
+        evaluate_pty_exhaustion_decision(
+            tracker,
+            &reason,
+            cached_quota,
+            policy.trigger_threshold_percent,
+            now_ms,
+        )
+    };
+
+    match decision {
+        PtyExhaustionDecision::Debounced => {}
+        PtyExhaustionDecision::NeedsCorrelationProbe => {
+            std::thread::spawn(|| {
+                let _ = crate::quota::get_subscription_quotas_direct(
+                    Some(serde_json::json!({ "providers": ["antigravity"] })),
+                    Some(true),
+                );
+            });
+        }
+        PtyExhaustionDecision::TriggerAutoSwitch { .. } => {
+            std::thread::spawn(move || {
+                let req = crate::account_switcher::auto_switch::AutoSwitchTriggerRequest {
+                    provider: "agy".to_string(),
+                    trigger_source: "pty_error".to_string(),
+                    requested_model: None,
+                    thread_id: None,
+                    current_remaining_percent: Some(0.0),
+                    has_exhausted_window: true,
+                    now_unix_ms: crate::account_switcher::now_ms(),
+                };
+                let _ = crate::account_switcher::auto_switch::evaluate_auto_switch(req);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+fn maybe_handle_agy_pty_exhaustion(
+    _session_id: &str,
+    _inst: &TerminalInstance,
+    _raw_bytes: &[u8],
+    _now_ms: i64,
+) {
+}
 
 pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -70,6 +330,9 @@ pub fn emit_terminal_ui_event(event: &str, payload: serde_json::Value) {
 pub fn notify_terminal_exit(session_id: &str, inst: &TerminalInstance, code: i64) {
     if inst.exit_notified.swap(true, Ordering::Relaxed) {
         return;
+    }
+    if let Ok(mut map) = pty_exhaustion_trackers().lock() {
+        map.remove(session_id);
     }
     inst.lifecycle_stop.store(true, Ordering::Relaxed);
     if inst.suppress_exit_event.load(Ordering::Relaxed) {
@@ -401,6 +664,7 @@ pub fn spawn_pty_reader(
             let now_ms = now_unix_ms();
             inst.last_output_ms.store(now_ms as u64, Ordering::Relaxed);
             let _ = capture_terminal_output(&session_id, &inst, &temp[..n], now_ms);
+            maybe_handle_agy_pty_exhaustion(&session_id, &inst, &temp[..n], now_ms);
             {
                 let mut b_guard = inst.buffer.lock().ok();
                 let mut s_guard = inst.scrollback.lock().ok();
@@ -653,5 +917,129 @@ pub fn snapshot_and_shutdown_all_terminals(reason: &str) {
         if let Ok(mut child) = inst.child.lock() {
             let _ = child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_agy_pty_cli_exhaustion_accepts_real_cli_api_quota_errors() {
+        assert!(detect_agy_pty_cli_exhaustion("Error: Request failed with RESOURCE_EXHAUSTED").is_some());
+        assert!(detect_agy_pty_cli_exhaustion("API Error (429): Too Many Requests").is_some());
+        assert!(detect_agy_pty_cli_exhaustion("API Error (429 Too Many Requests)").is_some());
+        assert!(detect_agy_pty_cli_exhaustion("Rate limit exceeded for model gemini-2.5-pro").is_some());
+        assert!(detect_agy_pty_cli_exhaustion("Quota exceeded for current billing project").is_some());
+        assert!(detect_agy_pty_cli_exhaustion("You've hit your usage limit. Try again in 2h.").is_some());
+        assert!(detect_agy_pty_cli_exhaustion("HTTP 429 Too Many Requests").is_some());
+
+        let ansi_payload = b"\x1b[31mError: googleapi: Error 429: RESOURCE_EXHAUSTED\x1b[0m\r\n";
+        assert!(detect_agy_pty_exhaustion_from_bytes(ansi_payload).is_some());
+    }
+
+    #[test]
+    fn detect_agy_pty_cli_exhaustion_rejects_diffs_code_and_logs() {
+        // Unified diff lines
+        assert!(detect_agy_pty_cli_exhaustion("+ Error: RESOURCE_EXHAUSTED").is_none());
+        assert!(detect_agy_pty_cli_exhaustion("- Quota exceeded").is_none());
+        assert!(detect_agy_pty_cli_exhaustion("@@ -12,4 +12,5 @@ Error: RESOURCE_EXHAUSTED").is_none());
+        assert!(
+            detect_agy_pty_exhaustion_from_bytes(
+                b"diff --git a/src/handoff.rs b/src/handoff.rs\n@@ -10,2 +10,3 @@\n+Error: RESOURCE_EXHAUSTED\n"
+            )
+            .is_none()
+        );
+
+        // Code snippets, assertions, file path line numbers, comments, test logs
+        assert!(detect_agy_pty_cli_exhaustion(
+            "assert!(detect_quota_exhaustion(\"agy\", \"Error: RESOURCE_EXHAUSTED\").is_some());"
+        )
+        .is_none());
+        assert!(detect_agy_pty_cli_exhaustion("let err = \"\\\"RESOURCE_EXHAUSTED\\\"\";").is_none());
+        assert!(detect_agy_pty_cli_exhaustion("const msg = \"RESOURCE_EXHAUSTED\";").is_none());
+        assert!(detect_agy_pty_cli_exhaustion(
+            "src-tauri/src/handoff.rs:55: Error: RESOURCE_EXHAUSTED"
+        )
+        .is_none());
+        assert!(detect_agy_pty_cli_exhaustion(
+            "src/components/QuotaBanner.test.ts:18: Quota exceeded"
+        )
+        .is_none());
+        assert!(detect_agy_pty_cli_exhaustion("// Error: RESOURCE_EXHAUSTED").is_none());
+        assert!(detect_agy_pty_cli_exhaustion("/* Rate limit exceeded */").is_none());
+        assert!(detect_agy_pty_cli_exhaustion(
+            "test handoff::tests::test_detect_quota_exhaustion_positive ... ok"
+        )
+        .is_none());
+        assert!(detect_agy_pty_cli_exhaustion(
+            "$ cargo test quota -- Rate limit exceeded"
+        )
+        .is_none());
+
+        // Mixed chunk: diff line ignored, actual trailing CLI error frame detected
+        let mixed = b"+ assert!(detect_quota_exhaustion(\"agy\", \"RESOURCE_EXHAUSTED\").is_some());\r\n\x1b[31mError: Request failed with status RESOURCE_EXHAUSTED\x1b[0m\r\n";
+        assert!(detect_agy_pty_exhaustion_from_bytes(mixed).is_some());
+    }
+
+    #[test]
+    fn evaluate_pty_exhaustion_decision_enforces_debounce_and_quota_correlation() {
+        let mut tracker = PtyExhaustionSessionTracker::default();
+        let healthy = Some(PtyQuotaHealth {
+            remaining_percent: 95.0,
+            has_exhausted_window: false,
+        });
+
+        // Single frame when live quota says 95% healthy -> requests correlation probe, no immediate switch
+        assert_eq!(
+            evaluate_pty_exhaustion_decision(
+                &mut tracker,
+                "Error: RESOURCE_EXHAUSTED",
+                healthy,
+                0.0,
+                100_000,
+            ),
+            PtyExhaustionDecision::NeedsCorrelationProbe
+        );
+
+        // Second error frame confirms -> triggers switch
+        assert!(matches!(
+            evaluate_pty_exhaustion_decision(
+                &mut tracker,
+                "Error: RESOURCE_EXHAUSTED",
+                healthy,
+                0.0,
+                102_000,
+            ),
+            PtyExhaustionDecision::TriggerAutoSwitch { .. }
+        ));
+
+        // Within 10s debounce window -> debounced even if quota is 0%
+        let exhausted = Some(PtyQuotaHealth {
+            remaining_percent: 0.0,
+            has_exhausted_window: true,
+        });
+        assert_eq!(
+            evaluate_pty_exhaustion_decision(
+                &mut tracker,
+                "Error: RESOURCE_EXHAUSTED",
+                exhausted,
+                0.0,
+                102_000 + PTY_EXHAUSTION_DEBOUNCE_MS - 1,
+            ),
+            PtyExhaustionDecision::Debounced
+        );
+
+        // After >= 10s debounce when live quota is 0% -> triggers immediately on single frame
+        assert!(matches!(
+            evaluate_pty_exhaustion_decision(
+                &mut tracker,
+                "Error: RESOURCE_EXHAUSTED",
+                exhausted,
+                0.0,
+                102_000 + PTY_EXHAUSTION_DEBOUNCE_MS,
+            ),
+            PtyExhaustionDecision::TriggerAutoSwitch { .. }
+        ));
     }
 }

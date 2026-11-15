@@ -276,7 +276,6 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
         }
     }
 
-    let mut to_fetch: Vec<String> = Vec::new();
     let mut to_fetch_epochs: Vec<(String, u64)> = Vec::new();
     {
         let mut cache_guard = CACHE.lock().unwrap();
@@ -292,7 +291,6 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
             };
 
             if needs_fetch {
-                to_fetch.push(p.to_string());
                 let epoch = if is_force {
                     bump_epoch_in_cache(cache, p)
                 } else {
@@ -360,6 +358,7 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
                             prov,
                             status,
                         );
+                        crate::account_switcher::auto_switch::on_fresh_quota_status(prov, status);
                     }
 
                     // Push live updated quotas ONLY for providers whose cache epoch stayed valid
@@ -380,21 +379,22 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
     }
 
     // Synchronous fetch only when explicitly forced by user (e.g. Refresh button clicked or unit tests)
-    if !to_fetch.is_empty() {
-        let mut newly_fetched = Vec::new();
+    if !to_fetch_epochs.is_empty() {
+        let mut newly_fetched: Vec<(String, u64, ProviderQuotaStatus)> = Vec::new();
         std::thread::scope(|s| {
             let mut handles = Vec::new();
-            for p in &to_fetch {
-                let handle = s.spawn(|| {
+            for (p, epoch) in &to_fetch_epochs {
+                let epoch = *epoch;
+                let handle = s.spawn(move || {
                     let status = fetch_single_provider(p);
-                    (p.clone(), status)
+                    (p.clone(), epoch, status)
                 });
                 handles.push(handle);
             }
 
             for handle in handles {
-                if let Ok((p, status)) = handle.join() {
-                    newly_fetched.push((p, status));
+                if let Ok((p, epoch, status)) = handle.join() {
+                    newly_fetched.push((p, epoch, status));
                 }
             }
         });
@@ -404,16 +404,22 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
         {
             let mut cache_guard = CACHE.lock().unwrap();
             if let Some(cache) = cache_guard.as_mut() {
-                for (p, status) in newly_fetched {
-                    synced_statuses.push((p.clone(), status.clone()));
-                    cache.entries.insert(p, (Instant::now(), status));
+                let updated_providers =
+                    commit_swr_results_if_epoch_matches(cache, newly_fetched);
+                if !updated_providers.is_empty() {
+                    save_persisted_cache(cache);
+                    for prov in &updated_providers {
+                        if let Some((_, status)) = cache.entries.get(prov) {
+                            synced_statuses.push((prov.clone(), status.clone()));
+                        }
+                    }
                 }
-                save_persisted_cache(cache);
             }
         }
         #[cfg(not(test))]
         for (prov, status) in &synced_statuses {
             crate::account_switcher::record_active_quota_snapshot_for_provider(prov, status);
+            crate::account_switcher::auto_switch::on_fresh_quota_status(prov, status);
         }
     }
 

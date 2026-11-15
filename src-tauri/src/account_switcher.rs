@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+pub mod auto_switch;
 pub mod commands;
 pub mod quota;
 pub mod registry;
@@ -8,6 +9,7 @@ pub mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use auto_switch::*;
 pub use commands::*;
 pub use quota::*;
 pub use registry::*;

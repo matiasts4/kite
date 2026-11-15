@@ -2457,3 +2457,1074 @@ fn test_rank_priority_order_bucket_mismatch_and_resume_runtime_state() {
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+struct MockAutoSwitchEnv {
+    root: std::path::PathBuf,
+    external: std::sync::Mutex<super::storage::ExternalProcessInspection>,
+    sessions: std::sync::Mutex<crate::terminal::ProviderSessionsInspection>,
+    runtime_statuses: std::sync::Mutex<std::collections::HashMap<String, super::registry::AutoSwitchRuntimeStatus>>,
+    switch_handler: std::sync::Mutex<Box<dyn FnMut(&str, &str, bool) -> Value + Send>>,
+    switch_calls: std::sync::Mutex<Vec<(String, String, bool)>>,
+    emitted_events: std::sync::Mutex<Vec<(String, Value)>>,
+}
+
+impl MockAutoSwitchEnv {
+    fn new(root: std::path::PathBuf) -> Self {
+        Self {
+            root,
+            external: std::sync::Mutex::new(super::storage::ExternalProcessInspection::idle()),
+            sessions: std::sync::Mutex::new(crate::terminal::ProviderSessionsInspection::default()),
+            runtime_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            switch_handler: std::sync::Mutex::new(Box::new(|_, _, _| json!({ "success": true }))),
+            switch_calls: std::sync::Mutex::new(Vec::new()),
+            emitted_events: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn set_switch_handler<F>(&self, f: F)
+    where
+        F: FnMut(&str, &str, bool) -> Value + Send + 'static,
+    {
+        *self.switch_handler.lock().unwrap() = Box::new(f);
+    }
+
+    fn take_events(&self) -> Vec<(String, Value)> {
+        std::mem::take(&mut *self.emitted_events.lock().unwrap())
+    }
+}
+
+impl super::auto_switch::AutoSwitchEnv for MockAutoSwitchEnv {
+    fn profiles_root(&self) -> std::path::PathBuf {
+        self.root.clone()
+    }
+
+    fn inspect_external(&self, _provider: &str) -> super::storage::ExternalProcessInspection {
+        self.external.lock().unwrap().clone()
+    }
+
+    fn inspect_sessions(&self, _provider: &str) -> crate::terminal::ProviderSessionsInspection {
+        self.sessions.lock().unwrap().clone()
+    }
+
+    fn execute_switch(&self, provider: &str, account_id: &str, force_busy: bool) -> Value {
+        self.switch_calls.lock().unwrap().push((
+            provider.to_string(),
+            account_id.to_string(),
+            force_busy,
+        ));
+        (self.switch_handler.lock().unwrap())(provider, account_id, force_busy)
+    }
+
+    fn get_runtime_status(&self, provider: &str) -> super::registry::AutoSwitchRuntimeStatus {
+        let canon = canon_provider(provider);
+        self.runtime_statuses
+            .lock()
+            .unwrap()
+            .get(&canon)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn set_runtime_status(&self, provider: &str, status: super::registry::AutoSwitchRuntimeStatus) {
+        let canon = canon_provider(provider);
+        self.runtime_statuses.lock().unwrap().insert(canon, status);
+    }
+
+    fn emit_event(&self, event: &str, payload: Value) {
+        self.emitted_events
+            .lock()
+            .unwrap()
+            .push((event.to_string(), payload));
+    }
+}
+
+fn seed_agy_cred_file(root: &std::path::Path, id: &str, email: &str) {
+    let dir = root.join("agy").join(id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("gemini_antigravity_cred.json"),
+        serde_json::to_string(&json!({
+            "id_token_email": email,
+            "token": { "access_token": "ya29.ok", "refresh_token": "1//ok" }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_auto_switch_coordinator_disabled_and_healthy_recovery_clears_all_exhausted() {
+    use super::auto_switch::{
+        evaluate_auto_switch_with, AutoSwitchCoordinatorState, AutoSwitchOutcome,
+        AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy, AutoSwitchRuntimeStatus};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_disabled_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let mut state = AutoSwitchCoordinatorState::default();
+
+    let req = AutoSwitchTriggerRequest {
+        provider: "antigravity".to_string(),
+        trigger_source: "quota_poll".to_string(),
+        requested_model: None,
+        thread_id: None,
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: true,
+        now_unix_ms: 1_000_000,
+    };
+    assert!(matches!(
+        evaluate_auto_switch_with(&req, &mut state, &env),
+        AutoSwitchOutcome::Disabled
+    ));
+    assert!(env.switch_calls.lock().unwrap().is_empty());
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    state
+        .target_cooldown_until_ms
+        .insert(("agy".to_string(), "acc-2".to_string()), 5_000_000);
+    env.set_runtime_status(
+        "agy",
+        AutoSwitchRuntimeStatus {
+            paused: true,
+            pause_reason: Some("ALL_ACCOUNTS_EXHAUSTED".to_string()),
+            next_reset_at: Some("18:00".to_string()),
+            next_reset_ms: Some(60_000),
+            ..Default::default()
+        },
+    );
+
+    let healthy_req = AutoSwitchTriggerRequest {
+        provider: "antigravity".to_string(),
+        trigger_source: "quota_poll".to_string(),
+        requested_model: None,
+        thread_id: None,
+        current_remaining_percent: Some(45.0),
+        has_exhausted_window: false,
+        now_unix_ms: 1_100_000,
+    };
+    assert!(matches!(
+        evaluate_auto_switch_with(&healthy_req, &mut state, &env),
+        AutoSwitchOutcome::NotExhausted
+    ));
+    let cleared = env.get_runtime_status("agy");
+    assert!(!cleared.paused);
+    assert!(cleared.pause_reason.is_none());
+    assert!(cleared.next_reset_at.is_none());
+    assert!(state.target_cooldown_until_ms.is_empty());
+    let events = env.take_events();
+    assert!(events.iter().any(|(name, _)| name == "kite://auto-switch-status"));
+
+    // Healthy poll must NOT auto-clear CIRCUIT_BREAKER_PAUSED
+    env.set_runtime_status(
+        "agy",
+        AutoSwitchRuntimeStatus {
+            paused: true,
+            pause_reason: Some("CIRCUIT_BREAKER_PAUSED".to_string()),
+            recent_switch_count: 3,
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        evaluate_auto_switch_with(&healthy_req, &mut state, &env),
+        AutoSwitchOutcome::NotExhausted
+    ));
+    let still_paused = env.get_runtime_status("agy");
+    assert!(still_paused.paused);
+    assert_eq!(
+        still_paused.pause_reason.as_deref(),
+        Some("CIRCUIT_BREAKER_PAUSED")
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_coordinator_exact_match_switches_records_cooldown_and_emits_events() {
+    use super::auto_switch::{
+        evaluate_auto_switch_with, AutoSwitchCoordinatorState, AutoSwitchOutcome,
+        AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_exact_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-a", "a@kite.local");
+    seed_agy_cred_file(&tmp, "acc-b", "b@kite.local");
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-a".to_string(),
+                provider: "agy".to_string(),
+                label: "Personal".to_string(),
+                email: Some("a@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-b".to_string(),
+                provider: "agy".to_string(),
+                label: "Work".to_string(),
+                email: Some("b@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(85.0),
+                available_model_ids: vec![
+                    "claude-opus-4-6".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                ],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.cooldown_seconds = 120;
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let mut state = AutoSwitchCoordinatorState::default();
+    let now = 2_000_000_i64;
+
+    let req = AutoSwitchTriggerRequest {
+        provider: "antigravity".to_string(),
+        trigger_source: "chat_turn".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: Some("thread-42".to_string()),
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: false,
+        now_unix_ms: now,
+    };
+
+    let outcome = evaluate_auto_switch_with(&req, &mut state, &env);
+    match outcome {
+        AutoSwitchOutcome::Switched {
+            provider,
+            from_account_id,
+            from_account_label,
+            to_account_id,
+            to_account_label,
+            applied_model,
+            model_adjusted,
+            auto_continue_chat_turn,
+            compatibility,
+            status,
+            ..
+        } => {
+            assert_eq!(provider, "agy");
+            assert_eq!(from_account_id.as_deref(), Some("acc-a"));
+            assert_eq!(from_account_label, "Personal");
+            assert_eq!(to_account_id, "acc-b");
+            assert_eq!(to_account_label, "Work");
+            assert_eq!(applied_model.as_deref(), Some("claude-opus-4-6"));
+            assert!(!model_adjusted);
+            assert!(auto_continue_chat_turn);
+            assert_eq!(compatibility, "exact");
+            assert!(!status.paused);
+            assert_eq!(status.recent_switch_count, 1);
+            assert_eq!(status.cooldown_until_ms, Some(now + 120_000));
+        }
+        other => panic!("Expected Switched, got {:?}", other),
+    }
+
+    assert_eq!(
+        *env.switch_calls.lock().unwrap(),
+        vec![("agy".to_string(), "acc-b".to_string(), false)]
+    );
+    assert_eq!(state.last_switch_unix_ms.get("agy"), Some(&now));
+    assert_eq!(
+        state
+            .target_cooldown_until_ms
+            .get(&("agy".to_string(), "acc-a".to_string())),
+        Some(&(now + 120_000))
+    );
+
+    let events = env.take_events();
+    assert!(events.iter().any(|(e, _)| e == "kite://auto-switch-status"));
+    let exec_ev = events
+        .iter()
+        .find(|(e, _)| e == "kite://auto-switch-executed")
+        .expect("must emit auto-switch-executed");
+    assert_eq!(exec_ev.1["provider"], "agy");
+    assert_eq!(exec_ev.1["fromAccountId"], "acc-a");
+    assert_eq!(exec_ev.1["toAccountId"], "acc-b");
+    assert_eq!(exec_ev.1["appliedModel"], "claude-opus-4-6");
+    assert_eq!(exec_ev.1["triggerSource"], "chat_turn");
+
+    // Trigger inside cooldown must return SkippedCooldown without switching again
+    let cooldown_req = AutoSwitchTriggerRequest {
+        now_unix_ms: now + 30_000,
+        ..req
+    };
+    match evaluate_auto_switch_with(&cooldown_req, &mut state, &env) {
+        AutoSwitchOutcome::SkippedCooldown { status } => {
+            assert_eq!(status.cooldown_until_ms, Some(now + 120_000));
+        }
+        other => panic!("Expected SkippedCooldown, got {:?}", other),
+    }
+    assert_eq!(env.switch_calls.lock().unwrap().len(), 1);
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_coordinator_rolling_circuit_breaker_pauses_and_manual_resume_unlocks() {
+    use super::auto_switch::{
+        evaluate_auto_switch_with, on_manual_switch_with, AutoSwitchCoordinatorState,
+        AutoSwitchOutcome, AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_breaker_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    for (id, em) in [
+        ("acc-1", "u1@kite.local"),
+        ("acc-2", "u2@kite.local"),
+        ("acc-3", "u3@kite.local"),
+        ("acc-4", "u4@kite.local"),
+    ] {
+        seed_agy_cred_file(&tmp, id, em);
+    }
+
+    let now = 5_000_000_i64;
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-1".to_string(),
+                provider: "agy".to_string(),
+                label: "U1".to_string(),
+                email: Some("u1@kite.local".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                time_until_reset_ms: Some(120_000),
+                primary_reset_at: Some("18:05".to_string()),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-2".to_string(),
+                provider: "agy".to_string(),
+                label: "U2".to_string(),
+                email: Some("u2@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(90.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-3".to_string(),
+                provider: "agy".to_string(),
+                label: "U3".to_string(),
+                email: Some("u3@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(80.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-4".to_string(),
+                provider: "agy".to_string(),
+                label: "U4".to_string(),
+                email: Some("u4@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(70.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.cooldown_seconds = 60;
+    policy.max_consecutive_switches = 3;
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let tmp_for_handler = tmp.clone();
+    env.set_switch_handler(move |_prov, target_id, _force| {
+        let mut r = load_registry_from(&tmp_for_handler);
+        for p in &mut r.profiles {
+            p.is_active = p.id == target_id;
+            if p.id == target_id {
+                p.primary_remaining_percent = Some(0.0);
+            }
+        }
+        save_registry_to(&tmp_for_handler, &r).unwrap();
+        json!({ "success": true })
+    });
+
+    let mut state = AutoSwitchCoordinatorState::default();
+    let base_req = |t: i64| AutoSwitchTriggerRequest {
+        provider: "agy".to_string(),
+        trigger_source: "pty_error".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: None,
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: true,
+        now_unix_ms: t,
+    };
+
+    assert!(matches!(
+        evaluate_auto_switch_with(&base_req(now), &mut state, &env),
+        AutoSwitchOutcome::Switched { .. }
+    ));
+    assert!(matches!(
+        evaluate_auto_switch_with(&base_req(now + 70_000), &mut state, &env),
+        AutoSwitchOutcome::Switched { .. }
+    ));
+    assert!(matches!(
+        evaluate_auto_switch_with(&base_req(now + 140_000), &mut state, &env),
+        AutoSwitchOutcome::Switched { .. }
+    ));
+
+    // 4th switch within 10 minutes must trip circuit breaker
+    match evaluate_auto_switch_with(&base_req(now + 210_000), &mut state, &env) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(status.pause_reason.as_deref(), Some("CIRCUIT_BREAKER_PAUSED"));
+            assert_eq!(status.recent_switch_count, 3);
+            assert_eq!(status.next_reset_at.as_deref(), Some("18:05"));
+            assert_eq!(status.next_reset_ms, Some(120_000));
+        }
+        other => panic!("Expected Paused circuit breaker, got {:?}", other),
+    }
+    assert_eq!(env.switch_calls.lock().unwrap().len(), 3);
+
+    // Even after 10 minutes pass, CIRCUIT_BREAKER_PAUSED stays locked until user resumes
+    match evaluate_auto_switch_with(&base_req(now + 900_000), &mut state, &env) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(status.pause_reason.as_deref(), Some("CIRCUIT_BREAKER_PAUSED"));
+        }
+        other => panic!("Expected Paused to persist until manual resume, got {:?}", other),
+    }
+
+    // Manual switch / resume unlocks breaker cleanly
+    on_manual_switch_with("agy", &mut state, &env);
+    assert!(!env.get_runtime_status("agy").paused);
+    assert!(state.recent_switches_ms.get("agy").map_or(true, |v| v.is_empty()));
+    assert!(state.target_cooldown_until_ms.is_empty());
+
+    let mut r = load_registry_from(&tmp);
+    for p in &mut r.profiles {
+        if p.id == "acc-1" {
+            p.primary_remaining_percent = Some(95.0);
+        }
+    }
+    save_registry_to(&tmp, &r).unwrap();
+
+    assert!(matches!(
+        evaluate_auto_switch_with(&base_req(now + 905_000), &mut state, &env),
+        AutoSwitchOutcome::Switched { .. }
+    ));
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_coordinator_all_accounts_exhausted_earliest_reset_eta() {
+    use super::auto_switch::{
+        evaluate_auto_switch_with, AutoSwitchCoordinatorState, AutoSwitchOutcome,
+        AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy, CachedQuotaWindow};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_all_ex_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-1", "a1@kite.local");
+    seed_agy_cred_file(&tmp, "acc-2", "a2@kite.local");
+    seed_agy_cred_file(&tmp, "acc-excluded", "ex@kite.local");
+
+    let now = 8_000_000_i64;
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-1".to_string(),
+                provider: "agy".to_string(),
+                label: "A1".to_string(),
+                email: Some("a1@kite.local".to_string()),
+                is_active: true,
+                last_used_unix_ms: now,
+                primary_remaining_percent: Some(0.0),
+                primary_reset_at: Some("2026-11-15T19:00:00Z".to_string()),
+                time_until_reset_ms: Some(900_000),
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-2".to_string(),
+                provider: "agy".to_string(),
+                label: "A2".to_string(),
+                email: Some("a2@kite.local".to_string()),
+                is_active: false,
+                last_used_unix_ms: now,
+                primary_remaining_percent: Some(0.0),
+                quota_windows: vec![CachedQuotaWindow {
+                    name: "Claude".to_string(),
+                    remaining_percent: 0.0,
+                    is_exhausted: true,
+                    resets_at: Some("2026-11-15T18:05:00Z".to_string()),
+                    time_until_reset_ms: Some(300_000),
+                    updated_at_unix_ms: now,
+                }],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-excluded".to_string(),
+                provider: "agy".to_string(),
+                label: "Excluded".to_string(),
+                email: Some("ex@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(100.0),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.excluded_account_ids = vec!["acc-excluded".to_string()];
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let mut state = AutoSwitchCoordinatorState::default();
+    let req = AutoSwitchTriggerRequest {
+        provider: "agy".to_string(),
+        trigger_source: "quota_poll".to_string(),
+        requested_model: None,
+        thread_id: None,
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: true,
+        now_unix_ms: now,
+    };
+
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(status.pause_reason.as_deref(), Some("ALL_ACCOUNTS_EXHAUSTED"));
+            assert_eq!(status.next_reset_ms, Some(300_000));
+            assert_eq!(
+                status.next_reset_at.as_deref(),
+                Some("2026-11-15T18:05:00Z")
+            );
+        }
+        other => panic!("Expected Paused ALL_ACCOUNTS_EXHAUSTED, got {:?}", other),
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_coordinator_external_process_and_busy_terminal_policies() {
+    use super::auto_switch::{
+        evaluate_auto_switch_with, AutoSwitchCoordinatorState, AutoSwitchOutcome,
+        AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy};
+    use super::storage::{ExternalProcessInspection, ResidualProcessSummary};
+    use crate::terminal::{ProviderSessionSummary, ProviderSessionsInspection};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_busy_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-1", "a1@kite.local");
+    seed_agy_cred_file(&tmp, "acc-2", "a2@kite.local");
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-1".to_string(),
+                provider: "agy".to_string(),
+                label: "A1".to_string(),
+                email: Some("a1@kite.local".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-2".to_string(),
+                provider: "agy".to_string(),
+                label: "A2".to_string(),
+                email: Some("a2@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(95.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.busy_terminals_policy = "wait_idle".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy.clone()).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let mut state = AutoSwitchCoordinatorState::default();
+    let req = AutoSwitchTriggerRequest {
+        provider: "agy".to_string(),
+        trigger_source: "quota_poll".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: None,
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: false,
+        now_unix_ms: 9_000_000,
+    };
+
+    // 1. base_app_open pauses cleanly without killing IDE window
+    *env.external.lock().unwrap() = ExternalProcessInspection {
+        state: "base_app_open".to_string(),
+        can_close_processes: false,
+        base_app_pids: vec![123],
+        base_app_titles: vec!["Antigravity — kite".to_string()],
+        residual_processes: vec![],
+        message: "Antigravity IDE open".to_string(),
+    };
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(status.pause_reason.as_deref(), Some("IDE_PROCESS_BUSY"));
+            assert_eq!(status.last_error_code.as_deref(), Some("PROVIDER_BUSY"));
+            assert_eq!(status.base_app_titles, vec!["Antigravity — kite".to_string()]);
+        }
+        other => panic!("Expected IDE_PROCESS_BUSY, got {:?}", other),
+    }
+
+    // 2. residual_only pauses with RESIDUAL_PROCESSES_BLOCKING & residual count
+    *env.external.lock().unwrap() = ExternalProcessInspection {
+        state: "residual_only".to_string(),
+        can_close_processes: true,
+        base_app_pids: vec![],
+        base_app_titles: vec![],
+        residual_processes: vec![
+            ResidualProcessSummary {
+                pid: 201,
+                name: "antigravity.exe".to_string(),
+                kind: "utility".to_string(),
+            },
+            ResidualProcessSummary {
+                pid: 202,
+                name: "antigravity.exe".to_string(),
+                kind: "renderer".to_string(),
+            },
+        ],
+        message: "2 residuals".to_string(),
+    };
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(
+                status.pause_reason.as_deref(),
+                Some("RESIDUAL_PROCESSES_BLOCKING")
+            );
+            assert_eq!(status.last_error_code.as_deref(), Some("PROVIDER_BUSY"));
+            assert_eq!(status.residual_process_count, Some(2));
+        }
+        other => panic!("Expected RESIDUAL_PROCESSES_BLOCKING, got {:?}", other),
+    }
+
+    // 3. External idle, but managed busy PTY with "wait_idle" defers cleanly
+    *env.external.lock().unwrap() = ExternalProcessInspection::idle();
+    let busy_summary = ProviderSessionSummary {
+        session_id: "term-1".to_string(),
+        engine: "antigravity".to_string(),
+        workspace_id: None,
+        pane_id: None,
+        cwd: "C:/repo".to_string(),
+        busy: true,
+        reasons: vec!["recent_output".to_string()],
+        last_output_age_ms: Some(120),
+        presentation_live: true,
+    };
+    *env.sessions.lock().unwrap() = ProviderSessionsInspection {
+        managed_busy: vec![busy_summary.clone()],
+        ..Default::default()
+    };
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(
+                status.pause_reason.as_deref(),
+                Some("BUSY_TERMINALS_DEFERRED")
+            );
+        }
+        other => panic!("Expected BUSY_TERMINALS_DEFERRED, got {:?}", other),
+    }
+    assert!(env.switch_calls.lock().unwrap().is_empty());
+
+    // 4. "ask" returns NeedsConfirmation with busy_sessions
+    policy.busy_terminals_policy = "ask".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy.clone()).unwrap();
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::NeedsConfirmation {
+            reason,
+            busy_sessions,
+            ..
+        } => {
+            assert_eq!(reason, "busy_terminals_ask");
+            assert_eq!(busy_sessions.len(), 1);
+            assert_eq!(busy_sessions[0].session_id, "term-1");
+        }
+        other => panic!("Expected NeedsConfirmation busy_terminals_ask, got {:?}", other),
+    }
+    assert!(env.switch_calls.lock().unwrap().is_empty());
+
+    // 5. "interrupt" passes force_busy = true and executes switch
+    policy.busy_terminals_policy = "interrupt".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+    assert!(matches!(
+        evaluate_auto_switch_with(&req, &mut state, &env),
+        AutoSwitchOutcome::Switched { .. }
+    ));
+    assert_eq!(
+        *env.switch_calls.lock().unwrap(),
+        vec![("agy".to_string(), "acc-2".to_string(), true)]
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_coordinator_model_mismatch_confirm_vs_auto_fallback_and_unverified() {
+    use super::auto_switch::{
+        evaluate_auto_switch_with, AutoSwitchCoordinatorState, AutoSwitchOutcome,
+        AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_mismatch_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-pro", "pro@kite.local");
+    seed_agy_cred_file(&tmp, "acc-free", "free@kite.local");
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-pro".to_string(),
+                provider: "agy".to_string(),
+                label: "Pro".to_string(),
+                email: Some("pro@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-free".to_string(),
+                provider: "agy".to_string(),
+                label: "Free".to_string(),
+                email: Some("free@kite.local".to_string()),
+                plan_name: Some("Free".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(100.0),
+                available_model_ids: vec![
+                    "gemini-2.5-pro".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                ],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.model_mismatch_policy = "confirm_notification".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy.clone()).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let mut state = AutoSwitchCoordinatorState::default();
+    let req = AutoSwitchTriggerRequest {
+        provider: "agy".to_string(),
+        trigger_source: "chat_turn".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: Some("th-1".to_string()),
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: false,
+        now_unix_ms: 10_000_000,
+    };
+
+    // 1. model_mismatch + confirm_notification asks without touching credentials
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::NeedsConfirmation {
+            candidate,
+            reason,
+            requested_model,
+            thread_id,
+            ..
+        } => {
+            assert_eq!(reason, "model_mismatch");
+            assert_eq!(candidate.profile.id, "acc-free");
+            assert_eq!(
+                candidate.suggested_fallback_model.as_deref(),
+                Some("gemini-2.5-pro")
+            );
+            assert_eq!(requested_model.as_deref(), Some("claude-opus-4-6"));
+            assert_eq!(thread_id.as_deref(), Some("th-1"));
+        }
+        other => panic!("Expected NeedsConfirmation model_mismatch, got {:?}", other),
+    }
+    assert!(env.switch_calls.lock().unwrap().is_empty());
+
+    // 2. model_mismatch + auto_fallback switches and applies fallback model
+    policy.model_mismatch_policy = "auto_fallback".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy.clone()).unwrap();
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Switched {
+            applied_model,
+            model_adjusted,
+            compatibility,
+            ..
+        } => {
+            assert_eq!(compatibility, "model_mismatch");
+            assert!(model_adjusted);
+            assert_eq!(applied_model.as_deref(), Some("gemini-2.5-pro"));
+        }
+        other => panic!("Expected Switched with fallback model, got {:?}", other),
+    }
+
+    // 3. unverified_catalog + confirm_notification also asks
+    let mut r2 = load_registry_from(&tmp);
+    r2.profiles[1].available_model_ids.clear();
+    save_registry_to(&tmp, &r2).unwrap();
+    policy.model_mismatch_policy = "confirm_notification".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+    let mut state2 = AutoSwitchCoordinatorState::default();
+    match evaluate_auto_switch_with(&req, &mut state2, &env) {
+        AutoSwitchOutcome::NeedsConfirmation { reason, .. } => {
+            assert_eq!(reason, "unverified_catalog");
+        }
+        other => panic!("Expected NeedsConfirmation unverified_catalog, got {:?}", other),
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_coordinator_failure_cooldown_provider_busy_race_and_quota_poll_helper() {
+    use super::auto_switch::{
+        build_quota_poll_trigger_request, evaluate_auto_switch_with, AutoSwitchCoordinatorState,
+        AutoSwitchOutcome, AutoSwitchTriggerRequest,
+    };
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy};
+    use crate::quota::{ProviderQuotaStatus, QuotaWindow};
+    use std::collections::HashMap;
+
+    // 1. Quota poll trigger helper verifies available/auth & exhausted window detection
+    let unavail = ProviderQuotaStatus {
+        provider_id: "antigravity".to_string(),
+        display_name: "Antigravity".to_string(),
+        is_available: false,
+        is_auth: false,
+        primary_usage_percent: 0.0,
+        primary_remaining_percent: 0.0,
+        primary_reset_at: None,
+        time_until_reset_ms: None,
+        windows: Vec::new(),
+        metadata: HashMap::new(),
+        last_updated_ms: 0,
+        error: None,
+    };
+    assert!(build_quota_poll_trigger_request("antigravity", &unavail, 1000).is_none());
+
+    let partial_exhaust = ProviderQuotaStatus {
+        is_available: true,
+        is_auth: true,
+        primary_remaining_percent: 50.0,
+        windows: vec![QuotaWindow {
+            name: "Claude".to_string(),
+            usage_percent: 100.0,
+            remaining_fraction: 0.0,
+            resets_at: None,
+            time_until_reset_ms: Some(1000),
+            is_exhausted: true,
+        }],
+        ..unavail
+    };
+    let built = build_quota_poll_trigger_request("antigravity", &partial_exhaust, 12_345).unwrap();
+    assert_eq!(built.provider, "agy");
+    assert_eq!(built.trigger_source, "quota_poll");
+    assert_eq!(built.current_remaining_percent, Some(50.0));
+    assert!(built.has_exhausted_window);
+    assert_eq!(built.now_unix_ms, 12_345);
+
+    // 2. Failure puts broken target on cooldown so next trigger picks backup candidate
+    let tmp = std::env::temp_dir().join(format!("kite_as_fail_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-1", "a1@kite.local");
+    seed_agy_cred_file(&tmp, "acc-broken", "broken@kite.local");
+    seed_agy_cred_file(&tmp, "acc-good", "good@kite.local");
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-1".to_string(),
+                provider: "agy".to_string(),
+                label: "A1".to_string(),
+                email: Some("a1@kite.local".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-broken".to_string(),
+                provider: "agy".to_string(),
+                label: "Broken".to_string(),
+                email: Some("broken@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(90.0),
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-good".to_string(),
+                provider: "agy".to_string(),
+                label: "Good".to_string(),
+                email: Some("good@kite.local".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(60.0),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    env.set_switch_handler(|_prov, target_id, _force| {
+        if target_id == "acc-broken" {
+            json!({
+                "success": false,
+                "code": "KEYRING_FAILED",
+                "error": "keyring locked"
+            })
+        } else {
+            json!({ "success": true })
+        }
+    });
+
+    let mut state = AutoSwitchCoordinatorState::default();
+    let req = AutoSwitchTriggerRequest {
+        provider: "agy".to_string(),
+        trigger_source: "quota_poll".to_string(),
+        requested_model: None,
+        thread_id: None,
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: false,
+        now_unix_ms: 20_000_000,
+    };
+
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Failed { code, error, status } => {
+            assert_eq!(code, "KEYRING_FAILED");
+            assert_eq!(error, "keyring locked");
+            assert_eq!(status.last_error_code.as_deref(), Some("KEYRING_FAILED"));
+        }
+        other => panic!("Expected Failed, got {:?}", other),
+    }
+    assert!(state
+        .target_cooldown_until_ms
+        .contains_key(&("agy".to_string(), "acc-broken".to_string())));
+
+    // Immediately retrying bypasses cooled-down broken profile and switches to acc-good
+    match evaluate_auto_switch_with(&req, &mut state, &env) {
+        AutoSwitchOutcome::Switched { to_account_id, .. } => {
+            assert_eq!(to_account_id, "acc-good");
+        }
+        other => panic!("Expected fallback switch to acc-good, got {:?}", other),
+    }
+
+    // 3. Race returning PROVIDER_BUSY maps into Paused status cleanly
+    let env_race = MockAutoSwitchEnv::new(tmp.clone());
+    env_race.set_switch_handler(|_, _, _| {
+        json!({
+            "success": false,
+            "code": "PROVIDER_BUSY",
+            "providerBusyKind": "base_app_open",
+            "baseAppTitles": ["Antigravity — app"]
+        })
+    });
+    let mut state_race = AutoSwitchCoordinatorState::default();
+    match evaluate_auto_switch_with(&req, &mut state_race, &env_race) {
+        AutoSwitchOutcome::Paused { status } => {
+            assert!(status.paused);
+            assert_eq!(status.pause_reason.as_deref(), Some("IDE_PROCESS_BUSY"));
+            assert_eq!(status.base_app_titles, vec!["Antigravity — app".to_string()]);
+        }
+        other => panic!("Expected Paused IDE_PROCESS_BUSY on race, got {:?}", other),
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_resume_auto_switch_with_clears_global_coordinator_circuit_breaker() {
+    use super::auto_switch::{auto_switch_coordinator_lock, auto_switch_coordinator_state};
+    use super::commands::{resume_auto_switch_with, set_auto_switch_runtime_status};
+    use super::registry::AutoSwitchRuntimeStatus;
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_global_res_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    // Use "codex" to avoid colliding with parallel "agy" runtime status tests
+    {
+        let _lock = auto_switch_coordinator_lock().lock().unwrap();
+        let mut st = auto_switch_coordinator_state().lock().unwrap();
+        st.last_switch_unix_ms.insert("codex".to_string(), 999);
+        st.recent_switches_ms
+            .insert("codex".to_string(), vec![997, 998, 999]);
+        st.target_cooldown_until_ms
+            .insert(("codex".to_string(), "c1".to_string()), 5000);
+    }
+    set_auto_switch_runtime_status(
+        "codex",
+        AutoSwitchRuntimeStatus {
+            paused: true,
+            pause_reason: Some("CIRCUIT_BREAKER_PAUSED".to_string()),
+            recent_switch_count: 3,
+            ..Default::default()
+        },
+    );
+
+    let resumed = resume_auto_switch_with(&tmp, "codex");
+    assert_eq!(resumed["success"], true);
+    assert_eq!(resumed["status"]["paused"], false);
+
+    {
+        let _lock = auto_switch_coordinator_lock().lock().unwrap();
+        let st = auto_switch_coordinator_state().lock().unwrap();
+        assert!(!st.last_switch_unix_ms.contains_key("codex"));
+        assert!(!st.recent_switches_ms.contains_key("codex"));
+        assert!(!st
+            .target_cooldown_until_ms
+            .keys()
+            .any(|(p, _)| p == "codex"));
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}

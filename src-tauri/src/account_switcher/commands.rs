@@ -1125,8 +1125,17 @@ pub async fn switch_account_profile_impl(request: Option<Value>) -> Value {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let provider_for_reset = provider.clone();
     tokio::task::spawn_blocking(move || {
-        switch_account_profile_direct_with_options(provider, account_id, force)
+        let res = switch_account_profile_direct_with_options(provider, account_id, force);
+        if res
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            super::auto_switch::reset_auto_switch_state_on_manual_switch(&provider_for_reset);
+        }
+        res
     })
     .await
     .unwrap_or_else(|e| {
@@ -1802,14 +1811,11 @@ pub(crate) fn save_auto_switch_policy_with(root: &Path, provider: &str, policy_v
     };
     match save_auto_switch_policy_in(root, &canon, parsed) {
         Ok(saved) => {
-            let mut status = get_auto_switch_runtime_status(&canon);
-            if !saved.enabled {
-                status.paused = false;
-                status.pause_reason = None;
-                status.cooldown_until_ms = None;
-                status.last_error_code = None;
-                set_auto_switch_runtime_status(&canon, status.clone());
-            }
+            let status = if !saved.enabled {
+                super::auto_switch::clear_runtime_pause_on_policy_disable(&canon)
+            } else {
+                get_auto_switch_runtime_status(&canon)
+            };
             json!({
                 "success": true,
                 "provider": canon,
@@ -1832,18 +1838,7 @@ pub(crate) fn resume_auto_switch_with(_root: &Path, provider: &str) -> Value {
             "error": "Provider cannot be empty."
         });
     }
-    let status = AutoSwitchRuntimeStatus {
-        paused: false,
-        pause_reason: None,
-        cooldown_until_ms: None,
-        recent_switch_count: 0,
-        next_reset_at: None,
-        next_reset_ms: None,
-        last_error_code: None,
-        residual_process_count: None,
-        base_app_titles: Vec::new(),
-    };
-    set_auto_switch_runtime_status(&canon, status.clone());
+    let status = super::auto_switch::resume_auto_switch_state(&canon);
     json!({
         "success": true,
         "provider": canon,

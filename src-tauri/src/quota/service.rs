@@ -336,16 +336,31 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
 
                     #[cfg_attr(test, allow(unused_variables, unused_assignments))]
                     let mut updated_providers: Vec<String> = Vec::new();
+                    #[cfg_attr(test, allow(unused_variables, unused_mut))]
+                    let mut synced_statuses: Vec<(String, ProviderQuotaStatus)> = Vec::new();
                     if let Ok(mut guard) = CACHE.lock() {
                         if let Some(cache) = guard.as_mut() {
                             updated_providers =
                                 commit_swr_results_if_epoch_matches(cache, fresh_entries);
                             if !updated_providers.is_empty() {
                                 save_persisted_cache(cache);
+                                for prov in &updated_providers {
+                                    if let Some((_, status)) = cache.entries.get(prov) {
+                                        synced_statuses.push((prov.clone(), status.clone()));
+                                    }
+                                }
                             }
                         }
                     }
                     drop(_reset_guard);
+
+                    #[cfg(not(test))]
+                    for (prov, status) in &synced_statuses {
+                        crate::account_switcher::record_active_quota_snapshot_for_provider(
+                            prov,
+                            status,
+                        );
+                    }
 
                     // Push live updated quotas ONLY for providers whose cache epoch stayed valid
                     #[cfg(not(test))]
@@ -384,12 +399,21 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
             }
         });
 
-        let mut cache_guard = CACHE.lock().unwrap();
-        if let Some(cache) = cache_guard.as_mut() {
-            for (p, status) in newly_fetched {
-                cache.entries.insert(p, (Instant::now(), status));
+        #[cfg_attr(test, allow(unused_variables))]
+        let mut synced_statuses: Vec<(String, ProviderQuotaStatus)> = Vec::new();
+        {
+            let mut cache_guard = CACHE.lock().unwrap();
+            if let Some(cache) = cache_guard.as_mut() {
+                for (p, status) in newly_fetched {
+                    synced_statuses.push((p.clone(), status.clone()));
+                    cache.entries.insert(p, (Instant::now(), status));
+                }
+                save_persisted_cache(cache);
             }
-            save_persisted_cache(cache);
+        }
+        #[cfg(not(test))]
+        for (prov, status) in &synced_statuses {
+            crate::account_switcher::record_active_quota_snapshot_for_provider(prov, status);
         }
     }
 

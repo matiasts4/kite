@@ -323,6 +323,40 @@ export interface RoutineCollection {
   };
 }
 
+export interface CachedQuotaWindow {
+  name: string;
+  remainingPercent: number;
+  isExhausted: boolean;
+  resetsAt?: string | null;
+  timeUntilResetMs?: number | null;
+  updatedAtUnixMs: number;
+}
+
+export interface AutoSwitchPolicy {
+  enabled: boolean;
+  triggerThresholdPercent: number;
+  selectionStrategy: 'highest_quota' | 'priority_order' | string;
+  priorityOrder: string[];
+  excludedAccountIds: string[];
+  modelMismatchPolicy: 'confirm_notification' | 'auto_fallback' | string;
+  busyTerminalsPolicy: 'wait_idle' | 'ask' | 'interrupt' | string;
+  autoContinueChatTurn: boolean;
+  cooldownSeconds: number;
+  maxConsecutiveSwitches: number;
+}
+
+export interface AutoSwitchRuntimeStatus {
+  paused: boolean;
+  pauseReason?: string | null;
+  cooldownUntilMs?: number | null;
+  recentSwitchCount: number;
+  nextResetAt?: string | null;
+  nextResetMs?: number | null;
+  lastErrorCode?: string | null;
+  residualProcessCount?: number;
+  baseAppTitles?: string[];
+}
+
 export interface SavedAccountProfile {
   id: string;
   provider: string;
@@ -336,6 +370,9 @@ export interface SavedAccountProfile {
   timeUntilResetMs: number | null;
   credentialStatus?: 'valid' | 'expired_no_refresh' | 'missing_tokens' | 'corrupt' | 'missing_file' | string | null;
   hasRefreshToken?: boolean;
+  quotaWindows?: CachedQuotaWindow[];
+  availableModelIds?: string[];
+  modelsUpdatedAtUnixMs?: number | null;
 }
 
 export interface AntigravityAuthTelemetry {

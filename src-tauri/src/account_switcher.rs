@@ -81,3 +81,18 @@ pub async fn inspect_provider_sessions(request: Option<Value>) -> Value {
 pub async fn close_residual_provider_processes(request: Option<Value>) -> Value {
     commands::close_residual_provider_processes_impl(request).await
 }
+
+#[tauri::command]
+pub async fn get_auto_switch_policy(request: Option<Value>) -> Value {
+    commands::get_auto_switch_policy_impl(request).await
+}
+
+#[tauri::command]
+pub async fn save_auto_switch_policy(request: Option<Value>) -> Value {
+    commands::save_auto_switch_policy_impl(request).await
+}
+
+#[tauri::command]
+pub async fn resume_auto_switch(request: Option<Value>) -> Value {
+    commands::resume_auto_switch_impl(request).await
+}

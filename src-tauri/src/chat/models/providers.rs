@@ -13,6 +13,44 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
     provider_models_for(provider, None, force_refresh)
 }
 
+/// Reads already-cached model IDs (memory or disk cache) without spawning a CLI binary.
+pub fn cached_provider_model_ids(provider: &str) -> Vec<String> {
+    let Some(canon) = canonical_thread_provider_id(provider) else {
+        return Vec::new();
+    };
+    let cache_key = catalog_cache_key(canon, None);
+    let models = {
+        if let Ok(cache) = model_cache().lock() {
+            if let Some(entry) = cache.get(&cache_key) {
+                if !entry.models.is_empty() {
+                    Some(entry.models.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    .or_else(|| load_provider_models_from_disk(&cache_key));
+
+    let mut ids: Vec<String> = models
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| {
+            m.get("id")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 pub const THREAD_PROVIDERS: [&str; 7] = [
     "antigravity",
     "grok",

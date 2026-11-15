@@ -18,6 +18,7 @@ fn test_saved_account_profile_serialization() {
         time_until_reset_ms: Some(3600000),
         credential_status: None,
         has_refresh_token: false,
+        ..Default::default()
     };
 
     let json_val = serde_json::to_value(&profile).expect("serialize profile");
@@ -89,6 +90,7 @@ fn test_save_current_account_profile_antigravity() {
         time_until_reset_ms: None,
         credential_status: None,
         has_refresh_token: false,
+        ..Default::default()
     };
     reg.profiles.push(p1);
 
@@ -144,6 +146,7 @@ fn test_reconcile_agy_profile_integrity_repairs_drift() {
         time_until_reset_ms: None,
         credential_status: None,
         has_refresh_token: false,
+        ..Default::default()
     });
 
     save_registry_to(&dir, &reg).unwrap();
@@ -398,6 +401,7 @@ fn test_reconcile_live_identity_clears_active_on_signout_and_keeps_list_fast() {
         time_until_reset_ms: None,
         credential_status: Some("valid".to_string()),
         has_refresh_token: true,
+        ..Default::default()
     });
     reg.profiles.push(SavedAccountProfile {
         id: "prof-b".to_string(),
@@ -412,6 +416,7 @@ fn test_reconcile_live_identity_clears_active_on_signout_and_keeps_list_fast() {
         time_until_reset_ms: None,
         credential_status: Some("valid".to_string()),
         has_refresh_token: true,
+        ..Default::default()
     });
 
     // When signed out (live_ident == None), stale is_active must be cleared cleanly
@@ -888,6 +893,7 @@ fn test_start_and_cancel_account_login_flow_snapshots_clears_and_restores_all_au
         time_until_reset_ms: None,
         credential_status: None,
         has_refresh_token: false,
+        ..Default::default()
     });
     save_registry_to(&root, &initial_reg).unwrap();
 
@@ -1320,7 +1326,9 @@ fn test_rename_account_profile_validates_label_hydrates_health_and_persists() {
             time_until_reset_ms: None,
             credential_status: None,
             has_refresh_token: false,
+            ..Default::default()
         }],
+        ..Default::default()
     };
     save_registry_to(&root, &reg).unwrap();
 
@@ -1443,6 +1451,7 @@ fn test_save_account_profile_with_creates_updates_dedups_and_preserves_custom_la
         until_ms: Some(1_800_000),
         email: Some("alpha@example.com".to_string()),
         plan: Some("Google AI Pro".to_string()),
+        windows: Vec::new(),
     };
 
     let first = save_account_profile_with(
@@ -1476,6 +1485,7 @@ fn test_save_account_profile_with_creates_updates_dedups_and_preserves_custom_la
         until_ms: Some(900_000),
         email: Some("ALPHA@example.com".to_string()),
         plan: Some("Google AI Pro".to_string()),
+        windows: Vec::new(),
     };
     let second = save_account_profile_with(
         &root,
@@ -1949,6 +1959,501 @@ fn test_switch_preflight_check_with_external_enriches_provider_busy() {
     assert_eq!(res["canCloseProcesses"], true);
     assert_eq!(res["residualProcessCount"], 2);
     assert_eq!(res["residualProcesses"][0]["pid"], 401);
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_auto_switch_policy_serialization_backwards_compat_and_validation() {
+    use super::commands::{get_auto_switch_policy_with, save_auto_switch_policy_with};
+    use super::registry::AutoSwitchPolicy;
+
+    let tmp = std::env::temp_dir().join(format!("kite_auto_policy_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    // 1. Legacy profiles.json without auto_switch_policies or model/window fields loads cleanly with opt-in disabled.
+    let legacy_json = json!({
+        "profiles": [{
+            "id": "acc-1",
+            "provider": "agy",
+            "label": "Personal",
+            "email": "p@kite.local",
+            "planName": "Google AI Pro",
+            "isActive": true,
+            "lastUsedUnixMs": 1000,
+            "primaryRemainingPercent": 80.0
+        }]
+    });
+    fs::write(tmp.join("profiles.json"), serde_json::to_vec_pretty(&legacy_json).unwrap()).unwrap();
+
+    let fetched = get_auto_switch_policy_with(&tmp, "antigravity");
+    assert_eq!(fetched["provider"], "agy");
+    assert_eq!(fetched["policy"]["enabled"], false);
+    assert_eq!(fetched["policy"]["triggerThresholdPercent"], 0.0);
+    assert_eq!(fetched["policy"]["selectionStrategy"], "highest_quota");
+    assert_eq!(fetched["policy"]["modelMismatchPolicy"], "confirm_notification");
+    assert_eq!(fetched["policy"]["busyTerminalsPolicy"], "wait_idle");
+    assert_eq!(fetched["policy"]["autoContinueChatTurn"], true);
+    assert_eq!(fetched["policy"]["cooldownSeconds"], 120);
+    assert_eq!(fetched["policy"]["maxConsecutiveSwitches"], 3);
+
+    // 2. Rejects invalid bounds / empty / unknown policies cleanly without overwriting.
+    let bad_threshold = save_auto_switch_policy_with(
+        &tmp,
+        "antigravity",
+        json!({ "enabled": true, "triggerThresholdPercent": -1.0 }),
+    );
+    assert_eq!(bad_threshold["success"], false);
+
+    let bad_strategy = save_auto_switch_policy_with(
+        &tmp,
+        "antigravity",
+        json!({ "enabled": true, "selectionStrategy": "random_magic" }),
+    );
+    assert_eq!(bad_strategy["success"], false);
+
+    let bad_breaker = save_auto_switch_policy_with(
+        &tmp,
+        "antigravity",
+        json!({ "enabled": true, "maxConsecutiveSwitches": 0 }),
+    );
+    assert_eq!(bad_breaker["success"], false);
+
+    let empty_provider = save_auto_switch_policy_with(&tmp, "   ", json!({ "enabled": true }));
+    assert_eq!(empty_provider["success"], false);
+
+    // 3. Valid save persists normalized alias ("antigravity" -> "agy").
+    let mut valid_policy = AutoSwitchPolicy::default();
+    valid_policy.enabled = true;
+    valid_policy.selection_strategy = "priority_order".to_string();
+    valid_policy.priority_order = vec!["acc-2".to_string(), "acc-1".to_string()];
+    valid_policy.excluded_account_ids = vec!["acc-bad".to_string()];
+    let saved = save_auto_switch_policy_with(
+        &tmp,
+        "antigravity",
+        serde_json::to_value(&valid_policy).unwrap(),
+    );
+    assert_eq!(saved["success"], true);
+    assert_eq!(saved["provider"], "agy");
+    assert_eq!(saved["policy"]["enabled"], true);
+    assert_eq!(saved["policy"]["selectionStrategy"], "priority_order");
+
+    let reloaded = get_auto_switch_policy_with(&tmp, "agy");
+    assert_eq!(reloaded["policy"]["enabled"], true);
+    assert_eq!(reloaded["policy"]["excludedAccountIds"][0], "acc-bad");
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_sync_active_profile_capabilities_never_cross_contaminates_inactive_profiles() {
+    use super::commands::sync_active_profile_capabilities_in;
+    use super::quota::LiveQuota;
+    use super::registry::CachedQuotaWindow;
+
+    let tmp = std::env::temp_dir().join(format!("kite_cap_sync_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-pro".to_string(),
+                provider: "agy".to_string(),
+                label: "Pro".to_string(),
+                email: Some("pro@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-free".to_string(),
+                provider: "agy".to_string(),
+                label: "Free".to_string(),
+                email: Some("free@kite.local".to_string()),
+                plan_name: Some("Free Tier".to_string()),
+                is_active: false,
+                available_model_ids: vec!["gemini-2.5-flash".to_string()],
+                models_updated_at_unix_ms: Some(1111),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let live_q = LiveQuota {
+        percent: 42.0,
+        reset_at: Some("2026-11-15T12:00:00Z".to_string()),
+        until_ms: Some(1800_000),
+        email: Some("pro@kite.local".to_string()),
+        plan: Some("Google AI Ultra".to_string()),
+        windows: vec![CachedQuotaWindow {
+            name: "Claude".to_string(),
+            remaining_percent: 42.0,
+            is_exhausted: false,
+            resets_at: Some("2026-11-15T12:00:00Z".to_string()),
+            time_until_reset_ms: Some(1800_000),
+            updated_at_unix_ms: 5000,
+        }],
+    };
+    let models = vec![
+        "claude-opus-4-6".to_string(),
+        "gemini-3-pro".to_string(),
+        "gemini-2.5-flash".to_string(),
+    ];
+
+    let changed = sync_active_profile_capabilities_in(
+        &tmp,
+        "agy",
+        Some("pro@kite.local"),
+        Some(&live_q),
+        Some(&models),
+        Some(5000),
+    );
+    assert!(changed);
+
+    let updated = load_registry_from(&tmp);
+    let pro = updated.profiles.iter().find(|p| p.id == "acc-pro").unwrap();
+    let free = updated.profiles.iter().find(|p| p.id == "acc-free").unwrap();
+    assert_eq!(pro.plan_name.as_deref(), Some("Google AI Ultra"));
+    assert_eq!(pro.quota_windows.len(), 1);
+    assert_eq!(pro.quota_windows[0].name, "Claude");
+    assert_eq!(pro.available_model_ids, models);
+    assert_eq!(pro.models_updated_at_unix_ms, Some(5000));
+
+    // Inactive Free account must retain its own plan & model list untouched
+    assert_eq!(free.plan_name.as_deref(), Some("Free Tier"));
+    assert_eq!(free.available_model_ids, vec!["gemini-2.5-flash".to_string()]);
+    assert!(free.quota_windows.is_empty());
+
+    // Email mismatch from stale quota probe must not write onto acc-pro either
+    let stale_q = LiveQuota {
+        email: Some("someone-else@kite.local".to_string()),
+        ..live_q
+    };
+    let rejected = sync_active_profile_capabilities_in(
+        &tmp,
+        "agy",
+        Some("someone-else@kite.local"),
+        Some(&stale_q),
+        Some(&["bad-model".to_string()]),
+        Some(6000),
+    );
+    assert!(!rejected);
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_rank_auto_switch_candidates_handles_models_windows_exclusions_and_resets() {
+    use super::commands::rank_auto_switch_candidates_in;
+    use super::registry::{AutoSwitchPolicy, CachedQuotaWindow};
+    use std::collections::HashMap;
+
+    let tmp = std::env::temp_dir().join(format!("kite_rank_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+
+    let seed_valid_cred = |id: &str, email: &str| {
+        let dir = tmp.join("agy").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("gemini_antigravity_cred.json"),
+            serde_json::to_string(&json!({
+                "id_token_email": email,
+                "token": { "access_token": "ya29.ok", "refresh_token": "1//ok" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    seed_valid_cred("acc-active", "active@kite.local");
+    seed_valid_cred("acc-exact-known", "exact@kite.local");
+    seed_valid_cred("acc-exact-unknown", "unknownq@kite.local");
+    seed_valid_cred("acc-mismatch", "free@kite.local");
+    seed_valid_cred("acc-excluded", "excl@kite.local");
+    seed_valid_cred("acc-reset-elapsed", "reset@kite.local");
+    // acc-invalid has missing_tokens
+    let bad_dir = tmp.join("agy").join("acc-invalid");
+    fs::create_dir_all(&bad_dir).unwrap();
+    fs::write(
+        bad_dir.join("gemini_antigravity_cred.json"),
+        r#"{"id_token_email":"bad@kite.local","token":{}}"#,
+    )
+    .unwrap();
+
+    let now = 10_000_000_i64;
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-active".to_string(),
+                provider: "agy".to_string(),
+                label: "Active".to_string(),
+                email: Some("active@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-invalid".to_string(),
+                provider: "agy".to_string(),
+                label: "NoTokens".to_string(),
+                email: Some("bad@kite.local".to_string()),
+                primary_remaining_percent: Some(100.0),
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-excluded".to_string(),
+                provider: "agy".to_string(),
+                label: "Excluded".to_string(),
+                email: Some("excl@kite.local".to_string()),
+                primary_remaining_percent: Some(100.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-mismatch".to_string(),
+                provider: "agy".to_string(),
+                label: "FreeTier".to_string(),
+                email: Some("free@kite.local".to_string()),
+                plan_name: Some("Free".to_string()),
+                primary_remaining_percent: Some(100.0),
+                available_model_ids: vec!["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-exact-unknown".to_string(),
+                provider: "agy".to_string(),
+                label: "UnknownQuotaExact".to_string(),
+                email: Some("unknownq@kite.local".to_string()),
+                primary_remaining_percent: None,
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-exact-known".to_string(),
+                provider: "agy".to_string(),
+                label: "KnownHealthy".to_string(),
+                email: Some("exact@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                primary_remaining_percent: Some(75.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-reset-elapsed".to_string(),
+                provider: "agy".to_string(),
+                label: "ResetReady".to_string(),
+                email: Some("reset@kite.local".to_string()),
+                last_used_unix_ms: now - 5000,
+                time_until_reset_ms: Some(1000),
+                primary_remaining_percent: Some(0.0),
+                quota_windows: vec![CachedQuotaWindow {
+                    name: "Claude".to_string(),
+                    remaining_percent: 0.0,
+                    is_exhausted: true,
+                    resets_at: None,
+                    time_until_reset_ms: Some(1000),
+                    updated_at_unix_ms: now - 5000,
+                }],
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.excluded_account_ids = vec!["acc-excluded".to_string()];
+
+    let ranked = rank_auto_switch_candidates_in(
+        &tmp,
+        "antigravity",
+        Some("claude-opus-4-6"),
+        &policy,
+        &HashMap::new(),
+        now,
+    );
+    let ids: Vec<&str> = ranked.iter().map(|c| c.profile.id.as_str()).collect();
+    assert!(!ids.contains(&"acc-active"));
+    assert!(!ids.contains(&"acc-invalid"));
+    assert!(!ids.contains(&"acc-excluded"));
+    // Reset-elapsed recovered account must be eligible, known healthy beats unknown None, exact beats mismatch.
+    assert!(ids.contains(&"acc-reset-elapsed"));
+    assert_eq!(ids[0], "acc-exact-known");
+    assert_eq!(ranked[0].compatibility, "exact");
+
+    // Exact unknown ranks ahead of model_mismatch (or exact known ahead of unknown)
+    let pos_known = ids.iter().position(|id| *id == "acc-exact-known").unwrap();
+    let pos_unknown = ids.iter().position(|id| *id == "acc-exact-unknown").unwrap();
+    let pos_mismatch = ids.iter().position(|id| *id == "acc-mismatch").unwrap();
+    assert!(pos_known < pos_unknown);
+    assert!(pos_unknown < pos_mismatch);
+
+    let mismatch = &ranked[pos_mismatch];
+    assert_eq!(mismatch.compatibility, "model_mismatch");
+    assert_eq!(mismatch.suggested_fallback_model.as_deref(), Some("gemini-2.5-pro"));
+    assert_eq!(mismatch.source_plan.as_deref(), Some("Google AI Pro"));
+    assert_eq!(mismatch.target_plan.as_deref(), Some("Free"));
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_rank_priority_order_bucket_mismatch_and_resume_runtime_state() {
+    use super::commands::{
+        get_auto_switch_policy_with, rank_auto_switch_candidates_in, resume_auto_switch_with,
+        set_auto_switch_runtime_status,
+    };
+    use super::registry::{AutoSwitchPolicy, AutoSwitchRuntimeStatus, CachedQuotaWindow};
+    use std::collections::HashMap;
+
+    let tmp = std::env::temp_dir().join(format!("kite_rank_prio_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+
+    for (id, email) in [
+        ("acc-active", "active@kite.local"),
+        ("acc-prio-1", "p1@kite.local"),
+        ("acc-prio-2", "p2@kite.local"),
+        ("acc-bucket-partial", "partial@kite.local"),
+    ] {
+        let dir = tmp.join("agy").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("gemini_antigravity_cred.json"),
+            serde_json::to_string(&json!({
+                "id_token_email": email,
+                "token": { "access_token": "ya29.ok", "refresh_token": "1//ok" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    let now = 20_000_000_i64;
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-active".to_string(),
+                provider: "agy".to_string(),
+                label: "Active".to_string(),
+                email: Some("active@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-prio-1".to_string(),
+                provider: "agy".to_string(),
+                label: "PreferredLowerPct".to_string(),
+                email: Some("p1@kite.local".to_string()),
+                primary_remaining_percent: Some(40.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-prio-2".to_string(),
+                provider: "agy".to_string(),
+                label: "SecondHigherPct".to_string(),
+                email: Some("p2@kite.local".to_string()),
+                primary_remaining_percent: Some(95.0),
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-bucket-partial".to_string(),
+                provider: "agy".to_string(),
+                label: "BucketPartial".to_string(),
+                email: Some("partial@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                primary_remaining_percent: Some(90.0),
+                quota_windows: vec![
+                    CachedQuotaWindow {
+                        name: "Claude".to_string(),
+                        remaining_percent: 0.0,
+                        is_exhausted: true,
+                        resets_at: None,
+                        time_until_reset_ms: Some(300_000),
+                        updated_at_unix_ms: now,
+                    },
+                    CachedQuotaWindow {
+                        name: "Gemini Flash".to_string(),
+                        remaining_percent: 90.0,
+                        is_exhausted: false,
+                        resets_at: None,
+                        time_until_reset_ms: None,
+                        updated_at_unix_ms: now,
+                    },
+                ],
+                available_model_ids: vec![
+                    "claude-opus-4-6".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                ],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.selection_strategy = "priority_order".to_string();
+    policy.priority_order = vec!["acc-prio-1".to_string(), "acc-prio-2".to_string()];
+
+    let ranked = rank_auto_switch_candidates_in(
+        &tmp,
+        "antigravity",
+        Some("claude-opus-4-6"),
+        &policy,
+        &HashMap::new(),
+        now,
+    );
+    assert_eq!(ranked.len(), 3);
+    assert_eq!(ranked[0].profile.id, "acc-prio-1");
+    assert_eq!(ranked[0].compatibility, "exact");
+    assert_eq!(ranked[1].profile.id, "acc-prio-2");
+    assert_eq!(ranked[1].compatibility, "exact");
+
+    // Bucket-level mismatch: Claude bucket is 0%, Gemini Flash bucket is 90%.
+    assert_eq!(ranked[2].profile.id, "acc-bucket-partial");
+    assert_eq!(ranked[2].compatibility, "model_mismatch");
+    assert_eq!(ranked[2].relevant_window_name.as_deref(), Some("Claude"));
+    assert_eq!(ranked[2].suggested_fallback_model.as_deref(), Some("gemini-2.5-flash"));
+
+    // Runtime pause & resume_auto_switch_with
+    set_auto_switch_runtime_status(
+        "agy",
+        AutoSwitchRuntimeStatus {
+            paused: true,
+            pause_reason: Some("circuit_breaker".to_string()),
+            cooldown_until_ms: Some(now + 60_000),
+            recent_switch_count: 3,
+            next_reset_at: Some("18:00".to_string()),
+            next_reset_ms: Some(120_000),
+            last_error_code: Some("PROVIDER_BUSY".to_string()),
+            residual_process_count: Some(2),
+            base_app_titles: vec!["Antigravity".to_string()],
+        },
+    );
+    let paused_view = get_auto_switch_policy_with(&tmp, "antigravity");
+    assert_eq!(paused_view["status"]["paused"], true);
+    assert_eq!(paused_view["status"]["pauseReason"], "circuit_breaker");
+    assert_eq!(paused_view["status"]["baseAppTitles"], json!(["Antigravity"]));
+
+    let resumed = resume_auto_switch_with(&tmp, "antigravity");
+    assert_eq!(resumed["success"], true);
+    assert_eq!(resumed["status"]["paused"], false);
+    assert!(resumed["status"]["pauseReason"].is_null());
+    assert_eq!(resumed["status"]["recentSwitchCount"], 0);
+    assert!(resumed["status"]["lastErrorCode"].is_null());
+    assert!(resumed["status"]["residualProcessCount"].is_null());
+    assert!(resumed["status"].get("baseAppTitles").is_none());
 
     let _ = fs::remove_dir_all(&tmp);
 }

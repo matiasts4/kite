@@ -1,7 +1,7 @@
 use crate::logger::log_trace;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -80,11 +80,13 @@ pub(crate) fn invalidate_detected_cli_accounts_cache() {
     crate::chat::models::invalidate_thread_providers_cache();
 }
 
-use super::quota::{get_cached_live_quota, LiveQuota};
+use super::quota::{get_cached_live_quota, live_quota_from_status, LiveQuota};
 use super::registry::{
-    appdata_dir, canon_provider, hydrate_profile_credential_health, load_registry,
-    load_registry_from, now_ms, profile_storage_dir, profile_storage_dir_in, profiles_root,
-    same_provider, save_registry, save_registry_to, user_home_dir, AccountProfilesRegistry,
+    appdata_dir, canon_provider, compute_profile_credential_health, get_auto_switch_policy_in,
+    hydrate_profile_credential_health, load_registry, load_registry_from, now_ms,
+    profile_storage_dir, profile_storage_dir_in, profiles_root, same_provider,
+    save_auto_switch_policy_in, save_registry, save_registry_to, user_home_dir,
+    AccountProfilesRegistry, AutoSwitchPolicy, AutoSwitchRuntimeStatus, CachedQuotaWindow,
     SavedAccountProfile, REGISTRY_LOCK,
 };
 use super::storage::{
@@ -194,11 +196,122 @@ pub(crate) fn build_antigravity_auth_telemetry(live_ident: Option<&LiveIdentityP
     )
 }
 
-pub(crate) fn reconcile_live_identity_with_registry(
+pub(crate) fn apply_capabilities_to_profile(
+    p: &mut SavedAccountProfile,
+    live_q: Option<&LiveQuota>,
+    cached_models: Option<&[String]>,
+    models_updated_at: Option<i64>,
+) -> bool {
+    let mut changed = false;
+
+    if let Some(q) = live_q {
+        let email_matches = match (q.email.as_deref(), p.email.as_deref()) {
+            (Some(qe), Some(pe)) => qe.eq_ignore_ascii_case(pe),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if email_matches {
+            if p.primary_remaining_percent != Some(q.percent)
+                || p.primary_reset_at != q.reset_at
+                || p.time_until_reset_ms != q.until_ms
+                || (q.plan.is_some() && p.plan_name != q.plan)
+                || (!q.windows.is_empty() && p.quota_windows != q.windows)
+            {
+                p.primary_remaining_percent = Some(q.percent);
+                p.primary_reset_at = q.reset_at.clone();
+                p.time_until_reset_ms = q.until_ms;
+                if q.plan.is_some() {
+                    p.plan_name = q.plan.clone();
+                }
+                if !q.windows.is_empty() {
+                    p.quota_windows = q.windows.clone();
+                }
+                changed = true;
+            }
+        }
+    }
+
+    if let Some(models) = cached_models {
+        if !models.is_empty() && p.available_model_ids != models {
+            p.available_model_ids = models.to_vec();
+            p.models_updated_at_unix_ms = Some(models_updated_at.unwrap_or_else(now_ms));
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+pub(crate) fn sync_active_profile_capabilities_in(
+    root: &Path,
+    provider: &str,
+    expected_email: Option<&str>,
+    live_q: Option<&LiveQuota>,
+    cached_models: Option<&[String]>,
+    models_updated_at: Option<i64>,
+) -> bool {
+    let canon = canon_provider(provider);
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let mut reg = load_registry_from(root);
+    let mut changed = false;
+
+    for p in &mut reg.profiles {
+        if !same_provider(&p.provider, &canon) || !p.is_active {
+            continue;
+        }
+        if let Some(exp) = expected_email {
+            if let Some(ref pe) = p.email {
+                if !exp.eq_ignore_ascii_case(pe) {
+                    continue;
+                }
+            }
+        }
+        if apply_capabilities_to_profile(p, live_q, cached_models, models_updated_at) {
+            changed = true;
+        }
+    }
+
+    if changed {
+        let _ = save_registry_to(root, &reg);
+    }
+    changed
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn record_active_quota_snapshot_for_provider(
+    quota_provider_key: &str,
+    status: &crate::quota::ProviderQuotaStatus,
+) {
+    if !status.is_available {
+        return;
+    }
+    let canon = canon_provider(quota_provider_key);
+    let live_q = live_quota_from_status(status);
+    let expected_email = live_q.email.as_deref();
+    let cached_models = if canon == "agy" {
+        crate::chat::models::cached_provider_model_ids("antigravity")
+    } else {
+        Vec::new()
+    };
+    let models_slice = (!cached_models.is_empty()).then_some(cached_models.as_slice());
+    let models_ts = models_slice.map(|_| now_ms());
+    let _ = sync_active_profile_capabilities_in(
+        &profiles_root(),
+        &canon,
+        expected_email,
+        Some(&live_q),
+        models_slice,
+        models_ts,
+    );
+}
+
+pub(crate) fn reconcile_live_identity_with_models(
     reg: &mut AccountProfilesRegistry,
     probe_target: &str,
     live_ident: Option<&LiveIdentityProbe>,
     live_q: Option<&LiveQuota>,
+    cached_models: Option<&[String]>,
+    models_updated_at: Option<i64>,
 ) -> (bool, Option<Value>) {
     let mut changed = false;
     let mut unregistered_live_session: Option<Value> = None;
@@ -231,22 +344,15 @@ pub(crate) fn reconcile_live_identity_with_registry(
                         }
                         changed = true;
                     }
-                    if should_be_active {
-                        if let Some(q) = quota_matches_live {
-                            if p.primary_remaining_percent != Some(q.percent)
-                                || p.primary_reset_at != q.reset_at
-                                || p.time_until_reset_ms != q.until_ms
-                                || (q.plan.is_some() && p.plan_name != q.plan)
-                            {
-                                p.primary_remaining_percent = Some(q.percent);
-                                p.primary_reset_at = q.reset_at.clone();
-                                p.time_until_reset_ms = q.until_ms;
-                                if q.plan.is_some() {
-                                    p.plan_name = q.plan.clone();
-                                }
-                                changed = true;
-                            }
-                        }
+                    if should_be_active
+                        && apply_capabilities_to_profile(
+                            p,
+                            quota_matches_live,
+                            cached_models,
+                            models_updated_at,
+                        )
+                    {
+                        changed = true;
                     }
                 }
             }
@@ -282,23 +388,25 @@ pub(crate) fn reconcile_live_identity_with_registry(
     (changed, unregistered_live_session)
 }
 
-pub fn list_saved_accounts_direct(request: Option<Value>) -> Value {
-    let req = crate::persist::body(&request);
-    let provider = req
-        .and_then(|r| r.get("provider"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+pub(crate) fn reconcile_live_identity_with_registry(
+    reg: &mut AccountProfilesRegistry,
+    probe_target: &str,
+    live_ident: Option<&LiveIdentityProbe>,
+    live_q: Option<&LiveQuota>,
+) -> (bool, Option<Value>) {
+    reconcile_live_identity_with_models(reg, probe_target, live_ident, live_q, None, None)
+}
 
-    let canon_prov = provider.as_deref().map(canon_provider);
-    let probe_target = canon_prov.clone().unwrap_or_else(|| "agy".to_string());
-    let quota_key = if probe_target == "agy" { "antigravity" } else { &probe_target };
-
-    // Direct synchronous live OS identity probe (fast, non-blocking).
-    let live_ident = probe_live_provider_identity(&probe_target);
-
-    // Check cached quota; invalidate immediately on email mismatch or external sign-out.
-    // Never fall back to a synchronous `/usage` CLI subprocess here.
-    let mut live_q = get_cached_live_quota(&probe_target);
+fn resolve_live_identity_and_quota(
+    probe_target: &str,
+) -> (Option<LiveIdentityProbe>, Option<LiveQuota>, Vec<String>) {
+    let quota_key = if probe_target == "agy" {
+        "antigravity"
+    } else {
+        probe_target
+    };
+    let live_ident = probe_live_provider_identity(probe_target);
+    let mut live_q = get_cached_live_quota(probe_target);
     if let Some(ref ident) = live_ident {
         if let Some(ref q) = live_q {
             if let Some(ref cached_email) = q.email {
@@ -317,15 +425,41 @@ pub fn list_saved_accounts_direct(request: Option<Value>) -> Value {
         live_q = None;
     }
 
+    let cached_models = if probe_target == "agy" && !cfg!(test) {
+        crate::chat::models::cached_provider_model_ids("antigravity")
+    } else {
+        Vec::new()
+    };
+
+    (live_ident, live_q, cached_models)
+}
+
+pub fn list_saved_accounts_direct(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let canon_prov = provider.as_deref().map(canon_provider);
+    let probe_target = canon_prov.clone().unwrap_or_else(|| "agy".to_string());
+
+    // Direct synchronous live OS identity + cached quota + non-blocking cached models.
+    let (live_ident, live_q, cached_models) = resolve_live_identity_and_quota(&probe_target);
+    let models_slice = (!cached_models.is_empty()).then_some(cached_models.as_slice());
+    let models_ts = models_slice.map(|_| now_ms());
+
     // Phase 2: reconcile live identity with registry (short lock).
     let (filtered, unregistered_live_session) = {
         let _guard = REGISTRY_LOCK.lock().unwrap();
         let mut reg = load_registry();
-        let (changed, unregistered_live_session_inner) = reconcile_live_identity_with_registry(
+        let (changed, unregistered_live_session_inner) = reconcile_live_identity_with_models(
             &mut reg,
             &probe_target,
             live_ident.as_ref(),
             live_q.as_ref(),
+            models_slice,
+            models_ts,
         );
 
         if changed {
@@ -405,10 +539,10 @@ pub(crate) fn save_account_profile_with(
         .map(|i| i.email.clone())
         .or_else(|| live_q.as_ref().and_then(|q| q.email.clone()));
 
-    let (plan_name, primary_remaining_percent, primary_reset_at, time_until_reset_ms) =
+    let (plan_name, primary_remaining_percent, primary_reset_at, time_until_reset_ms, quota_windows) =
         match live_q {
-            Some(q) => (q.plan, Some(q.percent), q.reset_at, q.until_ms),
-            None => (None, None, None, None),
+            Some(q) => (q.plan, Some(q.percent), q.reset_at, q.until_ms, q.windows),
+            None => (None, None, None, None, Vec::new()),
         };
 
     let (account_id, had_existing) = {
@@ -515,6 +649,9 @@ pub(crate) fn save_account_profile_with(
                 p.primary_reset_at = primary_reset_at;
                 p.time_until_reset_ms = time_until_reset_ms;
             }
+            if !quota_windows.is_empty() {
+                p.quota_windows = quota_windows;
+            }
             hydrate_profile_credential_health(root, std::slice::from_mut(p));
             p.clone()
         } else {
@@ -537,6 +674,8 @@ pub(crate) fn save_account_profile_with(
                 time_until_reset_ms,
                 credential_status: None,
                 has_refresh_token: false,
+                quota_windows,
+                ..Default::default()
             };
             hydrate_profile_credential_health(root, std::slice::from_mut(&mut new_prof));
             reg.profiles.push(new_prof.clone());
@@ -610,7 +749,14 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
         None
     };
 
-    save_account_profile_with(
+    let cached_models = if provider == "agy" && !cfg!(test) {
+        crate::chat::models::cached_provider_model_ids("antigravity")
+    } else {
+        Vec::new()
+    };
+    let expected_email = live_ident.as_ref().map(|i| i.email.clone());
+
+    let res = save_account_profile_with(
         &profiles_root(),
         &provider,
         label,
@@ -619,7 +765,20 @@ pub fn save_current_account_profile_direct(provider: String, label: String) -> V
         &LiveAntigravityCredStore,
         live_ident,
         live_q,
-    )
+    );
+
+    if res.get("success").and_then(Value::as_bool) == Some(true) && !cached_models.is_empty() {
+        let _ = sync_active_profile_capabilities_in(
+            &profiles_root(),
+            &provider,
+            expected_email.as_deref(),
+            None,
+            Some(&cached_models),
+            Some(now_ms()),
+        );
+    }
+
+    res
 }
 
 pub async fn save_current_account_profile_impl(request: Option<Value>) -> Value {
@@ -1148,36 +1307,21 @@ pub async fn rename_account_profile_impl(request: Option<Value>) -> Value {
 
 pub fn get_active_account_profile_direct(provider: &str) -> Value {
     let canon_p = canon_provider(provider);
-    let quota_key = if canon_p == "agy" { "antigravity" } else { &canon_p };
 
-    let live_ident = probe_live_provider_identity(&canon_p);
-    let mut live_q = get_cached_live_quota(&canon_p);
-    if let Some(ref ident) = live_ident {
-        if let Some(ref q) = live_q {
-            if let Some(ref cached_email) = q.email {
-                if !cached_email.eq_ignore_ascii_case(&ident.email) {
-                    crate::quota::invalidate_provider_cache(quota_key);
-                    live_q = None;
-                }
-            }
-        }
-    } else if live_q
-        .as_ref()
-        .and_then(|q| q.email.as_ref())
-        .is_some()
-    {
-        crate::quota::invalidate_provider_cache(quota_key);
-        live_q = None;
-    }
+    let (live_ident, live_q, cached_models) = resolve_live_identity_and_quota(&canon_p);
+    let models_slice = (!cached_models.is_empty()).then_some(cached_models.as_slice());
+    let models_ts = models_slice.map(|_| now_ms());
 
     let (active_profile, unregistered_live_session) = {
         let _guard = REGISTRY_LOCK.lock().unwrap();
         let mut reg = load_registry();
-        let (changed, unregistered_live_session) = reconcile_live_identity_with_registry(
+        let (changed, unregistered_live_session) = reconcile_live_identity_with_models(
             &mut reg,
             &canon_p,
             live_ident.as_ref(),
             live_q.as_ref(),
+            models_slice,
+            models_ts,
         );
         if changed {
             save_registry(&reg);
@@ -1230,23 +1374,535 @@ pub async fn get_active_account_profile_impl(request: Option<Value>) -> Value {
         })
 }
 
-/// Helper for handoff module: get list of alternative accounts for a provider that have quota available
-pub fn get_alternative_accounts_with_quota(provider: &str) -> Vec<SavedAccountProfile> {
-    let _guard = REGISTRY_LOCK.lock().unwrap();
-    let reg = load_registry();
-    let now = now_ms();
-    reg.profiles
-        .into_iter()
-        .filter(|p| {
-            if !same_provider(&p.provider, provider) || p.is_active {
-                return false;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedSwitchCandidate {
+    pub profile: SavedAccountProfile,
+    pub compatibility: String,
+    pub requested_model: Option<String>,
+    pub suggested_fallback_model: Option<String>,
+    pub available_target_models: Vec<String>,
+    pub source_plan: Option<String>,
+    pub target_plan: Option<String>,
+    pub remaining_percent: Option<f64>,
+    pub known_healthy_quota: bool,
+    pub quota_confidence: u8,
+    pub relevant_window_name: Option<String>,
+}
+
+fn strip_model_effort_suffix(model: &str) -> &str {
+    for suffix in ["-xhigh", "-minimal", "-medium", "-ultra", "-high", "-low", "-max"] {
+        if let Some(stripped) = model.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    model
+}
+
+fn models_match_exact_or_base(candidate_id: &str, requested_model: &str) -> bool {
+    if candidate_id.eq_ignore_ascii_case(requested_model) {
+        return true;
+    }
+    let cand_base = strip_model_effort_suffix(candidate_id.trim());
+    let req_base = strip_model_effort_suffix(requested_model.trim());
+    cand_base.eq_ignore_ascii_case(req_base)
+}
+
+fn relevant_quota_window<'a>(
+    windows: &'a [CachedQuotaWindow],
+    requested_model: Option<&str>,
+) -> Option<&'a CachedQuotaWindow> {
+    if windows.is_empty() {
+        return None;
+    }
+    let Some(req) = requested_model.map(str::trim).filter(|s| !s.is_empty()) else {
+        return windows
+            .iter()
+            .find(|w| w.name.eq_ignore_ascii_case("Primary Quota"))
+            .or_else(|| (windows.len() == 1).then_some(&windows[0]));
+    };
+    let lower = req.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("sonnet") || lower.contains("opus") || lower.contains("haiku") {
+        if let Some(w) = windows.iter().find(|w| {
+            let n = w.name.to_ascii_lowercase();
+            n.contains("claude") || n.contains("sonnet") || n.contains("opus") || n.contains("haiku")
+        }) {
+            return Some(w);
+        }
+    }
+    if lower.contains("flash") {
+        if let Some(w) = windows
+            .iter()
+            .find(|w| w.name.to_ascii_lowercase().contains("flash"))
+        {
+            return Some(w);
+        }
+    }
+    if lower.contains("gemini") {
+        if let Some(w) = windows.iter().find(|w| {
+            let n = w.name.to_ascii_lowercase();
+            (n.contains("gemini") || n.contains("pro")) && !n.contains("flash")
+        }) {
+            return Some(w);
+        }
+        if let Some(w) = windows
+            .iter()
+            .find(|w| w.name.to_ascii_lowercase().contains("gemini"))
+        {
+            return Some(w);
+        }
+    }
+    if lower.contains("gpt") || lower.contains("openai") {
+        if let Some(w) = windows.iter().find(|w| {
+            let n = w.name.to_ascii_lowercase();
+            n.contains("gpt") || n.contains("openai")
+        }) {
+            return Some(w);
+        }
+    }
+    None
+}
+
+fn is_window_reset_elapsed(w: &CachedQuotaWindow, now_unix_ms: i64) -> bool {
+    w.time_until_reset_ms.unwrap_or(0) > 0
+        && w.updated_at_unix_ms > 0
+        && now_unix_ms >= w.updated_at_unix_ms.saturating_add(w.time_until_reset_ms.unwrap_or(0))
+}
+
+fn is_window_healthy(w: &CachedQuotaWindow, threshold: f64, now_unix_ms: i64) -> bool {
+    (!w.is_exhausted && w.remaining_percent > threshold) || is_window_reset_elapsed(w, now_unix_ms)
+}
+
+fn pick_suggested_fallback_model(
+    requested_model: &str,
+    available_models: &[String],
+    windows: &[CachedQuotaWindow],
+    threshold: f64,
+    now_unix_ms: i64,
+) -> Option<String> {
+    if available_models.is_empty() {
+        return None;
+    }
+
+    let req_lower = requested_model.trim().to_ascii_lowercase();
+    let eligible: Vec<&String> = available_models
+        .iter()
+        .filter(|id| {
+            if let Some(w) = relevant_quota_window(windows, Some(id)) {
+                is_window_healthy(w, threshold, now_unix_ms)
+            } else {
+                true
             }
-            // Check quota: if primary_remaining_percent > 0.0 or reset time has passed
-            let remaining = p.primary_remaining_percent.unwrap_or(100.0);
-            let time_until_reset = p.time_until_reset_ms.unwrap_or(0);
-            remaining > 0.0 || (time_until_reset > 0 && now >= (p.last_used_unix_ms + time_until_reset))
         })
-        .collect()
+        .collect();
+    let pool: Vec<&String> = if eligible.is_empty() {
+        available_models.iter().collect()
+    } else {
+        eligible
+    };
+
+    let prefer_flash = req_lower.contains("flash") || req_lower.contains("haiku") || req_lower.contains("mini");
+    let tier_score_for = |id: &str| -> i32 {
+        let lower = id.to_ascii_lowercase();
+        if !models_match_exact_or_base(id, requested_model) && req_lower.contains("claude") && lower.contains("claude") {
+            0
+        } else if !models_match_exact_or_base(id, requested_model) && req_lower.contains("gemini") && lower.contains("gemini") {
+            1
+        } else if prefer_flash && lower.contains("flash") {
+            2
+        } else if !prefer_flash && (lower.contains("pro") || lower.contains("opus") || lower.contains("sonnet")) {
+            2
+        } else if lower.contains("pro") {
+            3
+        } else if lower.contains("flash") {
+            4
+        } else {
+            5
+        }
+    };
+
+    pool.into_iter()
+        .min_by(|a, b| (tier_score_for(a), a.as_str()).cmp(&(tier_score_for(b), b.as_str())))
+        .cloned()
+}
+
+pub(crate) fn rank_auto_switch_candidates_in(
+    root: &Path,
+    provider: &str,
+    requested_model: Option<&str>,
+    policy: &AutoSwitchPolicy,
+    runtime_cooldowns: &HashMap<String, i64>,
+    now_unix_ms: i64,
+) -> Vec<RankedSwitchCandidate> {
+    let canon = canon_provider(provider);
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let reg = load_registry_from(root);
+
+    let source_plan = reg
+        .profiles
+        .iter()
+        .find(|p| same_provider(&p.provider, &canon) && p.is_active)
+        .and_then(|p| p.plan_name.clone());
+
+    let req_trimmed = requested_model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let mut ranked: Vec<RankedSwitchCandidate> = Vec::new();
+
+    for p in reg.profiles {
+        if !same_provider(&p.provider, &canon) || p.is_active {
+            continue;
+        }
+        if policy.excluded_account_ids.iter().any(|id| id == &p.id) {
+            continue;
+        }
+        if let Some(&cooldown_until) = runtime_cooldowns.get(&p.id) {
+            if cooldown_until > now_unix_ms {
+                continue;
+            }
+        }
+        let health = p
+            .credential_status
+            .clone()
+            .unwrap_or_else(|| compute_profile_credential_health(root, &p).0);
+        if health != "valid" {
+            continue;
+        }
+
+        let primary_reset_elapsed = p.time_until_reset_ms.unwrap_or(0) > 0
+            && p.last_used_unix_ms > 0
+            && now_unix_ms >= p.last_used_unix_ms.saturating_add(p.time_until_reset_ms.unwrap_or(0));
+
+        let other_healthy_window = p
+            .quota_windows
+            .iter()
+            .find(|w| is_window_healthy(w, policy.trigger_threshold_percent, now_unix_ms));
+
+        let relevant_win = relevant_quota_window(&p.quota_windows, req_trimmed.as_deref());
+
+        let (relevant_bucket_exhausted, remaining_percent, quota_confidence, relevant_window_name) =
+            if let Some(w) = relevant_win {
+                let win_ok = is_window_healthy(w, policy.trigger_threshold_percent, now_unix_ms);
+                if win_ok {
+                    let conf = if !w.is_exhausted && w.remaining_percent > policy.trigger_threshold_percent {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    let eff = if conf == 2 {
+                        Some(w.remaining_percent)
+                    } else {
+                        Some(1.0)
+                    };
+                    (false, eff, conf, Some(w.name.clone()))
+                } else if let Some(alt_win) = other_healthy_window {
+                    let conf = if !alt_win.is_exhausted && alt_win.remaining_percent > policy.trigger_threshold_percent {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    (
+                        true,
+                        Some(alt_win.remaining_percent),
+                        conf,
+                        Some(w.name.clone()),
+                    )
+                } else {
+                    continue;
+                }
+            } else if let Some(primary_pct) = p.primary_remaining_percent {
+                if primary_pct > policy.trigger_threshold_percent {
+                    (false, Some(primary_pct), 2u8, None)
+                } else if primary_reset_elapsed {
+                    (false, Some(1.0), 1u8, None)
+                } else if let Some(alt_win) = other_healthy_window {
+                    (false, Some(alt_win.remaining_percent), 2u8, None)
+                } else {
+                    continue;
+                }
+            } else if let Some(alt_win) = other_healthy_window {
+                (false, Some(alt_win.remaining_percent), 2u8, None)
+            } else {
+                (false, None, 0u8, None)
+            };
+
+        let (compatibility, suggested_fallback_model) = match req_trimmed.as_deref() {
+            None => ("exact".to_string(), None),
+            Some(req) if relevant_bucket_exhausted => (
+                "model_mismatch".to_string(),
+                pick_suggested_fallback_model(
+                    req,
+                    &p.available_model_ids,
+                    &p.quota_windows,
+                    policy.trigger_threshold_percent,
+                    now_unix_ms,
+                ),
+            ),
+            Some(_) if p.available_model_ids.is_empty() => ("unverified_catalog".to_string(), None),
+            Some(req)
+                if p.available_model_ids
+                    .iter()
+                    .any(|id| models_match_exact_or_base(id, req)) =>
+            {
+                ("exact".to_string(), None)
+            }
+            Some(req) => (
+                "model_mismatch".to_string(),
+                pick_suggested_fallback_model(
+                    req,
+                    &p.available_model_ids,
+                    &p.quota_windows,
+                    policy.trigger_threshold_percent,
+                    now_unix_ms,
+                ),
+            ),
+        };
+
+        let target_plan = p.plan_name.clone();
+        let available_target_models = p.available_model_ids.clone();
+        ranked.push(RankedSwitchCandidate {
+            profile: p,
+            compatibility,
+            requested_model: req_trimmed.clone(),
+            suggested_fallback_model,
+            available_target_models,
+            source_plan: source_plan.clone(),
+            target_plan,
+            remaining_percent,
+            known_healthy_quota: quota_confidence > 0,
+            quota_confidence,
+            relevant_window_name,
+        });
+    }
+
+    let strategy_priority = policy.selection_strategy == "priority_order";
+    ranked.sort_by(|a, b| {
+        let compat_rank = |c: &str| match c {
+            "exact" => 0u8,
+            "unverified_catalog" => 1u8,
+            _ => 2u8,
+        };
+        let ca = compat_rank(&a.compatibility);
+        let cb = compat_rank(&b.compatibility);
+        if ca != cb {
+            return ca.cmp(&cb);
+        }
+
+        // Known healthy quota strictly ranks ahead of unknown (`None`) cached quota.
+        if a.known_healthy_quota != b.known_healthy_quota {
+            return b.known_healthy_quota.cmp(&a.known_healthy_quota);
+        }
+
+        if strategy_priority {
+            let pa = policy
+                .priority_order
+                .iter()
+                .position(|id| id == &a.profile.id)
+                .unwrap_or(usize::MAX);
+            let pb = policy
+                .priority_order
+                .iter()
+                .position(|id| id == &b.profile.id)
+                .unwrap_or(usize::MAX);
+            if pa != pb {
+                return pa.cmp(&pb);
+            }
+        }
+
+        if a.quota_confidence != b.quota_confidence {
+            return b.quota_confidence.cmp(&a.quota_confidence);
+        }
+
+        let ra = a.remaining_percent.unwrap_or(-1.0);
+        let rb = b.remaining_percent.unwrap_or(-1.0);
+        rb.partial_cmp(&ra)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.profile.id.cmp(&b.profile.id))
+    });
+
+    ranked
+}
+
+/// Helper for handoff module: get list of alternative accounts for a provider that have quota available.
+pub fn get_alternative_accounts_with_quota(provider: &str) -> Vec<SavedAccountProfile> {
+    let root = profiles_root();
+    let policy = get_auto_switch_policy_in(&root, provider);
+    let mut list_policy = AutoSwitchPolicy {
+        excluded_account_ids: policy.excluded_account_ids,
+        ..Default::default()
+    };
+    list_policy.trigger_threshold_percent = 0.0;
+    rank_auto_switch_candidates_in(
+        &root,
+        provider,
+        None,
+        &list_policy,
+        &HashMap::new(),
+        now_ms(),
+    )
+    .into_iter()
+    .map(|c| c.profile)
+    .collect()
+}
+
+static AUTO_SWITCH_RUNTIME_STATUS: OnceLock<Mutex<HashMap<String, AutoSwitchRuntimeStatus>>> =
+    OnceLock::new();
+
+pub(crate) fn auto_switch_runtime_map() -> &'static Mutex<HashMap<String, AutoSwitchRuntimeStatus>> {
+    AUTO_SWITCH_RUNTIME_STATUS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn get_auto_switch_runtime_status(provider: &str) -> AutoSwitchRuntimeStatus {
+    let canon = canon_provider(provider);
+    auto_switch_runtime_map()
+        .lock()
+        .unwrap()
+        .get(&canon)
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_auto_switch_runtime_status(provider: &str, status: AutoSwitchRuntimeStatus) {
+    let canon = canon_provider(provider);
+    auto_switch_runtime_map()
+        .lock()
+        .unwrap()
+        .insert(canon, status);
+}
+
+pub(crate) fn get_auto_switch_policy_with(root: &Path, provider: &str) -> Value {
+    let canon = canon_provider(provider);
+    let policy = get_auto_switch_policy_in(root, &canon);
+    let status = get_auto_switch_runtime_status(&canon);
+    json!({
+        "provider": canon,
+        "policy": policy,
+        "status": status,
+    })
+}
+
+pub(crate) fn save_auto_switch_policy_with(root: &Path, provider: &str, policy_val: Value) -> Value {
+    let canon = canon_provider(provider);
+    if canon.trim().is_empty() {
+        return json!({
+            "success": false,
+            "error": "Provider cannot be empty."
+        });
+    }
+    let parsed: AutoSwitchPolicy = match serde_json::from_value(policy_val) {
+        Ok(p) => p,
+        Err(err) => {
+            return json!({
+                "success": false,
+                "error": format!("Invalid auto-switch policy payload: {err}")
+            });
+        }
+    };
+    match save_auto_switch_policy_in(root, &canon, parsed) {
+        Ok(saved) => {
+            let mut status = get_auto_switch_runtime_status(&canon);
+            if !saved.enabled {
+                status.paused = false;
+                status.pause_reason = None;
+                status.cooldown_until_ms = None;
+                status.last_error_code = None;
+                set_auto_switch_runtime_status(&canon, status.clone());
+            }
+            json!({
+                "success": true,
+                "provider": canon,
+                "policy": saved,
+                "status": status,
+            })
+        }
+        Err(err) => json!({
+            "success": false,
+            "error": err,
+        }),
+    }
+}
+
+pub(crate) fn resume_auto_switch_with(_root: &Path, provider: &str) -> Value {
+    let canon = canon_provider(provider);
+    if canon.trim().is_empty() {
+        return json!({
+            "success": false,
+            "error": "Provider cannot be empty."
+        });
+    }
+    let status = AutoSwitchRuntimeStatus {
+        paused: false,
+        pause_reason: None,
+        cooldown_until_ms: None,
+        recent_switch_count: 0,
+        next_reset_at: None,
+        next_reset_ms: None,
+        last_error_code: None,
+        residual_process_count: None,
+        base_app_titles: Vec::new(),
+    };
+    set_auto_switch_runtime_status(&canon, status.clone());
+    json!({
+        "success": true,
+        "provider": canon,
+        "status": status,
+    })
+}
+
+pub fn get_auto_switch_policy_direct(provider: &str) -> Value {
+    get_auto_switch_policy_with(&profiles_root(), provider)
+}
+
+pub fn save_auto_switch_policy_direct(provider: &str, policy: Value) -> Value {
+    save_auto_switch_policy_with(&profiles_root(), provider, policy)
+}
+
+pub fn resume_auto_switch_direct(provider: &str) -> Value {
+    resume_auto_switch_with(&profiles_root(), provider)
+}
+
+pub async fn get_auto_switch_policy_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("agy")
+        .to_string();
+    tokio::task::spawn_blocking(move || get_auto_switch_policy_direct(&provider))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
+}
+
+pub async fn save_auto_switch_policy_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .as_ref()
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("agy")
+        .to_string();
+    let policy_val = req
+        .as_ref()
+        .and_then(|r| r.get("policy"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    tokio::task::spawn_blocking(move || save_auto_switch_policy_direct(&provider, policy_val))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
+}
+
+pub async fn resume_auto_switch_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("agy")
+        .to_string();
+    tokio::task::spawn_blocking(move || resume_auto_switch_direct(&provider))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
 }
 
 // ---------------------------------------------------------------------------

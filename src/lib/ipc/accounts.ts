@@ -1,7 +1,18 @@
-import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../types';
+import type {
+  AntigravityAuthTelemetry,
+  AutoSwitchPolicy,
+  AutoSwitchRuntimeStatus,
+  CachedQuotaWindow,
+  SavedAccountProfile,
+} from '../../types';
 import { invokeCommand, isTauriEnvironment } from './core';
 
-export type { AntigravityAuthTelemetry };
+export type {
+  AntigravityAuthTelemetry,
+  AutoSwitchPolicy,
+  AutoSwitchRuntimeStatus,
+  CachedQuotaWindow,
+};
 
 export interface UnregisteredLiveSession {
   provider: string;
@@ -385,5 +396,92 @@ export async function migrateLocalStorageCredentials(records: Record<string, str
     return await invokeCommand<{ success: boolean; migrated: number }>('migrate_localstorage_credentials', { records });
   } catch {
     return { success: false, migrated: 0 };
+  }
+}
+
+export const DEFAULT_AUTO_SWITCH_POLICY: AutoSwitchPolicy = {
+  enabled: false,
+  triggerThresholdPercent: 0,
+  selectionStrategy: 'highest_quota',
+  priorityOrder: [],
+  excludedAccountIds: [],
+  modelMismatchPolicy: 'confirm_notification',
+  busyTerminalsPolicy: 'wait_idle',
+  autoContinueChatTurn: true,
+  cooldownSeconds: 120,
+  maxConsecutiveSwitches: 3,
+};
+
+export const DEFAULT_AUTO_SWITCH_STATUS: AutoSwitchRuntimeStatus = {
+  paused: false,
+  pauseReason: null,
+  cooldownUntilMs: null,
+  recentSwitchCount: 0,
+  nextResetAt: null,
+  nextResetMs: null,
+  lastErrorCode: null,
+};
+
+export interface GetAutoSwitchPolicyResult {
+  provider: string;
+  policy: AutoSwitchPolicy;
+  status: AutoSwitchRuntimeStatus;
+}
+
+export interface SaveAutoSwitchPolicyResult {
+  success: boolean;
+  provider?: string;
+  policy?: AutoSwitchPolicy;
+  status?: AutoSwitchRuntimeStatus;
+  error?: string;
+}
+
+export interface ResumeAutoSwitchResult {
+  success: boolean;
+  provider?: string;
+  status?: AutoSwitchRuntimeStatus;
+  error?: string;
+}
+
+export async function getAutoSwitchPolicy(provider: string): Promise<GetAutoSwitchPolicyResult> {
+  try {
+    return await invokeCommand<GetAutoSwitchPolicyResult>('get_auto_switch_policy', { provider });
+  } catch (err: any) {
+    console.warn('[IPC] getAutoSwitchPolicy failed:', err);
+    return {
+      provider: provider === 'antigravity' ? 'agy' : provider,
+      policy: { ...DEFAULT_AUTO_SWITCH_POLICY },
+      status: { ...DEFAULT_AUTO_SWITCH_STATUS },
+    };
+  }
+}
+
+export async function saveAutoSwitchPolicy(
+  provider: string,
+  policy: AutoSwitchPolicy
+): Promise<SaveAutoSwitchPolicyResult> {
+  try {
+    return await invokeCommand<SaveAutoSwitchPolicyResult>('save_auto_switch_policy', {
+      provider,
+      policy,
+    });
+  } catch (err: any) {
+    console.error('[IPC] saveAutoSwitchPolicy failed:', err);
+    return {
+      success: false,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+export async function resumeAutoSwitch(provider: string): Promise<ResumeAutoSwitchResult> {
+  try {
+    return await invokeCommand<ResumeAutoSwitchResult>('resume_auto_switch', { provider });
+  } catch (err: any) {
+    console.error('[IPC] resumeAutoSwitch failed:', err);
+    return {
+      success: false,
+      error: err?.message || String(err),
+    };
   }
 }

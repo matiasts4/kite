@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -6,7 +7,140 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::storage::{copy_atomic, staged_path};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedQuotaWindow {
+    pub name: String,
+    pub remaining_percent: f64,
+    pub is_exhausted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_until_reset_ms: Option<i64>,
+    #[serde(default)]
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AutoSwitchPolicy {
+    pub enabled: bool,
+    pub trigger_threshold_percent: f64,
+    pub selection_strategy: String,
+    pub priority_order: Vec<String>,
+    pub excluded_account_ids: Vec<String>,
+    pub model_mismatch_policy: String,
+    pub busy_terminals_policy: String,
+    pub auto_continue_chat_turn: bool,
+    pub cooldown_seconds: u64,
+    pub max_consecutive_switches: u32,
+}
+
+impl Default for AutoSwitchPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_threshold_percent: 0.0,
+            selection_strategy: "highest_quota".to_string(),
+            priority_order: Vec::new(),
+            excluded_account_ids: Vec::new(),
+            model_mismatch_policy: "confirm_notification".to_string(),
+            busy_terminals_policy: "wait_idle".to_string(),
+            auto_continue_chat_turn: true,
+            cooldown_seconds: 120,
+            max_consecutive_switches: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AutoSwitchRuntimeStatus {
+    pub paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_until_ms: Option<i64>,
+    pub recent_switch_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_reset_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_reset_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_process_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_app_titles: Vec<String>,
+}
+
+fn normalize_id_list(ids: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in ids {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !out.iter().any(|existing: &String| existing == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+pub(crate) fn validate_and_normalize_auto_switch_policy(
+    mut policy: AutoSwitchPolicy,
+) -> Result<AutoSwitchPolicy, String> {
+    if !policy.trigger_threshold_percent.is_finite()
+        || policy.trigger_threshold_percent < 0.0
+        || policy.trigger_threshold_percent > 100.0
+    {
+        return Err("triggerThresholdPercent must be between 0 and 100.".to_string());
+    }
+
+    policy.selection_strategy = policy.selection_strategy.trim().to_string();
+    if !matches!(
+        policy.selection_strategy.as_str(),
+        "highest_quota" | "priority_order"
+    ) {
+        return Err(format!(
+            "Unsupported selectionStrategy '{}'. Allowed: highest_quota, priority_order.",
+            policy.selection_strategy
+        ));
+    }
+
+    policy.model_mismatch_policy = policy.model_mismatch_policy.trim().to_string();
+    if !matches!(
+        policy.model_mismatch_policy.as_str(),
+        "confirm_notification" | "auto_fallback"
+    ) {
+        return Err(format!(
+            "Unsupported modelMismatchPolicy '{}'. Allowed: confirm_notification, auto_fallback.",
+            policy.model_mismatch_policy
+        ));
+    }
+
+    policy.busy_terminals_policy = policy.busy_terminals_policy.trim().to_string();
+    if !matches!(
+        policy.busy_terminals_policy.as_str(),
+        "wait_idle" | "ask" | "interrupt"
+    ) {
+        return Err(format!(
+            "Unsupported busyTerminalsPolicy '{}'. Allowed: wait_idle, ask, interrupt.",
+            policy.busy_terminals_policy
+        ));
+    }
+
+    if policy.cooldown_seconds > 86_400 {
+        return Err("cooldownSeconds cannot exceed 86400 seconds.".to_string());
+    }
+    if policy.max_consecutive_switches == 0 || policy.max_consecutive_switches > 50 {
+        return Err("maxConsecutiveSwitches must be between 1 and 50.".to_string());
+    }
+
+    policy.priority_order = normalize_id_list(policy.priority_order);
+    policy.excluded_account_ids = normalize_id_list(policy.excluded_account_ids);
+    Ok(policy)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedAccountProfile {
     pub id: String,
@@ -23,6 +157,12 @@ pub struct SavedAccountProfile {
     pub credential_status: Option<String>,
     #[serde(default)]
     pub has_refresh_token: bool,
+    #[serde(default)]
+    pub quota_windows: Vec<CachedQuotaWindow>,
+    #[serde(default)]
+    pub available_model_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_updated_at_unix_ms: Option<i64>,
 }
 
 pub(crate) fn compute_profile_credential_health(
@@ -57,8 +197,12 @@ pub(crate) fn hydrate_profile_credential_health(
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AccountProfilesRegistry {
+    #[serde(default)]
     pub(crate) profiles: Vec<SavedAccountProfile>,
+    #[serde(default, alias = "auto_switch_policies")]
+    pub(crate) auto_switch_policies: HashMap<String, AutoSwitchPolicy>,
 }
 
 pub(crate) static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
@@ -73,9 +217,10 @@ pub(crate) fn now_ms() -> i64 {
 /// `antigravity` and `agy` are the same product; keep a single identity so
 /// profiles / active flags / vault folders never diverge.
 pub fn canon_provider(p: &str) -> String {
-    match p {
-        "antigravity" => "agy".to_string(),
-        other => other.to_string(),
+    let trimmed = p.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "antigravity" | "agy" => "agy".to_string(),
+        _ => trimmed.to_string(),
     }
 }
 
@@ -231,6 +376,41 @@ pub(crate) fn save_registry(registry: &AccountProfilesRegistry) {
     let _ = save_registry_to(&profiles_root(), registry);
 }
 
+pub(crate) fn get_auto_switch_policy_in(root: &Path, provider: &str) -> AutoSwitchPolicy {
+    let canon = canon_provider(provider);
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let reg = load_registry_from(root);
+    reg.auto_switch_policies
+        .get(&canon)
+        .cloned()
+        .or_else(|| {
+            reg.auto_switch_policies
+                .iter()
+                .find(|(k, _)| same_provider(k, &canon))
+                .map(|(_, v)| v.clone())
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_auto_switch_policy_in(
+    root: &Path,
+    provider: &str,
+    policy: AutoSwitchPolicy,
+) -> Result<AutoSwitchPolicy, String> {
+    let canon = canon_provider(provider);
+    if canon.trim().is_empty() {
+        return Err("Provider cannot be empty.".to_string());
+    }
+    let normalized = validate_and_normalize_auto_switch_policy(policy)?;
+
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let mut reg = load_registry_from(root);
+    reg.auto_switch_policies.retain(|k, _| !same_provider(k, &canon));
+    reg.auto_switch_policies.insert(canon, normalized.clone());
+    save_registry_to(root, &reg)?;
+    Ok(normalized)
+}
+
 // ---------------------------------------------------------------------------
 // Import from a legacy per-install account-profiles tree
 // ---------------------------------------------------------------------------
@@ -314,6 +494,13 @@ pub(crate) fn merge_profile(registry: &mut AccountProfilesRegistry, incoming: Sa
                 if incoming.time_until_reset_ms.is_some() {
                     current.time_until_reset_ms = incoming.time_until_reset_ms;
                 }
+                if !incoming.quota_windows.is_empty() {
+                    current.quota_windows = incoming.quota_windows;
+                }
+                if !incoming.available_model_ids.is_empty() {
+                    current.available_model_ids = incoming.available_model_ids;
+                    current.models_updated_at_unix_ms = incoming.models_updated_at_unix_ms;
+                }
                 current.last_used_unix_ms = incoming.last_used_unix_ms;
             }
             if !provider_has_active && incoming.is_active {
@@ -372,6 +559,7 @@ pub fn import_account_profiles_from(
                 time_until_reset_ms: None,
                 credential_status: None,
                 has_refresh_token: false,
+                ..Default::default()
             });
         }
     }

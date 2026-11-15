@@ -1,3 +1,7 @@
+/**
+ * Legacy HTTP/SSE mock server used only by `npm run dev:browser`.
+ * For real Tauri/WebView2 desktop verification, run `npm run verify:desktop:e2e`.
+ */
 import express from "express";
 import fs from "node:fs";
 import os from "node:os";

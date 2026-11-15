@@ -1,8 +1,26 @@
 # Catálogo de pruebas de Kite
 
-Fuente de verdad para ids, áreas, tipos y estado. Historial de ejecuciones append-only en [`catalog-runs.jsonl`](catalog-runs.jsonl).
+Fuente de verdad para ids, áreas, tipos y estado. Historial de ejecuciones de browser-lane append-only en [`catalog-runs.jsonl`](catalog-runs.jsonl).
 
-**Carril:** `npm run dev:browser` → http://127.0.0.1:1430 · Playwright `npm run verify:browser:smoke` / `npm run verify:browser:qa` · Agent solo Antigravity con respuestas simuladas.
+## Carril Desktop E2E Real (`verify:desktop:e2e`)
+
+**Carril principal:** `npm run verify:desktop:e2e` → Tauri + WebView2 real vía CDP (`scripts/e2e/run.mjs`) con sandbox aislado y shims CLI deterministas (`scripts/e2e/fake-driver/`). Sustituye al antiguo carril HTTP simulado para validar UI real, streaming IPC, subagentes/swarm y geometría sin saltarse hit-testing.
+
+| id | spec | pasos / aserción | estado | última corrida | nota |
+|----|------|------------------|--------|--------------|------|
+| DESKTOP-SMOKE-01 | `desktop-smoke` | Shell Tauri real sin boot gate + toggle `Thread` hit-testable + composer listo | passed | 2026-11-15 verify:desktop:e2e | Sabotage `--sabotage=overlay` verifica rechazo de oclusión |
+| THREAD-STREAM-01 | `thread-streaming` | Deltas mid-turn en vivo (`Interrupt`/estado activo) → cierre `idle` automático | passed | 2026-11-15 verify:desktop:e2e | Sabotage `--sabotage=ipc-drop` verifica fallo ante corte IPC |
+| THREAD-SWITCH-01 | `thread-streaming` | Cambio entre Thread A en curso y Thread B sin perder estado ni mezclar streams | passed | 2026-11-15 verify:desktop:e2e | Cubierto dentro de `thread-streaming.e2e.mjs` |
+| ORCH-SUB-01 | `orchestration` | Fan-out paralelo `Worker Alpha` / `Worker Beta` + inspección en RightDock `Subagents` | passed | 2026-11-15 verify:desktop:e2e | Verified live con `win-shim-v1.exe` |
+| ORCH-SWARM-01 | `orchestration` | Swarm `E2E Release Swarm` (`@scout`, `@verifier`) en tablero RightDock `Subagents` | passed | 2026-11-15 verify:desktop:e2e | Corregido `name_taken` por placeholders `child_thread_id.is_none()` en `execute_swarm_add` |
+| ORCH-FAIL-01 | `orchestration` | Propagación visible de subagente fallido (`Crasher Worker` -> `Failed` + `subagent_error`) sin quedar en spinner colgado | passed | 2026-11-15 verify:desktop:e2e | Cubierto en `orchestration.e2e.mjs` |
+| UI-LAYOUT-01 | `ui-layout` | Cero overflow horizontal, cero overlap entre controles/filas en `1366x840` y `960x680` (RightDock cerrado/abierto) y cero clics forzados | passed | 2026-11-15 verify:desktop:e2e | Corregido shrink flex de wrappers en `.kite-composer-footer-left` (`composer.css`) |
+
+---
+
+## Carril Legacy Browser Mock (`dev:browser`)
+
+**Carril legacy (solo HTTP simulado):** `npm run dev:browser` → `server/server.mjs` (mock Express + SSE) + Vite en `http://127.0.0.1:1430` · Playwright `npm run verify:browser:smoke` / `npm run verify:browser:qa` · No valida WebView2, IPC Rust ni procesos CLI reales.
 
 ## Reglas
 
@@ -132,7 +150,13 @@ Fuente de verdad para ids, áreas, tipos y estado. Historial de ejecuciones appe
 ## Comandos
 
 ```powershell
-Set-Location E:\kite
+# Carril Desktop E2E Real (recomendado — Tauri + WebView2 CDP aislado)
+npm run verify:desktop:e2e
+npm run verify:desktop:e2e -- --spec desktop-smoke
+npm run verify:desktop:e2e -- --sabotage=overlay --spec desktop-smoke
+npm run verify:desktop:e2e -- --sabotage=ipc-drop --spec thread-streaming
+
+# Carril Legacy HTTP Mock (solo UI aislada sin IPC Rust)
 npm run dev:browser
 npm run verify:browser:smoke
 npm run verify:browser:qa

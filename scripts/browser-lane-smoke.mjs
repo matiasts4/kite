@@ -1,5 +1,6 @@
 /**
- * Smoke tests for npm run dev:browser (Playwright — no Tauri / no Ego required).
+ * Smoke tests for the legacy `npm run dev:browser` HTTP mock lane (no Tauri runtime).
+ * Use `npm run verify:desktop:e2e` for real Tauri + WebView2 CDP verification.
  */
 import { chromium } from 'playwright-core';
 import {

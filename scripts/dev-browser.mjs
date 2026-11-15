@@ -1,5 +1,6 @@
 /**
- * Browser test lane: Express IPC mock + Vite on :1430 (does not replace tauri dev / installer).
+ * Legacy HTTP mock lane: Express IPC mock + Vite on :1430 (does not test Tauri IPC or native runtime).
+ * Prefer `npm run verify:desktop:e2e` for real desktop E2E verification.
  */
 import { spawn } from 'node:child_process';
 import path from 'node:path';

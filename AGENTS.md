@@ -71,6 +71,7 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
    - A correction that belongs to an existing ODD updates that document in the same change: append the user's words to `## Log`, rewrite the affected `S#`, and reopen or add the linked task. Do not leave the fix floating only in code.
 2. **Quality Verification**:
    - Always verify changes with `npx tsc --noEmit` and `npx vitest run`.
+   - For real desktop UI, streaming, orchestration, and layout verification over CDP, run `npm run verify:desktop:e2e` (see [docs/qa/catalog.md](docs/qa/catalog.md) and local skill `kite-desktop-qa`).
    - Before any commit or push, run `node .kite/sanitizer/audit-references.mjs --check`.
 3. **Matching another product**:
    - Write gate: inventory the source as a person and as an agent before any code. Cover how the feature is delivered, how it is read, how it is shown, CLI, flags, env gates, instruction/skill loading, engines, lifecycle, panes, persistence, and every other user-visible behavior of the requested feature.

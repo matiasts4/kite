@@ -1,14 +1,51 @@
 import { listen } from '@tauri-apps/api/event';
-import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../types';
+import type {
+  AntigravityAuthTelemetry,
+  AutoSwitchExecutedEvent,
+  AutoSwitchPolicy,
+  AutoSwitchRuntimeStatus,
+  PendingAutoSwitchConfirmation,
+  SavedAccountProfile,
+} from '../../types';
 import * as ipc from '../ipc';
 import type {
+  ConfirmPendingAutoSwitchOptions,
+  ConfirmPendingAutoSwitchResult,
+  DismissPendingAutoSwitchResult,
   ListSavedAccountsResult,
   ProviderSessionSummary,
+  ResumeAutoSwitchResult,
+  SaveAutoSwitchPolicyResult,
   SwitchAccountProfileResult,
   UnregisteredLiveSession,
 } from '../ipc';
 import { subscriptionQuotaManager } from '../quota/quotaManager';
 import { guidedLoginCoordinator } from './guidedLoginCoordinator';
+
+const FALLBACK_AUTO_SWITCH_POLICY: AutoSwitchPolicy = {
+  enabled: false,
+  triggerThresholdPercent: 0,
+  selectionStrategy: 'highest_quota',
+  priorityOrder: [],
+  excludedAccountIds: [],
+  modelMismatchPolicy: 'confirm_notification',
+  busyTerminalsPolicy: 'wait_idle',
+  autoContinueChatTurn: true,
+  cooldownSeconds: 120,
+  maxConsecutiveSwitches: 3,
+};
+
+const FALLBACK_AUTO_SWITCH_STATUS: AutoSwitchRuntimeStatus = {
+  paused: false,
+  pauseReason: null,
+  cooldownUntilMs: null,
+  recentSwitchCount: 0,
+  nextResetAt: null,
+  nextResetMs: null,
+  lastErrorCode: null,
+  residualProcessCount: null,
+  baseAppTitles: [],
+};
 
 function safeIpcFn<K extends keyof typeof ipc>(name: K): (typeof ipc)[K] | null {
   try {
@@ -68,6 +105,14 @@ export interface ProviderVaultState {
   overwritePrompt: OverwritePromptState | null;
   deleteConfirmProfile: SavedAccountProfile | null;
   lastFailedSwitch: FailedSwitchState | null;
+  autoSwitchPolicy: AutoSwitchPolicy;
+  autoSwitchRuntimeStatus: AutoSwitchRuntimeStatus;
+  pendingAutoSwitchConfirmations: PendingAutoSwitchConfirmation[];
+  autoSwitchLoading: boolean;
+  autoSwitchHasLoadedOnce: boolean;
+  autoSwitchSaving: boolean;
+  autoSwitchResuming: boolean;
+  confirmingAutoSwitchId: string | null;
   error: string | null;
   notice: string | null;
 }
@@ -79,6 +124,52 @@ export function canonicalVaultProvider(provider?: string | null): string {
 
 export function quotaKeyForProvider(provider?: string | null): string {
   return canonicalVaultProvider(provider);
+}
+
+/**
+ * Returns saved profiles ordered according to `priorityOrder`, appending any profiles
+ * not yet recorded in `priorityOrder` in their existing vault order.
+ */
+export function resolveOrderedAutoSwitchProfiles(
+  profiles: SavedAccountProfile[],
+  priorityOrder: string[] = []
+): SavedAccountProfile[] {
+  const byId = new Map<string, SavedAccountProfile>();
+  for (const prof of profiles) {
+    byId.set(prof.id, prof);
+  }
+  const ordered: SavedAccountProfile[] = [];
+  const seen = new Set<string>();
+  for (const id of priorityOrder) {
+    const prof = byId.get(id);
+    if (prof && !seen.has(id)) {
+      ordered.push(prof);
+      seen.add(id);
+    }
+  }
+  for (const prof of profiles) {
+    if (!seen.has(prof.id)) {
+      ordered.push(prof);
+      seen.add(prof.id);
+    }
+  }
+  return ordered;
+}
+
+function upsertPendingConfirmationList(
+  current: PendingAutoSwitchConfirmation[],
+  incoming: PendingAutoSwitchConfirmation
+): PendingAutoSwitchConfirmation[] {
+  const incomingCanon = canonicalVaultProvider(incoming.provider);
+  const filtered = current.filter(
+    (item) =>
+      item.confirmationId !== incoming.confirmationId &&
+      !(
+        canonicalVaultProvider(item.provider) === incomingCanon &&
+        item.toAccountId === incoming.toAccountId
+      )
+  );
+  return [incoming, ...filtered];
 }
 
 export function resolveLiveAccountEmail(state: Pick<
@@ -137,6 +228,14 @@ function createInitialProviderState(provider: string): ProviderVaultState {
     overwritePrompt: null,
     deleteConfirmProfile: null,
     lastFailedSwitch: null,
+    autoSwitchPolicy: { ...FALLBACK_AUTO_SWITCH_POLICY },
+    autoSwitchRuntimeStatus: { ...FALLBACK_AUTO_SWITCH_STATUS },
+    pendingAutoSwitchConfirmations: [],
+    autoSwitchLoading: false,
+    autoSwitchHasLoadedOnce: false,
+    autoSwitchSaving: false,
+    autoSwitchResuming: false,
+    confirmingAutoSwitchId: null,
     error: null,
     notice: null,
   };
@@ -147,12 +246,17 @@ class AccountVaultStore {
   private listeners = new Map<string, Set<() => void>>();
   private inFlightLoads = new Map<string, Promise<ListSavedAccountsResult | void>>();
   private loadEpochs = new Map<string, number>();
+  private inFlightAutoSwitchLoads = new Map<string, Promise<void>>();
+  private autoSwitchLoadEpochs = new Map<string, number>();
   private globalBound = false;
   private windowAccountsListener: ((e: Event) => void) | null = null;
+  private windowAutoSwitchListener: ((e: Event) => void) | null = null;
   private tauriUnlisten: (() => void) | null = null;
   private tauriListenInit = false;
   private pendingAccountReloads = new Set<string>();
+  private pendingAutoSwitchReloads = new Set<string>();
   private reloadScheduled = false;
+  private autoSwitchReloadScheduled = false;
   private reloadGeneration = 0;
 
   getSnapshot(rawProvider: string): ProviderVaultState {
@@ -242,6 +346,30 @@ class AccountVaultStore {
     });
   }
 
+  private scheduleAutoSwitchReload(providers: Iterable<string>): void {
+    for (const prov of providers) {
+      if (this.listeners.has(prov) || this.states.get(prov)?.autoSwitchHasLoadedOnce) {
+        this.pendingAutoSwitchReloads.add(prov);
+      }
+    }
+    if (this.autoSwitchReloadScheduled || this.pendingAutoSwitchReloads.size === 0) {
+      return;
+    }
+    this.autoSwitchReloadScheduled = true;
+    const generation = this.reloadGeneration;
+    queueMicrotask(() => {
+      if (generation !== this.reloadGeneration) return;
+      this.autoSwitchReloadScheduled = false;
+      const batch = Array.from(this.pendingAutoSwitchReloads);
+      this.pendingAutoSwitchReloads.clear();
+      for (const prov of batch) {
+        if (this.listeners.has(prov) || this.states.get(prov)?.autoSwitchHasLoadedOnce) {
+          void this.loadAutoSwitchPolicy(prov, { force: true });
+        }
+      }
+    });
+  }
+
   private ensureGlobalListeners(): void {
     if (typeof window !== 'undefined' && !this.globalBound) {
       this.globalBound = true;
@@ -256,6 +384,18 @@ class AccountVaultStore {
         this.scheduleAccountReload(targetProviders);
       };
       window.addEventListener('kite:accounts-changed', this.windowAccountsListener);
+
+      this.windowAutoSwitchListener = (event: Event) => {
+        const detail = (event as CustomEvent<{ provider?: string; _fromVaultStore?: boolean }>)?.detail;
+        if (detail?._fromVaultStore) {
+          return;
+        }
+        const targetProviders = detail?.provider
+          ? [canonicalVaultProvider(detail.provider)]
+          : Array.from(new Set([...this.listeners.keys(), ...this.states.keys()]));
+        this.scheduleAutoSwitchReload(targetProviders);
+      };
+      window.addEventListener('kite:auto-switch-changed', this.windowAutoSwitchListener);
     }
 
     const inTauri = safeIsTauriEnvironment();
@@ -290,6 +430,10 @@ class AccountVaultStore {
       window.removeEventListener('kite:accounts-changed', this.windowAccountsListener);
       this.windowAccountsListener = null;
     }
+    if (typeof window !== 'undefined' && this.windowAutoSwitchListener) {
+      window.removeEventListener('kite:auto-switch-changed', this.windowAutoSwitchListener);
+      this.windowAutoSwitchListener = null;
+    }
     this.globalBound = false;
     if (this.tauriUnlisten) {
       try {
@@ -309,6 +453,24 @@ class AccountVaultStore {
         detail: { provider: canon, action, accountId, _fromVaultStore: true },
       })
     );
+  }
+
+  private dispatchAutoSwitchChanged(
+    canon: string,
+    action: string,
+    extra?: Record<string, unknown>
+  ): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(
+      new CustomEvent('kite:auto-switch-changed', {
+        detail: { provider: canon, action, ...extra, _fromVaultStore: true },
+      })
+    );
+  }
+
+  private dispatchNotificationsRefresh(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
   }
 
   private triggerQuotaRefresh(canon: string, markRefreshing: boolean): void {
@@ -811,15 +973,560 @@ class AccountVaultStore {
     }
   }
 
+  private resolveConfirmationProvider(
+    confirmationId: string,
+    rawProvider?: string
+  ): string {
+    if (rawProvider) {
+      return canonicalVaultProvider(rawProvider);
+    }
+    for (const [prov, state] of this.states.entries()) {
+      if (
+        state.pendingAutoSwitchConfirmations.some(
+          (item) => item.confirmationId === confirmationId
+        )
+      ) {
+        return prov;
+      }
+    }
+    return 'antigravity';
+  }
+
+  async loadAutoSwitchPolicy(
+    rawProvider: string,
+    opts?: { force?: boolean }
+  ): Promise<void> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const getPolicyFn = safeIpcFn('getAutoSwitchPolicy');
+    const listPendingFn = safeIpcFn('listPendingAutoSwitches');
+    if (!getPolicyFn && !listPendingFn) {
+      this.patchState(canon, {
+        autoSwitchLoading: false,
+        autoSwitchHasLoadedOnce: true,
+      });
+      return;
+    }
+
+    const existing = this.inFlightAutoSwitchLoads.get(canon);
+    if (existing && !opts?.force) {
+      return existing;
+    }
+
+    const nextEpoch = (this.autoSwitchLoadEpochs.get(canon) ?? 0) + 1;
+    this.autoSwitchLoadEpochs.set(canon, nextEpoch);
+
+    const prev = this.getSnapshot(canon);
+    if (!prev.autoSwitchHasLoadedOnce) {
+      this.patchState(canon, { autoSwitchLoading: true });
+    }
+
+    let task!: Promise<void>;
+    task = (async () => {
+      try {
+        const [policyRes, pendingRes] = await Promise.all([
+          getPolicyFn ? getPolicyFn(canon) : Promise.resolve(null),
+          listPendingFn ? listPendingFn(canon) : Promise.resolve(null),
+        ]);
+        if (this.autoSwitchLoadEpochs.get(canon) !== nextEpoch) {
+          return;
+        }
+        this.patchState(canon, (curr) => {
+          const nextPolicy = policyRes?.policy ? policyRes.policy : curr.autoSwitchPolicy;
+          const nextStatus = policyRes?.status
+            ? policyRes.status
+            : curr.autoSwitchRuntimeStatus;
+          const nextPending =
+            pendingRes?.success !== false &&
+            Array.isArray(pendingRes?.confirmations)
+              ? pendingRes.confirmations
+              : curr.pendingAutoSwitchConfirmations;
+          return {
+            autoSwitchPolicy: nextPolicy,
+            autoSwitchRuntimeStatus: nextStatus,
+            pendingAutoSwitchConfirmations: nextPending,
+            autoSwitchLoading: false,
+            autoSwitchHasLoadedOnce: true,
+          };
+        });
+      } catch (err: any) {
+        if (this.autoSwitchLoadEpochs.get(canon) !== nextEpoch) {
+          return;
+        }
+        this.patchState(canon, {
+          autoSwitchLoading: false,
+          autoSwitchHasLoadedOnce: true,
+          error:
+            err?.message ||
+            'No se pudo cargar la configuración de cambio automático.',
+        });
+      } finally {
+        if (this.inFlightAutoSwitchLoads.get(canon) === task) {
+          this.inFlightAutoSwitchLoads.delete(canon);
+        }
+      }
+    })();
+
+    this.inFlightAutoSwitchLoads.set(canon, task);
+    return task;
+  }
+
+  async saveAutoSwitchPolicy(
+    rawProvider: string,
+    policy: AutoSwitchPolicy
+  ): Promise<SaveAutoSwitchPolicyResult> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const saveFn = safeIpcFn('saveAutoSwitchPolicy');
+    const normalizedPolicy: AutoSwitchPolicy = {
+      ...FALLBACK_AUTO_SWITCH_POLICY,
+      ...policy,
+      priorityOrder: Array.from(new Set(policy.priorityOrder || [])),
+      excludedAccountIds: Array.from(new Set(policy.excludedAccountIds || [])),
+    };
+    if (!saveFn) {
+      return {
+        success: false,
+        provider: canon,
+        error: 'La función para guardar la política de cambio automático no está disponible.',
+      };
+    }
+
+    this.patchState(canon, { autoSwitchSaving: true, error: null });
+
+    try {
+      const res = await saveFn(canon, normalizedPolicy);
+      if (res?.success) {
+        const persisted = res.policy ?? normalizedPolicy;
+        this.patchState(canon, (curr) => ({
+          autoSwitchSaving: false,
+          autoSwitchHasLoadedOnce: true,
+          autoSwitchPolicy: persisted,
+          autoSwitchRuntimeStatus: res.status ?? curr.autoSwitchRuntimeStatus,
+          error: null,
+        }));
+        this.dispatchAutoSwitchChanged(canon, 'policy-saved');
+        return {
+          ...res,
+          success: true,
+          provider: res.provider || canon,
+          policy: persisted,
+        };
+      }
+
+      const errMsg =
+        res?.error || 'No se pudo guardar la configuración de cambio automático.';
+      this.patchState(canon, {
+        autoSwitchSaving: false,
+        error: errMsg,
+      });
+      return {
+        success: false,
+        provider: canon,
+        error: errMsg,
+      };
+    } catch (err: any) {
+      const errMsg =
+        err?.message ||
+        'No se pudo guardar la configuración de cambio automático.';
+      this.patchState(canon, {
+        autoSwitchSaving: false,
+        error: errMsg,
+      });
+      return {
+        success: false,
+        provider: canon,
+        error: errMsg,
+      };
+    }
+  }
+
+  async updateAutoSwitchPolicy(
+    rawProvider: string,
+    patchOrUpdater:
+      | Partial<AutoSwitchPolicy>
+      | ((prev: AutoSwitchPolicy) => AutoSwitchPolicy)
+  ): Promise<SaveAutoSwitchPolicyResult> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const current =
+      this.getSnapshot(canon).autoSwitchPolicy ?? FALLBACK_AUTO_SWITCH_POLICY;
+    const nextPolicy =
+      typeof patchOrUpdater === 'function'
+        ? patchOrUpdater(current)
+        : { ...current, ...patchOrUpdater };
+    return this.saveAutoSwitchPolicy(canon, nextPolicy);
+  }
+
+  async toggleAccountAutoSwitchEligibility(
+    rawProvider: string,
+    accountId: string
+  ): Promise<SaveAutoSwitchPolicyResult> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const current =
+      this.getSnapshot(canon).autoSwitchPolicy ?? FALLBACK_AUTO_SWITCH_POLICY;
+    const excluded = new Set(current.excludedAccountIds || []);
+    if (excluded.has(accountId)) {
+      excluded.delete(accountId);
+    } else {
+      excluded.add(accountId);
+    }
+    return this.saveAutoSwitchPolicy(canon, {
+      ...current,
+      excludedAccountIds: Array.from(excluded),
+    });
+  }
+
+  async moveAccountAutoSwitchPriority(
+    rawProvider: string,
+    accountId: string,
+    direction: 'up' | 'down'
+  ): Promise<SaveAutoSwitchPolicyResult> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const snap = this.getSnapshot(canon);
+    const current = snap.autoSwitchPolicy ?? FALLBACK_AUTO_SWITCH_POLICY;
+    const orderedIds = resolveOrderedAutoSwitchProfiles(
+      snap.profiles,
+      current.priorityOrder
+    ).map((prof) => prof.id);
+    for (const id of current.priorityOrder || []) {
+      if (!orderedIds.includes(id)) {
+        orderedIds.push(id);
+      }
+    }
+    const index = orderedIds.indexOf(accountId);
+    if (index < 0) {
+      return { success: true, provider: canon, policy: current };
+    }
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= orderedIds.length) {
+      return { success: true, provider: canon, policy: current };
+    }
+    const nextOrder = [...orderedIds];
+    const [moved] = nextOrder.splice(index, 1);
+    nextOrder.splice(targetIndex, 0, moved);
+    return this.saveAutoSwitchPolicy(canon, {
+      ...current,
+      priorityOrder: nextOrder,
+    });
+  }
+
+  async resumeAutoSwitch(rawProvider: string): Promise<ResumeAutoSwitchResult> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const resumeFn = safeIpcFn('resumeAutoSwitch');
+    if (!resumeFn) {
+      return {
+        success: false,
+        provider: canon,
+        status: this.getSnapshot(canon).autoSwitchRuntimeStatus,
+        error: 'La función para reanudar el cambio automático no está disponible.',
+      };
+    }
+
+    this.patchState(canon, { autoSwitchResuming: true, error: null });
+
+    try {
+      const res = await resumeFn(canon);
+      if (res?.success) {
+        this.patchState(canon, (curr) => ({
+          autoSwitchResuming: false,
+          autoSwitchRuntimeStatus: res.status ?? curr.autoSwitchRuntimeStatus,
+          error: null,
+          notice: 'Cambio automático reanudado.',
+        }));
+        this.dispatchAutoSwitchChanged(canon, 'resumed');
+        return res;
+      }
+
+      const errMsg =
+        res?.error || 'No se pudo reanudar el cambio automático.';
+      this.patchState(canon, (curr) => ({
+        autoSwitchResuming: false,
+        autoSwitchRuntimeStatus: res?.status ?? curr.autoSwitchRuntimeStatus,
+        error: errMsg,
+      }));
+      return {
+        success: false,
+        provider: canon,
+        status: res?.status ?? this.getSnapshot(canon).autoSwitchRuntimeStatus,
+        error: errMsg,
+      };
+    } catch (err: any) {
+      const errMsg =
+        err?.message || 'Error al reanudar el cambio automático.';
+      this.patchState(canon, { autoSwitchResuming: false, error: errMsg });
+      return {
+        success: false,
+        provider: canon,
+        status: this.getSnapshot(canon).autoSwitchRuntimeStatus,
+        error: errMsg,
+      };
+    }
+  }
+
+  async confirmPendingAutoSwitch(
+    options: ConfirmPendingAutoSwitchOptions,
+    rawProvider?: string
+  ): Promise<ConfirmPendingAutoSwitchResult> {
+    const canon = this.resolveConfirmationProvider(
+      options.confirmationId,
+      rawProvider
+    );
+    const confirmFn = safeIpcFn('confirmPendingAutoSwitch');
+    const invokeFn = safeIpcFn('invokeCommand');
+    this.patchState(canon, {
+      confirmingAutoSwitchId: options.confirmationId,
+      error: null,
+    });
+
+    try {
+      let res: ConfirmPendingAutoSwitchResult;
+      if (confirmFn) {
+        res = await confirmFn(options);
+      } else if (invokeFn) {
+        const payload: Record<string, unknown> = {
+          confirmationId: options.confirmationId,
+        };
+        if (options.selectedModelId !== undefined) {
+          payload.selectedModelId = options.selectedModelId;
+        }
+        if (options.forceBusy !== undefined) {
+          payload.forceBusy = options.forceBusy;
+        }
+        if (options.autoResumeTurn !== undefined) {
+          payload.autoResumeTurn = options.autoResumeTurn;
+        }
+        res = await invokeFn<ConfirmPendingAutoSwitchResult>(
+          'confirm_pending_auto_switch',
+          payload
+        );
+      } else {
+        res = {
+          success: false,
+          confirmationId: options.confirmationId,
+          error: 'No hay canal IPC disponible para confirmar el cambio automático.',
+        };
+      }
+
+      const effectiveProvider = canonicalVaultProvider(res?.provider || canon);
+
+      if (res?.success) {
+        this.patchState(effectiveProvider, (curr) => ({
+          confirmingAutoSwitchId: null,
+          pendingAutoSwitchConfirmations:
+            curr.pendingAutoSwitchConfirmations.filter(
+              (item) => item.confirmationId !== options.confirmationId
+            ),
+          autoSwitchRuntimeStatus:
+            res.status ?? curr.autoSwitchRuntimeStatus,
+          lastFailedSwitch: null,
+          error: null,
+          notice: res.toAccountLabel
+            ? `Cuenta cambiada automáticamente a ${res.toAccountLabel}.`
+            : 'Cambio automático confirmado.',
+        }));
+        void this.loadAccounts(effectiveProvider, { force: true });
+        this.triggerQuotaRefresh(effectiveProvider, true);
+        this.dispatchAccountsChanged(
+          effectiveProvider,
+          'auto-switch-confirmed',
+          res.toAccountId
+        );
+        this.dispatchAutoSwitchChanged(effectiveProvider, 'confirmed', {
+          confirmationId: options.confirmationId,
+          toAccountId: res.toAccountId,
+          resumedThreadId: res.resumedThreadId,
+        });
+        if (res.resumedThreadId && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('kite:threads-changed', {
+              detail: { threadId: res.resumedThreadId },
+            })
+          );
+        }
+        this.dispatchNotificationsRefresh();
+        return res;
+      }
+
+      if (res?.expired) {
+        this.patchState(effectiveProvider, (curr) => ({
+          confirmingAutoSwitchId: null,
+          pendingAutoSwitchConfirmations:
+            curr.pendingAutoSwitchConfirmations.filter(
+              (item) => item.confirmationId !== options.confirmationId
+            ),
+          autoSwitchRuntimeStatus:
+            res.status ?? curr.autoSwitchRuntimeStatus,
+          error: res.error || 'La confirmación de cambio automático expiró.',
+        }));
+        this.dispatchAutoSwitchChanged(effectiveProvider, 'expired', {
+          confirmationId: options.confirmationId,
+        });
+        this.dispatchNotificationsRefresh();
+        return res;
+      }
+
+      const errMsg =
+        res?.error || 'No se pudo confirmar el cambio automático.';
+      this.patchState(effectiveProvider, (curr) => ({
+        confirmingAutoSwitchId: null,
+        pendingAutoSwitchConfirmations: Array.isArray(res?.freshCatalogModels)
+          ? curr.pendingAutoSwitchConfirmations.map((item) =>
+              item.confirmationId === options.confirmationId
+                ? {
+                    ...item,
+                    availableTargetModels: res.freshCatalogModels!,
+                    suggestedFallbackModel:
+                      res.freshCatalogModels![0] ?? item.suggestedFallbackModel,
+                  }
+                : item
+            )
+          : curr.pendingAutoSwitchConfirmations,
+        autoSwitchRuntimeStatus: res?.status ?? curr.autoSwitchRuntimeStatus,
+        lastFailedSwitch:
+          res?.code === 'PROVIDER_BUSY'
+            ? {
+                accountId: '',
+                code: res.code,
+                providerBusyKind: res.providerBusyKind ?? undefined,
+                canCloseProcesses: Boolean(res.canCloseProcesses),
+                residualProcessCount: res.residualProcessCount ?? undefined,
+              }
+            : curr.lastFailedSwitch,
+        error: errMsg,
+      }));
+      if (res?.status) {
+        this.dispatchAutoSwitchChanged(effectiveProvider, 'status-updated');
+      }
+      return {
+        ...res,
+        success: false,
+        confirmationId: options.confirmationId,
+        error: errMsg,
+      };
+    } catch (err: any) {
+      const errMsg =
+        err?.message || 'Error al confirmar el cambio automático.';
+      this.patchState(canon, {
+        confirmingAutoSwitchId: null,
+        error: errMsg,
+      });
+      return {
+        success: false,
+        confirmationId: options.confirmationId,
+        error: errMsg,
+      };
+    }
+  }
+
+  async dismissPendingAutoSwitch(
+    confirmationId: string,
+    rawProvider?: string
+  ): Promise<DismissPendingAutoSwitchResult> {
+    const canon = this.resolveConfirmationProvider(confirmationId, rawProvider);
+    const dismissFn = safeIpcFn('dismissPendingAutoSwitch');
+    const invokeFn = safeIpcFn('invokeCommand');
+
+    try {
+      let res: DismissPendingAutoSwitchResult;
+      if (dismissFn) {
+        res = await dismissFn(confirmationId);
+      } else if (invokeFn) {
+        res = await invokeFn<DismissPendingAutoSwitchResult>(
+          'dismiss_pending_auto_switch',
+          { confirmationId }
+        );
+      } else {
+        res = {
+          success: false,
+          dismissed: false,
+          confirmationId,
+          error: 'No hay canal IPC disponible para descartar la confirmación.',
+        };
+      }
+
+      if (res?.success) {
+        this.patchState(canon, (curr) => ({
+          pendingAutoSwitchConfirmations:
+            curr.pendingAutoSwitchConfirmations.filter(
+              (item) => item.confirmationId !== confirmationId
+            ),
+          error: null,
+        }));
+        this.dispatchAutoSwitchChanged(canon, 'dismissed', {
+          confirmationId,
+        });
+        this.dispatchNotificationsRefresh();
+      } else if (res?.error) {
+        this.patchState(canon, { error: res.error });
+      }
+      return res;
+    } catch (err: any) {
+      const errMsg =
+        err?.message || 'Error al descartar la confirmación pendiente.';
+      this.patchState(canon, { error: errMsg });
+      return {
+        success: false,
+        dismissed: false,
+        confirmationId,
+        error: errMsg,
+      };
+    }
+  }
+
+  applyAutoSwitchStatusEvent(
+    rawProvider: string,
+    status: AutoSwitchRuntimeStatus
+  ): void {
+    const canon = canonicalVaultProvider(rawProvider);
+    this.patchState(canon, {
+      autoSwitchRuntimeStatus: status,
+      autoSwitchHasLoadedOnce: true,
+    });
+  }
+
+  applyPendingConfirmationEvent(
+    confirmation: PendingAutoSwitchConfirmation
+  ): void {
+    const canon = canonicalVaultProvider(confirmation.provider);
+    this.patchState(canon, (curr) => ({
+      pendingAutoSwitchConfirmations: upsertPendingConfirmationList(
+        curr.pendingAutoSwitchConfirmations,
+        confirmation
+      ),
+    }));
+  }
+
+  handleAutoSwitchExecutedEvent(payload: AutoSwitchExecutedEvent): void {
+    const canon = canonicalVaultProvider(payload.provider);
+    this.patchState(canon, (curr) => ({
+      pendingAutoSwitchConfirmations: payload.confirmationId
+        ? curr.pendingAutoSwitchConfirmations.filter(
+            (item) => item.confirmationId !== payload.confirmationId
+          )
+        : curr.pendingAutoSwitchConfirmations.filter(
+            (item) => item.toAccountId !== payload.toAccountId
+          ),
+      lastFailedSwitch: null,
+      error: null,
+      notice: `Cuenta cambiada automáticamente a ${payload.toAccountLabel || payload.toAccountId}.`,
+    }));
+    void this.loadAccounts(canon, { force: true });
+    void this.loadAutoSwitchPolicy(canon, { force: true });
+    this.triggerQuotaRefresh(canon, true);
+    this.dispatchAccountsChanged(canon, 'auto-switch-executed', payload.toAccountId);
+  }
+
   resetForTest(): void {
     this.reloadGeneration += 1;
     this.reloadScheduled = false;
+    this.autoSwitchReloadScheduled = false;
     this.pendingAccountReloads.clear();
+    this.pendingAutoSwitchReloads.clear();
     this.teardownGlobalListeners();
     this.states.clear();
     this.listeners.clear();
     this.inFlightLoads.clear();
     this.loadEpochs.clear();
+    this.inFlightAutoSwitchLoads.clear();
+    this.autoSwitchLoadEpochs.clear();
   }
 }
 

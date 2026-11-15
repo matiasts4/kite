@@ -103,9 +103,16 @@ export function useNotifications(): UseNotificationsResult {
     }
   }, [processSnapshot]);
 
-  // Initial fetch and focus-aware polling
+  // Initial fetch, external immediate refresh listener, and focus-aware polling
   useEffect(() => {
     void refresh();
+
+    const handleExternalRefresh = () => {
+      void refresh();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('kite:notifications-refresh', handleExternalRefresh);
+    }
 
     const interval = setInterval(() => {
       // Only poll when the window is focused (or every 15s if blurred)
@@ -123,6 +130,9 @@ export function useNotifications(): UseNotificationsResult {
     }, 15000);
 
     return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('kite:notifications-refresh', handleExternalRefresh);
+      }
       clearInterval(interval);
       clearInterval(blurredInterval);
     };

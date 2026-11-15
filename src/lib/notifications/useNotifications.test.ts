@@ -177,4 +177,33 @@ describe('useNotifications hook', () => {
 
     expect(toast.agentApproval).not.toHaveBeenCalled();
   });
+
+  it('refreshes immediately on kite:notifications-refresh and exposes autoSwitchConfirm without duplicate approval toast', async () => {
+    const autoSwitchRec = {
+      id: 'autoswitch_conf-1',
+      isRead: false,
+      isWaitingForInput: true,
+      confirmationId: 'conf-1',
+      kind: { kind: 'autoSwitchConfirm', requestKind: 'model_mismatch' },
+      title: 'Model confirmation required',
+      body: 'Switching from Personal to Work',
+    };
+    vi.mocked(invokeCommand)
+      .mockResolvedValueOnce(snapshot({ id: 'seed', isRead: true, kind: { kind: 'settled', outcome: 'completed' } }))
+      .mockResolvedValueOnce(snapshot(autoSwitchRec));
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+
+    const { result } = renderHook(() => useNotifications());
+    await waitFor(() => expect(invokeCommand).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+    });
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledTimes(2);
+      expect(result.current.snapshot?.records[0]?.id).toBe('autoswitch_conf-1');
+    });
+    expect(toast.agentApproval).not.toHaveBeenCalled();
+  });
 });

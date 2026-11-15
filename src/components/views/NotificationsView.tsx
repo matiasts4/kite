@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { NotificationsSnapshot } from '../../types';
+import type {
+  NotificationsSnapshot,
+  NotificationRecord,
+  PendingAutoSwitchConfirmation,
+} from '../../types';
+import * as ipc from '../../lib/ipc';
 import { invokeCommand } from '../../lib/ipc';
+import { accountVaultStore } from '../../lib/accounts/accountVaultStore';
 import './notifications.css';
+
+export type { NotificationRecord };
 
 export interface NotificationsViewProps {
   onUnreadCountChange?: (count: number) => void;
@@ -11,26 +19,6 @@ export interface NotificationsViewProps {
   onClose?: () => void;
   onOpenSettings?: () => void;
   externalSnapshot?: NotificationsSnapshot | null;
-}
-
-export interface NotificationRecord {
-  id: string;
-  runId?: string;
-  target?: {
-    source: 'agentChat' | 'codeThread' | 'codeTerminal' | 'task' | string;
-    id: string;
-  };
-  profileId?: string | null;
-  routineId?: string | null;
-  kind?: {
-    kind: 'settled' | 'needsInput' | string;
-    outcome?: 'completed' | 'failed' | 'cancelled' | string;
-    requestKind?: 'toolApproval' | 'question' | 'unknown' | string;
-  };
-  resolution?: 'answered' | 'attended' | 'runSettled' | 'abandoned' | string | null;
-  createdAtUnixMs: number;
-  isRead: boolean;
-  isWaitingForInput?: boolean;
 }
 
 const DISMISSED_STORAGE_KEY = 'kite_dismissed_notifications';
@@ -68,6 +56,9 @@ function formatRelativeTime(timestampMs: number, nowMs = Date.now()): string {
 }
 
 function getActorName(rec: NotificationRecord): string {
+  if (rec.kind?.kind === 'autoSwitchConfirm') {
+    return rec.title || 'Cambio automático de cuenta';
+  }
   if (rec.routineId) return 'Routine Automation';
   if (rec.target?.source === 'agentChat') return 'Agent chat';
   if (rec.target?.source === 'codeThread') return 'Code thread';
@@ -76,9 +67,30 @@ function getActorName(rec: NotificationRecord): string {
   return 'Kite';
 }
 
+function formatAutoSwitchSummary(confirm: PendingAutoSwitchConfirmation): string {
+  const from = confirm.fromAccountLabel || confirm.fromEmail || 'cuenta actual';
+  const to = confirm.toAccountLabel || confirm.toEmail || 'otra cuenta';
+  const plan = confirm.toPlanName ? ` (${confirm.toPlanName})` : '';
+  if (confirm.reason === 'busy_terminals_ask' || confirm.busySessions.length > 0) {
+    const busyCount = confirm.busySessions.length;
+    return `Cambio de ${from} a ${to}${plan}. ${busyCount} ${busyCount === 1 ? 'terminal activa' : 'terminales activas'}.`;
+  }
+  if (confirm.requestedModel && confirm.suggestedFallbackModel) {
+    return `Cambio de ${from} a ${to}${plan}. Modelo «${confirm.requestedModel}» no disponible; sugerido: «${confirm.suggestedFallbackModel}».`;
+  }
+  return `Confirma el cambio de ${from} a ${to}${plan}.`;
+}
+
 function getDetailMessage(rec: NotificationRecord): string {
   const kind = rec.kind;
   if (!kind) return 'System notice updated.';
+  if (kind.kind === 'autoSwitchConfirm') {
+    if (rec.body) return rec.body;
+    if (rec.autoSwitchConfirm) return formatAutoSwitchSummary(rec.autoSwitchConfirm);
+    if (rec.resolution === 'attended') return 'Cambio automático confirmado.';
+    if (rec.resolution === 'abandoned') return 'Confirmación descartada o expirada.';
+    return 'Confirma el cambio automático de cuenta.';
+  }
   if (kind.kind === 'needsInput') {
     const isWaiting = rec.isWaitingForInput ?? !rec.isRead;
     switch (kind.requestKind) {
@@ -101,7 +113,12 @@ function getDetailMessage(rec: NotificationRecord): string {
 }
 
 function isWaitingForInput(rec: NotificationRecord): boolean {
-  return rec.isWaitingForInput === true || (rec.kind?.kind === 'needsInput' && !rec.isRead);
+  if (rec.resolution) return false;
+  if (rec.isWaitingForInput === true) return true;
+  return (
+    (rec.kind?.kind === 'needsInput' || rec.kind?.kind === 'autoSwitchConfirm') &&
+    !rec.isRead
+  );
 }
 
 // SVG icon definitions
@@ -247,7 +264,14 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         })
         .catch(() => {});
     }, 15000);
-    return () => clearInterval(interval);
+    const handleExternalRefresh = () => {
+      void loadSnapshot();
+    };
+    window.addEventListener('kite:notifications-refresh', handleExternalRefresh);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('kite:notifications-refresh', handleExternalRefresh);
+    };
   }, [loadSnapshot, syncSnapshot]);
 
   const handleMarkRead = async (recordId: string) => {
@@ -341,21 +365,259 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
 
   const unreadCount = snapshot?.unreadCount ?? allRecords.filter((r) => !r.isRead).length;
 
+  const AutoSwitchConfirmCard: React.FC<{ rec: NotificationRecord }> = ({ rec }) => {
+    const confirm = rec.autoSwitchConfirm!;
+    const models = confirm.availableTargetModels || [];
+    const defaultModel = confirm.suggestedFallbackModel || models[0] || '';
+    const [selectedModel, setSelectedModel] = useState<string>(defaultModel);
+    const [autoResumeTurn, setAutoResumeTurn] = useState<boolean>(
+      Boolean(confirm.threadId)
+    );
+    const [submitting, setSubmitting] = useState(false);
+    const [closingProcesses, setClosingProcesses] = useState(false);
+    const [cardError, setCardError] = useState<string | null>(null);
+    const [canCloseProcesses, setCanCloseProcesses] = useState(false);
+    const [baseAppTitles, setBaseAppTitles] = useState<string[]>([]);
+
+    useEffect(() => {
+      if (defaultModel && !models.includes(selectedModel)) {
+        setSelectedModel(defaultModel);
+      } else if (!selectedModel && defaultModel) {
+        setSelectedModel(defaultModel);
+      }
+    }, [defaultModel, models, selectedModel]);
+
+    const stopBubble = (e: React.SyntheticEvent) => {
+      e.stopPropagation();
+    };
+
+    const handleConfirm = async (e?: React.SyntheticEvent) => {
+      e?.stopPropagation();
+      setSubmitting(true);
+      setCardError(null);
+      setCanCloseProcesses(false);
+      setBaseAppTitles([]);
+
+      const chosenModel = selectedModel || defaultModel || undefined;
+      const res = await accountVaultStore.confirmPendingAutoSwitch(
+        {
+          confirmationId: confirm.confirmationId,
+          ...(chosenModel ? { selectedModelId: chosenModel } : {}),
+          ...(confirm.reason === 'busy_terminals_ask' ? { forceBusy: true } : {}),
+          ...(confirm.threadId ? { autoResumeTurn } : {}),
+        },
+        confirm.provider
+      );
+
+      setSubmitting(false);
+
+      if (res.success || res.expired) {
+        await loadSnapshot();
+        window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+        return;
+      }
+
+      if (res.freshCatalogModels?.length) {
+        setSelectedModel(res.freshCatalogModels[0] || '');
+      }
+      setCardError(res.error || 'No se pudo confirmar el cambio automático.');
+      setCanCloseProcesses(Boolean(res.canCloseProcesses));
+      setBaseAppTitles(res.baseAppTitles || []);
+    };
+
+    const handleDismiss = async (e: React.SyntheticEvent) => {
+      e.stopPropagation();
+      setSubmitting(true);
+      setCardError(null);
+      const res = await accountVaultStore.dismissPendingAutoSwitch(
+        confirm.confirmationId,
+        confirm.provider
+      );
+      setSubmitting(false);
+      if (res.success) {
+        await loadSnapshot();
+        window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+      } else if (res.error) {
+        setCardError(res.error);
+      }
+    };
+
+    const handleCloseResidualProcesses = async (e: React.SyntheticEvent) => {
+      e.stopPropagation();
+      setClosingProcesses(true);
+      setCardError(null);
+      try {
+        const closeFn =
+          typeof (ipc as Record<string, unknown>).closeResidualProviderProcesses ===
+          'function'
+            ? ipc.closeResidualProviderProcesses
+            : null;
+        const res = closeFn
+          ? await closeFn(confirm.provider || 'antigravity')
+          : await invokeCommand<{ success?: boolean; error?: string }>(
+              'close_residual_provider_processes',
+              { provider: confirm.provider || 'antigravity' }
+            );
+        setClosingProcesses(false);
+        if (res?.success) {
+          setCanCloseProcesses(false);
+          await handleConfirm();
+        } else {
+          setCardError(
+            res?.error || 'No se pudieron cerrar los procesos residuales de Antigravity.'
+          );
+        }
+      } catch (err: any) {
+        setClosingProcesses(false);
+        setCardError(
+          err?.message || 'Error al cerrar procesos residuales de Antigravity.'
+        );
+      }
+    };
+
+    const title = getActorName(rec);
+    const detail = getDetailMessage(rec);
+
+    return (
+      <div
+        className="notification-row notification-confirm-card"
+        onClick={stopBubble}
+        role="group"
+        aria-label={title}
+      >
+        <span className="notification-row__icon notification-row__icon--waiting">
+          <HandIcon size={15} strokeWidth={1.8} />
+        </span>
+
+        <div className="notification-row__copy">
+          <div className="notification-row__topline">
+            <span className="notification-row__actor notification-row__actor--unread">
+              {title}
+            </span>
+            <time dateTime={new Date(rec.createdAtUnixMs).toISOString()}>
+              {formatRelativeTime(rec.createdAtUnixMs)}
+            </time>
+          </div>
+
+          <p className="notification-confirm-card__detail">{detail}</p>
+
+          {confirm.reason === 'busy_terminals_ask' || confirm.busySessions.length > 0 ? (
+            <div className="notification-confirm-card__busy">
+              {confirm.busySessions.length > 0
+                ? `${confirm.busySessions.length} ${confirm.busySessions.length === 1 ? 'terminal activa' : 'terminales activas'}${confirm.busySessions[0]?.cwd ? ` · ${confirm.busySessions[0].cwd}` : ''}`
+                : 'Terminales activas requieren confirmación'}
+            </div>
+          ) : null}
+
+          <div className="notification-confirm-card__controls">
+            {models.length > 0 ? (
+              <label className="notification-confirm-card__field" onClick={stopBubble}>
+                <span>Modelo destino</span>
+                <select
+                  aria-label="Modelo destino"
+                  className="notification-confirm-card__select"
+                  value={selectedModel}
+                  disabled={submitting || closingProcesses}
+                  onClick={stopBubble}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    setSelectedModel(e.target.value);
+                  }}
+                >
+                  {models.map((modelId) => (
+                    <option key={modelId} value={modelId}>
+                      {modelId}
+                      {confirm.suggestedFallbackModel === modelId ? ' (sugerido)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+
+            {confirm.threadId ? (
+              <label className="notification-confirm-card__checkbox" onClick={stopBubble}>
+                <input
+                  type="checkbox"
+                  checked={autoResumeTurn}
+                  disabled={submitting || closingProcesses}
+                  onClick={stopBubble}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    setAutoResumeTurn(e.target.checked);
+                  }}
+                />
+                <span>Reanudar turno automáticamente</span>
+              </label>
+            ) : null}
+          </div>
+
+          {cardError ? (
+            <div className="notification-confirm-card__error" role="alert">
+              <span>
+                {cardError}
+                {baseAppTitles.length > 0 ? ` (${baseAppTitles.join(', ')})` : ''}
+              </span>
+              {canCloseProcesses ? (
+                <button
+                  type="button"
+                  className="notification-confirm-card__btn notification-confirm-card__btn--danger"
+                  disabled={closingProcesses || submitting}
+                  onClick={handleCloseResidualProcesses}
+                >
+                  {closingProcesses ? 'Cerrando procesos…' : 'Cerrar procesos Antigravity'}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="notification-confirm-card__actions">
+            <button
+              type="button"
+              className="notification-confirm-card__btn notification-confirm-card__btn--primary"
+              disabled={submitting || closingProcesses}
+              onClick={handleConfirm}
+            >
+              {submitting ? 'Confirmando…' : 'Confirmar cambio'}
+            </button>
+            <button
+              type="button"
+              className="notification-confirm-card__btn"
+              disabled={submitting || closingProcesses}
+              onClick={handleDismiss}
+            >
+              Descartar
+            </button>
+          </div>
+        </div>
+
+        {!rec.isRead && (
+          <span aria-hidden="true" className="notification-row__unread" />
+        )}
+      </div>
+    );
+  };
+
   const renderIcon = (rec: NotificationRecord) => {
-    if (rec.kind?.kind === 'needsInput') {
+    if (
+      rec.kind?.kind === 'needsInput' ||
+      (rec.kind?.kind === 'autoSwitchConfirm' && isWaitingForInput(rec))
+    ) {
       return <HandIcon size={15} strokeWidth={1.8} />;
     }
-    if (rec.kind?.kind === 'settled' && rec.kind.outcome === 'failed') {
+    if (
+      (rec.kind?.kind === 'settled' && rec.kind.outcome === 'failed') ||
+      (rec.kind?.kind === 'autoSwitchConfirm' && rec.resolution === 'abandoned')
+    ) {
       return <CircleAlertIcon size={15} strokeWidth={1.8} />;
     }
     return <CircleCheckIcon size={15} strokeWidth={1.8} />;
   };
 
   const getIconClass = (rec: NotificationRecord) => {
-    if (rec.kind?.kind === 'needsInput') {
-      return isWaitingForInput(rec)
-        ? 'notification-row__icon--waiting'
-        : 'notification-row__icon--quiet';
+    if (rec.kind?.kind === 'needsInput' || rec.kind?.kind === 'autoSwitchConfirm') {
+      if (isWaitingForInput(rec)) return 'notification-row__icon--waiting';
+      if (rec.resolution === 'attended') return 'notification-row__icon--done';
+      return 'notification-row__icon--quiet';
     }
     if (rec.kind?.kind === 'settled' && rec.kind.outcome === 'failed') {
       return 'notification-row__icon--failed';
@@ -401,6 +663,14 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
               </h2>
 
               {group.records.map((rec) => {
+                if (
+                  rec.kind?.kind === 'autoSwitchConfirm' &&
+                  !rec.resolution &&
+                  rec.autoSwitchConfirm
+                ) {
+                  return <AutoSwitchConfirmCard key={rec.id} rec={rec} />;
+                }
+
                 const actor = getActorName(rec);
                 const detail = getDetailMessage(rec);
                 const statusStr = isWaitingForInput(rec) ? 'unanswered' : rec.isRead ? 'read' : 'unread';

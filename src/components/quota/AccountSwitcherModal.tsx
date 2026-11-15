@@ -26,6 +26,7 @@ import {
   resolveAuthModeLabel,
   resolveCredentialHealthBadge,
 } from '../accounts/AccountVaultUI';
+import { AutoSwitchSettingsPanel } from '../accounts/AutoSwitchSettingsPanel';
 import { surfaceMotion } from '../../motion/standard/surfaces';
 import { springs, tweens } from '../../motion/standard/tokens';
 import { BrandLogo } from '../ui/BrandLogo';
@@ -549,6 +550,38 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
               })
             )}
           </div>
+
+          <AutoSwitchSettingsPanel
+            variant="compact"
+            provider={provider}
+            profiles={vault.profiles}
+            policy={vault.autoSwitchPolicy}
+            status={vault.autoSwitchRuntimeStatus}
+            pendingConfirmations={vault.pendingAutoSwitchConfirmations}
+            saving={vault.autoSwitchSaving}
+            resuming={vault.autoSwitchResuming}
+            closingProcesses={vault.closingProcesses}
+            onUpdatePolicy={vault.updateAutoSwitchPolicy}
+            onToggleAccountEligibility={vault.toggleAccountAutoSwitchEligibility}
+            onMoveAccountPriority={vault.moveAccountAutoSwitchPriority}
+            onResume={vault.resumeAutoSwitch}
+            onCloseResidualProcesses={async () => {
+              const res = await vault.closeResidualProcesses();
+              if (res?.success && vault.autoSwitchRuntimeStatus.paused) {
+                await vault.resumeAutoSwitch();
+              }
+            }}
+            onConfirmPending={(item, selectedModelId) =>
+              vault.confirmPendingAutoSwitch({
+                confirmationId: item.confirmationId,
+                ...(selectedModelId ? { selectedModelId } : {}),
+                ...(item.reason === 'busy_terminals_ask' ? { forceBusy: true } : {}),
+              })
+            }
+            onDismissPending={(confirmationId) =>
+              vault.dismissPendingAutoSwitch(confirmationId)
+            }
+          />
 
           {/* Snapshot current session form */}
           {showAddForm ? (

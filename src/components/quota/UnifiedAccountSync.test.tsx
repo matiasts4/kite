@@ -25,6 +25,8 @@ let mockProfiles: SavedAccountProfile[] = [];
 let mockUnregistered: { provider: string; email: string; planName?: string | null } | null = null;
 let mockTelemetry: any = null;
 let mockCliEmail = 'personal@kite.local';
+let mockAutoSwitchPolicy: any = null;
+let mockAutoSwitchStatus: any = null;
 
 vi.mock('../../lib/ipc', () => ({
   isTauriEnvironment: vi.fn().mockReturnValue(false),
@@ -131,6 +133,47 @@ vi.mock('../../lib/ipc', () => ({
   cancelAccountLoginFlow: vi.fn().mockResolvedValue({ success: true }),
   clearOpenCodeApiKey: vi.fn().mockResolvedValue(true),
   saveOpenCodeApiKey: vi.fn().mockResolvedValue(true),
+  getAutoSwitchPolicy: vi.fn(async () => ({
+    provider: 'agy',
+    policy: { ...mockAutoSwitchPolicy },
+    status: { ...mockAutoSwitchStatus },
+  })),
+  saveAutoSwitchPolicy: vi.fn(async (_provider: string, policy: any) => {
+    mockAutoSwitchPolicy = { ...policy };
+    if (!policy.enabled) {
+      mockAutoSwitchStatus = {
+        paused: false,
+        pauseReason: null,
+        cooldownUntilMs: null,
+        recentSwitchCount: 0,
+      };
+    }
+    return {
+      success: true,
+      provider: 'agy',
+      policy: { ...mockAutoSwitchPolicy },
+      status: { ...mockAutoSwitchStatus },
+    };
+  }),
+  resumeAutoSwitch: vi.fn(async () => {
+    mockAutoSwitchStatus = {
+      paused: false,
+      pauseReason: null,
+      cooldownUntilMs: null,
+      recentSwitchCount: 0,
+      nextResetAt: null,
+      nextResetMs: null,
+      lastErrorCode: null,
+    };
+    return {
+      success: true,
+      provider: 'agy',
+      status: { ...mockAutoSwitchStatus },
+    };
+  }),
+  listPendingAutoSwitches: vi.fn(async () => ({ success: true, confirmations: [] })),
+  confirmPendingAutoSwitch: vi.fn(async () => ({ success: true })),
+  dismissPendingAutoSwitch: vi.fn(async () => ({ success: true, dismissed: true })),
 }));
 
 function resetScenario() {
@@ -146,6 +189,27 @@ function resetScenario() {
   );
   mockCliEmail = 'personal@kite.local';
   mockUnregistered = null;
+  mockAutoSwitchPolicy = {
+    enabled: false,
+    triggerThresholdPercent: 0,
+    selectionStrategy: 'highest_quota',
+    priorityOrder: [],
+    excludedAccountIds: [],
+    modelMismatchPolicy: 'confirm_notification',
+    busyTerminalsPolicy: 'wait_idle',
+    autoContinueChatTurn: true,
+    cooldownSeconds: 120,
+    maxConsecutiveSwitches: 3,
+  };
+  mockAutoSwitchStatus = {
+    paused: false,
+    pauseReason: null,
+    cooldownUntilMs: null,
+    recentSwitchCount: 0,
+    nextResetAt: null,
+    nextResetMs: null,
+    lastErrorCode: null,
+  };
   mockTelemetry = {
     authMode: 'oauth',
     authModeLabel: 'OAuth CLI',
@@ -676,5 +740,130 @@ describe('Unified Multi-Account Lifecycle & Cross-Surface Sync (S6.1 & S6.2)', (
     await waitFor(() => {
       expect(onChanged).toHaveBeenCalled();
     });
+  });
+
+  it('synchronizes Auto-Switch policy controls, manual priority, and paused resume banner across AccountVault, AccountSwitcherModal, and SubscriptionQuotaPopover (S5)', async () => {
+    const user = userEvent.setup();
+    const ipc = await import('../../lib/ipc');
+    const { accountVaultStore } = await import('../../lib/accounts/accountVaultStore');
+
+    render(
+      <>
+        <div data-testid="vault-auto-wrap">
+          <AccountVault />
+        </div>
+        <AccountSwitcherModal
+          provider="antigravity"
+          providerLabel="Antigravity"
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+        <SubscriptionQuotaPopover
+          allQuotas={{
+            antigravity: {
+              providerId: 'antigravity',
+              displayName: 'Antigravity',
+              isAvailable: true,
+              isAuth: true,
+              primaryUsagePercent: 10,
+              primaryRemainingPercent: 90,
+              primaryResetAt: null,
+              timeUntilResetMs: null,
+              windows: [],
+              metadata: { email: 'personal@kite.local', planType: 'Google AI Pro' },
+              lastUpdatedMs: Date.now(),
+              error: null,
+            },
+          }}
+          selectedProvider="antigravity"
+          onSelectProvider={vi.fn()}
+          onRefresh={vi.fn()}
+          isRefreshing={false}
+          onClose={vi.fn()}
+          prefs={{
+            ...DEFAULT_QUOTA_PREFERENCES,
+            setupVersion: QUOTA_SETUP_VERSION,
+            enabledProviders: [PROVIDERS.ANTIGRAVITY],
+          }}
+        />
+      </>
+    );
+
+    const vaultWrap = screen.getByTestId('vault-auto-wrap');
+    const modalDialog = screen.getByRole('dialog', { name: /Cuentas de Antigravity/i });
+    const popoverDialog = screen.getByRole('dialog', { name: /Cuotas de suscripción IA/i });
+
+    const vaultSwitch = await within(vaultWrap).findByRole('switch', {
+      name: /Cambio automático al 0%/i,
+    });
+    expect(vaultSwitch).toHaveAttribute('aria-checked', 'false');
+
+    // Enable auto-switch in AccountVault
+    await user.click(vaultSwitch);
+
+    await waitFor(() => {
+      expect(ipc.saveAutoSwitchPolicy).toHaveBeenCalledWith(
+        'antigravity',
+        expect.objectContaining({ enabled: true })
+      );
+    });
+
+    // Both AccountSwitcherModal switch and SubscriptionQuotaPopover badge reflect enabled state
+    expect(
+      within(modalDialog).getByRole('switch', { name: /Cambio automático al 0%/i })
+    ).toHaveAttribute('aria-checked', 'true');
+    expect(within(popoverDialog).getByText(/Auto 0%: Activo/i)).toBeInTheDocument();
+
+    // Configure strategy, mismatch policy, busy terminals policy, and manual order in AccountVault
+    await user.selectOptions(
+      within(vaultWrap).getByLabelText(/Estrategia de selección/i),
+      'priority_order'
+    );
+    await user.selectOptions(
+      within(vaultWrap).getByLabelText(/Si cambia el plan o modelo/i),
+      'auto_fallback'
+    );
+    await user.selectOptions(
+      within(vaultWrap).getByLabelText(/Terminales ocupadas/i),
+      'ask'
+    );
+
+    // Move Work up in manual order and toggle Personal eligibility
+    await user.click(within(vaultWrap).getByRole('button', { name: /Subir prioridad de Work/i }));
+    await user.click(within(vaultWrap).getByRole('checkbox', { name: /Incluir Personal/i }));
+
+    await waitFor(() => {
+      expect(mockAutoSwitchPolicy.priorityOrder[0]).toBe('acc-2');
+      expect(mockAutoSwitchPolicy.excludedAccountIds).toContain('acc-1');
+      expect(mockAutoSwitchPolicy.modelMismatchPolicy).toBe('auto_fallback');
+      expect(mockAutoSwitchPolicy.busyTerminalsPolicy).toBe('ask');
+    });
+
+    // Simulate backend pause status (ALL_ACCOUNTS_EXHAUSTED) -> live banner & Resume button appear across surfaces
+    accountVaultStore.applyAutoSwitchStatusEvent('agy', {
+      paused: true,
+      pauseReason: 'ALL_ACCOUNTS_EXHAUSTED',
+      cooldownUntilMs: null,
+      recentSwitchCount: 2,
+      nextResetAt: '2026-11-15T06:00:00Z',
+      nextResetMs: 3600000,
+      lastErrorCode: null,
+    });
+
+    expect(
+      await within(vaultWrap).findByText(/Auto-cambio pausado: todas las cuentas en 0%/i)
+    ).toBeInTheDocument();
+    expect(within(popoverDialog).getByText(/Auto 0%: Pausado/i)).toBeInTheDocument();
+
+    // Expand compact auto-switch drawer in AccountSwitcherModal & resume from modal
+    const modalExpandBtn = within(modalDialog).getByRole('button', { name: /Opciones/i });
+    await user.click(modalExpandBtn);
+    const resumeBtn = within(modalDialog).getByRole('button', { name: /^Reanudar$/i });
+    await user.click(resumeBtn);
+
+    await waitFor(() => {
+      expect(ipc.resumeAutoSwitch).toHaveBeenCalledWith('antigravity');
+    });
+    expect(within(popoverDialog).getByText(/Auto 0%: Activo/i)).toBeInTheDocument();
   });
 });

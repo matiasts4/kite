@@ -13,6 +13,12 @@ const ipcMocks = vi.hoisted(() => ({
   saveCurrentAccountProfile: vi.fn(),
   renameAccountProfile: vi.fn(),
   deleteAccountProfile: vi.fn(),
+  getAutoSwitchPolicy: vi.fn(),
+  saveAutoSwitchPolicy: vi.fn(),
+  resumeAutoSwitch: vi.fn(),
+  listPendingAutoSwitches: vi.fn(),
+  confirmPendingAutoSwitch: vi.fn(),
+  dismissPendingAutoSwitch: vi.fn(),
   isTauriEnvironment: vi.fn(() => false),
 }));
 
@@ -93,6 +99,34 @@ describe('accountVaultStore & useAccountVault', () => {
         splitBrainWarning: false,
         hasRefreshToken: true,
       },
+    });
+    ipcMocks.getAutoSwitchPolicy.mockResolvedValue({
+      provider: 'agy',
+      policy: {
+        enabled: false,
+        triggerThresholdPercent: 0,
+        selectionStrategy: 'highest_quota',
+        priorityOrder: [],
+        excludedAccountIds: [],
+        modelMismatchPolicy: 'confirm_notification',
+        busyTerminalsPolicy: 'wait_idle',
+        autoContinueChatTurn: true,
+        cooldownSeconds: 120,
+        maxConsecutiveSwitches: 3,
+      },
+      status: {
+        paused: false,
+        pauseReason: null,
+        cooldownUntilMs: null,
+        recentSwitchCount: 0,
+        nextResetAt: null,
+        nextResetMs: null,
+        lastErrorCode: null,
+      },
+    });
+    ipcMocks.listPendingAutoSwitches.mockResolvedValue({
+      success: true,
+      confirmations: [],
     });
   });
 
@@ -411,5 +445,154 @@ describe('accountVaultStore & useAccountVault', () => {
     expect(result.current.closingProcesses).toBe(false);
     expect(result.current.lastFailedSwitch?.canCloseProcesses).toBe(false);
     expect(result.current.lastFailedSwitch?.providerBusyKind).toBe('base_app_open');
+  });
+
+  it('syncs autoSwitchPolicy, eligibility/priority ordering, resume, and kite:auto-switch-changed across surfaces', async () => {
+    const autoSwitchEvents: unknown[] = [];
+    const onAutoSwitchChanged = (e: Event) => autoSwitchEvents.push((e as CustomEvent).detail);
+    window.addEventListener('kite:auto-switch-changed', onAutoSwitchChanged);
+
+    ipcMocks.saveAutoSwitchPolicy.mockImplementation(async (_prov, policy) => ({
+      success: true,
+      provider: 'agy',
+      policy,
+      status: {
+        paused: false,
+        pauseReason: null,
+        cooldownUntilMs: null,
+        recentSwitchCount: 0,
+      },
+    }));
+    ipcMocks.resumeAutoSwitch.mockResolvedValue({
+      success: true,
+      provider: 'agy',
+      status: {
+        paused: false,
+        pauseReason: null,
+        cooldownUntilMs: null,
+        recentSwitchCount: 0,
+      },
+    });
+
+    const hookA = renderHook(() => useAccountVault('antigravity'));
+    const hookB = renderHook(() => useAccountVault('agy'));
+    await waitFor(() => expect(hookA.result.current.profiles).toHaveLength(2));
+
+    expect(hookA.result.current.autoSwitchPolicy.enabled).toBe(false);
+
+    await act(async () => {
+      await hookA.result.current.updateAutoSwitchPolicy({
+        enabled: true,
+        selectionStrategy: 'priority_order',
+      });
+    });
+
+    expect(ipcMocks.saveAutoSwitchPolicy).toHaveBeenCalledWith(
+      'antigravity',
+      expect.objectContaining({
+        enabled: true,
+        selectionStrategy: 'priority_order',
+      })
+    );
+    expect(hookB.result.current.autoSwitchPolicy.enabled).toBe(true);
+    expect(autoSwitchEvents.length).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      await hookA.result.current.toggleAccountAutoSwitchEligibility('acc-2');
+    });
+    expect(hookB.result.current.autoSwitchPolicy.excludedAccountIds).toContain('acc-2');
+
+    await act(async () => {
+      await hookA.result.current.moveAccountAutoSwitchPriority('acc-2', 'up');
+    });
+    expect(hookB.result.current.autoSwitchPolicy.priorityOrder[0]).toBe('acc-2');
+
+    act(() => {
+      accountVaultStore.applyAutoSwitchStatusEvent('agy', {
+        paused: true,
+        pauseReason: 'ALL_ACCOUNTS_EXHAUSTED',
+        cooldownUntilMs: null,
+        recentSwitchCount: 1,
+        nextResetAt: '2026-11-15T05:00:00Z',
+        nextResetMs: 3600000,
+        lastErrorCode: null,
+      });
+    });
+    expect(hookB.result.current.autoSwitchRuntimeStatus.paused).toBe(true);
+
+    await act(async () => {
+      await hookA.result.current.resumeAutoSwitch();
+    });
+    expect(ipcMocks.resumeAutoSwitch).toHaveBeenCalledWith('antigravity');
+    expect(hookB.result.current.autoSwitchRuntimeStatus.paused).toBe(false);
+
+    window.removeEventListener('kite:auto-switch-changed', onAutoSwitchChanged);
+  });
+
+  it('confirms and dismisses pending auto-switch confirmations cleanly', async () => {
+    const sampleConf = {
+      confirmationId: 'conf-42',
+      provider: 'agy',
+      fromAccountId: 'acc-1',
+      fromAccountLabel: 'Personal Pro',
+      fromEmail: 'personal@gmail.com',
+      toAccountId: 'acc-2',
+      toAccountLabel: 'Trabajo Team',
+      toEmail: 'work@company.com',
+      toPlanName: 'Google AI Ultra',
+      sourcePlanName: 'Google AI Pro',
+      requestedModel: 'claude-opus-4-6',
+      suggestedFallbackModel: 'gemini-2.5-flash',
+      availableTargetModels: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+      threadId: 'thread-7',
+      busySessions: [],
+      reason: 'model_mismatch',
+      createdAtUnixMs: 1000,
+      expiresAtUnixMs: 901000,
+    };
+    ipcMocks.listPendingAutoSwitches.mockResolvedValue({
+      success: true,
+      confirmations: [sampleConf],
+    });
+    ipcMocks.confirmPendingAutoSwitch.mockResolvedValueOnce({
+      success: true,
+      confirmationId: 'conf-42',
+      provider: 'agy',
+      toAccountId: 'acc-2',
+      toAccountLabel: 'Trabajo Team',
+      appliedModel: 'gemini-2.5-pro',
+      modelAdjusted: true,
+      resumedThreadId: 'thread-7',
+    });
+
+    const threadEvents: Event[] = [];
+    const notifEvents: Event[] = [];
+    const onThreads = (e: Event) => threadEvents.push(e);
+    const onNotif = (e: Event) => notifEvents.push(e);
+    window.addEventListener('kite:threads-changed', onThreads);
+    window.addEventListener('kite:notifications-refresh', onNotif);
+
+    const { result } = renderHook(() => useAccountVault('antigravity'));
+    await waitFor(() =>
+      expect(result.current.pendingAutoSwitchConfirmations).toHaveLength(1)
+    );
+
+    await act(async () => {
+      await result.current.confirmPendingAutoSwitch({
+        confirmationId: 'conf-42',
+        selectedModelId: 'gemini-2.5-pro',
+      });
+    });
+
+    expect(ipcMocks.confirmPendingAutoSwitch).toHaveBeenCalledWith({
+      confirmationId: 'conf-42',
+      selectedModelId: 'gemini-2.5-pro',
+    });
+    expect(result.current.pendingAutoSwitchConfirmations).toHaveLength(0);
+    expect(threadEvents).toHaveLength(1);
+    expect(notifEvents.length).toBeGreaterThanOrEqual(1);
+
+    window.removeEventListener('kite:threads-changed', onThreads);
+    window.removeEventListener('kite:notifications-refresh', onNotif);
   });
 });

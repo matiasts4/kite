@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type React from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { OPEN_SETTINGS_EVENT } from '../../lib/settingsNav';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../../lib/terminalLinkNav';
 import {
@@ -7,9 +8,16 @@ import {
   type OpenRightDockSubagentDetail,
 } from '../../lib/subagentNav';
 import { sendUiAck, type UiBusRequestPayload } from '../../lib/operator/executor/ui-bus';
-import { registerToastNavigator } from '../../lib/toast';
+import { registerToastNavigator, toast } from '../../lib/toast';
+import { closeResidualProviderProcesses } from '../../lib/ipc';
+import { accountVaultStore } from '../../lib/accounts/accountVaultStore';
 import type { WorkMode } from '../Sidebar';
-import type { AgentProfile } from '../../types';
+import type {
+  AgentProfile,
+  AutoSwitchExecutedEvent,
+  AutoSwitchStatusEvent,
+  PendingAutoSwitchConfirmation,
+} from '../../types';
 
 export interface UseAppGlobalEventsOptions {
   setWorkMode: (mode: WorkMode) => void;
@@ -317,4 +325,231 @@ export function useAppGlobalEvents({
     window.addEventListener('kite:threads-changed', handleThreadsChanged);
     return () => window.removeEventListener('kite:threads-changed', handleThreadsChanged);
   }, [loadThreads]);
+
+  const confirmationToastsRef = useRef<Map<string, string>>(new Map());
+  const loadThreadsRef = useRef(loadThreads);
+  loadThreadsRef.current = loadThreads;
+
+  useEffect(() => {
+    const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+    if (!host.__TAURI_INTERNALS__ && !host.__TAURI__) return;
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
+
+    const register = (stop: () => void) => {
+      if (cancelled) {
+        stop();
+      } else {
+        unlisteners.push(stop);
+      }
+    };
+
+    const runConfirmFromToast = async (
+      payload: PendingAutoSwitchConfirmation,
+      fallbackModel: string | undefined,
+      activeToastId: string
+    ) => {
+      toast.dismiss(activeToastId);
+      confirmationToastsRef.current.delete(payload.confirmationId);
+
+      const confirmOpts = {
+        confirmationId: payload.confirmationId,
+        ...(fallbackModel ? { selectedModelId: fallbackModel } : {}),
+        ...(payload.reason === 'busy_terminals_ask' ? { forceBusy: true } : {}),
+      };
+
+      const res = await accountVaultStore.confirmPendingAutoSwitch(
+        confirmOpts,
+        payload.provider
+      );
+
+      if (res.success) {
+        return;
+      }
+
+      if (res.code === 'PROVIDER_BUSY' && res.canCloseProcesses) {
+        let cleanupToastId = '';
+        cleanupToastId = toast.action(
+          'Cierra los procesos residuales de Antigravity para completar el cambio',
+          {
+            title: 'Cerrar procesos Antigravity',
+            onClick: async () => {
+              if (cleanupToastId) {
+                toast.dismiss(cleanupToastId);
+              }
+              const closeRes = await closeResidualProviderProcesses(
+                payload.provider || 'antigravity'
+              );
+              if (!closeRes?.success) {
+                toast.error(
+                  'No se pudieron cerrar los procesos de Antigravity',
+                  closeRes?.error ||
+                    'Cierra el IDE manualmente y confirma desde Notificaciones.'
+                );
+                return;
+              }
+              const retryRes = await accountVaultStore.confirmPendingAutoSwitch(
+                confirmOpts,
+                payload.provider
+              );
+              if (!retryRes.success) {
+                toast.error(
+                  'No se pudo confirmar el cambio automático',
+                  retryRes.error
+                );
+              }
+            },
+          },
+          res.error ||
+            'Quedaron procesos secundarios abiertos bloqueando el cambio de sesión.',
+          { duration: 15000 }
+        );
+        return;
+      }
+
+      if (res.baseAppTitles?.length) {
+        toast.error(
+          'Cierra el IDE antes de cambiar de cuenta',
+          `${res.baseAppTitles.join(', ')}${res.error ? ` — ${res.error}` : ''}`
+        );
+        return;
+      }
+
+      toast.error(
+        'No se pudo confirmar el cambio automático',
+        res.error || 'Abre Notificaciones para intentarlo de nuevo.'
+      );
+    };
+
+    void Promise.resolve()
+      .then(async () => {
+        const stopConfirm = await listen<PendingAutoSwitchConfirmation>(
+          'kite://auto-switch-confirmation',
+          (event) => {
+            const payload = event?.payload;
+            if (!payload?.confirmationId) return;
+
+            accountVaultStore.applyPendingConfirmationEvent(payload);
+            window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+
+            const existingToast = confirmationToastsRef.current.get(
+              payload.confirmationId
+            );
+            if (existingToast) {
+              toast.dismiss(existingToast);
+            }
+
+            const fallbackModel =
+              payload.suggestedFallbackModel ||
+              payload.availableTargetModels?.[0] ||
+              undefined;
+            const fromLabel =
+              payload.fromAccountLabel || payload.fromEmail || 'cuenta actual';
+            const toLabel =
+              payload.toAccountLabel || payload.toEmail || 'otra cuenta';
+
+            const title =
+              payload.reason === 'busy_terminals_ask'
+                ? `Terminales activas bloquean cambio de «${fromLabel}» a «${toLabel}»`
+                : `Cuota agotada en «${fromLabel}» — cambiar a «${toLabel}»`;
+
+            let description: string;
+            if (payload.reason === 'busy_terminals_ask') {
+              const count = payload.busySessions?.length || 1;
+              description = `${count} sesión(es) ocupada(s). Confirma aquí o abre Notificaciones para revisar modelos.`;
+            } else if (fallbackModel && payload.requestedModel) {
+              const planInfo = payload.toPlanName ? ` (${payload.toPlanName})` : '';
+              description = `«${payload.requestedModel}» no está disponible en ${toLabel}${planInfo}. Se usará «${fallbackModel}» (abre Notificaciones para elegir otro modelo).`;
+            } else if (payload.availableTargetModels?.length) {
+              description = `Abre Notificaciones para elegir modelo en ${toLabel} o confirma ahora.`;
+            } else {
+              description = `Confirma el cambio automático hacia ${toLabel}.`;
+            }
+
+            const buttonTitle =
+              payload.reason === 'busy_terminals_ask'
+                ? fallbackModel
+                  ? `Confirmar y usar «${fallbackModel}»`
+                  : 'Confirmar cambio'
+                : fallbackModel
+                  ? `Cambiar y usar «${fallbackModel}»`
+                  : 'Confirmar cambio';
+
+            let createdToastId = '';
+            createdToastId = toast.action(
+              title,
+              {
+                title: buttonTitle,
+                onClick: () => runConfirmFromToast(payload, fallbackModel, createdToastId),
+              },
+              description,
+              { duration: 30000 }
+            );
+            if (createdToastId) {
+              confirmationToastsRef.current.set(
+                payload.confirmationId,
+                createdToastId
+              );
+            }
+          }
+        );
+        register(stopConfirm);
+
+        const stopExecuted = await listen<AutoSwitchExecutedEvent>(
+          'kite://auto-switch-executed',
+          (event) => {
+            const payload = event?.payload;
+            if (!payload?.toAccountId) return;
+
+            if (payload.confirmationId) {
+              const tracked = confirmationToastsRef.current.get(
+                payload.confirmationId
+              );
+              if (tracked) {
+                toast.dismiss(tracked);
+                confirmationToastsRef.current.delete(payload.confirmationId);
+              }
+            }
+
+            accountVaultStore.handleAutoSwitchExecutedEvent(payload);
+            if (payload.resumedThreadId || payload.threadId) {
+              void loadThreadsRef.current();
+            }
+            window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+
+            const targetName = payload.toAccountLabel || payload.toAccountId;
+            toast.success(
+              `Cuenta cambiada automáticamente a ${targetName}`,
+              payload.appliedModel ? `Modelo activo: ${payload.appliedModel}` : undefined
+            );
+          }
+        );
+        register(stopExecuted);
+
+        const stopStatus = await listen<AutoSwitchStatusEvent>(
+          'kite://auto-switch-status',
+          (event) => {
+            const payload = event?.payload;
+            if (!payload?.status) return;
+            accountVaultStore.applyAutoSwitchStatusEvent(
+              payload.provider || 'antigravity',
+              payload.status
+            );
+          }
+        );
+        register(stopStatus);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      for (const stop of unlisteners) {
+        stop();
+      }
+      for (const toastId of confirmationToastsRef.current.values()) {
+        toast.dismiss(toastId);
+      }
+      confirmationToastsRef.current.clear();
+    };
+  }, []);
 }

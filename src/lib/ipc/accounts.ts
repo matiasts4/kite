@@ -1,17 +1,25 @@
 import type {
   AntigravityAuthTelemetry,
+  AutoSwitchBusySessionSummary,
+  AutoSwitchExecutedEvent,
   AutoSwitchPolicy,
   AutoSwitchRuntimeStatus,
+  AutoSwitchStatusEvent,
   CachedQuotaWindow,
+  PendingAutoSwitchConfirmation,
   SavedAccountProfile,
 } from '../../types';
 import { invokeCommand, isTauriEnvironment } from './core';
 
 export type {
   AntigravityAuthTelemetry,
+  AutoSwitchBusySessionSummary,
+  AutoSwitchExecutedEvent,
   AutoSwitchPolicy,
   AutoSwitchRuntimeStatus,
+  AutoSwitchStatusEvent,
   CachedQuotaWindow,
+  PendingAutoSwitchConfirmation,
 };
 
 export interface UnregisteredLiveSession {
@@ -481,6 +489,114 @@ export async function resumeAutoSwitch(provider: string): Promise<ResumeAutoSwit
     console.error('[IPC] resumeAutoSwitch failed:', err);
     return {
       success: false,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+export interface ListPendingAutoSwitchesResult {
+  success: boolean;
+  confirmations: PendingAutoSwitchConfirmation[];
+}
+
+export interface ConfirmPendingAutoSwitchOptions {
+  confirmationId: string;
+  selectedModelId?: string;
+  forceBusy?: boolean;
+  autoResumeTurn?: boolean;
+}
+
+export interface ConfirmPendingAutoSwitchResult {
+  success: boolean;
+  confirmationId: string;
+  provider?: string;
+  toAccountId?: string;
+  toAccountLabel?: string;
+  appliedModel?: string | null;
+  modelAdjusted?: boolean;
+  freshCatalogModels?: string[];
+  resumedThreadId?: string | null;
+  status?: AutoSwitchRuntimeStatus;
+  error?: string;
+  code?: string;
+  expired?: boolean;
+  providerBusyKind?: ProviderBusyKind | null;
+  canCloseProcesses?: boolean | null;
+  residualProcesses?: ResidualProcessSummary[];
+  residualProcessCount?: number | null;
+  baseAppTitles?: string[];
+}
+
+export interface DismissPendingAutoSwitchResult {
+  success: boolean;
+  dismissed: boolean;
+  confirmationId: string;
+  error?: string;
+}
+
+export async function listPendingAutoSwitches(
+  provider?: string
+): Promise<ListPendingAutoSwitchesResult> {
+  try {
+    const payload = provider ? { provider } : {};
+    const res = await invokeCommand<ListPendingAutoSwitchesResult>(
+      'list_pending_auto_switches',
+      payload
+    );
+    return {
+      success: Boolean(res?.success),
+      confirmations: Array.isArray(res?.confirmations) ? res.confirmations : [],
+    };
+  } catch (err) {
+    console.warn('[IPC] listPendingAutoSwitches failed:', err);
+    return { success: false, confirmations: [] };
+  }
+}
+
+export async function confirmPendingAutoSwitch(
+  options: ConfirmPendingAutoSwitchOptions
+): Promise<ConfirmPendingAutoSwitchResult> {
+  try {
+    const payload: Record<string, unknown> = {
+      confirmationId: options.confirmationId,
+    };
+    if (options.selectedModelId !== undefined) {
+      payload.selectedModelId = options.selectedModelId;
+    }
+    if (options.forceBusy !== undefined) {
+      payload.forceBusy = options.forceBusy;
+    }
+    if (options.autoResumeTurn !== undefined) {
+      payload.autoResumeTurn = options.autoResumeTurn;
+    }
+    return await invokeCommand<ConfirmPendingAutoSwitchResult>(
+      'confirm_pending_auto_switch',
+      payload
+    );
+  } catch (err: any) {
+    console.error('[IPC] confirmPendingAutoSwitch failed:', err);
+    return {
+      success: false,
+      confirmationId: options.confirmationId,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+export async function dismissPendingAutoSwitch(
+  confirmationId: string
+): Promise<DismissPendingAutoSwitchResult> {
+  try {
+    return await invokeCommand<DismissPendingAutoSwitchResult>(
+      'dismiss_pending_auto_switch',
+      { confirmationId }
+    );
+  } catch (err: any) {
+    console.error('[IPC] dismissPendingAutoSwitch failed:', err);
+    return {
+      success: false,
+      dismissed: false,
+      confirmationId,
       error: err?.message || String(err),
     };
   }

@@ -3,6 +3,9 @@ import {
   getAutoSwitchPolicy,
   saveAutoSwitchPolicy,
   resumeAutoSwitch,
+  listPendingAutoSwitches,
+  confirmPendingAutoSwitch,
+  dismissPendingAutoSwitch,
 } from './accounts';
 
 const coreMocks = vi.hoisted(() => ({
@@ -82,5 +85,87 @@ describe('Auto-switch account IPC helpers (T1)', () => {
     });
     expect(saved.success).toBe(false);
     expect(saved.error).toContain('IPC down');
+  });
+
+  it('invokes list_pending_auto_switches, confirm_pending_auto_switch, and dismiss_pending_auto_switch cleanly', async () => {
+    coreMocks.invokeCommand.mockResolvedValueOnce({
+      success: true,
+      confirmations: [
+        {
+          confirmationId: 'conf-1',
+          provider: 'agy',
+          fromAccountLabel: 'Personal',
+          toAccountId: 'acc-2',
+          toAccountLabel: 'Work',
+          requestedModel: 'claude-opus-4-6',
+          suggestedFallbackModel: 'gemini-2.5-flash',
+          availableTargetModels: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+          busySessions: [],
+          reason: 'model_mismatch',
+          createdAtUnixMs: 1000,
+          expiresAtUnixMs: 901000,
+        },
+      ],
+    });
+
+    const listed = await listPendingAutoSwitches('antigravity');
+    expect(coreMocks.invokeCommand).toHaveBeenCalledWith('list_pending_auto_switches', {
+      provider: 'antigravity',
+    });
+    expect(listed.success).toBe(true);
+    expect(listed.confirmations).toHaveLength(1);
+
+    coreMocks.invokeCommand.mockResolvedValueOnce({
+      success: true,
+      confirmationId: 'conf-1',
+      provider: 'agy',
+      toAccountId: 'acc-2',
+      toAccountLabel: 'Work',
+      appliedModel: 'gemini-2.5-pro',
+      modelAdjusted: true,
+      resumedThreadId: 'thread-1',
+    });
+
+    const confirmed = await confirmPendingAutoSwitch({
+      confirmationId: 'conf-1',
+      selectedModelId: 'gemini-2.5-pro',
+      autoResumeTurn: true,
+    });
+    expect(coreMocks.invokeCommand).toHaveBeenCalledWith('confirm_pending_auto_switch', {
+      confirmationId: 'conf-1',
+      selectedModelId: 'gemini-2.5-pro',
+      autoResumeTurn: true,
+    });
+    expect(confirmed.success).toBe(true);
+    expect(confirmed.appliedModel).toBe('gemini-2.5-pro');
+
+    coreMocks.invokeCommand.mockResolvedValueOnce({
+      success: true,
+      dismissed: true,
+      confirmationId: 'conf-1',
+    });
+
+    const dismissed = await dismissPendingAutoSwitch('conf-1');
+    expect(coreMocks.invokeCommand).toHaveBeenCalledWith('dismiss_pending_auto_switch', {
+      confirmationId: 'conf-1',
+    });
+    expect(dismissed.dismissed).toBe(true);
+  });
+
+  it('returns safe fallbacks when pending confirmation IPCs throw', async () => {
+    coreMocks.invokeCommand.mockRejectedValueOnce(new Error('list failed'));
+    const listed = await listPendingAutoSwitches();
+    expect(listed).toEqual({ success: false, confirmations: [] });
+
+    coreMocks.invokeCommand.mockRejectedValueOnce(new Error('confirm failed'));
+    const confirmed = await confirmPendingAutoSwitch({ confirmationId: 'c1' });
+    expect(confirmed.success).toBe(false);
+    expect(confirmed.error).toContain('confirm failed');
+
+    coreMocks.invokeCommand.mockRejectedValueOnce(new Error('dismiss failed'));
+    const dismissed = await dismissPendingAutoSwitch('c1');
+    expect(dismissed.success).toBe(false);
+    expect(dismissed.dismissed).toBe(false);
+    expect(dismissed.error).toContain('dismiss failed');
   });
 });

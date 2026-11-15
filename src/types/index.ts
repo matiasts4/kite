@@ -260,16 +260,27 @@ export interface NotificationRecord {
   id: string;
   runId?: string;
   target?: {
-    source: 'agentChat' | 'codeThread' | 'codeTerminal' | 'task' | string;
+    source: 'agentChat' | 'codeThread' | 'codeTerminal' | 'task' | 'accountVault' | string;
     id: string;
   };
   profileId?: string | null;
   routineId?: string | null;
   kind?: {
-    kind: 'settled' | 'needsInput' | string;
+    kind: 'settled' | 'needsInput' | 'autoSwitchConfirm' | string;
     outcome?: 'completed' | 'failed' | 'cancelled' | string;
-    requestKind?: 'toolApproval' | 'question' | 'unknown' | string;
+    requestKind?:
+      | 'toolApproval'
+      | 'question'
+      | 'unknown'
+      | 'model_mismatch'
+      | 'unverified_catalog'
+      | 'busy_terminals_ask'
+      | string;
   };
+  title?: string | null;
+  body?: string | null;
+  confirmationId?: string | null;
+  autoSwitchConfirm?: PendingAutoSwitchConfirmation | null;
   resolution?: 'answered' | 'attended' | 'runSettled' | 'abandoned' | string | null;
   createdAtUnixMs: number;
   isRead: boolean;
@@ -353,8 +364,63 @@ export interface AutoSwitchRuntimeStatus {
   nextResetAt?: string | null;
   nextResetMs?: number | null;
   lastErrorCode?: string | null;
-  residualProcessCount?: number;
+  residualProcessCount?: number | null;
   baseAppTitles?: string[];
+}
+
+export interface AutoSwitchBusySessionSummary {
+  sessionId: string;
+  engine: string;
+  workspaceId?: string | null;
+  paneId?: string | null;
+  cwd: string;
+  busy: boolean;
+  reasons: string[];
+  lastOutputAgeMs?: number | null;
+  presentationLive: boolean;
+}
+
+export interface PendingAutoSwitchConfirmation {
+  confirmationId: string;
+  provider: string;
+  fromAccountId?: string | null;
+  fromAccountLabel: string;
+  fromEmail?: string | null;
+  toAccountId: string;
+  toAccountLabel: string;
+  toEmail?: string | null;
+  toPlanName?: string | null;
+  sourcePlanName?: string | null;
+  requestedModel?: string | null;
+  suggestedFallbackModel?: string | null;
+  availableTargetModels: string[];
+  threadId?: string | null;
+  handoffPrompt?: string | null;
+  busySessions: AutoSwitchBusySessionSummary[];
+  reason: 'model_mismatch' | 'unverified_catalog' | 'busy_terminals_ask' | string;
+  createdAtUnixMs: number;
+  expiresAtUnixMs: number;
+}
+
+export interface AutoSwitchExecutedEvent {
+  provider: string;
+  confirmationId?: string | null;
+  fromAccountId?: string | null;
+  fromAccountLabel: string;
+  toAccountId: string;
+  toAccountLabel: string;
+  appliedModel?: string | null;
+  modelAdjusted?: boolean;
+  autoContinueChatTurn?: boolean;
+  compatibility?: string;
+  triggerSource?: string;
+  threadId?: string | null;
+  resumedThreadId?: string | null;
+}
+
+export interface AutoSwitchStatusEvent {
+  provider: string;
+  status: AutoSwitchRuntimeStatus;
 }
 
 export interface SavedAccountProfile {

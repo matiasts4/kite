@@ -725,3 +725,143 @@
   transform: translateX(18px);
 }
 
+/* -------------------------------------------------------------------------
+   Sticky Auto-Switch Confirmation Card
+   ------------------------------------------------------------------------- */
+.notification-confirm-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 10px;
+  border-radius: var(--card-radius, 12px);
+  background: var(--notif-card-bg);
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  cursor: default;
+}
+
+.notification-confirm-card:hover {
+  background: var(--notif-hover);
+}
+
+.notification-confirm-card__detail {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--notif-text-secondary);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.notification-confirm-card__busy {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: var(--control-radius, 8px);
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  color: #fcd34d;
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.notification-confirm-card__controls {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.notification-confirm-card__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--notif-text-secondary);
+}
+
+.notification-confirm-card__select {
+  height: var(--vl-control-sm, 28px);
+  padding: 0 8px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--notif-card-border);
+  background: var(--bg-input, rgba(0, 0, 0, 0.35));
+  color: var(--notif-text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  width: 100%;
+}
+
+.notification-confirm-card__checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--notif-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.notification-confirm-card__error {
+  margin-top: 7px;
+  padding: 7px 9px;
+  border-radius: var(--control-radius, 8px);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.32);
+  color: #fca5a5;
+  font-size: 11.5px;
+  line-height: 1.35;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notification-confirm-card__actions {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.notification-confirm-card__btn {
+  height: var(--vl-control-sm, 28px);
+  padding: 0 10px;
+  border-radius: var(--control-radius, 8px);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--notif-card-border);
+  background: transparent;
+  color: var(--notif-text-primary);
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.notification-confirm-card__btn:hover:not(:disabled) {
+  background: var(--notif-hover);
+}
+
+.notification-confirm-card__btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.notification-confirm-card__btn--primary {
+  background: var(--accent-fill, #2a62ea);
+  border-color: rgba(92, 143, 255, 0.55);
+  color: #ffffff;
+}
+
+.notification-confirm-card__btn--primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent-fill, #2a62ea);
+}
+
+.notification-confirm-card__btn--danger {
+  align-self: flex-start;
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #fecaca;
+}
+
+

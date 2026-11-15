@@ -21,6 +21,7 @@ import {
   resolveAuthModeLabel,
   resolveCredentialHealthBadge,
 } from '../../accounts/AccountVaultUI';
+import { AutoSwitchSettingsPanel } from '../../accounts/AutoSwitchSettingsPanel';
 import { BrandLogo } from '../../ui/BrandLogo';
 import { SparklesIcon } from './icons';
 
@@ -494,6 +495,38 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged, quotas: e
           })}
         </div>
       )}
+
+      <AutoSwitchSettingsPanel
+        variant="full"
+        provider={provider}
+        profiles={vault.profiles}
+        policy={vault.autoSwitchPolicy}
+        status={vault.autoSwitchRuntimeStatus}
+        pendingConfirmations={vault.pendingAutoSwitchConfirmations}
+        saving={vault.autoSwitchSaving}
+        resuming={vault.autoSwitchResuming}
+        closingProcesses={vault.closingProcesses}
+        onUpdatePolicy={vault.updateAutoSwitchPolicy}
+        onToggleAccountEligibility={vault.toggleAccountAutoSwitchEligibility}
+        onMoveAccountPriority={vault.moveAccountAutoSwitchPriority}
+        onResume={vault.resumeAutoSwitch}
+        onCloseResidualProcesses={async () => {
+          const res = await vault.closeResidualProcesses();
+          if (res?.success && vault.autoSwitchRuntimeStatus.paused) {
+            await vault.resumeAutoSwitch();
+          }
+        }}
+        onConfirmPending={(item, selectedModelId) =>
+          vault.confirmPendingAutoSwitch({
+            confirmationId: item.confirmationId,
+            ...(selectedModelId ? { selectedModelId } : {}),
+            ...(item.reason === 'busy_terminals_ask' ? { forceBusy: true } : {}),
+          })
+        }
+        onDismissPending={(confirmationId) =>
+          vault.dismissPendingAutoSwitch(confirmationId)
+        }
+      />
 
       <div className="qt-save">
         <div className="qt-save__copy">

@@ -246,10 +246,15 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         renamingId={vault.renamingId}
         closingProcesses={vault.closingProcesses}
         lastFailedSwitch={vault.lastFailedSwitch}
+        autoSwitchPolicy={vault.autoSwitchPolicy}
+        autoSwitchRuntimeStatus={vault.autoSwitchRuntimeStatus}
+        pendingAutoSwitchConfirmations={vault.pendingAutoSwitchConfirmations}
+        autoSwitchResuming={vault.autoSwitchResuming}
         onSwitchAccount={handleSwitchAccount}
         onSaveCurrent={handleSaveCurrent}
         onRenameProfile={handleRenameProfile}
         onCloseResidualProcesses={handleCloseResidualProcesses}
+        onResumeAutoSwitch={vault.resumeAutoSwitch}
         onAlignIde={vault.alignIde}
         onReauth={() => {
           void guidedLoginCoordinator.start(selectedProvider);

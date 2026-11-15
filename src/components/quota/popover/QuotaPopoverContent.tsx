@@ -5,8 +5,15 @@ import { BrandLogo } from '../../views/agents/engineMetadata';
 import { QuotaProgressRing } from '../QuotaProgressRing';
 import { QuotaAccountSwitcher } from '../QuotaAccountSwitcher';
 import { formatDetailedReset } from '../../../lib/quota/useResetCountdownClock';
-import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../../types';
+import type {
+  AntigravityAuthTelemetry,
+  AutoSwitchPolicy,
+  AutoSwitchRuntimeStatus,
+  PendingAutoSwitchConfirmation,
+  SavedAccountProfile,
+} from '../../../types';
 import type { FailedSwitchState } from '../../../lib/accounts/accountVaultStore';
+import { AutoSwitchStatusBanner } from '../../accounts/AutoSwitchSettingsPanel';
 
 export interface QuotaPopoverContentProps {
   activeIdsCount: number;
@@ -32,10 +39,15 @@ export interface QuotaPopoverContentProps {
   renamingId?: string | null;
   closingProcesses?: boolean;
   lastFailedSwitch?: FailedSwitchState | null;
+  autoSwitchPolicy?: AutoSwitchPolicy;
+  autoSwitchRuntimeStatus?: AutoSwitchRuntimeStatus;
+  pendingAutoSwitchConfirmations?: PendingAutoSwitchConfirmation[];
+  autoSwitchResuming?: boolean;
   onSwitchAccount: (profileId: string) => Promise<void>;
   onSaveCurrent?: (label?: string) => Promise<boolean>;
   onRenameProfile?: (profileId: string, label: string) => Promise<boolean>;
   onCloseResidualProcesses?: () => void | Promise<unknown>;
+  onResumeAutoSwitch?: () => void | Promise<unknown>;
   onAlignIde?: () => Promise<void>;
   onReauth?: () => void;
   onOpenSettings: (providerId?: string) => void;
@@ -62,10 +74,15 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
   renamingId = null,
   closingProcesses = false,
   lastFailedSwitch = null,
+  autoSwitchPolicy,
+  autoSwitchRuntimeStatus,
+  pendingAutoSwitchConfirmations = [],
+  autoSwitchResuming = false,
   onSwitchAccount,
   onSaveCurrent,
   onRenameProfile,
   onCloseResidualProcesses,
+  onResumeAutoSwitch,
   onAlignIde,
   onReauth,
   onOpenSettings,
@@ -79,13 +96,19 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
     (currentQuota?.metadata?.email ? String(currentQuota.metadata.email) : null) ||
     'Sesión nativa activa';
 
+  const hasAutoSwitchStrip = Boolean(
+    autoSwitchPolicy?.enabled ||
+      autoSwitchRuntimeStatus?.paused ||
+      pendingAutoSwitchConfirmations.length > 0
+  );
+
   const accountSwitcherBar = (
     <div
       style={{
         position: 'relative',
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
+        flexDirection: 'column',
+        gap: '6px',
         padding: '7px 10px',
         borderRadius: 'var(--control-radius, 8px)',
         backgroundColor: 'var(--block-fill)',
@@ -143,6 +166,70 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
           onToggleAccounts={onToggleAccounts}
         />
       </div>
+
+      {hasAutoSwitchStrip ? (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            paddingTop: '6px',
+            borderTop: '1px solid var(--block-stroke)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '8px',
+            }}
+          >
+            <span
+              className="qt-chip"
+              data-tone={
+                autoSwitchRuntimeStatus?.paused
+                  ? 'warn'
+                  : pendingAutoSwitchConfirmations.length > 0
+                    ? 'warn'
+                    : 'ok'
+              }
+            >
+              {autoSwitchRuntimeStatus?.paused
+                ? 'Auto 0%: Pausado'
+                : pendingAutoSwitchConfirmations.length > 0
+                  ? 'Auto 0%: Confirmar'
+                  : 'Auto 0%: Activo'}
+            </span>
+            <button
+              type="button"
+              onClick={() => onOpenSettings(selectedProvider)}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                color: 'var(--accent)',
+                fontSize: '11px',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Configurar
+            </button>
+          </div>
+          {autoSwitchRuntimeStatus ? (
+            <AutoSwitchStatusBanner
+              status={autoSwitchRuntimeStatus}
+              resuming={autoSwitchResuming}
+              closingProcesses={closingProcesses}
+              pendingCount={pendingAutoSwitchConfirmations.length}
+              compact
+              onResume={onResumeAutoSwitch}
+              onCloseResidualProcesses={onCloseResidualProcesses}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
   return (

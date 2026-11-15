@@ -1269,3 +1269,249 @@
 .settings-master-detail--nested .qt-providers-sidebar {
   background: transparent;
 }
+
+/* -------------------------------------------------------------------------
+   Auto-Switch Settings Panel & Runtime Banners
+   ------------------------------------------------------------------------- */
+.qt-auto-panel {
+  border-radius: var(--card-radius, 12px);
+  border: 1px solid var(--block-stroke);
+  background: color-mix(in srgb, var(--block-fill) 78%, transparent);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qt-auto-panel--compact {
+  padding: 10px 12px;
+  gap: 8px;
+}
+
+.qt-auto-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.qt-auto-panel__heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.qt-auto-panel__title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qt-auto-panel__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.qt-auto-panel__subtitle {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.qt-auto-panel__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.qt-auto-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qt-auto-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.qt-auto-banner__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.qt-auto-banner__detail {
+  font-size: 11.5px;
+  opacity: 0.9;
+  white-space: normal;
+}
+
+.qt-auto-banner__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.qt-auto-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--block-stroke);
+}
+
+.qt-auto-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.qt-auto-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.qt-auto-select {
+  height: var(--vl-control-md, 32px);
+  border-radius: var(--control-radius, 8px);
+  font-size: 12px;
+}
+
+.qt-auto-panel--compact .qt-auto-select {
+  height: var(--vl-control-sm, 28px);
+}
+
+.qt-auto-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.qt-auto-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qt-auto-accounts__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.qt-auto-accounts__label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.qt-auto-accounts__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qt-auto-account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--block-stroke);
+  background: color-mix(in srgb, var(--pane) 65%, transparent);
+}
+
+.qt-auto-account-row[data-excluded='true'] {
+  opacity: 0.6;
+}
+
+.qt-auto-account-row__toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+
+.qt-auto-account-row__order {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.qt-auto-account-row__name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.qt-auto-account-row__email {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-auto-account-row__controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.qt-auto-pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qt-auto-pending-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  flex-wrap: wrap;
+}
+
+.qt-auto-pending-item__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11.5px;
+}
+
+.qt-auto-pending-item__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+

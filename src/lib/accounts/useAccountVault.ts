@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
-import type { SavedAccountProfile } from '../../types';
+import type { AutoSwitchPolicy, SavedAccountProfile } from '../../types';
+import type { ConfirmPendingAutoSwitchOptions } from '../ipc';
 import {
   accountVaultStore,
   canonicalVaultProvider,
@@ -31,6 +32,25 @@ export interface UseAccountVaultResult extends ProviderVaultState {
   closeResidualProcesses: () => ReturnType<typeof accountVaultStore.closeResidualProcesses>;
   alignIde: () => Promise<void>;
   clearFeedback: () => void;
+  loadAutoSwitchPolicy: (force?: boolean) => ReturnType<typeof accountVaultStore.loadAutoSwitchPolicy>;
+  saveAutoSwitchPolicy: (policy: AutoSwitchPolicy) => ReturnType<typeof accountVaultStore.saveAutoSwitchPolicy>;
+  updateAutoSwitchPolicy: (
+    patchOrUpdater: Partial<AutoSwitchPolicy> | ((prev: AutoSwitchPolicy) => AutoSwitchPolicy)
+  ) => ReturnType<typeof accountVaultStore.updateAutoSwitchPolicy>;
+  toggleAccountAutoSwitchEligibility: (
+    accountId: string
+  ) => ReturnType<typeof accountVaultStore.toggleAccountAutoSwitchEligibility>;
+  moveAccountAutoSwitchPriority: (
+    accountId: string,
+    direction: 'up' | 'down'
+  ) => ReturnType<typeof accountVaultStore.moveAccountAutoSwitchPriority>;
+  resumeAutoSwitch: () => ReturnType<typeof accountVaultStore.resumeAutoSwitch>;
+  confirmPendingAutoSwitch: (
+    options: ConfirmPendingAutoSwitchOptions
+  ) => ReturnType<typeof accountVaultStore.confirmPendingAutoSwitch>;
+  dismissPendingAutoSwitch: (
+    confirmationId: string
+  ) => ReturnType<typeof accountVaultStore.dismissPendingAutoSwitch>;
 }
 
 export function useAccountVault(
@@ -55,6 +75,7 @@ export function useAccountVault(
   useEffect(() => {
     if (autoLoad) {
       void accountVaultStore.loadAccounts(canon);
+      void accountVaultStore.loadAutoSwitchPolicy(canon);
     }
   }, [autoLoad, canon]);
 
@@ -64,6 +85,7 @@ export function useAccountVault(
       canonicalProvider: canon,
       refresh: async (force = true) => {
         await accountVaultStore.loadAccounts(canon, { force });
+        await accountVaultStore.loadAutoSwitchPolicy(canon, { force });
       },
       switchAccount: (accountId, opts) =>
         accountVaultStore.switchAccount(canon, accountId, opts),
@@ -84,6 +106,21 @@ export function useAccountVault(
       closeResidualProcesses: () => accountVaultStore.closeResidualProcesses(canon),
       alignIde: () => accountVaultStore.alignIde(canon),
       clearFeedback: () => accountVaultStore.clearFeedback(canon),
+      loadAutoSwitchPolicy: (force = false) =>
+        accountVaultStore.loadAutoSwitchPolicy(canon, { force }),
+      saveAutoSwitchPolicy: (policy) =>
+        accountVaultStore.saveAutoSwitchPolicy(canon, policy),
+      updateAutoSwitchPolicy: (patchOrUpdater) =>
+        accountVaultStore.updateAutoSwitchPolicy(canon, patchOrUpdater),
+      toggleAccountAutoSwitchEligibility: (accountId) =>
+        accountVaultStore.toggleAccountAutoSwitchEligibility(canon, accountId),
+      moveAccountAutoSwitchPriority: (accountId, direction) =>
+        accountVaultStore.moveAccountAutoSwitchPriority(canon, accountId, direction),
+      resumeAutoSwitch: () => accountVaultStore.resumeAutoSwitch(canon),
+      confirmPendingAutoSwitch: (opts) =>
+        accountVaultStore.confirmPendingAutoSwitch(opts, canon),
+      dismissPendingAutoSwitch: (confirmationId) =>
+        accountVaultStore.dismissPendingAutoSwitch(confirmationId, canon),
     }),
     [state, canon]
   );

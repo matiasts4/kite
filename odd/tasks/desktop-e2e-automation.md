@@ -3,7 +3,7 @@
 Objective: Automate real desktop end-to-end verification in Kite Code (Tauri + WebView2 + Rust backend + core daemon) over CDP with Playwright, covering Thread live streaming, Agent runs, parallel Subagent/Swarm orchestration, and geometric/visual checks without mocks hiding regressions.
 Branch: `feat/response-thread`
 Delivery strategy: ask-on-risk
-Allowed edit surfaces: `odd/tasks/desktop-e2e-automation.md`, `package.json`, `.gitignore`, `vite.config.ts`, `scripts/e2e/**`, `test-results/**` (gitignored artifacts), `.agents/skills/kite-desktop-qa/**`, `.kite/tasks/run-tests.md`, `docs/qa/**`, `server/server.mjs` / `scripts/qa/**` (only if Phase 3 `dev:browser` alignment touches them; verify before editing). Never alter unrelated dirty workspace files or protected `TitleBar.tsx` switcher geometry.
+Allowed edit surfaces: `odd/tasks/desktop-e2e-automation.md`, `AGENTS.md`, `package.json`, `.gitignore`, `vite.config.ts`, `scripts/e2e/**`, `test-results/**` (gitignored artifacts), `.agents/skills/kite-desktop-qa/**`, `.kite/tasks/run-tests.md`, `docs/qa/**`, `server/server.mjs`, `scripts/dev-browser.mjs`, `scripts/browser-lane-smoke.mjs`, `src-tauri/src/chat/swarm/actions.rs` (reconcile streamed tool-call `SwarmMember` placeholders in `execute_swarm_add`), `src-tauri/src/chat/swarm/tests.rs` (regression unit test for streamed placeholder reconciliation), and `src/components/views/chat/composer/composer.css` (prevent `.kite-composer-control-pill` overflow/overlap across standard and compact viewports). Never alter unrelated dirty workspace files or protected `TitleBar.tsx` switcher geometry.
 Test runner: `npm run verify:desktop:e2e`, `npx tsc --noEmit`, `npx vitest run`, `node .kite/sanitizer/audit-references.mjs --check`
 
 ## Specs
@@ -41,12 +41,12 @@ Test runner: `npm run verify:desktop:e2e`, `npx tsc --noEmit`, `npx vitest run`,
 
 | ID | Task | Specs | Route | Commit |
 | :--- | :--- | :--- | :--- | :--- |
-| T1 | Create isolated CDP desktop launcher (`scripts/e2e/sandbox.mjs`, `scripts/e2e/launch-desktop.mjs`, `scripts/e2e/run.mjs`), Phase 1 `desktop-smoke.e2e.mjs`, and `verify:desktop:e2e` script; verify end-to-end against real `kite-code.exe` | S1 | inline (Phase 1 setup & integration) | verified (commit pending) |
-| T2 | Build deterministic Fake CLI Driver (`scripts/e2e/fake-driver/`) speaking `--version`, `stream-json`, ACP JSON-RPC stdio, and scenario-driven `kite dispatch` invocations | S2 | inline (after reading fixtures & driver parsers) | pending |
-| T3 | Implement Thread streaming & switching E2E specs (`THREAD-STREAM-01`, `THREAD-SWITCH-01`) and verify against real backend + fake driver | S2, S3 | inline | pending |
-| T4 | Implement Orchestration E2E specs (`ORCH-SUB-01`, `ORCH-SWARM-01`, `ORCH-FAIL-01`) and automated Sabotage verification mode | S2, S3 | inline | pending |
-| T5 | Implement geometric layout assertion helpers, viewport resize/no-force checks, and automatic screenshot capture (`UI-LAYOUT-01`) under `test-results/e2e/` (gitignored) | S4 | inline | pending |
-| T6 | Author `.agents/skills/kite-desktop-qa/SKILL.md`, update `.kite/tasks/run-tests.md` and `docs/qa/catalog.md`, align `dev:browser` status, and run full verification suite | S5 | inline | pending |
+| T1 | Create isolated CDP desktop launcher (`scripts/e2e/sandbox.mjs`, `scripts/e2e/launch-desktop.mjs`, `scripts/e2e/run.mjs`), Phase 1 `desktop-smoke.e2e.mjs`, and `verify:desktop:e2e` script; verify end-to-end against real `kite-code.exe` | S1 | inline (Phase 1 setup & integration) | `8358e6e`, `cb577cd` |
+| T2 | Build deterministic Fake CLI Driver (`scripts/e2e/fake-driver/`) speaking `--version`, `stream-json`, ACP JSON-RPC stdio, and scenario-driven `kite dispatch` invocations | S2 | inline (after reading fixtures & driver parsers) | `ae36e30` |
+| T3 | Implement Thread streaming & switching E2E specs (`THREAD-STREAM-01`, `THREAD-SWITCH-01`) and verify against real backend + fake driver | S2, S3 | inline | `d621779` |
+| T4 | Implement Orchestration E2E specs (`ORCH-SUB-01`, `ORCH-SWARM-01`, `ORCH-FAIL-01`), automated Sabotage verification mode, and Swarm streamed-placeholder reconciliation fix + Rust unit test | S2, S3 | inline | `3a09e32`, `abbc497`, `10ec864` |
+| T5 | Implement geometric layout assertion helpers, viewport resize/no-force checks (`UI-LAYOUT-01`), automatic screenshot capture, and composer footer flex-shrink fix | S4 | inline | `6de4f42`, `59dffc0` |
+| T6 | Author `.agents/skills/kite-desktop-qa/SKILL.md`, update `.kite/tasks/run-tests.md`, `AGENTS.md`, and `docs/qa/catalog.md`, align `dev:browser` status, and run full verification suite | S5 | inline | `8569bc3` (plus ODD closure commit) |
 
 ## Verification
 - After Phase 1 (`T1`): `npm run verify:desktop:e2e`, `npx tsc --noEmit`, `npx vitest run`, `node .kite/sanitizer/audit-references.mjs --check`.
@@ -62,3 +62,14 @@ Test runner: `npm run verify:desktop:e2e`, `npx tsc --noEmit`, `npx vitest run`,
   - Evergreen WebView2 `157.0.4341.46` ignores `--remote-debugging-port` TCP binding under `--embedded-browser-webview=1`; `scripts/e2e/sandbox.mjs` automatically provisions/pins Fixed Version WebView2 `149.0.4022.98` in user cache (`~/.cache/kite-code-e2e/webview2/`) via `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` unless overridden (`KITE_E2E_WEBVIEW2_DIR` / `KITE_E2E_USE_SYSTEM_WEBVIEW2=1`).
   - `vite.config.ts` now scopes `optimizeDeps.entries` to `['index.html']` and ignores Rust/artifact directories under `server.watch.ignored`, reducing dev server cold response from ~77s (`/` 8.2s + `/src/main.tsx` 69.5s) to <1.7s (`/` 28ms + `/src/main.tsx` 1.6s).
   - Phase 1 gate passed: `DESKTOP-SMOKE-01` (30.2s, real Tauri IPC + WebView2 CDP + screenshots under `test-results/e2e/` + clean process/temp teardown), `npx tsc --noEmit`, `npx vitest run` (182 files / 1275 tests), and `node .kite/sanitizer/audit-references.mjs --check`.
+- **L3 (User follow-ups & Phase 2/3 findings):**
+  4. `"Eh, quiero que continúes."`
+  5. `"termino o no?"`
+  6. `"continua"`
+  7. `"si ampliemos si es necesario"` — User authorized expanding ODD scope to fix the two surfaced product bugs in `src-tauri/src/chat/swarm/actions.rs` and `src/components/views/chat/composer/composer.css` and verify all 4 desktop E2E specs green.
+  - Built cross-platform / Windows native shim (`scripts/e2e/fake-driver/setup.mjs` compiles `win-shim-v1.exe` in `~/.cache/kite-code-e2e/`) bypassing `cmd.exe %*` newline truncation on multiline subagent prompts, plus `executeAndTrackCommand` / `driver-calls.jsonl` capture into `test-results/e2e/`.
+  - Verified green: `DESKTOP-SMOKE-01`, `THREAD-STREAM-01`, `THREAD-SWITCH-01`, `ORCH-SUB-01` (parallel `Worker Alpha` / `Worker Beta` in RightDock `Subagents`), `--sabotage=overlay` on `desktop-smoke`, and `--sabotage=ipc-drop` on `thread-streaming` (`window.fetch` / `window.ipc.postMessage` Tauri IPC transport hook).
+  - Surfaced and fixed two genuine Kite product bugs after user authorized expanding scope (`"si ampliemos si es necesario"`):
+    1. `ORCH-SWARM-01` (`name_taken`, previously blocking `ORCH-FAIL-01`): `record_swarm_tool_call` (`src-tauri/src/chat/subagents/record.rs:281-300`) pre-inserts `SwarmMember` placeholders with `child_thread_id: None` on streamed `RUNNING` tool frames before `kite dispatch swarm add` executes `execute_swarm_add`. Fixed in `src-tauri/src/chat/swarm/actions.rs` by only treating members with `child_thread_id.is_some()` as `NameTaken` and stripping `child_thread_id.is_none()` placeholders before prompt generation and insertion.
+    2. `UI-LAYOUT-01` (`[Permission]` overlapping `[Attach files or a folder]` by `35.6x28.0px` when RightDock is open at `1366x840`): Fixed in `src/components/views/chat/composer/composer.css` by making direct popover wrapper children of `.kite-composer-footer-left` shrinkable flex items (`display: flex; min-width: 0; flex-shrink: 1`) and tightening pill padding/separators at `@container composer-main (width <= 640px)`. Also documented building `kite-code.exe` with `--no-default-features` so debug builds serve live Vite (`127.0.0.1:1420`) rather than embedded `dist/`.
+  - Phase 3 docs/skill (`T6`) completed: `.agents/skills/kite-desktop-qa/SKILL.md` (local gitignored under `skills/`), `AGENTS.md`, `.kite/tasks/run-tests.md`, `docs/qa/catalog.md`, and legacy `dev:browser` mock notes.

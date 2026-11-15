@@ -3528,3 +3528,511 @@ fn test_resume_auto_switch_with_clears_global_coordinator_circuit_breaker() {
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_pending_auto_switch_confirmation_publish_dedup_expiry_and_notification_mirror() {
+    use super::auto_switch::{
+        list_pending_auto_switches_in, publish_needs_confirmation_in, AutoSwitchOutcome,
+        PendingAutoSwitchConfirmation, PENDING_CONFIRMATION_TTL_MS,
+    };
+    use super::commands::RankedSwitchCandidate;
+    use crate::terminal::ProviderSessionSummary;
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_pend_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+        std::sync::Mutex::new(Vec::new());
+
+    let candidate = RankedSwitchCandidate {
+        profile: SavedAccountProfile {
+            id: "acc-free".to_string(),
+            provider: "agy".to_string(),
+            label: "Free Tier".to_string(),
+            email: Some("free@kite.local".to_string()),
+            plan_name: Some("Free".to_string()),
+            available_model_ids: vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
+            ..Default::default()
+        },
+        compatibility: "model_mismatch".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        suggested_fallback_model: Some("gemini-2.5-pro".to_string()),
+        available_target_models: vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
+        source_plan: Some("Google AI Pro".to_string()),
+        target_plan: Some("Free".to_string()),
+        remaining_percent: Some(100.0),
+        known_healthy_quota: true,
+        quota_confidence: 2,
+        relevant_window_name: Some("Primary".to_string()),
+    };
+
+    let poll_outcome = AutoSwitchOutcome::NeedsConfirmation {
+        provider: "agy".to_string(),
+        from_account_id: Some("acc-pro".to_string()),
+        from_account_label: "Pro Tier".to_string(),
+        from_email: Some("pro@kite.local".to_string()),
+        source_plan_name: Some("Google AI Pro".to_string()),
+        candidate: candidate.clone(),
+        reason: "model_mismatch".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: None,
+        busy_sessions: vec![ProviderSessionSummary {
+            session_id: "term-1".to_string(),
+            engine: "antigravity".to_string(),
+            workspace_id: None,
+            pane_id: None,
+            cwd: "C:/repo".to_string(),
+            busy: true,
+            reasons: vec!["recent_output".to_string()],
+            last_output_age_ms: Some(120),
+            presentation_live: true,
+        }],
+        trigger_source: "quota_poll".to_string(),
+    };
+
+    let t0 = 5_000_000i64;
+    let published_poll =
+        publish_needs_confirmation_in(&poll_outcome, None, t0, &store, &env).expect("published");
+    assert_eq!(published_poll.expires_at_unix_ms, t0 + PENDING_CONFIRMATION_TTL_MS);
+    assert_eq!(published_poll.source_plan_name.as_deref(), Some("Google AI Pro"));
+    assert_eq!(published_poll.to_plan_name.as_deref(), Some("Free"));
+    assert!(env
+        .emitted_events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(ev, p)| ev == "kite://auto-switch-confirmation"
+            && p["confirmationId"] == published_poll.confirmation_id));
+
+    // Thread trigger for the same (provider, to_account_id, reason) enriches instead of duplicating.
+    let thread_outcome = AutoSwitchOutcome::NeedsConfirmation {
+        provider: "agy".to_string(),
+        from_account_id: Some("acc-pro".to_string()),
+        from_account_label: "Pro Tier".to_string(),
+        from_email: Some("pro@kite.local".to_string()),
+        source_plan_name: Some("Google AI Pro".to_string()),
+        candidate: candidate.clone(),
+        reason: "model_mismatch".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: Some("thread-1".to_string()),
+        busy_sessions: Vec::new(),
+        trigger_source: "chat_turn".to_string(),
+    };
+    let enriched = publish_needs_confirmation_in(
+        &thread_outcome,
+        Some("Continue task on fallback".to_string()),
+        t0 + 1_000,
+        &store,
+        &env,
+    )
+    .expect("enriched");
+    assert_eq!(enriched.confirmation_id, published_poll.confirmation_id);
+    assert_eq!(enriched.thread_id.as_deref(), Some("thread-1"));
+    assert_eq!(
+        enriched.handoff_prompt.as_deref(),
+        Some("Continue task on fallback")
+    );
+    assert_eq!(store.lock().unwrap().len(), 1);
+
+    // Subsequent generic poll does NOT clobber enriched thread_id / handoff_prompt.
+    let after_repoll =
+        publish_needs_confirmation_in(&poll_outcome, None, t0 + 2_000, &store, &env)
+            .expect("repoll");
+    assert_eq!(after_repoll.thread_id.as_deref(), Some("thread-1"));
+    assert_eq!(
+        after_repoll.handoff_prompt.as_deref(),
+        Some("Continue task on fallback")
+    );
+    assert_eq!(store.lock().unwrap().len(), 1);
+
+    // Distinct thread_id creates a separate confirmation entry.
+    let thread2_outcome = AutoSwitchOutcome::NeedsConfirmation {
+        provider: "agy".to_string(),
+        from_account_id: Some("acc-pro".to_string()),
+        from_account_label: "Pro Tier".to_string(),
+        from_email: Some("pro@kite.local".to_string()),
+        source_plan_name: Some("Google AI Pro".to_string()),
+        candidate,
+        reason: "model_mismatch".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: Some("thread-2".to_string()),
+        busy_sessions: Vec::new(),
+        trigger_source: "chat_turn".to_string(),
+    };
+    let second = publish_needs_confirmation_in(
+        &thread2_outcome,
+        Some("Thread 2 prompt".to_string()),
+        t0 + 3_000,
+        &store,
+        &env,
+    )
+    .expect("second");
+    assert_ne!(second.confirmation_id, enriched.confirmation_id);
+
+    // Listing before expiry returns both; listing after thread-1 expires prunes only expired ones.
+    let listed_now = list_pending_auto_switches_in(Some("agy"), t0 + 4_000, &store, &env);
+    assert_eq!(listed_now["confirmations"].as_array().unwrap().len(), 2);
+
+    let listed_after_t1_expiry = list_pending_auto_switches_in(
+        Some("agy"),
+        t0 + 2_000 + PENDING_CONFIRMATION_TTL_MS + 1,
+        &store,
+        &env,
+    );
+    let rem = listed_after_t1_expiry["confirmations"].as_array().unwrap();
+    assert_eq!(rem.len(), 1);
+    assert_eq!(rem[0]["threadId"], "thread-2");
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_confirm_pending_auto_switch_busy_preservation_and_fresh_catalog_fallback() {
+    use super::auto_switch::{
+        confirm_pending_auto_switch_in, publish_needs_confirmation_in, AutoSwitchCoordinatorState,
+        AutoSwitchOutcome, PendingAutoSwitchConfirmation,
+    };
+    use super::commands::RankedSwitchCandidate;
+    use super::registry::{get_auto_switch_policy_in, save_auto_switch_policy_in, AutoSwitchPolicy};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_confirm_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-1", "pro@kite.local");
+    seed_agy_cred_file(&tmp, "acc-2", "free@kite.local");
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-1".to_string(),
+                provider: "agy".to_string(),
+                label: "Pro".to_string(),
+                email: Some("pro@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                available_model_ids: vec!["claude-opus-4-6".to_string()],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-2".to_string(),
+                provider: "agy".to_string(),
+                label: "Free".to_string(),
+                email: Some("free@kite.local".to_string()),
+                plan_name: Some("Free".to_string()),
+                is_active: false,
+                available_model_ids: vec!["gemini-2.5-pro".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    env.set_switch_handler(|_, _, _| {
+        json!({
+            "success": false,
+            "code": "PROVIDER_BUSY",
+            "error": "Close open IDE windows first.",
+            "providerBusyKind": "base_app_open",
+            "canCloseProcesses": false,
+            "baseAppTitles": ["Antigravity IDE"],
+        })
+    });
+
+    let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+        std::sync::Mutex::new(Vec::new());
+    let state = std::sync::Mutex::new(AutoSwitchCoordinatorState::default());
+
+    let outcome = AutoSwitchOutcome::NeedsConfirmation {
+        provider: "agy".to_string(),
+        from_account_id: Some("acc-1".to_string()),
+        from_account_label: "Pro".to_string(),
+        from_email: Some("pro@kite.local".to_string()),
+        source_plan_name: Some("Google AI Pro".to_string()),
+        candidate: RankedSwitchCandidate {
+            profile: reg.profiles[1].clone(),
+            compatibility: "model_mismatch".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            suggested_fallback_model: Some("gemini-2.5-pro".to_string()),
+            available_target_models: vec!["gemini-2.5-pro".to_string()],
+            source_plan: Some("Google AI Pro".to_string()),
+            target_plan: Some("Free".to_string()),
+            remaining_percent: Some(100.0),
+            known_healthy_quota: true,
+            quota_confidence: 2,
+            relevant_window_name: None,
+        },
+        reason: "model_mismatch".to_string(),
+        requested_model: Some("claude-opus-4-6".to_string()),
+        thread_id: Some("thread-confirm-1".to_string()),
+        busy_sessions: Vec::new(),
+        trigger_source: "chat_turn".to_string(),
+    };
+    let conf = publish_needs_confirmation_in(
+        &outcome,
+        Some("Resume analysis".to_string()),
+        10_000_000,
+        &store,
+        &env,
+    )
+    .expect("published");
+
+    let eval_lock = std::sync::Mutex::new(());
+    let busy_req = json!({
+        "confirmationId": conf.confirmation_id,
+        "selectedModelId": "gemini-2.5-pro",
+    });
+    let busy_res = confirm_pending_auto_switch_in(
+        Some(busy_req),
+        10_005_000,
+        &eval_lock,
+        &state,
+        &store,
+        &env,
+        |_prov, _model| unreachable!("catalog check must not run if switch failed"),
+        |_conf, _model, _adj, _auto_resume| None,
+    );
+    assert_eq!(busy_res["success"], false);
+    assert_eq!(busy_res["code"], "PROVIDER_BUSY");
+    assert_eq!(busy_res["providerBusyKind"], "base_app_open");
+    assert_eq!(busy_res["confirmationId"], conf.confirmation_id);
+    assert_eq!(store.lock().unwrap().len(), 1, "busy error must preserve confirmation");
+    assert_eq!(env.get_runtime_status("agy").pause_reason.as_deref(), Some("IDE_PROCESS_BUSY"));
+
+    // Clear busy state and simulate fresh catalog unexpectedly replacing gemini-2.5-pro -> gemini-2.5-flash.
+    let tmp_switch = tmp.clone();
+    env.set_switch_handler(move |_, acc_id, _| {
+        let mut r = load_registry_from(&tmp_switch);
+        for p in r.profiles.iter_mut() {
+            p.is_active = p.id == acc_id;
+        }
+        save_registry_to(&tmp_switch, &r).unwrap();
+        json!({ "success": true })
+    });
+    let resumed_models: std::sync::Mutex<Vec<(Option<String>, bool, bool)>> =
+        std::sync::Mutex::new(Vec::new());
+    let ok_req = json!({
+        "confirmationId": conf.confirmation_id,
+        "selectedModelId": "gemini-2.5-pro",
+        "autoResumeTurn": true,
+    });
+    let ok_res = confirm_pending_auto_switch_in(
+        Some(ok_req),
+        10_010_000,
+        &eval_lock,
+        &state,
+        &store,
+        &env,
+        |_prov, _desired| Ok(("gemini-2.5-flash".to_string(), true, vec!["gemini-2.5-flash".to_string()])),
+        |c, applied, adjusted, auto_resume| {
+            resumed_models.lock().unwrap().push((
+                applied.map(String::from),
+                adjusted,
+                auto_resume,
+            ));
+            c.thread_id.clone()
+        },
+    );
+    assert_eq!(ok_res["success"], true);
+    assert_eq!(ok_res["appliedModel"], "gemini-2.5-flash");
+    assert_eq!(ok_res["modelAdjusted"], true);
+    assert_eq!(ok_res["resumedThreadId"], "thread-confirm-1");
+    assert!(store.lock().unwrap().is_empty());
+    assert_eq!(
+        *resumed_models.lock().unwrap(),
+        vec![(Some("gemini-2.5-flash".to_string()), true, true)]
+    );
+    let updated_reg = load_registry_from(&tmp);
+    let target_prof = updated_reg.profiles.iter().find(|p| p.id == "acc-2").unwrap();
+    assert_eq!(target_prof.available_model_ids, vec!["gemini-2.5-flash".to_string()]);
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .last_switch_unix_ms
+            .get("agy")
+            .copied()
+            == Some(10_010_000)
+    );
+    assert!(env
+        .take_events()
+        .iter()
+        .any(|(ev, p)| ev == "kite://auto-switch-executed"
+            && p["confirmationId"] == conf.confirmation_id
+            && p["appliedModel"] == "gemini-2.5-flash"
+            && p["modelAdjusted"] == true
+            && p["resumedThreadId"] == "thread-confirm-1"));
+    let _ = get_auto_switch_policy_in(&tmp, "agy");
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_verify_fresh_model_catalog_with_fetcher_validates_and_falls_back() {
+    use super::auto_switch::verify_fresh_model_catalog_with_fetcher;
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_cat_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-1", "cat@kite.local");
+    let reg = AccountProfilesRegistry {
+        profiles: vec![SavedAccountProfile {
+            id: "acc-1".to_string(),
+            provider: "agy".to_string(),
+            label: "Cat".to_string(),
+            email: Some("cat@kite.local".to_string()),
+            is_active: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    // 1. Exact/base catalog match keeps desired model without adjustment.
+    let (id1, adj1, list1) = verify_fresh_model_catalog_with_fetcher(
+        &tmp,
+        "agy",
+        "claude-opus-4-6",
+        Some("cat@kite.local"),
+        |chat_prov| {
+            assert_eq!(chat_prov, "antigravity");
+            json!({
+                "catalogState": "ready",
+                "models": [
+                    { "id": "claude-opus-4-6" },
+                    { "id": "gemini-2.5-pro" }
+                ]
+            })
+        },
+    )
+    .expect("exact match succeeds");
+    assert_eq!(id1, "claude-opus-4-6");
+    assert!(!adj1);
+    assert_eq!(list1.len(), 2);
+
+    // 2. Dropped model falls back to closest catalog entry and marks adjusted = true.
+    let (id2, adj2, _list2) = verify_fresh_model_catalog_with_fetcher(
+        &tmp,
+        "agy",
+        "claude-opus-4-6",
+        Some("cat@kite.local"),
+        |_chat_prov| {
+            json!({
+                "catalogState": "ready",
+                "models": [
+                    { "id": "gemini-2.5-pro" },
+                    { "id": "gemini-2.5-flash" }
+                ]
+            })
+        },
+    )
+    .expect("fallback succeeds");
+    assert_eq!(id2, "gemini-2.5-pro");
+    assert!(adj2);
+    let updated = load_registry_from(&tmp);
+    assert_eq!(
+        updated.profiles[0].available_model_ids,
+        vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_dismiss_and_cleanup_pending_auto_switches() {
+    use super::auto_switch::{
+        clear_runtime_pause_on_policy_disable, dismiss_pending_auto_switch_in,
+        on_manual_switch_with_store, publish_needs_confirmation_in, AutoSwitchCoordinatorState,
+        AutoSwitchOutcome, PendingAutoSwitchConfirmation,
+    };
+    use super::commands::RankedSwitchCandidate;
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_dismiss_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+        std::sync::Mutex::new(Vec::new());
+
+    let mk_outcome = |prov: &str, to_id: &str| AutoSwitchOutcome::NeedsConfirmation {
+        provider: prov.to_string(),
+        from_account_id: Some("a1".to_string()),
+        from_account_label: "A1".to_string(),
+        from_email: None,
+        source_plan_name: None,
+        candidate: RankedSwitchCandidate {
+            profile: SavedAccountProfile {
+                id: to_id.to_string(),
+                provider: prov.to_string(),
+                label: "Target".to_string(),
+                ..Default::default()
+            },
+            compatibility: "unverified_catalog".to_string(),
+            requested_model: Some("claude-sonnet-4-6".to_string()),
+            suggested_fallback_model: None,
+            available_target_models: Vec::new(),
+            source_plan: None,
+            target_plan: None,
+            remaining_percent: Some(90.0),
+            known_healthy_quota: true,
+            quota_confidence: 1,
+            relevant_window_name: None,
+        },
+        reason: "unverified_catalog".to_string(),
+        requested_model: Some("claude-sonnet-4-6".to_string()),
+        thread_id: None,
+        busy_sessions: Vec::new(),
+        trigger_source: "quota_poll".to_string(),
+    };
+
+    let c1 = publish_needs_confirmation_in(&mk_outcome("agy", "t1"), None, 1_000, &store, &env)
+        .unwrap();
+    let c2 = publish_needs_confirmation_in(&mk_outcome("agy", "t2"), None, 1_100, &store, &env)
+        .unwrap();
+    let dismissed = dismiss_pending_auto_switch_in(
+        Some(json!({ "confirmationId": c1.confirmation_id })),
+        1_200,
+        &store,
+        &env,
+    );
+    assert_eq!(dismissed["success"], true);
+    assert_eq!(dismissed["dismissed"], true);
+    assert_eq!(store.lock().unwrap().len(), 1);
+    assert_eq!(store.lock().unwrap()[0].confirmation_id, c2.confirmation_id);
+
+    // Manual switch clears remaining confirmations for that provider.
+    let mut state = AutoSwitchCoordinatorState::default();
+    on_manual_switch_with_store("agy", &mut state, &store, &env);
+    assert!(store.lock().unwrap().is_empty());
+
+    // Clear on policy disable clears global pending store for the targeted provider.
+    struct GlobalCleanupGuard(&'static str);
+    impl Drop for GlobalCleanupGuard {
+        fn drop(&mut self) {
+            super::auto_switch::clear_pending_confirmations_for_provider_global(self.0);
+        }
+    }
+    let test_prov = "gemini_as_cleanup_test";
+    let _guard = GlobalCleanupGuard(test_prov);
+    let global_store = super::auto_switch::pending_auto_switches_store();
+    let _gconf = publish_needs_confirmation_in(
+        &mk_outcome(test_prov, "g1"),
+        None,
+        2_000,
+        global_store,
+        &env,
+    )
+    .unwrap();
+    clear_runtime_pause_on_policy_disable(test_prov);
+    assert!(!global_store
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.provider == test_prov));
+
+    let _ = fs::remove_dir_all(&tmp);
+}

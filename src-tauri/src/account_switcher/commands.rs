@@ -1408,7 +1408,7 @@ fn strip_model_effort_suffix(model: &str) -> &str {
     model
 }
 
-fn models_match_exact_or_base(candidate_id: &str, requested_model: &str) -> bool {
+pub(crate) fn models_match_exact_or_base(candidate_id: &str, requested_model: &str) -> bool {
     if candidate_id.eq_ignore_ascii_case(requested_model) {
         return true;
     }
@@ -1482,7 +1482,7 @@ fn is_window_healthy(w: &CachedQuotaWindow, threshold: f64, now_unix_ms: i64) ->
     (!w.is_exhausted && w.remaining_percent > threshold) || is_window_reset_elapsed(w, now_unix_ms)
 }
 
-fn pick_suggested_fallback_model(
+pub(crate) fn pick_suggested_fallback_model(
     requested_model: &str,
     available_models: &[String],
     windows: &[CachedQuotaWindow],
@@ -1896,6 +1896,24 @@ pub async fn resume_auto_switch_impl(request: Option<Value>) -> Value {
         .unwrap_or("agy")
         .to_string();
     tokio::task::spawn_blocking(move || resume_auto_switch_direct(&provider))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
+}
+
+pub async fn list_pending_auto_switches_impl(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || super::auto_switch::list_pending_auto_switches_direct(request))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
+}
+
+pub async fn confirm_pending_auto_switch_impl(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || super::auto_switch::confirm_pending_auto_switch_direct(request))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
+}
+
+pub async fn dismiss_pending_auto_switch_impl(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || super::auto_switch::dismiss_pending_auto_switch_direct(request))
         .await
         .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker failed: {e}") }))
 }

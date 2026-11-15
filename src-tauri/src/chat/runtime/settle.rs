@@ -43,6 +43,7 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     let mut profile_for_routine: Option<String> = None;
     let mut reflection_task: Option<(String, String, String)> = None;
     let mut quota_events: Option<(Value, Value)> = None;
+    let mut exhausted_turn_ctx: Option<ExhaustedThreadTurnContext> = None;
 
     let error_item = if !ok && !stopped && assistant_text.is_empty() && !error_text.is_empty() {
         Some(chat_item(&format!("e{}", Uuid::new_v4().simple()), "error", error_text, false))
@@ -212,6 +213,30 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                     });
                     upsert_item(thread, &handoff_item);
                     quota_events = Some((handoff_item, offer));
+
+                    if !waiting_for_permission && !stopped {
+                        let account_provider =
+                            crate::account_switcher::canon_provider(&current_provider);
+                        if !account_provider.is_empty() {
+                            let requested_model = thread
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(String::from);
+                            exhausted_turn_ctx = Some(ExhaustedThreadTurnContext {
+                                thread_id: thread_id.clone(),
+                                account_provider,
+                                requested_model,
+                                profile_id: thread
+                                    .get("profileId")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                handoff_prompt: handoff_capsule.clone(),
+                                now_unix_ms: now_ms(),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -287,6 +312,9 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     if !thread_id.is_empty() {
         crate::chat::swarm::on_worker_turn_settled(&thread_id, ok && !stopped);
         crate::dispatch_wire::on_thread_settled(&thread_id);
+    }
+    if let Some(ctx) = exhausted_turn_ctx {
+        handle_thread_quota_exhaustion_after_settle(&ctx);
     }
     chat_log(&format!("finish_run: completed cleanly for run_id={}", run_id));
 }
@@ -420,4 +448,628 @@ pub fn continue_turn_with_handoff(request: Option<Value>) -> Result<Value, Strin
 
     let profile_id = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
     Ok(start_turn(&thread_id, profile_id.as_deref(), &handoff_prompt, Vec::new(), None))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExhaustedThreadTurnContext {
+    pub thread_id: String,
+    pub account_provider: String,
+    pub requested_model: Option<String>,
+    pub profile_id: Option<String>,
+    pub handoff_prompt: String,
+    pub now_unix_ms: i64,
+}
+
+fn format_provider_display_name(account_provider: &str) -> &str {
+    match account_provider {
+        "agy" | "antigravity" => "Antigravity",
+        other => other,
+    }
+}
+
+fn load_thread_snapshot(thread_id: &str) -> Value {
+    let existing = {
+        let items = threads().lock().unwrap();
+        items
+            .iter()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+            .cloned()
+    };
+    existing.unwrap_or_else(|| load_thread(thread_id, None, "Chat"))
+}
+
+fn resolve_thread_handoff_prompt(thread_id: &str, account_provider: &str) -> String {
+    let thread = load_thread_snapshot(thread_id);
+    if let Some(saved) = thread
+        .pointer("/quotaHandoffOffer/handoffPrompt")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return saved.to_string();
+    }
+    let from_p = thread
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if account_provider == "agy" {
+                "antigravity"
+            } else {
+                account_provider
+            }
+        });
+    let ws_id = thread.get("workspaceId").and_then(|v| v.as_str());
+    crate::handoff::build_handoff_capsule(thread_id, from_p, "", ws_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_thread_auto_switch_and_continue<C>(
+    thread_id: &str,
+    account_provider: &str,
+    to_account_label: &str,
+    applied_model: Option<&str>,
+    requested_model: Option<&str>,
+    model_adjusted: bool,
+    fallback_profile_id: Option<&str>,
+    handoff_prompt: &str,
+    auto_continue: bool,
+    continue_turn: C,
+) -> Option<String>
+where
+    C: FnOnce(&str, Option<&str>, &str) -> Value,
+{
+    let mut thread = load_thread_snapshot(thread_id);
+    thread["quotaHandoffOffer"] = Value::Null;
+    thread["providerSessionId"] = Value::Null;
+    if let Some(model_id) = applied_model.map(str::trim).filter(|s| !s.is_empty()) {
+        thread["model"] = json!(model_id);
+    }
+
+    let provider_label = format_provider_display_name(account_provider);
+    let mut note_text = match (model_adjusted, requested_model, applied_model) {
+        (true, Some(req), Some(app)) if !req.eq_ignore_ascii_case(app) => format!(
+            "Switched {} account to {} and updated model from {} to {}.",
+            provider_label, to_account_label, req, app
+        ),
+        (_, _, Some(app)) if !app.trim().is_empty() => format!(
+            "Switched {} account to {} (model {}).",
+            provider_label, to_account_label, app
+        ),
+        _ => format!("Switched {} account to {}.", provider_label, to_account_label),
+    };
+    if !auto_continue {
+        note_text.push_str(" Auto-continue is disabled; send a message when ready to continue.");
+    }
+
+    let note_id = format!("as_{}", Uuid::new_v4().simple());
+    let note_item = chat_item(&note_id, "note", &note_text, false);
+    upsert_item(&mut thread, &note_item);
+    touch(&mut thread);
+    replace_thread(&thread);
+
+    let profile_id = thread
+        .get("profileId")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| fallback_profile_id.map(String::from));
+
+    if auto_continue && !handoff_prompt.trim().is_empty() {
+        let _ = continue_turn(thread_id, profile_id.as_deref(), handoff_prompt);
+        Some(thread_id.to_string())
+    } else {
+        persist();
+        None
+    }
+}
+
+fn pause_thread_for_fresh_catalog_mismatch(
+    thread_id: &str,
+    account_provider: &str,
+    to_account_label: &str,
+    requested_model: &str,
+) {
+    let mut thread = load_thread_snapshot(thread_id);
+    let provider_label = format_provider_display_name(account_provider);
+    let note_text = format!(
+        "Switched {} account to {}, but model {} is unavailable in the target catalog. Confirm a fallback model in Notifications to continue.",
+        provider_label, to_account_label, requested_model
+    );
+    let note_id = format!("as_{}", Uuid::new_v4().simple());
+    let note_item = chat_item(&note_id, "note", &note_text, false);
+    upsert_item(&mut thread, &note_item);
+    touch(&mut thread);
+    replace_thread(&thread);
+    persist();
+}
+
+pub(crate) fn resume_thread_after_auto_switch(
+    conf: &crate::account_switcher::PendingAutoSwitchConfirmation,
+    applied_model: Option<&str>,
+    model_adjusted: bool,
+    auto_resume: bool,
+) -> Option<String> {
+    let tid = conf.thread_id.as_deref()?.trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let handoff_prompt = conf
+        .handoff_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| resolve_thread_handoff_prompt(tid, &conf.provider));
+    apply_thread_auto_switch_and_continue(
+        tid,
+        &conf.provider,
+        &conf.to_account_label,
+        applied_model,
+        conf.requested_model.as_deref(),
+        model_adjusted,
+        None,
+        &handoff_prompt,
+        auto_resume,
+        |id, pid, prompt| start_turn(id, pid, prompt, Vec::new(), None),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_thread_quota_exhaustion_after_settle_with<E, Eval, Pol, Ver, Cont>(
+    ctx: &ExhaustedThreadTurnContext,
+    store: &std::sync::Mutex<Vec<crate::account_switcher::PendingAutoSwitchConfirmation>>,
+    publish_env: &E,
+    evaluate: Eval,
+    get_mismatch_policy: Pol,
+    verify_catalog: Ver,
+    continue_turn: Cont,
+) where
+    E: crate::account_switcher::AutoSwitchEnv,
+    Eval: FnOnce(crate::account_switcher::AutoSwitchTriggerRequest) -> crate::account_switcher::AutoSwitchOutcome,
+    Pol: FnOnce() -> String,
+    Ver: FnOnce(&str, &str) -> Result<(String, bool, Vec<String>), String>,
+    Cont: FnOnce(&str, Option<&str>, &str) -> Value,
+{
+    if ctx.thread_id.trim().is_empty() || ctx.account_provider.trim().is_empty() {
+        return;
+    }
+    let req = crate::account_switcher::AutoSwitchTriggerRequest {
+        provider: ctx.account_provider.clone(),
+        trigger_source: "chat_turn".to_string(),
+        requested_model: ctx.requested_model.clone(),
+        thread_id: Some(ctx.thread_id.clone()),
+        current_remaining_percent: Some(0.0),
+        has_exhausted_window: true,
+        now_unix_ms: ctx.now_unix_ms,
+    };
+
+    let outcome = evaluate(req);
+    match outcome {
+        crate::account_switcher::AutoSwitchOutcome::Switched {
+            from_account_id,
+            from_account_label,
+            to_account_id,
+            to_account_label,
+            to_email,
+            to_plan,
+            requested_model,
+            applied_model,
+            model_adjusted,
+            auto_continue_chat_turn,
+            ..
+        } => {
+            let desired_model = applied_model
+                .as_deref()
+                .or(requested_model.as_deref())
+                .unwrap_or("");
+            let mismatch_policy = get_mismatch_policy();
+            let (verified_model, fresh_adjusted, fresh_models) =
+                match verify_catalog(&ctx.account_provider, desired_model) {
+                    Ok((id, adjusted, models)) => (
+                        (!id.trim().is_empty()).then_some(id),
+                        adjusted,
+                        models,
+                    ),
+                    Err(_) => (applied_model.clone(), false, Vec::new()),
+                };
+
+            if !model_adjusted
+                && fresh_adjusted
+                && mismatch_policy == "confirm_notification"
+            {
+                if let Some(ref req_m) = ctx.requested_model {
+                    pause_thread_for_fresh_catalog_mismatch(
+                        &ctx.thread_id,
+                        &ctx.account_provider,
+                        &to_account_label,
+                        req_m,
+                    );
+                    let conf = crate::account_switcher::PendingAutoSwitchConfirmation {
+                        confirmation_id: format!("asc_{}", Uuid::new_v4().simple()),
+                        provider: ctx.account_provider.clone(),
+                        from_account_id,
+                        from_account_label,
+                        from_email: None,
+                        to_account_id,
+                        to_account_label,
+                        to_email,
+                        to_plan_name: to_plan,
+                        source_plan_name: None,
+                        requested_model: ctx.requested_model.clone(),
+                        suggested_fallback_model: verified_model,
+                        available_target_models: fresh_models,
+                        thread_id: Some(ctx.thread_id.clone()),
+                        handoff_prompt: Some(ctx.handoff_prompt.clone()),
+                        busy_sessions: Vec::new(),
+                        reason: "model_mismatch".to_string(),
+                        created_at_unix_ms: ctx.now_unix_ms,
+                        expires_at_unix_ms: ctx
+                            .now_unix_ms
+                            .saturating_add(crate::account_switcher::PENDING_CONFIRMATION_TTL_MS),
+                    };
+                    let _ = crate::account_switcher::auto_switch::publish_confirmation_record_in(
+                        conf,
+                        ctx.now_unix_ms,
+                        store,
+                        publish_env,
+                    );
+                    return;
+                }
+            }
+
+            let final_model = verified_model.or(applied_model);
+            let final_adjusted = model_adjusted
+                || fresh_adjusted
+                || ctx
+                    .requested_model
+                    .as_deref()
+                    .zip(final_model.as_deref())
+                    .is_some_and(|(req_m, app_m)| !req_m.eq_ignore_ascii_case(app_m));
+
+            let _ = apply_thread_auto_switch_and_continue(
+                &ctx.thread_id,
+                &ctx.account_provider,
+                &to_account_label,
+                final_model.as_deref(),
+                ctx.requested_model.as_deref(),
+                final_adjusted,
+                ctx.profile_id.as_deref(),
+                &ctx.handoff_prompt,
+                auto_continue_chat_turn,
+                continue_turn,
+            );
+        }
+        crate::account_switcher::AutoSwitchOutcome::NeedsConfirmation { .. } => {
+            let _ = crate::account_switcher::auto_switch::publish_needs_confirmation_in(
+                &outcome,
+                Some(ctx.handoff_prompt.clone()),
+                ctx.now_unix_ms,
+                store,
+                publish_env,
+            );
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn handle_thread_quota_exhaustion_after_settle(ctx: &ExhaustedThreadTurnContext) {
+    let provider = ctx.account_provider.clone();
+    handle_thread_quota_exhaustion_after_settle_with(
+        ctx,
+        crate::account_switcher::auto_switch::pending_auto_switches_store(),
+        &crate::account_switcher::LiveAutoSwitchEnv,
+        crate::account_switcher::evaluate_auto_switch_raw,
+        move || {
+            let policy_val = crate::account_switcher::get_auto_switch_policy_direct(&provider);
+            policy_val
+                .pointer("/policy/modelMismatchPolicy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("confirm_notification")
+                .to_string()
+        },
+        crate::account_switcher::verify_fresh_model_catalog_live,
+        |tid, pid, prompt| start_turn(tid, pid, prompt, Vec::new(), None),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account_switcher::{
+        AutoSwitchEnv, AutoSwitchOutcome, AutoSwitchRuntimeStatus,
+        PendingAutoSwitchConfirmation, RankedSwitchCandidate, SavedAccountProfile,
+    };
+
+    #[derive(Default)]
+    struct NoopPublishEnv;
+    impl AutoSwitchEnv for NoopPublishEnv {
+        fn profiles_root(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+        fn inspect_external(&self, _provider: &str) -> crate::account_switcher::ExternalProcessInspection {
+            crate::account_switcher::ExternalProcessInspection::idle()
+        }
+        fn inspect_sessions(&self, _provider: &str) -> crate::terminal::ProviderSessionsInspection {
+            crate::terminal::ProviderSessionsInspection::default()
+        }
+        fn execute_switch(&self, _provider: &str, _account_id: &str, _force_busy: bool) -> Value {
+            json!({ "success": true })
+        }
+        fn get_runtime_status(&self, _provider: &str) -> AutoSwitchRuntimeStatus {
+            AutoSwitchRuntimeStatus::default()
+        }
+        fn set_runtime_status(&self, _provider: &str, _status: AutoSwitchRuntimeStatus) {}
+        fn emit_event(&self, _event: &str, _payload: Value) {}
+    }
+
+    struct ThreadCleanupGuard(String);
+    impl Drop for ThreadCleanupGuard {
+        fn drop(&mut self) {
+            let mut items = threads().lock().unwrap();
+            items.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(self.0.as_str()));
+        }
+    }
+
+    fn seed_test_thread(thread_id: &str, model: &str) -> ThreadCleanupGuard {
+        let mut items = threads().lock().unwrap();
+        items.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(thread_id));
+        items.push(json!({
+            "id": thread_id,
+            "provider": "antigravity",
+            "model": model,
+            "providerSessionId": "sess-old-1",
+            "quotaHandoffOffer": {
+                "failedProvider": "antigravity",
+                "reason": "quota exhausted",
+                "handoffPrompt": "Resume exact task",
+            },
+            "items": [],
+            "updatedAtUnixMs": 1_000,
+        }));
+        ThreadCleanupGuard(thread_id.to_string())
+    }
+
+    #[test]
+    fn test_handle_thread_quota_exhaustion_after_settle_exact_switch_updates_model_and_continues() {
+        let tid = format!("th-as-exact-{}", Uuid::new_v4());
+        let _guard = seed_test_thread(&tid, "claude-opus-4-6");
+
+        let ctx = ExhaustedThreadTurnContext {
+            thread_id: tid.clone(),
+            account_provider: "agy".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            profile_id: Some("prof-1".to_string()),
+            handoff_prompt: "Continue debugging module X".to_string(),
+            now_unix_ms: 9_000_000,
+        };
+
+        let continued: std::sync::Mutex<Vec<(String, Option<String>, String)>> =
+            std::sync::Mutex::new(Vec::new());
+        let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+            std::sync::Mutex::new(Vec::new());
+
+        handle_thread_quota_exhaustion_after_settle_with(
+            &ctx,
+            &store,
+            &NoopPublishEnv,
+            |_req| AutoSwitchOutcome::Switched {
+                provider: "agy".to_string(),
+                from_account_id: Some("acc-1".to_string()),
+                from_account_label: "Pro 1".to_string(),
+                to_account_id: "acc-2".to_string(),
+                to_account_label: "Pro 2".to_string(),
+                to_email: Some("p2@kite.local".to_string()),
+                to_plan: Some("Google AI Pro".to_string()),
+                requested_model: Some("claude-opus-4-6".to_string()),
+                applied_model: Some("claude-opus-4-6".to_string()),
+                model_adjusted: false,
+                auto_continue_chat_turn: true,
+                compatibility: "exact".to_string(),
+                status: AutoSwitchRuntimeStatus::default(),
+            },
+            || "confirm_notification".to_string(),
+            |_prov, model| Ok((model.to_string(), false, vec![model.to_string()])),
+            |thread_id, profile_id, prompt| {
+                continued
+                    .lock()
+                    .unwrap()
+                    .push((thread_id.to_string(), profile_id.map(String::from), prompt.to_string()));
+                json!({ "runId": "run-continued-1" })
+            },
+        );
+
+        let updated = {
+            let items = threads().lock().unwrap();
+            items
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(tid.as_str()))
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(updated["model"], "claude-opus-4-6");
+        assert!(updated["quotaHandoffOffer"].is_null());
+        assert!(updated["providerSessionId"].is_null());
+        let thread_items = updated["items"].as_array().unwrap();
+        assert!(thread_items
+            .iter()
+            .any(|it| it["kind"] == "note"
+                && it["text"].as_str().unwrap_or("").contains("Pro 2")));
+        assert_eq!(
+            *continued.lock().unwrap(),
+            vec![(
+                tid.clone(),
+                Some("prof-1".to_string()),
+                "Continue debugging module X".to_string()
+            )]
+        );
+        assert!(store.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_handle_thread_quota_exhaustion_after_settle_needs_confirmation_leaves_offer_intact() {
+        let tid = format!("th-as-confirm-{}", Uuid::new_v4());
+        let _guard = seed_test_thread(&tid, "claude-opus-4-6");
+
+        let ctx = ExhaustedThreadTurnContext {
+            thread_id: tid.clone(),
+            account_provider: "agy".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            profile_id: None,
+            handoff_prompt: "Continue prompt preserved".to_string(),
+            now_unix_ms: 9_100_000,
+        };
+
+        let continued = std::sync::atomic::AtomicBool::new(false);
+        let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+            std::sync::Mutex::new(Vec::new());
+
+        handle_thread_quota_exhaustion_after_settle_with(
+            &ctx,
+            &store,
+            &NoopPublishEnv,
+            |_req| AutoSwitchOutcome::NeedsConfirmation {
+                provider: "agy".to_string(),
+                from_account_id: Some("acc-1".to_string()),
+                from_account_label: "Pro".to_string(),
+                from_email: Some("pro@kite.local".to_string()),
+                source_plan_name: Some("Google AI Pro".to_string()),
+                candidate: RankedSwitchCandidate {
+                    profile: SavedAccountProfile {
+                        id: "acc-free".to_string(),
+                        provider: "agy".to_string(),
+                        label: "Free".to_string(),
+                        plan_name: Some("Free".to_string()),
+                        available_model_ids: vec!["gemini-2.5-pro".to_string()],
+                        ..Default::default()
+                    },
+                    compatibility: "model_mismatch".to_string(),
+                    requested_model: Some("claude-opus-4-6".to_string()),
+                    suggested_fallback_model: Some("gemini-2.5-pro".to_string()),
+                    available_target_models: vec!["gemini-2.5-pro".to_string()],
+                    source_plan: Some("Google AI Pro".to_string()),
+                    target_plan: Some("Free".to_string()),
+                    remaining_percent: Some(100.0),
+                    known_healthy_quota: true,
+                    quota_confidence: 2,
+                    relevant_window_name: None,
+                },
+                reason: "model_mismatch".to_string(),
+                requested_model: Some("claude-opus-4-6".to_string()),
+                thread_id: Some(tid.clone()),
+                busy_sessions: Vec::new(),
+                trigger_source: "chat_turn".to_string(),
+            },
+            || "confirm_notification".to_string(),
+            |_prov, _model| unreachable!("verify_catalog should not run before confirmation"),
+            |_tid, _pid, _prompt| {
+                continued.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({})
+            },
+        );
+
+        assert!(!continued.load(std::sync::atomic::Ordering::SeqCst));
+        let stored_thread = {
+            let items = threads().lock().unwrap();
+            items
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(tid.as_str()))
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(stored_thread["model"], "claude-opus-4-6");
+        assert!(!stored_thread["quotaHandoffOffer"].is_null());
+
+        let pending = store.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].thread_id.as_deref(), Some(tid.as_str()));
+        assert_eq!(
+            pending[0].handoff_prompt.as_deref(),
+            Some("Continue prompt preserved")
+        );
+        assert_eq!(
+            pending[0].suggested_fallback_model.as_deref(),
+            Some("gemini-2.5-pro")
+        );
+    }
+
+    #[test]
+    fn test_handle_thread_quota_exhaustion_after_settle_unexpected_fresh_mismatch_pauses_confirm() {
+        let tid = format!("th-as-fresh-mismatch-{}", Uuid::new_v4());
+        let _guard = seed_test_thread(&tid, "claude-opus-4-6");
+
+        let ctx = ExhaustedThreadTurnContext {
+            thread_id: tid.clone(),
+            account_provider: "agy".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            profile_id: None,
+            handoff_prompt: "Keep prompt for fallback confirm".to_string(),
+            now_unix_ms: 9_200_000,
+        };
+
+        let continued = std::sync::atomic::AtomicBool::new(false);
+        let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+            std::sync::Mutex::new(Vec::new());
+
+        handle_thread_quota_exhaustion_after_settle_with(
+            &ctx,
+            &store,
+            &NoopPublishEnv,
+            |_req| AutoSwitchOutcome::Switched {
+                provider: "agy".to_string(),
+                from_account_id: Some("acc-1".to_string()),
+                from_account_label: "Pro".to_string(),
+                to_account_id: "acc-2".to_string(),
+                to_account_label: "Next Account".to_string(),
+                to_email: Some("next@kite.local".to_string()),
+                to_plan: Some("Free".to_string()),
+                requested_model: Some("claude-opus-4-6".to_string()),
+                applied_model: Some("claude-opus-4-6".to_string()),
+                model_adjusted: false,
+                auto_continue_chat_turn: true,
+                compatibility: "exact".to_string(),
+                status: AutoSwitchRuntimeStatus::default(),
+            },
+            || "confirm_notification".to_string(),
+            |_prov, _model| {
+                Ok((
+                    "gemini-2.5-pro".to_string(),
+                    true,
+                    vec!["gemini-2.5-pro".to_string()],
+                ))
+            },
+            |_tid, _pid, _prompt| {
+                continued.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({})
+            },
+        );
+
+        assert!(!continued.load(std::sync::atomic::Ordering::SeqCst));
+        let stored_thread = {
+            let items = threads().lock().unwrap();
+            items
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(tid.as_str()))
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(stored_thread["model"], "claude-opus-4-6");
+        assert!(!stored_thread["quotaHandoffOffer"].is_null());
+        assert!(stored_thread["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|it| it["kind"] == "note"));
+
+        let pending = store.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].reason, "model_mismatch");
+        assert_eq!(
+            pending[0].suggested_fallback_model.as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            pending[0].handoff_prompt.as_deref(),
+            Some("Keep prompt for fallback confirm")
+        );
+    }
 }

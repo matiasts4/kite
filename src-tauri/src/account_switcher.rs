@@ -98,3 +98,18 @@ pub async fn save_auto_switch_policy(request: Option<Value>) -> Value {
 pub async fn resume_auto_switch(request: Option<Value>) -> Value {
     commands::resume_auto_switch_impl(request).await
 }
+
+#[tauri::command]
+pub async fn list_pending_auto_switches(request: Option<Value>) -> Value {
+    commands::list_pending_auto_switches_impl(request).await
+}
+
+#[tauri::command]
+pub async fn confirm_pending_auto_switch(request: Option<Value>) -> Value {
+    commands::confirm_pending_auto_switch_impl(request).await
+}
+
+#[tauri::command]
+pub async fn dismiss_pending_auto_switch(request: Option<Value>) -> Value {
+    commands::dismiss_pending_auto_switch_impl(request).await
+}

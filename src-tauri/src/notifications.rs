@@ -274,6 +274,189 @@ pub async fn notifications_report_attention(request: Option<Value>) -> Value {
         .unwrap_or_else(|_| make_notifications_snapshot())
 }
 
+fn format_auto_switch_confirmation_copy(
+    confirmation: &crate::account_switcher::PendingAutoSwitchConfirmation,
+) -> (String, String) {
+    let from_label = if confirmation.from_account_label.trim().is_empty() {
+        "current account"
+    } else {
+        confirmation.from_account_label.trim()
+    };
+    let to_target = match confirmation
+        .to_plan_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(plan) => format!("{} ({})", confirmation.to_account_label, plan),
+        None => confirmation.to_account_label.clone(),
+    };
+    let busy_count = confirmation.busy_sessions.len();
+    let title = match confirmation.reason.as_str() {
+        "busy_terminals_ask" => format!(
+            "Confirm switch to {} ({} busy terminal{})",
+            confirmation.to_account_label,
+            busy_count,
+            if busy_count == 1 { "" } else { "s" }
+        ),
+        "unverified_catalog" => format!(
+            "Confirm switch to {} (catalog unverified)",
+            confirmation.to_account_label
+        ),
+        _ => format!(
+            "Model confirmation required to switch to {}",
+            confirmation.to_account_label
+        ),
+    };
+
+    let mut body = format!("Switching from {} to {}.", from_label, to_target);
+    let req_model = confirmation
+        .requested_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let fallback_model = confirmation
+        .suggested_fallback_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match confirmation.reason.as_str() {
+        "busy_terminals_ask" => {
+            if busy_count > 0 {
+                body.push_str(&format!(
+                    " {} active terminal session{} may be interrupted.",
+                    busy_count,
+                    if busy_count == 1 { "" } else { "s" }
+                ));
+            }
+            if let Some(req) = req_model {
+                body.push_str(&format!(" Current model: '{}'.", req));
+            }
+        }
+        "unverified_catalog" => {
+            if let Some(req) = req_model {
+                body.push_str(&format!(
+                    " Model '{}' compatibility is unverified for the target account.",
+                    req
+                ));
+            }
+            if let Some(fb) = fallback_model.filter(|fb| Some(*fb) != req_model) {
+                body.push_str(&format!(" Suggested fallback: '{}'.", fb));
+            }
+        }
+        _ => match (req_model, fallback_model) {
+            (Some(req), Some(fb)) if !req.eq_ignore_ascii_case(fb) => {
+                body.push_str(&format!(
+                    " Requested model '{}' is unavailable; suggested fallback: '{}'.",
+                    req, fb
+                ));
+            }
+            (Some(req), _) => {
+                body.push_str(&format!(" Requested model '{}' requires confirmation.", req));
+            }
+            (None, Some(fb)) => {
+                body.push_str(&format!(" Suggested fallback model: '{}'.", fb));
+            }
+            (None, None) => {}
+        },
+    }
+
+    (title, body)
+}
+
+/// Inserts or replaces a sticky actionable notification for a pending auto-switch confirmation.
+/// Releases `notifications()` BEFORE snapshotting or calling `persist()`.
+pub(crate) fn upsert_auto_switch_confirmation_notification(
+    confirmation: &crate::account_switcher::PendingAutoSwitchConfirmation,
+) -> Value {
+    let id = format!("autoswitch_{}", confirmation.confirmation_id);
+    let target = if let Some(ref tid) = confirmation.thread_id {
+        json!({ "source": "codeThread", "id": tid })
+    } else {
+        json!({ "source": "accountVault", "id": confirmation.provider })
+    };
+    let (title, body) = format_auto_switch_confirmation_copy(confirmation);
+    let notice = json!({
+        "id": id,
+        "runId": Value::Null,
+        "target": target,
+        "profileId": Value::Null,
+        "routineId": Value::Null,
+        "kind": {
+            "kind": "autoSwitchConfirm",
+            "requestKind": confirmation.reason,
+        },
+        "title": title,
+        "body": body,
+        "confirmationId": confirmation.confirmation_id,
+        "autoSwitchConfirm": serde_json::to_value(confirmation).unwrap_or(Value::Null),
+        "createdAtUnixMs": confirmation.created_at_unix_ms,
+        "isRead": false,
+        "isWaitingForInput": true,
+        "resolution": Value::Null,
+    });
+
+    {
+        let mut items = notifications().lock().unwrap();
+        items.retain(|existing| existing.get("id").and_then(|v| v.as_str()) != Some(&id));
+        items.insert(0, notice);
+        if items.len() > 100 {
+            items.truncate(100);
+        }
+    }
+
+    let snapshot = make_notifications_snapshot();
+    persist();
+    snapshot
+}
+
+/// Resolves sticky auto-switch confirmation notifications in bulk (`"attended"` or `"abandoned"`).
+/// Drops `notifications()` lock BEFORE calling `persist()`.
+pub(crate) fn resolve_auto_switch_notifications_for_ids(
+    confirmation_ids: &[String],
+    resolution: &str,
+) -> usize {
+    if confirmation_ids.is_empty() {
+        return 0;
+    }
+    let mut changed = 0usize;
+    {
+        let mut items = notifications().lock().unwrap();
+        for item in items.iter_mut() {
+            let matches = confirmation_ids.iter().any(|cid| {
+                let expected_id = format!("autoswitch_{}", cid);
+                item.get("confirmationId").and_then(|v| v.as_str()) == Some(cid.as_str())
+                    || item.get("id").and_then(|v| v.as_str()) == Some(expected_id.as_str())
+            });
+            if !matches {
+                continue;
+            }
+            let unresolved = item.get("resolution").map(|v| v.is_null()).unwrap_or(true)
+                || item.get("isWaitingForInput").and_then(|v| v.as_bool()) == Some(true);
+            if unresolved {
+                item["resolution"] = json!(resolution);
+                item["isWaitingForInput"] = json!(false);
+                item["isRead"] = json!(true);
+                changed += 1;
+            }
+        }
+    }
+
+    if changed > 0 {
+        persist();
+    }
+    changed
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_auto_switch_confirmation_notification(
+    confirmation_id: &str,
+    resolution: &str,
+) -> bool {
+    resolve_auto_switch_notifications_for_ids(&[confirmation_id.to_string()], resolution) > 0
+}
+
 pub fn notifications_mark_read_direct(request: Option<Value>) -> Value {
     let req = body(&request);
     let record_id = req.and_then(|r| r.get("recordId")).and_then(|v| v.as_str()).unwrap_or("");
@@ -519,5 +702,75 @@ mod tests {
         let records2 = snap2["records"].as_array().unwrap();
         let approval = records2.iter().find(|r| r["id"] == "approval-req-99").unwrap();
         assert_eq!(approval["isWaitingForInput"], true);
+    }
+
+    #[test]
+    fn test_auto_switch_confirmation_notification_upsert_and_resolve() {
+        let cid = format!("conf-test-{}", Uuid::new_v4().simple());
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let target_id = format!("autoswitch_{}", self.0);
+                let mut items = notifications().lock().unwrap();
+                items.retain(|n| n.get("id").and_then(|v| v.as_str()) != Some(target_id.as_str()));
+            }
+        }
+        let _cleanup = Cleanup(cid.clone());
+
+        let conf = crate::account_switcher::PendingAutoSwitchConfirmation {
+            confirmation_id: cid.clone(),
+            provider: "agy".to_string(),
+            from_account_id: Some("a1".to_string()),
+            from_account_label: "Work Pro".to_string(),
+            from_email: Some("work@kite.local".to_string()),
+            to_account_id: "a2".to_string(),
+            to_account_label: "Personal Free".to_string(),
+            to_email: Some("personal@kite.local".to_string()),
+            to_plan_name: Some("Free".to_string()),
+            source_plan_name: Some("Google AI Pro".to_string()),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            suggested_fallback_model: Some("gemini-2.5-pro".to_string()),
+            available_target_models: vec!["gemini-2.5-pro".to_string()],
+            thread_id: Some("thread-notif-1".to_string()),
+            handoff_prompt: Some("Resume now".to_string()),
+            busy_sessions: Vec::new(),
+            reason: "model_mismatch".to_string(),
+            created_at_unix_ms: 100_000,
+            expires_at_unix_ms: 1_000_000,
+        };
+
+        let snap = upsert_auto_switch_confirmation_notification(&conf);
+        let expected_id = format!("autoswitch_{}", cid);
+        let records = snap["records"].as_array().unwrap();
+        let rec = records
+            .iter()
+            .find(|r| r["id"] == expected_id)
+            .expect("auto-switch notification record");
+        assert_eq!(rec["kind"]["kind"], "autoSwitchConfirm");
+        assert_eq!(rec["kind"]["requestKind"], "model_mismatch");
+        assert_eq!(rec["target"]["source"], "codeThread");
+        assert_eq!(rec["target"]["id"], "thread-notif-1");
+        assert_eq!(rec["confirmationId"], cid);
+        assert_eq!(rec["autoSwitchConfirm"]["toAccountId"], "a2");
+        assert_eq!(rec["isWaitingForInput"], true);
+        assert_eq!(rec["isRead"], false);
+        assert!(rec["resolution"].is_null());
+        let body = rec["body"].as_str().unwrap_or("");
+        assert!(body.contains("Work Pro"));
+        assert!(body.contains("Personal Free"));
+        assert!(body.contains("Free"));
+        assert!(body.contains("claude-opus-4-6"));
+        assert!(body.contains("gemini-2.5-pro"));
+
+        assert!(resolve_auto_switch_confirmation_notification(&cid, "attended"));
+        let snap2 = make_notifications_snapshot();
+        let rec2 = snap2["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == expected_id)
+            .unwrap();
+        assert_eq!(rec2["resolution"], "attended");
+        assert_eq!(rec2["isWaitingForInput"], false);
     }
 }

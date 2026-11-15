@@ -138,7 +138,7 @@ fn execute_swarm_add(
         if state
             .members
             .iter()
-            .any(|m| m.name.eq_ignore_ascii_case(name))
+            .any(|m| m.name.eq_ignore_ascii_case(name) && m.child_thread_id.is_some())
         {
             return Err(DispatchError::NameTaken);
         }
@@ -187,7 +187,7 @@ fn execute_swarm_add(
         if state
             .members
             .iter()
-            .any(|m| m.name.eq_ignore_ascii_case(name))
+            .any(|m| m.name.eq_ignore_ascii_case(name) && m.child_thread_id.is_some())
         {
             rollback_worktree = true;
             Err(DispatchError::NameTaken)
@@ -247,6 +247,9 @@ fn execute_swarm_add(
                     last_read_seq: seq,
                     pending_wake: false,
                 };
+                state
+                    .members
+                    .retain(|m| !(m.name.eq_ignore_ascii_case(name) && m.child_thread_id.is_none()));
                 let role_pair = role.zip(role_body_owned.as_deref());
                 let prompt = build_worker_initial_prompt(&state, &member, &post, role_pair);
                 state.members.push(member);

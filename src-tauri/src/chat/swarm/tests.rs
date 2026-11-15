@@ -877,3 +877,113 @@ fn swarm_add_injects_role_body_and_model_switch_enforces_stack_policy() {
         .unwrap();
     crate::chat::threads::remove_thread(&worker_cid);
 }
+
+#[test]
+fn execute_swarm_add_replaces_streamed_placeholder_and_rejects_live_duplicate() {
+    use crate::acp::build_acp_tool_call;
+    use crate::chat::subagents::{acp_tool_to_chat_item, record_swarm_tool_call};
+    use crate::dispatch::DispatchError;
+
+    let coord_id = format!("swarm-ph-{}", uuid::Uuid::new_v4().simple());
+    let repo_dir =
+        std::env::temp_dir().join(format!("kite-swarm-ph-{}", uuid::Uuid::new_v4().simple()));
+    init_git_repo(&repo_dir);
+    let _guard = CleanupSwarmThread(coord_id.clone(), repo_dir.clone());
+
+    let mut coord = blank_thread(&coord_id, None, "Swarm Coord", "claude", None);
+    coord["model"] = json!("claude-sonnet-4-6");
+    coord["workingDirectory"] = json!(repo_dir.to_string_lossy().to_string());
+    threads().lock().unwrap().push(coord);
+
+    // Simulate a streamed running `swarm add` tool frame arriving before the CLI dispatch executes.
+    let streamed_add = acp_tool_to_chat_item(&build_acp_tool_call(
+        "sw-ph-1".into(),
+        "swarm".into(),
+        json!({
+            "action": "add",
+            "name": "scout",
+            "workspace": "inherit",
+            "brief": "Streamed placeholder brief"
+        }),
+        "running".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ));
+    record_swarm_tool_call(&coord_id, &streamed_add);
+
+    let cwd_str = repo_dir.to_string_lossy().to_string();
+    let (pre_state, _) = load_swarm_state(&coord_id, Some(&cwd_str));
+    assert_eq!(pre_state.members.len(), 1);
+    assert!(pre_state.members[0].child_thread_id.is_none());
+
+    let launched: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let launched_clone = launched.clone();
+    let launcher_fn = move |cid: &str, prompt: &str| -> Result<(), String> {
+        launched_clone
+            .lock()
+            .unwrap()
+            .push((cid.to_string(), prompt.to_string()));
+        Ok(())
+    };
+
+    let coord_addr = format!("thread:{coord_id}");
+    let add_res = execute_swarm_action(
+        &SwarmCommand::Add {
+            name: "scout".into(),
+            provider: None,
+            model: None,
+            effort: None,
+            workspace: Some("inherit".into()),
+            channels: Vec::new(),
+            fork: None,
+            role: Some("Scout".into()),
+            override_stack: false,
+            brief: "Real scout task".into(),
+        },
+        &coord_addr,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    )
+    .expect("streamed child_thread_id=None placeholder must not trigger NameTaken");
+    assert!(add_res.contains("added @scout"), "add_res={add_res}");
+
+    let (post_state, _) = load_swarm_state(&coord_id, Some(&cwd_str));
+    assert_eq!(post_state.members.len(), 1);
+    let scout_cid = post_state.members[0]
+        .child_thread_id
+        .clone()
+        .expect("reconciled member must carry spawned child_thread_id");
+    assert_eq!(post_state.members[0].state, "working");
+    assert_eq!(launched.lock().unwrap().len(), 1);
+
+    let dup_res = execute_swarm_action(
+        &SwarmCommand::Add {
+            name: "scout".into(),
+            provider: None,
+            model: None,
+            effort: None,
+            workspace: Some("inherit".into()),
+            channels: Vec::new(),
+            fork: None,
+            role: None,
+            override_stack: false,
+            brief: "Duplicate task".into(),
+        },
+        &coord_addr,
+        Some(&cwd_str),
+        Some(&launcher_fn),
+    );
+    assert!(
+        matches!(dup_res, Err(DispatchError::NameTaken)),
+        "live member with child_thread_id=Some must still reject duplicate name: {dup_res:?}"
+    );
+    assert_eq!(launched.lock().unwrap().len(), 1);
+
+    crate::chat::threads::remove_thread(&scout_cid);
+}

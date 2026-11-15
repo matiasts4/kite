@@ -87,7 +87,7 @@ export function resolveDesktopBinary() {
 
   if (!fs.existsSync(candidate)) {
     throw new Error(
-      `Kite desktop binary not found at ${candidate}. Run "cargo build --manifest-path src-tauri/Cargo.toml --bin kite-code --bin kite" first.`
+      `Kite desktop binary not found at ${candidate}. Run "cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin kite-code --bin kite" first.`
     );
   }
   return candidate;
@@ -189,6 +189,10 @@ export async function launchIsolatedDesktop(options = {}) {
     extraEnv: options.extraEnv,
   });
 
+  if (typeof options.setupSandbox === 'function') {
+    await options.setupSandbox(sandbox);
+  }
+
   const artifactsDir =
     options.artifactsDir ||
     path.join(REPO_ROOT, 'test-results', 'e2e', `run-${sandbox.runId}`);
@@ -224,6 +228,12 @@ export async function launchIsolatedDesktop(options = {}) {
       const dump = logs.dump();
       if (dump) {
         await fsp.writeFile(path.join(artifactsDir, 'process-logs.txt'), dump, 'utf8').catch(() => {});
+      }
+      for (const debugName of ['driver-calls.jsonl', 'driver-errors.log']) {
+        const src = path.join(sandbox.rootDir, debugName);
+        if (fs.existsSync(src)) {
+          await fsp.copyFile(src, path.join(artifactsDir, debugName)).catch(() => {});
+        }
       }
 
       if (!options.keepSandboxOnExit && !process.env.KITE_E2E_KEEP_SANDBOX) {

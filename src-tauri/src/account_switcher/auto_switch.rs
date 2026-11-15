@@ -207,6 +207,7 @@ pub(crate) fn emit_tauri_event(event: &str, payload: Value) {
 #[cfg(test)]
 pub(crate) fn emit_tauri_event(_event: &str, _payload: Value) {}
 
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn emit_auto_switch_status_event(provider: &str, status: &AutoSwitchRuntimeStatus) {
     let canon = canon_provider(provider);
     emit_tauri_event(

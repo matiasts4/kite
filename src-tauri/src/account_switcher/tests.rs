@@ -4036,3 +4036,161 @@ fn test_dismiss_and_cleanup_pending_auto_switches() {
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_end_to_end_evaluate_publish_confirm_and_anti_bounce_cooldown() {
+    use super::auto_switch::{
+        confirm_pending_auto_switch_in, evaluate_auto_switch_with, list_pending_auto_switches_in,
+        publish_needs_confirmation_in, AutoSwitchCoordinatorState, AutoSwitchOutcome,
+        AutoSwitchTriggerRequest,
+    };
+    use super::commands::resume_auto_switch_with;
+    use super::registry::{save_auto_switch_policy_in, AutoSwitchPolicy};
+
+    let tmp = std::env::temp_dir().join(format!("kite_as_e2e_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    seed_agy_cred_file(&tmp, "acc-pro", "pro@kite.local");
+    seed_agy_cred_file(&tmp, "acc-free", "free@kite.local");
+
+    let reg = AccountProfilesRegistry {
+        profiles: vec![
+            SavedAccountProfile {
+                id: "acc-pro".to_string(),
+                provider: "agy".to_string(),
+                label: "Pro Account".to_string(),
+                email: Some("pro@kite.local".to_string()),
+                plan_name: Some("Google AI Pro".to_string()),
+                is_active: true,
+                primary_remaining_percent: Some(0.0),
+                available_model_ids: vec![
+                    "claude-opus-4-6".to_string(),
+                    "gemini-2.5-pro".to_string(),
+                ],
+                ..Default::default()
+            },
+            SavedAccountProfile {
+                id: "acc-free".to_string(),
+                provider: "agy".to_string(),
+                label: "Free Fallback".to_string(),
+                email: Some("free@kite.local".to_string()),
+                plan_name: Some("Free".to_string()),
+                is_active: false,
+                primary_remaining_percent: Some(92.0),
+                available_model_ids: vec!["gemini-2.5-flash".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    save_registry_to(&tmp, &reg).unwrap();
+
+    let mut policy = AutoSwitchPolicy::default();
+    policy.enabled = true;
+    policy.cooldown_seconds = 120;
+    policy.model_mismatch_policy = "confirm_notification".to_string();
+    save_auto_switch_policy_in(&tmp, "agy", policy).unwrap();
+
+    let env = MockAutoSwitchEnv::new(tmp.clone());
+    let tmp_switch = tmp.clone();
+    env.set_switch_handler(move |_, acc_id, _| {
+        let mut r = load_registry_from(&tmp_switch);
+        for p in r.profiles.iter_mut() {
+            p.is_active = p.id == acc_id;
+        }
+        save_registry_to(&tmp_switch, &r).unwrap();
+        json!({ "success": true })
+    });
+
+    let mut state = AutoSwitchCoordinatorState::default();
+    let eval_outcome = evaluate_auto_switch_with(
+        &AutoSwitchTriggerRequest {
+            provider: "antigravity".to_string(),
+            trigger_source: "chat_turn".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            thread_id: Some("thread-e2e-1".to_string()),
+            current_remaining_percent: Some(0.0),
+            has_exhausted_window: true,
+            now_unix_ms: 20_000_000,
+        },
+        &mut state,
+        &env,
+    );
+    assert!(matches!(
+        &eval_outcome,
+        AutoSwitchOutcome::NeedsConfirmation { reason, candidate, .. }
+            if reason == "model_mismatch"
+                && candidate.profile.id == "acc-free"
+                && candidate.suggested_fallback_model.as_deref() == Some("gemini-2.5-flash")
+    ));
+
+    let store: std::sync::Mutex<Vec<PendingAutoSwitchConfirmation>> =
+        std::sync::Mutex::new(Vec::new());
+    let conf = publish_needs_confirmation_in(
+        &eval_outcome,
+        Some("Continue debugging".to_string()),
+        20_000_500,
+        &store,
+        &env,
+    )
+    .expect("confirmation published");
+    let listed = list_pending_auto_switches_in(Some("antigravity"), 20_001_000, &store, &env);
+    assert_eq!(listed["confirmations"].as_array().map(|v| v.len()), Some(1));
+
+    let eval_lock = std::sync::Mutex::new(());
+    let state_mutex = std::sync::Mutex::new(state);
+    let confirmed = confirm_pending_auto_switch_in(
+        Some(json!({
+            "confirmationId": conf.confirmation_id,
+            "selectedModelId": "gemini-2.5-flash",
+            "autoResumeTurn": true,
+        })),
+        20_005_000,
+        &eval_lock,
+        &state_mutex,
+        &store,
+        &env,
+        |_prov, _desired| {
+            Ok((
+                "gemini-2.5-flash".to_string(),
+                false,
+                vec!["gemini-2.5-flash".to_string()],
+            ))
+        },
+        |c, applied, adjusted, auto_resume| {
+            assert_eq!(applied, Some("gemini-2.5-flash"));
+            assert!(adjusted);
+            assert!(auto_resume);
+            c.thread_id.clone()
+        },
+    );
+    assert_eq!(confirmed["success"], true);
+    assert_eq!(confirmed["toAccountId"], "acc-free");
+    assert_eq!(confirmed["resumedThreadId"], "thread-e2e-1");
+
+    // Immediate subsequent trigger inside cooldown_seconds must not bounce back.
+    let mut locked_state = state_mutex.lock().unwrap();
+    let cooldown_hit = evaluate_auto_switch_with(
+        &AutoSwitchTriggerRequest {
+            provider: "agy".to_string(),
+            trigger_source: "quota_poll".to_string(),
+            requested_model: None,
+            thread_id: None,
+            current_remaining_percent: Some(0.0),
+            has_exhausted_window: true,
+            now_unix_ms: 20_020_000,
+        },
+        &mut locked_state,
+        &env,
+    );
+    assert!(matches!(
+        cooldown_hit,
+        AutoSwitchOutcome::SkippedCooldown { ref status } if status.cooldown_until_ms.is_some()
+    ));
+    drop(locked_state);
+
+    let resumed_manual = resume_auto_switch_with(&tmp, "agy");
+    assert_eq!(resumed_manual["success"], true);
+    assert_eq!(resumed_manual["status"]["paused"], false);
+
+    let _ = fs::remove_dir_all(&tmp);
+}

@@ -161,12 +161,15 @@ function upsertPendingConfirmationList(
   incoming: PendingAutoSwitchConfirmation
 ): PendingAutoSwitchConfirmation[] {
   const incomingCanon = canonicalVaultProvider(incoming.provider);
+  const incomingThread = incoming.threadId ?? '';
   const filtered = current.filter(
     (item) =>
       item.confirmationId !== incoming.confirmationId &&
       !(
         canonicalVaultProvider(item.provider) === incomingCanon &&
-        item.toAccountId === incoming.toAccountId
+        item.toAccountId === incoming.toAccountId &&
+        item.reason === incoming.reason &&
+        (item.threadId ?? '') === incomingThread
       )
   );
   return [incoming, ...filtered];

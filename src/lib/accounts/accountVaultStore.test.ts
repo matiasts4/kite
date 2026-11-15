@@ -595,4 +595,60 @@ describe('accountVaultStore & useAccountVault', () => {
     window.removeEventListener('kite:threads-changed', onThreads);
     window.removeEventListener('kite:notifications-refresh', onNotif);
   });
+
+  it('keeps distinct multi-thread confirmations targeting the same account and dismisses cleanly', async () => {
+    const baseConf = {
+      provider: 'agy',
+      fromAccountId: 'acc-1',
+      fromAccountLabel: 'Personal Pro',
+      toAccountId: 'acc-2',
+      toAccountLabel: 'Trabajo Free',
+      suggestedFallbackModel: 'gemini-2.5-flash',
+      availableTargetModels: ['gemini-2.5-flash'],
+      busySessions: [],
+      reason: 'model_mismatch' as const,
+      createdAtUnixMs: 1000,
+      expiresAtUnixMs: 901000,
+    };
+
+    ipcMocks.dismissPendingAutoSwitch.mockResolvedValue({
+      success: true,
+      dismissed: true,
+      confirmationId: 'conf-thread-a',
+    });
+
+    const notifEvents: Event[] = [];
+    const onNotif = (e: Event) => notifEvents.push(e);
+    window.addEventListener('kite:notifications-refresh', onNotif);
+
+    const { result } = renderHook(() => useAccountVault('antigravity'));
+    await waitFor(() => expect(result.current.hasLoadedOnce).toBe(true));
+
+    act(() => {
+      accountVaultStore.applyPendingConfirmationEvent({
+        ...baseConf,
+        confirmationId: 'conf-thread-a',
+        threadId: 'thread-a',
+      });
+      accountVaultStore.applyPendingConfirmationEvent({
+        ...baseConf,
+        confirmationId: 'conf-thread-b',
+        threadId: 'thread-b',
+      });
+    });
+    expect(
+      result.current.pendingAutoSwitchConfirmations.map((c) => c.confirmationId)
+    ).toEqual(['conf-thread-b', 'conf-thread-a']);
+
+    await act(async () => {
+      await result.current.dismissPendingAutoSwitch('conf-thread-a');
+    });
+    expect(ipcMocks.dismissPendingAutoSwitch).toHaveBeenCalledWith('conf-thread-a');
+    expect(
+      result.current.pendingAutoSwitchConfirmations.map((c) => c.confirmationId)
+    ).toEqual(['conf-thread-b']);
+    expect(notifEvents.length).toBeGreaterThanOrEqual(1);
+
+    window.removeEventListener('kite:notifications-refresh', onNotif);
+  });
 });

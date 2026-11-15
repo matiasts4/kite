@@ -88,7 +88,7 @@ use session::*;
 use system_metrics::*;
 use headroom_monitor::fetch_headroom_monitor;
 use terminal::*;
-use account_switcher::inspect_provider_sessions;
+use account_switcher::{close_residual_provider_processes, inspect_provider_sessions};
 use tickets::*;
 use updater::*;
 use window::*;
@@ -679,6 +679,7 @@ fn main() {
             save_current_account_profile,
             switch_account_profile,
             inspect_provider_sessions,
+            close_residual_provider_processes,
             prepare_new_account_login,
             start_account_login_flow,
             cancel_account_login_flow,

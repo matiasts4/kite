@@ -9,6 +9,7 @@ const ipcMocks = vi.hoisted(() => ({
   cancelAccountLoginFlow: vi.fn(),
   probeLiveAccountLoginStatus: vi.fn(),
   saveCurrentAccountProfile: vi.fn(),
+  closeResidualProviderProcesses: vi.fn(),
 }));
 
 const quotaMocks = vi.hoisted(() => ({
@@ -90,5 +91,56 @@ describe('GuidedLoginBanner', () => {
     unmount();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(ipcMocks.probeLiveAccountLoginStatus).toHaveBeenCalledTimes(probeCountAtUnmount);
+  });
+
+  it('shows "Cerrar procesos Antigravity" only for residual processes in banner error state and retries', async () => {
+    const user = userEvent.setup();
+    render(<GuidedLoginBanner />);
+
+    ipcMocks.startAccountLoginFlow.mockResolvedValueOnce({
+      success: false,
+      code: 'PROVIDER_BUSY',
+      error: 'Antigravity IDE está abierto en una ventana activa.',
+      providerBusyKind: 'base_app_open',
+      canCloseProcesses: false,
+    });
+
+    await act(async () => {
+      await guidedLoginCoordinator.start('antigravity');
+    });
+    expect(screen.getByText(/Antigravity IDE está abierto/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Cerrar procesos Antigravity/i })).not.toBeInTheDocument();
+
+    ipcMocks.startAccountLoginFlow
+      .mockResolvedValueOnce({
+        success: false,
+        code: 'PROVIDER_BUSY',
+        error: 'Quedaron procesos secundarios de Antigravity.',
+        providerBusyKind: 'residual_only',
+        canCloseProcesses: true,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        flowId: 'flow-banner-2',
+        previousEmail: 'prev@example.com',
+        previousEmailSaved: 'prev@example.com',
+        engine: 'agy',
+        loginArgv: ['C:\\Tools\\agy.exe', 'acp', '--login'],
+        loginCommand: 'agy acp --login',
+      });
+    ipcMocks.closeResidualProviderProcesses.mockResolvedValueOnce({
+      success: true,
+      closedPids: [4120],
+    });
+
+    await act(async () => {
+      await guidedLoginCoordinator.start('antigravity');
+    });
+
+    const closeBtn = await screen.findByRole('button', { name: /Cerrar procesos Antigravity/i });
+    await user.click(closeBtn);
+
+    expect(ipcMocks.closeResidualProviderProcesses).toHaveBeenCalledWith('antigravity');
+    expect(await screen.findByText(/Esperando inicio de sesión \(agy acp --login\)/i)).toBeInTheDocument();
   });
 });

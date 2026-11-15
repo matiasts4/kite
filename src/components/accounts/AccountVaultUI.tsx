@@ -4,6 +4,7 @@ import '../views/settings/quotas-tab.css';
 import type { AntigravityAuthTelemetry, SavedAccountProfile } from '../../types';
 import type {
   BusyTerminalConfirmState,
+  FailedSwitchState,
   OverwritePromptState,
 } from '../../lib/accounts/accountVaultStore';
 
@@ -74,6 +75,155 @@ export const RefreshSmallIcon: React.FC<{ size?: number }> = ({ size = 12 }) => 
     <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
   </svg>
 );
+
+export interface AccountSwitchErrorActionsProps {
+  lastFailedSwitch?: FailedSwitchState | null;
+  closingProcesses?: boolean;
+  variant?: 'standard' | 'compact';
+  onCloseResidualProcesses?: () => void | Promise<unknown>;
+  onReauth?: () => void;
+  onRetry: (accountId: string) => void | Promise<unknown>;
+}
+
+/**
+ * Shared action strip rendered next to failed account switch banners across
+ * AccountVault, AccountSwitcherModal, and QuotaAccountSwitcher.
+ */
+export const AccountSwitchErrorActions: React.FC<AccountSwitchErrorActionsProps> = ({
+  lastFailedSwitch,
+  closingProcesses = false,
+  variant = 'standard',
+  onCloseResidualProcesses,
+  onReauth,
+  onRetry,
+}) => {
+  if (!lastFailedSwitch) return null;
+
+  const isCompact = variant === 'compact';
+  const showCloseResidual =
+    lastFailedSwitch.code === 'PROVIDER_BUSY' &&
+    lastFailedSwitch.canCloseProcesses === true &&
+    Boolean(onCloseResidualProcesses);
+  const showReauth =
+    lastFailedSwitch.code === 'INVALID_TARGET_PROFILE' && Boolean(onReauth);
+
+  const compactBase: React.CSSProperties = {
+    borderRadius: 'var(--control-radius, 8px)',
+    height: 'var(--vl-control-sm, 26px)',
+    padding: '0 8px',
+    fontSize: '11px',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+  };
+
+  return (
+    <div style={{ display: 'flex', gap: isCompact ? '4px' : '6px', flexShrink: 0, flexWrap: 'wrap' }}>
+      {showCloseResidual && (
+        <button
+          type="button"
+          className={isCompact ? undefined : 'qt-button qt-button--primary'}
+          disabled={closingProcesses}
+          onClick={() => void onCloseResidualProcesses?.()}
+          style={
+            isCompact
+              ? {
+                  ...compactBase,
+                  background: 'var(--accent)',
+                  color: '#fff',
+                  border: 'none',
+                  opacity: closingProcesses ? 0.7 : 1,
+                }
+              : undefined
+          }
+        >
+          {closingProcesses ? 'Cerrando procesos…' : 'Cerrar procesos Antigravity'}
+        </button>
+      )}
+      {showReauth && (
+        <button
+          type="button"
+          className={isCompact ? undefined : 'qt-button qt-button--primary'}
+          onClick={onReauth}
+          style={
+            isCompact
+              ? {
+                  ...compactBase,
+                  background: 'var(--accent)',
+                  color: '#fff',
+                  border: 'none',
+                }
+              : undefined
+          }
+        >
+          Reautenticar
+        </button>
+      )}
+      <button
+        type="button"
+        className={isCompact ? undefined : 'qt-button'}
+        disabled={closingProcesses}
+        onClick={() => void onRetry(lastFailedSwitch.accountId)}
+        style={
+          isCompact
+            ? {
+                ...compactBase,
+                background: 'var(--chip-fill)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--block-stroke)',
+              }
+            : undefined
+        }
+      >
+        Reintentar
+      </button>
+    </div>
+  );
+};
+
+export interface GuidedLoginErrorActionsProps {
+  canCloseProcesses?: boolean;
+  closingProcesses?: boolean;
+  canForceStart?: boolean;
+  onCloseResidualProcesses: () => void | Promise<unknown>;
+  onForceStart: () => void | Promise<unknown>;
+}
+
+/**
+ * Shared action strip for guided-login PROVIDER_BUSY / CONFIRM_BUSY_TERMINALS banners.
+ */
+export const GuidedLoginErrorActions: React.FC<GuidedLoginErrorActionsProps> = ({
+  canCloseProcesses = false,
+  closingProcesses = false,
+  canForceStart = false,
+  onCloseResidualProcesses,
+  onForceStart,
+}) => {
+  if (!canCloseProcesses && !canForceStart) return null;
+  return (
+    <div style={{ display: 'flex', gap: '6px', flexShrink: 0, flexWrap: 'wrap' }}>
+      {canCloseProcesses ? (
+        <button
+          type="button"
+          className="qt-button qt-button--primary"
+          disabled={closingProcesses}
+          onClick={() => void onCloseResidualProcesses()}
+        >
+          {closingProcesses ? 'Cerrando procesos…' : 'Cerrar procesos Antigravity'}
+        </button>
+      ) : null}
+      {canForceStart ? (
+        <button
+          type="button"
+          className="qt-button qt-button--primary"
+          onClick={() => void onForceStart()}
+        >
+          Forzar y continuar
+        </button>
+      ) : null}
+    </div>
+  );
+};
 
 export interface AccountConfirmDialogsProps {
   busyConfirm: BusyTerminalConfirmState | null;

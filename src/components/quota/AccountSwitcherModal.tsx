@@ -19,6 +19,8 @@ import { subscriptionQuotaManager } from '../../lib/quota/quotaManager';
 import type { ProviderQuotaStatus } from '../../lib/quota/types';
 import {
   AccountConfirmDialogs,
+  AccountSwitchErrorActions,
+  GuidedLoginErrorActions,
   PencilIcon,
   RefreshSmallIcon,
   resolveAuthModeLabel,
@@ -91,6 +93,14 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
     if (res.success && res.profile) {
       onAccountSwitched?.(res.profile);
     }
+  };
+
+  const handleCloseResidualProcesses = async () => {
+    const res = await vault.closeResidualProcesses();
+    if (res.success && res.profile) {
+      onAccountSwitched?.(res.profile);
+    }
+    return res;
   };
 
   const handleSaveCurrent = async (overrideLabel?: string) => {
@@ -225,26 +235,13 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
               style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}
             >
               <span>{vault.error}</span>
-              <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
-                {vault.lastFailedSwitch?.code === 'INVALID_TARGET_PROFILE' ? (
-                  <button
-                    type="button"
-                    className="qt-button qt-button--primary"
-                    onClick={() => void handleConnectNewAccount()}
-                  >
-                    Reautenticar
-                  </button>
-                ) : null}
-                {vault.lastFailedSwitch ? (
-                  <button
-                    type="button"
-                    className="qt-button"
-                    onClick={() => void handleSwitch(vault.lastFailedSwitch!.accountId)}
-                  >
-                    Reintentar
-                  </button>
-                ) : null}
-              </div>
+              <AccountSwitchErrorActions
+                lastFailedSwitch={vault.lastFailedSwitch}
+                closingProcesses={vault.closingProcesses}
+                onCloseResidualProcesses={handleCloseResidualProcesses}
+                onReauth={() => void handleConnectNewAccount()}
+                onRetry={handleSwitch}
+              />
             </div>
           ) : null}
 
@@ -322,15 +319,13 @@ export const AccountSwitcherModal: React.FC<AccountSwitcherModalProps> = ({
               style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
             >
               <span>{loginState.error}</span>
-              {loginState.canForceStart ? (
-                <button
-                  type="button"
-                  className="qt-button qt-button--primary"
-                  onClick={() => void guidedLoginCoordinator.start(provider, { force: true })}
-                >
-                  Forzar y continuar
-                </button>
-              ) : null}
+              <GuidedLoginErrorActions
+                canCloseProcesses={loginState.canCloseProcesses}
+                closingProcesses={loginState.closingProcesses}
+                canForceStart={loginState.canForceStart}
+                onCloseResidualProcesses={() => guidedLoginCoordinator.closeResidualProcessesAndRetry(provider)}
+                onForceStart={() => guidedLoginCoordinator.start(provider, { force: true })}
+              />
             </div>
           ) : null}
 

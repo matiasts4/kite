@@ -30,10 +30,12 @@ export interface QuotaPopoverContentProps {
   switchingAccountId: string | null;
   saving?: boolean;
   renamingId?: string | null;
+  closingProcesses?: boolean;
   lastFailedSwitch?: FailedSwitchState | null;
   onSwitchAccount: (profileId: string) => Promise<void>;
   onSaveCurrent?: (label?: string) => Promise<boolean>;
   onRenameProfile?: (profileId: string, label: string) => Promise<boolean>;
+  onCloseResidualProcesses?: () => void | Promise<unknown>;
   onAlignIde?: () => Promise<void>;
   onReauth?: () => void;
   onOpenSettings: (providerId?: string) => void;
@@ -58,10 +60,12 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
   switchingAccountId,
   saving = false,
   renamingId = null,
+  closingProcesses = false,
   lastFailedSwitch = null,
   onSwitchAccount,
   onSaveCurrent,
   onRenameProfile,
+  onCloseResidualProcesses,
   onAlignIde,
   onReauth,
   onOpenSettings,
@@ -126,10 +130,12 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
           switchingAccountId={switchingAccountId}
           saving={saving}
           renamingId={renamingId}
+          closingProcesses={closingProcesses}
           lastFailedSwitch={lastFailedSwitch}
           onSwitchAccount={onSwitchAccount}
           onSaveCurrent={onSaveCurrent}
           onRenameProfile={onRenameProfile}
+          onCloseResidualProcesses={onCloseResidualProcesses}
           onAlignIde={onAlignIde}
           onReauth={onReauth}
           onOpenSettings={onOpenSettings}

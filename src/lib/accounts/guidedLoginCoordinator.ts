@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   cancelAccountLoginFlow,
+  closeResidualProviderProcesses,
   probeLiveAccountLoginStatus,
   saveCurrentAccountProfile,
   startAccountLoginFlow,
@@ -34,6 +35,9 @@ export interface GuidedLoginState {
   timedOut: boolean;
   busySessionsCount: number;
   canForceStart: boolean;
+  providerBusyKind: 'base_app_open' | 'residual_only' | 'unknown' | null;
+  canCloseProcesses: boolean;
+  closingProcesses: boolean;
 }
 
 const INITIAL_STATE: GuidedLoginState = {
@@ -50,6 +54,9 @@ const INITIAL_STATE: GuidedLoginState = {
   timedOut: false,
   busySessionsCount: 0,
   canForceStart: false,
+  providerBusyKind: null,
+  canCloseProcesses: false,
+  closingProcesses: false,
 };
 
 export function isSameAccountProvider(a?: string | null, b?: string | null): boolean {
@@ -200,6 +207,14 @@ class GuidedLoginCoordinator {
           provider,
           canForceStart: false,
           busySessionsCount: 0,
+          providerBusyKind:
+            res.code === 'PROVIDER_BUSY' &&
+            res.providerBusyKind &&
+            res.providerBusyKind !== 'idle'
+              ? res.providerBusyKind
+              : null,
+          canCloseProcesses: Boolean(res.code === 'PROVIDER_BUSY' && res.canCloseProcesses),
+          closingProcesses: false,
           error: res.error || 'No se pudo preparar la conexión de una nueva cuenta.',
         });
         return false;
@@ -241,6 +256,9 @@ class GuidedLoginCoordinator {
         timedOut: false,
         busySessionsCount: 0,
         canForceStart: false,
+        providerBusyKind: null,
+        canCloseProcesses: false,
+        closingProcesses: false,
       });
 
       this.dispatchWorkspaceLoginSpawn(runToken, {
@@ -266,7 +284,46 @@ class GuidedLoginCoordinator {
         phase: 'error',
         provider,
         canForceStart: false,
+        canCloseProcesses: false,
+        closingProcesses: false,
         error: err?.message || 'Error al iniciar el flujo de autenticación.',
+      });
+      return false;
+    }
+  }
+
+  async closeResidualProcessesAndRetry(
+    provider: string,
+    options?: { force?: boolean }
+  ): Promise<boolean> {
+    if (this.state.closingProcesses) {
+      return false;
+    }
+    this.setState({ closingProcesses: true });
+    try {
+      const res = await closeResidualProviderProcesses(provider);
+      if (res?.success) {
+        this.setState({
+          closingProcesses: false,
+          canCloseProcesses: false,
+          providerBusyKind: null,
+        });
+        return this.start(provider, options);
+      }
+      this.setState({
+        closingProcesses: false,
+        providerBusyKind:
+          res?.providerBusyKind && res.providerBusyKind !== 'idle'
+            ? res.providerBusyKind
+            : this.state.providerBusyKind,
+        canCloseProcesses: Boolean(res?.canCloseProcesses),
+        error: res?.error || 'No se pudieron cerrar los procesos residuales de Antigravity.',
+      });
+      return false;
+    } catch (err: any) {
+      this.setState({
+        closingProcesses: false,
+        error: err?.message || 'Error al cerrar los procesos residuales de Antigravity.',
       });
       return false;
     }

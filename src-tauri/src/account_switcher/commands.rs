@@ -88,9 +88,10 @@ use super::registry::{
     SavedAccountProfile, REGISTRY_LOCK,
 };
 use super::storage::{
-    apply_profile_to_active, copy_atomic, decode_jwt_payload, ensure_provider_idle,
-    get_provider_file_mappings, probe_live_provider_identity, snapshot_active_to_profile,
-    snapshot_active_to_profile_with, write_bytes_atomic, AntigravityCredStore, FileMapping,
+    apply_profile_to_active, close_residual_provider_processes_direct, copy_atomic,
+    decode_jwt_payload, get_provider_file_mappings, inspect_external_provider_processes,
+    probe_live_provider_identity, snapshot_active_to_profile, snapshot_active_to_profile_with,
+    write_bytes_atomic, AntigravityCredStore, ExternalProcessInspection, FileMapping,
     LiveAntigravityCredStore, LiveIdentityProbe,
 };
 
@@ -673,6 +674,19 @@ pub(crate) fn validate_profile_switch_ready_in(
     Ok(())
 }
 
+pub(crate) fn provider_busy_payload(external: &ExternalProcessInspection) -> Value {
+    json!({
+        "success": false,
+        "code": "PROVIDER_BUSY",
+        "error": external.message,
+        "providerBusyKind": external.state,
+        "canCloseProcesses": external.can_close_processes,
+        "residualProcessCount": external.residual_processes.len(),
+        "residualProcesses": external.residual_processes,
+        "baseAppTitles": external.base_app_titles,
+    })
+}
+
 pub(crate) fn switch_preflight_check_with(
     root: &std::path::Path,
     provider: &str,
@@ -714,6 +728,30 @@ pub(crate) fn switch_preflight_check_with(
     None
 }
 
+pub(crate) fn switch_preflight_check_with_external(
+    root: &std::path::Path,
+    provider: &str,
+    account_id: &str,
+    force: bool,
+    external: &ExternalProcessInspection,
+    inspection: &crate::terminal::ProviderSessionsInspection,
+) -> Option<Value> {
+    if let Some(mut rejection) = switch_preflight_check_with(
+        root,
+        provider,
+        account_id,
+        force,
+        external.to_idle_result(),
+        inspection,
+    ) {
+        if rejection.get("code").and_then(|v| v.as_str()) == Some("PROVIDER_BUSY") {
+            rejection = provider_busy_payload(external);
+        }
+        return Some(rejection);
+    }
+    None
+}
+
 pub fn switch_account_profile_direct(provider: String, account_id: String) -> Value {
     switch_account_profile_direct_with_options(provider, account_id, false)
 }
@@ -740,14 +778,14 @@ pub fn switch_account_profile_direct_with_options(
 
     // Preflight strictly in order (target validity -> external client lock -> managed busy PTYs)
     // OUTSIDE REGISTRY_LOCK BEFORE touching or terminating any Kite terminal.
-    let idle_res = ensure_provider_idle(&provider);
+    let external = inspect_external_provider_processes(&provider);
     let inspection = crate::terminal::inspect_provider_sessions(&provider);
-    if let Some(rejection) = switch_preflight_check_with(
+    if let Some(rejection) = switch_preflight_check_with_external(
         &profiles_root(),
         &provider,
         &account_id,
         force,
-        idle_res,
+        &external,
         &inspection,
     ) {
         return rejection;
@@ -967,6 +1005,18 @@ pub async fn inspect_provider_sessions_impl(request: Option<Value>) -> Value {
             "unaffectedTerminalsCount": 0
         })
     })
+}
+
+pub async fn close_residual_provider_processes_impl(request: Option<Value>) -> Value {
+    let req = crate::persist::body(&request);
+    let provider = req
+        .and_then(|r| r.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity")
+        .to_string();
+    tauri::async_runtime::spawn_blocking(move || close_residual_provider_processes_direct(provider))
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "error": format!("Worker task failed: {e}") }))
 }
 
 pub fn delete_account_profile_direct(provider: &str, account_id: &str) -> Value {
@@ -2021,21 +2071,31 @@ pub fn start_account_login_flow_direct(provider: String, force: bool) -> Value {
         });
     }
     let mappings = get_provider_file_mappings("agy");
-    let (state_vscdb, idle_check, inspection, (login_argv, login_command)) =
+    let (state_vscdb, external_proc, inspection, (login_argv, login_command)) =
         std::thread::scope(|s| {
             let h_vscdb = s.spawn(crate::quota::find_existing_state_vscdb);
-            let h_idle = s.spawn(|| ensure_provider_idle("agy"));
+            let h_ext = s.spawn(|| inspect_external_provider_processes("agy"));
             let h_inspect = s.spawn(|| crate::terminal::inspect_provider_sessions("agy"));
             let h_argv = s.spawn(resolve_antigravity_login_argv);
             (
                 h_vscdb.join().unwrap_or(None),
-                h_idle.join().unwrap_or_else(|_| Err("idle check panicked".to_string())),
+                h_ext.join().unwrap_or_else(|_| ExternalProcessInspection {
+                    state: "unknown".to_string(),
+                    can_close_processes: false,
+                    base_app_pids: Vec::new(),
+                    base_app_titles: Vec::new(),
+                    residual_processes: Vec::new(),
+                    message: "idle check panicked".to_string(),
+                }),
                 h_inspect
                     .join()
                     .unwrap_or_else(|_| crate::terminal::inspect_provider_sessions("agy")),
                 h_argv.join().unwrap_or_else(|_| resolve_antigravity_login_argv()),
             )
         });
+    if external_proc.state != "idle" {
+        return provider_busy_payload(&external_proc);
+    }
     start_account_login_flow_with(
         &profiles_root(),
         &canon,
@@ -2043,7 +2103,7 @@ pub fn start_account_login_flow_direct(provider: String, force: bool) -> Value {
         &mappings,
         state_vscdb.as_deref(),
         &LiveAntigravityCredStore,
-        idle_check,
+        external_proc.to_idle_result(),
         &inspection,
         login_argv,
         login_command,

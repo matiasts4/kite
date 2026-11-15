@@ -107,11 +107,24 @@ export interface ProviderSessionsInspection {
   unaffectedTerminalsCount: number;
 }
 
+export interface ResidualProcessSummary {
+  pid: number;
+  name: string;
+  kind: string;
+}
+
+export type ProviderBusyKind = 'idle' | 'residual_only' | 'base_app_open' | 'unknown';
+
 export interface SwitchAccountProfileResult {
   success: boolean;
   profile?: SavedAccountProfile;
   code?: string;
   error?: string;
+  providerBusyKind?: ProviderBusyKind;
+  canCloseProcesses?: boolean;
+  residualProcessCount?: number;
+  residualProcesses?: ResidualProcessSummary[];
+  baseAppTitles?: string[];
   terminalsRestarted?: number;
   targetedSessionIds?: string[];
   skippedUnaffectedCount?: number;
@@ -119,6 +132,31 @@ export interface SwitchAccountProfileResult {
   managedIdleCount?: number;
   unaffectedTerminalsCount?: number;
   authTelemetry?: AntigravityAuthTelemetry | null;
+}
+
+export interface CloseResidualProviderProcessesResult {
+  success: boolean;
+  alreadyIdle?: boolean;
+  closedCount?: number;
+  closedPids?: number[];
+  code?: string;
+  providerBusyKind?: ProviderBusyKind;
+  canCloseProcesses?: boolean;
+  residualProcessCount?: number;
+  residualProcesses?: ResidualProcessSummary[];
+  baseAppTitles?: string[];
+  error?: string;
+}
+
+export async function closeResidualProviderProcesses(
+  provider: string
+): Promise<CloseResidualProviderProcessesResult> {
+  try {
+    return await invokeCommand('close_residual_provider_processes', { provider });
+  } catch (err: any) {
+    console.error('[IPC] closeResidualProviderProcesses failed:', err);
+    return { success: false, error: err?.message || String(err) };
+  }
 }
 
 export async function inspectProviderSessions(
@@ -194,6 +232,11 @@ export interface StartAccountLoginFlowResult {
   success: boolean;
   code?: string;
   error?: string;
+  providerBusyKind?: ProviderBusyKind;
+  canCloseProcesses?: boolean;
+  residualProcessCount?: number;
+  residualProcesses?: ResidualProcessSummary[];
+  baseAppTitles?: string[];
   flowId?: string;
   previousEmail?: string | null;
   previousEmailSaved?: string | null;

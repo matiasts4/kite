@@ -14,6 +14,8 @@ import { subscriptionQuotaManager } from '../../../lib/quota/quotaManager';
 import type { ProviderQuotaStatus } from '../../../lib/quota/types';
 import {
   AccountConfirmDialogs,
+  AccountSwitchErrorActions,
+  GuidedLoginErrorActions,
   PencilIcon,
   RefreshSmallIcon,
   resolveAuthModeLabel,
@@ -92,6 +94,14 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged, quotas: e
     }
   };
 
+  const handleCloseResidualProcesses = async () => {
+    const res = await vault.closeResidualProcesses();
+    if (res.success) {
+      onChanged?.();
+    }
+    return res;
+  };
+
   const handleSave = async (overrideLabel?: string) => {
     const res = await vault.saveCurrentAccount(
       overrideLabel ?? label,
@@ -168,26 +178,13 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged, quotas: e
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
         >
           <span>{vault.error}</span>
-          <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-            {vault.lastFailedSwitch?.code === 'INVALID_TARGET_PROFILE' ? (
-              <button
-                type="button"
-                className="qt-button qt-button--primary"
-                onClick={() => void handleConnectNewAccount()}
-              >
-                Reautenticar
-              </button>
-            ) : null}
-            {vault.lastFailedSwitch ? (
-              <button
-                type="button"
-                className="qt-button"
-                onClick={() => void handleSwitch(vault.lastFailedSwitch!.accountId)}
-              >
-                Reintentar
-              </button>
-            ) : null}
-          </div>
+          <AccountSwitchErrorActions
+            lastFailedSwitch={vault.lastFailedSwitch}
+            closingProcesses={vault.closingProcesses}
+            onCloseResidualProcesses={handleCloseResidualProcesses}
+            onReauth={() => void handleConnectNewAccount()}
+            onRetry={handleSwitch}
+          />
         </div>
       ) : null}
       {vault.notice ? <div className="qt-banner" data-tone="ok">{vault.notice}</div> : null}
@@ -240,15 +237,13 @@ export const AccountVault: React.FC<AccountVaultProps> = ({ onChanged, quotas: e
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}
         >
           <span>{loginState.error}</span>
-          {loginState.canForceStart ? (
-            <button
-              type="button"
-              className="qt-button qt-button--primary"
-              onClick={() => void guidedLoginCoordinator.start(provider, { force: true })}
-            >
-              Forzar y continuar
-            </button>
-          ) : null}
+          <GuidedLoginErrorActions
+            canCloseProcesses={loginState.canCloseProcesses}
+            closingProcesses={loginState.closingProcesses}
+            canForceStart={loginState.canForceStart}
+            onCloseResidualProcesses={() => guidedLoginCoordinator.closeResidualProcessesAndRetry(provider)}
+            onForceStart={() => guidedLoginCoordinator.start(provider, { force: true })}
+          />
         </div>
       ) : null}
 

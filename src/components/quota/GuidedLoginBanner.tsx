@@ -81,6 +81,17 @@ export const GuidedLoginBanner: React.FC = () => {
           </button>
         ) : null}
 
+        {state.phase === 'error' && state.canCloseProcesses && state.provider ? (
+          <button
+            type="button"
+            disabled={state.closingProcesses}
+            className="guided-login-banner__btn guided-login-banner__btn--primary"
+            onClick={() => void guidedLoginCoordinator.closeResidualProcessesAndRetry(state.provider!)}
+          >
+            {state.closingProcesses ? 'Cerrando procesos…' : 'Cerrar procesos Antigravity'}
+          </button>
+        ) : null}
+
         {state.phase === 'error' && state.canForceStart && state.provider ? (
           <button
             type="button"

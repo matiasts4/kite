@@ -125,6 +125,7 @@ vi.mock('../../lib/ipc', () => ({
     },
   })),
   listConnections: vi.fn().mockResolvedValue([]),
+  closeResidualProviderProcesses: vi.fn().mockResolvedValue({ success: true, closedCount: 0, closedPids: [] }),
   startAccountLoginFlow: vi.fn().mockResolvedValue({ success: false }),
   probeLiveAccountLoginStatus: vi.fn().mockResolvedValue({ completed: false }),
   cancelAccountLoginFlow: vi.fn().mockResolvedValue({ success: true }),
@@ -447,5 +448,233 @@ describe('Unified Multi-Account Lifecycle & Cross-Surface Sync (S6.1 & S6.2)', (
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(ipc.deleteAccountProfile).toHaveBeenCalledWith('antigravity', 'acc-2');
     confirmSpy.mockRestore();
+  });
+
+  it('shows "Cerrar procesos Antigravity" only for residual processes (never for open base IDE app) and retries switch', async () => {
+    const user = userEvent.setup();
+    const ipc = await import('../../lib/ipc');
+
+    mockProfiles = [
+      {
+        id: 'acc-1',
+        provider: 'antigravity',
+        label: 'Personal',
+        email: 'personal@kite.local',
+        planName: 'Google AI Pro',
+        lastUsedUnixMs: 2000,
+        primaryRemainingPercent: 90,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        isActive: true,
+        credentialStatus: 'valid',
+        hasRefreshToken: true,
+      },
+      {
+        id: 'acc-2',
+        provider: 'antigravity',
+        label: 'Work',
+        email: 'work@kite.local',
+        planName: 'Google AI Pro',
+        lastUsedUnixMs: 1000,
+        primaryRemainingPercent: 100,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        isActive: false,
+        credentialStatus: 'valid',
+        hasRefreshToken: true,
+      },
+    ];
+
+    const onAccountSwitched = vi.fn();
+    render(
+      <AccountSwitcherModal
+        provider="antigravity"
+        providerLabel="Antigravity"
+        isOpen={true}
+        onClose={vi.fn()}
+        onAccountSwitched={onAccountSwitched}
+      />
+    );
+
+    await screen.findByText('Work');
+
+    // Case 1: Base IDE window is genuinely open -> button MUST NOT appear
+    vi.mocked(ipc.switchAccountProfile).mockResolvedValueOnce({
+      success: false,
+      code: 'PROVIDER_BUSY',
+      error: 'Antigravity IDE está abierto en una ventana activa.',
+      providerBusyKind: 'base_app_open',
+      canCloseProcesses: false,
+      residualProcessCount: 0,
+    });
+
+    const activateBtn = screen.getByRole('button', { name: /^Activar$/i });
+    await user.click(activateBtn);
+    expect(await screen.findByText(/Antigravity IDE está abierto/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Cerrar procesos Antigravity/i })).not.toBeInTheDocument();
+
+    // Case 2: Residual background processes remain -> button appears next to error and retries cleanly
+    vi.mocked(ipc.switchAccountProfile)
+      .mockResolvedValueOnce({
+        success: false,
+        code: 'PROVIDER_BUSY',
+        error: 'Quedaron 2 procesos secundarios de Antigravity.',
+        providerBusyKind: 'residual_only',
+        canCloseProcesses: true,
+        residualProcessCount: 2,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        profile: { ...mockProfiles[1], isActive: true },
+        terminalsRestarted: 1,
+      });
+
+    await user.click(screen.getByRole('button', { name: /Reintentar/i }));
+    const closeBtn = await screen.findByRole('button', { name: /Cerrar procesos Antigravity/i });
+    await user.click(closeBtn);
+
+    expect(ipc.closeResidualProviderProcesses).toHaveBeenCalledWith('antigravity');
+    await waitFor(() => {
+      expect(screen.getByText(/Sesión cambiada y verificada en «Work»/i)).toBeInTheDocument();
+    });
+    expect(onAccountSwitched).toHaveBeenCalledWith(expect.objectContaining({ id: 'acc-2', isActive: true }));
+  });
+
+  it('supports "Cerrar procesos Antigravity" and parent callbacks in AccountVault and SubscriptionQuotaPopover', async () => {
+    const user = userEvent.setup();
+    const ipc = await import('../../lib/ipc');
+
+    mockProfiles = [
+      {
+        id: 'acc-1',
+        provider: 'antigravity',
+        label: 'Personal',
+        email: 'personal@kite.local',
+        planName: 'Google AI Pro',
+        lastUsedUnixMs: 2000,
+        primaryRemainingPercent: 90,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        isActive: true,
+        credentialStatus: 'valid',
+        hasRefreshToken: true,
+      },
+      {
+        id: 'acc-2',
+        provider: 'antigravity',
+        label: 'Work',
+        email: 'work@kite.local',
+        planName: 'Google AI Pro',
+        lastUsedUnixMs: 1000,
+        primaryRemainingPercent: 100,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        isActive: false,
+        credentialStatus: 'valid',
+        hasRefreshToken: true,
+      },
+    ];
+
+    const onChanged = vi.fn();
+    const onRefresh = vi.fn();
+    render(
+      <>
+        <div data-testid="vault-wrap">
+          <AccountVault onChanged={onChanged} />
+        </div>
+        <SubscriptionQuotaPopover
+          allQuotas={{
+            antigravity: {
+              providerId: 'antigravity',
+              displayName: 'Antigravity',
+              isAvailable: true,
+              isAuth: true,
+              primaryUsagePercent: 10,
+              primaryRemainingPercent: 90,
+              primaryResetAt: null,
+              timeUntilResetMs: null,
+              windows: [],
+              metadata: { email: 'personal@kite.local', planType: 'Google AI Pro' },
+              lastUpdatedMs: Date.now(),
+              error: null,
+            },
+          }}
+          selectedProvider="antigravity"
+          onSelectProvider={vi.fn()}
+          onRefresh={onRefresh}
+          isRefreshing={false}
+          onClose={vi.fn()}
+          prefs={{
+            ...DEFAULT_QUOTA_PREFERENCES,
+            setupVersion: QUOTA_SETUP_VERSION,
+            enabledProviders: [PROVIDERS.ANTIGRAVITY],
+          }}
+        />
+      </>
+    );
+
+    await screen.findAllByText('Work');
+    const vaultWrap = screen.getByTestId('vault-wrap');
+    const popoverDialog = screen.getByRole('dialog', { name: /Cuotas de suscripción IA/i });
+
+    vi.mocked(ipc.switchAccountProfile)
+      .mockResolvedValueOnce({
+        success: false,
+        code: 'PROVIDER_BUSY',
+        error: 'Quedaron procesos secundarios de Antigravity.',
+        providerBusyKind: 'residual_only',
+        canCloseProcesses: true,
+        residualProcessCount: 1,
+      })
+      .mockImplementationOnce(async () => {
+        mockProfiles = mockProfiles.map((p) => ({ ...p, isActive: p.id === 'acc-2' }));
+        return {
+          success: true,
+          profile: { ...mockProfiles[1], isActive: true },
+          terminalsRestarted: 0,
+        };
+      });
+
+    // Popover compact switcher: click "Usar" -> PROVIDER_BUSY -> "Cerrar procesos Antigravity" -> fires onRefresh
+    await user.click(within(popoverDialog).getByRole('button', { name: /^Cambiar cuenta$/i }));
+    await user.click(within(popoverDialog).getByRole('button', { name: /^Usar$/i }));
+
+    const popCloseBtn = await within(popoverDialog).findByRole('button', {
+      name: /Cerrar procesos Antigravity/i,
+    });
+    await user.click(popCloseBtn);
+
+    await waitFor(() => {
+      expect(onRefresh).toHaveBeenCalled();
+    });
+
+    // AccountVault: switch back to Personal -> PROVIDER_BUSY -> "Cerrar procesos Antigravity" -> fires onChanged
+    vi.mocked(ipc.switchAccountProfile)
+      .mockResolvedValueOnce({
+        success: false,
+        code: 'PROVIDER_BUSY',
+        error: 'Quedaron procesos secundarios de Antigravity.',
+        providerBusyKind: 'residual_only',
+        canCloseProcesses: true,
+        residualProcessCount: 1,
+      })
+      .mockImplementationOnce(async () => {
+        mockProfiles = mockProfiles.map((p) => ({ ...p, isActive: p.id === 'acc-1' }));
+        return {
+          success: true,
+          profile: { ...mockProfiles[0], isActive: true },
+          terminalsRestarted: 0,
+        };
+      });
+
+    await user.click(within(vaultWrap).getByRole('button', { name: /^Activar$/i }));
+    const vaultCloseBtn = await within(vaultWrap).findByRole('button', {
+      name: /Cerrar procesos Antigravity/i,
+    });
+    await user.click(vaultCloseBtn);
+
+    await waitFor(() => {
+      expect(onChanged).toHaveBeenCalled();
+    });
   });
 });

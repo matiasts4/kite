@@ -1730,3 +1730,225 @@ fn test_detected_cli_accounts_cache_hits_and_invalidates_on_write() {
     assert_eq!(probes.load(Ordering::SeqCst), 3);
     assert_eq!(bypassed["probeCount"], json!(3));
 }
+
+#[test]
+fn test_inspect_external_provider_processes_distinguishes_base_app_vs_residual() {
+    use super::storage::{
+        close_residual_provider_processes_with, inspect_external_provider_processes_with,
+        ExternalProcessRecord,
+    };
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    // 1. Enum unavailable -> unknown, cannot close
+    let unknown = inspect_external_provider_processes_with("agy", None, &HashSet::new());
+    assert_eq!(unknown.state, "unknown");
+    assert!(!unknown.can_close_processes);
+
+    // 2. Visible base Antigravity window + Chromium child -> base_app_open, NEVER allow close button
+    let open_procs = vec![
+        ExternalProcessRecord {
+            pid: 100,
+            parent_pid: Some(10),
+            name: "antigravity.exe".to_string(),
+            command_line: Some("\"C:\\Antigravity\\Antigravity.exe\"".to_string()),
+            has_visible_window: true,
+            window_title: Some("Mi Proyecto - Antigravity".to_string()),
+        },
+        ExternalProcessRecord {
+            pid: 101,
+            parent_pid: Some(100),
+            name: "antigravity.exe".to_string(),
+            command_line: Some("\"C:\\Antigravity\\Antigravity.exe\" --type=utility".to_string()),
+            has_visible_window: false,
+            window_title: None,
+        },
+    ];
+    let base_open = inspect_external_provider_processes_with("antigravity", Some(open_procs), &HashSet::new());
+    assert_eq!(base_open.state, "base_app_open");
+    assert!(!base_open.can_close_processes);
+    assert_eq!(base_open.base_app_pids, vec![100]);
+    assert!(base_open.residual_processes.is_empty());
+
+    // Attempting close_residual when base_app_open MUST refuse without terminating PIDs
+    let killed = RefCell::new(Vec::<u32>::new());
+    let refuse = close_residual_provider_processes_with(
+        "agy",
+        || base_open.clone(),
+        |pids| {
+            killed.borrow_mut().extend_from_slice(pids);
+            Ok(())
+        },
+    );
+    assert_eq!(refuse["success"], false);
+    assert_eq!(refuse["code"], "BASE_APP_OPEN");
+    assert!(killed.borrow().is_empty());
+
+    // 3. Only residual helpers + excluded ancestor -> residual_only, excludes ancestor/PTY PIDs
+    let mut excluded = HashSet::new();
+    excluded.insert(500u32);
+    let residual_procs = vec![
+        ExternalProcessRecord {
+            pid: 500,
+            parent_pid: Some(1),
+            name: "antigravity.exe".to_string(),
+            command_line: Some("Antigravity.exe --import=sidecar".to_string()),
+            has_visible_window: false,
+            window_title: None,
+        },
+        ExternalProcessRecord {
+            pid: 201,
+            parent_pid: Some(200),
+            name: "antigravity.exe".to_string(),
+            command_line: Some("\"C:\\Antigravity\\Antigravity.exe\" --type=utility".to_string()),
+            has_visible_window: false,
+            window_title: None,
+        },
+        ExternalProcessRecord {
+            pid: 202,
+            parent_pid: Some(1),
+            name: "antigravity.exe".to_string(),
+            command_line: Some("\"C:\\Antigravity\\Antigravity.exe\" --type=renderer".to_string()),
+            has_visible_window: false,
+            window_title: None,
+        },
+    ];
+    let residual_only =
+        inspect_external_provider_processes_with("agy", Some(residual_procs), &excluded);
+    assert_eq!(residual_only.state, "residual_only");
+    assert!(residual_only.can_close_processes);
+    assert_eq!(
+        residual_only.residual_processes.iter().map(|p| p.pid).collect::<Vec<_>>(),
+        vec![201, 202]
+    );
+
+    let idle_inspect = inspect_external_provider_processes_with("agy", Some(vec![]), &excluded);
+    let mut call_n = 0usize;
+    let closed_ok = close_residual_provider_processes_with(
+        "agy",
+        || {
+            call_n += 1;
+            if call_n == 1 {
+                residual_only.clone()
+            } else {
+                idle_inspect.clone()
+            }
+        },
+        |pids| {
+            killed.borrow_mut().extend_from_slice(pids);
+            Ok(())
+        },
+    );
+    assert_eq!(closed_ok["success"], true);
+    assert_eq!(closed_ok["closedCount"], 2);
+    assert_eq!(*killed.borrow(), vec![201, 202]);
+
+    // 4. Unknown command_line OR unflagged main exe on windowless process fails safe as base_app_open (can_close_processes=false)
+    let opaque_proc = vec![ExternalProcessRecord {
+        pid: 300,
+        parent_pid: Some(1),
+        name: "antigravity.exe".to_string(),
+        command_line: None,
+        has_visible_window: false,
+        window_title: None,
+    }];
+    let opaque = inspect_external_provider_processes_with("agy", Some(opaque_proc), &HashSet::new());
+    assert_eq!(opaque.state, "base_app_open");
+    assert!(!opaque.can_close_processes);
+
+    let unflagged_main = vec![ExternalProcessRecord {
+        pid: 301,
+        parent_pid: Some(1),
+        name: "antigravity.exe".to_string(),
+        command_line: Some("\"C:\\Antigravity\\Antigravity.exe\" --no-sandbox".to_string()),
+        has_visible_window: false,
+        window_title: None,
+    }];
+    let unflagged =
+        inspect_external_provider_processes_with("agy", Some(unflagged_main), &HashSet::new());
+    assert_eq!(unflagged.state, "base_app_open");
+    assert!(!unflagged.can_close_processes);
+    assert!(unflagged.residual_processes.is_empty());
+
+    // 5. electron_run_as_node helper classifies as residual sidecar & surviving PID fails safely
+    let sidecar_proc = vec![ExternalProcessRecord {
+        pid: 302,
+        parent_pid: Some(1),
+        name: "antigravity.exe".to_string(),
+        command_line: Some("Antigravity.exe --ms-enable-electron_run_as_node worker.js".to_string()),
+        has_visible_window: false,
+        window_title: None,
+    }];
+    let sidecar_res =
+        inspect_external_provider_processes_with("agy", Some(sidecar_proc), &HashSet::new());
+    assert_eq!(sidecar_res.state, "residual_only");
+    assert!(sidecar_res.can_close_processes);
+    assert_eq!(sidecar_res.residual_processes[0].kind, "sidecar");
+
+    let survivor = close_residual_provider_processes_with(
+        "agy",
+        || sidecar_res.clone(),
+        |_| Ok(()),
+    );
+    assert_eq!(survivor["success"], false);
+    assert_eq!(survivor["canCloseProcesses"], true);
+    assert_eq!(survivor["residualProcessCount"], 1);
+}
+
+#[test]
+fn test_switch_preflight_check_with_external_enriches_provider_busy() {
+    use super::commands::switch_preflight_check_with_external;
+    use super::storage::{ExternalProcessInspection, ResidualProcessSummary};
+    use crate::terminal::ProviderSessionsInspection;
+
+    let tmp = std::env::temp_dir().join(format!("kite_preflight_ext_{}", Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&tmp);
+    let prof_dir = tmp.join("agy").join("acc-valid");
+    fs::create_dir_all(&prof_dir).unwrap();
+    fs::write(
+        prof_dir.join("gemini_antigravity_cred.json"),
+        serde_json::to_string(&json!({
+            "id_token_email": "valid@example.com",
+            "token": { "access_token": "ya29.ok", "refresh_token": "1//ok" }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let ext = ExternalProcessInspection {
+        state: "residual_only".to_string(),
+        can_close_processes: true,
+        base_app_pids: vec![],
+        base_app_titles: vec![],
+        residual_processes: vec![
+            ResidualProcessSummary {
+                pid: 401,
+                name: "antigravity.exe".to_string(),
+                kind: "utility".to_string(),
+            },
+            ResidualProcessSummary {
+                pid: 402,
+                name: "antigravity.exe".to_string(),
+                kind: "renderer".to_string(),
+            },
+        ],
+        message: "Quedaron 2 procesos secundarios de Antigravity abiertos.".to_string(),
+    };
+    let res = switch_preflight_check_with_external(
+        &tmp,
+        "antigravity",
+        "acc-valid",
+        false,
+        &ext,
+        &ProviderSessionsInspection::default(),
+    )
+    .expect("residual process must return PROVIDER_BUSY");
+
+    assert_eq!(res["code"], "PROVIDER_BUSY");
+    assert_eq!(res["providerBusyKind"], "residual_only");
+    assert_eq!(res["canCloseProcesses"], true);
+    assert_eq!(res["residualProcessCount"], 2);
+    assert_eq!(res["residualProcesses"][0]["pid"], 401);
+
+    let _ = fs::remove_dir_all(&tmp);
+}

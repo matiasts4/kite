@@ -9,6 +9,7 @@ import { useAccountVault } from './useAccountVault';
 const ipcMocks = vi.hoisted(() => ({
   listSavedAccountsFull: vi.fn(),
   switchAccountProfile: vi.fn(),
+  closeResidualProviderProcesses: vi.fn(),
   saveCurrentAccountProfile: vi.fn(),
   renameAccountProfile: vi.fn(),
   deleteAccountProfile: vi.fn(),
@@ -308,5 +309,107 @@ describe('accountVaultStore & useAccountVault', () => {
     await waitFor(() => {
       expect(result.current.profiles.find((p) => p.id === 'acc-2')?.isActive).toBe(true);
     });
+  });
+
+  it('closes residual processes and retries failed PROVIDER_BUSY switch when canCloseProcesses is true', async () => {
+    ipcMocks.switchAccountProfile
+      .mockResolvedValueOnce({
+        success: false,
+        code: 'PROVIDER_BUSY',
+        error: 'Quedaron 2 procesos residuales de Antigravity.',
+        providerBusyKind: 'residual_only',
+        canCloseProcesses: true,
+        residualProcessCount: 2,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        profile: { ...baseProfiles[1], isActive: true },
+        terminalsRestarted: 1,
+      });
+
+    ipcMocks.closeResidualProviderProcesses.mockResolvedValueOnce({
+      success: true,
+      closedCount: 2,
+      closedPids: [401, 402],
+    });
+
+    ipcMocks.listSavedAccountsFull
+      .mockResolvedValueOnce({ profiles: baseProfiles, unregisteredLiveSession: null, authTelemetry: null })
+      .mockResolvedValueOnce({ profiles: baseProfiles, unregisteredLiveSession: null, authTelemetry: null })
+      .mockResolvedValueOnce({
+        profiles: [
+          { ...baseProfiles[0], isActive: false },
+          { ...baseProfiles[1], isActive: true },
+        ],
+        unregisteredLiveSession: null,
+        authTelemetry: null,
+      });
+
+    const { result } = renderHook(() => useAccountVault('antigravity'));
+    await waitFor(() => expect(result.current.profiles).toHaveLength(2));
+
+    await act(async () => {
+      await result.current.switchAccount('acc-2');
+    });
+    expect(result.current.lastFailedSwitch?.canCloseProcesses).toBe(true);
+    expect(result.current.lastFailedSwitch?.providerBusyKind).toBe('residual_only');
+
+    await act(async () => {
+      await result.current.closeResidualProcesses();
+    });
+
+    expect(ipcMocks.closeResidualProviderProcesses).toHaveBeenCalledWith('antigravity');
+    expect(ipcMocks.switchAccountProfile).toHaveBeenLastCalledWith('antigravity', 'acc-2');
+    expect(result.current.lastFailedSwitch).toBeNull();
+    expect(result.current.profiles.find((p) => p.id === 'acc-2')?.isActive).toBe(true);
+  });
+
+  it('keeps canCloseProcesses=false when base IDE is open and updates state on cleanup failure', async () => {
+    ipcMocks.switchAccountProfile.mockResolvedValueOnce({
+      success: false,
+      code: 'PROVIDER_BUSY',
+      error: 'Antigravity IDE está abierto.',
+      providerBusyKind: 'base_app_open',
+      canCloseProcesses: false,
+      residualProcessCount: 0,
+    });
+
+    const { result } = renderHook(() => useAccountVault('antigravity'));
+    await waitFor(() => expect(result.current.profiles).toHaveLength(2));
+
+    await act(async () => {
+      await result.current.switchAccount('acc-2');
+    });
+    expect(result.current.lastFailedSwitch?.providerBusyKind).toBe('base_app_open');
+    expect(result.current.lastFailedSwitch?.canCloseProcesses).toBe(false);
+
+    ipcMocks.switchAccountProfile.mockResolvedValueOnce({
+      success: false,
+      code: 'PROVIDER_BUSY',
+      error: 'Quedó 1 proceso residual.',
+      providerBusyKind: 'residual_only',
+      canCloseProcesses: true,
+      residualProcessCount: 1,
+    });
+    await act(async () => {
+      await result.current.switchAccount('acc-2');
+    });
+
+    ipcMocks.closeResidualProviderProcesses.mockResolvedValueOnce({
+      success: false,
+      code: 'BASE_APP_OPEN',
+      providerBusyKind: 'base_app_open',
+      canCloseProcesses: false,
+      residualProcessCount: 0,
+      error: 'Antigravity IDE está abierto.',
+    });
+    await act(async () => {
+      const res = await result.current.closeResidualProcesses();
+      expect(res.success).toBe(false);
+    });
+
+    expect(result.current.closingProcesses).toBe(false);
+    expect(result.current.lastFailedSwitch?.canCloseProcesses).toBe(false);
+    expect(result.current.lastFailedSwitch?.providerBusyKind).toBe('base_app_open');
   });
 });

@@ -28,6 +28,7 @@ export interface UseAccountVaultResult extends ProviderVaultState {
   cancelDeleteProfile: () => void;
   confirmDeleteProfile: () => ReturnType<typeof accountVaultStore.confirmDeleteProfile>;
   refreshQuota: () => Promise<void>;
+  closeResidualProcesses: () => ReturnType<typeof accountVaultStore.closeResidualProcesses>;
   alignIde: () => Promise<void>;
   clearFeedback: () => void;
 }
@@ -80,6 +81,7 @@ export function useAccountVault(
       cancelDeleteProfile: () => accountVaultStore.cancelDeleteProfile(canon),
       confirmDeleteProfile: () => accountVaultStore.confirmDeleteProfile(canon),
       refreshQuota: () => accountVaultStore.refreshQuota(canon),
+      closeResidualProcesses: () => accountVaultStore.closeResidualProcesses(canon),
       alignIde: () => accountVaultStore.alignIde(canon),
       clearFeedback: () => accountVaultStore.clearFeedback(canon),
     }),

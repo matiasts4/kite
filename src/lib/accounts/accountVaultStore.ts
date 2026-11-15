@@ -47,6 +47,9 @@ export interface OverwritePromptState {
 export interface FailedSwitchState {
   accountId: string;
   code?: string;
+  providerBusyKind?: string;
+  canCloseProcesses?: boolean;
+  residualProcessCount?: number;
 }
 
 export interface ProviderVaultState {
@@ -57,6 +60,7 @@ export interface ProviderVaultState {
   loading: boolean;
   hasLoadedOnce: boolean;
   switchingId: string | null;
+  closingProcesses: boolean;
   saving: boolean;
   renamingId: string | null;
   deletingId: string | null;
@@ -125,6 +129,7 @@ function createInitialProviderState(provider: string): ProviderVaultState {
     loading: false,
     hasLoadedOnce: false,
     switchingId: null,
+    closingProcesses: false,
     saving: false,
     renamingId: null,
     deletingId: null,
@@ -457,7 +462,13 @@ class AccountVaultStore {
       this.patchState(canon, {
         switchingId: null,
         error: errorText,
-        lastFailedSwitch: { accountId, code: res?.code },
+        lastFailedSwitch: {
+          accountId,
+          code: res?.code,
+          providerBusyKind: res?.providerBusyKind,
+          canCloseProcesses: res?.canCloseProcesses,
+          residualProcessCount: res?.residualProcessCount,
+        },
       });
       await this.loadAccounts(canon, { force: true });
       return res || { success: false, error: errorText };
@@ -718,6 +729,68 @@ class AccountVaultStore {
       await Promise.resolve(subscriptionQuotaManager.fetchAll(true, [quotaKey])).catch(() => undefined);
     }
     await this.loadAccounts(canon, { force: true });
+  }
+
+  async closeResidualProcesses(rawProvider: string): Promise<{
+    success: boolean;
+    error?: string;
+    profile?: SavedAccountProfile;
+  }> {
+    const canon = canonicalVaultProvider(rawProvider);
+    const snapshot = this.getSnapshot(canon);
+    if (snapshot.closingProcesses) {
+      return { success: false, error: 'Cierre de procesos en curso.' };
+    }
+    const closeFn = safeIpcFn('closeResidualProviderProcesses');
+    if (!closeFn) {
+      return { success: false, error: 'IPC de limpieza de procesos no disponible.' };
+    }
+
+    const retryAccountId = snapshot.lastFailedSwitch?.accountId ?? null;
+    this.patchState(canon, { closingProcesses: true });
+
+    try {
+      const res = await closeFn(canon);
+      this.patchState(canon, { closingProcesses: false });
+      if (res?.success) {
+        if (retryAccountId) {
+          const switchRes = await this.switchAccount(canon, retryAccountId);
+          return {
+            success: Boolean(switchRes?.success),
+            error: switchRes?.error,
+            profile: switchRes?.profile,
+          };
+        }
+        this.patchState(canon, {
+          error: null,
+          lastFailedSwitch: null,
+          notice: 'Procesos residuales de Antigravity cerrados.',
+        });
+        return { success: true };
+      }
+
+      const errMsg =
+        res?.error || 'No se pudieron cerrar los procesos residuales de Antigravity.';
+      this.patchState(canon, (prev) => ({
+        error: errMsg,
+        lastFailedSwitch: prev.lastFailedSwitch
+          ? {
+              ...prev.lastFailedSwitch,
+              code: res?.code || prev.lastFailedSwitch.code,
+              providerBusyKind: res?.providerBusyKind ?? prev.lastFailedSwitch.providerBusyKind,
+              canCloseProcesses: Boolean(res?.canCloseProcesses),
+              residualProcessCount:
+                res?.residualProcessCount ?? prev.lastFailedSwitch.residualProcessCount,
+            }
+          : null,
+      }));
+      return { success: false, error: errMsg };
+    } catch (err: any) {
+      const errMsg =
+        err?.message || 'Error al cerrar los procesos residuales de Antigravity.';
+      this.patchState(canon, { closingProcesses: false, error: errMsg });
+      return { success: false, error: errMsg };
+    }
   }
 
   async alignIde(rawProvider: string): Promise<void> {

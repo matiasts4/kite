@@ -7,6 +7,7 @@ import {
   type FailedSwitchState,
 } from '../../lib/accounts/accountVaultStore';
 import {
+  AccountSwitchErrorActions,
   PencilIcon,
   resolveAuthModeLabel,
   resolveCredentialHealthBadge,
@@ -27,10 +28,12 @@ export interface QuotaAccountSwitcherProps {
   switchingAccountId: string | null;
   saving?: boolean;
   renamingId?: string | null;
+  closingProcesses?: boolean;
   lastFailedSwitch?: FailedSwitchState | null;
   onSwitchAccount: (profileId: string) => Promise<void>;
   onSaveCurrent?: (label?: string) => Promise<boolean>;
   onRenameProfile?: (profileId: string, label: string) => Promise<boolean>;
+  onCloseResidualProcesses?: () => void | Promise<unknown>;
   onAlignIde?: () => Promise<void>;
   onReauth?: () => void;
   onOpenSettings: (providerId: string) => void;
@@ -50,10 +53,12 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
   switchingAccountId,
   saving = false,
   renamingId = null,
+  closingProcesses = false,
   lastFailedSwitch = null,
   onSwitchAccount,
   onSaveCurrent,
   onRenameProfile,
+  onCloseResidualProcesses,
   onAlignIde,
   onReauth,
   onOpenSettings,
@@ -261,41 +266,15 @@ export const QuotaAccountSwitcher: React.FC<QuotaAccountSwitcherProps> = ({
               }}
             >
               <span>{switchFeedback}</span>
-              {isErrorFeedback && lastFailedSwitch && (
-                <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
-                  {lastFailedSwitch.code === 'INVALID_TARGET_PROFILE' && onReauth && (
-                    <button
-                      type="button"
-                      onClick={onReauth}
-                      style={{
-                        background: 'var(--accent)',
-                        color: '#fff',
-                        border: 'none',
-                        borderRadius: 'var(--vl-radius-xs, 4px)',
-                        padding: '2px 6px',
-                        fontSize: '10px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Reautenticar
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void onSwitchAccount(lastFailedSwitch.accountId)}
-                    style={{
-                      background: 'var(--chip-fill)',
-                      color: 'var(--text-primary)',
-                      border: '1px solid var(--block-stroke)',
-                      borderRadius: 'var(--vl-radius-xs, 4px)',
-                      padding: '2px 6px',
-                      fontSize: '10px',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Reintentar
-                  </button>
-                </div>
+              {isErrorFeedback && (
+                <AccountSwitchErrorActions
+                  lastFailedSwitch={lastFailedSwitch}
+                  closingProcesses={closingProcesses}
+                  variant="compact"
+                  onCloseResidualProcesses={onCloseResidualProcesses}
+                  onReauth={onReauth}
+                  onRetry={onSwitchAccount}
+                />
               )}
             </div>
           )}

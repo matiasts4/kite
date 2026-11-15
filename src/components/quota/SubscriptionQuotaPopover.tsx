@@ -73,6 +73,14 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
     }
   };
 
+  const handleCloseResidualProcesses = async () => {
+    const res = await vault.closeResidualProcesses();
+    if (res.success) {
+      void onRefresh();
+    }
+    return res;
+  };
+
   const handleSaveCurrent = async (label?: string) => {
     const res = await vault.saveCurrentAccount(label, { source: 'popover' });
     if (res.success) {
@@ -236,10 +244,12 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         switchingAccountId={vault.switchingId}
         saving={vault.saving}
         renamingId={vault.renamingId}
+        closingProcesses={vault.closingProcesses}
         lastFailedSwitch={vault.lastFailedSwitch}
         onSwitchAccount={handleSwitchAccount}
         onSaveCurrent={handleSaveCurrent}
         onRenameProfile={handleRenameProfile}
+        onCloseResidualProcesses={handleCloseResidualProcesses}
         onAlignIde={vault.alignIde}
         onReauth={() => {
           void guidedLoginCoordinator.start(selectedProvider);

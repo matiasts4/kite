@@ -76,3 +76,8 @@ pub async fn probe_live_account_login_status(request: Option<Value>) -> Value {
 pub async fn inspect_provider_sessions(request: Option<Value>) -> Value {
     commands::inspect_provider_sessions_impl(request).await
 }
+
+#[tauri::command]
+pub async fn close_residual_provider_processes(request: Option<Value>) -> Value {
+    commands::close_residual_provider_processes_impl(request).await
+}

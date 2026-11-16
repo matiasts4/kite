@@ -8,7 +8,13 @@ import {
   resolveDisplayProvider,
   QUOTA_PREFS_CHANGED_EVENT,
 } from '../../lib/quota/quotaManager';
-import { type ProviderQuotaStatus, PROVIDERS, PROVIDER_LABELS, resolveEnabledProviderIds } from '../../lib/quota/types';
+import {
+  type ProviderQuotaStatus,
+  PROVIDERS,
+  PROVIDER_LABELS,
+  resolveEnabledProviderIds,
+} from '../../lib/quota/types';
+import { isWindowExhausted } from '../../lib/quota/modelQuota';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { usePresence } from '../../motion/usePresence';
 
@@ -110,10 +116,19 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
   };
 
   const windowLabel = currentQuota?.metadata?.primaryWindowLabel || (currentQuota?.metadata?.primaryWindow === '5h' ? '5h' : null);
+  const exhaustedWindows = hasData
+    ? (currentQuota?.windows ?? []).filter(isWindowExhausted)
+    : [];
+  const hasPartialExhaustion =
+    hasData && remPct !== null && remPct > 0 && exhaustedWindows.length > 0;
+  const exhaustedNote =
+    exhaustedWindows.length > 0
+      ? ` Cuota agotada en: ${exhaustedWindows.map((w) => w.name).join(', ')}.`
+      : '';
   const badgeTitle = !displayProvider
     ? 'Cuotas de suscripción IA: agregá un proveedor para empezar'
     : hasData
-    ? `${label}${windowLabel ? ` (${windowLabel})` : ''}: ${remPct}% de cuota restante.${currentQuota?.error ? ` (${currentQuota.error})` : ''} Clic para ver detalles y límites.`
+    ? `${label}${windowLabel ? ` (${windowLabel})` : ''}: ${remPct}% de cuota restante.${exhaustedNote}${currentQuota?.error ? ` (${currentQuota.error})` : ''} Clic para ver detalles y límites.`
     : currentQuota?.error || 'Comprobando cuota de suscripción IA...';
 
   const isUsedMode = prefs.displayMode === 'percent_used';
@@ -225,6 +240,19 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
           >
             --
           </span>
+        )}
+        {hasPartialExhaustion && (
+          <span
+            data-testid="quota-partial-exhausted-dot"
+            aria-hidden="true"
+            style={{
+              width: '6px',
+              height: '6px',
+              borderRadius: '9999px',
+              backgroundColor: 'var(--status-failed, #ef4444)',
+              flexShrink: 0,
+            }}
+          />
         )}
       </button>
 

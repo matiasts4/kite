@@ -7,6 +7,7 @@ import type {
 import * as ipc from '../../lib/ipc';
 import { invokeCommand } from '../../lib/ipc';
 import { accountVaultStore } from '../../lib/accounts/accountVaultStore';
+import { openSettingsTab } from '../../lib/settingsNav';
 import './notifications.css';
 
 export type { NotificationRecord };
@@ -59,6 +60,9 @@ function getActorName(rec: NotificationRecord): string {
   if (rec.kind?.kind === 'autoSwitchConfirm') {
     return rec.title || 'Cambio automático de cuenta';
   }
+  if (rec.kind?.kind === 'modelQuotaExhausted') {
+    return rec.title || 'Cuota de modelo agotada';
+  }
   if (rec.routineId) return 'Routine Automation';
   if (rec.target?.source === 'agentChat') return 'Agent chat';
   if (rec.target?.source === 'codeThread') return 'Code thread';
@@ -90,6 +94,9 @@ function getDetailMessage(rec: NotificationRecord): string {
     if (rec.resolution === 'attended') return 'Cambio automático confirmado.';
     if (rec.resolution === 'abandoned') return 'Confirmación descartada o expirada.';
     return 'Confirma el cambio automático de cuenta.';
+  }
+  if (kind.kind === 'modelQuotaExhausted') {
+    return rec.body || 'Este modelo alcanzó el 0% de cuota.';
   }
   if (kind.kind === 'needsInput') {
     const isWaiting = rec.isWaitingForInput ?? !rec.isRead;
@@ -215,7 +222,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   onNavigateAgent,
   onNavigateThread,
   onNavigateMode,
-  onClose: _onClose,
+  onClose,
   onOpenSettings,
   externalSnapshot,
 }) => {
@@ -316,6 +323,11 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   const handleRowClick = (rec: NotificationRecord) => {
     if (!rec.isRead) {
       handleMarkRead(rec.id);
+    }
+    if (rec.kind?.kind === 'modelQuotaExhausted' || rec.target?.source === 'accountVault') {
+      openSettingsTab('quotas', rec.target?.id || undefined);
+      onClose?.();
+      return;
     }
     const targetThreadId = rec.target?.id;
     if (onNavigateThread && targetThreadId) {
@@ -606,7 +618,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     }
     if (
       (rec.kind?.kind === 'settled' && rec.kind.outcome === 'failed') ||
-      (rec.kind?.kind === 'autoSwitchConfirm' && rec.resolution === 'abandoned')
+      (rec.kind?.kind === 'autoSwitchConfirm' && rec.resolution === 'abandoned') ||
+      rec.kind?.kind === 'modelQuotaExhausted'
     ) {
       return <CircleAlertIcon size={15} strokeWidth={1.8} />;
     }
@@ -619,7 +632,10 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       if (rec.resolution === 'attended') return 'notification-row__icon--done';
       return 'notification-row__icon--quiet';
     }
-    if (rec.kind?.kind === 'settled' && rec.kind.outcome === 'failed') {
+    if (
+      (rec.kind?.kind === 'settled' && rec.kind.outcome === 'failed') ||
+      rec.kind?.kind === 'modelQuotaExhausted'
+    ) {
       return 'notification-row__icon--failed';
     }
     return 'notification-row__icon--done';

@@ -20,4 +20,31 @@ describe('ThreadErrorBanner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(onDismiss).toHaveBeenCalledOnce();
   });
+
+  it('dispatches kite:usage-limit-detected when rendering a usageLimit failure', () => {
+    const listener = vi.fn();
+    window.addEventListener('kite:usage-limit-detected', listener);
+    try {
+      render(
+        <ThreadErrorBanner
+          failure={{
+            kind: 'usageLimit',
+            provider: 'antigravity',
+            message: 'Individual quota reached on Gemini 4 Argon',
+            resetAtUnixMs: 1_800_000_000_000,
+          }}
+          onDismiss={vi.fn()}
+        />
+      );
+      expect(listener).toHaveBeenCalledTimes(1);
+      const evt = listener.mock.calls[0]?.[0] as CustomEvent;
+      expect(evt.detail).toMatchObject({
+        provider: 'antigravity',
+        message: 'Individual quota reached on Gemini 4 Argon',
+        resetAtUnixMs: 1_800_000_000_000,
+      });
+    } finally {
+      window.removeEventListener('kite:usage-limit-detected', listener);
+    }
+  });
 });

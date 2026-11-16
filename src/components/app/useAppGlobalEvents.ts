@@ -1,8 +1,14 @@
 import { useEffect, useRef } from 'react';
 import type React from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { OPEN_SETTINGS_EVENT } from '../../lib/settingsNav';
+import { OPEN_SETTINGS_EVENT, openSettingsTab } from '../../lib/settingsNav';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../../lib/terminalLinkNav';
+import { subscriptionQuotaManager } from '../../lib/quota/quotaManager';
+import {
+  canonicalQuotaProviderId,
+  collectExhaustedModelWindows,
+} from '../../lib/quota/modelQuota';
+import { PROVIDER_LABELS, type ProviderQuotaStatus } from '../../lib/quota/types';
 import {
   OPEN_RIGHT_DOCK_SUBAGENT_EVENT,
   type OpenRightDockSubagentDetail,
@@ -550,6 +556,121 @@ export function useAppGlobalEvents({
         toast.dismiss(toastId);
       }
       confirmationToastsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const alertedQuotaKeys = new Set<string>();
+    const initialProviderUpdates = new Map<string, number>();
+    let firstSubscribePass = true;
+
+    const notifyModelQuotaExhausted = (
+      providerId: string,
+      displayName: string,
+      windowName: string,
+      resetsAt?: string | null
+    ) => {
+      const canon = canonicalQuotaProviderId(providerId) || providerId;
+      const key = `${canon}|${windowName}|${resetsAt ?? 'none'}`;
+      if (alertedQuotaKeys.has(key)) return;
+      alertedQuotaKeys.add(key);
+
+      const providerLabel = PROVIDER_LABELS[canon] || displayName || canon;
+      const resetNote = resetsAt ? ` Reinicio: ${resetsAt}.` : '';
+      toast.action(
+        `Cuota agotada: ${windowName}`,
+        {
+          title: 'Ver cuotas',
+          onClick: () => openSettingsTab('quotas', canon),
+        },
+        `${providerLabel} llegó al 0% en este modelo/pool.${resetNote} Cambiá de modelo o revisá tus cuentas.`,
+        { duration: 15000 }
+      );
+    };
+
+    const unsubQuota = subscriptionQuotaManager.subscribe(
+      (quotas: Record<string, ProviderQuotaStatus>) => {
+        if (firstSubscribePass) {
+          firstSubscribePass = false;
+          for (const [prov, status] of Object.entries(quotas)) {
+            if (status?.lastUpdatedMs) {
+              initialProviderUpdates.set(prov, status.lastUpdatedMs);
+            }
+          }
+          return;
+        }
+        for (const hit of collectExhaustedModelWindows(quotas)) {
+          const prevTs = initialProviderUpdates.get(hit.providerId) ?? 0;
+          const currentTs = quotas[hit.providerId]?.lastUpdatedMs ?? 0;
+          if (currentTs > prevTs || prevTs === 0) {
+            initialProviderUpdates.set(hit.providerId, currentTs || Date.now());
+            notifyModelQuotaExhausted(
+              hit.providerId,
+              hit.displayName,
+              hit.window.name,
+              hit.window.resetsAt
+            );
+          }
+        }
+      }
+    );
+
+    const handleRuntimeUsageLimit = (e: Event) => {
+      const detail = (e as CustomEvent<{
+        provider?: string | null;
+        message?: string;
+        resetAtUnixMs?: number | null;
+      }>).detail;
+      if (!detail) return;
+      const canon = canonicalQuotaProviderId(detail.provider);
+      const targets = canon ? [canon] : undefined;
+      void subscriptionQuotaManager.fetchAll(true, targets);
+
+      const key = `runtime|${canon || 'provider'}|${detail.message || ''}`;
+      if (!alertedQuotaKeys.has(key)) {
+        alertedQuotaKeys.add(key);
+        const label = (canon && PROVIDER_LABELS[canon]) || canon || 'el proveedor actual';
+        toast.action(
+          `Cuota agotada en ${label}`,
+          {
+            title: 'Ver cuotas',
+            onClick: () => openSettingsTab('quotas', canon || undefined),
+          },
+          detail.message || 'El modelo o proveedor actual alcanzó su límite de uso.',
+          { duration: 15000 }
+        );
+      }
+    };
+    window.addEventListener('kite:usage-limit-detected', handleRuntimeUsageLimit);
+
+    let cancelled = false;
+    let stopExhausted: (() => void) | null = null;
+    void Promise.resolve()
+      .then(async () => {
+        const stop = await listen<{
+          providerId: string;
+          displayName: string;
+          windowName: string;
+          resetsAt?: string | null;
+        }>('kite://model-quota-exhausted', (event) => {
+          const p = event?.payload;
+          if (!p?.windowName) return;
+          window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+          notifyModelQuotaExhausted(p.providerId, p.displayName, p.windowName, p.resetsAt);
+        });
+        if (cancelled) {
+          stop();
+        } else {
+          stopExhausted = stop;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unsubQuota();
+      window.removeEventListener('kite:usage-limit-detected', handleRuntimeUsageLimit);
+      stopExhausted?.();
     };
   }, []);
 }

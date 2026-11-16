@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { ModelPickerPopover } from './ModelPickerPopover';
+import { subscriptionQuotaManager } from '../../../../lib/quota/quotaManager';
 import type { DriverDeclaration } from '../../../../lib/session/types';
 
 describe('ModelPickerPopover — Multi-Provider Favorites', () => {
@@ -101,5 +102,69 @@ describe('ModelPickerPopover — Multi-Provider Favorites', () => {
     // Should switch provider to grok and select grok-2
     expect(onSelectProvider).toHaveBeenCalledWith('grok');
     expect(onSelectModel).toHaveBeenCalledWith('grok-2', 'grok');
+  });
+
+  it('marks exhausted model rows and trigger pill with a 0% quota warning badge', () => {
+    subscriptionQuotaManager.applyExternalQuotas({
+      antigravity: {
+        providerId: 'antigravity',
+        displayName: 'Antigravity',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 62,
+        primaryRemainingPercent: 38,
+        primaryResetAt: '2026-11-16T23:07:38Z',
+        timeUntilResetMs: 600_000,
+        windows: [
+          {
+            name: 'Gemini Models (Five Hour)',
+            usagePercent: 62,
+            remainingFraction: 0.38,
+            resetsAt: '2026-11-16T23:07:38Z',
+            timeUntilResetMs: 600_000,
+            isExhausted: false,
+          },
+          {
+            name: 'Gemini 4 Argon (Gemini 4 Argon Weekly Limit)',
+            usagePercent: 100,
+            remainingFraction: 0,
+            resetsAt: '2026-11-22T05:16:50Z',
+            timeUntilResetMs: 463_708_020,
+            isExhausted: true,
+          },
+        ],
+        metadata: {},
+        lastUpdatedMs: Date.now() + 5000,
+        error: null,
+      },
+    });
+
+    const decl: DriverDeclaration = {
+      ...mockDeclaration,
+      models: [
+        { id: 'gemini-4-argon', label: 'Gemini 4 Argon', detail: 'Frontier reasoning' },
+        { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen', detail: 'Deep reasoning' },
+      ],
+    };
+
+    render(
+      <ModelPickerPopover
+        provider="antigravity"
+        model="gemini-4-argon"
+        declaration={decl}
+        onSelectModel={vi.fn()}
+        onSelectProvider={vi.fn()}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: 'Model' });
+    expect(trigger).toHaveTextContent('0%');
+
+    fireEvent.click(trigger);
+    const options = screen.getAllByRole('option');
+    const argonRow = options.find((el) => el.textContent?.includes('Gemini 4 Argon'))!;
+    const hydroRow = options.find((el) => el.textContent?.includes('Gemini 4 Hydrogen'))!;
+    expect(within(argonRow).getByText('0%')).toBeInTheDocument();
+    expect(within(hydroRow).queryByText('0%')).toBeNull();
   });
 });

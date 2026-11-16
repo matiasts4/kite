@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface TurnFailureView {
   kind: 'usageLimit' | 'authRequired' | 'cliUsageError' | 'processError';
@@ -27,7 +27,24 @@ export function ThreadErrorBanner({
   onSignIn?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const lastDispatchedRef = useRef<string | null>(null);
   const reset = formatResetTime(failure.resetAtUnixMs);
+
+  useEffect(() => {
+    if (failure.kind !== 'usageLimit') return;
+    const signature = `${failure.provider ?? ''}|${failure.message}|${failure.resetAtUnixMs ?? ''}`;
+    if (lastDispatchedRef.current === signature) return;
+    lastDispatchedRef.current = signature;
+    window.dispatchEvent(
+      new CustomEvent('kite:usage-limit-detected', {
+        detail: {
+          provider: failure.provider ?? null,
+          message: failure.message,
+          resetAtUnixMs: failure.resetAtUnixMs ?? null,
+        },
+      })
+    );
+  }, [failure.kind, failure.provider, failure.message, failure.resetAtUnixMs]);
   return (
     <section className="thread-error-banner rounded-card" role="alert">
       <strong>{failure.kind === 'usageLimit' ? 'Usage limit' : 'Thread error'}</strong>

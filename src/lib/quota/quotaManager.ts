@@ -363,6 +363,13 @@ class SubscriptionQuotaManager {
     this.notify();
   }
 
+  applyExternalQuotas(payload: Record<string, ProviderQuotaStatus>) {
+    if (this.mergePayloadIntoCache(payload)) {
+      saveQuotaCache(this.getAllQuotas());
+      this.notify();
+    }
+  }
+
   /**
    * One-time upgrade from the legacy "all providers enabled" default.
    * Monitoring starts empty so the user explicitly adds what they use; keys,

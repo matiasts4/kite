@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NotificationsView } from './NotificationsView';
 import { resetAccountVaultStoreForTest } from '../../lib/accounts/accountVaultStore';
+import * as settingsNav from '../../lib/settingsNav';
 
 // Mock ipc invokeCommand
 vi.mock('../../lib/ipc', () => ({
@@ -254,5 +255,39 @@ describe('NotificationsView Component', () => {
         confirmationId: 'conf-2',
       });
     });
+  });
+
+  it('opens Settings -> Quotas when clicking a modelQuotaExhausted notification', async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(settingsNav, 'openSettingsTab').mockImplementation(() => {});
+    const onClose = vi.fn();
+    const quotaSnap = {
+      records: [
+        {
+          id: 'quota_antigravity:Gemini 4 Argon:2026-11-22T05:16:50Z',
+          createdAtUnixMs: Date.now(),
+          isRead: false,
+          isWaitingForInput: false,
+          target: { source: 'accountVault', id: 'antigravity' },
+          kind: { kind: 'modelQuotaExhausted', requestKind: 'antigravity' },
+          title: 'Cuota agotada: Gemini 4 Argon (Gemini 4 Argon Weekly Limit)',
+          body: 'Antigravity llegó al 0% en «Gemini 4 Argon».',
+        },
+      ],
+      unreadCount: 1,
+      openInputRequestCount: 0,
+    };
+
+    vi.mocked(invokeCommand)
+      .mockResolvedValueOnce(quotaSnap)
+      .mockResolvedValueOnce({ ...quotaSnap, unreadCount: 0 });
+
+    render(<NotificationsView onClose={onClose} />);
+    const row = await screen.findByRole('button', { name: /Cuota agotada: Gemini 4 Argon/i });
+    await user.click(row);
+
+    expect(openSpy).toHaveBeenCalledWith('quotas', 'antigravity');
+    expect(onClose).toHaveBeenCalled();
+    openSpy.mockRestore();
   });
 });

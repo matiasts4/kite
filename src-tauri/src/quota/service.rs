@@ -5,11 +5,140 @@ use crate::quota::{
     fetch_cursor_quota, fetch_deepseek_quota, fetch_droid_quota, fetch_gemini_quota,
     fetch_grok_quota, fetch_kimi_quota, fetch_opencode_quota, fetch_qoder_quota,
 };
+use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExhaustedQuotaAlert {
+    pub provider_id: String,
+    pub display_name: String,
+    pub window_name: String,
+    pub remaining_percent: f64,
+    pub resets_at: Option<String>,
+    pub time_until_reset_ms: Option<i64>,
+    pub dedup_key: String,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn seen_exhausted_windows() -> &'static Mutex<HashSet<(String, String, Option<String>)>> {
+    static CELL: OnceLock<Mutex<HashSet<(String, String, Option<String>)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn collect_new_exhausted_alerts_in(
+    seen: &mut HashSet<(String, String, Option<String>)>,
+    provider_id: &str,
+    status: &ProviderQuotaStatus,
+) -> Vec<ExhaustedQuotaAlert> {
+    if !status.is_available || !status.is_auth {
+        return Vec::new();
+    }
+
+    let exhausted_windows: Vec<(String, f64, Option<String>, Option<i64>)> =
+        if status.windows.is_empty() {
+            if status.primary_remaining_percent <= 0.0 {
+                vec![(
+                    status.display_name.clone(),
+                    0.0,
+                    status.primary_reset_at.clone(),
+                    status.time_until_reset_ms,
+                )]
+            } else {
+                Vec::new()
+            }
+        } else {
+            status
+                .windows
+                .iter()
+                .filter(|w| w.is_exhausted || w.remaining_fraction <= 0.0 || w.usage_percent >= 100.0)
+                .map(|w| {
+                    (
+                        w.name.clone(),
+                        (w.remaining_fraction * 100.0).clamp(0.0, 100.0).round(),
+                        w.resets_at.clone(),
+                        w.time_until_reset_ms,
+                    )
+                })
+                .collect()
+        };
+
+    // Re-arm once a window recovers (> 0%) or advances to a new reset window.
+    seen.retain(|(prov, win, rst)| {
+        if prov != provider_id {
+            return true;
+        }
+        exhausted_windows
+            .iter()
+            .any(|(ew, _, erst, _)| ew == win && erst == rst)
+    });
+
+    let mut alerts = Vec::new();
+    for (window_name, remaining_percent, resets_at, time_until_reset_ms) in exhausted_windows {
+        let key = (provider_id.to_string(), window_name.clone(), resets_at.clone());
+        if seen.insert(key) {
+            let dedup_key = format!(
+                "{}:{}:{}",
+                provider_id,
+                window_name,
+                resets_at.as_deref().unwrap_or("none")
+            );
+            alerts.push(ExhaustedQuotaAlert {
+                provider_id: provider_id.to_string(),
+                display_name: status.display_name.clone(),
+                window_name,
+                remaining_percent,
+                resets_at,
+                time_until_reset_ms,
+                dedup_key,
+            });
+        }
+    }
+    alerts
+}
+
+#[cfg(not(test))]
+fn publish_synced_quota_effects(synced_statuses: &[(String, ProviderQuotaStatus)]) {
+    use tauri::Emitter;
+
+    if synced_statuses.is_empty() {
+        return;
+    }
+
+    let mut new_alerts = Vec::new();
+    for (prov, status) in synced_statuses {
+        crate::account_switcher::record_active_quota_snapshot_for_provider(prov, status);
+        crate::account_switcher::auto_switch::on_fresh_quota_status(prov, status);
+
+        if let Ok(mut guard) = seen_exhausted_windows().lock() {
+            new_alerts.extend(collect_new_exhausted_alerts_in(&mut guard, prov, status));
+        }
+    }
+
+    let app = crate::get_app_handle();
+    for alert in &new_alerts {
+        crate::notifications::upsert_model_quota_exhausted_notification(
+            &alert.dedup_key,
+            &alert.provider_id,
+            &alert.display_name,
+            &alert.window_name,
+            alert.resets_at.as_deref(),
+        );
+        if let Some(app) = app.as_ref() {
+            let _ = app.emit("kite://model-quota-exhausted", alert);
+        }
+    }
+
+    if let Some(app) = app.as_ref() {
+        let targets: Vec<&str> = synced_statuses.iter().map(|(p, _)| p.as_str()).collect();
+        let updated_payload = build_cache_result(&targets);
+        let _ = app.emit("kite://subscription-quotas-updated", updated_payload);
+    }
+}
 
 struct QuotaCache {
     entries: HashMap<String, (Instant, ProviderQuotaStatus)>,
@@ -353,25 +482,7 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
                     drop(_reset_guard);
 
                     #[cfg(not(test))]
-                    for (prov, status) in &synced_statuses {
-                        crate::account_switcher::record_active_quota_snapshot_for_provider(
-                            prov,
-                            status,
-                        );
-                        crate::account_switcher::auto_switch::on_fresh_quota_status(prov, status);
-                    }
-
-                    // Push live updated quotas ONLY for providers whose cache epoch stayed valid
-                    #[cfg(not(test))]
-                    if !updated_providers.is_empty() {
-                        use tauri::Emitter;
-                        if let Some(app) = crate::get_app_handle() {
-                            let targets: Vec<&str> =
-                                updated_providers.iter().map(|s| s.as_str()).collect();
-                            let updated_payload = build_cache_result(&targets);
-                            let _ = app.emit("kite://subscription-quotas-updated", updated_payload);
-                        }
-                    }
+                    publish_synced_quota_effects(&synced_statuses);
                 });
             }
         }
@@ -417,10 +528,7 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
             }
         }
         #[cfg(not(test))]
-        for (prov, status) in &synced_statuses {
-            crate::account_switcher::record_active_quota_snapshot_for_provider(prov, status);
-            crate::account_switcher::auto_switch::on_fresh_quota_status(prov, status);
-        }
+        publish_synced_quota_effects(&synced_statuses);
     }
 
     build_cache_result(&target_providers)
@@ -452,6 +560,52 @@ mod tests {
         );
         assert!(inserted.is_empty(), "stale SWR fetch must be discarded after invalidation");
         assert!(!cache.entries.contains_key("antigravity"));
+    }
+
+    #[test]
+    fn test_collect_new_exhausted_alerts_dedupes_same_reset_window_and_rearms() {
+        let mut seen: HashSet<(String, String, Option<String>)> = HashSet::new();
+        let mut status = default_provider_status("antigravity");
+        status.is_available = true;
+        status.is_auth = true;
+        status.primary_remaining_percent = 73.0;
+        status.windows = vec![
+            crate::quota::types::QuotaWindow {
+                name: "Gemini Models (Five Hour)".to_string(),
+                usage_percent: 27.0,
+                remaining_fraction: 0.73,
+                resets_at: Some("2026-11-16T23:00:00Z".to_string()),
+                time_until_reset_ms: Some(1_000),
+                is_exhausted: false,
+            },
+            crate::quota::types::QuotaWindow {
+                name: "Gemini 4 Argon (Gemini 4 Argon Weekly Limit)".to_string(),
+                usage_percent: 100.0,
+                remaining_fraction: 0.0,
+                resets_at: Some("2026-11-22T05:16:50Z".to_string()),
+                time_until_reset_ms: Some(500_000),
+                is_exhausted: true,
+            },
+        ];
+
+        let first = collect_new_exhausted_alerts_in(&mut seen, "antigravity", &status);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].window_name, "Gemini 4 Argon (Gemini 4 Argon Weekly Limit)");
+
+        // Repeating the same exhausted window with the same reset timestamp must NOT re-alert.
+        let second = collect_new_exhausted_alerts_in(&mut seen, "antigravity", &status);
+        assert!(second.is_empty());
+
+        // Recovery clears the armed entry so a future drop to 0% alerts again.
+        status.windows[1].is_exhausted = false;
+        status.windows[1].remaining_fraction = 1.0;
+        assert!(collect_new_exhausted_alerts_in(&mut seen, "antigravity", &status).is_empty());
+
+        status.windows[1].is_exhausted = true;
+        status.windows[1].remaining_fraction = 0.0;
+        status.windows[1].resets_at = Some("2026-11-29T05:16:50Z".to_string());
+        let rearmed = collect_new_exhausted_alerts_in(&mut seen, "antigravity", &status);
+        assert_eq!(rearmed.len(), 1);
     }
 }
 

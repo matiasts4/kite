@@ -457,6 +457,68 @@ pub(crate) fn resolve_auto_switch_confirmation_notification(
     resolve_auto_switch_notifications_for_ids(&[confirmation_id.to_string()], resolution) > 0
 }
 
+/// Inserts a deduplicated unread alert notification when a model or quota window hits 0%.
+/// Returns `None` if an unread record with the same `dedup_key` already exists.
+pub fn upsert_model_quota_exhausted_notification(
+    dedup_key: &str,
+    provider_id: &str,
+    display_name: &str,
+    window_name: &str,
+    resets_at: Option<&str>,
+) -> Option<Value> {
+    let record_id = format!("quota_{dedup_key}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let title = format!("Cuota agotada: {window_name}");
+    let reset_suffix = resets_at
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|r| format!(" (reinicio: {r})"))
+        .unwrap_or_default();
+    let body = format!("{display_name} llegó al 0% en «{window_name}»{reset_suffix}. Cambiá de modelo o revisá tus cuotas.");
+
+    {
+        let mut items = notifications().lock().unwrap();
+        let already_unread = items.iter().any(|item| {
+            item.get("id").and_then(|v| v.as_str()) == Some(record_id.as_str())
+                && !item.get("isRead").and_then(|v| v.as_bool()).unwrap_or(false)
+        });
+        if already_unread {
+            return None;
+        }
+        items.retain(|item| item.get("id").and_then(|v| v.as_str()) != Some(record_id.as_str()));
+        items.insert(
+            0,
+            json!({
+                "id": record_id,
+                "runId": Value::Null,
+                "target": { "source": "accountVault", "id": provider_id },
+                "profileId": Value::Null,
+                "routineId": Value::Null,
+                "kind": {
+                    "kind": "modelQuotaExhausted",
+                    "requestKind": provider_id,
+                },
+                "title": title,
+                "body": body,
+                "createdAtUnixMs": now,
+                "isRead": false,
+                "isWaitingForInput": false,
+                "resolution": Value::Null,
+            }),
+        );
+        if items.len() > 100 {
+            items.truncate(100);
+        }
+    }
+
+    let snapshot = make_notifications_snapshot();
+    persist();
+    Some(snapshot)
+}
+
 pub fn notifications_mark_read_direct(request: Option<Value>) -> Value {
     let req = body(&request);
     let record_id = req.and_then(|r| r.get("recordId")).and_then(|v| v.as_str()).unwrap_or("");
@@ -772,5 +834,47 @@ mod tests {
             .unwrap();
         assert_eq!(rec2["resolution"], "attended");
         assert_eq!(rec2["isWaitingForInput"], false);
+    }
+
+    #[test]
+    fn model_quota_exhausted_notifications_are_created_and_deduplicated() {
+        let key = format!("test-quota-{}", Uuid::new_v4());
+        let expected_id = format!("quota_{}", key);
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let mut items = notifications().lock().unwrap();
+                items.retain(|n| n.get("id").and_then(|v| v.as_str()) != Some(self.0.as_str()));
+            }
+        }
+        let _cleanup = Cleanup(expected_id.clone());
+
+        let created = upsert_model_quota_exhausted_notification(
+            &key,
+            "antigravity",
+            "Antigravity",
+            "Gemini 4 Argon (Gemini 4 Argon Weekly Limit)",
+            Some("2026-11-22T05:16:50Z"),
+        );
+        assert!(created.is_some());
+
+        // Duplicate call with identical dedup key returns None (no spam).
+        let duplicate = upsert_model_quota_exhausted_notification(
+            &key,
+            "antigravity",
+            "Antigravity",
+            "Gemini 4 Argon (Gemini 4 Argon Weekly Limit)",
+            Some("2026-11-22T05:16:50Z"),
+        );
+        assert!(duplicate.is_none());
+
+        let snap = make_notifications_snapshot();
+        let count = snap["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["id"] == expected_id)
+            .count();
+        assert_eq!(count, 1);
     }
 }

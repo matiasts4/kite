@@ -15,6 +15,15 @@ import { BrandLogo } from '../../agents/engineMetadata';
 import { SearchIcon, CheckIcon } from '../ChatIcons';
 import { ComposerControl, ComposerControlChevron } from './ComposerControl';
 import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
+import { subscriptionQuotaManager } from '../../../../lib/quota/quotaManager';
+import { type ProviderQuotaStatus } from '../../../../lib/quota/types';
+import {
+  canonicalQuotaProviderId,
+  getWindowRemainingPercent,
+  isWindowExhausted,
+  isWindowLow,
+  resolveModelQuotaWindow,
+} from '../../../../lib/quota/modelQuota';
 
 const DEFAULT_PROVIDERS: Record<string, { label: string; vendor: string }> = {
   antigravity: { label: 'Antigravity', vendor: 'Google DeepMind' },
@@ -127,10 +136,17 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
   const [activeRailTab, setActiveRailTab] = useState<'favorites' | ChatProvider>(provider);
   const [favorites, setFavorites] = useState<FavoriteModelEntry[]>(() => loadFavorites());
   const [coords, setCoords] = useState<PopoverCoords | null>(null);
+  const [quotas, setQuotas] = useState<Record<string, ProviderQuotaStatus>>({});
 
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    return subscriptionQuotaManager.subscribe((data) => {
+      setQuotas(data);
+    });
+  }, []);
 
   useEffect(() => {
     setActiveRailTab(provider);
@@ -219,6 +235,18 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
       ? 'Automatic'
       : currentModelOption?.label || model;
   const modelTriggerLabel = currentModelName.replace(/^Claude /u, '');
+  const selectedQuotaStatus = quotas[canonicalQuotaProviderId(provider)];
+  const selectedQuotaWindow = resolveModelQuotaWindow(
+    provider,
+    model,
+    selectedQuotaStatus,
+    currentModelName
+  );
+  const selectedQuotaExhausted = isWindowExhausted(selectedQuotaWindow);
+  const selectedQuotaLow = isWindowLow(selectedQuotaWindow);
+  const selectedQuotaPct = selectedQuotaWindow
+    ? getWindowRemainingPercent(selectedQuotaWindow)
+    : null;
 
   const isFavorite = useCallback(
     (prov: ChatProvider, modelId: string) => {
@@ -305,7 +333,13 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
         role="combobox"
         aria-label="Model"
         aria-expanded={isOpen}
-        title={modelReason || `Model: ${currentModelName}`}
+        title={
+          selectedQuotaExhausted
+            ? `${currentModelName} — Model quota exhausted (0%: ${selectedQuotaWindow?.name || 'quota limit'})`
+            : selectedQuotaLow && selectedQuotaPct !== null
+            ? `${currentModelName} — Low quota (${selectedQuotaPct}%: ${selectedQuotaWindow?.name || 'quota limit'})`
+            : modelReason || `Model: ${currentModelName}`
+        }
         disabled={disabled}
         data-state={isOpen ? 'open' : 'closed'}
         onClick={() => {
@@ -324,6 +358,17 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
         <span className="kite-composer-control-label font-medium text-foreground" title={modelTriggerLabel}>
           {modelTriggerLabel}
         </span>
+        {(selectedQuotaExhausted || selectedQuotaLow) && (
+          <span
+            className={`kite-composer-model-quota ${
+              selectedQuotaExhausted
+                ? 'kite-composer-model-quota--exhausted'
+                : 'kite-composer-model-quota--low'
+            }`}
+          >
+            {selectedQuotaExhausted ? '0%' : `${selectedQuotaPct}%`}
+          </span>
+        )}
         <ComposerControlChevron />
       </ComposerControl>
 
@@ -449,6 +494,17 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                         label: DEFAULT_PROVIDERS[itemProv]?.label ?? itemProv,
                         engine: itemProv,
                       };
+                    const rowQuotaWindow = resolveModelQuotaWindow(
+                      itemProv,
+                      item.id,
+                      quotas[canonicalQuotaProviderId(itemProv)],
+                      item.label
+                    );
+                    const rowExhausted = isWindowExhausted(rowQuotaWindow);
+                    const rowLow = isWindowLow(rowQuotaWindow);
+                    const rowPct = rowQuotaWindow
+                      ? getWindowRemainingPercent(rowQuotaWindow)
+                      : null;
 
                     return (
                       <div
@@ -477,6 +533,18 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                           </span>
                           <span className="kite-model-item-label">{item.label}</span>
                           {badge && <span className="kite-model-item-badge">{badge}</span>}
+                          {(rowExhausted || rowLow) && (
+                            <span
+                              title={rowQuotaWindow?.name || undefined}
+                              className={`kite-model-item-badge ${
+                                rowExhausted
+                                  ? 'kite-model-item-badge--exhausted'
+                                  : 'kite-model-item-badge--low'
+                              }`}
+                            >
+                              {rowExhausted ? '0%' : `${rowPct}%`}
+                            </span>
+                          )}
                           {activeRailTab === 'favorites' && (
                             <span
                               className="kite-model-item-badge"

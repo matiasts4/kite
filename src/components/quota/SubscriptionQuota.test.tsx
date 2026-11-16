@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SubscriptionQuotaBadge } from './SubscriptionQuotaBadge';
 import { SubscriptionQuotaPopover } from './SubscriptionQuotaPopover';
@@ -369,6 +369,51 @@ describe('Subscription Quota UI', () => {
       'antigravity',
       'personal@kite.local'
     );
+  });
+
+  it('shows a partial-exhaustion warning indicator when primary quota > 0% but a model window hit 0%', async () => {
+    const { subscriptionQuotaManager } = await import('../../lib/quota/quotaManager');
+    render(<SubscriptionQuotaBadge />);
+
+    act(() => {
+      subscriptionQuotaManager.applyExternalQuotas({
+        antigravity: {
+          providerId: 'antigravity',
+          displayName: 'Antigravity',
+          isAvailable: true,
+          isAuth: true,
+          primaryUsagePercent: 27,
+          primaryRemainingPercent: 73,
+          primaryResetAt: '2026-11-16T23:00:00Z',
+          timeUntilResetMs: 600_000,
+          windows: [
+            {
+              name: 'Gemini Models (Five Hour)',
+              usagePercent: 27,
+              remainingFraction: 0.73,
+              resetsAt: '2026-11-16T23:00:00Z',
+              timeUntilResetMs: 600_000,
+              isExhausted: false,
+            },
+            {
+              name: 'Gemini 4 Argon (Gemini 4 Argon Weekly Limit)',
+              usagePercent: 100,
+              remainingFraction: 0,
+              resetsAt: '2026-11-22T05:16:50Z',
+              timeUntilResetMs: 463_708_020,
+              isExhausted: true,
+            },
+          ],
+          metadata: { primaryWindowLabel: '5h' },
+          lastUpdatedMs: Date.now() + 5000,
+          error: null,
+        },
+      });
+    });
+
+    const badge = await screen.findByRole('button', { name: /Gemini 4 Argon/i });
+    expect(badge).toHaveTextContent('73%');
+    expect(screen.getByTestId('quota-partial-exhausted-dot')).toBeInTheDocument();
   });
 });
 

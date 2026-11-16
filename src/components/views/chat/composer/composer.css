@@ -658,6 +658,29 @@
   flex-shrink: 0;
 }
 
+.kite-model-item-badge--exhausted,
+.kite-composer-model-quota--exhausted {
+  background: color-mix(in srgb, var(--status-failed, #ef4444) 18%, transparent);
+  color: var(--status-failed, #f87171);
+  font-weight: 600;
+}
+
+.kite-model-item-badge--low,
+.kite-composer-model-quota--low {
+  background: color-mix(in srgb, var(--warning-text, #f59e0b) 18%, transparent);
+  color: var(--warning-text, #fbbf24);
+  font-weight: 600;
+}
+
+.kite-composer-model-quota {
+  font-size: 0.625rem;
+  line-height: 1;
+  padding: 0.125rem 0.3125rem;
+  border-radius: var(--vl-radius-xs, 4px);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
 .kite-model-item-right {
   display: flex;
   align-items: center;

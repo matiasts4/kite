@@ -316,7 +316,7 @@ pub fn launch_provider(
                                         error.reason()
                                     ),
                                 );
-                                finish_run(&run_id, false, false, "");
+                                finish_run(&run_id, false, false, error.reason());
                                 return;
                             }
                         }

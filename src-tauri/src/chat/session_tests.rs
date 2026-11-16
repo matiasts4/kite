@@ -459,3 +459,144 @@ fn stop_all_terminates_all_active_transports() {
     assert_eq!(t1.stop_count(), 1);
     assert_eq!(t2.stop_count(), 1);
 }
+
+#[test]
+fn attaching_after_session_failed_exit_reattaches_and_preserves_resume_handle() {
+    let mut manager = SessionManager::new();
+    let initial = attach(
+        &mut manager,
+        spec("thread-1", SessionMode::Persistent, None),
+        ScriptedTransport::new().with_resume_handle("conv-1"),
+    );
+    manager.start("thread-1").unwrap();
+    initial.script(TransportEvent::Exit {
+        code: Some(1),
+        error: Some("quota".to_string()),
+    });
+    manager.poll("thread-1").unwrap();
+    assert_eq!(manager.status("thread-1").unwrap().state, SessionState::Failed);
+
+    let replacement = ScriptedTransport::new();
+    let outcome = manager
+        .attach(
+            spec("thread-1", SessionMode::Persistent, None),
+            Box::new(replacement.clone()),
+        )
+        .unwrap();
+    assert_eq!(outcome, AttachOutcome::Attached { generation: 2 });
+    manager.start("thread-1").unwrap();
+    assert_eq!(replacement.spawn_count(), 1);
+    assert_eq!(
+        replacement.spawned_specs()[0].resume_handle.as_deref(),
+        Some("conv-1")
+    );
+}
+
+#[test]
+fn dead_idle_transport_or_immutable_model_switch_respawns_preserving_resume_handle() {
+    let mut manager = SessionManager::new();
+    let argon = PersistentControls {
+        model: Some("gemini-4-argon".to_string()),
+        effort: None,
+        permission_mode: Some("auto".to_string()),
+    };
+    let hydrogen = PersistentControls {
+        model: Some("gemini-4-hydrogen".to_string()),
+        effort: None,
+        permission_mode: Some("auto".to_string()),
+    };
+
+    let first = attach(
+        &mut manager,
+        spec("thread-agy", SessionMode::Persistent, None),
+        ScriptedTransport::new()
+            .with_resume_handle("5ef02f9b")
+            .with_controls(argon, false),
+    );
+    manager
+        .send_turn("thread-agy", "cmd-1", "first")
+        .expect("initial turn");
+    first.script(TransportEvent::TurnEnded);
+    manager.poll("thread-agy").unwrap();
+    assert_eq!(manager.status("thread-agy").unwrap().state, SessionState::Idle);
+
+    // Process dies quietly without delivering Exit (mimics post-429 shutdown)
+    first.mark_dead();
+    let second = ScriptedTransport::new().with_controls(hydrogen.clone(), false);
+    let outcome = manager
+        .attach(
+            spec("thread-agy", SessionMode::Persistent, None),
+            Box::new(second.clone()),
+        )
+        .unwrap();
+    assert_eq!(outcome, AttachOutcome::Attached { generation: 2 });
+    assert_eq!(first.stop_count(), 1);
+
+    manager
+        .send_turn("thread-agy", "cmd-2", "retry on hydrogen")
+        .expect("respawned turn should write to replacement transport");
+    assert_eq!(second.spawn_count(), 1);
+    assert_eq!(
+        second.spawned_specs()[0].resume_handle.as_deref(),
+        Some("5ef02f9b")
+    );
+    assert_eq!(second.written_turns(), vec!["retry on hydrogen".to_string()]);
+
+    // Even if alive, an immutable transport refuses model change and respawns cleanly
+    let third = ScriptedTransport::new().with_controls(
+        PersistentControls {
+            model: Some("gemini-4-flash".to_string()),
+            ..hydrogen
+        },
+        false,
+    );
+    let outcome3 = manager
+        .attach(
+            spec("thread-agy", SessionMode::Persistent, None),
+            Box::new(third.clone()),
+        )
+        .unwrap();
+    assert_eq!(outcome3, AttachOutcome::Attached { generation: 3 });
+}
+
+#[test]
+fn mutable_transport_updates_controls_in_place_without_respawn() {
+    let mut manager = SessionManager::new();
+    let first = attach(
+        &mut manager,
+        spec("thread-grok", SessionMode::Persistent, None),
+        ScriptedTransport::new().with_controls(
+            PersistentControls {
+                model: Some("grok-4".to_string()),
+                effort: Some("medium".to_string()),
+                permission_mode: Some("acceptEdits".to_string()),
+            },
+            true,
+        ),
+    );
+    manager.send_turn("thread-grok", "cmd-1", "hi").unwrap();
+    first.script(TransportEvent::TurnEnded);
+    manager.poll("thread-grok").unwrap();
+
+    let next_controls = PersistentControls {
+        model: Some("grok-4.7".to_string()),
+        effort: Some("high".to_string()),
+        permission_mode: Some("acceptEdits".to_string()),
+    };
+    let incoming = ScriptedTransport::new().with_controls(next_controls.clone(), true);
+    let outcome = manager
+        .attach(
+            spec("thread-grok", SessionMode::Persistent, None),
+            Box::new(incoming.clone()),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AttachOutcome::AlreadyAttached {
+            generation: 1,
+            state: SessionState::Idle,
+        }
+    );
+    assert_eq!(first.controls_snapshot(), Some(next_controls));
+    assert_eq!(incoming.spawn_count(), 0);
+}

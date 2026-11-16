@@ -214,6 +214,7 @@ pub struct OpenCodeServerSession {
     session_key: Option<String>,
     /// Model id for each turn, including `#level` when a level was chosen.
     model_arg: Option<String>,
+    controls: PersistentControls,
     turn: Option<HiddenChild>,
     turn_streams: Option<JoinHandle<()>>,
     turn_eof: Arc<AtomicBool>,
@@ -241,7 +242,13 @@ impl OpenCodeServerSession {
         session.model_arg = controls.model.as_deref().filter(|model| !model.trim().is_empty()).map(|model| {
             opencode_model_arg(model.trim(), controls.effort.as_deref())
         });
+        session.controls = controls;
         session
+    }
+
+    #[cfg(test)]
+    pub(super) fn model_arg_for_test(&self) -> Option<&str> {
+        self.model_arg.as_deref()
     }
 
     pub fn with_probe(program: Option<PathBuf>, probe: Box<dyn DriverProbe>) -> Self {
@@ -257,6 +264,7 @@ impl OpenCodeServerSession {
             port: None,
             session_key: None,
             model_arg: None,
+            controls: PersistentControls::default(),
             turn: None,
             turn_streams: None,
             turn_eof: Arc::new(AtomicBool::new(true)),
@@ -528,6 +536,35 @@ impl SessionTransport for OpenCodeServerSession {
         }
 
         events
+    }
+
+    fn is_alive(&self) -> bool {
+        if self.spawns == 0 {
+            return !self.stopping;
+        }
+        !self.stopping
+            && self.server.is_some()
+            && !self.server_eof.load(Ordering::SeqCst)
+            && !self
+                .server_streams
+                .as_ref()
+                .map(JoinHandle::is_finished)
+                .unwrap_or(false)
+    }
+
+    fn controls(&self) -> Option<PersistentControls> {
+        Some(self.controls.clone())
+    }
+
+    fn update_controls(&mut self, next: &PersistentControls) -> bool {
+        self.controls = next.clone();
+        self.model_arg = next
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(|model| opencode_model_arg(model, next.effort.as_deref()));
+        true
     }
 }
 

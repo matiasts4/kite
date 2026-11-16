@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::chat::drivers::DriverDeclaration;
+pub use crate::chat::persistent::PersistentControls;
 use crate::chat::utils::now_ms;
 
 /// How a driver keeps a session alive between turns.
@@ -326,5 +327,18 @@ pub trait SessionTransport: fmt::Debug + Send {
     /// One-shot runs keep their own stdin; a lasting session must use this.
     fn write_frame(&mut self, _frame: &str) -> Result<(), String> {
         Err("this session has no client frame channel".to_string())
+    }
+    /// Whether the backing child process or server can still accept turns.
+    fn is_alive(&self) -> bool {
+        true
+    }
+    /// Returns the persistent controls configured for this transport, if any.
+    fn controls(&self) -> Option<PersistentControls> {
+        None
+    }
+    /// Applies updated controls in-place without respawning when supported.
+    /// Returning `false` instructs `SessionManager` to attach and spawn a fresh process.
+    fn update_controls(&mut self, _next: &PersistentControls) -> bool {
+        true
     }
 }

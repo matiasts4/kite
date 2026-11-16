@@ -188,13 +188,15 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
                     "antigravity ended the turn with status {status}"
                 ))));
             }
-            if let Some(err) = value.pointer("/result/error").and_then(Value::as_str) {
-                let trimmed_err = err.trim();
-                if !trimmed_err.is_empty() {
-                    events.push(TransportEvent::Notice(bounded_notice(&format!(
-                        "antigravity error: {trimmed_err}"
-                    ))));
-                }
+            let result_error = ["/result/error", "/result/error/message", "/error/message", "/error"]
+                .iter()
+                .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+                .map(str::trim)
+                .find(|err| !err.is_empty());
+            if let Some(trimmed_err) = result_error {
+                events.push(TransportEvent::Notice(bounded_notice(&format!(
+                    "antigravity error: {trimmed_err}"
+                ))));
             }
             if let Some(denied) = value.pointer("/result/denied_actions").and_then(Value::as_array) {
                 if !denied.is_empty() {
@@ -208,19 +210,30 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
                     ))));
                 }
             }
-            events.push(TransportEvent::TurnEnded);
+            if !status.eq_ignore_ascii_case("SUCCESS") || result_error.is_some() {
+                let reason = result_error
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("antigravity ended the turn with status {status}"));
+                events.push(TransportEvent::TurnFailed(bounded_notice(&reason)));
+            } else {
+                events.push(TransportEvent::TurnEnded);
+            }
             ParsedLine {
                 conversation_id: None,
                 events,
             }
         }
-        "error" => ParsedLine {
-            conversation_id: None,
-            events: vec![TransportEvent::Notice(bounded_notice(&format!(
-                "antigravity reported an error: {}",
-                error_detail(&value)
-            )))],
-        },
+        "error" => {
+            let detail = error_detail(&value);
+            let msg = format!("antigravity reported an error: {detail}");
+            ParsedLine {
+                conversation_id: None,
+                events: vec![
+                    TransportEvent::Notice(bounded_notice(&msg)),
+                    TransportEvent::TurnFailed(bounded_notice(&msg)),
+                ],
+            }
+        }
         other => ParsedLine {
             conversation_id: None,
             events: vec![TransportEvent::Notice(bounded_notice(&format!(
@@ -326,6 +339,11 @@ impl AntigravitySession {
         if let Some(reader) = self.stderr_reader.take() {
             let _ = reader.join();
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn mark_spawned_for_test(&mut self) {
+        self.spawns = 1;
     }
 }
 
@@ -490,6 +508,32 @@ impl SessionTransport for AntigravitySession {
         }
 
         events
+    }
+
+    fn is_alive(&self) -> bool {
+        if self.spawns == 0 {
+            return !self.stopping;
+        }
+        !self.stopping
+            && !self.eof.load(Ordering::SeqCst)
+            && self.stdin.is_some()
+            && !self
+                .reader
+                .as_ref()
+                .map(JoinHandle::is_finished)
+                .unwrap_or(false)
+    }
+
+    fn controls(&self) -> Option<PersistentControls> {
+        Some(self.controls.clone())
+    }
+
+    fn update_controls(&mut self, next: &PersistentControls) -> bool {
+        if self.spawns == 0 {
+            self.controls = next.clone();
+            return true;
+        }
+        self.controls == *next
     }
 }
 

@@ -737,6 +737,41 @@ impl SessionTransport for GrokSession {
         }
         events
     }
+
+    fn is_alive(&self) -> bool {
+        if self.spawns == 0 {
+            return !self.stopping;
+        }
+        if self.stopping || self.eof.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.record.is_some() {
+            return true;
+        }
+        self.stdin.is_some()
+            && !self
+                .reader
+                .as_ref()
+                .map(JoinHandle::is_finished)
+                .unwrap_or(false)
+    }
+
+    fn controls(&self) -> Option<PersistentControls> {
+        Some(self.controls.clone())
+    }
+
+    fn update_controls(&mut self, next: &PersistentControls) -> bool {
+        if self.spawns == 0 {
+            self.controls = next.clone();
+            return true;
+        }
+        if self.controls.permission_mode != next.permission_mode {
+            return false;
+        }
+        self.controls.model = next.model.clone();
+        self.controls.effort = next.effort.clone();
+        true
+    }
 }
 
 impl Drop for GrokSession {

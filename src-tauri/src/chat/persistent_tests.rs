@@ -132,9 +132,22 @@
         let success = parse_antigravity_line(r#"{"event":"result","result":{"status":"SUCCESS"}}"#);
         assert_eq!(success.events, vec![TransportEvent::TurnEnded]);
 
-        let failed = parse_antigravity_line(r#"{"event":"result","result":{"status":"ERROR"}}"#);
+        let failed = parse_antigravity_line(
+            r#"{"event":"result","result":{"status":"ERROR","error":"Individual quota reached. Resets in 129h9m59s."}}"#,
+        );
         assert!(matches!(failed.events.first(), Some(TransportEvent::Notice(_))));
-        assert_eq!(failed.events.last(), Some(&TransportEvent::TurnEnded));
+        assert!(matches!(
+            failed.events.last(),
+            Some(TransportEvent::TurnFailed(reason)) if reason.contains("Individual quota reached")
+        ));
+
+        let err_frame = parse_antigravity_line(
+            r#"{"event":"error","error":{"message":"RESOURCE_EXHAUSTED (code 429)"}}"#,
+        );
+        assert!(matches!(
+            err_frame.events.last(),
+            Some(TransportEvent::TurnFailed(reason)) if reason.contains("RESOURCE_EXHAUSTED")
+        ));
     }
 
     #[test]
@@ -594,4 +607,18 @@
             opencode_line_event(tool_line),
             Some(TransportEvent::Activity(tool_line.to_string()))
         );
+    }
+
+    #[test]
+    fn antigravity_requires_respawn_after_model_change_while_opencode_updates_in_place() {
+        let mut agy = AntigravitySession::new(controls(Some("gemini-4-argon"), None, Some("auto")));
+        assert!(agy.is_alive());
+        assert!(agy.update_controls(&controls(Some("gemini-4-hydrogen"), None, Some("auto"))));
+        agy.mark_spawned_for_test();
+        assert!(!agy.update_controls(&controls(Some("gemini-4-argon"), None, Some("auto"))));
+        assert!(agy.update_controls(&controls(Some("gemini-4-hydrogen"), None, Some("auto"))));
+
+        let mut oc = OpenCodeServerSession::with_controls(controls(Some("openai/gpt-5"), Some("low"), None));
+        assert!(oc.update_controls(&controls(Some("anthropic/claude-sonnet-4"), Some("high"), None)));
+        assert_eq!(oc.model_arg_for_test(), Some("anthropic/claude-sonnet-4#high"));
     }

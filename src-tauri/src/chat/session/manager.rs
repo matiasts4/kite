@@ -27,6 +27,21 @@ pub struct SessionManager {
     pub(super) commands: HashMap<String, CommandRecord>,
 }
 
+fn canon_driver(driver: &str) -> &str {
+    match driver.trim() {
+        "agy" => "antigravity",
+        other => other,
+    }
+}
+
+fn capture_resume_handle(session: &mut ManagedSession) {
+    if let Some(handle) = session.transport.resume_handle() {
+        if !handle.trim().is_empty() {
+            session.record.resume_handle = Some(handle);
+        }
+    }
+}
+
 impl SessionManager {
     pub fn new() -> Self {
         Self::default()
@@ -45,22 +60,59 @@ impl SessionManager {
         if spec.thread_id.trim().is_empty() {
             return Err(SessionError::NotAttached(spec.thread_id));
         }
-        if let Some(existing) = self.sessions.get(&spec.thread_id) {
-            if existing.record.state != SessionState::Closed {
+
+        let incoming_controls = transport.controls();
+        let replacement = if let Some(existing) = self.sessions.get_mut(&spec.thread_id) {
+            let same_driver = canon_driver(&existing.record.driver) == canon_driver(&spec.driver);
+            let same_binding = same_driver
+                && existing.record.connection_id == spec.connection_id
+                && existing.record.working_directory == spec.working_directory
+                && existing.record.mode == spec.mode;
+            let dead_or_terminal = matches!(
+                existing.record.state,
+                SessionState::Closed
+                    | SessionState::Failed
+                    | SessionState::Resumable
+                    | SessionState::Interrupted
+            ) || (existing.record.state != SessionState::Reaped
+                && !existing.transport.is_alive());
+            let controls_ok = if !dead_or_terminal && same_binding {
+                incoming_controls
+                    .as_ref()
+                    .map(|next| existing.transport.update_controls(next))
+                    .unwrap_or(true)
+            } else {
+                false
+            };
+            if !dead_or_terminal && same_binding && controls_ok {
                 return Ok(AttachOutcome::AlreadyAttached {
                     generation: existing.record.generation,
                     state: existing.record.state,
                 });
             }
-        }
+            let prior_generation = existing.record.generation;
+            let carry_handle = if existing.record.state != SessionState::Closed
+                && same_driver
+                && existing.record.connection_id == spec.connection_id
+            {
+                capture_resume_handle(existing);
+                existing.record.resume_handle.clone()
+            } else {
+                None
+            };
+            let _ = existing.transport.stop();
+            settle_approvals(existing, "reattached");
+            Some((prior_generation, carry_handle))
+        } else {
+            None
+        };
 
-        let generation = self
-            .sessions
-            .get(&spec.thread_id)
-            .map(|existing| existing.record.generation + 1)
-            .unwrap_or(1);
+        let generation = replacement.as_ref().map(|(g, _)| g + 1).unwrap_or(1);
+        let resume_handle = spec
+            .resume_handle
+            .or_else(|| replacement.and_then(|(_, carried)| carried));
         let session_id = format!("{}:{}", spec.thread_id, generation);
-        let initial_state = if spec.resume_handle.is_some() && spec.mode == SessionMode::Persistent {
+        let initial_state = if resume_handle.is_some() && spec.mode == SessionMode::Persistent {
             SessionState::Reaped
         } else {
             SessionState::Prepared
@@ -76,7 +128,7 @@ impl SessionManager {
             mode: spec.mode,
             state: initial_state,
             recipe: spec.recipe,
-            resume_handle: spec.resume_handle,
+            resume_handle,
             extra_env: spec.extra_env,
             started_at_ms: now,
             last_active_at_ms: now,
@@ -101,10 +153,10 @@ impl SessionManager {
             .get(thread_id)
             .map(|s| {
                 s.record.mode == SessionMode::Persistent
-                    && !matches!(
+                    && (!matches!(
                         s.record.state,
                         SessionState::Running | SessionState::Waiting | SessionState::Idle
-                    )
+                    ) || (s.transport.spawn_count() > 0 && !s.transport.is_alive()))
             })
             .unwrap_or(false);
         if is_persistent_and_needs_spawn {
@@ -115,6 +167,22 @@ impl SessionManager {
             .sessions
             .get_mut(thread_id)
             .ok_or_else(|| SessionError::NotAttached(thread_id.to_string()))?;
+        if session.record.mode == SessionMode::Persistent
+            && session.transport.spawn_count() > 0
+            && !session.transport.is_alive()
+            && matches!(
+                session.record.state,
+                SessionState::Running
+                    | SessionState::Waiting
+                    | SessionState::Idle
+                    | SessionState::Completed
+            )
+        {
+            capture_resume_handle(session);
+            let _ = session.transport.stop();
+            settle_approvals(session, "transportDead");
+            session.record.state = SessionState::Reaped;
+        }
         if matches!(
             session.record.state,
             SessionState::Running | SessionState::Waiting | SessionState::Idle
@@ -166,10 +234,10 @@ impl SessionManager {
             .get(thread_id)
             .map(|s| {
                 s.record.mode == SessionMode::Persistent
-                    && !matches!(
+                    && (!matches!(
                         s.record.state,
                         SessionState::Running | SessionState::Waiting | SessionState::Idle
-                    )
+                    ) || (s.transport.spawn_count() > 0 && !s.transport.is_alive()))
             })
             .unwrap_or(false);
         if is_persistent_and_needs_spawn {
@@ -180,6 +248,23 @@ impl SessionManager {
             .sessions
             .get_mut(thread_id)
             .ok_or_else(|| SessionError::NotAttached(thread_id.to_string()))?;
+
+        if session.record.mode == SessionMode::Persistent
+            && session.transport.spawn_count() > 0
+            && !session.transport.is_alive()
+            && matches!(
+                session.record.state,
+                SessionState::Running
+                    | SessionState::Waiting
+                    | SessionState::Idle
+                    | SessionState::Completed
+            )
+        {
+            capture_resume_handle(session);
+            let _ = session.transport.stop();
+            settle_approvals(session, "transportDead");
+            session.record.state = SessionState::Reaped;
+        }
 
         let needs_new_command = session.record.mode == SessionMode::OneShot
             && matches!(
@@ -207,16 +292,20 @@ impl SessionManager {
                 // the session: the next message is written onto it.
                 let process_serves_the_thread = session.record.mode == SessionMode::Persistent
                     && matches!(session.record.state, SessionState::Completed | SessionState::Idle)
-                    && session.transport.spawn_count() > 0;
+                    && session.transport.spawn_count() > 0
+                    && session.transport.is_alive();
                 if !process_serves_the_thread {
                     spawn_once(session, None)?;
                 }
             }
         }
-        session
-            .transport
-            .write_turn(prompt)
-            .map_err(SessionError::Transport)?;
+        if let Err(err) = session.transport.write_turn(prompt) {
+            if !session.transport.is_alive() {
+                capture_resume_handle(session);
+                session.record.state = SessionState::Failed;
+            }
+            return Err(SessionError::Transport(err));
+        }
         session.record.state = SessionState::Running;
         session.record.last_active_at_ms = now_ms();
         push_event(session, "turnAccepted", json!({ "commandId": command_id }));

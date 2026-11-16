@@ -326,3 +326,27 @@ fn tool_tracker_marks_failed_cli_subagent_and_cleans_shell_redirections() {
         Some("Unknown model gemini-2.5-flash")
     );
 }
+
+#[test]
+fn classify_turn_failure_detects_resource_exhausted_and_reset_hint() {
+    let bare = classify_turn_failure(Some(1), "RESOURCE_EXHAUSTED (code 429)", "antigravity");
+    assert!(matches!(
+        bare,
+        Some(TurnFailure::UsageLimit { ref message, reset_at_unix_ms: None })
+            if message.contains("RESOURCE_EXHAUSTED")
+    ), "got {bare:?}");
+
+    let with_reset = classify_turn_failure(
+        Some(1),
+        "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 1h30m5s.",
+        "antigravity",
+    );
+    let Some(TurnFailure::UsageLimit { reset_at_unix_ms: Some(reset_at), .. }) = with_reset else {
+        panic!("expected UsageLimit with parsed reset_at_unix_ms, got {with_reset:?}");
+    };
+    let delta_ms = reset_at - crate::chat::utils::now_ms();
+    assert!(
+        (5_390_000..=5_420_000).contains(&delta_ms),
+        "expected ~1h30m5s delta ms, got {delta_ms}"
+    );
+}

@@ -190,10 +190,15 @@ pub fn classify_turn_failure(exit_code: Option<i32>, stderr: &str, provider: &st
         return None;
     }
     let lower = text.to_ascii_lowercase();
-    if lower.contains("rate limit") || lower.contains("usage limit") || lower.contains("quota") {
+    if lower.contains("rate limit")
+        || lower.contains("usage limit")
+        || lower.contains("quota")
+        || lower.contains("resource_exhausted")
+        || lower.contains("resource has been exhausted")
+    {
         return Some(TurnFailure::UsageLimit {
             message: bounded(text, 400),
-            reset_at_unix_ms: None,
+            reset_at_unix_ms: parse_reset_hint_unix_ms(text),
         });
     }
     if lower.contains("sign in")
@@ -305,4 +310,45 @@ pub fn grok_permission_flag(mode: PermissionMode) -> &'static str {
         PermissionMode::Auto => "auto",
         PermissionMode::FullAccess => "bypassPermissions",
     }
+}
+
+/// Parses `"Resets in XhYmZs"` duration hints (for example `"Resets in 129h9m59s."`) into ms.
+pub fn parse_reset_duration_ms(text: &str) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    let idx = lower.find("resets in ")?;
+    let rest = &lower[idx + "resets in ".len()..];
+    let token = rest
+        .split(|ch: char| ch.is_whitespace() || ch == '.' || ch == ',' || ch == ';' || ch == ')')
+        .find(|part| !part.is_empty())?;
+    let mut total_secs: i64 = 0;
+    let mut digits = String::new();
+    let mut matched = false;
+    for ch in token.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        let Ok(amount) = digits.parse::<i64>() else {
+            return None;
+        };
+        digits.clear();
+        let unit = match ch {
+            'd' => 86_400,
+            'h' => 3_600,
+            'm' => 60,
+            's' => 1,
+            _ => return None,
+        };
+        total_secs = total_secs.saturating_add(amount.saturating_mul(unit));
+        matched = true;
+    }
+    if matched && digits.is_empty() && total_secs > 0 {
+        Some(total_secs.saturating_mul(1_000))
+    } else {
+        None
+    }
+}
+
+fn parse_reset_hint_unix_ms(text: &str) -> Option<i64> {
+    parse_reset_duration_ms(text).map(|ms| crate::chat::utils::now_ms().saturating_add(ms))
 }

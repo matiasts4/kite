@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { ChatComposer } from './ChatComposer';
 import { expandCitations, insertCitationAtCaret } from './citationChip';
 import { declarationFromCatalog } from './driverDeclaration';
-import { listConnections, type ConnectionSummary } from '../../../lib/ipc';
+import { invokeCommand, listConnections, type ConnectionSummary } from '../../../lib/ipc';
 import {
   decodeMention,
   encodeMention,
@@ -16,7 +16,11 @@ import { composerGoalStop, type StashEntry } from './threadInteraction';
 
 vi.mock('../../../lib/ipc', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../lib/ipc')>();
-  return { ...actual, listConnections: vi.fn(async () => []) };
+  return {
+    ...actual,
+    invokeCommand: vi.fn(async () => null),
+    listConnections: vi.fn(async () => []),
+  };
 });
 
 function claudeConnection(connectionId: string, displayName: string): ConnectionSummary {
@@ -34,6 +38,7 @@ function claudeConnection(connectionId: string, displayName: string): Connection
 
 describe('ChatComposer - Behavioral Tests', () => {
   beforeEach(() => {
+    vi.mocked(invokeCommand).mockResolvedValue(null);
     vi.mocked(listConnections).mockResolvedValue([]);
   });
 
@@ -610,9 +615,17 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(onGoalStop).toHaveBeenCalledWith(composerGoalStop('claude', 'tests pass'));
   });
 
-  it('still inserts a dropped prompt as text and ignores a file drop while running', () => {
+  it('inserts dropped prompts, file/thread mentions, and files while running', () => {
     const onChangePrompt = vi.fn();
-    const view = render(<ChatComposer {...defaultProps} prompt="" onChangePrompt={onChangePrompt} />);
+    const onStageFiles = vi.fn();
+    const view = render(
+      <ChatComposer
+        {...defaultProps}
+        prompt=""
+        onChangePrompt={onChangePrompt}
+        onStageFiles={onStageFiles}
+      />,
+    );
     fireEvent.drop(document.querySelector('[data-slot="composer-main"]') as Element, {
       dataTransfer: {
         types: ['application/x-kite-prompt'],
@@ -623,7 +636,13 @@ describe('ChatComposer - Behavioral Tests', () => {
 
     onChangePrompt.mockClear();
     view.rerender(
-      <ChatComposer {...defaultProps} running prompt="Hello" onChangePrompt={onChangePrompt} />,
+      <ChatComposer
+        {...defaultProps}
+        running
+        prompt="Hello"
+        onChangePrompt={onChangePrompt}
+        onStageFiles={onStageFiles}
+      />,
     );
     fireEvent.drop(document.querySelector('[data-slot="composer-main"]') as Element, {
       dataTransfer: {
@@ -631,7 +650,18 @@ describe('ChatComposer - Behavioral Tests', () => {
         getData: () => JSON.stringify({ relativePath: 'src/main.rs' }),
       },
     });
-    expect(onChangePrompt).not.toHaveBeenCalled();
+    const droppedDraft = onChangePrompt.mock.calls[0]?.[0] as string;
+    expect(droppedDraft).toBeDefined();
+    expect(decodeMention(droppedDraft.slice('Hello'.length))?.id).toBe('src/main.rs');
+
+    const droppedFile = new File(['abc'], 'diagram.png', { type: 'image/png' });
+    fireEvent.drop(document.querySelector('[data-slot="composer-main"]') as Element, {
+      dataTransfer: {
+        types: ['Files'],
+        files: [droppedFile],
+      },
+    });
+    expect(onStageFiles).toHaveBeenCalledWith([droppedFile]);
   });
 
   it('refuses /compact on other providers and asks codex or claude to compact without sending the slash text', async () => {
@@ -793,5 +823,373 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(onQueue).not.toHaveBeenCalled();
     expect(onSend).not.toHaveBeenCalled();
     expect(screen.getByText('New session')).toBeInTheDocument();
+  });
+
+  it('enables sending and queueing for attachment-only messages and renders image thumbnails', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    const onQueue = vi.fn();
+    const imageAtt = {
+      resourceId: 'att-img-1',
+      displayName: 'pasted-image.png',
+      isDirectory: false,
+      byteSize: 2048,
+      mimeType: 'image/png',
+      path: 'C:/tmp/pasted-image.png',
+      previewDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    };
+
+    const { rerender } = render(
+      <ChatComposer
+        {...defaultProps}
+        running={false}
+        prompt=""
+        attachments={[imageAtt]}
+        onSend={onSend}
+        onQueue={onQueue}
+      />,
+    );
+
+    const thumb = document.querySelector('.kite-composer-attachment-thumb') as HTMLImageElement | null;
+    expect(thumb).not.toBeNull();
+    expect(thumb?.getAttribute('src')).toContain('data:image/png;base64,');
+
+    const sendBtn = screen.getByTitle(/Send prompt/i);
+    expect(sendBtn).not.toBeDisabled();
+    await user.click(sendBtn);
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        running={true}
+        prompt=""
+        attachments={[imageAtt]}
+        onSend={onSend}
+        onQueue={onQueue}
+      />,
+    );
+
+    const queueBtn = screen.getByRole('button', { name: 'Queue' });
+    expect(queueBtn).not.toBeDisabled();
+    await user.click(queueBtn);
+    expect(onQueue).toHaveBeenCalledWith('', [imageAtt]);
+  });
+
+  it('supports Steer on Ctrl+Enter while running, Alt+ArrowUp to edit last queued item, and Escape to cancel queue edit', async () => {
+    const onSteer = vi.fn();
+    const onEditLastQueued = vi.fn();
+    const onCancelQueueEdit = vi.fn();
+    const imageAtt = {
+      resourceId: 'att-1',
+      displayName: 'diagram.png',
+      isDirectory: false,
+      byteSize: 512,
+    };
+
+    const { rerender } = render(
+      <ChatComposer
+        {...defaultProps}
+        running={true}
+        prompt="Redirect focus to auth"
+        attachments={[imageAtt]}
+        onSteer={onSteer}
+        onEditLastQueued={onEditLastQueued}
+      />,
+    );
+
+    const textbox = screen.getByRole('textbox');
+    fireEvent.keyDown(textbox, { key: 'Enter', ctrlKey: true });
+    expect(onSteer).toHaveBeenCalledWith('Redirect focus to auth', [imageAtt]);
+
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        running={true}
+        prompt=""
+        attachments={[]}
+        onEditLastQueued={onEditLastQueued}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'ArrowUp', altKey: true });
+    expect(onEditLastQueued).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        running={true}
+        prompt="Editing queued row"
+        editingQueuedId="q-1"
+        onQueue={vi.fn()}
+        onCancelQueueEdit={onCancelQueueEdit}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+    expect(onCancelQueueEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows ComposerContextStrip on draft conversations and hides it once the conversation starts', async () => {
+    const { rerender } = render(
+      <ChatComposer
+        {...defaultProps}
+        threadItems={[]}
+        running={false}
+        threadWorkspaceId="ws-1"
+        threadWorkspaceName="kite"
+        threadBranch="feat/response-thread"
+      />,
+    );
+
+    expect(screen.getByTitle('Select workspace environment')).toBeInTheDocument();
+    expect(screen.getByTitle(/Git branch: feat\/response-thread/i)).toBeInTheDocument();
+
+    // Open branch menu before starting to ensure starting dismisses any open strip menu
+    fireEvent.click(screen.getByTitle(/Git branch: feat\/response-thread/i));
+    expect(screen.getByRole('dialog', { name: 'Select Git Branch' })).toBeInTheDocument();
+
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        threadItems={[
+          {
+            id: 'u-start',
+            kind: 'user',
+            text: 'Start the task',
+            title: null,
+            detail: null,
+            status: null,
+            streaming: false,
+            exitCode: null,
+            createdAtUnixMs: 1000,
+            attachments: [],
+          },
+        ]}
+        running={true}
+        threadWorkspaceId="ws-1"
+        threadWorkspaceName="kite"
+        threadBranch="feat/response-thread"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Select Git Branch' })).not.toBeInTheDocument();
+      expect(screen.queryByTitle('Select workspace environment')).not.toBeInTheDocument();
+      expect(screen.queryByTitle(/Git branch: feat\/response-thread/i)).not.toBeInTheDocument();
+    });
+
+    // Mounting an already-started conversation keeps the strip unmounted immediately
+    const startedView = render(
+      <ChatComposer
+        {...defaultProps}
+        threadId="thread-started"
+        conversationStarted={true}
+        threadWorkspaceId="ws-1"
+        threadWorkspaceName="kite"
+        threadBranch="main"
+      />,
+    );
+    expect(
+      startedView.container.querySelector('[data-slot="composer-context-strip"]'),
+    ).toBeNull();
+  });
+
+  it('keeps paste, attach menu, dictation, voice mode, config pickers, and follow-up placeholder interactive while running', async () => {
+    const user = userEvent.setup();
+    vi.mocked(invokeCommand).mockImplementation(async (cmd) => {
+      if (cmd === 'read_dictation_availability') {
+        return { canStart: true, canRequestPermission: false, guidance: '' };
+      }
+      if (cmd === 'start_dictation') return { ok: true };
+      return null;
+    });
+    const onStageFiles = vi.fn();
+    const onPickAttachments = vi.fn();
+    const onStartVoiceMode = vi.fn();
+    const onUpdateConfig = vi.fn();
+
+    render(
+      <ChatComposer
+        {...defaultProps}
+        running={true}
+        prompt=""
+        onQueue={vi.fn()}
+        onSteer={vi.fn()}
+        onStageFiles={onStageFiles}
+        onPickAttachments={onPickAttachments}
+        onStartVoiceMode={onStartVoiceMode}
+        onUpdateConfig={onUpdateConfig}
+      />,
+    );
+
+    const textbox = screen.getByRole('textbox');
+    expect(textbox).toHaveAttribute('placeholder', 'Write a follow-up while your agent works…');
+
+    // Paste image while running
+    const pastedImage = new File(['png'], 'screenshot.png', { type: 'image/png' });
+    const imgPaste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(imgPaste, 'clipboardData', {
+      value: { files: [pastedImage], items: [] },
+    });
+    textbox.dispatchEvent(imgPaste);
+    expect(onStageFiles).toHaveBeenCalledWith([pastedImage]);
+
+    // Paste >=32 KiB text while running converts to file
+    onStageFiles.mockClear();
+    const bigText = 'x'.repeat(32 * 1024);
+    const textPaste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(textPaste, 'clipboardData', {
+      value: { files: [], items: [], getData: (t: string) => (t === 'text/plain' ? bigText : '') },
+    });
+    textbox.dispatchEvent(textPaste);
+    expect(onStageFiles).toHaveBeenCalledTimes(1);
+    expect(onStageFiles.mock.calls[0]?.[0]?.[0]?.name).toBe('pasted-text.txt');
+
+    // Attach menu works while running
+    const attachBtn = screen.getByRole('button', { name: 'Attach files or a folder' });
+    expect(attachBtn).not.toBeDisabled();
+    await user.click(attachBtn);
+    await user.click(await screen.findByText('Add files…'));
+    expect(onPickAttachments).toHaveBeenCalledWith('files');
+
+    // Dictation works while running
+    const dictateBtn = screen.getByRole('button', { name: 'Dictate message' });
+    await waitFor(() => expect(dictateBtn).not.toBeDisabled());
+    await user.click(dictateBtn);
+    expect(invokeCommand).toHaveBeenCalledWith(
+      'start_dictation',
+      expect.objectContaining({ supportedSchemaVersion: 1 }),
+    );
+
+    // Voice mode works while running
+    const voiceBtn = screen.getByLabelText('Iniciar sesión de voz');
+    expect(voiceBtn).not.toBeDisabled();
+    await user.click(voiceBtn);
+    expect(onStartVoiceMode).toHaveBeenCalledTimes(1);
+
+    // Config pickers stay enabled while running
+    const modelPicker = screen.getByRole('combobox', { name: /model/i });
+    expect(modelPicker).not.toBeDisabled();
+    await user.click(modelPicker);
+    await user.click(await screen.findByRole('option', { name: /Automatic/i }));
+    expect(onUpdateConfig).toHaveBeenCalledWith({ model: null });
+  });
+
+  it('supports Steer across any provider with onSteer and disables queue/steer when draft exceeds 120,000 chars', () => {
+    const onSteer = vi.fn();
+    const onQueue = vi.fn();
+    const { rerender } = render(
+      <ChatComposer
+        {...defaultProps}
+        threadProvider="antigravity"
+        declaration={declarationFromCatalog({ provider: 'antigravity' })}
+        running={true}
+        prompt="Steer antigravity now"
+        onSteer={onSteer}
+        onQueue={onQueue}
+      />,
+    );
+
+    const textbox = screen.getByRole('textbox');
+    fireEvent.keyDown(textbox, { key: 'Enter', ctrlKey: true });
+    expect(onSteer).toHaveBeenCalledWith('Steer antigravity now', []);
+
+    // Holding Ctrl flips Queue -> Steer even on gemini
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        threadProvider="gemini"
+        declaration={declarationFromCatalog({ provider: 'gemini' })}
+        running={true}
+        prompt="Steer gemini"
+        onSteer={onSteer}
+        onQueue={onQueue}
+      />,
+    );
+    fireEvent.keyDown(window, { key: 'Control' });
+    const steerBtn = screen.getByRole('button', { name: 'Steer' });
+    expect(steerBtn).not.toBeDisabled();
+    fireEvent.click(steerBtn);
+    expect(onSteer).toHaveBeenCalledWith('Steer gemini', []);
+
+    // Over 120,000 chars disables Steer and Queue buttons
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        threadProvider="gemini"
+        declaration={declarationFromCatalog({ provider: 'gemini' })}
+        running={true}
+        prompt={'a'.repeat(120_001)}
+        onSteer={onSteer}
+        onQueue={onQueue}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Steer' })).toBeDisabled();
+
+    fireEvent.keyUp(window, { key: 'Control' });
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeDisabled();
+  });
+
+  it('switches default running follow-up button between Queue and Steer from saved preference', () => {
+    localStorage.setItem('kite_default_follow_up', 'steer');
+    try {
+      const onSteer = vi.fn();
+      const onQueue = vi.fn();
+      render(
+        <ChatComposer
+          {...defaultProps}
+          threadProvider="antigravity"
+          declaration={declarationFromCatalog({ provider: 'antigravity' })}
+          running={true}
+          prompt="Steer by default"
+          onSteer={onSteer}
+          onQueue={onQueue}
+        />,
+      );
+
+      const steerBtn = screen.getByRole('button', { name: 'Steer' });
+      fireEvent.click(steerBtn);
+      expect(onSteer).toHaveBeenCalledWith('Steer by default', []);
+
+      // Holding Ctrl flips default Steer -> Queue
+      fireEvent.keyDown(window, { key: 'Control' });
+      const queueBtn = screen.getByRole('button', { name: 'Queue' });
+      fireEvent.click(queueBtn);
+      expect(onQueue).toHaveBeenCalledWith('Steer by default', []);
+      fireEvent.keyUp(window, { key: 'Control' });
+
+      // Plain Enter steers when default preference is Steer, and Ctrl+Enter flips to Queue
+      onSteer.mockClear();
+      onQueue.mockClear();
+      const textbox = screen.getByRole('textbox');
+      fireEvent.keyDown(textbox, { key: 'Enter' });
+      expect(onSteer).toHaveBeenCalledWith('Steer by default', []);
+      fireEvent.keyDown(textbox, { key: 'Enter', ctrlKey: true });
+      expect(onQueue).toHaveBeenCalledWith('Steer by default', []);
+    } finally {
+      localStorage.removeItem('kite_default_follow_up');
+    }
+  });
+
+  it('preserves composer prompt text when async onSteer resolves false after cancel failure', async () => {
+    const onChangePrompt = vi.fn();
+    const onSteer = vi.fn().mockResolvedValue(false);
+    render(
+      <ChatComposer
+        {...defaultProps}
+        running={true}
+        prompt="Keep my text if abort fails"
+        onChangePrompt={onChangePrompt}
+        onSteer={onSteer}
+        onQueue={vi.fn()}
+      />,
+    );
+
+    const textbox = screen.getByRole('textbox');
+    fireEvent.keyDown(textbox, { key: 'Enter', ctrlKey: true });
+    expect(onSteer).toHaveBeenCalledWith('Keep my text if abort fails', []);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onChangePrompt).not.toHaveBeenCalledWith('');
   });
 });

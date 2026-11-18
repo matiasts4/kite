@@ -13,7 +13,7 @@ export interface ComposerDictationButtonProps {
 }
 
 export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = ({
-  running,
+  running: _running,
   prompt,
   onChangePrompt,
   voice,
@@ -27,6 +27,7 @@ export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = (
   const [dictationError, setDictationError] = useState<string | null>(null);
   const dictationReqIdRef = useRef<string | null>(null);
   const dictationPollRef = useRef<number | null>(null);
+  const dictationPollInFlightRef = useRef(false);
   const promptRef = useRef(prompt);
   useEffect(() => {
     promptRef.current = prompt;
@@ -73,7 +74,6 @@ export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = (
   }, []);
 
   const toggleDictation = async () => {
-    if (running) return;
     setDictationError(null);
 
     if (dictationState === 'recording' || dictationState === 'starting') {
@@ -107,6 +107,8 @@ export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = (
           if (dictationPollRef.current) window.clearInterval(dictationPollRef.current);
           return;
         }
+        if (dictationPollInFlightRef.current) return;
+        dictationPollInFlightRef.current = true;
         try {
           const take = await invokeCommand<any>('read_dictation', { id, supportedSchemaVersion: 1 });
           if (!take) return;
@@ -143,6 +145,8 @@ export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = (
           }
         } catch {
           // Keep polling
+        } finally {
+          dictationPollInFlightRef.current = false;
         }
       }, 250);
     } catch (err: any) {
@@ -157,10 +161,9 @@ export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = (
     <button
       type="button"
       disabled={
-        running ||
-        (dictationAvailability !== null &&
-          !dictationAvailability.canStart &&
-          !dictationAvailability.canRequestPermission)
+        dictationAvailability !== null &&
+        !dictationAvailability.canStart &&
+        !dictationAvailability.canRequestPermission
       }
       onClick={toggleDictation}
       title={

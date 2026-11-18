@@ -23,6 +23,7 @@ import { EffortPicker } from './chat/EffortPicker';
 import { UnifiedDiffView } from './chat/UnifiedDiffView';
 import { SpinnerIcon } from './chat/ChatIcons';
 import { ThreadGrid } from './chat/ThreadGrid';
+import { ThemeHeroFigure } from '../theme/ThemeHeroFigure';
 import { ChatComposer } from './chat/ChatComposer';
 import { ChatRail } from './chat/ChatRail';
 import { useChatSession } from './chat/useChatSession';
@@ -100,8 +101,10 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
     const activeThread = activeThreadId ? session.threadsMap[activeThreadId] ?? null : null;
     const draftKey = activeThreadId || `draft-${agentId}`;
     const effectiveProvider = activeThread?.provider || session.draftConfig.provider;
-    const isDraft = !activeThread || (activeThread.items.length === 0 && !session.isRunning[activeThread.id]);
-    const running = activeThread ? Boolean(session.isRunning[activeThread.id]) : false;
+    const running = activeThread
+      ? Boolean(session.isRunning[activeThread.id]) || activeThread.status === 'running'
+      : false;
+    const isDraft = !activeThread || ((activeThread.items?.length ?? 0) === 0 && !running);
     const prompt = session.promptMap[draftKey] || '';
     const attachments = session.attachmentsMap[draftKey] || [];
     const totalTokens = activeThread ? ((activeThread.usage?.inputTokens || 0) + (activeThread.usage?.outputTokens || 0)) : 0;
@@ -127,7 +130,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
           id: t.id,
           title: t.title,
           status: t.status,
-          running: Boolean(session.isRunning[t.id]),
+          running: Boolean(session.isRunning[t.id]) || t.status === 'running',
           routineId: (t as any).routineId ?? (t as any).routine_id ?? null,
           placeCount: (t as any).place_display_names?.length || (t as any).placeDisplayNames?.length || 1,
           updatedAtUnixMs: (t as any).updatedAt ?? (t as any).createdAt ?? Date.now(),
@@ -145,7 +148,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
           activeThreadId ? props.driverDeclarations?.[activeThreadId] ?? null : null
         }
         session={activeThreadId ? props.sessionProjections?.[activeThreadId] ?? null : null}
-        onNew={() => void session.handleCreateNewThread()}
+        onNew={() => session.handleCreateNewThread()}
         onSelect={(id) => void session.handleLoadThread(id)}
         onRename={(id, title) => void session.handleRenameThread(id, title)}
         onArchive={(id) => void session.handleArchiveThread(id)}
@@ -167,6 +170,19 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
           session.setPromptMap((prev) => ({ ...prev, [draftKey]: '' }));
           void session.handleStartThreadFromHome(text);
         }}
+        onQueuePrompt={(text, atts) =>
+          activeThreadId && session.handleQueuePrompt(activeThreadId, text, atts)
+        }
+        onUpdateQueuedRuns={(nextQueue, removedAtts) =>
+          activeThreadId && session.handleUpdateQueuedRuns(activeThreadId, nextQueue, removedAtts)
+        }
+        onSendNowQueuedRun={(rowId) =>
+          activeThreadId && void session.handleSendNowQueuedRun(activeThreadId, rowId)
+        }
+        onSteerPrompt={(text, atts) =>
+          activeThreadId ? session.handleSteerPrompt(activeThreadId, text, atts) : Promise.resolve(false)
+        }
+        onSetAttachments={(items) => session.writeAttachments(draftKey, items)}
         onStop={() => activeThreadId && void session.handleCancelTurn(activeThreadId)}
         onPickAttachments={(kind) => void session.handlePickAttachments(draftKey, kind)}
         onStageFiles={(files) => void session.handleStageFiles(draftKey, files)}
@@ -207,6 +223,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
             gap: '12px',
           }}
         >
+          <ThemeHeroFigure variant="hero" />
           <p
             className="chat-empty-state__line"
             style={{
@@ -220,7 +237,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
           <button
             type="button"
             className="secondary-button"
-            onClick={() => void session.handleCreateNewThread()}
+            onClick={() => void session.handleCreateNewThread(props.embedded ? workspaceId : null)}
             style={{
               padding: '8px 16px',
               fontSize: '13px',
@@ -285,6 +302,13 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
       onCancelRename={() => session.setEditingTitleId(null)}
       onChangePrompt={(tid, val) => session.setPromptMap((prev) => ({ ...prev, [tid]: val }))}
       onSend={(tid, overridePrompt, planAction) => session.handleSendPrompt(tid, overridePrompt, undefined, planAction)}
+      onQueuePrompt={(tid, text, atts) => session.handleQueuePrompt(tid, text, atts)}
+      onUpdateQueuedRuns={(tid, nextQueue, removedAtts) =>
+        session.handleUpdateQueuedRuns(tid, nextQueue, removedAtts)
+      }
+      onSendNowQueuedRun={(tid, rowId) => void session.handleSendNowQueuedRun(tid, rowId)}
+      onSteerPrompt={(tid, text, atts) => session.handleSteerPrompt(tid, text, atts)}
+      onSetAttachments={(tid, items) => session.writeAttachments(tid, items)}
       onStop={(tid) => void session.handleCancelTurn(tid)}
       onPickAttachments={(tid, kind) => void session.handlePickAttachments(tid, kind)}
       onStageFiles={(tid, files) => void session.handleStageFiles(tid, files)}

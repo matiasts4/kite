@@ -1,6 +1,9 @@
 import React from 'react';
 import { ArrowUpIcon, StopIcon } from '../ChatIcons';
-import { resolvePrimaryAction } from '../composerPrimaryAction';
+import {
+  resolvePrimaryAction,
+  useDefaultFollowUp,
+} from '../composerPrimaryAction';
 import { composerGoalStop } from '../threadInteraction';
 import type { ChatProvider } from '../types';
 
@@ -17,8 +20,10 @@ export interface ComposerPrimaryActionButtonProps {
   onGoalStop?: (result: { goal: string | null; paused: boolean; turnEnded: boolean }) => void;
   onStop: () => void;
   onSend: () => void;
-  deliverDraft: (mode: 'send' | 'queue') => void;
+  deliverDraft: (mode: 'send' | 'queue' | 'steer') => void;
   hasQueueHandler: boolean;
+  hasSteerHandler?: boolean;
+  editingQueued?: boolean;
 }
 
 export const ComposerPrimaryActionButton: React.FC<ComposerPrimaryActionButtonProps> = ({
@@ -36,13 +41,33 @@ export const ComposerPrimaryActionButton: React.FC<ComposerPrimaryActionButtonPr
   onSend,
   deliverDraft,
   hasQueueHandler,
+  hasSteerHandler = false,
+  editingQueued = false,
 }) => {
+  const defaultFollowUp = useDefaultFollowUp();
+
+  if (editingQueued && hasQueueHandler) {
+    return (
+      <button
+        type="button"
+        aria-label="Save"
+        title="Save queued message (Enter) · Cancel (Escape)"
+        disabled={!canSend}
+        onClick={() => {
+          if (canSend) deliverDraft('queue');
+        }}
+        className="kite-composer-action-btn kite-composer-action-btn--send"
+      >
+        <ArrowUpIcon size={16} />
+      </button>
+    );
+  }
   const action = resolvePrimaryAction({
     running,
     draftEmpty: prompt.trim().length === 0 && attachmentsCount === 0,
     paused,
-    steerSupported: threadProvider === 'codex' || threadProvider === 'claude' || threadProvider === 'grok',
-    defaultFollowUp: 'queue',
+    steerSupported: hasSteerHandler,
+    defaultFollowUp,
     flip: followUpFlip,
   });
 
@@ -78,14 +103,19 @@ export const ComposerPrimaryActionButton: React.FC<ComposerPrimaryActionButtonPr
       type="button"
       aria-label={label}
       title="Send prompt (Enter) · New line (Shift+Enter) · Earlier prompts (↑)"
-      disabled={action === 'send' && !canSend}
+      disabled={(action === 'send' || action === 'queue' || action === 'steer') && !canSend}
       data-testid={agentName ? 'agent-chat-send' : undefined}
       onClick={() => {
         if (action === 'resume') {
           onSend();
           return;
         }
-        if ((action === 'queue' || action === 'steer') && hasQueueHandler && prompt.trim()) {
+        if (!canSend) return;
+        if (action === 'steer' && (hasSteerHandler || hasQueueHandler)) {
+          deliverDraft('steer');
+          return;
+        }
+        if (action === 'queue' && hasQueueHandler) {
           deliverDraft('queue');
           return;
         }

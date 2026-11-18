@@ -6,6 +6,8 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 const ATTACHMENT_BYTE_LIMIT: usize = 10 * 1024 * 1024;
+const PREVIEW_IMAGE_BYTE_LIMIT: usize = 2 * 1024 * 1024;
+const ATTACHED_FILES_HEADER: &str = "[Attached files]";
 
 pub struct StagedAttachment {
     pub thread_id: String,
@@ -21,7 +23,7 @@ fn staged_attachments() -> &'static Mutex<HashMap<String, StagedAttachment>> {
 fn attachment_segment(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
-        && id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        && id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 fn attachment_root() -> PathBuf {
@@ -49,13 +51,106 @@ fn clip_attachment_name(name: &str) -> String {
     }
 }
 
-fn attachment_payload(resource_id: &str, display_name: &str, is_directory: bool, byte_size: Option<u64>) -> Value {
-    json!({
+pub fn infer_mime_type(display_name: &str, explicit_mime: Option<&str>) -> String {
+    if let Some(raw) = explicit_mime.map(str::trim).filter(|s| {
+        !s.is_empty() && !s.eq_ignore_ascii_case("application/octet-stream")
+    }) {
+        return raw.chars().take(127).collect();
+    }
+    let ext = Path::new(display_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "gif" => "image/gif".to_string(),
+        "webp" => "image/webp".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "svg" => "image/svg+xml".to_string(),
+        "pdf" => "application/pdf".to_string(),
+        "txt" | "md" | "log" | "csv" => "text/plain".to_string(),
+        "json" => "application/json".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
+fn ensure_filename_extension(name: &str, mime_type: &str) -> String {
+    if Path::new(name).extension().is_some() {
+        return name.to_string();
+    }
+    let ext = match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        "image/svg+xml" => Some("svg"),
+        "text/plain" => Some("txt"),
+        "application/pdf" => Some("pdf"),
+        _ => None,
+    };
+    match ext {
+        Some(ext) => format!("{name}.{ext}"),
+        None => name.to_string(),
+    }
+}
+
+pub fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push(TABLE[(n & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let n = (bytes[i] as u32) << 16;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+fn attachment_payload(
+    resource_id: &str,
+    display_name: &str,
+    is_directory: bool,
+    byte_size: Option<u64>,
+    mime_type: Option<&str>,
+    path: Option<&str>,
+    preview_data_url: Option<&str>,
+) -> Value {
+    let mut payload = json!({
         "resourceId": resource_id,
         "displayName": display_name,
         "isDirectory": is_directory,
         "byteSize": byte_size
-    })
+    });
+    if let Some(mime) = mime_type.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["mimeType"] = json!(mime);
+    }
+    if let Some(p) = path.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["path"] = json!(p);
+    }
+    if let Some(preview) = preview_data_url.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["previewDataUrl"] = json!(preview);
+    }
+    payload
 }
 
 fn remember_attachment(thread_id: &str, resource_id: String, directory: PathBuf, payload: Value) -> Value {
@@ -72,6 +167,15 @@ fn remember_attachment(thread_id: &str, resource_id: String, directory: PathBuf,
 }
 
 pub fn stage_blob_attachment(thread_id: &str, display_name: &str, data_base64: &str) -> Option<Value> {
+    stage_blob_attachment_with_mime(thread_id, display_name, None, data_base64)
+}
+
+pub fn stage_blob_attachment_with_mime(
+    thread_id: &str,
+    display_name: &str,
+    mime_type: Option<&str>,
+    data_base64: &str,
+) -> Option<Value> {
     if !attachment_segment(thread_id) || data_base64.len() > (ATTACHMENT_BYTE_LIMIT / 3) * 4 + 4 {
         return None;
     }
@@ -82,16 +186,32 @@ pub fn stage_blob_attachment(thread_id: &str, display_name: &str, data_base64: &
     let resource_id = Uuid::new_v4().to_string();
     let directory = attachment_root().join(thread_id).join(&resource_id);
     fs::create_dir_all(&directory).ok()?;
-    let name = clip_attachment_name(display_name);
-    if fs::write(directory.join(&name), &bytes).is_err() {
+    let mime = infer_mime_type(display_name, mime_type);
+    let name = ensure_filename_extension(&clip_attachment_name(display_name), &mime);
+    let dest = directory.join(&name);
+    if fs::write(&dest, &bytes).is_err() {
         let _ = fs::remove_dir_all(&directory);
         return None;
     }
+    let dest_str = dest.to_string_lossy().to_string();
+    let preview_data_url = if mime.starts_with("image/") && bytes.len() <= PREVIEW_IMAGE_BYTE_LIMIT {
+        Some(format!("data:{mime};base64,{}", encode_base64(&bytes)))
+    } else {
+        None
+    };
     Some(remember_attachment(
         thread_id,
         resource_id.clone(),
         directory,
-        attachment_payload(&resource_id, &name, false, Some(bytes.len() as u64)),
+        attachment_payload(
+            &resource_id,
+            &name,
+            false,
+            Some(bytes.len() as u64),
+            Some(&mime),
+            Some(&dest_str),
+            preview_data_url.as_deref(),
+        ),
     ))
 }
 
@@ -120,25 +240,49 @@ pub fn stage_dropped_path(thread_id: &str, path: &Path) -> Option<Value> {
         .and_then(|name| name.to_str())
         .map(clip_attachment_name)
         .unwrap_or_else(|| "attachment".to_string());
-    let byte_size = if is_directory {
+    let (byte_size, mime_opt, resolved_path, preview_data_url) = if is_directory {
         if fs::write(directory.join("directory.txt"), path_text.as_bytes()).is_err() {
             let _ = fs::remove_dir_all(&directory);
             return None;
         }
-        None
+        (None, None, path_text.to_string(), None)
     } else {
         let dest = directory.join(&display_name);
         if fs::copy(path, &dest).is_err() {
             let _ = fs::remove_dir_all(&directory);
             return None;
         }
-        fs::metadata(&dest).ok().map(|meta| meta.len())
+        let size = fs::metadata(&dest).ok().map(|meta| meta.len());
+        let mime = infer_mime_type(&display_name, None);
+        let preview = if mime.starts_with("image/")
+            && size.is_some_and(|len| (len as usize) <= PREVIEW_IMAGE_BYTE_LIMIT)
+        {
+            fs::read(&dest)
+                .ok()
+                .map(|bytes| format!("data:{mime};base64,{}", encode_base64(&bytes)))
+        } else {
+            None
+        };
+        (
+            size,
+            Some(mime),
+            dest.to_string_lossy().to_string(),
+            preview,
+        )
     };
     Some(remember_attachment(
         thread_id,
         resource_id.clone(),
         directory,
-        attachment_payload(&resource_id, &display_name, is_directory, byte_size),
+        attachment_payload(
+            &resource_id,
+            &display_name,
+            is_directory,
+            byte_size,
+            mime_opt.as_deref(),
+            Some(&resolved_path),
+            preview_data_url.as_deref(),
+        ),
     ))
 }
 
@@ -146,21 +290,111 @@ pub fn release_staged_attachment(thread_id: &str, resource_id: &str) {
     let removed = {
         let mut staged = staged_attachments().lock().unwrap();
         match staged.get(resource_id) {
-            Some(item) if item.thread_id == thread_id => staged.remove(resource_id),
+            Some(item) if item.thread_id == thread_id || thread_id.is_empty() => staged.remove(resource_id),
             _ => None,
         }
     };
     if let Some(item) = removed {
         let _ = fs::remove_dir_all(item.directory);
+    } else if attachment_segment(thread_id) && attachment_segment(resource_id) {
+        let fallback_dir = attachment_root().join(thread_id).join(resource_id);
+        if fallback_dir.exists() {
+            let _ = fs::remove_dir_all(fallback_dir);
+        }
     }
 }
 
 pub fn lookup_staged_attachment(resource_id: &str) -> Option<Value> {
-    staged_attachments()
+    if let Some(found) = staged_attachments()
         .lock()
         .unwrap()
         .get(resource_id)
         .map(|item| item.payload.clone())
+    {
+        return Some(found);
+    }
+    resolve_staged_on_disk(None, resource_id)
+}
+
+fn inspect_staged_resource_dir(resource_id: &str, dir: &Path) -> Option<Value> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let dir_marker = dir.join("directory.txt");
+    if dir_marker.is_file() {
+        let target_path = fs::read_to_string(&dir_marker).ok()?;
+        let display_name = Path::new(target_path.trim())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(clip_attachment_name)
+            .unwrap_or_else(|| "folder".to_string());
+        return Some(attachment_payload(
+            resource_id,
+            &display_name,
+            true,
+            None,
+            None,
+            Some(target_path.trim()),
+            None,
+        ));
+    }
+    let mut entries = fs::read_dir(dir).ok()?;
+    while let Some(Ok(entry)) = entries.next() {
+        let file_path = entry.path();
+        if file_path.is_file() {
+            let name = file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(clip_attachment_name)
+                .unwrap_or_else(|| "attachment".to_string());
+            let size = fs::metadata(&file_path).ok().map(|m| m.len());
+            let mime = infer_mime_type(&name, None);
+            let preview = if mime.starts_with("image/")
+                && size.is_some_and(|len| (len as usize) <= PREVIEW_IMAGE_BYTE_LIMIT)
+            {
+                fs::read(&file_path)
+                    .ok()
+                    .map(|bytes| format!("data:{mime};base64,{}", encode_base64(&bytes)))
+            } else {
+                None
+            };
+            let path_str = file_path.to_string_lossy().to_string();
+            return Some(attachment_payload(
+                resource_id,
+                &name,
+                false,
+                size,
+                Some(&mime),
+                Some(&path_str),
+                preview.as_deref(),
+            ));
+        }
+    }
+    None
+}
+
+fn resolve_staged_on_disk(thread_id: Option<&str>, resource_id: &str) -> Option<Value> {
+    if !attachment_segment(resource_id) {
+        return None;
+    }
+    let root = attachment_root();
+    if let Some(tid) = thread_id.filter(|t| attachment_segment(t)) {
+        let candidate = root.join(tid).join(resource_id);
+        if let Some(found) = inspect_staged_resource_dir(resource_id, &candidate) {
+            return Some(found);
+        }
+    }
+    let thread_dirs = fs::read_dir(&root).ok()?;
+    for entry in thread_dirs.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let candidate = path.join(resource_id);
+            if let Some(found) = inspect_staged_resource_dir(resource_id, &candidate) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 pub fn decode_base64(input: &str) -> Option<Vec<u8>> {
@@ -204,29 +438,40 @@ pub fn decode_base64(input: &str) -> Option<Vec<u8>> {
 
 pub fn parse_attachments(req: Option<&Value>) -> Vec<Value> {
     let Some(req) = req else { return Vec::new(); };
+    let thread_id = req.get("threadId").and_then(|v| v.as_str());
     let mut res = Vec::new();
     if let Some(arr) = req.get("attachments").and_then(|v| v.as_array()) {
         for item in arr.iter().take(64) {
             if let Some(resource_id) = item.get("resourceId").and_then(|v| v.as_str()) {
-                if let Some(staged) = lookup_staged_attachment(resource_id) {
+                if let Some(staged) = lookup_staged_attachment(resource_id)
+                    .or_else(|| resolve_staged_on_disk(thread_id, resource_id))
+                {
                     res.push(staged);
                     continue;
                 }
                 let display_name = item.get("displayName").and_then(|v| v.as_str()).unwrap_or("attachment");
                 let is_dir = item.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false);
                 let byte_size = item.get("byteSize").and_then(|v| v.as_u64());
-                res.push(json!({
-                    "resourceId": resource_id,
-                    "displayName": display_name,
-                    "isDirectory": is_dir,
-                    "byteSize": byte_size
-                }));
+                let mime_type = item.get("mimeType").and_then(|v| v.as_str());
+                let path = item.get("path").and_then(|v| v.as_str());
+                let preview = item.get("previewDataUrl").and_then(|v| v.as_str());
+                res.push(attachment_payload(
+                    resource_id,
+                    display_name,
+                    is_dir,
+                    byte_size,
+                    mime_type,
+                    path,
+                    preview,
+                ));
             }
         }
     } else if let Some(ids) = req.get("attachmentIds").and_then(|v| v.as_array()) {
         for id in ids.iter().take(16) {
             if let Some(uuid_str) = id.as_str() {
-                if let Some(staged) = lookup_staged_attachment(uuid_str) {
+                if let Some(staged) = lookup_staged_attachment(uuid_str)
+                    .or_else(|| resolve_staged_on_disk(thread_id, uuid_str))
+                {
                     res.push(staged);
                 } else {
                     res.push(json!({
@@ -240,4 +485,153 @@ pub fn parse_attachments(req: Option<&Value>) -> Vec<Value> {
         }
     }
     res
+}
+
+/// Formats a user prompt together with any staged file/image attachments so
+/// every connected provider receives the exact local disk paths, MIME types,
+/// and sizes, and an attachment-only message is never sent as an empty prompt.
+pub fn format_prompt_with_attachments(prompt: &str, attachments: &[Value]) -> String {
+    if attachments.is_empty() {
+        return prompt.to_string();
+    }
+    let mut lines = Vec::new();
+    for item in attachments {
+        let resource_id = item.get("resourceId").and_then(|v| v.as_str()).unwrap_or("");
+        let resolved = if item.get("path").and_then(|v| v.as_str()).is_none() && !resource_id.is_empty() {
+            lookup_staged_attachment(resource_id)
+        } else {
+            None
+        };
+        let source = resolved.as_ref().unwrap_or(item);
+        let name = source
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("attachment");
+        let is_dir = source
+            .get("isDirectory")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let byte_size = source.get("byteSize").and_then(|v| v.as_u64());
+        let mime = source
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if is_dir {
+                    "directory".to_string()
+                } else {
+                    infer_mime_type(name, None)
+                }
+            });
+        let path = source
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let meta = match byte_size {
+            Some(bytes) => format!("{mime}, {bytes} bytes"),
+            None => mime,
+        };
+        match path {
+            Some(p) => lines.push(format!("- {name} ({meta}): {p}")),
+            None => lines.push(format!("- {name} ({meta})")),
+        }
+    }
+    if lines.is_empty() {
+        return prompt.to_string();
+    }
+    let base = if prompt.trim().is_empty() {
+        "Please inspect the attached file(s) and image(s)."
+    } else {
+        prompt.trim_end()
+    };
+    format!("{base}\n\n{ATTACHED_FILES_HEADER}\n{}", lines.join("\n"))
+}
+
+/// Extracts existing on-disk file paths from a prompt formatted with
+/// `format_prompt_with_attachments` so CLI transports with native `--file`
+/// flags (such as OpenCode) can pass them directly in addition to the prompt.
+pub fn extract_attachment_file_paths(prompt: &str) -> Vec<String> {
+    let Some((_, block)) = prompt.rsplit_once(&format!("\n{ATTACHED_FILES_HEADER}\n")) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("- ") {
+            break;
+        }
+        if let Some((_, path_part)) = trimmed.rsplit_once("): ") {
+            let candidate = path_part.trim();
+            if !candidate.is_empty() && Path::new(candidate).is_file() {
+                paths.push(candidate.to_string());
+            }
+        }
+    }
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_blob_resolves_disk_path_mime_extension_and_preview() {
+        let thread_id = format!("test-att-{}", Uuid::new_v4().simple());
+        // 1x1 transparent PNG
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let staged = stage_blob_attachment_with_mime(
+            &thread_id,
+            "clipboard-image",
+            Some("image/png"),
+            png_b64,
+        )
+        .expect("staged blob");
+
+        let resource_id = staged["resourceId"].as_str().expect("resourceId").to_string();
+        assert_eq!(staged["displayName"], json!("clipboard-image.png"));
+        assert_eq!(staged["mimeType"], json!("image/png"));
+        let path_str = staged["path"].as_str().expect("resolved disk path");
+        assert!(Path::new(path_str).is_file(), "staged file exists on disk");
+        assert!(
+            staged["previewDataUrl"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("data:image/png;base64,"))
+        );
+
+        let formatted = format_prompt_with_attachments("", std::slice::from_ref(&staged));
+        assert!(formatted.contains("Please inspect the attached file(s) and image(s)."));
+        assert!(formatted.contains("[Attached files]"));
+        assert!(formatted.contains(path_str));
+
+        let extracted = extract_attachment_file_paths(&formatted);
+        assert_eq!(extracted, vec![path_str.to_string()]);
+
+        release_staged_attachment(&thread_id, &resource_id);
+        assert!(!Path::new(path_str).exists(), "released file removed");
+    }
+
+    #[test]
+    fn stage_blob_accepts_underscored_agent_draft_thread_ids_and_rejects_traversal() {
+        let draft_id = format!("draft-agent_builder_{}", Uuid::new_v4().simple());
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let staged = stage_blob_attachment_with_mime(
+            &draft_id,
+            "draft-shot",
+            Some("image/png"),
+            png_b64,
+        )
+        .expect("underscored draft thread id stages cleanly");
+        let resource_id = staged["resourceId"].as_str().expect("resourceId");
+        let path_str = staged["path"].as_str().expect("path");
+        assert!(Path::new(path_str).is_file());
+        release_staged_attachment(&draft_id, resource_id);
+
+        assert!(!attachment_segment("../escape"));
+        assert!(!attachment_segment("draft/sub"));
+        assert!(attachment_segment("draft-agent_builder_1"));
+    }
 }

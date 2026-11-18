@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import type React from 'react';
 import {
   addWorkspace,
@@ -11,6 +11,7 @@ import {
   moveAgent,
   deleteAgentProfile,
   renameChatThread,
+  regenerateChatThreadTitle,
   setChatThreadPinned,
   archiveChatThread,
   restoreArchivedChat,
@@ -54,17 +55,28 @@ export function useAppSidebarHandlers({
   setSettingsOpen,
   setNewSessionRequest,
 }: UseAppSidebarHandlersOptions) {
-  const handleAddWorkspace = useCallback(async () => {
+  const [regeneratingThreadId, setRegeneratingThreadId] = useState<string | null>(null);
+
+  const handleAddWorkspace = useCallback(async (targetThreadId?: string | unknown) => {
+    const targetTid = typeof targetThreadId === 'string' ? targetThreadId : undefined;
     try {
       const created = await addWorkspace();
       if (created) {
         await loadBootstrap();
-        setSelectedWorkspaceId(created.id);
-        if (workMode !== 'chat') {
-          setWorkMode('code');
+        if (targetTid) {
+          window.dispatchEvent(
+            new CustomEvent('kite:assign-thread-workspace', {
+              detail: { threadId: targetTid, workspaceId: created.id },
+            })
+          );
+        } else {
+          setSelectedWorkspaceId(created.id);
+          if (workMode !== 'chat') {
+            setWorkMode('code');
+          }
+          setNewSessionRequest((n) => n + 1);
         }
         setSettingsOpen(false);
-        setNewSessionRequest((n) => n + 1);
       }
     } catch (e) {
       console.error(e);
@@ -165,10 +177,24 @@ export function useAppSidebarHandlers({
     try {
       await renameChatThread(id, newTitle);
       await loadThreads();
+      window.dispatchEvent(new CustomEvent('kite:threads-changed'));
     } catch (e) {
       console.error(e);
     }
   }, [loadThreads]);
+
+  const handleRegenerateTitle = useCallback(async (id: string) => {
+    setRegeneratingThreadId(id);
+    try {
+      await regenerateChatThreadTitle(id, workMode === 'agent' ? selectedAgentId : null);
+      await loadThreads();
+      window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRegeneratingThreadId((curr) => (curr === id ? null : curr));
+    }
+  }, [loadThreads, workMode, selectedAgentId]);
 
   const handleArchiveThread = useCallback(async (id: string) => {
     try {
@@ -232,6 +258,8 @@ export function useAppSidebarHandlers({
     handleMoveWorkspace,
     handleTogglePinThread,
     handleRenameThread,
+    handleRegenerateTitle,
+    titlePending: regeneratingThreadId !== null,
     handleArchiveThread,
     handleRestoreThread,
     handleDeleteThread,

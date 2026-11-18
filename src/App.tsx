@@ -636,6 +636,8 @@ export const App: React.FC = () => {
             onMoveWorkspace={sidebarHandlers.handleMoveWorkspace}
             onTogglePinThread={sidebarHandlers.handleTogglePinThread}
             onRenameThread={sidebarHandlers.handleRenameThread}
+            onRegenerateTitle={sidebarHandlers.handleRegenerateTitle}
+            titlePending={sidebarHandlers.titlePending}
             onArchiveThread={sidebarHandlers.handleArchiveThread}
             onRestoreThread={sidebarHandlers.handleRestoreThread}
             onDeleteThread={sidebarHandlers.handleDeleteThread}

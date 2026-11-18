@@ -114,7 +114,7 @@ export const ConnectionPickerPopover: React.FC<ConnectionPickerPopoverProps> = (
                 padding: '0.25rem 0.5rem',
                 fontSize: '0.6875rem',
                 fontWeight: 600,
-                color: 'var(--muted-foreground)',
+                color: 'var(--text-secondary)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.04em',
               }}
@@ -142,7 +142,7 @@ export const ConnectionPickerPopover: React.FC<ConnectionPickerPopoverProps> = (
                         {c.displayName}
                       </span>
                       {c.supportedEndpoint && (
-                        <span style={{ fontSize: '0.6875rem', color: 'var(--muted-foreground)' }}>
+                        <span style={{ fontSize: '0.6875rem', color: 'var(--text-secondary)' }}>
                           {c.supportedEndpoint}
                         </span>
                       )}

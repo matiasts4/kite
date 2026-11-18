@@ -46,7 +46,7 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
   threadMode,
   threadConnectionId,
   declaration,
-  running,
+  running: _running,
   catalogState = null,
   connectionCandidates,
   ensureDynamicModels,
@@ -84,7 +84,6 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
         provider={threadProvider}
         model={threadModel}
         declaration={declaration}
-        disabled={running}
         modelReason={modelReason}
         catalogState={catalogState}
         ensureDynamicModels={ensureDynamicModels}
@@ -107,7 +106,6 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
         effort={threadEffort}
         modelName={currentModelName}
         declaration={declaration}
-        disabled={running}
         unlistedReason={effortReason}
         onChangeEffort={(effortId) => onUpdateConfig({ effort: effortId })}
       />
@@ -120,7 +118,6 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
         currentAgent={threadAgent}
         currentPlan={threadPlan}
         currentMode={threadMode}
-        disabled={running}
         onSelectWorkMode={(patch) => onUpdateConfig(patch)}
       />
 
@@ -132,7 +129,6 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
         permissions={permissions}
         permissionDeclared={permissionDeclared}
         permissionReason={permissionReason}
-        disabled={running}
         onSelectPermission={(mode) =>
           onUpdateConfig({
             mode,
@@ -149,7 +145,6 @@ export const ComposerConfigControls: React.FC<ComposerConfigControlsProps> = ({
           <ConnectionPickerPopover
             threadConnectionId={threadConnectionId ?? null}
             candidates={connectionCandidates}
-            disabled={running}
             onSelectConnection={onSelectConnection}
           />
         </>

@@ -1,4 +1,55 @@
+import { useEffect, useState } from 'react';
+
 export type PrimaryAction = 'send' | 'interrupt' | 'queue' | 'steer' | 'resume';
+export type FollowUpMode = 'queue' | 'steer';
+
+export const FOLLOW_UP_MODE_KEY = 'kite_default_follow_up';
+export const FOLLOW_UP_MODE_EVENT = 'kite:default-follow-up';
+
+export function isFollowUpMode(value: string | null | undefined): value is FollowUpMode {
+  return value === 'queue' || value === 'steer';
+}
+
+export function readDefaultFollowUp(): FollowUpMode {
+  try {
+    const raw = localStorage.getItem(FOLLOW_UP_MODE_KEY);
+    return isFollowUpMode(raw) ? raw : 'queue';
+  } catch {
+    return 'queue';
+  }
+}
+
+export function writeDefaultFollowUp(mode: FollowUpMode): void {
+  try {
+    localStorage.setItem(FOLLOW_UP_MODE_KEY, mode);
+  } catch {
+    // Session listener still applies the preference when storage is unavailable.
+  }
+  window.dispatchEvent(new CustomEvent(FOLLOW_UP_MODE_EVENT, { detail: mode }));
+}
+
+export function useDefaultFollowUp(): FollowUpMode {
+  const [mode, setMode] = useState<FollowUpMode>(() => readDefaultFollowUp());
+
+  useEffect(() => {
+    setMode(readDefaultFollowUp());
+    const onFollowUpChange = (event: Event) => {
+      const next = (event as CustomEvent<FollowUpMode>).detail;
+      setMode(isFollowUpMode(next) ? next : readDefaultFollowUp());
+    };
+    const onStorage = () => {
+      setMode(readDefaultFollowUp());
+    };
+    window.addEventListener(FOLLOW_UP_MODE_EVENT, onFollowUpChange);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(FOLLOW_UP_MODE_EVENT, onFollowUpChange);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  return mode;
+}
 
 export function resolvePrimaryAction(input: {
   running: boolean;

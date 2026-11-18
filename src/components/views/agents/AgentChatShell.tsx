@@ -1,5 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion, useIsPresent } from 'motion/react';
+import { useReduceMotion } from '../../../motion/standard/context';
+import { prefersReducedMotion } from '../../../motion/contract';
+import { shift, tweens } from '../../../motion/standard/tokens';
 import {
   PlusIcon,
   ArchiveIcon,
@@ -10,6 +14,7 @@ import {
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from '../chat/ChatItemRow';
 import { SubagentGroupRow } from '../chat/SubagentActivityCard';
 import { TurnActivityStatus } from '../chat/TurnActivityStatus';
+import { QueuedRunsControl, type QueuedRunRow } from '../chat/QueuedRunsControl';
 import { ChatComposer } from '../chat/ChatComposer';
 import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
 import { declarationFromCatalog } from '../chat/driverDeclaration';
@@ -21,7 +26,16 @@ import {
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
-import { invokeCommand, listWorkspaceBranches, switchWorkspaceBranch, createWorkspaceBranch } from '../../../lib/ipc';
+import { useThreadFailureBanner } from '../chat/ThreadErrorBanner';
+import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
+import {
+  invokeCommand,
+  listWorkspaceBranches,
+  switchWorkspaceBranch,
+  createWorkspaceBranch,
+  renameChatThread,
+} from '../../../lib/ipc';
+import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
 import type {
   ExtendedChatThread,
@@ -79,7 +93,7 @@ export interface AgentChatSurfaceProps {
   session?: SessionProjection | null;
   isRefreshingModels?: boolean;
   onRefreshModels?: (provider: ChatProvider) => void;
-  onNew: () => void;
+  onNew: () => void | Promise<string | null | void>;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onArchive: (id: string) => void;
@@ -88,6 +102,11 @@ export interface AgentChatSurfaceProps {
   onChangePrompt: (val: string) => void;
   onSend: () => void;
   onSendInitial?: (text: string) => void;
+  onQueuePrompt?: (text: string, attachments?: ChatAttachment[]) => void;
+  onUpdateQueuedRuns?: (nextQueue: QueuedRunRow[], removedAttachments?: ChatAttachment[]) => void;
+  onSendNowQueuedRun?: (rowId: string) => void;
+  onSteerPrompt?: (text: string, attachments?: ChatAttachment[]) => void | Promise<boolean | void>;
+  onSetAttachments?: (items: ChatAttachment[]) => void;
   onStop: () => void;
   onPickAttachments: (kind?: 'files' | 'folder') => void;
   onStageFiles: (files: File[]) => void;
@@ -117,6 +136,75 @@ function formatRelativeTime(timestamp?: number): string {
   const diffDays = Math.floor(diffHour / 24);
   return `${diffDays}d ago`;
 }
+
+interface AgentTranscriptMotionProps {
+  reducedMotion: boolean;
+  transcriptRef: React.RefObject<HTMLDivElement>;
+  onScroll: React.UIEventHandler<HTMLDivElement>;
+  children: React.ReactNode;
+}
+
+const AgentTranscriptMotion: React.FC<AgentTranscriptMotionProps> = ({
+  reducedMotion,
+  transcriptRef,
+  onScroll,
+  children,
+}) => {
+  const isPresent = useIsPresent();
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+
+  const attachRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      nodeRef.current = node;
+      if (isPresent) {
+        (transcriptRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
+      }
+    },
+    [isPresent, transcriptRef]
+  );
+
+  useEffect(() => {
+    const node = nodeRef.current as (HTMLDivElement & { inert?: boolean }) | null;
+    if (node) {
+      node.inert = !isPresent;
+    }
+    if (!isPresent && transcriptRef.current === nodeRef.current) {
+      (transcriptRef as React.MutableRefObject<HTMLDivElement | null>).current = null;
+    }
+  }, [isPresent, transcriptRef]);
+
+  return (
+    <motion.div
+      ref={attachRef}
+      className="chat-transcript"
+      aria-hidden={!isPresent || undefined}
+      data-motion-present={isPresent ? 'true' : 'false'}
+      style={
+        isPresent
+          ? undefined
+          : {
+              position: 'absolute',
+              inset: 0,
+              zIndex: 0,
+              pointerEvents: 'none',
+            }
+      }
+      initial={reducedMotion ? { opacity: 0 } : { opacity: 0, y: shift.handoff }}
+      animate={{
+        opacity: 1,
+        y: 0,
+        transition: reducedMotion ? tweens.instant : tweens.fade,
+      }}
+      exit={{
+        opacity: 0,
+        transition: reducedMotion ? tweens.instant : tweens.swap,
+      }}
+      onScroll={onScroll}
+    >
+      {children}
+    </motion.div>
+  );
+};
 
 export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   agentId,
@@ -155,6 +243,11 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   onChangePrompt,
   onSend,
   onSendInitial,
+  onQueuePrompt,
+  onUpdateQueuedRuns,
+  onSendNowQueuedRun,
+  onSteerPrompt,
+  onSetAttachments,
   onStop,
   onPickAttachments,
   onStageFiles,
@@ -164,6 +257,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   onApprovalDecision,
 }) => {
   const effectiveWsId = activeThread?.workspaceId || workspaceId;
+  const { failureBanner } = useThreadFailureBanner(activeThread, onSend);
   const currentWorkspace = workspaces?.find((w) => w.id === effectiveWsId);
   const effectiveWorkspaceName =
     currentWorkspace?.displayName ||
@@ -226,7 +320,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
     }
   };
 
-  const handleSelectWorkspace = (wsId: string) => {
+  const handleSelectWorkspace = (wsId: string | null) => {
     onUpdateConfig({ workspaceId: wsId });
   };
   const savedProvider = getSavedSelectedProvider();
@@ -256,9 +350,140 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   );
 
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const contextReduceMotion = useReduceMotion();
+  const reducedMotion = contextReduceMotion || prefersReducedMotion();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>('');
   const [archivedModalOpen, setArchivedModalOpen] = useState(false);
+
+  const [queuedRuns, setQueuedRuns] = useState<QueuedRunRow[]>(activeThread?.queuedRuns ?? []);
+  const [queueExpanded, setQueueExpanded] = useState(false);
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null);
+  const savedDraftBeforeEditRef = useRef<{ prompt: string; attachments: ChatAttachment[] } | null>(null);
+
+  useEffect(() => {
+    setEditingQueuedId(null);
+    savedDraftBeforeEditRef.current = null;
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    setQueuedRuns(activeThread?.queuedRuns ?? []);
+  }, [activeThread?.queuedRuns]);
+
+  const commitQueuedRuns = useCallback(
+    (next: QueuedRunRow[], removedAttachments?: ChatAttachment[]) => {
+      setQueuedRuns(next);
+      if (onUpdateQueuedRuns) {
+        onUpdateQueuedRuns(next, removedAttachments);
+      } else if (activeThread?.id) {
+        void invokeCommand('update_chat_configuration', {
+          threadId: activeThread.id,
+          queuedRuns: next,
+        });
+      }
+    },
+    [activeThread?.id, onUpdateQueuedRuns]
+  );
+
+  const handleCancelQueueEdit = useCallback(() => {
+    setEditingQueuedId(null);
+    const saved = savedDraftBeforeEditRef.current;
+    savedDraftBeforeEditRef.current = null;
+    onChangePrompt(saved?.prompt ?? '');
+    onSetAttachments?.(saved?.attachments ?? []);
+  }, [onChangePrompt, onSetAttachments]);
+
+  const handleStartQueueEdit = useCallback(
+    (id: string) => {
+      const row = queuedRuns.find((entry) => entry.id === id);
+      if (!row) return;
+      if (!editingQueuedId) {
+        savedDraftBeforeEditRef.current = { prompt, attachments };
+      }
+      setEditingQueuedId(id);
+      onChangePrompt(row.text);
+      onSetAttachments?.(row.attachments ?? []);
+    },
+    [attachments, editingQueuedId, onChangePrompt, onSetAttachments, prompt, queuedRuns]
+  );
+
+  const handleRemoveQueuedRun = useCallback(
+    (id: string) => {
+      const row = queuedRuns.find((entry) => entry.id === id);
+      if (editingQueuedId === id) {
+        handleCancelQueueEdit();
+      }
+      const rest = queuedRuns.filter((entry) => entry.id !== id);
+      const remainingIds = new Set(
+        rest.flatMap((entry) => (entry.attachments ?? []).map((att) => att.resourceId))
+      );
+      const orphanAttachments = row?.attachments?.filter(
+        (att) => !remainingIds.has(att.resourceId)
+      );
+      commitQueuedRuns(rest, orphanAttachments);
+    },
+    [commitQueuedRuns, editingQueuedId, handleCancelQueueEdit, queuedRuns]
+  );
+
+  const handleSendNowQueued = useCallback(
+    (id: string) => {
+      if (editingQueuedId === id) {
+        handleCancelQueueEdit();
+      }
+      if (onSendNowQueuedRun) {
+        onSendNowQueuedRun(id);
+        return;
+      }
+      const row = queuedRuns.find((entry) => entry.id === id);
+      const rest = queuedRuns.filter((entry) => entry.id !== id);
+      commitQueuedRuns(rest);
+      if (row?.text) {
+        onChangePrompt(row.text);
+      }
+    },
+    [commitQueuedRuns, editingQueuedId, handleCancelQueueEdit, onChangePrompt, onSendNowQueuedRun, queuedRuns]
+  );
+
+  const handleQueueFromComposer = useCallback(
+    (text: string, queuedAttachments?: ChatAttachment[]) => {
+      const atts = queuedAttachments ?? attachments;
+      if (editingQueuedId) {
+        const next = queuedRuns.map((entry) =>
+          entry.id === editingQueuedId
+            ? {
+                ...entry,
+                text,
+                ...(atts.length > 0 ? { attachments: atts } : { attachments: undefined }),
+              }
+            : entry
+        );
+        setEditingQueuedId(null);
+        const saved = savedDraftBeforeEditRef.current;
+        savedDraftBeforeEditRef.current = null;
+        commitQueuedRuns(next);
+        onChangePrompt(saved?.prompt ?? '');
+        onSetAttachments?.(saved?.attachments ?? []);
+        return;
+      }
+      if (onQueuePrompt) {
+        onQueuePrompt(text, atts);
+        return;
+      }
+      const next: QueuedRunRow[] = [
+        ...queuedRuns,
+        {
+          id: `q-${Date.now()}`,
+          text,
+          ...(atts.length > 0 ? { attachments: atts } : {}),
+          createdAtUnixMs: Date.now(),
+        },
+      ];
+      commitQueuedRuns(next);
+      onChangePrompt('');
+      onSetAttachments?.([]);
+    },
+    [attachments, commitQueuedRuns, editingQueuedId, onChangePrompt, onQueuePrompt, onSetAttachments, queuedRuns]
+  );
 
   // Tab dragging state
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
@@ -334,9 +559,30 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
 
   const atLiveEdgeRef = useRef(true);
   const threadId = activeThread?.id ?? null;
+  const activeItems = Array.isArray(activeThread?.items) ? activeThread.items : [];
+  const startVoiceMode = useCallback(async () => {
+    const isBlank = Boolean(activeThread?.id) && activeItems.length === 0 && !running;
+    if (isBlank && activeThread?.id) {
+      voiceSessionStore.startSession(activeThread.id, 'thread');
+      return;
+    }
+    let targetId: string | null = activeThread?.id || 'draft';
+    try {
+      const created = await onNew();
+      if (typeof created === 'string' && created) targetId = created;
+    } catch (err) {
+      console.warn('[AgentChatShell] Could not open a new voice thread:', err);
+    }
+    voiceSessionStore.startSession(targetId, 'thread');
+    if (targetId && targetId !== 'draft' && targetId !== activeThread?.id) {
+      void renameChatThread(targetId, 'Sesión de voz')
+        .then(() => window.dispatchEvent(new CustomEvent('kite:threads-changed')))
+        .catch(() => undefined);
+    }
+  }, [activeThread?.id, activeItems.length, running, onNew]);
   const enterFor = useTranscriptMotion(
     threadId,
-    (activeThread?.items ?? []).map((item) => item.id),
+    activeItems.map((item) => item.id),
   );
   useTranscriptLiveEdge(transcriptRef, threadId, atLiveEdgeRef);
 
@@ -555,8 +801,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                 Messages could not be loaded.{' '}
                 <button
                   type="button"
-                  className="secondary-button"
-                  style={{ height: '24px', fontSize: '11px', padding: '0 8px' }}
+                  className="secondary-button agent-inbox__btn"
                   onClick={() => void fetchInbox()}
                   disabled={inboxLoading}
                 >
@@ -583,8 +828,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             <div className="agent-inbox__actions">
               <button
                 type="button"
-                className="secondary-button"
-                style={{ height: '24px', fontSize: '11px', padding: '0 8px' }}
+                className="secondary-button agent-inbox__btn"
                 onClick={() => void fetchInbox()}
                 disabled={inboxLoading}
               >
@@ -593,8 +837,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               {inboxData?.nextCursor && (
                 <button
                   type="button"
-                  className="secondary-button"
-                  style={{ height: '24px', fontSize: '11px', padding: '0 8px' }}
+                  className="secondary-button agent-inbox__btn"
                   onClick={() => void fetchInbox(inboxData.nextCursor)}
                   disabled={inboxLoading}
                 >
@@ -615,142 +858,186 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
         {/* 3. Direct conversation layout */}
         <div className={`chat-thread-layout _layout_85ff1_81 scroll-quiet${isDraft ? ' chat-thread-layout--draft' : ''}`}>
           <div className="chat-thread-layout__body">
-            {isDraft || !activeThread ? null : (
-              <div
-                className="chat-transcript"
-                ref={transcriptRef}
-                onScroll={(e) => {
-                  const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
-                  atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
-                }}
-              >
-                <div className="chat-transcript__column">
-                  {groupTranscriptRows(activeThread.items).map((row, index, rows) => {
-                    const rowKey =
-                      row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
-                    const liveAt = running ? liveActivityRowIndex(rows) : -1;
-                    return (
-                      <React.Fragment key={rowKey}>
-                        {index === liveAt ? (
-                          <TurnActivityStatus
-                            running={running}
-                            pendingApproval={activeThread.pendingApproval}
-                            items={activeThread.items}
-                            swarmState={activeThread.swarmState}
-                            interrupted={false}
-                            durationSeconds={activeThread.usage?.durationSeconds}
-                          />
-                        ) : null}
-                        {row.kind === 'work' ? (
-                          <ChatWorkGroup
-                            items={row.items}
-                            running={running}
-                            enterFor={enterFor}
-                            interrupted={Boolean(activeThread.stoppedByBuilder)}
-                          />
-                        ) : row.kind === 'subagentGroup' ? (
-                          <SubagentGroupRow
-                            items={row.items}
-                            threadId={activeThread.id}
-                            workspaceId={effectiveWsId}
-                            subagentRuns={activeThread.subagentRuns}
-                            enterFor={enterFor}
-                          />
-                        ) : (
-                          <ChatItemRow
-                            item={row.item}
-                            threadId={activeThread.id}
-                            workspaceId={effectiveWsId}
-                            subagentRuns={activeThread.subagentRuns}
-                            swarmState={activeThread.swarmState}
-                            enter={enterFor(row.item.id)}
-                            onEditUserMessage={(text) => {
-                              onChangePrompt(text);
-                              const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
-                              if (el) {
-                                el.focus();
-                                el.setSelectionRange(text.length, text.length);
-                              }
-                            }}
-                          />
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
+            <AnimatePresence initial={false}>
+              {isDraft || !activeThread ? null : (
+                <AgentTranscriptMotion
+                  key={activeThread.id}
+                  reducedMotion={reducedMotion}
+                  transcriptRef={transcriptRef}
+                  onScroll={(e) => {
+                    const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
+                    atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
+                  }}
+                >
+                  <div className="chat-transcript__column">
+                    {groupTranscriptRows(activeItems).map((row, index, rows) => {
+                      const rowKey =
+                        row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
+                      const liveAt = running ? liveActivityRowIndex(rows) : -1;
+                      return (
+                        <React.Fragment key={rowKey}>
+                          {index === liveAt ? (
+                            <TurnActivityStatus
+                              running={running}
+                              pendingApproval={activeThread.pendingApproval}
+                              items={activeItems}
+                              swarmState={activeThread.swarmState}
+                              interrupted={false}
+                              durationSeconds={activeThread.usage?.durationSeconds}
+                            />
+                          ) : null}
+                          {row.kind === 'work' ? (
+                            <ChatWorkGroup
+                              items={row.items}
+                              running={running && index === liveAt}
+                              enterFor={enterFor}
+                              interrupted={Boolean(activeThread.stoppedByBuilder) && index === rows.length - 1}
+                            />
+                          ) : row.kind === 'subagentGroup' ? (
+                            <SubagentGroupRow
+                              items={row.items}
+                              threadId={activeThread.id}
+                              workspaceId={effectiveWsId}
+                              subagentRuns={activeThread.subagentRuns}
+                              enterFor={enterFor}
+                            />
+                          ) : (
+                            <ChatItemRow
+                              item={row.item}
+                              threadId={activeThread.id}
+                              workspaceId={effectiveWsId}
+                              subagentRuns={activeThread.subagentRuns}
+                              swarmState={activeThread.swarmState}
+                              enter={enterFor(row.item.id)}
+                              onEditUserMessage={(text) => {
+                                onChangePrompt(text);
+                                const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+                                if (el) {
+                                  el.focus();
+                                  el.setSelectionRange(text.length, text.length);
+                                }
+                              }}
+                            />
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
 
-                  {liveActivityRowIndex(groupTranscriptRows(activeThread.items)) < 0 || !running ? (
-                    <TurnActivityStatus
-                      running={running}
-                      pendingApproval={activeThread.pendingApproval}
-                      items={activeThread.items}
-                      swarmState={activeThread.swarmState}
-                      interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
-                      durationSeconds={activeThread.usage?.durationSeconds}
-                    />
-                  ) : null}
+                    {liveActivityRowIndex(groupTranscriptRows(activeItems)) < 0 || !running ? (
+                      <TurnActivityStatus
+                        running={running}
+                        pendingApproval={activeThread.pendingApproval}
+                        items={activeItems}
+                        swarmState={activeThread.swarmState}
+                        interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
+                        durationSeconds={activeThread.usage?.durationSeconds}
+                      />
+                    ) : null}
 
-                  {/* Quota Handoff Banner */}
-                  {activeThread.quotaHandoffOffer && (
-                    <QuotaHandoffBanner
-                      offer={activeThread.quotaHandoffOffer}
-                      threadId={activeThread.id}
-                    />
-                  )}
-                </div>
-              </div>
-            )}
+                    {/* Quota Handoff Banner */}
+                    {activeThread.quotaHandoffOffer && (
+                      <QuotaHandoffBanner
+                        offer={activeThread.quotaHandoffOffer}
+                        threadId={activeThread.id}
+                      />
+                    )}
+                  </div>
+                </AgentTranscriptMotion>
+              )}
+            </AnimatePresence>
           </div>
 
           {isDraft ? (
-            <div className="chat-draft-hero agent-chat-hero scroll-quiet">
+            <motion.div
+              key="agent-draft-hero"
+              initial={reducedMotion ? false : { opacity: 0, y: shift.handoff }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={reducedMotion ? tweens.instant : tweens.fade}
+              className="chat-draft-hero agent-chat-hero scroll-quiet"
+            >
+              <ThemeHeroFigure variant="hero" />
               <h1>What should we build?</h1>
-            </div>
+              <p>Pick a thread above or start typing below to hand real work to {agentName}.</p>
+            </motion.div>
           ) : null}
 
-          {session && <SessionLifecycleBar projection={session} />}
+          <div className="chat-thread-layout__composer">
+            {session && <SessionLifecycleBar projection={session} />}
+            {failureBanner}
 
-          <ChatComposer
-            threadId={activeThread?.id || 'draft'}
-            agentName={agentName}
-            engineLabel={engineLabel}
-            threadMode={activeThread ? activeThread.mode : draftMode ?? 'acceptEdits'}
-            threadProvider={effectiveProvider}
-            threadModel={effectiveModel}
-            threadEffort={activeThread ? activeThread.effort || null : draftEffort ?? null}
-            threadPlan={activeThread ? Boolean((activeThread as any).plan) : false}
-            threadAgent={effectiveAgent}
-            threadBranch={gitBranch}
-            branches={branches}
-            threadWorkspaceName={effectiveWorkspaceName || 'Local'}
-            workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
-            onSwitchBranch={handleSwitchBranch}
-            onCreateBranch={handleCreateBranch}
-            onSelectWorkspace={handleSelectWorkspace}
-            running={running}
-            prompt={prompt}
-            attachments={attachments}
-            totalTokens={totalTokens}
-            declaration={declaration}
-            ensureDynamicAgents={ensureDynamicAgents}
-            isRefreshingModels={isRefreshingModels}
-            onRefreshModels={onRefreshModels}
-            onChangePrompt={onChangePrompt}
-            onSend={() => {
-              if (isDraft && !activeThread && onSendInitial) {
-                onSendInitial(prompt);
-              } else {
-                onSend();
+            <QueuedRunsControl
+              rows={queuedRuns}
+              expanded={queueExpanded}
+              editingId={editingQueuedId}
+              onToggle={() => setQueueExpanded((v) => !v)}
+              onSendNow={handleSendNowQueued}
+              onEdit={handleStartQueueEdit}
+              onCancelEdit={handleCancelQueueEdit}
+              onRemove={handleRemoveQueuedRun}
+            />
+
+            <ChatComposer
+              threadId={activeThread?.id || 'draft'}
+              threadItems={activeItems}
+              conversationStarted={!isDraft || queuedRuns.length > 0}
+              agentName={agentName}
+              engineLabel={engineLabel}
+              threadMode={activeThread ? activeThread.mode : draftMode ?? 'acceptEdits'}
+              threadProvider={effectiveProvider}
+              threadModel={effectiveModel}
+              threadEffort={activeThread ? activeThread.effort || null : draftEffort ?? null}
+              threadPlan={activeThread ? Boolean((activeThread as any).plan) : false}
+              threadAgent={effectiveAgent}
+              threadBranch={gitBranch}
+              branches={branches}
+              threadWorkspaceId={effectiveWsId ?? null}
+              threadWorkspaceName={effectiveWorkspaceName || 'Local'}
+              workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
+              onSwitchBranch={handleSwitchBranch}
+              onCreateBranch={handleCreateBranch}
+              onSelectWorkspace={handleSelectWorkspace}
+              running={running}
+              prompt={prompt}
+              attachments={attachments}
+              totalTokens={totalTokens}
+              declaration={declaration}
+              ensureDynamicAgents={ensureDynamicAgents}
+              isRefreshingModels={isRefreshingModels}
+              onRefreshModels={onRefreshModels}
+              onChangePrompt={onChangePrompt}
+              onQueue={activeThread ? handleQueueFromComposer : undefined}
+              onSteer={activeThread ? onSteerPrompt : undefined}
+              editingQueuedId={editingQueuedId}
+              onCancelQueueEdit={handleCancelQueueEdit}
+              onEditLastQueued={
+                queuedRuns.length > 0
+                  ? () => handleStartQueueEdit(queuedRuns[queuedRuns.length - 1].id)
+                  : undefined
               }
-            }}
-            onStop={onStop}
-            onPickAttachments={onPickAttachments}
-            onStageFiles={onStageFiles}
-            onStagePaths={onStagePaths}
-            onRemoveAttachment={onRemoveAttachment}
-            onUpdateConfig={onUpdateConfig}
-            pendingApproval={session?.pendingApprovals[0] ?? activeThread?.pendingApproval}
-            onApprovalDecision={onApprovalDecision}
-          />
+              paused={
+                !running &&
+                (activeThread?.turnFailure?.kind === 'usageLimit' ||
+                  Boolean(activeThread?.stoppedByBuilder) ||
+                  queuedRuns.length > 0)
+              }
+              onSend={() => {
+                if (isDraft && !activeThread && onSendInitial) {
+                  onSendInitial(prompt);
+                } else {
+                  onSend();
+                }
+              }}
+              onStop={onStop}
+              onStartVoiceMode={() => void startVoiceMode()}
+              onPickAttachments={onPickAttachments}
+              onStageFiles={onStageFiles}
+              onStagePaths={onStagePaths}
+              onRemoveAttachment={onRemoveAttachment}
+              onUpdateConfig={onUpdateConfig}
+              pendingApproval={session?.pendingApprovals[0] ?? activeThread?.pendingApproval}
+              onApprovalDecision={onApprovalDecision}
+            />
+          </div>
 
           <div aria-hidden="true" className="chat-thread-layout__tail" />
         </div>

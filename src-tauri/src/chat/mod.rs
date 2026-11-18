@@ -36,6 +36,8 @@ pub use threads::*;
 pub use utils::*;
 
 pub use crate::chat_attachments::{
-    decode_base64, lookup_staged_attachment, parse_attachments, release_staged_attachment,
-    stage_blob_attachment, stage_dropped_path, stage_dropped_paths, StagedAttachment,
+    decode_base64, encode_base64, extract_attachment_file_paths, format_prompt_with_attachments,
+    infer_mime_type, lookup_staged_attachment, parse_attachments, release_staged_attachment,
+    stage_blob_attachment, stage_blob_attachment_with_mime, stage_dropped_path,
+    stage_dropped_paths, StagedAttachment,
 };

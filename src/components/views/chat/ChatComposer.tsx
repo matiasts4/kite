@@ -1,5 +1,9 @@
 import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import './composer/composer.css';
+import { useReduceMotion } from '../../../motion/standard/context';
+import { prefersReducedMotion } from '../../../motion/contract';
+import { eases, tweens } from '../../../motion/standard/tokens';
 import {
   ChatProvider,
   ChatMode,
@@ -59,6 +63,7 @@ import { CitationDraftEditor } from './composer/CitationDraftEditor';
 import { ComposerAttachments } from './composer/ComposerAttachments';
 import { ComposerDictationButton } from './composer/ComposerDictationButton';
 import { ComposerPrimaryActionButton } from './composer/ComposerPrimaryActionButton';
+import { resolvePrimaryAction, useDefaultFollowUp } from './composerPrimaryAction';
 import { ComposerConfigControls } from './composer/ComposerConfigControls';
 import { usePromptHistory } from './composer/usePromptHistory';
 
@@ -83,12 +88,13 @@ export interface ChatComposerProps {
   threadConnectionId?: string | null;
   threadItems?: ChatItem[];
   threadBranch?: string | null;
+  threadWorkspaceId?: string | null;
   threadWorkspaceName?: string | null;
   workspaces?: Array<{ id: string; name: string }>;
   branches?: string[];
   onSwitchBranch?: (branch: string) => void;
   onCreateBranch?: (branch: string) => void;
-  onSelectWorkspace?: (wsId: string) => void;
+  onSelectWorkspace?: (wsId: string | null) => void;
   declaration: DriverDeclaration;
   running: boolean;
   paused?: boolean;
@@ -108,7 +114,11 @@ export interface ChatComposerProps {
   onFreshContext?: () => void;
   /** Asks a supporting provider to compact. Does not invent a protocol frame. */
   onCompact?: () => void;
-  onQueue?: (text: string) => void;
+  onQueue?: (text: string, attachments?: ChatAttachment[]) => void;
+  onSteer?: (text: string, attachments?: ChatAttachment[]) => void | Promise<boolean | void>;
+  editingQueuedId?: string | null;
+  onEditLastQueued?: () => void;
+  onCancelQueueEdit?: () => void;
   onStop: () => void;
   onPickAttachments: (kind?: 'files' | 'folder') => void;
   onStageFiles: (files: File[]) => void;
@@ -140,6 +150,8 @@ export interface ChatComposerProps {
   onSendVoiceTurn?: (text: string) => void;
   /** Opens Voice Mode in its own conversation. Falls back to binding the current thread. */
   onStartVoiceMode?: () => void;
+  /** True once the conversation has started so the pre-chat folder/branch strip collapses away. */
+  conversationStarted?: boolean;
 }
 
 export const ChatComposer: React.FC<ChatComposerProps> = ({
@@ -155,6 +167,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   threadConnectionId,
   threadItems = [],
   threadBranch,
+  threadWorkspaceId,
   threadWorkspaceName,
   workspaces,
   branches = [],
@@ -176,6 +189,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onFreshContext,
   onCompact,
   onQueue,
+  onSteer,
+  editingQueuedId = null,
+  onEditLastQueued,
+  onCancelQueueEdit,
   onStop,
   onPickAttachments,
   onStageFiles,
@@ -194,7 +211,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   stashEnvironment = '',
   onSendVoiceTurn,
   onStartVoiceMode,
+  conversationStarted,
 }) => {
+  const reduceMotion = useReduceMotion() || prefersReducedMotion();
+  const defaultFollowUp = useDefaultFollowUp();
+  const hasStarted = conversationStarted ?? (running || threadItems.length > 0);
   const voice = useVoiceSession();
   const isVoiceModeActive =
     (voice.phase === 'active' || voice.phase === 'starting') &&
@@ -252,11 +273,14 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Control' || event.key === 'Meta') setFollowUpFlip(event.type === 'keydown');
     };
+    const onBlur = () => setFollowUpFlip(false);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKey);
+      window.removeEventListener('blur', onBlur);
     };
   }, []);
 
@@ -346,7 +370,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   };
 
   const getDropKind = (event: React.DragEvent): 'attach' | 'mention' | 'prompt' | null => {
-    if (running) return null;
     const types = event.dataTransfer?.types ?? [];
     if (types.includes('application/x-kite-prompt')) return 'prompt';
     if (types.includes(KITE_THREAD_MIME) || types.includes(KITE_FILES_MIME)) return 'mention';
@@ -356,7 +379,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const handleDrop = (event: React.DragEvent) => {
     setDropKind(null);
-    if (running) return;
     event.preventDefault();
 
     const types = event.dataTransfer?.types ?? [];
@@ -403,12 +425,12 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const composerPlaceholder = isVoiceModeActive
     ? 'Escribir en la sesión de voz…'
-    : agentName
-    ? running
-      ? 'Write a follow-up while your agent works…'
-      : `Message ${agentName}…`
     : running
-    ? "Working — send when it's done, or stop it."
+    ? agentName || onQueue || onSteer
+      ? 'Write a follow-up while your agent works…'
+      : "Working — send when it's done, or stop it."
+    : agentName
+    ? `Message ${agentName}…`
     : threadPlan
     ? 'Describe the work. You approve the plan before anything changes.'
     : threadMode === 'fullAccess'
@@ -434,7 +456,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   };
 
   const onComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (running) return;
     const dt = event.clipboardData;
     if (!dt) return;
 
@@ -479,7 +500,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     onStageFiles([new File([text], 'pasted-text.txt', { type: 'text/plain' })]);
   };
 
-  const deliverDraft = (mode: 'send' | 'queue') => {
+  const deliverDraft = (mode: 'send' | 'queue' | 'steer') => {
     if (isVoiceModeActive && prompt.trim()) {
       const text = expandMentions(expandCitations(prompt)).trim();
       onChangePrompt('');
@@ -507,8 +528,28 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       onChangePrompt('');
       return;
     }
-    if (mode === 'queue' && onQueue && prompt.trim()) {
-      onQueue(expandMentions(expandCitations(prompt)));
+    const hasDraftPayload = Boolean(prompt.trim() || attachments.length > 0);
+    if (editingQueuedId && onQueue && hasDraftPayload) {
+      onQueue(expandMentions(expandCitations(prompt)), attachments);
+      return;
+    }
+    if (mode === 'steer' && (onSteer || onQueue) && hasDraftPayload) {
+      const steerTarget = onSteer ?? onQueue!;
+      const result = steerTarget(expandMentions(expandCitations(prompt)), attachments);
+      if (result != null && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void Promise.resolve(result).then(
+          (ok) => {
+            if (ok !== false) onChangePrompt('');
+          },
+          () => {}
+        );
+      } else if ((result as unknown) !== false) {
+        onChangePrompt('');
+      }
+      return;
+    }
+    if (mode === 'queue' && onQueue && hasDraftPayload) {
+      onQueue(expandMentions(expandCitations(prompt)), attachments);
       onChangePrompt('');
       return;
     }
@@ -554,6 +595,22 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       }
       return;
     }
+    if (editingQueuedId && event.key === 'Escape' && onCancelQueueEdit) {
+      event.preventDefault();
+      onCancelQueueEdit();
+      return;
+    }
+    if (
+      event.altKey &&
+      event.key === 'ArrowUp' &&
+      !prompt.trim() &&
+      attachments.length === 0 &&
+      onEditLastQueued
+    ) {
+      event.preventDefault();
+      onEditLastQueued();
+      return;
+    }
     if (handleHistoryKey(event)) return;
 
     if (event.key === 'Backspace' && !prompt && !composerValue && attachments.length > 0 && isPlainKey(event)) {
@@ -578,7 +635,23 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         onChangePrompt('');
         return;
       }
-      deliverDraft(running && onQueue ? 'queue' : 'send');
+      const keyAction = resolvePrimaryAction({
+        running,
+        draftEmpty: !prompt.trim() && attachments.length === 0,
+        paused,
+        steerSupported: Boolean(onSteer),
+        defaultFollowUp,
+        flip: Boolean(event.ctrlKey || event.metaKey),
+      });
+      deliverDraft(
+        editingQueuedId && onQueue
+          ? 'queue'
+          : keyAction === 'steer' && onSteer
+          ? 'steer'
+          : keyAction === 'queue' && onQueue
+          ? 'queue'
+          : 'send'
+      );
     }
   };
 
@@ -623,7 +696,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       {/* Tier 1: Main Floating Glass Card */}
       <ComposerSurface.Main
         onDragOver={(event) => {
-          if (running) return;
           const kind = getDropKind(event);
           if (kind !== null) {
             event.preventDefault();
@@ -769,10 +841,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             {/* Right Actions */}
             <div className="kite-composer-footer-right">
               {/* Attachment Button with Popover */}
-              <AttachMenuPopover
-                disabled={running}
-                onPickAttachments={onPickAttachments}
-              />
+              <AttachMenuPopover onPickAttachments={onPickAttachments} />
 
               {/* Dictation Button */}
               <ComposerDictationButton
@@ -785,7 +854,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               {/* Voice Mode Button (S1, S7) */}
               <button
                 type="button"
-                disabled={running}
                 onClick={() => {
                   if (onStartVoiceMode) {
                     onStartVoiceMode();
@@ -844,22 +912,56 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                 onSend={onSend}
                 deliverDraft={deliverDraft}
                 hasQueueHandler={Boolean(onQueue)}
+                hasSteerHandler={Boolean(onSteer)}
+                editingQueued={Boolean(editingQueuedId)}
               />
             </div>
           </div>
         )}
       </ComposerSurface.Main>
 
-      {/* Tier 2: Recessed Lower Context Strip */}
-      <ComposerContextStrip
-        currentBranch={threadBranch || 'main'}
-        branches={branches}
-        currentWorkspace={threadWorkspaceName || 'Local'}
-        workspaces={workspaces}
-        onSelectBranch={onSwitchBranch}
-        onCreateBranch={onCreateBranch}
-        onSelectWorkspace={onSelectWorkspace}
-      />
+      {/* Tier 2: Recessed Lower Context Strip (draft-only; collapses smoothly once chat starts) */}
+      <AnimatePresence initial={false}>
+        {!hasStarted && (
+          <motion.div
+            key="composer-context-strip"
+            className="kite-composer-context-strip-wrap"
+            initial={reduceMotion ? false : { opacity: 0, height: 0, y: -6 }}
+            animate={{
+              opacity: 1,
+              height: 'auto',
+              y: 0,
+              transition: reduceMotion ? tweens.instant : tweens.disclosure,
+            }}
+            exit={
+              reduceMotion
+                ? { opacity: 0, height: 0, transition: tweens.instant }
+                : {
+                    opacity: 0,
+                    height: 0,
+                    y: -8,
+                    transition: {
+                      height: { duration: 0.26, ease: eases.out },
+                      y: { duration: 0.22, ease: eases.out },
+                      opacity: { duration: 0.16, ease: eases.leave },
+                    },
+                  }
+            }
+            style={{ overflow: 'hidden' }}
+          >
+            <ComposerContextStrip
+              currentBranch={threadBranch || 'main'}
+              branches={branches}
+              currentWorkspaceId={threadWorkspaceId}
+              currentWorkspace={threadWorkspaceName || 'Local'}
+              workspaces={workspaces}
+              onSelectBranch={onSwitchBranch}
+              onCreateBranch={onCreateBranch}
+              onSelectWorkspace={onSelectWorkspace}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

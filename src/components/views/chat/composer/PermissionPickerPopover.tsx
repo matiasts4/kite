@@ -115,7 +115,7 @@ export const PermissionPickerPopover: React.FC<PermissionPickerPopoverProps> = (
                 padding: '0.25rem 0.5rem',
                 fontSize: '0.6875rem',
                 fontWeight: 600,
-                color: 'var(--muted-foreground)',
+                color: 'var(--text-secondary)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.04em',
               }}
@@ -143,7 +143,7 @@ export const PermissionPickerPopover: React.FC<PermissionPickerPopoverProps> = (
                         {p.label}
                       </span>
                       {p.detail && (
-                        <span style={{ fontSize: '0.6875rem', color: 'var(--muted-foreground)' }}>
+                        <span style={{ fontSize: '0.6875rem', color: 'var(--text-secondary)' }}>
                           {p.detail}
                         </span>
                       )}

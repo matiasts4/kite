@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { useIsPresent } from 'motion/react';
 import { composerMenuStyle } from './composerMenu';
 import {
   FolderIcon,
@@ -15,12 +16,13 @@ import { getAnchoredPopoverCoords, PopoverCoords } from './anchoredPosition';
 export interface ComposerContextStripProps {
   currentBranch?: string | null;
   branches?: string[];
+  currentWorkspaceId?: string | null;
   currentWorkspace?: string | null;
   workspaces?: Array<{ id: string; name: string }>;
   envMode?: 'local' | 'worktree';
   onSelectBranch?: (branch: string) => void;
   onCreateBranch?: (branch: string) => void;
-  onSelectWorkspace?: (wsId: string) => void;
+  onSelectWorkspace?: (wsId: string | null) => void;
   onSelectEnvMode?: (mode: 'local' | 'worktree') => void;
   className?: string;
 }
@@ -50,6 +52,7 @@ const MENU_HEIGHT = 260;
 export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
   currentBranch = 'main',
   branches = [],
+  currentWorkspaceId,
   currentWorkspace = 'Local',
   workspaces = [],
   envMode = 'local',
@@ -59,9 +62,17 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
   onSelectEnvMode,
   className = '',
 }) => {
+  const isPresent = useIsPresent();
   const [isEnvOpen, setIsEnvOpen] = useState(false);
   const [isBranchOpen, setIsBranchOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState('');
+
+  useEffect(() => {
+    if (!isPresent) {
+      setIsEnvOpen(false);
+      setIsBranchOpen(false);
+    }
+  }, [isPresent]);
 
   const [envCoords, setEnvCoords] = useState<PopoverCoords | null>(null);
   const [branchCoords, setBranchCoords] = useState<PopoverCoords | null>(null);
@@ -222,7 +233,7 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
                   <div
                     style={{
                       height: '1px',
-                      background: 'var(--border, rgba(255,255,255,0.08))',
+                      background: 'var(--separator, var(--vl-stroke, rgba(255,255,255,0.08)))',
                       margin: '0.25rem 0',
                     }}
                   />
@@ -231,15 +242,30 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
                       padding: '0.25rem 0.5rem',
                       fontSize: '0.625rem',
                       fontWeight: 600,
-                      color: 'var(--muted-foreground)',
+                      color: 'var(--text-secondary)',
                       textTransform: 'uppercase',
                     }}
                   >
                     Workspaces
                   </div>
+                  {currentWorkspaceId !== null && currentWorkspaceId !== undefined && onSelectWorkspace && (
+                    <button
+                      type="button"
+                      className="kite-context-menu-item"
+                      onClick={() => {
+                        onSelectWorkspace(null);
+                        setIsEnvOpen(false);
+                      }}
+                    >
+                      <FolderIcon size={12} className="shrink-0 text-icon-muted" />
+                      <span className="kite-context-menu-item-text">No folder</span>
+                    </button>
+                  )}
                   {workspaces.map((ws) => {
                     const isSelected =
-                      currentWorkspace === ws.name || currentWorkspace === ws.id;
+                      currentWorkspaceId !== undefined
+                        ? ws.id === currentWorkspaceId
+                        : currentWorkspace === ws.name || currentWorkspace === ws.id;
                     return (
                       <button
                         key={ws.id}
@@ -346,7 +372,7 @@ export const ComposerContextStrip: React.FC<ComposerContextStripProps> = ({
                         setIsBranchOpen(false);
                       }}
                       className="kite-context-menu-item"
-                      style={{ color: 'var(--primary, #3b82f6)' }}
+                      style={{ color: 'var(--accent, #5c8fff)' }}
                     >
                       <PlusIcon size={13} className="shrink-0" />
                       <span className="kite-context-menu-item-text">

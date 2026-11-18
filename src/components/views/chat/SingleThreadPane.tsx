@@ -1,4 +1,8 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { motion } from 'motion/react';
+import { useReduceMotion } from '../../../motion/standard/context';
+import { prefersReducedMotion } from '../../../motion/contract';
+import { shift, tweens } from '../../../motion/standard/tokens';
 import {
   FolderIcon,
   FileCodeIcon,
@@ -22,20 +26,20 @@ import {
   restoreThreadCheckpoint,
   renameChatThread,
 } from '../../../lib/ipc';
-import { ChatItemRow, ChatWorkGroup, groupTranscriptRows } from './ChatItemRow';
+import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
 import { SubagentGroupRow } from './SubagentActivityCard';
 import { filterTranscriptForVisibility, readToolVisibility, TOOL_VISIBILITY_EVENT, type ToolVisibilityMode } from './toolVisibility';
-import { QueuedRunsControl } from './QueuedRunsControl';
+import { QueuedRunsControl, type QueuedRunRow } from './QueuedRunsControl';
 import { SideChatPane } from './SideChatPane';
 import { TurnActivityStatus } from './TurnActivityStatus';
 import { ChatComposer } from './ChatComposer';
+import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
 import { SessionLifecycleBar } from './SessionLifecycleBar';
 import { declarationFromCatalog } from './driverDeclaration';
 import { getSavedSelectedModel, getSavedSelectedAgent } from './modelPersistence';
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
-import { ThreadErrorBanner } from './ThreadErrorBanner';
-import { openSettingsTab } from '../../../lib/settingsNav';
+import { useThreadFailureBanner } from './ThreadErrorBanner';
 import { ChangedFilesCard } from './ChangedFilesCard';
 import { HtmlRenderFrame } from './HtmlRenderFrame';
 import { ComposerPendingUserInputPanel } from './ComposerPendingUserInputPanel';
@@ -95,6 +99,11 @@ export interface SingleThreadPaneProps {
   onCancelRename: () => void;
   onChangePrompt: (val: string) => void;
   onSend: (overridePrompt?: string, planAction?: PlanActionPayload) => Promise<boolean | void> | void;
+  onQueuePrompt?: (text: string, attachments?: ChatAttachment[]) => void;
+  onUpdateQueuedRuns?: (nextQueue: QueuedRunRow[], removedAttachments?: ChatAttachment[]) => void;
+  onSendNowQueuedRun?: (rowId: string) => void;
+  onSteerPrompt?: (text: string, attachments?: ChatAttachment[]) => void | Promise<boolean | void>;
+  onSetAttachments?: (items: ChatAttachment[]) => void;
   onStop: () => void;
   onStopThread?: (threadId: string) => void;
   onPickAttachments: (kind?: 'files' | 'folder') => void;
@@ -148,6 +157,11 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   onCancelRename,
   onChangePrompt,
   onSend,
+  onQueuePrompt,
+  onUpdateQueuedRuns,
+  onSendNowQueuedRun,
+  onSteerPrompt,
+  onSetAttachments,
   onStop,
   onStopThread,
   knownThreadsList = [],
@@ -162,13 +176,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   isRefreshingModels,
   onRefreshModels,
 }) => {
-  const activeWsId = thread.workspaceId || workspaceId;
-  const currentWorkspace = workspaces?.find((w) => w.id === activeWsId);
-  const effectiveWorkspaceName =
-    currentWorkspace?.displayName ||
-    currentWorkspace?.name ||
-    workspaceName ||
-    (activeWsId ? 'Workspace' : null);
+  const activeWsId = thread.workspaceId || (embedded ? workspaceId : null);
+  const currentWorkspace = activeWsId ? workspaces?.find((w) => w.id === activeWsId) : undefined;
+  const effectiveWorkspaceName = activeWsId
+    ? currentWorkspace?.displayName ||
+      currentWorkspace?.name ||
+      (embedded ? workspaceName : null) ||
+      'Workspace'
+    : null;
 
   const effectiveModel = thread.model || getSavedSelectedModel(thread.provider);
   const effectiveAgent = (thread as any).agent || (thread as any).workMode || getSavedSelectedAgent(thread.provider) || null;
@@ -188,20 +203,26 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const branchState = useThreadBranches({ workspaceId: activeWsId });
 
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const contextReduceMotion = useReduceMotion();
+  const reduceMotion = contextReduceMotion || prefersReducedMotion();
   const [hiddenFromId, setHiddenFromId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(200);
 
   const atLiveEdgeRef = useRef(true);
+  const promptRef = useRef(prompt);
+  promptRef.current = prompt;
   const transcriptItems = React.useMemo(() => {
-    if (!hiddenFromId) return thread.items;
-    const index = thread.items.findIndex((item) => item.id === hiddenFromId && item.kind === 'user');
-    if (index < 0) return thread.items;
-    return thread.items.slice(0, index);
+    const safeItems = Array.isArray(thread.items) ? thread.items : [];
+    if (!hiddenFromId) return safeItems;
+    const index = safeItems.findIndex((item) => item.id === hiddenFromId && item.kind === 'user');
+    if (index < 0) return safeItems;
+    return safeItems.slice(0, index);
   }, [thread.items, hiddenFromId]);
-  const enterFor = useTranscriptMotion(
-    thread.id,
-    transcriptItems.map((item) => item.id),
+  const transcriptItemIds = React.useMemo(
+    () => transcriptItems.map((item) => item.id),
+    [transcriptItems]
   );
+  const enterFor = useTranscriptMotion(thread.id, transcriptItemIds);
   useEffect(() => {
     setHiddenFromId(null);
   }, [thread.id]);
@@ -210,6 +231,22 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     if (result?.error) throw new Error(result.error);
     setHiddenFromId(messageId);
   }, [thread.id]);
+  const handleRestoreFiles = useCallback(async (messageId: string) => {
+    const result = await restoreThreadCheckpoint(thread.id);
+    if (!result?.restored || result.error) {
+      throw new Error(result?.error || 'File restore did not run.');
+    }
+    await rewindFromMessage(messageId);
+  }, [thread.id, rewindFromMessage]);
+  const handleEditUserMessage = useCallback((text: string) => {
+    onChangePrompt(composeRewoundPrompt(promptRef.current, text));
+    const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+    el?.focus();
+  }, [onChangePrompt]);
+  const handleTranscriptScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
+    atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
+  }, []);
   useTranscriptLiveEdge(transcriptRef, thread.id, atLiveEdgeRef);
 
   const providerMeta = (PROVIDER_CATALOG as Record<string, any>)[thread.provider] || PROVIDER_CATALOG.claude;
@@ -237,7 +274,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   };
   const activePlan = getActivePlan(thread);
   const [dismissedPlanIds, setDismissedPlanIds] = useState<Set<string>>(new Set());
-  const [failureDismissed, setFailureDismissed] = useState(false);
   const isPlanDismissed = activePlan ? dismissedPlanIds.has(activePlan.id) : false;
 
   const voice = useVoiceSession();
@@ -310,6 +346,21 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const handleSendVoiceTurn = useCallback(async (text: string) => {
     const clean = text.trim();
     if (!clean) return;
+    const currentTitle = (thread.title || '').trim();
+    if (!currentTitle || ['New Chat', 'New Agent Chat', 'Chat', 'Chat Thread'].includes(currentTitle)) {
+      const firstLine = clean
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\s*(?:#+\s*|>\s*|[-*+]\s+)/, '').trim())
+        .find((line) => line.length > 0);
+      if (firstLine) {
+        const derived = firstLine.length > 60 ? `${firstLine.slice(0, 59).trimEnd()}…` : firstLine;
+        void renameChatThread(thread.id, derived)
+          .then(() => {
+            window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+          })
+          .catch(() => undefined);
+      }
+    }
     try {
       setLiveVoiceTurn({
         turnId: `turn-${Date.now()}`,
@@ -383,8 +434,15 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
   const isDraft = timelineItems.length === 0 && !running;
   const [toolVisibility, setToolVisibility] = useState<ToolVisibilityMode>(() => readToolVisibility());
-  const [queuedRuns, setQueuedRuns] = useState(thread.queuedRuns ?? []);
+  const [queuedRuns, setQueuedRuns] = useState<QueuedRunRow[]>(thread.queuedRuns ?? []);
+  const [queueExpanded, setQueueExpanded] = useState(false);
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null);
+  const savedDraftBeforeEditRef = useRef<{ prompt: string; attachments: ChatAttachment[] } | null>(null);
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
+  useEffect(() => {
+    setEditingQueuedId(null);
+    savedDraftBeforeEditRef.current = null;
+  }, [thread.id]);
   useEffect(() => {
     const onSide = (event: Event) => {
       const detail = (event as CustomEvent<{ threadId?: string; question?: string }>).detail;
@@ -396,6 +454,118 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   useEffect(() => {
     setQueuedRuns(thread.queuedRuns ?? []);
   }, [thread.queuedRuns]);
+
+  const commitQueuedRuns = useCallback(
+    (next: QueuedRunRow[], removedAttachments?: ChatAttachment[]) => {
+      setQueuedRuns(next);
+      if (onUpdateQueuedRuns) {
+        onUpdateQueuedRuns(next, removedAttachments);
+      } else {
+        void invokeCommand('update_chat_configuration', { threadId: thread.id, queuedRuns: next });
+      }
+    },
+    [onUpdateQueuedRuns, thread.id]
+  );
+
+  const handleCancelQueueEdit = useCallback(() => {
+    setEditingQueuedId(null);
+    const saved = savedDraftBeforeEditRef.current;
+    savedDraftBeforeEditRef.current = null;
+    onChangePrompt(saved?.prompt ?? '');
+    onSetAttachments?.(saved?.attachments ?? []);
+  }, [onChangePrompt, onSetAttachments]);
+
+  const handleStartQueueEdit = useCallback(
+    (id: string) => {
+      const row = queuedRuns.find((entry) => entry.id === id);
+      if (!row) return;
+      if (!editingQueuedId) {
+        savedDraftBeforeEditRef.current = { prompt, attachments };
+      }
+      setEditingQueuedId(id);
+      onChangePrompt(row.text);
+      onSetAttachments?.(row.attachments ?? []);
+    },
+    [attachments, editingQueuedId, onChangePrompt, onSetAttachments, prompt, queuedRuns]
+  );
+
+  const handleRemoveQueuedRun = useCallback(
+    (id: string) => {
+      const row = queuedRuns.find((entry) => entry.id === id);
+      if (editingQueuedId === id) {
+        handleCancelQueueEdit();
+      }
+      const rest = queuedRuns.filter((entry) => entry.id !== id);
+      const remainingIds = new Set(
+        rest.flatMap((entry) => (entry.attachments ?? []).map((att) => att.resourceId))
+      );
+      const orphanAttachments = row?.attachments?.filter(
+        (att) => !remainingIds.has(att.resourceId)
+      );
+      commitQueuedRuns(rest, orphanAttachments);
+    },
+    [commitQueuedRuns, editingQueuedId, handleCancelQueueEdit, queuedRuns]
+  );
+
+  const handleSendNowQueued = useCallback(
+    (id: string) => {
+      if (editingQueuedId === id) {
+        handleCancelQueueEdit();
+      }
+      if (onSendNowQueuedRun) {
+        onSendNowQueuedRun(id);
+        return;
+      }
+      const row = queuedRuns.find((entry) => entry.id === id);
+      const rest = queuedRuns.filter((entry) => entry.id !== id);
+      commitQueuedRuns(rest);
+      if (row?.text) {
+        onChangePrompt(row.text);
+      }
+    },
+    [commitQueuedRuns, editingQueuedId, handleCancelQueueEdit, onChangePrompt, onSendNowQueuedRun, queuedRuns]
+  );
+
+  const handleQueueFromComposer = useCallback(
+    (text: string, queuedAttachments?: ChatAttachment[]) => {
+      const atts = queuedAttachments ?? attachments;
+      if (editingQueuedId) {
+        const next = queuedRuns.map((entry) =>
+          entry.id === editingQueuedId
+            ? {
+                ...entry,
+                text,
+                ...(atts.length > 0 ? { attachments: atts } : { attachments: undefined }),
+              }
+            : entry
+        );
+        setEditingQueuedId(null);
+        const saved = savedDraftBeforeEditRef.current;
+        savedDraftBeforeEditRef.current = null;
+        commitQueuedRuns(next);
+        onChangePrompt(saved?.prompt ?? '');
+        onSetAttachments?.(saved?.attachments ?? []);
+        return;
+      }
+      if (onQueuePrompt) {
+        onQueuePrompt(text, atts);
+        return;
+      }
+      const next: QueuedRunRow[] = [
+        ...queuedRuns,
+        {
+          id: `q-${Date.now()}`,
+          text,
+          ...(atts.length > 0 ? { attachments: atts } : {}),
+          createdAtUnixMs: Date.now(),
+        },
+      ];
+      commitQueuedRuns(next);
+      onChangePrompt('');
+      onSetAttachments?.([]);
+    },
+    [attachments, commitQueuedRuns, editingQueuedId, onChangePrompt, onQueuePrompt, onSetAttachments, queuedRuns]
+  );
   useEffect(() => {
     const onVisibility = (event: Event) => {
       const mode = (event as CustomEvent<ToolVisibilityMode>).detail;
@@ -404,26 +574,27 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     window.addEventListener(TOOL_VISIBILITY_EVENT, onVisibility);
     return () => window.removeEventListener(TOOL_VISIBILITY_EVENT, onVisibility);
   }, []);
-  const transcriptRows = groupTranscriptRows(filterTranscriptForVisibility(timelineItems, toolVisibility));
+  const transcriptRows = React.useMemo(
+    () => groupTranscriptRows(filterTranscriptForVisibility(timelineItems, toolVisibility)),
+    [timelineItems, toolVisibility]
+  );
   const totalRows = transcriptRows.length;
-  const displayedRows =
-    totalRows > visibleLimit
-      ? transcriptRows.slice(totalRows - visibleLimit)
-      : transcriptRows;
-  const failureBanner = thread.turnFailure && !failureDismissed ? (
-    <ThreadErrorBanner
-      failure={thread.turnFailure}
-      onDismiss={() => setFailureDismissed(true)}
-      onResume={() => onSend()}
-      onResumeAtReset={(resetAtUnixMs) => {
-        const delay = Math.max(0, resetAtUnixMs - Date.now());
-        window.setTimeout(() => onSend(), delay);
-      }}
-      onSignIn={() => {
-        openSettingsTab('quotas', thread.provider);
-      }}
-    />
-  ) : null;
+  const displayedRows = React.useMemo(
+    () => (totalRows > visibleLimit ? transcriptRows.slice(totalRows - visibleLimit) : transcriptRows),
+    [transcriptRows, totalRows, visibleLimit]
+  );
+  const liveWorkIdx = React.useMemo(
+    () => (running ? liveActivityRowIndex(displayedRows) : -1),
+    [running, displayedRows]
+  );
+  const handleEnsureAllVisible = useCallback(() => {
+    setVisibleLimit(totalRows + 200);
+  }, [totalRows]);
+  const isFileRestoreAllowed = fileRestoreAllowed(
+    Boolean(thread.providerCanRewind),
+    Boolean(thread.isolatedCheckout),
+  );
+  const { failureBanner } = useThreadFailureBanner(thread, () => onSend());
 
   return (
     <section
@@ -472,22 +643,18 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
           <div className={`chat-thread-layout${isDraft ? ' chat-thread-layout--draft' : ''}`}>
             {/* Layout body: renders null when isDraft to prevent empty transcript pushing hero up */}
             <div className="chat-thread-layout__body">
-              {failureBanner}
               {isDraft ? null : (
                 <>
                   <ThreadTurnRail
                     items={timelineItems}
                     running={running}
                     transcriptRef={transcriptRef}
-                    onEnsureAllVisible={() => setVisibleLimit(totalRows + 200)}
+                    onEnsureAllVisible={handleEnsureAllVisible}
                   />
                   <div
                     className="chat-transcript"
                     ref={transcriptRef}
-                    onScroll={(e) => {
-                      const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
-                      atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
-                    }}
+                    onScroll={handleTranscriptScroll}
                   >
                     <div className="chat-transcript__column">
                       {displayedRows.length < transcriptRows.length && (
@@ -527,7 +694,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                         </div>
                       )}
 
-                      {displayedRows.map((row) => {
+                      {displayedRows.map((row, rowIdx) => {
                         const rowKey =
                           row.kind === 'work' || row.kind === 'subagentGroup'
                             ? row.id
@@ -540,15 +707,15 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                             {row.kind === 'work' ? (
                               <ChatWorkGroup
                                 items={row.items}
-                                running={running}
+                                running={running && rowIdx === liveWorkIdx}
                                 enterFor={enterFor}
-                                interrupted={Boolean(thread.stoppedByBuilder)}
+                                interrupted={Boolean(thread.stoppedByBuilder) && rowIdx === displayedRows.length - 1}
                               />
                             ) : row.kind === 'subagentGroup' ? (
                               <SubagentGroupRow
                                 items={row.items}
                                 threadId={thread.id}
-                                workspaceId={thread.workspaceId ?? workspaceId ?? null}
+                                workspaceId={activeWsId ?? null}
                                 subagentRuns={thread.subagentRuns ?? null}
                                 enterFor={enterFor}
                               />
@@ -556,27 +723,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                               <ChatItemRow
                                 item={row.item}
                                 threadId={thread.id}
-                                workspaceId={thread.workspaceId ?? workspaceId ?? null}
+                                workspaceId={activeWsId ?? null}
                                 subagentRuns={thread.subagentRuns ?? null}
                                 swarmState={thread.swarmState ?? null}
                                 enter={enterFor(row.item.id)}
-                                fileRestoreEnabled={fileRestoreAllowed(
-                                  Boolean(thread.providerCanRewind),
-                                  Boolean(thread.isolatedCheckout),
-                                )}
-                                onRewindTranscript={(messageId) => rewindFromMessage(messageId)}
-                                onRestoreFiles={async (messageId) => {
-                                  const result = await restoreThreadCheckpoint(thread.id);
-                                  if (!result?.restored || result.error) {
-                                    throw new Error(result?.error || 'File restore did not run.');
-                                  }
-                                  await rewindFromMessage(messageId);
-                                }}
-                                onEditUserMessage={(text) => {
-                                  onChangePrompt(composeRewoundPrompt(prompt, text));
-                                  const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
-                                  el?.focus();
-                                }}
+                                fileRestoreEnabled={isFileRestoreAllowed}
+                                onRewindTranscript={rewindFromMessage}
+                                onRestoreFiles={handleRestoreFiles}
+                                onEditUserMessage={handleEditUserMessage}
                               />
                             )}
                           </React.Fragment>
@@ -607,7 +761,13 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
             {/* Draft hero rendered when empty */}
             {isDraft ? (
-              <div className={agentName ? 'chat-draft-hero agent-chat-hero scroll-quiet' : 'chat-draft-hero scroll-quiet'}>
+              <motion.div
+                initial={reduceMotion ? false : { y: shift.handoff }}
+                animate={{ y: 0 }}
+                transition={reduceMotion ? tweens.instant : tweens.fade}
+                className={agentName ? 'chat-draft-hero agent-chat-hero scroll-quiet' : 'chat-draft-hero scroll-quiet'}
+              >
+                <ThemeHeroFigure variant="hero" />
                 <h1>
                   {isVoiceActiveHere ? (
                     voice.micMuted ? (
@@ -640,14 +800,16 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                     type="button"
                     className="secondary-button action-button--row chat-draft-hero__action"
                     onClick={() => {
-                      window.dispatchEvent(new CustomEvent('kite:add-workspace'));
+                      window.dispatchEvent(
+                        new CustomEvent('kite:add-workspace', { detail: { threadId: thread.id } })
+                      );
                     }}
                   >
                     <FolderIcon size={13} />
                     <span>Add a folder</span>
                   </button>
                 )}
-              </div>
+              </motion.div>
             ) : null}
 
             {/* Composer Area with Proposed Plan Panel mounted directly above */}
@@ -730,27 +892,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 }}
               />
             ) : null}
-            <QueuedRunsControl
-              rows={queuedRuns}
-              expanded={false}
-              onToggle={() => undefined}
-              onSendNow={(id) => {
-                const row = queuedRuns.find((entry) => entry.id === id);
-                const rest = queuedRuns.filter((entry) => entry.id !== id);
-                setQueuedRuns(rest);
-                void invokeCommand('update_chat_configuration', { threadId: thread.id, queuedRuns: rest });
-                if (row?.text) onChangePrompt(row.text);
-              }}
-              onEdit={(id) => {
-                const row = queuedRuns.find((entry) => entry.id === id);
-                if (row) onChangePrompt(row.text);
-              }}
-              onRemove={(id) => {
-                const rest = queuedRuns.filter((entry) => entry.id !== id);
-                setQueuedRuns(rest);
-                void invokeCommand('update_chat_configuration', { threadId: thread.id, queuedRuns: rest });
-              }}
-            />
             <ChangedFilesCard
               files={changedFilesForTurn(transcriptItems)}
               workspaceName={effectiveWorkspaceName}
@@ -772,9 +913,23 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               }}
             />
 
+            {failureBanner}
+
+            <QueuedRunsControl
+              rows={queuedRuns}
+              expanded={queueExpanded}
+              editingId={editingQueuedId}
+              onToggle={() => setQueueExpanded((v) => !v)}
+              onSendNow={handleSendNowQueued}
+              onEdit={handleStartQueueEdit}
+              onCancelEdit={handleCancelQueueEdit}
+              onRemove={handleRemoveQueuedRun}
+            />
+
             <ChatComposer
               threadId={thread.id}
               threadItems={transcriptItems}
+              conversationStarted={!isDraft || queuedRuns.length > 0}
               agentName={agentName}
               engineLabel={engineLabel}
               threadMode={thread.mode}
@@ -785,13 +940,18 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               threadAgent={effectiveAgent}
               threadConnectionId={thread.connectionId ?? null}
               catalogState={catalogState}
-              onQueue={directNotice ? () => undefined : (text) => {
-                const next = [...queuedRuns, { id: `q-${Date.now()}`, text }];
-                setQueuedRuns(next);
-                void invokeCommand('update_chat_configuration', { threadId: thread.id, queuedRuns: next });
-              }}
+              onQueue={directNotice ? undefined : handleQueueFromComposer}
+              onSteer={directNotice ? undefined : onSteerPrompt}
+              editingQueuedId={editingQueuedId}
+              onCancelQueueEdit={handleCancelQueueEdit}
+              onEditLastQueued={
+                queuedRuns.length > 0
+                  ? () => handleStartQueueEdit(queuedRuns[queuedRuns.length - 1].id)
+                  : undefined
+              }
               threadBranch={branchState.gitBranch}
               branches={branchState.branches}
+              threadWorkspaceId={activeWsId ?? null}
               threadWorkspaceName={effectiveWorkspaceName || 'Local'}
               workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
               onSelectWorkspace={(wsId) => onUpdateConfig({ workspaceId: wsId })}
@@ -822,7 +982,12 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               onStop={stopRunning}
               onSendVoiceTurn={handleSendVoiceTurn}
               onStartVoiceMode={() => void startVoiceMode()}
-              paused={!running && thread.turnFailure?.kind === 'usageLimit'}
+              paused={
+                !running &&
+                (thread.turnFailure?.kind === 'usageLimit' ||
+                  Boolean(thread.stoppedByBuilder) ||
+                  queuedRuns.length > 0)
+              }
               onPickAttachments={onPickAttachments}
               onStageFiles={onStageFiles}
               onStagePaths={onStagePaths}

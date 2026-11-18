@@ -18,7 +18,7 @@ export interface SingleThreadHeaderProps {
   effectiveWorkspaceName: string | null;
   workspaces?: Array<{ id: string; displayName?: string; name?: string }>;
   currentWorkspaceId?: string | null;
-  onSelectWorkspace: (workspaceId: string) => void;
+  onSelectWorkspace: (workspaceId: string | null) => void;
   branchState: UseThreadBranchesResult;
   editingTitleId: string | null;
   titleInput: string;
@@ -116,28 +116,47 @@ export const SingleThreadHeader: React.FC<SingleThreadHeaderProps> = ({
             <div className="chat-thread-header__menu" onClick={(e) => e.stopPropagation()}>
               <div className="chat-thread-header__menu-header">Select Project</div>
               <div className="chat-thread-header__menu-list">
-                {workspaces && workspaces.length > 0 ? (
-                  workspaces.map((ws) => {
-                    const isSelected = ws.id === (thread.workspaceId || currentWorkspaceId);
-                    return (
+                {(() => {
+                  const selectedWsId = thread.workspaceId ?? (currentWorkspaceId ?? null);
+                  return (
+                    <>
                       <button
-                        key={ws.id}
                         type="button"
-                        className={`chat-thread-header__menu-item${isSelected ? ' chat-thread-header__menu-item--selected' : ''}`}
+                        className={`chat-thread-header__menu-item${!selectedWsId ? ' chat-thread-header__menu-item--selected' : ''}`}
                         onClick={() => {
-                          onSelectWorkspace(ws.id);
+                          onSelectWorkspace(null);
                           setWsDropdownOpen(false);
                         }}
                       >
                         <FolderIcon size={13} />
-                        <span className="chat-thread-header__menu-item-text">{ws.displayName || ws.name || ws.id}</span>
-                        {isSelected && <CheckIcon size={12} className="chat-thread-header__menu-item-check" />}
+                        <span className="chat-thread-header__menu-item-text">No folder</span>
+                        {!selectedWsId && <CheckIcon size={12} className="chat-thread-header__menu-item-check" />}
                       </button>
-                    );
-                  })
-                ) : (
-                  <div className="chat-thread-header__menu-empty">No projects found</div>
-                )}
+                      {workspaces && workspaces.length > 0 ? (
+                        workspaces.map((ws) => {
+                          const isSelected = ws.id === selectedWsId;
+                          return (
+                            <button
+                              key={ws.id}
+                              type="button"
+                              className={`chat-thread-header__menu-item${isSelected ? ' chat-thread-header__menu-item--selected' : ''}`}
+                              onClick={() => {
+                                onSelectWorkspace(ws.id);
+                                setWsDropdownOpen(false);
+                              }}
+                            >
+                              <FolderIcon size={13} />
+                              <span className="chat-thread-header__menu-item-text">{ws.displayName || ws.name || ws.id}</span>
+                              {isSelected && <CheckIcon size={12} className="chat-thread-header__menu-item-check" />}
+                            </button>
+                          );
+                        })
+                      ) : (
+                        <div className="chat-thread-header__menu-empty">No projects found</div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           )}

@@ -1,9 +1,14 @@
 import React from 'react';
+import { AnimatePresence, motion, useIsPresent } from 'motion/react';
+import { useReduceMotion } from '../../../motion/standard/context';
+import { prefersReducedMotion } from '../../../motion/contract';
+import { tweens } from '../../../motion/standard/tokens';
 import { SpinnerIcon } from './ChatIcons';
 import { SingleThreadPane } from './SingleThreadPane';
 import type {
   ExtendedChatThread,
   ChatAttachment,
+  QueuedRunItem,
   ModelOption,
   ChatProvider,
   ChatMode,
@@ -54,6 +59,11 @@ export interface ThreadGridProps {
   onCancelRename: () => void;
   onChangePrompt: (threadId: string, val: string) => void;
   onSend: (threadId: string, overridePrompt?: string, planAction?: PlanActionPayload) => Promise<boolean | void> | void;
+  onQueuePrompt?: (threadId: string, text: string, attachments?: ChatAttachment[]) => void;
+  onUpdateQueuedRuns?: (threadId: string, nextQueue: QueuedRunItem[], removedAttachments?: ChatAttachment[]) => void;
+  onSendNowQueuedRun?: (threadId: string, rowId: string) => void;
+  onSteerPrompt?: (threadId: string, text: string, attachments?: ChatAttachment[]) => void | Promise<boolean | void>;
+  onSetAttachments?: (threadId: string, items: ChatAttachment[]) => void;
   onStop: (threadId: string) => void;
   onPickAttachments: (threadId: string, kind?: 'files' | 'folder') => void;
   onStageFiles: (threadId: string, files: File[]) => void;
@@ -143,6 +153,67 @@ export function computeThreadGridRects(
   ];
 }
 
+interface ThreadGridCellMotionProps {
+  threadId: string;
+  className: string;
+  style: React.CSSProperties;
+  reducedMotion: boolean;
+  onDragOver?: React.DragEventHandler<HTMLDivElement>;
+  onDragLeave?: React.DragEventHandler<HTMLDivElement>;
+  onDrop?: React.DragEventHandler<HTMLDivElement>;
+  children: React.ReactNode;
+}
+
+const ThreadGridCellMotion: React.FC<ThreadGridCellMotionProps> = ({
+  threadId,
+  className,
+  style,
+  reducedMotion,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  children,
+}) => {
+  const isPresent = useIsPresent();
+  const cellRef = React.useRef<HTMLDivElement>(null);
+
+  React.useLayoutEffect(() => {
+    const node = cellRef.current as (HTMLDivElement & { inert?: boolean }) | null;
+    if (node) {
+      node.inert = !isPresent;
+    }
+  }, [isPresent]);
+
+  return (
+    <motion.div
+      ref={cellRef}
+      className={className}
+      data-thread-grid-cell={threadId}
+      data-motion-present={isPresent ? 'true' : 'false'}
+      aria-hidden={!isPresent || undefined}
+      style={{
+        ...style,
+        zIndex: isPresent ? 1 : 0,
+        pointerEvents: isPresent ? undefined : 'none',
+      }}
+      initial={{ opacity: 0 }}
+      animate={{
+        opacity: 1,
+        transition: reducedMotion ? tweens.instant : tweens.fade,
+      }}
+      exit={{
+        opacity: 0,
+        transition: reducedMotion ? tweens.instant : tweens.swap,
+      }}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {children}
+    </motion.div>
+  );
+};
+
 export const ThreadGrid: React.FC<ThreadGridProps> = ({
   gridThreadIds,
   focusedThreadId,
@@ -184,6 +255,11 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   onCancelRename,
   onChangePrompt,
   onSend,
+  onQueuePrompt,
+  onUpdateQueuedRuns,
+  onSendNowQueuedRun,
+  onSteerPrompt,
+  onSetAttachments,
   onStop,
   onPickAttachments,
   onStageFiles,
@@ -195,6 +271,8 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   onDropThread,
 }) => {
   const isMulti = gridThreadIds.length > 1;
+  const contextReduceMotion = useReduceMotion();
+  const reducedMotion = contextReduceMotion || prefersReducedMotion();
   const canvasRef = React.useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = React.useState<{ width: number; height: number }>({
     width: 0,
@@ -206,14 +284,28 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   } | null>(null);
 
   React.useLayoutEffect(() => {
-    if (!canvasRef.current) return;
+    const el = canvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      setDimensions((prev) =>
+        prev.width === rect.width && prev.height === rect.height
+          ? prev
+          : { width: rect.width, height: rect.height }
+      );
+    }
+    if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        setDimensions({ width, height });
+        if (width > 0 && height > 0) {
+          setDimensions((prev) =>
+            prev.width === width && prev.height === height ? prev : { width, height }
+          );
+        }
       }
     });
-    observer.observe(canvasRef.current);
+    observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
@@ -233,6 +325,9 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   }, [isMulti, focusedThreadId, gridThreadIds, onClosePane]);
 
   const rects = React.useMemo(() => {
+    if (gridThreadIds.length <= 1) {
+      return [];
+    }
     return computeThreadGridRects(
       dimensions.width || 1000,
       dimensions.height || 800,
@@ -271,153 +366,169 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
         className="thread-grid__canvas"
         style={{ width: '100%', height: '100%', position: 'relative' }}
       >
-        {gridThreadIds.map((tid, idx) => {
-          const thread = threadsMap[tid];
-          const isFocused = focusedThreadId === tid;
-          const running = !!isRunning[tid];
-          const attachments = attachmentsMap[tid] || [];
-          const prompt = promptMap[tid] || '';
-          const rect = rects[idx];
-          const cellStyle: React.CSSProperties = rect
-            ? {
-                position: 'absolute',
-                left: `${rect.left}px`,
-                top: `${rect.top}px`,
-                width: `${rect.width}px`,
-                height: `${rect.height}px`,
-              }
-            : {
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-              };
+        <AnimatePresence initial={false}>
+          {gridThreadIds.map((tid, idx) => {
+            const thread = threadsMap[tid];
+            const isFocused = focusedThreadId === tid;
+            const running = Boolean(isRunning[tid]) || thread?.status === 'running';
+            const attachments = attachmentsMap[tid] || [];
+            const prompt = promptMap[tid] || '';
+            const rect = rects[idx];
+            const cellStyle: React.CSSProperties = rect
+              ? {
+                  position: 'absolute',
+                  left: `${rect.left}px`,
+                  top: `${rect.top}px`,
+                  width: `${rect.width}px`,
+                  height: `${rect.height}px`,
+                }
+              : {
+                  position: 'absolute',
+                  inset: 0,
+                  width: '100%',
+                  height: '100%',
+                };
 
-          if (!thread) {
-            return (
-              <div
-                key={tid}
-                className="thread-grid__cell"
-                data-thread-grid-cell={tid}
-                style={{
-                  ...cellStyle,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                <SpinnerIcon size={24} style={{ color: 'var(--text-secondary)' }} />
-              </div>
-            );
-          }
-
-          return (
-            <div
-              key={tid}
-              className={`thread-grid__cell ${isFocused ? 'thread-grid__cell--focused' : ''}`}
-              data-thread-grid-cell={tid}
-              style={cellStyle}
-              onDragOver={(e) => handleDragOverCell(e, tid)}
-              onDragLeave={() => setDropTarget(null)}
-              onDrop={(e) => handleDropCell(e, tid)}
-            >
-              {dropTarget && dropTarget.threadId === tid && (
-                <div
-                  className={`thread-grid__drop thread-grid__drop--${dropTarget.position}`}
+            if (!thread) {
+              return (
+                <ThreadGridCellMotion
+                  key={tid}
+                  threadId={tid}
+                  className="thread-grid__cell"
+                  reducedMotion={reducedMotion}
                   style={{
-                    position: 'absolute',
-                    inset: 0,
-                    zIndex: 100,
-                    pointerEvents: 'none',
+                    ...cellStyle,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    backgroundColor: 'rgba(59, 130, 246, 0.15)',
-                    border: '2px dashed var(--accent, #3b82f6)',
-                    borderRadius: '8px',
+                    color: 'var(--text-secondary)',
                   }}
                 >
-                  <span
-                    className="thread-grid__drop-label"
+                  <SpinnerIcon size={24} style={{ color: 'var(--text-secondary)' }} />
+                </ThreadGridCellMotion>
+              );
+            }
+
+            return (
+              <ThreadGridCellMotion
+                key={tid}
+                threadId={tid}
+                className={`thread-grid__cell ${isFocused ? 'thread-grid__cell--focused' : ''}`}
+                reducedMotion={reducedMotion}
+                style={cellStyle}
+                onDragOver={(e) => handleDragOverCell(e, tid)}
+                onDragLeave={() => setDropTarget(null)}
+                onDrop={(e) => handleDropCell(e, tid)}
+              >
+                {dropTarget && dropTarget.threadId === tid && (
+                  <div
+                    className={`thread-grid__drop thread-grid__drop--${dropTarget.position}`}
                     style={{
-                      backgroundColor: 'var(--composer, #1e1e1e)',
-                      color: 'var(--text-primary, #fafafa)',
-                      padding: '6px 14px',
-                      borderRadius: '6px',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                      position: 'absolute',
+                      inset: 0,
+                      zIndex: 100,
+                      pointerEvents: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: 'var(--accent-tint, rgba(59, 130, 246, 0.15))',
+                      border: '2px dashed var(--accent, #3b82f6)',
+                      borderRadius: 'var(--control-radius, 8px)',
                     }}
                   >
-                    {dropTarget.position === 'before'
-                      ? 'Split left'
-                      : dropTarget.position === 'after'
-                      ? 'Split right'
-                      : 'Replace'}
-                  </span>
-                </div>
-              )}
-              <SingleThreadPane
-                thread={thread}
-                workspaceId={workspaceId}
-                workspaceName={workspaceName}
-                workspaces={workspaces}
-                agentName={agentName}
-                engineLabel={engineLabel}
-                isFocused={isFocused}
-                isMulti={isMulti}
-                embedded={embedded}
-                running={running}
-                prompt={prompt}
-                attachments={attachments}
-                liveRunsCount={liveRunsCount}
-                dynamicModels={dynamicModelsMap[thread.provider] || []}
-                catalogState={(() => {
-                  const state = catalogStateMap?.[thread.provider];
-                  return state && state !== 'ready' ? state : null;
-                })()}
-                dynamicAgents={dynamicAgentsMap?.[thread.provider] || []}
-                ensureDynamicAgents={ensureDynamicAgents}
-                driverDeclaration={driverDeclarations?.[tid] ?? null}
-                session={sessionProjections?.[tid] ?? null}
-                isRefreshingModels={isRefreshingModels}
-                onRefreshModels={onRefreshModels}
-                activeDropdown={activeDropdown}
-                editingTitleId={editingTitleId}
-                titleInput={titleInput}
-                showHistoryPopover={showHistoryPopover}
-                knownThreadsList={knownThreadsList}
-                onFocus={() => onFocusThread(tid)}
-                onClosePane={() => onClosePane(tid)}
-                onToggleSplit={onToggleSplit}
-                onToggleHistory={onToggleHistory}
-                onNewThread={onNewThread}
-                onSelectHistoryThread={onSelectHistoryThread}
-                onPinThread={onPinThread}
-                onArchiveThread={onArchiveThread}
-                onStartRename={onStartRename}
-                onSaveRename={() => onSaveRename(tid)}
-                onChangeTitleInput={onChangeTitleInput}
-                onCancelRename={onCancelRename}
-                onChangePrompt={(val) => onChangePrompt(tid, val)}
-                onSend={(overridePrompt, planAction) => onSend(tid, overridePrompt, planAction)}
-                onStop={() => onStop(tid)}
-                onStopThread={onStop}
-                onPickAttachments={(kind) => onPickAttachments(tid, kind)}
-                onStageFiles={(files) => onStageFiles(tid, files)}
-                onStagePaths={(paths) => onStagePaths(tid, paths)}
-                onRemoveAttachment={(resId) => onRemoveAttachment(tid, resId)}
-                onDropdownToggle={(type) => onDropdownToggle(tid, type)}
-                onUpdateConfig={(patch) => onUpdateConfig(tid, patch)}
-                onApprovalDecision={(decision, reqId) => onApprovalDecision(tid, decision, reqId)}
-                onChildApprovalDecision={(childTid, decision, reqId) =>
-                  onApprovalDecision(childTid, decision, reqId)
-                }
-              />
-            </div>
-          );
-        })}
+                    <span
+                      className="thread-grid__drop-label"
+                      style={{
+                        background: 'var(--glass-overlay-bg, var(--composer, #1e1e1e))',
+                        border: '1px solid var(--glass-border, var(--panel-stroke))',
+                        color: 'var(--text-primary, #fafafa)',
+                        padding: '6px 14px',
+                        borderRadius: 'var(--vl-radius-sm, 6px)',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        boxShadow: 'var(--glass-shadow, 0 4px 12px rgba(0,0,0,0.4))',
+                      }}
+                    >
+                      {dropTarget.position === 'before'
+                        ? 'Split left'
+                        : dropTarget.position === 'after'
+                        ? 'Split right'
+                        : 'Replace'}
+                    </span>
+                  </div>
+                )}
+                <SingleThreadPane
+                  thread={thread}
+                  workspaceId={workspaceId}
+                  workspaceName={workspaceName}
+                  workspaces={workspaces}
+                  agentName={agentName}
+                  engineLabel={engineLabel}
+                  isFocused={isFocused}
+                  isMulti={isMulti}
+                  embedded={embedded}
+                  running={running}
+                  prompt={prompt}
+                  attachments={attachments}
+                  liveRunsCount={liveRunsCount}
+                  dynamicModels={dynamicModelsMap[thread.provider] || []}
+                  catalogState={(() => {
+                    const state = catalogStateMap?.[thread.provider];
+                    return state && state !== 'ready' ? state : null;
+                  })()}
+                  dynamicAgents={dynamicAgentsMap?.[thread.provider] || []}
+                  ensureDynamicAgents={ensureDynamicAgents}
+                  driverDeclaration={driverDeclarations?.[tid] ?? null}
+                  session={sessionProjections?.[tid] ?? null}
+                  isRefreshingModels={isRefreshingModels}
+                  onRefreshModels={onRefreshModels}
+                  activeDropdown={activeDropdown}
+                  editingTitleId={editingTitleId}
+                  titleInput={titleInput}
+                  showHistoryPopover={showHistoryPopover}
+                  knownThreadsList={knownThreadsList}
+                  onFocus={() => onFocusThread(tid)}
+                  onClosePane={() => onClosePane(tid)}
+                  onToggleSplit={onToggleSplit}
+                  onToggleHistory={onToggleHistory}
+                  onNewThread={onNewThread}
+                  onSelectHistoryThread={onSelectHistoryThread}
+                  onPinThread={onPinThread}
+                  onArchiveThread={onArchiveThread}
+                  onStartRename={onStartRename}
+                  onSaveRename={() => onSaveRename(tid)}
+                  onChangeTitleInput={onChangeTitleInput}
+                  onCancelRename={onCancelRename}
+                  onChangePrompt={(val) => onChangePrompt(tid, val)}
+                  onSend={(overridePrompt, planAction) => onSend(tid, overridePrompt, planAction)}
+                  onQueuePrompt={onQueuePrompt ? (text, atts) => onQueuePrompt(tid, text, atts) : undefined}
+                  onUpdateQueuedRuns={
+                    onUpdateQueuedRuns
+                      ? (nextQueue, removedAtts) => onUpdateQueuedRuns(tid, nextQueue, removedAtts)
+                      : undefined
+                  }
+                  onSendNowQueuedRun={
+                    onSendNowQueuedRun ? (rowId) => onSendNowQueuedRun(tid, rowId) : undefined
+                  }
+                  onSteerPrompt={onSteerPrompt ? (text, atts) => onSteerPrompt(tid, text, atts) : undefined}
+                  onSetAttachments={onSetAttachments ? (items) => onSetAttachments(tid, items) : undefined}
+                  onStop={() => onStop(tid)}
+                  onStopThread={onStop}
+                  onPickAttachments={(kind) => onPickAttachments(tid, kind)}
+                  onStageFiles={(files) => onStageFiles(tid, files)}
+                  onStagePaths={(paths) => onStagePaths(tid, paths)}
+                  onRemoveAttachment={(resId) => onRemoveAttachment(tid, resId)}
+                  onDropdownToggle={(type) => onDropdownToggle(tid, type)}
+                  onUpdateConfig={(patch) => onUpdateConfig(tid, patch)}
+                  onApprovalDecision={(decision, reqId) => onApprovalDecision(tid, decision, reqId)}
+                  onChildApprovalDecision={(childTid, decision, reqId) =>
+                    onApprovalDecision(childTid, decision, reqId)
+                  }
+                />
+              </ThreadGridCellMotion>
+            );
+          })}
+        </AnimatePresence>
       </div>
     </div>
   );

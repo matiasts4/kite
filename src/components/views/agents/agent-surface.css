@@ -1,0 +1,378 @@
+/* Agent Surface & Glass Integration
+   Harmonizes Agent mode panels, rail, inbox strip, draft hero, and composer
+   with Thread mode and the frosted glass surface architecture. */
+
+/* 1. Top-level Glass Shell Restoration & Pane Header Harmonization --------- */
+
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane,
+html[data-surface-glass='true'] body.kite-app .pane.agent-editor,
+html[data-surface-glass='true'] body.kite-app .pane.empty-roster-surface {
+  background: var(--glass-island-bg) !important;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+}
+
+.agent-pane {
+  min-height: 0;
+}
+
+.agent-pane:has(.agent-inbox-strip) {
+  min-height: 0;
+}
+
+.agent-pane__header {
+  min-height: 44px;
+  padding: 6px 12px;
+  gap: 10px;
+  align-items: center;
+  background: transparent;
+  border-bottom: 1px solid var(--separator);
+}
+
+.agent-pane__header + .agent-pane__rule {
+  display: none;
+}
+
+.agent-pane__header .agent-settings-toggle {
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+/* 2. Nested Container Transparency (Glass & Non-Glass Cleanliness) ------- */
+
+._surface_85ff1_11,
+._body_85ff1_45,
+._rail_33zx5_27,
+.pane.agent-pane .agent-chat-surface,
+.pane.agent-pane .agent-inbox-strip,
+.pane.agent-pane .agent-inbox-strip > summary,
+.pane.agent-pane .agent-terminal,
+.pane.agent-pane .agent-terminal__toolbar,
+.pane.agent-pane .agent-terminal__readonly,
+.pane.agent-pane .agent-terminal__inline-error,
+.pane.agent-pane .agent-settings,
+.pane.agent-pane .agent-settings--profile,
+.pane.agent-pane .agent-settings__footer,
+.pane.agent-pane .agent-detail-state,
+.pane.agent-pane .agent-face-tabs,
+.pane.agent-editor .ai-create-stage,
+.pane.agent-editor .agent-editor__footer {
+  background: transparent;
+}
+
+html[data-surface-glass='true'] body.kite-app .pane .pane.agent-pane,
+html[data-surface-glass='true'] body.kite-app .pane .pane.agent-editor,
+html[data-surface-glass='true'] body.kite-app .pane .pane.empty-roster-surface,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane ._surface_85ff1_11,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane ._body_85ff1_45,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane ._rail_33zx5_27,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-chat-surface,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-inbox-strip,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-inbox-strip > summary,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-terminal,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-terminal__toolbar,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-terminal__readonly,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-terminal__inline-error,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-settings,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-settings--profile,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-settings__footer,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-editor,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .ai-create-stage,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-detail-state,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .empty-roster-surface,
+html[data-surface-glass='true'] body.kite-app .pane.agent-pane .agent-face-tabs,
+html[data-surface-glass='true'] body.kite-app .pane.agent-editor .ai-create-stage,
+html[data-surface-glass='true'] body.kite-app .pane.agent-editor .agent-editor__footer,
+html[data-surface-glass='true'] body.kite-app .pane ._surface_85ff1_11,
+html[data-surface-glass='true'] body.kite-app .pane ._body_85ff1_45,
+html[data-surface-glass='true'] body.kite-app .pane ._rail_33zx5_27,
+html[data-surface-glass='true'] body.kite-app .pane .agent-inbox-strip,
+html[data-surface-glass='true'] body.kite-app .pane .agent-inbox-strip > summary,
+html[data-surface-glass='true'] body.kite-app .pane .agent-terminal__readonly,
+html[data-surface-glass='true'] body.kite-app .pane .agent-terminal__inline-error,
+html[data-surface-glass='true'] body.kite-app .pane .agent-settings,
+html[data-surface-glass='true'] body.kite-app .pane .agent-settings--profile,
+html[data-surface-glass='true'] body.kite-app .pane .ai-create-stage,
+html[data-surface-glass='true'] body.kite-app .pane .agent-detail-state,
+html[data-surface-glass='true'] body.kite-app .pane .agent-face-tabs {
+  background: transparent !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+
+/* 3. Chat | Terminal Segmented Toggle (AGENTS.md §1 & §2) ---------------- */
+
+.agent-surface-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--control-row, 28px);
+  min-height: var(--control-row, 28px);
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: var(--control-radius, 8px);
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  flex: none;
+}
+
+html[data-surface-glass='true'] body.kite-app .agent-surface-toggle {
+  background: color-mix(in srgb, var(--chip-fill, rgba(255, 255, 255, 0.08)) 65%, transparent);
+  border-color: color-mix(in srgb, var(--vl-stroke, rgba(255, 255, 255, 0.14)) 85%, transparent);
+}
+
+.agent-surface-toggle__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--vl-control-sm, 26px);
+  min-height: var(--vl-control-sm, 26px);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--vl-radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-ink, 120ms) var(--ease-ink, ease-out),
+    color var(--duration-ink, 120ms) var(--ease-ink, ease-out);
+}
+
+.agent-surface-toggle__btn:hover:not([aria-pressed='true']) {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--hover-fill, rgba(255, 255, 255, 0.06)) 80%, transparent);
+}
+
+.agent-surface-toggle__btn[aria-pressed='true'],
+.agent-surface-toggle__btn--active {
+  background: var(--thumb-fill, var(--selected-fill, rgba(255, 255, 255, 0.12)));
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold, 600);
+  box-shadow: var(--shadow-segment-thumb, inset 0 1px 0 rgba(255, 255, 255, 0.08));
+}
+
+html[data-surface-glass='true'] body.kite-app .agent-surface-toggle__btn[aria-pressed='true'],
+html[data-surface-glass='true'] body.kite-app .agent-surface-toggle__btn--active {
+  background: color-mix(
+    in srgb,
+    var(--accent, #5c8fff) 18%,
+    color-mix(in srgb, var(--composer, var(--pane, #141414)) 46%, transparent)
+  );
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 12%, transparent);
+}
+
+.agent-surface-toggle__btn:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: -2px;
+}
+
+/* 4. Agent Chat Rail & Translucent Tab Pills ---------------------------- */
+
+._rail_33zx5_27 {
+  block-size: 36px;
+  min-block-size: 36px;
+  padding: 0 10px;
+  gap: 4px;
+  align-items: center;
+  border-block-end: 1px solid var(--separator);
+}
+
+._rail_33zx5_27 ._empty_33zx5_631 {
+  padding-block-end: 0;
+  margin-inline-end: auto;
+  font-size: var(--text-caption, 11px);
+  color: var(--text-secondary);
+}
+
+._rail_33zx5_27 ._list_33zx5_149,
+._rail_33zx5_27 ._list_33zx5_149 ul {
+  align-items: center;
+  gap: 4px;
+}
+
+._row_33zx5_181 {
+  block-size: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  align-items: center;
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+._selected_33zx5_211::after {
+  display: none;
+  content: none;
+}
+
+._selectButton_33zx5_229 {
+  block-size: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  margin-block-end: 0;
+  padding: 0 10px;
+  border-radius: var(--vl-radius-sm, 6px);
+  color: var(--text-secondary);
+  transition:
+    background-color var(--duration-ink, 120ms) var(--ease-ink, ease-out),
+    color var(--duration-ink, 120ms) var(--ease-ink, ease-out),
+    box-shadow var(--duration-ink, 120ms) var(--ease-ink, ease-out);
+}
+
+._row_33zx5_181:hover:not(._selected_33zx5_211) ._selectButton_33zx5_229 {
+  background: color-mix(in srgb, var(--hover-fill, rgba(255, 255, 255, 0.08)) 85%, transparent);
+  color: var(--text-primary);
+}
+
+._row_33zx5_181._selected_33zx5_211 ._selectButton_33zx5_229 {
+  background: var(--selected-fill, rgba(255, 255, 255, 0.1));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, #5c8fff) 24%, var(--block-stroke, rgba(255, 255, 255, 0.12)));
+  color: var(--text-primary);
+}
+
+html[data-surface-glass='true'] body.kite-app ._row_33zx5_181._selected_33zx5_211 ._selectButton_33zx5_229 {
+  background: color-mix(
+    in srgb,
+    var(--accent, #5c8fff) 16%,
+    color-mix(in srgb, var(--composer, var(--pane, #141414)) 46%, transparent)
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 12%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent, #5c8fff) 28%, var(--vl-stroke, rgba(255, 255, 255, 0.14)));
+}
+
+._newButton_33zx5_83 {
+  block-size: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  inline-size: var(--vl-control-sm, 26px);
+  min-inline-size: var(--vl-control-sm, 26px);
+  margin-block-end: 0;
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+._closeButton_33zx5_467 {
+  inset-block-start: 5px;
+  inset-inline-end: 4px;
+  border-radius: var(--pill-radius, 9999px);
+}
+
+/* 5. Teammate Inbox Strip ------------------------------------------------ */
+
+.agent-inbox-strip {
+  min-height: var(--control-row, 28px);
+  padding: 0 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--separator) 75%, transparent);
+  flex: 0 0 auto;
+}
+
+.agent-inbox-strip[open] {
+  flex: 0 1 auto;
+}
+
+.agent-inbox-strip > summary {
+  height: var(--control-row, 28px);
+  min-height: var(--control-row, 28px);
+  margin: 0 calc(-1 * var(--space-1, 4px));
+  padding: 0 var(--space-1, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  line-height: var(--leading-caption, 14px);
+  border-radius: var(--vl-radius-sm, 6px);
+  transition: color var(--duration-ink, 120ms) var(--ease-ink, ease-out);
+}
+
+html:not([data-surface-glass='true']) .agent-inbox-strip[open] > summary {
+  background: var(--pane);
+}
+
+html[data-surface-glass='true'] body.kite-app .agent-inbox__message {
+  background: var(--glass-elevated-bg);
+  border-color: var(--glass-border);
+  border-radius: var(--control-radius, 8px);
+}
+
+.agent-inbox__btn {
+  height: var(--vl-control-sm, 26px);
+  min-height: var(--vl-control-sm, 26px);
+  padding: 0 10px;
+  font-size: var(--text-caption, 11px);
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+/* 6. Agent Face Tabs (Settings / Memory / Skills) ------------------------ */
+
+.agent-face-tabs {
+  min-height: 36px;
+  height: 36px;
+  padding: 0 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--separator);
+}
+
+/* 7. Draft Symmetry, Hero Centering, Composer Alignment & Scroll Layer --- */
+
+._body_85ff1_45 > ._layout_85ff1_81 {
+  flex: 1 1 0%;
+  height: 100%;
+  block-size: 100%;
+  min-height: 0;
+  min-block-size: 0;
+  overscroll-behavior: contain;
+}
+
+._body_85ff1_45 > ._layout_85ff1_81.chat-thread-layout--draft {
+  height: 100%;
+  block-size: 100%;
+  min-height: 0;
+  min-block-size: 0;
+}
+
+.chat-thread-layout > .agent-chat-hero {
+  align-items: center;
+  text-align: center;
+}
+
+.chat-thread-layout > .agent-chat-hero p {
+  max-width: 48ch;
+  font-size: var(--text-row);
+  line-height: var(--leading-row);
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+._surface_85ff1_11 .chat-thread-layout__composer,
+.agent-pane .chat-thread-layout__composer {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  align-items: center;
+}
+
+._surface_85ff1_11 .chat-thread-layout--draft .chat-thread-layout__composer,
+.agent-pane .chat-thread-layout--draft .chat-thread-layout__composer {
+  padding: 0 var(--space-6);
+}
+
+._surface_85ff1_11 .chat-thread-layout__composer > .kite-composer-shell,
+.agent-pane .chat-thread-layout__composer > .kite-composer-shell {
+  width: 100%;
+  max-width: min(720px, 100%);
+  margin: 0 auto;
+  padding: 0;
+}
+
+._surface_85ff1_11 .chat-transcript,
+.agent-pane .chat-transcript {
+  transform: translateZ(0);
+  will-change: scroll-position;
+  contain: layout style;
+}

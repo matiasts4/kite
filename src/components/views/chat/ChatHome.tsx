@@ -13,6 +13,7 @@ import {
   PROVIDER_CATALOG,
   MODE_LABELS,
 } from './types';
+import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
 
 export interface ChatHomeProps {
   onStartThread: (prompt: string, provider: ChatProvider, mode: ChatMode, model?: string) => void;
@@ -43,6 +44,7 @@ export const ChatHome: React.FC<ChatHomeProps> = ({
     <section className="pane chat-home">
       {/* Hero Header */}
       <div className="chat-home__hero">
+        <ThemeHeroFigure variant="hero" />
         <h1>What’s on your mind?</h1>
         <p>Pick a model. Then ask.</p>
       </div>

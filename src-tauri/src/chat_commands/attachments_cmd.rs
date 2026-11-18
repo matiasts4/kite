@@ -68,11 +68,15 @@ pub fn stage_chat_blob(request: Option<Value>) -> Value {
         .and_then(|item| item.get("displayName"))
         .and_then(|value| value.as_str())
         .unwrap_or("attachment");
+    let mime_type = req
+        .and_then(|item| item.get("mimeType"))
+        .and_then(|value| value.as_str());
     let data_base64 = req
         .and_then(|item| item.get("dataBase64"))
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    stage_blob_attachment(thread_id, display_name, data_base64).unwrap_or(Value::Null)
+    crate::chat::stage_blob_attachment_with_mime(thread_id, display_name, mime_type, data_base64)
+        .unwrap_or(Value::Null)
 }
 
 pub fn stage_dropped_chat_attachments(request: Option<Value>) -> Value {

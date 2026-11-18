@@ -355,7 +355,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
             size={14}
           />
         </span>
-        <span className="kite-composer-control-label font-medium text-foreground" title={modelTriggerLabel}>
+        <span className="kite-composer-control-label font-medium" style={{ color: 'var(--text-primary)' }} title={modelTriggerLabel}>
           {modelTriggerLabel}
         </span>
         {(selectedQuotaExhausted || selectedQuotaLow) && (
@@ -468,7 +468,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                     style={{
                       fontWeight: 400,
                       textTransform: 'none',
-                      color: 'var(--muted-foreground)',
+                      color: 'var(--text-secondary)',
                     }}
                   >
                     {activeTabProviderRow.detail}
@@ -564,7 +564,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                             <CheckIcon
                               size={14}
                               className="shrink-0"
-                              style={{ color: 'var(--primary, #3b82f6)' }}
+                              style={{ color: 'var(--accent, #5c8fff)' }}
                             />
                           )}
                           {item.id !== AUTOMATIC_MODEL_ID && (
@@ -595,7 +595,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                       padding: '2rem 1rem',
                       textAlign: 'center',
                       fontSize: '0.75rem',
-                      color: 'var(--muted-foreground, #71717a)',
+                      color: 'var(--text-secondary, #71717a)',
                     }}
                   >
                     {searchQuery.trim()

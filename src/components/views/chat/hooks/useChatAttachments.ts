@@ -62,13 +62,26 @@ export function useChatAttachments() {
         if (file.size > 10 * 1024 * 1024) continue;
         try {
           const dataBase64 = await fileToBase64(file);
+          const mimeType = (file.type || 'application/octet-stream').slice(0, 127);
+          const fallbackName = file.type.startsWith('image/') ? 'pasted-image.png' : 'attachment';
           const item = await invokeCommand<ChatAttachment | null>('stage_chat_blob', {
             threadId,
-            displayName: file.name || 'attachment',
-            mimeType: (file.type || 'application/octet-stream').slice(0, 127),
+            displayName: file.name || fallbackName,
+            mimeType,
             dataBase64,
           });
-          if (item?.resourceId) staged.push(item);
+          if (item?.resourceId) {
+            const enriched: ChatAttachment = {
+              ...item,
+              mimeType: item.mimeType ?? mimeType,
+              previewDataUrl:
+                item.previewDataUrl ??
+                (mimeType.startsWith('image/') && file.size <= 2 * 1024 * 1024
+                  ? `data:${mimeType};base64,${dataBase64}`
+                  : null),
+            };
+            staged.push(enriched);
+          }
         } catch (err) {
           console.error('[ChatView] stage_chat_blob failed:', err);
         }

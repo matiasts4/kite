@@ -5,6 +5,7 @@ import { invokeCommand } from '../../../lib/ipc';
 import { resolvePrimaryAction, queueVisibleRows } from './composerPrimaryAction';
 import { ChatRail } from './ChatRail';
 import { SingleThreadPane } from './SingleThreadPane';
+import { ThreadGrid } from './ThreadGrid';
 import type { ExtendedChatThread } from './types';
 import type { ChatItem } from '../../../types';
 import {
@@ -319,6 +320,15 @@ describe('failed threads and side chats', () => {
       { id: 'agent-child', parentThreadId: 'main', startedByAgent: true, sideChat: false },
       { id: 'user-child', parentThreadId: 'main', startedByAgent: false, sideChat: false },
     ]).map((thread) => thread.id)).toEqual(['main', 'user-child']);
+  });
+
+  it('excludes archived threads and children of archived parents from visibleRosterThreads', () => {
+    expect(visibleRosterThreads([
+      { id: 'live', sideChat: false },
+      { id: 'arch', sideChat: false, archivedAtUnixMs: 1794746728540 },
+      { id: 'arch-child', parentThreadId: 'arch', startedByAgent: false, sideChat: false },
+      { id: 'live-child', parentThreadId: 'live', startedByAgent: false, sideChat: false },
+    ]).map((thread) => thread.id)).toEqual(['live', 'live-child']);
   });
 
   it('offers Regenerate title only for the selected thread and disables it while pending', () => {
@@ -668,5 +678,58 @@ describe('file restore on the thread row', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New thread' }));
     expect(onNewThread).toHaveBeenCalledTimes(1);
     expect(onNewThread).toHaveBeenCalledWith();
+  });
+
+  it('derives running in ThreadGrid from thread.status === running even when isRunning map is false', () => {
+    const runningThread = railThread({
+      id: 'thread-grid-running',
+      title: 'Running Thread',
+      status: 'running',
+      items: [userItem()],
+    });
+    render(
+      createElement(ThreadGrid, {
+        gridThreadIds: ['thread-grid-running'],
+        focusedThreadId: 'thread-grid-running',
+        threadsMap: { 'thread-grid-running': runningThread },
+        isRunning: {},
+        attachmentsMap: {},
+        promptMap: {},
+        workspaceId: null,
+        liveRunsCount: 1,
+        dynamicModelsMap: {},
+        activeDropdown: null,
+        editingTitleId: null,
+        titleInput: '',
+        showHistoryPopover: false,
+        knownThreadsList: [runningThread],
+        onFocusThread: () => undefined,
+        onClosePane: () => undefined,
+        onToggleSplit: () => undefined,
+        onToggleHistory: () => undefined,
+        onNewThread: () => undefined,
+        onSelectHistoryThread: () => undefined,
+        onPinThread: () => undefined,
+        onArchiveThread: () => undefined,
+        onStartRename: () => undefined,
+        onSaveRename: () => undefined,
+        onChangeTitleInput: () => undefined,
+        onCancelRename: () => undefined,
+        onChangePrompt: () => undefined,
+        onSend: () => undefined,
+        onQueuePrompt: () => undefined,
+        onSteerPrompt: () => undefined,
+        onStop: () => undefined,
+        onPickAttachments: () => undefined,
+        onStageFiles: () => undefined,
+        onStagePaths: () => undefined,
+        onRemoveAttachment: () => undefined,
+        onDropdownToggle: () => undefined,
+        onUpdateConfig: () => undefined,
+        onApprovalDecision: () => undefined,
+      }),
+    );
+
+    expect(screen.getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
   });
 });

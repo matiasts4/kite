@@ -23,23 +23,23 @@
   flex-direction: column;
   container: composer-main / inline-size;
   border-radius: var(--card-radius, 12px);
-  background: color-mix(in srgb, var(--surface-raised, var(--surface, #18181b)) 85%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.08)));
-  box-shadow: 0 18px 42px -18px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.35);
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--composer, #18181b) 85%, transparent));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 1px solid var(--glass-border, var(--chat-composer-outline, var(--vl-stroke, rgba(255, 255, 255, 0.08))));
+  box-shadow: var(--glass-highlight, 0 18px 42px -18px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.35));
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   box-sizing: border-box;
 }
 
 .kite-composer-main:focus-within {
-  border-color: color-mix(in srgb, var(--primary, #3b82f6) 40%, var(--border, rgba(255, 255, 255, 0.15)));
+  border-color: color-mix(in srgb, var(--accent, #5c8fff) 45%, var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.15))));
 }
 
 [data-theme='light'] .kite-composer-main {
-  background: color-mix(in srgb, var(--surface-raised, #ffffff) 90%, transparent);
-  border-color: var(--border, rgba(0, 0, 0, 0.1));
-  box-shadow: 0 16px 36px -18px rgba(15, 23, 42, 0.18), 0 2px 6px rgba(15, 23, 42, 0.06);
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--composer, #ffffff) 90%, transparent));
+  border-color: var(--glass-border, var(--vl-stroke, rgba(0, 0, 0, 0.1)));
+  box-shadow: var(--glass-highlight, 0 16px 36px -18px rgba(15, 23, 42, 0.18), 0 2px 6px rgba(15, 23, 42, 0.06));
 }
 
 /* 2. Textarea Area */
@@ -60,7 +60,7 @@
 }
 
 .kite-composer-textarea::placeholder {
-  color: var(--muted-foreground, var(--text-faint, #71717a));
+  color: var(--text-faint, var(--text-secondary, #71717a));
 }
 
 /* 3. Attachment Chips */
@@ -79,11 +79,19 @@
   height: 1.75rem; /* 28px */
   padding: 0 0.625rem;
   border-radius: var(--control-radius, 8px);
-  background: var(--surface, #1e1e24);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: var(--glass-elevated-bg, var(--composer, #1e1e24));
+  border: 1px solid var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.08)));
   font-size: 0.75rem;
   color: var(--text-primary, #f4f4f5);
   max-width: 220px;
+}
+
+.kite-composer-attachment-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--vl-radius-xs, 4px);
+  object-fit: cover;
+  flex-shrink: 0;
 }
 
 .kite-composer-attachment-chip span {
@@ -141,7 +149,7 @@
   border-radius: var(--control-radius, 8px);
   background: transparent;
   border: 1px solid transparent;
-  color: var(--secondary-label, var(--text-secondary, #a1a1aa));
+  color: var(--text-secondary, #a1a1aa);
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
@@ -215,58 +223,64 @@
 }
 
 .kite-composer-control-pill--active {
-  background: color-mix(in srgb, var(--primary, #3b82f6) 15%, transparent);
-  color: var(--primary, #3b82f6);
-  border-color: color-mix(in srgb, var(--primary, #3b82f6) 25%, transparent);
+  background: color-mix(in srgb, var(--accent, #5c8fff) 15%, transparent);
+  color: var(--accent, #5c8fff);
+  border-color: color-mix(in srgb, var(--accent, #5c8fff) 25%, transparent);
 }
 
 .kite-composer-control-separator {
   width: 1px;
   height: 0.875rem; /* 14px */
-  background: var(--border, rgba(255, 255, 255, 0.1));
+  background: var(--separator, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
   margin: 0 0.125rem;
   flex-shrink: 0;
 }
 
-/* 6. Recessed Lower Context Strip (Drawer) */
+/* 6. Recessed Lower Context Strip (Flush beneath main composer without overlapping translucent bottom) */
+.kite-composer-context-strip-wrap {
+  position: relative;
+  z-index: 5;
+  width: 100%;
+}
+
 .kite-composer-context-strip {
   position: relative;
   z-index: 5;
   margin-left: auto;
   margin-right: auto;
-  margin-top: -0.75rem; /* Overlap slightly under the main glass card */
+  margin-top: 0;
   width: calc(100% - 2.5rem);
-  padding: 1rem 0.875rem 0.375rem;
+  padding: 0.25rem 0.875rem 0.375rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  border-radius: 0 0 1rem 1rem; /* rounded-b-2xl */
-  border: 1px solid var(--chat-composer-outline, var(--border, rgba(255, 255, 255, 0.08)));
+  border-radius: 0 0 var(--card-radius, 12px) var(--card-radius, 12px);
+  border: 1px solid var(--glass-border, var(--chat-composer-outline, var(--vl-stroke, rgba(255, 255, 255, 0.08))));
   border-top: none;
-  background: color-mix(in srgb, var(--surface, #111114) 82%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--pane, #111114) 82%, transparent));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   font-size: 0.75rem;
-  color: var(--secondary-label, var(--text-secondary, #a1a1aa));
+  color: var(--text-secondary, #a1a1aa);
   box-sizing: border-box;
 }
 
 [data-theme='light'] .kite-composer-context-strip {
-  background: color-mix(in srgb, var(--surface, #f4f4f5) 85%, transparent);
-  border-color: var(--border, rgba(0, 0, 0, 0.1));
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--pane, #f4f4f5) 85%, transparent));
+  border-color: var(--glass-border, var(--vl-stroke, rgba(0, 0, 0, 0.1)));
 }
 
 .kite-context-strip-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
-  height: 1.5rem; /* 24px */
+  height: var(--vl-control-sm, 26px);
   padding: 0 0.5rem;
-  border-radius: var(--vl-radius-sm, 6px);
+  border-radius: var(--control-radius, 8px);
   background: transparent;
   border: 1px solid transparent;
-  color: var(--secondary-label, #a1a1aa);
+  color: var(--text-secondary, #a1a1aa);
   font-size: 0.6875rem;
   font-weight: 500;
   cursor: pointer;
@@ -284,11 +298,11 @@
   position: fixed;
   z-index: 1000;
   border-radius: var(--card-radius, 12px);
-  background: color-mix(in srgb, var(--surface-elevated, var(--popover, #1c1c22)) 98%, transparent);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-  box-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  background: var(--glass-overlay-bg, color-mix(in srgb, var(--menu-plate, #1c1c22) 98%, transparent));
+  -webkit-backdrop-filter: var(--glass-overlay-blur, blur(24px));
+  backdrop-filter: var(--glass-overlay-blur, blur(24px));
+  border: 1px solid var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+  box-shadow: var(--glass-shadow, 0 20px 48px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.05));
   box-sizing: border-box;
   outline: none;
   animation-name: kiteComposerMenu;
@@ -298,9 +312,9 @@
 }
 
 [data-theme='light'] .kite-floating-card {
-  background: color-mix(in srgb, #ffffff 98%, transparent);
-  border-color: var(--border, rgba(0, 0, 0, 0.12));
-  box-shadow: 0 16px 36px -12px rgba(15, 23, 42, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  background: var(--glass-overlay-bg, color-mix(in srgb, #ffffff 98%, transparent));
+  border-color: var(--glass-border, var(--vl-stroke, rgba(0, 0, 0, 0.12)));
+  box-shadow: var(--glass-shadow, 0 16px 36px -12px rgba(15, 23, 42, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.04));
 }
 
 @keyframes kiteComposerMenu {
@@ -348,7 +362,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--primary, #3b82f6);
+  color: var(--accent, #5c8fff);
   flex-shrink: 0;
 }
 
@@ -364,13 +378,13 @@
 .kite-effort-title {
   font-size: 0.9375rem;
   font-weight: 600;
-  color: var(--primary, #3b82f6);
+  color: var(--accent, #5c8fff);
   line-height: 1.25;
 }
 
 .kite-effort-subtitle {
   font-size: 0.6875rem;
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-secondary, #71717a);
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -378,15 +392,15 @@
 }
 
 .kite-effort-reset-btn {
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: var(--vl-radius-sm, 6px);
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  border-radius: var(--control-radius, 8px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-secondary, #71717a);
   cursor: pointer;
   outline: none;
   transition: background-color 0.12s ease, color 0.12s ease;
@@ -404,7 +418,8 @@
   width: 100%;
   height: 1.375rem; /* 22px */
   border-radius: 9999px;
-  background: #23232a;
+  background: var(--glass-elevated-bg, var(--chip-fill, #23232a));
+  border: 1px solid var(--glass-border, transparent);
   display: flex;
   align-items: center;
   cursor: pointer;
@@ -413,7 +428,7 @@
 }
 
 [data-theme='light'] .kite-effort-track-wrap {
-  background: #e4e4e7;
+  background: var(--glass-elevated-bg, var(--chip-fill, #e4e4e7));
 }
 
 .kite-effort-track-wrap--dragging .kite-effort-track-progress,
@@ -426,7 +441,7 @@
   left: 0;
   top: 0;
   bottom: 0;
-  background: var(--primary, #3b82f6);
+  background: var(--accent, #5c8fff);
   border-radius: 9999px 0 0 9999px;
   pointer-events: none;
   transition: width 0.16s cubic-bezier(0.2, 0, 0, 1);
@@ -484,8 +499,8 @@
 
 .kite-model-rail {
   width: 2.875rem; /* 46px */
-  background: color-mix(in srgb, var(--surface, #141418) 70%, transparent);
-  border-right: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--sidebar-fill, var(--pane, #141418)) 52%, transparent);
+  border-right: 1px solid var(--glass-border, var(--separator, rgba(255, 255, 255, 0.08)));
   padding: 0.5rem 0;
   display: flex;
   flex-direction: column;
@@ -506,7 +521,7 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  color: var(--secondary-label, #a1a1aa);
+  color: var(--text-secondary, #a1a1aa);
   transition: background-color 0.12s ease, color 0.12s ease;
   outline: none;
 }
@@ -517,8 +532,8 @@
 }
 
 .kite-model-rail-btn--active {
-  background: color-mix(in srgb, var(--primary, #3b82f6) 15%, transparent);
-  color: var(--primary, #3b82f6);
+  background: color-mix(in srgb, var(--accent, #5c8fff) 15%, transparent);
+  color: var(--accent, #5c8fff);
 }
 
 .kite-model-rail-indicator {
@@ -527,14 +542,14 @@
   top: 0.375rem;
   bottom: 0.375rem;
   width: 2px;
-  background: var(--primary, #3b82f6);
+  background: var(--accent, #5c8fff);
   border-radius: 9999px;
 }
 
 .kite-model-rail-divider {
   width: 1.5rem;
   height: 1px;
-  background: var(--border, rgba(255, 255, 255, 0.08));
+  background: var(--separator, var(--vl-stroke, rgba(255, 255, 255, 0.08)));
   margin: 0.25rem 0;
   flex-shrink: 0;
 }
@@ -564,7 +579,7 @@
 .kite-model-search-wrap {
   height: 2.375rem; /* 38px */
   padding: 0 0.75rem;
-  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-bottom: 1px solid var(--separator, var(--vl-stroke, rgba(255, 255, 255, 0.08)));
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -583,7 +598,7 @@
 }
 
 .kite-model-search-input::placeholder {
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-faint, var(--text-secondary, #71717a));
 }
 
 .kite-model-section-header {
@@ -592,7 +607,7 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-secondary, #71717a);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -627,7 +642,7 @@
 }
 
 .kite-model-item--selected {
-  background: color-mix(in srgb, var(--primary, #3b82f6) 14%, transparent);
+  background: color-mix(in srgb, var(--accent, #5c8fff) 14%, transparent);
 }
 
 .kite-model-item-left {
@@ -652,8 +667,8 @@
   font-size: 0.625rem;
   padding: 0.125rem 0.375rem;
   border-radius: var(--vl-radius-xs, 4px);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--secondary-label, #a1a1aa);
+  background: var(--chip-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-secondary, #a1a1aa);
   font-weight: 500;
   flex-shrink: 0;
 }
@@ -698,7 +713,7 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-secondary, #71717a);
   outline: none;
   opacity: 0;
   transition: opacity 0.12s ease, color 0.12s ease;
@@ -758,7 +773,7 @@
 
 .kite-attach-item-detail {
   font-size: 0.6875rem;
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-secondary, #71717a);
 }
 
 /* 11. Context Strip Popups (Branch & Workspace Menus) */
@@ -775,7 +790,7 @@
 .kite-context-menu-search {
   height: 2rem;
   padding: 0 0.5rem;
-  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-bottom: 1px solid var(--separator, var(--vl-stroke, rgba(255, 255, 255, 0.08)));
   display: flex;
   align-items: center;
   gap: 0.375rem;
@@ -794,7 +809,7 @@
 }
 
 .kite-context-menu-search input::placeholder {
-  color: var(--muted-foreground, #71717a);
+  color: var(--text-faint, var(--text-secondary, #71717a));
 }
 
 .kite-context-menu-list {
@@ -829,7 +844,7 @@
 }
 
 .kite-context-menu-item--selected {
-  background: color-mix(in srgb, var(--primary, #3b82f6) 14%, transparent);
+  background: color-mix(in srgb, var(--accent, #5c8fff) 14%, transparent);
 }
 
 .kite-context-menu-item-text {
@@ -861,28 +876,28 @@
 }
 
 .kite-composer-action-btn--send {
-  background: var(--message-action, var(--text-primary, #ffffff));
-  color: var(--message-action-foreground, var(--canvas, #000000));
+  background: var(--text-primary, #ffffff);
+  color: var(--background, #090a0c);
 }
 
 .kite-composer-action-btn--send:hover:not(:disabled) {
-  background: var(--message-action-hover, #e4e4e7);
+  background: color-mix(in srgb, var(--text-primary, #ffffff) 88%, var(--background, #090a0c));
 }
 
 .kite-composer-action-btn--send:disabled {
-  background: color-mix(in srgb, var(--surface-raised, #27272a) 60%, transparent);
-  color: var(--muted-foreground, #71717a);
-  opacity: 0.45;
+  background: var(--chip-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-secondary, #a1a1aa);
+  opacity: 0.62;
   cursor: not-allowed;
 }
 
 .kite-composer-action-btn--stop {
-  background: var(--destructive, #ef4444);
+  background: var(--status-failed, #ef4444);
   color: #ffffff;
 }
 
 .kite-composer-action-btn--stop:hover {
-  background: color-mix(in srgb, var(--destructive, #ef4444) 85%, #000000);
+  background: color-mix(in srgb, var(--status-failed, #ef4444) 85%, #000000);
 }
 
 /* 13. Dictation & Voice Mode Composer Triggers + Voice Mode Footer Bar */
@@ -896,7 +911,7 @@
   justify-content: center;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--secondary-label, #a1a1aa);
+  color: var(--text-secondary, #a1a1aa);
   cursor: pointer;
   padding: 0;
   outline: none;
@@ -917,9 +932,9 @@
 }
 
 .chat-dictate-control--recording {
-  color: var(--destructive, #ef4444);
-  background: color-mix(in srgb, var(--destructive, #ef4444) 14%, transparent);
-  border-color: color-mix(in srgb, var(--destructive, #ef4444) 30%, transparent);
+  color: var(--status-failed, #ef4444);
+  background: color-mix(in srgb, var(--status-failed, #ef4444) 14%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 30%, transparent);
 }
 
 /* 14. Voice Mode footer — reuses `.kite-composer-footer` geometry; only the voice-specific parts live here */
@@ -929,7 +944,7 @@
 
 .kite-voice-pill--static:hover {
   background: transparent;
-  color: var(--secondary-label, var(--text-secondary, #a1a1aa));
+  color: var(--text-secondary, #a1a1aa);
 }
 
 .kite-voice-pill__icon {
@@ -946,7 +961,7 @@
   min-width: 0;
   font-size: 0.75rem;
   font-weight: 500;
-  color: var(--secondary-label, var(--text-secondary, #a1a1aa));
+  color: var(--text-secondary, #a1a1aa);
   user-select: none;
   box-sizing: border-box;
 }
@@ -975,7 +990,7 @@
 }
 
 .kite-voice-status[data-tone='muted'] .kite-voice-status__dot {
-  background: var(--destructive, #ef4444);
+  background: var(--status-failed, #ef4444);
   animation: none;
 }
 
@@ -1012,7 +1027,7 @@
   justify-content: center;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--secondary-label, #a1a1aa);
+  color: var(--text-secondary, #a1a1aa);
   cursor: pointer;
   padding: 0;
   outline: none;
@@ -1027,9 +1042,9 @@
 }
 
 .kite-voice-ctrl-btn[data-muted] {
-  color: var(--destructive, #ef4444);
-  background: color-mix(in srgb, var(--destructive, #ef4444) 14%, transparent);
-  border-color: color-mix(in srgb, var(--destructive, #ef4444) 30%, transparent);
+  color: var(--status-failed, #ef4444);
+  background: color-mix(in srgb, var(--status-failed, #ef4444) 14%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 30%, transparent);
 }
 
 /* Replaces the circular Send action in the same 32px slot */

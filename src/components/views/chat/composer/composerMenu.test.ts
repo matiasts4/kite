@@ -10,6 +10,14 @@ import workModePicker from './WorkModePickerPopover.tsx?raw';
 import permissionPicker from './PermissionPickerPopover.tsx?raw';
 import contextStrip from './ComposerContextStrip.tsx?raw';
 
+async function readRepoFile(relativePath: string): Promise<string> {
+  const fsSpecifier = ['node', 'fs'].join(':');
+  const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+    readFileSync: (filePath: string, encoding: 'utf8') => string;
+  };
+  return fs.readFileSync(relativePath, 'utf8');
+}
+
 const POPOVERS = [
   attachMenu,
   modelPicker,
@@ -35,5 +43,33 @@ describe('composer menu motion', () => {
       expect(source).toContain('composerMenuStyle');
       expect(source).not.toContain('kiteFadeIn');
     }
+  });
+
+  it('keeps the context strip flush below the composer without undefined theme tokens', async () => {
+    const composerCss = await readRepoFile('src/components/views/chat/composer/composer.css');
+    const stripBlock = composerCss.match(/\.kite-composer-context-strip\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(stripBlock).toContain('margin-top: 0;');
+    expect(stripBlock).not.toMatch(/margin-top:\s*-/);
+
+    const undefinedTokenPattern = /var\(--(?:border|secondary-label|muted-foreground|primary|destructive|canvas|surface|surface-raised)\b/;
+    expect(composerCss).not.toMatch(undefinedTokenPattern);
+    for (const source of POPOVERS) {
+      expect(source).not.toMatch(undefinedTokenPattern);
+    }
+  });
+
+  it('hides inactive mode layers and active child tab/pane layers to prevent bleed-through', async () => {
+    const indexCss = await readRepoFile('src/index.css');
+    const modeLayerBlock = indexCss.match(/\.mode-layer\s*\{[^}]*\}/)?.[0] ?? '';
+    const visibleModeLayerBlock = indexCss.match(/\.mode-layer--visible\s*\{[^}]*\}/)?.[0] ?? '';
+
+    expect(modeLayerBlock).toContain('visibility: hidden;');
+    expect(modeLayerBlock).toContain('opacity: 0;');
+    expect(visibleModeLayerBlock).toContain('visibility: visible;');
+    expect(visibleModeLayerBlock).toContain('opacity: 1;');
+    expect(indexCss).toContain('.mode-layer:not(.mode-layer--visible) .workspace-tab-layer--active');
+    expect(indexCss).toMatch(/\.mode-layer\[aria-hidden=['"]true['"]\] \.workspace-tab-layer--active/);
+    expect(indexCss).toContain('.mode-layer:not(.mode-layer--visible) .main-pane__layer--visible');
+    expect(indexCss).toContain('.workspace-shell:has(> .app-browser-sidebar--fullscreen)');
   });
 });

@@ -1,10 +1,11 @@
 import type { KeyboardEvent } from 'react';
 import type { ChatItem } from '../../../../types';
+import { isInternalDispatchItem } from '../chatItemHelpers';
 
 export function extractUserPromptHistory(items: ChatItem[] = []): string[] {
   const result: string[] = [];
   for (const item of items) {
-    if (item.kind !== 'user') continue;
+    if (item.kind !== 'user' || isInternalDispatchItem(item)) continue;
     const text = item.text?.trim() ?? '';
     if (text.length !== 0 && result[result.length - 1] !== text) {
       result.push(text);

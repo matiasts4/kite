@@ -1,4 +1,5 @@
 import type { ExtendedChatThread } from '../types';
+import { isInternalDispatchItem } from '../chatItemHelpers';
 
 export function composeRewoundPrompt(draft: string, rewound: string): string {
   if (!draft.trim()) return rewound;
@@ -44,7 +45,7 @@ function normalizeTurnFileKey(filePath: string): string {
 export function changedFilesForTurn(items: ExtendedChatThread['items']) {
   let start = 0;
   items.forEach((item, index) => {
-    if (item.kind === 'user') start = index + 1;
+    if (item.kind === 'user' && !isInternalDispatchItem(item)) start = index + 1;
   });
   const files = new Map<string, { path: string; additions: number; deletions: number }>();
   for (const item of items.slice(start)) {

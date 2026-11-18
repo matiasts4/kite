@@ -143,7 +143,7 @@ export const WorkModePickerPopover: React.FC<WorkModePickerPopoverProps> = ({
                 padding: '0.375rem 0.625rem 0.25rem',
                 fontSize: '0.625rem',
                 fontWeight: 600,
-                color: 'var(--muted-foreground, #71717a)',
+                color: 'var(--text-secondary, #71717a)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.05em',
               }}
@@ -207,7 +207,7 @@ export const WorkModePickerPopover: React.FC<WorkModePickerPopoverProps> = ({
                         <span
                           style={{
                             fontSize: '0.6875rem',
-                            color: 'var(--muted-foreground, #71717a)',
+                            color: 'var(--text-secondary, #71717a)',
                             lineHeight: '1.25',
                             whiteSpace: 'normal',
                           }}

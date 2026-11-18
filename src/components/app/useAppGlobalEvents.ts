@@ -34,7 +34,7 @@ export interface UseAppGlobalEventsOptions {
   setSelectedThreadId: React.Dispatch<React.SetStateAction<string | null>>;
   setRightDockVisible: React.Dispatch<React.SetStateAction<boolean>>;
   setIsCommandPaletteOpen?: React.Dispatch<React.SetStateAction<boolean>>;
-  onAddWorkspace?: () => Promise<void> | void;
+  onAddWorkspace?: (targetThreadId?: string) => Promise<void> | void;
   loadBootstrap: () => Promise<void>;
   loadThreads: () => Promise<void>;
   setAgents: React.Dispatch<React.SetStateAction<AgentProfile[]>>;
@@ -198,9 +198,12 @@ export function useAppGlobalEvents({
       }
     };
 
-    const handleAddWorkspaceEvent = () => {
+    const handleAddWorkspaceEvent = (e: Event) => {
       if (onAddWorkspace) {
-        void onAddWorkspace();
+        const custom = e as CustomEvent<{ threadId?: string } | undefined>;
+        void onAddWorkspace(
+          typeof custom.detail?.threadId === 'string' ? custom.detail.threadId : undefined
+        );
       }
     };
 

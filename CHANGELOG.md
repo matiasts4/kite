@@ -6,6 +6,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.65] - 2026-11-18
+
+> Hooks obligatorios de contexto, compresión in-process y proxy MCP
+
+### Added
+- proxy stdio ligero `kite ctx mcp-proxy` para comprimir respuestas extensas de servidores MCP sin demonios HTTP adicionales, junto con el auditor `kite ctx discover` y filtros declarativos personalizados (`.kite/ctx-filters.json`).
+
+### Changed
+- Hooks y plugins obligatorios (`PreToolUse`, `BeforeTool` y plugins nativos) en `kite ctx init` para Antigravity, Claude Code, Codex, Gemini CLI, Cursor, OpenCode y Copilot, con soporte para cadenas de comandos compuestas (`&&` y `;`) en `kite ctx hook-rewrite`.
+- Compresión automática in-process en el runtime de Kite para historiales de conversación largos (`runtime:thread_history`) y handoffs de subagentes (`runtime:subagent_handoff`), preservando anclas de inicio/cierre y referencias reversibles `<<ccr:HASH>>`.
+
+---
+
+## [0.1.64] - 2026-11-18
+
+> Motor de contexto kite-ctx, integracion multi-agente y ahorro por funcionalidad
+
+### Added
+- Motor modular de optimizacion de contexto en Rust puro sin dependencias ML (kite-ctx) con compresion sin perdida, compresor tabular JSON, deduplicacion de lecturas por sesion, recuperacion reversible CCR, handoffs compartidos y alineacion KV-cache.
+- Comandos CLI kite ctx (read, exec, compress, retrieve, share, stats, init, hook-rewrite, kv-check) e instalacion automatica de hooks y skills en todos los agentes locales con atribucion de sesion, agente, proveedor, modelo y proyecto.
+- Nueva pestana Contexto en el Monitor de Recursos con ahorro acumulado y por sesion, cuota preservada, desglose por agente, modelo, canal y por funcionalidad, mas acceso directo desde Resumen.
+
+---
+
+## [0.1.63] - 2026-11-17
+
+> Recuperacion de turnos congelados en Antigravity, curado de errores post-respuesta y tarjetas unicas de subagente
+
+### Changed
+- Conservacion del identificador de conversacion durante el turno activo frente a cambios de cuenta y guardia contra cierre prematuro mientras haya subagentes o comandos en segundo plano en ejecucion.
+
+### Fixed
+- Recuperacion automatica de turnos de Antigravity desde su transcripcion en disco cuando se corta stdout tras errores transitorios, liquidando herramientas previas interrumpidas y podando en vivo el aviso de inactividad.
+- Adopcion unica de subagentes para evitar tarjetas duplicadas por delegacion, lectura legible de reportes estructurados JSON y envoltura de chips en el inspector lateral.
+- Curado idempotente de desconexiones posteriores a respuestas ya entregadas, limpieza de fallos previos al iniciar o completar turnos y recicle limpio de sesiones persistentes tras errores de red.
+
+---
+
+## [0.1.62] - 2026-11-17
+
+> Entrega completa de imagenes adjuntas a agentes, cola FIFO persistente mientras trabaja el agente y asociacion de carpetas en Thread
+
+### Added
+- Miniaturas de previsualizacion para imagenes adjuntas en el compositor, el historial de mensajes y la cola de ejecucion, ademas de traspaso automatico de adjuntos desde borradores en Agent Chat.
+
+### Changed
+- Tarjetas de mensajes en cola ancladas sobre el compositor con edicion en el lugar conservando el borrador actual, envio inmediato (Send now / Steer) y control desplegable de elementos.
+
+### Fixed
+- Entrega real de imagenes pegadas y archivos adjuntos a todos los agentes conectados mediante resolucion de ruta en disco, inferencia MIME, banderas de archivo y soporte de turnos con solo imagenes.
+- Cola persistente de mensajes enviados mientras el agente trabaja (QueuedRunsControl) sincronizada entre cambios de conversacion en Thread y Agent Chat, con despacho automatico FIFO al terminar el turno.
+- Asociacion explicita de conversaciones a carpetas de proyecto, generacion automatica y regeneracion de titulos de conversacion, y agrupacion unificada en tiempo real de ejecucion de herramientas.
+
+---
+
+## [0.1.61] - 2026-11-17
+
+> Translucidez global en 4 niveles, terminales cristalinas, transicion Code-Thread fluida y Settings en espanol
+
+### Added
+- Sistema reutilizable de vidrio esmerilado en 4 niveles (--glass-*) con adopcion global en Sidebar, Files, Diffs (incluido Shadow DOM), Settings, Quotas, Notificaciones, Composers, Modales y Popovers.
+- Terminales translucidas en GhostGrid 2D mediante contexto alfa y limpieza selectiva sobre paneles esmerilados en modos Code y Agent.
+
+### Changed
+- Interfaz de Agent armonizada visualmente con Thread y traduccion completa al espanol en Customizations, Settings y Plugins.
+- Limpieza de presets de wallpaper descartados y superposiciones SVG para mejorar el contraste sobre Aurora Mesh, Alpine Dusk y Solar Horizon.
+
+### Fixed
+- Transicion fluida entre Code y Thread conservando la posicion de scroll y dimensiones exactas sin doble parpadeo ni saltos al inicio de la conversacion.
+- Fluidez de scroll en hilos largos eliminando animaciones continuas de fondo, desenfoques anidados en listas y mediciones sin throttle en ThreadTurnRail.
+
+---
+
+## [0.1.60] - 2026-11-17
+
+> Wallpapers en alta resolucion, paneles con translucidez real y figuras tematicas en vistas activas
+
+### Added
+- Seis wallpapers tematicos en alta resolucion (1920x1080) integrados en StageBackdrop y en las previsualizaciones de Customizations (Aurora Mesh, Alpine Dusk, Solar Horizon, Cyber Prism, Architect Grid y Editorial Paper).
+- Ilustraciones y figuras tematicas (ThemeHeroFigure) integradas en los estados iniciales de Thread, Agent y el dock de Subagentes.
+
+### Changed
+- Translucidez real de vidrio esmerilado en todos los paneles principales, chat central, inspector de subagentes, tarjetas y composer para que el fondo se aprecie a traves de toda la interfaz y no solo entre bordes.
+- Activacion automatica de superficies translucidas al usar cualquier escena de fondo con opacidad predeterminada al 56% (ajustable de 15% a 95%) y atenuacion optimizada al 14%.
+
+---
+
+## [0.1.59] - 2026-11-16
+
+> Temas visuales multicapa, fondos de escenario, vidrio esmerilado y mejoras de interfaz
+
+### Added
+- Sistema de temas visuales multicapa con paquetes de tema, fondos de escenario, figuras decorativas, efecto de vidrio esmerilado y control de contraste.
+- Paleta daltonizada para diffs, sincronizacion cromatica en el canvas de terminal y panel de personalizacion con importacion y exportacion de perfiles.
+
+### Changed
+- Mejoras en el visor de diffs de columna unica y nuevos iconos orbitales de estado para agentes y subagentes laterales.
+- Persistencia optimizada del modo de trabajo seleccionado al iniciar la aplicacion.
+
+---
+
+## [0.1.58] - 2026-11-16
+
+> Estabilidad en Thread sin congelamientos, persistencia diferencial y sincronizacion de subagentes
+
+### Changed
+- Activado SQLite WAL con synchronous NORMAL y busy_timeout de 5000ms, sincronizacion diferencial de threads por revision y timestamp, y persistencia asincrona coalesced en persist_async
+
+### Fixed
+- Eliminados bloqueos y congelamientos en Thread (Application Hang 1002) corrigiendo el deadlock AB-BA entre persist y threads, desacople de locks en checkpoints, settle, swarm y dispatch_wire
+- Pasados a async con spawn_blocking todos los comandos bloqueantes restantes en chat, git, handoff y actividad de agentes para evitar trabas en el hilo UI
+- Aumentada la cola de eventos de transporte a 8192 preservando frames terminales, retencion de 120s tras cierre de turnos largos y reconciliacion resyncRequired sin cortar pollers activos
+- Guards contra solapamiento de intervalos en live runs, dictado y agentes, proteccion contra regresiones de estado asentado en useChatSession y recarga en vivo del inspector de subagentes
+- Separadas consultas de gestion de subagentes como llamadas dinamicas, soporte de payloads en arreglo y transcript URI nativos, herencia de modelo en inspector y ocultamiento de sobres internos de despacho
+
+---
+
+## [0.1.57] - 2026-11-15
+
+> Cambio automático de cuenta al 0% de cuota y cierre seguro de procesos residuales
+
+### Added
+- Cambio automático de cuenta al alcanzar el 0% de cuota con política opt-in configurable por proveedor, circuit breaker y anti-rebote entre cuota y terminal
+- Confirmación interactiva en notificaciones y toast con selector de modelo alternativo cuando la cuenta destino tiene un tier o catálogo distinto
+- Continuación automática en Thread tras confirmar o ejecutar un cambio de cuenta y panel compartido en Cuentas, Cuotas y modal de cambio
+
+### Fixed
+- Detección y cierre selectivo de procesos residuales en segundo plano al cambiar de cuenta sin afectar la aplicación base
+- Validación contra catálogo fresco al aprobar cambios pendientes y deduplicación por hilo de confirmaciones concurrentes
+
+---
+
+## [0.1.56] - 2026-11-14
+
+> Configuraciones y Proveedores sin freezes, cache SWR y cambio fluido entre threads
+
+### Changed
+- Carga diferida (React.lazy) de las 15 pestañas en Configuraciones, diferimiento de IPCs de voz/audio hasta abrir la pestaña Voice y limpieza de capas backdrop-filter y SelectMenu
+- Caché SWR instantánea y sondeos paralelos con invalidación por escritura para cuotas, cuentas CLI, modelos por thread, plugins y actualizaciones de agentes
+
+### Fixed
+- Eliminados freezes en Configuraciones, Proveedores, Cuotas, Cuentas, Subagentes y Notificaciones pasando comandos Rust bloqueantes a async (spawn_blocking) con lotes SQLite y locks acotados
+- Eliminada inversión de bloqueo AB-BA en instantáneas de notificaciones bajo ejecución concurrente
+- Persistencia con debounce de 350 ms y flush en Zed/Operator y transición suave entre threads sin parpadeo del indicador de carga
+
+---
+
+## [0.1.55] - 2026-11-14
+
+> Optimización de arranque, Thread rápido y persistencia de vista
+
+### Added
+- Reapertura automática en la última vista activa (Agent, Code o Thread) al reiniciar
+- Nuevo visor unificado de diffs con resaltado de sintaxis y mejoras de subagentes y swarm
+
+### Changed
+- Aislamiento de runtime en Vite para excluir chunks pesados de la precarga inicial
+
+### Fixed
+- Optimizado el arranque inicial con carga diferida de rutas, overlays, Mermaid y workers de diffs
+- Eliminado el doble bootstrap al abrir la aplicación y reducido el splash mínimo a 250 ms
+- Inicialización no bloqueante en Rust para dispatch wire, shims por metadatos y daemon sincronizado sin frenar la ventana
+- Reparada la animación del spinner en Thread, hidratación instantánea desde caché y lecturas SQLite sin escrituras innecesarias
+
+---
+
 ## [0.1.54] - 2026-11-12
 
 > Correcciones en Thread: sidebar, diff stats y turn rail

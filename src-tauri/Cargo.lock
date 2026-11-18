@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "kite-code"
-version = "0.1.54"
+version = "0.1.65"
 dependencies = [
  "dotenvy",
  "kite-ctx",
@@ -5971,4 +5971,3 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.4",
 ]
-

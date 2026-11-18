@@ -3,7 +3,7 @@ members = [".", "crates/kite-ctx"]
 
 [package]
 name = "kite-code"
-version = "0.1.54"
+version = "0.1.65"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
@@ -73,6 +73,5 @@ overflow-checks = false
 
 [patch.crates-io]
 vt100 = { path = "vendor/vt100" }
-
 
 

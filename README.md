@@ -1,12 +1,11 @@
 # Kite Code
 
-<!-- Diff verification test: line added/removed -->
 Autonomous agentic development environment and native multi-model terminal desktop application built with React, TypeScript, Rust, and Tauri 2.
 
 ## Key Features
 
 - **Multi-Model Native Terminal**: Run and manage live CLI agents (Claude Code, Gemini, Codex, Antigravity, OpenCode, Cursor, and more).
-- **Domain Workspaces**: Integrated file exploration, Git staging, diff views, and local repository tracking.
+- **Domain Workspaces**: Integrated file exploration, Git staging, side-by-side diff views, and local repository tracking.
 - **Agent Mind & Memory**: Configurable memory budgets, reflection modes, and persistent instruction synchronization.
 - **Routines & Tasks**: Automated scheduled routines and agent task orchestration.
 - **Offline & Local-First**: Built with local SQLite persistence and native ConPTY process management.
@@ -30,8 +29,8 @@ npm run app
 
 ### Building for Production
 
-<!-- Thread diff test: verification of line addition and removal in thread view -->
-Compile the standalone native installer (Windows / cross-platform target):
+Compile the standalone native installer (Windows / cross-platform target).
+The installer packages the desktop shell and the local agent runtime:
 ```powershell
 npm run build:installer
 ```

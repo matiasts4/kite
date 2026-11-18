@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/kite-ctx"]
+
 [package]
 name = "kite-code"
 version = "0.1.54"
@@ -31,6 +34,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 dotenvy = "0.15"
 vt100 = "0.15"
+kite-ctx = { path = "crates/kite-ctx" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -69,5 +73,6 @@ overflow-checks = false
 
 [patch.crates-io]
 vt100 = { path = "vendor/vt100" }
+
 
 

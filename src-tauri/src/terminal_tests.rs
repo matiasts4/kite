@@ -126,7 +126,7 @@ fn a_codex_birth_is_the_task_and_grok_keeps_the_system_prompt() {
         &SpawnMode::Fresh,
         Some("- leading hyphen task"),
         true,
-        Some(crate::dispatch::cli::skill_text()),
+        Some(&crate::dispatch::cli::skill_text()),
     );
     let override_idx = grok_args
         .iter()
@@ -1050,4 +1050,19 @@ fn quiesce_suppresses_exit_event_and_respawn_prioritizes_live_and_defers_unfocus
     map.remove(&live_sid);
     map.remove(&bg_sid);
     write_persisted_terminal_sessions(&map);
+}
+
+#[test]
+fn compose_terminal_context_env_attributes_session_agent_provider_and_project() {
+    let pairs = compose_terminal_context_env(
+        "term-ctx-1",
+        Some("ws-kite"),
+        "claude",
+        Some("claude-code"),
+    );
+    let map: std::collections::HashMap<String, String> = pairs.into_iter().collect();
+    assert_eq!(map.get("KITE_SESSION_ID").map(String::as_str), Some("term-ctx-1"));
+    assert_eq!(map.get("KITE_AGENT_NAME").map(String::as_str), Some("claude-code"));
+    assert_eq!(map.get("KITE_PROVIDER").map(String::as_str), Some("claude-code"));
+    assert_eq!(map.get("KITE_PROJECT").map(String::as_str), Some("ws-kite"));
 }

@@ -1,3 +1,10 @@
+//! Deprecated Headroom proxy monitor command.
+//!
+//! Detached from runtime loading (`main.rs` gates this module behind `#[cfg(test)]`
+//! and unregisters `fetch_headroom_monitor` from `tauri::generate_handler!`).
+//! Kept as reference for a future token/context-savings monitor.
+//! See `docs/HEADROOM_MONITOR_DEPRECATED.md`.
+
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -31,6 +38,7 @@ fn headroom_base_url() -> String {
     }
 }
 
+#[allow(dead_code)]
 #[tauri::command]
 pub fn fetch_headroom_monitor() -> Value {
     let base = headroom_base_url();

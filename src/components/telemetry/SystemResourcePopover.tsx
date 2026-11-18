@@ -18,7 +18,8 @@ import { MemoryProcessTab } from './tabs/MemoryProcessTab';
 import { OverviewTab } from './tabs/OverviewTab';
 import { CpuTab } from './tabs/CpuTab';
 import { DiskTab } from './tabs/DiskTab';
-import { HeadroomTab } from './tabs/HeadroomTab';
+import { ContextTab } from './tabs/ContextTab';
+import { loadContextMonitor } from '../../lib/contextMonitor';
 
 export interface SystemResourcePopoverProps {
   snapshot: SystemMetricsSnapshot;
@@ -31,7 +32,7 @@ export interface SystemResourcePopoverProps {
   phase?: 'in' | 'out';
 }
 
-type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk' | 'headroom';
+type ResourceTab = 'overview' | 'memory' | 'cpu' | 'disk' | 'context';
 
 export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   snapshot,
@@ -51,6 +52,27 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
   const hasWorkspaces = Boolean(snapshot?.runtime.workspaces && snapshot.runtime.workspaces.length > 0);
   const [procViewMode, setProcViewMode] = useState<'projects' | 'terminals' | 'flat'>(hasWorkspaces ? 'projects' : 'flat');
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const [contextSummary, setContextSummary] = useState<{
+    tokensSaved: number;
+    savingsPercent: number;
+    requests: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void loadContextMonitor().then((res) => {
+      if (active && res.status === 'online') {
+        setContextSummary({
+          tokensSaved: res.view.lifetime.tokensSaved,
+          savingsPercent: res.view.lifetime.savingsPercent,
+          requests: res.view.lifetime.requests,
+        });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [activeTab]);
 
   // Measure live UI frame rate while popover is open
   useEffect(() => {
@@ -146,12 +168,12 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
         width: '416px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
-        backgroundColor: 'var(--menu-glass, #121214)',
-        backdropFilter: 'var(--menu-backdrop, blur(20px))',
-        WebkitBackdropFilter: 'var(--menu-backdrop, blur(20px))',
-        border: '1px solid var(--block-stroke)',
-        borderRadius: '12px',
-        boxShadow: '0 16px 42px rgba(0, 0, 0, 0.42)',
+        background: 'var(--glass-overlay-bg, var(--menu-glass, #121214))',
+        backdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
+        WebkitBackdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
+        border: '1px solid var(--glass-border, var(--block-stroke))',
+        borderRadius: 'var(--card-radius, 12px)',
+        boxShadow: 'var(--glass-shadow, 0 16px 42px rgba(0, 0, 0, 0.42))',
         padding: '14px',
         color: 'var(--text-primary)',
         fontSize: '12px',
@@ -324,8 +346,8 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
           gap: '4px',
           padding: '3px',
-          backgroundColor: 'var(--block-fill)',
-          border: '1px solid var(--block-stroke)',
+          backgroundColor: 'var(--glass-elevated-bg, var(--block-fill))',
+          border: '1px solid var(--glass-border, var(--block-stroke))',
           borderRadius: '8px',
           marginBottom: '12px',
         }}
@@ -336,7 +358,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
             { id: 'memory', label: 'RAM' },
             { id: 'cpu', label: 'CPU' },
             { id: 'disk', label: 'Disco' },
-            { id: 'headroom', label: 'Headroom' },
+            { id: 'context', label: 'Contexto' },
           ] as const
         ).map((tab) => {
           const isSelected = activeTab === tab.id;
@@ -348,9 +370,9 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
               aria-selected={isSelected}
               onClick={() => setActiveTab(tab.id)}
               style={{
-                padding: '5px 4px',
+                padding: '5px 8px',
                 borderRadius: '6px',
-                fontSize: '10px',
+                fontSize: '11px',
                 whiteSpace: 'nowrap',
                 fontWeight: isSelected ? 600 : 500,
                 border: isSelected
@@ -385,8 +407,8 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
         {(activeTab === 'overview' || activeTab === 'memory') && (
           <div
             style={{
-              backgroundColor: 'var(--block-fill)',
-              border: '1px solid var(--block-stroke)',
+              backgroundColor: 'var(--glass-elevated-bg, var(--block-fill))',
+              border: '1px solid var(--glass-border, var(--block-stroke))',
               borderRadius: '10px',
               padding: '12px',
               display: 'flex',
@@ -680,6 +702,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
             cpuColor={cpuColor}
             diskColor={diskColor}
             uiFps={uiFps}
+            contextSummary={contextSummary}
             onSelectTab={setActiveTab}
           />
         )}
@@ -702,7 +725,8 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           />
         )}
 
-        {activeTab === 'headroom' && <HeadroomTab />}
+        {/* CONTEXT ENGINE TELEMETRY TAB */}
+        {activeTab === 'context' && <ContextTab />}
       </div>
 
       {/* Footer Controls: Update Frequency & Badge Display Mode */}
@@ -742,10 +766,10 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                     fontWeight: active ? 600 : 400,
                     border: active
                       ? '1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.35))'
-                      : '1px solid var(--block-stroke)',
+                      : '1px solid var(--glass-border, var(--block-stroke))',
                     backgroundColor: active
                       ? 'var(--accent-tint, rgba(92, 143, 255, 0.14))'
-                      : 'var(--block-fill)',
+                      : 'var(--glass-elevated-bg, var(--block-fill))',
                     color: active ? 'var(--accent, #5c8fff)' : 'var(--text-secondary)',
                     cursor: 'pointer',
                   }}
@@ -784,10 +808,10 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
                     fontVariantNumeric: 'tabular-nums',
                     border: active
                       ? '1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.35))'
-                      : '1px solid var(--block-stroke)',
+                      : '1px solid var(--glass-border, var(--block-stroke))',
                     backgroundColor: active
                       ? 'var(--accent-tint, rgba(92, 143, 255, 0.14))'
-                      : 'var(--block-fill)',
+                      : 'var(--glass-elevated-bg, var(--block-fill))',
                     color: active ? 'var(--accent, #5c8fff)' : 'var(--text-secondary)',
                     cursor: 'pointer',
                   }}

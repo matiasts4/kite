@@ -51,6 +51,44 @@ vi.mock('../../lib/ipc', () => ({
     },
   }),
   isTauriEnvironment: vi.fn().mockReturnValue(true),
+  invokeCommand: vi.fn().mockResolvedValue({
+    ok: true,
+    engine_version: '0.1.0',
+    lifetime: {
+      requests: 3,
+      raw_tokens: 10000,
+      compressed_tokens: 2000,
+      tokens_saved: 8000,
+      savings_percent: 80,
+      cache_hits: 1,
+      cache_hit_rate: 33.3,
+      estimated_usd_saved: 0.02,
+    },
+    session: {
+      requests: 3,
+      raw_tokens: 10000,
+      compressed_tokens: 2000,
+      tokens_saved: 8000,
+      savings_percent: 80,
+      cache_hits: 1,
+      cache_hit_rate: 33.3,
+      estimated_usd_saved: 0.02,
+    },
+    agents: [],
+    models: [],
+    categories: [],
+    recent_sparkline: [],
+    avg_overhead_ms: 1.2,
+    ccr_entries: 1,
+    shared_entries: 0,
+    read_records: 2,
+    quota_preservation: {
+      saved_tokens_30d: 8000,
+      pro_equivalent_pct: 0.16,
+      tier_5x_pct: 0.03,
+      tier_20x_pct: 0.01,
+    },
+  }),
 }));
 
 describe('SystemResourceBadge & SystemResourcePopover', () => {
@@ -89,7 +127,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     expect(screen.getByText(/Terminales PTY & Agentes/i)).toBeInTheDocument();
     expect(screen.getByText(/Procesador \(CPU\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Disco \(E:\\\)/i)).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Headroom' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Headroom' })).not.toBeInTheDocument();
 
     // Switch to CPU tab
     await user.click(screen.getByRole('tab', { name: 'CPU' }));
@@ -99,6 +137,10 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     // Switch to Disk tab
     await user.click(screen.getByRole('tab', { name: 'Disco' }));
     expect(screen.getByText(/Almacenamiento Local \(E:\\\)/i)).toBeInTheDocument();
+
+    // Switch to Contexto tab
+    await user.click(screen.getByRole('tab', { name: 'Contexto' }));
+    expect(await screen.findByText(/Ahorro acumulado/i)).toBeInTheDocument();
 
     // Toggle badge display mode to RAM + CPU
     await user.click(screen.getByRole('button', { name: 'RAM + CPU' }));
@@ -267,5 +309,33 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     // Switch to "Lista Completa" flat view
     await user.click(screen.getByRole('button', { name: /Lista Completa/i }));
     expect(screen.getByText('PID 6200')).toBeInTheDocument();
+  });
+
+  it('isolates popover scroll container on its own compositor layer without stacked backdrop-filter or nested scroll traps', async () => {
+    const user = userEvent.setup();
+    render(<SystemResourceBadge />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('system-resource-ram-value')).toHaveTextContent('480 MB');
+    });
+
+    await user.click(screen.getByTestId('system-resource-badge'));
+
+    const dialog = screen.getByRole('dialog', {
+      name: /monitor de recursos del sistema y de la aplicación/i,
+    });
+    expect(dialog.style.backdropFilter).toBe('none');
+
+    const scrollViewport = dialog.querySelector('.system-resource-popover__scroll') as HTMLElement | null;
+    expect(scrollViewport).not.toBeNull();
+    expect(scrollViewport?.style.willChange).toBe('scroll-position');
+    expect(scrollViewport?.style.transform).toBe('translateZ(0)');
+
+    // Switch to RAM tab and ensure process lists do not create nested overflow-y: auto scroll traps
+    await user.click(screen.getByRole('tab', { name: 'RAM' }));
+    const nestedAutoScrollers = Array.from(scrollViewport?.querySelectorAll('*') ?? []).filter(
+      (el) => (el as HTMLElement).style?.overflowY === 'auto'
+    );
+    expect(nestedAutoScrollers).toHaveLength(0);
   });
 });

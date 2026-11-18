@@ -69,6 +69,16 @@ pub(super) fn running_under_test() -> bool {
         .unwrap_or(false)
 }
 
+fn shim_matches_metadata(src: &std::fs::Metadata, dest: &std::fs::Metadata) -> bool {
+    if src.len() != dest.len() {
+        return false;
+    }
+    match (src.modified(), dest.modified()) {
+        (Ok(s_mod), Ok(d_mod)) => s_mod <= d_mod,
+        _ => false,
+    }
+}
+
 pub(crate) fn write_shim_to_dir(dir: &std::path::Path, current_exe: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
     let console_name = if cfg!(windows) { "kite.exe" } else { "kite" };
@@ -77,9 +87,7 @@ pub(crate) fn write_shim_to_dir(dir: &std::path::Path, current_exe: &std::path::
         let dest = dir.join(console_name);
         if dest != src {
             let needs_copy = match (std::fs::metadata(&src), std::fs::metadata(&dest)) {
-                (Ok(s), Ok(d)) => {
-                    s.len() != d.len() || std::fs::read(&src).ok() != std::fs::read(&dest).ok()
-                }
+                (Ok(s), Ok(d)) => !shim_matches_metadata(&s, &d),
                 (Ok(_), Err(_)) => true,
                 _ => false,
             };
@@ -178,11 +186,36 @@ pub fn install_dispatch_skill() -> std::path::PathBuf {
     }
     let _ = std::fs::create_dir_all(&dir);
     let text = skill_text();
-    let _ = std::fs::write(&path, text);
+    let _ = std::fs::write(&path, &text);
     if let Some(home) = user_home_dir() {
-        copy_skill_into_existing_roots(&home, text);
+        copy_skill_into_existing_roots(&home, &text);
     }
     path
+}
+
+/// Installs non-destructive `kite ctx` hooks and `kite-ctx/SKILL.md` across all
+/// detected agent directories on the host.
+pub fn install_ctx_integrations() -> Vec<kite_ctx::HookInstallAction> {
+    if running_under_test() {
+        return Vec::new();
+    }
+    let Some(home) = user_home_dir() else {
+        return Vec::new();
+    };
+    let workspace = std::env::current_dir().unwrap_or_else(|_| home.clone());
+    kite_ctx::apply_agent_setup(kite_ctx::AgentTarget::All, &home, &workspace, false)
+        .unwrap_or_default()
+}
+
+/// Runs `install_ctx_integrations` at most once per desktop app process.
+pub fn ensure_ctx_integrations_once() {
+    if running_under_test() {
+        return;
+    }
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = install_ctx_integrations();
+    });
 }
 
 /// `--hidden` wins. Otherwise `--pane` or a human caller asks for a pane.

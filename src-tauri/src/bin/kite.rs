@@ -3,6 +3,8 @@
 
 #[path = "../dispatch/cli_wire.rs"]
 mod cli_wire;
+#[path = "../ctx_cli.rs"]
+mod ctx_cli;
 
 fn sibling_gui_binary() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -26,6 +28,10 @@ fn main() {
         let code = cli_wire::run_cli(&args[2..], None);
         std::process::exit(code);
     }
+    if args.get(1).map(String::as_str) == Some("ctx") {
+        let code = ctx_cli::run_ctx_cli(&args[2..]);
+        std::process::exit(code);
+    }
 
     if let Some(gui) = sibling_gui_binary() {
         let status = std::process::Command::new(&gui).args(&args[1..]).spawn();
@@ -38,6 +44,6 @@ fn main() {
         }
     }
 
-    eprintln!("Usage: kite dispatch <ls|programs|providers|models|run|send|wait|read|report|swarm|kill|interrupt|keys|attach|skill> ...");
+    eprintln!("Usage: kite <dispatch|ctx> ...");
     std::process::exit(2);
 }

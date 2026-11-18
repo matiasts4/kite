@@ -2147,6 +2147,7 @@ name = "kite-code"
 version = "0.1.54"
 dependencies = [
  "dotenvy",
+ "kite-ctx",
  "portable-pty",
  "reqwest 0.12.28",
  "rusqlite",
@@ -2164,6 +2165,19 @@ dependencies = [
  "uuid",
  "vt100",
  "windows",
+]
+
+[[package]]
+name = "kite-ctx"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -5957,3 +5971,4 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.4",
 ]
+

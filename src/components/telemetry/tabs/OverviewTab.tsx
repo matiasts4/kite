@@ -3,6 +3,7 @@ import {
   type SystemMetricsSnapshot,
   formatBytes,
 } from '../../../lib/systemMetrics';
+import { formatPercent, formatTokenCount } from '../../../lib/contextMonitor';
 import { Sparkline } from '../TelemetryGauges';
 
 export interface OverviewTabProps {
@@ -11,7 +12,12 @@ export interface OverviewTabProps {
   cpuColor: string;
   diskColor: string;
   uiFps: number;
-  onSelectTab: (tab: 'cpu' | 'disk') => void;
+  contextSummary?: {
+    tokensSaved: number;
+    savingsPercent: number;
+    requests: number;
+  } | null;
+  onSelectTab: (tab: 'cpu' | 'disk' | 'context') => void;
 }
 
 export const OverviewTab: React.FC<OverviewTabProps> = ({
@@ -20,6 +26,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   cpuColor,
   diskColor,
   uiFps,
+  contextSummary,
   onSelectTab,
 }) => {
   return (
@@ -270,6 +277,37 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           </div>
         </div>
       </div>
+
+      {/* CONTEXT ENGINE SUMMARY SHORTCUT */}
+      <button
+        type="button"
+        onClick={() => onSelectTab('context')}
+        style={{
+          padding: '8px 10px',
+          borderRadius: 'var(--control-radius, 8px)',
+          border: '1px solid var(--block-stroke)',
+          backgroundColor: 'var(--block-fill)',
+          color: 'var(--text-primary)',
+          fontSize: '11px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '8px',
+          cursor: 'pointer',
+        }}
+      >
+        <span style={{ color: 'var(--text-secondary)' }}>
+          Motor de contexto:{' '}
+          <strong style={{ color: 'var(--accent, #5c8fff)', fontVariantNumeric: 'tabular-nums' }}>
+            {contextSummary && contextSummary.requests > 0
+              ? `${formatTokenCount(contextSummary.tokensSaved)} tokens ahorrados (${formatPercent(contextSummary.savingsPercent)})`
+              : 'Sin actividad aún'}
+          </strong>
+        </span>
+        <span style={{ color: 'var(--accent, #5c8fff)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+          Por funcionalidad →
+        </span>
+      </button>
     </>
   );
 };

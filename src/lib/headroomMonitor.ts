@@ -1,3 +1,9 @@
+/**
+ * @deprecated Detached from runtime loading (`SystemResourcePopover` / `HeadroomTab`).
+ * Headroom proxy/MCP monitoring is no longer active; kept as reference for a
+ * future token/context-savings telemetry client.
+ * See `docs/HEADROOM_MONITOR_DEPRECATED.md`.
+ */
 import { invokeCommand, isTauriEnvironment } from './ipc';
 
 export const HEADROOM_OFFLINE_MESSAGE = 'Headroom no responde.';

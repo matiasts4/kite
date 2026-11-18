@@ -62,6 +62,28 @@ pub fn attach_dispatch_manual(
     (system_prompt, initial_prompt)
 }
 
+pub fn compose_terminal_context_env(
+    session_id: &str,
+    workspace_id: Option<&str>,
+    engine: &str,
+    detected_agent: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut env = vec![("KITE_SESSION_ID".to_string(), session_id.to_string())];
+    let provider = detected_agent
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| canonical_agent_engine(engine));
+    if !provider.is_empty() {
+        env.push(("KITE_PROVIDER".to_string(), provider.clone()));
+        env.push(("KITE_AGENT_NAME".to_string(), provider));
+    }
+    if let Some(ws) = workspace_id.map(str::trim).filter(|s| !s.is_empty()) {
+        env.push(("KITE_PROJECT".to_string(), ws.to_string()));
+    }
+    env
+}
+
 pub fn spawn_session_with_options(
     session_id: &str,
     cwd: &str,
@@ -212,13 +234,21 @@ pub fn spawn_session_with_options(
     };
 
     cmd.env("KITE_ENV", "1");
-    cmd.env("KITE_SESSION_ID", session_id);
+    for (k, v) in compose_terminal_context_env(
+        session_id,
+        options.workspace_id.as_deref(),
+        manual_engine,
+        initial_detected_agent.as_deref(),
+    ) {
+        cmd.env(k, v);
+    }
     cmd.env("KITE_DISPATCH", "1");
     let dispatch_address = format!("session:{session_id}");
     cmd.env("KITE_ADDRESS", &dispatch_address);
     let skill = crate::dispatch::cli::install_dispatch_skill();
     cmd.env("KITE_SKILL_FILE", skill.display().to_string());
     let bin = crate::dispatch::cli::install_kite_shim();
+    crate::dispatch::cli::ensure_ctx_integrations_once();
     let inherited = std::env::var("PATH").unwrap_or_default();
     let mut path_parts = vec![bin.display().to_string()];
     if let Some(ref prog) = resolved_program_path {

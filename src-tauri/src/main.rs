@@ -41,6 +41,8 @@ pub mod local_feed;
 pub mod account_switcher;
 pub mod handoff;
 pub mod system_metrics;
+pub mod context_monitor;
+#[cfg(test)]
 pub mod headroom_monitor;
 pub mod acp;
 pub mod odd_tasks;
@@ -86,7 +88,7 @@ use quota::*;
 use routines::*;
 use session::*;
 use system_metrics::*;
-use headroom_monitor::fetch_headroom_monitor;
+use context_monitor::{fetch_context_monitor, reset_context_monitor};
 use terminal::*;
 use account_switcher::{close_residual_provider_processes, inspect_provider_sessions};
 use tickets::*;
@@ -703,7 +705,8 @@ fn main() {
             recommend_continuation_targets,
             get_handoff_preview,
             get_system_metrics,
-            fetch_headroom_monitor,
+            fetch_context_monitor,
+            reset_context_monitor,
             start_terminal_benchmark,
             stop_terminal_benchmark,
             get_terminal_benchmark_sample,
@@ -786,4 +789,5 @@ fn main() {
         }
     });
 }
+
 

@@ -74,6 +74,47 @@ pub fn compose_thread_dispatch_env(
     env
 }
 
+fn upsert_env_var(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some((_, existing)) = env.iter_mut().find(|(k, _)| k == key) {
+        *existing = value.to_string();
+    } else {
+        env.push((key.to_string(), value.to_string()));
+    }
+}
+
+/// Appends context-engine attribution environment variables so `kite ctx` calls
+/// inside thread and subagent processes track the exact session, agent, provider,
+/// model, and project workspace.
+pub fn append_context_engine_env(
+    env: &mut Vec<(String, String)>,
+    session_id: &str,
+    workspace_id: Option<&str>,
+    agent_name: Option<&str>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) {
+    let trimmed_sid = session_id.trim();
+    if !trimmed_sid.is_empty() {
+        upsert_env_var(env, "KITE_SESSION_ID", trimmed_sid);
+    }
+    if let Some(ws) = workspace_id.map(str::trim).filter(|s| !s.is_empty()) {
+        upsert_env_var(env, "KITE_PROJECT", ws);
+    }
+    if let Some(prov) = provider.map(str::trim).filter(|s| !s.is_empty()) {
+        upsert_env_var(env, "KITE_PROVIDER", prov);
+    }
+    let resolved_agent = agent_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| provider.map(str::trim).filter(|s| !s.is_empty()));
+    if let Some(agent) = resolved_agent {
+        upsert_env_var(env, "KITE_AGENT_NAME", agent);
+    }
+    if let Some(mdl) = model.map(str::trim).filter(|s| !s.is_empty()) {
+        upsert_env_var(env, "KITE_MODEL", mdl);
+    }
+}
+
 pub fn build_thread_dispatch_env(
     thread_id: &str,
     workspace_id: Option<&str>,
@@ -81,6 +122,7 @@ pub fn build_thread_dispatch_env(
 ) -> Vec<(String, String)> {
     let skill = crate::dispatch::cli::install_dispatch_skill();
     let bin = crate::dispatch::cli::install_kite_shim();
+    crate::dispatch::cli::ensure_ctx_integrations_once();
     let inherited = std::env::var("PATH").unwrap_or_default();
     compose_thread_dispatch_env(
         thread_id,
@@ -123,6 +165,16 @@ pub fn launch_provider(
         .or_else(|| thread.get("workMode"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let subagent_role = thread
+        .get("subagentRole")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let resolved_agent_name = subagent_role
+        .or_else(|| agent.clone().filter(|s| !s.trim().is_empty()))
+        .or_else(|| profile_id.clone().filter(|s| !s.trim().is_empty()))
+        .or_else(|| Some(provider.clone()));
     let prompt = prompt.to_string();
     let thread_clone = thread.clone();
     let binding = binding.cloned();
@@ -200,10 +252,18 @@ pub fn launch_provider(
                     plan.endpoint.verified_endpoint(),
                     plan.connection_id.as_deref().unwrap_or("none"),
                 ));
-                let dispatch_env = build_thread_dispatch_env(
+                let mut dispatch_env = build_thread_dispatch_env(
                     &thread_id,
                     workspace_id.as_deref(),
                     Some(&plan.program),
+                );
+                append_context_engine_env(
+                    &mut dispatch_env,
+                    &thread_id,
+                    workspace_id.as_deref(),
+                    resolved_agent_name.as_deref(),
+                    Some(&provider),
+                    model.as_deref(),
                 );
                 let persistent_enabled = persistent_sessions_enabled();
                 let mut fallback_notice_emitted = false;
@@ -704,6 +764,10 @@ pub fn spawn_args(
             if let Some(model) = resolved.model {
                 args.push("--model".into());
                 args.push(opencode_model_arg(model, effort));
+            }
+            for file_path in crate::chat::extract_attachment_file_paths(&sent) {
+                args.push("--file".into());
+                args.push(file_path);
             }
             args.push(sent);
             args

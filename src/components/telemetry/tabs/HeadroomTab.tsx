@@ -1,3 +1,9 @@
+/**
+ * @deprecated Detached from runtime loading in `SystemResourcePopover.tsx`.
+ * Headroom proxy/MCP monitoring is no longer active; this UI component is kept
+ * in the repository as reference for a future token/context-savings monitor.
+ * See `docs/HEADROOM_MONITOR_DEPRECATED.md`.
+ */
 import React, { useCallback, useEffect, useState } from 'react';
 import { Sparkline } from '../TelemetryGauges';
 import {

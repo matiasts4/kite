@@ -82,10 +82,29 @@ impl<P: Port> Service<P> {
             return self.finish(rejected(id, "report", &target, DispatchError::ParentMissing));
         }
         let from_label = from.unwrap_or("session:unknown").to_string();
+        let effective_body = if body.chars().count() > 2400 && body.chars().count() <= BODY_LIMIT {
+            kite_ctx::ContextEngine::open_default()
+                .ok()
+                .and_then(|eng| {
+                    eng.compress_runtime_segment(
+                        body,
+                        2400,
+                        "runtime:subagent_handoff",
+                        &from_label,
+                        &from_label,
+                        "dispatch",
+                        "subagent",
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| body.to_string())
+        } else {
+            body.to_string()
+        };
         let receipt = self.send(SendInput {
             id: id.to_string(),
             address: target,
-            body: body.to_string(),
+            body: effective_body,
             caller,
             force: false,
             allow_queue: true,

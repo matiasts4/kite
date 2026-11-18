@@ -1,0 +1,260 @@
+/* Shared reactive status and role icon styling for lateral rails and subagent views. */
+
+.agent-status-indicator {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.agent-status-indicator--running {
+  color: var(--status-running, #4ade80);
+}
+
+.agent-status-indicator--backgroundWorking {
+  color: var(--text-secondary);
+}
+
+.agent-status-indicator--waiting {
+  color: var(--warning, #fbbf24);
+}
+
+.agent-status-indicator--completed {
+  color: var(--status-running, #4ade80);
+  opacity: 0.78;
+}
+
+.agent-status-indicator--failed {
+  color: var(--danger-ink, #ff8a8c);
+}
+
+.agent-status-indicator--killed {
+  color: var(--text-tertiary, var(--text-secondary));
+  opacity: 0.72;
+}
+
+/* 4-dot orbital circular spinner */
+.agent-orbit-spinner {
+  display: inline-block;
+  flex: none;
+  transform-origin: center;
+  animation: kite-orbit-spin 1.15s linear infinite;
+}
+
+.agent-orbit-spinner__dot {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.agent-orbit-spinner__dot--1 {
+  opacity: 1;
+}
+
+.agent-orbit-spinner__dot--2 {
+  opacity: 0.78;
+}
+
+.agent-orbit-spinner__dot--3 {
+  opacity: 0.48;
+}
+
+.agent-orbit-spinner__dot--4 {
+  opacity: 0.25;
+}
+
+@keyframes kite-orbit-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 3-dot subtle wave for background work */
+.agent-dot-bounce {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding-inline: 2px;
+  opacity: 0.72;
+}
+
+.agent-dot-bounce__dot {
+  width: 3px;
+  height: 3px;
+  border-radius: var(--pill-radius, 9999px);
+  background: currentColor;
+  animation: kite-dot-bounce 1.6s ease-in-out infinite;
+}
+
+.agent-dot-bounce__dot--2 {
+  animation-delay: 120ms;
+}
+
+.agent-dot-bounce__dot--3 {
+  animation-delay: 240ms;
+}
+
+@keyframes kite-dot-bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  18% {
+    transform: translateY(-2px);
+  }
+  36% {
+    transform: translateY(0);
+  }
+}
+
+/* Contextual waiting / attention glyph with corner pulse dot */
+.agent-status-attention {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--warning, #fbbf24);
+}
+
+.agent-status-attention__icon {
+  opacity: 0.9;
+}
+
+.agent-status-attention__dot {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--pill-radius, 9999px);
+  background: var(--warning, #fbbf24);
+  pointer-events: none;
+}
+
+.agent-status-attention__ping {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--pill-radius, 9999px);
+  background: var(--warning, #fbbf24);
+  opacity: 0;
+  animation: kite-attention-ping 2.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes kite-attention-ping {
+  0% {
+    transform: scale(0.45);
+    opacity: 0.55;
+  }
+  55% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(0.45);
+    opacity: 0;
+  }
+}
+
+/* Lateral agent & subagent icon wrappers */
+.subagent-role-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.subagent-role-icon--running,
+.subagent-role-icon--active {
+  color: var(--accent);
+}
+
+.subagent-role-icon--waiting {
+  color: var(--warning, #fbbf24);
+}
+
+.subagent-role-icon--completed {
+  color: var(--status-running, #4ade80);
+}
+
+.subagent-role-icon--failed {
+  color: var(--danger-ink, #ff8a8c);
+}
+
+.subagent-role-icon--killed {
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.agent-row-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+
+.agent-row-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.agent-row-subtitle__engine {
+  flex: none;
+  opacity: 0.85;
+}
+
+.agent-row-subtitle__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-thread-row__status-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.side-panel-tab__activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 2px;
+}
+
+.agent-avatar--running circle[data-avatar-badge="true"] {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-avatar-beacon 1.6s ease-in-out infinite;
+}
+
+@keyframes kite-avatar-beacon {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(0.84);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-orbit-spinner,
+  .agent-dot-bounce__dot,
+  .agent-status-attention__ping,
+  .agent-avatar--running circle[data-avatar-badge="true"] {
+    animation: none !important;
+  }
+}

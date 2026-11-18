@@ -10,12 +10,14 @@ import {
   burstDurationSeconds,
   commandStatusWord,
   interruptedTurnLine,
+  liveWorkGroupHeadline,
   opensInFilesSidebar,
   outputStatLabel,
   splitTraceLabel,
   summarizeWorkBurst,
   toolExpandedBody,
   traceFilePath,
+  traceLineRangeLabel,
   workedForLine,
 } from './activityPresentation';
 import { UnifiedDiffView } from './UnifiedDiffView';
@@ -117,6 +119,7 @@ export const ChatWorkEntry: React.FC<{
   const isRunning = Boolean(running || item.streaming || item.status === 'running' || item.status === 'inProgress');
   const traceLabel = activityTraceLabel(item);
   const traceParts = splitTraceLabel(traceLabel);
+  const lineRangeLabel = traceLineRangeLabel(item);
   const statLabel = outputStatLabel(item.text);
   const bodyText = toolExpandedBody(item);
   const openPath = traceFilePath(item);
@@ -201,9 +204,8 @@ export const ChatWorkEntry: React.FC<{
             traceLabel
           )}
         </strong>
+        {lineRangeLabel ? <span className="chat-work-entry__range">{lineRangeLabel}</span> : null}
         {statLabel ? <span className="chat-work-entry__meta">{statLabel}</span> : null}
-
-        <i className="chat-work-entry__spacer" />
 
         {failedMark ? (
           <span className="chat-work-entry__status chat-work-entry__status--failed">
@@ -247,55 +249,86 @@ export const ChatWorkGroup: React.FC<{
   enterFor?: (id: string) => boolean;
   interrupted?: boolean;
   durationSeconds?: number | null;
-}> = ({ items, running, enterFor, interrupted = false, durationSeconds = null }) => {
-  const [expanded, setExpanded] = useState(false);
+  defaultExpanded?: boolean;
+}> = ({
+  items,
+  running,
+  enterFor,
+  interrupted = false,
+  durationSeconds = null,
+  defaultExpanded = false,
+}) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const groupId = useId();
+  if (items.length === 0) return null;
+
   const groupLive = items.some(
-    (item) => item.streaming || item.status === 'running' || item.status === 'inProgress',
+    (item) =>
+      item.streaming ||
+      item.status === 'running' ||
+      item.status === 'inProgress' ||
+      item.status === 'pending',
   );
-  const settled = !groupLive && !running;
+  const isLive = Boolean(groupLive || running);
+  const settled = !isLive;
   const summary = summarizeWorkBurst(items);
   const durationLine = interrupted
     ? interruptedTurnLine(durationSeconds ?? burstDurationSeconds(items))
     : workedForLine(durationSeconds ?? burstDurationSeconds(items));
-  const showSummary = settled && items.length > 1;
-  const visibleItems = showSummary && !expanded ? [] : items;
-  const headerLabel = summary || `${items.length} actions`;
+  const liveHeadline = liveWorkGroupHeadline(items);
+  const settledHeadline =
+    summary || (items.length === 1 ? activityTraceLabel(items[0]) : `${items.length} actions`);
+  const fallbackLabel = isLive ? 'Working' : `${items.length} ${items.length === 1 ? 'action' : 'actions'}`;
+  const headerLabel = (isLive ? liveHeadline : settledHeadline).trim() || fallbackLabel;
+  const visibleItems = expanded ? items : [];
 
   return (
-    <div className={`chat-work-group ${expanded && items.length > 1 ? 'chat-work-group--expanded' : ''}`}>
-      {showSummary && (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          className="chat-work-group__toggle"
-          onClick={() => setExpanded((v) => !v)}
+    <div
+      className={`chat-work-group ${expanded ? 'chat-work-group--expanded' : 'chat-work-group--collapsed'} ${
+        isLive ? 'chat-work-group--live' : ''
+      }`}
+    >
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={groupId}
+        className="chat-work-group__toggle"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span
+          className={`chat-work-group__label ${isLive ? 'live-tool-shine chat-activity-shine' : ''}`}
+          title={headerLabel}
         >
-          <span aria-hidden="true" className="chat-work-entry__glyph">
-            <ActivityGlyph item={items[0]} size={16} />
-          </span>
-          <span className="chat-work-group__label">{headerLabel}</span>
-          {settled && durationLine && !expanded ? (
-            <span className="chat-work-group__duration">{durationLine}</span>
+          {headerLabel}
+        </span>
+        {settled && durationLine && !expanded ? (
+          <span className="chat-work-group__duration">{durationLine}</span>
+        ) : null}
+        <span
+          aria-hidden="true"
+          className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
+        >
+          <ChevronRightIcon size={12} />
+        </span>
+      </button>
+      {expanded && (
+        <div id={groupId} className="chat-work-group__items">
+          {visibleItems.map((item, idx) => (
+            <ChatWorkEntry
+              key={item.id}
+              item={item}
+              running={(running && item.streaming) || item.streaming}
+              stepIndex={idx}
+              enter={enterFor?.(item.id) ?? false}
+            />
+          ))}
+          {isLive ? (
+            <div className="chat-work-group__working" role="status">
+              <span className="live-tool-shine chat-activity-shine">Working</span>
+            </div>
           ) : null}
-          <span
-            aria-hidden="true"
-            className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
-          >
-            <ChevronRightIcon size={12} />
-          </span>
-        </button>
+        </div>
       )}
-      <div className="chat-work-group__items">
-        {visibleItems.map((item, idx) => (
-          <ChatWorkEntry
-            key={item.id}
-            item={item}
-            running={(running && item.streaming) || item.streaming}
-            stepIndex={idx}
-            enter={enterFor?.(item.id) ?? false}
-          />
-        ))}
-      </div>
     </div>
   );
 };

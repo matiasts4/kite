@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatItem } from '../../../types';
 import { activityTraceLabel, summarizeWorkBurst } from './activityPresentation';
+import { isInternalDispatchItem, visibleAssistantText } from './chatItemHelpers';
 import { expandCitations } from './citationChip';
 
 export interface ThreadTurnEntry {
@@ -41,10 +42,11 @@ export function formatTurnTimestamp(unixMs: number | null | undefined): string {
 }
 
 export function buildThreadTurns(items: ChatItem[], running = false): ThreadTurnEntry[] {
+  const humanTurnCount = items.filter((it) => it.kind === 'user' && !isInternalDispatchItem(it)).length;
   const turns: ThreadTurnEntry[] = [];
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i];
-    if (!item || item.kind !== 'user') continue;
+    if (!item || item.kind !== 'user' || isInternalDispatchItem(item)) continue;
 
     const rawPrompt = stripMarkdown(expandCitations(item.text || ''));
     const promptTitle = rawPrompt || (item.attachments?.length ? 'Attached files' : 'Message');
@@ -54,16 +56,17 @@ export function buildThreadTurns(items: ChatItem[], running = false): ThreadTurn
     for (let j = i + 1; j < items.length; j += 1) {
       const next = items[j];
       if (!next) continue;
-      if (next.kind === 'user') break;
-      if (next.kind === 'assistant' && next.text?.trim()) {
-        assistantParts.push(next.text.trim());
+      if (next.kind === 'user' && !isInternalDispatchItem(next)) break;
+      if (next.kind === 'assistant') {
+        const visible = visibleAssistantText(next.text ?? '').trim();
+        if (visible) assistantParts.push(visible);
       } else if (next.kind === 'tool' || next.kind === 'command' || next.kind === 'reasoning') {
         workItems.push(next);
       }
     }
 
     const joinedAssistant = stripMarkdown(assistantParts.join(' '));
-    const isLastTurn = turns.length === items.filter((it) => it.kind === 'user').length - 1;
+    const isLastTurn = turns.length === humanTurnCount - 1;
     let assistantPreview = joinedAssistant;
     if (!assistantPreview) {
       if (workItems.length > 0) {
@@ -96,7 +99,7 @@ export interface ThreadTurnRailProps {
   onEnsureAllVisible?: () => void;
 }
 
-export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
+export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = React.memo(({
   items,
   running = false,
   transcriptRef,
@@ -106,9 +109,28 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
   const [activeIndex, setActiveIndex] = useState<number>(() => Math.max(0, turns.length - 1));
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const dotsRef = useRef<HTMLDivElement | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+  const lastActiveRef = useRef<number>(activeIndex);
+  lastActiveRef.current = activeIndex;
+  const turnsRef = useRef<ThreadTurnEntry[]>(turns);
+  turnsRef.current = turns;
+  const turnOffsetsCacheRef = useRef<{
+    turnsRef: ThreadTurnEntry[];
+    scrollHeight: number;
+    clientHeight: number;
+    clientWidth: number;
+    offsets: Array<{ index: number; top: number }>;
+  } | null>(null);
+
+  const commitActiveIndex = useCallback((nextIndex: number) => {
+    if (lastActiveRef.current === nextIndex) return;
+    lastActiveRef.current = nextIndex;
+    setActiveIndex(nextIndex);
+  }, []);
 
   useEffect(() => {
     if (turns.length === 0) {
+      turnOffsetsCacheRef.current = null;
       setActiveIndex(0);
       setHoveredIndex(null);
       return;
@@ -130,45 +152,99 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
     }
   }, [activeIndex, turns.length]);
 
-  const syncActiveFromScroll = useCallback(() => {
-    const container = transcriptRef.current;
-    if (!container || turns.length === 0) return;
+  const cancelScheduledSync = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+  }, []);
 
-    const { scrollTop, scrollHeight, clientHeight } = container;
+  const syncActiveFromScroll = useCallback(() => {
+    cancelScheduledSync();
+    const currentTurns = turnsRef.current;
+    const container = transcriptRef.current;
+    if (!container || currentTurns.length === 0) return;
+
+    const { scrollTop, scrollHeight, clientHeight, clientWidth } = container;
     if (scrollHeight - scrollTop - clientHeight <= 36) {
-      setActiveIndex(turns.length - 1);
+      commitActiveIndex(currentTurns.length - 1);
       return;
     }
 
-    const containerRect = container.getBoundingClientRect();
-    const thresholdY = containerRect.top + Math.min(180, containerRect.height * 0.4);
-    let current = 0;
+    const cache = turnOffsetsCacheRef.current;
+    let offsets: Array<{ index: number; top: number }>;
+    if (
+      cache &&
+      cache.turnsRef === currentTurns &&
+      cache.scrollHeight === scrollHeight &&
+      cache.clientHeight === clientHeight &&
+      cache.clientWidth === clientWidth
+    ) {
+      offsets = cache.offsets;
+    } else {
+      const containerRect = container.getBoundingClientRect();
+      const nodeById = new Map<string, HTMLElement>();
+      const nodes = container.querySelectorAll<HTMLElement>('[data-turn-user-id]');
+      for (let i = 0; i < nodes.length; i += 1) {
+        const el = nodes[i];
+        const id = el?.dataset.turnUserId;
+        if (id) nodeById.set(id, el);
+      }
+      offsets = [];
+      for (let idx = 0; idx < currentTurns.length; idx += 1) {
+        const turn = currentTurns[idx]!;
+        const node = nodeById.get(turn.userItemId);
+        if (!node) continue;
+        const top = node.getBoundingClientRect().top - containerRect.top + scrollTop;
+        offsets.push({ index: idx, top });
+      }
+      turnOffsetsCacheRef.current = {
+        turnsRef: currentTurns,
+        scrollHeight,
+        clientHeight,
+        clientWidth,
+        offsets,
+      };
+    }
 
-    for (let idx = 0; idx < turns.length; idx += 1) {
-      const turn = turns[idx];
-      const node = container.querySelector<HTMLElement>(`[data-turn-user-id="${turn.userItemId}"]`);
-      if (!node) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.top <= thresholdY) {
-        current = idx;
+    const thresholdScrollTop = scrollTop + Math.min(180, clientHeight * 0.4);
+    let nextIndex = 0;
+    for (let i = 0; i < offsets.length; i += 1) {
+      const entry = offsets[i]!;
+      if (entry.top <= thresholdScrollTop) {
+        nextIndex = entry.index;
       } else {
         break;
       }
     }
-    setActiveIndex(current);
-  }, [transcriptRef, turns]);
+    commitActiveIndex(nextIndex);
+  }, [transcriptRef, commitActiveIndex, cancelScheduledSync]);
+
+  const scheduleSyncFromScroll = useCallback(() => {
+    if (turnsRef.current.length === 0) return;
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+    }
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      syncActiveFromScroll();
+    });
+  }, [syncActiveFromScroll]);
 
   useEffect(() => {
     const container = transcriptRef.current;
     if (!container || turns.length === 0) return;
     syncActiveFromScroll();
-    container.addEventListener('scroll', syncActiveFromScroll, { passive: true });
-    return () => container.removeEventListener('scroll', syncActiveFromScroll);
-  }, [transcriptRef, turns.length, syncActiveFromScroll]);
+    container.addEventListener('scroll', scheduleSyncFromScroll, { passive: true });
+    return () => {
+      container.removeEventListener('scroll', scheduleSyncFromScroll);
+      cancelScheduledSync();
+    };
+  }, [transcriptRef, turns.length, syncActiveFromScroll, scheduleSyncFromScroll, cancelScheduledSync]);
 
   const handleSelectTurn = useCallback(
     (turn: ThreadTurnEntry) => {
-      setActiveIndex(turn.index);
+      commitActiveIndex(turn.index);
       const scrollTarget = () => {
         const root = transcriptRef.current ?? document;
         const target = root.querySelector<HTMLElement>(`[data-turn-user-id="${turn.userItemId}"]`);
@@ -186,7 +262,7 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
         });
       }
     },
-    [transcriptRef, onEnsureAllVisible],
+    [transcriptRef, onEnsureAllVisible, commitActiveIndex],
   );
 
   if (turns.length === 0) return null;
@@ -238,4 +314,5 @@ export const ThreadTurnRail: React.FC<ThreadTurnRailProps> = ({
       ) : null}
     </nav>
   );
-};
+});
+ThreadTurnRail.displayName = 'ThreadTurnRail';

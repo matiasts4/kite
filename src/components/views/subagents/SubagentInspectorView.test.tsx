@@ -7,6 +7,7 @@ import type { ChatItem } from '../../../types';
 const loadChatThreadMock = vi.fn();
 const getThreadSubagentDetailMock = vi.fn();
 const getThreadSwarmStateMock = vi.fn();
+const listAllSubagentRunsMock = vi.fn();
 const sendSubagentMessageMock = vi.fn();
 const stopSubagentRunMock = vi.fn();
 const respondChatApprovalMock = vi.fn();
@@ -18,6 +19,7 @@ vi.mock('../../../lib/ipc/chat', () => ({
   loadChatThread: (...args: unknown[]) => loadChatThreadMock(...args),
   getThreadSubagentDetail: (...args: unknown[]) => getThreadSubagentDetailMock(...args),
   getThreadSwarmState: (...args: unknown[]) => getThreadSwarmStateMock(...args),
+  listAllSubagentRuns: (...args: unknown[]) => listAllSubagentRunsMock(...args),
   sendSubagentMessage: (...args: unknown[]) => sendSubagentMessageMock(...args),
   stopSubagentRun: (...args: unknown[]) => stopSubagentRunMock(...args),
   respondChatApproval: (...args: unknown[]) => respondChatApprovalMock(...args),
@@ -161,6 +163,12 @@ describe('SubagentInspectorView', () => {
     vi.clearAllMocks();
     getThreadSubagentDetailMock.mockResolvedValue(null);
     getThreadSwarmStateMock.mockResolvedValue(null);
+    listAllSubagentRunsMock.mockResolvedValue({
+      runs: [],
+      totalCount: 0,
+      activeCount: 0,
+      waitingCount: 0,
+    });
   });
 
   it('renders empty state when thread has no subagents or swarms', async () => {
@@ -204,7 +212,9 @@ describe('SubagentInspectorView', () => {
     expect(hierarchy.textContent).toMatch(/Subagent:\s*Gemini 2\.5 Flash/);
     expect(screen.getByText('inherit')).toBeInTheDocument();
 
-    // TaskBriefCard collapsed -> expanded toggle
+    // TaskBriefCard collapsed -> expanded toggle inside user prompt turn bubble
+    const promptTurn = screen.getByTestId('subagent-prompt-turn');
+    expect(promptTurn.className).toContain('chat-user-row--bubble');
     const briefToggle = screen.getByRole('button', { name: /Task Brief/i });
     expect(briefToggle.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(briefToggle);
@@ -213,7 +223,11 @@ describe('SubagentInspectorView', () => {
       screen.getByText(/Inspect all chat normalization modules/i),
     ).toBeInTheDocument();
 
-    // Subagent live steps rendered (work rows + markdown assistant block)
+    // Subagent live steps rendered inside main-thread transcript column
+    const transcriptCol = screen.getByTestId('subagent-transcript-column');
+    expect(transcriptCol.className).toContain('chat-transcript__column');
+    expect(transcriptCol.querySelector('.chat-assistant-row')).not.toBeNull();
+    expect(transcriptCol.querySelector('.chat-turn-activity')).not.toBeNull();
     expect(screen.getByText(/Found/i)).toBeInTheDocument();
     expect(screen.getByText('SubagentRun')).toBeInTheDocument();
 
@@ -263,17 +277,17 @@ describe('SubagentInspectorView', () => {
     expect(screen.getByTestId('swarm-board-inspector')).toBeInTheDocument();
   });
 
-  it('sends follow-up steering messages and stops an active subagent run', async () => {
+  it('renders a read-only subagent footer without direct messaging and stops an active subagent run', async () => {
     const thread = makeThread();
     loadChatThreadMock.mockResolvedValueOnce(thread);
-    sendSubagentMessageMock.mockResolvedValueOnce({
-      ok: true,
-      run: { ...thread.subagentRuns![0], status: 'running' },
-    });
     stopSubagentRunMock.mockResolvedValueOnce({
       ok: true,
       run: { ...thread.subagentRuns![0], status: 'killed' },
     });
+
+    const selectEvents: CustomEvent[] = [];
+    const listener = (e: Event) => selectEvents.push(e as CustomEvent);
+    window.addEventListener('kite:select-thread', listener);
 
     render(
       <SubagentInspectorView
@@ -287,22 +301,22 @@ describe('SubagentInspectorView', () => {
       />,
     );
 
-    const input = await screen.findByPlaceholderText(/Message Codebase Researcher/i);
-    fireEvent.change(input, { target: { value: 'Check edge case #2' } });
-    fireEvent.submit(screen.getByTestId('subagent-steering-form'));
+    const footer = await screen.findByTestId('subagent-readonly-footer');
+    expect(screen.queryByTestId('subagent-steering-form')).toBeNull();
+    expect(screen.queryByPlaceholderText(/Message Codebase Researcher/i)).toBeNull();
+    expect(footer).toHaveTextContent(/Read-only subagent thread/i);
 
-    await waitFor(() => {
-      expect(sendSubagentMessageMock).toHaveBeenCalledWith(
-        'thread-main-1',
-        'sub-1',
-        'Check edge case #2',
-      );
-    });
+    fireEvent.click(screen.getByRole('button', { name: /Focus main thread/i }));
+    expect(selectEvents).toHaveLength(1);
+    expect(selectEvents[0].detail).toEqual({ threadId: 'thread-main-1' });
+    expect(sendSubagentMessageMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: /Stop subagent/i }));
     await waitFor(() => {
       expect(stopSubagentRunMock).toHaveBeenCalledWith('thread-main-1', 'sub-1');
     });
+
+    window.removeEventListener('kite:select-thread', listener);
   });
 
   it('shows inline failure diagnostics instead of waiting placeholder when a subagent run fails with zero steps', async () => {
@@ -399,6 +413,11 @@ describe('SubagentInspectorView', () => {
               text: 'grok sent an unknown frame (schema=jsonrpc,method,params)',
             }),
             makeItem({
+              id: 'internal-dispatch-1',
+              kind: 'user',
+              text: '[kite from="thread:peer-1"]\nThis is another agent, not the person.\nTo reply: kite dispatch send thread:peer-1 "<reply>"\nIrreversible and privileged actions still wait for the person.\nBODY:\nstate: done',
+            }),
+            makeItem({
               id: 'r-1',
               kind: 'reasoning',
               text: 'Reviewing package.json in root to identify dev and test scripts.',
@@ -426,9 +445,19 @@ describe('SubagentInspectorView', () => {
     expect(container.querySelector('.subagent-inspector__selector-strip')).toBeNull();
     expect(screen.queryByText('Tool')).toBeNull();
     expect(screen.queryByText(/grok sent an unknown frame/i)).toBeNull();
+    expect(screen.queryByText(/This is another agent, not the person/i)).toBeNull();
+
+    // Reasoning row uses main-thread ChatItemRow collapsible Thought disclosure
+    const thoughtToggle = screen.getByRole('button', { name: /Thought/i });
+    expect(thoughtToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(thoughtToggle);
+    expect(thoughtToggle.getAttribute('aria-expanded')).toBe('true');
     expect(
       screen.getByText('Reviewing package.json in root to identify dev and test scripts.'),
     ).toBeInTheDocument();
+
+    // Assistant row uses unboxed main-thread markdown prose container
+    expect(container.querySelector('.chat-assistant-row')).not.toBeNull();
     expect(screen.getByText(/starts Vite/i)).toBeInTheDocument();
   });
 
@@ -558,6 +587,292 @@ describe('SubagentInspectorView', () => {
     fireEvent.click(allowBtn);
     await waitFor(() => {
       expect(respondChatApprovalMock).toHaveBeenCalledWith('child-wait-1', 'allowOnce', 'apr-child-1');
+    });
+  });
+
+  it('shows multi-subagent overview cards when a thread has 2+ runs, filters Live, and drills into a selected run', async () => {
+    const thread = makeThread({ swarmState: null });
+    loadChatThreadMock.mockResolvedValueOnce(thread);
+
+    render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-main-1" />);
+
+    const overview = await screen.findByTestId('subagent-runs-overview');
+    expect(overview).toHaveTextContent('2 subagents');
+    expect(screen.getAllByTestId('subagent-run-card')).toHaveLength(2);
+
+    // Filter down to active runs only
+    fireEvent.click(screen.getByRole('tab', { name: /Live \(1\)/i }));
+    expect(screen.getAllByTestId('subagent-run-card')).toHaveLength(1);
+    expect(screen.getByTestId('subagent-run-card')).toHaveTextContent('Codebase Researcher');
+
+    // Drill into Codebase Researcher's stream and navigate back to Overview
+    fireEvent.click(screen.getByRole('button', { name: /Inspect Codebase Researcher/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId('subagent-transcript-column')).toBeInTheDocument();
+    });
+    const backBtn = screen.getByRole('button', { name: /← Subagents \(2\)/i });
+    fireEvent.click(backBtn);
+    expect(screen.getByTestId('subagent-runs-overview')).toBeInTheDocument();
+  });
+
+  it('updates reactively when selectedThreadId changes and resolves requestedTarget.childThreadId', async () => {
+    const threadA = makeThread({ id: 'thread-a', title: 'Thread Alpha', swarmState: null });
+    const threadB = makeThread({
+      id: 'thread-b',
+      title: 'Thread Beta',
+      swarmState: null,
+      subagentRuns: [
+        {
+          subagentId: 'sub-b-1',
+          parentThreadId: 'thread-b',
+          parentToolCallId: 'call-b-1',
+          childThreadId: 'child-b-1',
+          role: 'Database Reviewer',
+          provider: 'grok',
+          model: 'grok-4.7-build-fast',
+          workspaceMode: 'inherit',
+          status: 'completed',
+          prompt: 'Check migrations.',
+          stepCount: 1,
+          startedAtUnixMs: Date.now() - 10_000,
+          updatedAtUnixMs: Date.now() - 1_000,
+          items: [
+            makeItem({
+              id: 'b-step-1',
+              kind: 'assistant',
+              text: 'All migrations valid.',
+            }),
+          ],
+        },
+      ],
+    });
+    loadChatThreadMock.mockImplementation(async (tid: string) => {
+      if (tid === 'thread-a') return threadA;
+      if (tid === 'thread-b') return threadB;
+      return null;
+    });
+
+    const { rerender } = render(
+      <SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-a" />,
+    );
+    await screen.findByTestId('subagent-runs-overview');
+
+    rerender(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-b" />);
+    await waitFor(() => {
+      expect(screen.getByText('Database Reviewer')).toBeInTheDocument();
+    });
+    expect(screen.getByText('All migrations valid.')).toBeInTheDocument();
+
+    // Child row clicks pass childThreadId without subagentId
+    rerender(
+      <SubagentInspectorView
+        workspaceId="ws-1"
+        selectedThreadId="thread-a"
+        requestedTarget={{
+          threadId: 'thread-a',
+          childThreadId: 'thread-sub-1',
+          mode: 'subagent',
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('subagent-transcript-column')).toBeInTheDocument();
+      expect(document.querySelector('.subagent-inspector__role')).toHaveTextContent(
+        'Codebase Researcher',
+      );
+      expect(screen.queryByText('All checks passed.')).not.toBeInTheDocument();
+    });
+  });
+
+  it('supports combined All Threads view grouped by parent thread with drill-down and empty-thread shortcut', async () => {
+    const emptyThread = makeThread({ id: 'thread-empty', subagentRuns: [], swarmState: null });
+    const loadedOtherThread = makeThread({ id: 'thread-other', title: 'Other Feature', swarmState: null });
+    loadChatThreadMock.mockImplementation(async (tid: string) => {
+      if (tid === 'thread-empty') return emptyThread;
+      if (tid === 'thread-other') return loadedOtherThread;
+      return null;
+    });
+    listAllSubagentRunsMock.mockResolvedValue({
+      totalCount: 2,
+      activeCount: 1,
+      waitingCount: 0,
+      runs: [
+        {
+          threadId: 'thread-other',
+          threadTitle: 'Other Feature',
+          workspaceId: 'ws-1',
+          parentProvider: 'claude',
+          parentModel: 'claude-opus-4-6',
+          hasPendingApproval: false,
+          run: {
+            ...loadedOtherThread.subagentRuns![0],
+            parentThreadId: 'thread-other',
+            items: [],
+          },
+        },
+        {
+          threadId: 'thread-remote',
+          threadTitle: 'Remote Repo Audit',
+          workspaceId: 'ws-2',
+          parentProvider: 'gemini',
+          parentModel: 'gemini-3-pro',
+          hasPendingApproval: false,
+          run: {
+            ...loadedOtherThread.subagentRuns![1],
+            subagentId: 'sub-remote-1',
+            parentThreadId: 'thread-remote',
+            items: [],
+          },
+        },
+      ],
+    });
+
+    render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-empty" />);
+
+    const cta = await screen.findByRole('button', { name: /View 1 live across all threads/i });
+    fireEvent.click(cta);
+
+    const globalView = await screen.findByTestId('global-subagents-view');
+    expect(globalView).toHaveTextContent('Other Feature');
+    expect(globalView).toHaveTextContent('Remote Repo Audit');
+    expect(screen.getAllByTestId('global-subagent-thread-group')).toHaveLength(2);
+
+    // Project workspace filter narrows to ws-1
+    fireEvent.click(screen.getByRole('tab', { name: /This project/i }));
+    expect(screen.getAllByTestId('global-subagent-thread-group')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('tab', { name: /All projects/i }));
+
+    // Clicking a card in global view drills into its detail stream with Back to All Subagents
+    fireEvent.click(screen.getByRole('button', { name: /Inspect Codebase Researcher/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /← All Subagents/i })).toBeInTheDocument();
+      expect(screen.getByTestId('subagent-transcript-column')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /← All Subagents/i }));
+    expect(screen.getByTestId('global-subagents-view')).toBeInTheDocument();
+  });
+
+  it('displays parentModelLabel when subagent model is inherit and refreshes on kite:threads-changed', async () => {
+    const initialThread = makeThread({
+      id: 'thread-inherit',
+      status: 'running',
+      subagentRuns: [
+        {
+          subagentId: 'sub-inh-1',
+          parentThreadId: 'thread-inherit',
+          parentToolCallId: 'call-inh',
+          role: 'Inherited Auditor',
+          typeName: 'research',
+          provider: 'claude',
+          model: 'inherit',
+          workspaceMode: 'inherit',
+          status: 'running',
+          prompt: 'Audit lock order.',
+          stepCount: 0,
+          startedAtUnixMs: Date.now() - 5_000,
+          updatedAtUnixMs: Date.now() - 1_000,
+          items: [],
+        },
+      ],
+    });
+    const settledThread = makeThread({
+      id: 'thread-inherit',
+      status: 'idle',
+      subagentRuns: [
+        {
+          ...initialThread.subagentRuns![0],
+          status: 'completed',
+          stepCount: 1,
+          completedAtUnixMs: Date.now(),
+          items: [
+            makeItem({
+              id: 'asst-done',
+              kind: 'assistant',
+              text: 'Audit finished cleanly.',
+              status: 'completed',
+            }),
+          ],
+        },
+      ],
+    });
+
+    loadChatThreadMock
+      .mockResolvedValueOnce(initialThread)
+      .mockResolvedValueOnce(settledThread);
+
+    render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-inherit" />);
+
+    const hierarchy = await screen.findByTestId('subagent-model-hierarchy');
+    expect(hierarchy).toHaveTextContent('Main: Opus 4.6 ➔ Subagent: Opus 4.6');
+    expect(hierarchy.textContent).not.toMatch(/inherit/i);
+
+    window.dispatchEvent(new Event('kite:threads-changed'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Audit finished cleanly\./i)).toBeInTheDocument();
+    });
+    expect(loadChatThreadMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders SubagentRoleIcon and 4-dot orbital spinner without literal Working text in cards and inspector header', async () => {
+    const runningThread = makeThread({
+      id: 'thread-icons-1',
+      status: 'running',
+      subagentRuns: [
+        {
+          subagentId: 'sub-icon-1',
+          parentThreadId: 'thread-icons-1',
+          parentToolCallId: 'call-icon-1',
+          role: 'Codebase Researcher',
+          typeName: 'research',
+          provider: 'antigravity',
+          model: 'gemini-4-argon',
+          workspaceMode: 'inherit',
+          status: 'running',
+          prompt: 'Map icons',
+          stepCount: 1,
+          startedAtUnixMs: Date.now() - 4_000,
+          updatedAtUnixMs: Date.now(),
+          items: [],
+        },
+        {
+          subagentId: 'sub-icon-2',
+          parentThreadId: 'thread-icons-1',
+          parentToolCallId: 'call-icon-2',
+          role: 'Security Auditor',
+          typeName: 'review',
+          provider: 'claude',
+          model: 'claude-opus-4-6',
+          workspaceMode: 'share',
+          status: 'completed',
+          prompt: 'Audit rules',
+          stepCount: 2,
+          startedAtUnixMs: Date.now() - 8_000,
+          updatedAtUnixMs: Date.now() - 1_000,
+          completedAtUnixMs: Date.now() - 1_000,
+          items: [],
+        },
+      ],
+    });
+    loadChatThreadMock.mockResolvedValueOnce(runningThread);
+
+    render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-icons-1" />);
+
+    const overview = await screen.findByTestId('subagent-runs-overview');
+    const roleIcons = overview.querySelectorAll('[data-testid="subagent-role-icon"]');
+    expect(roleIcons).toHaveLength(2);
+    expect(roleIcons[0]).toHaveAttribute('data-role-kind', 'explore');
+    expect(roleIcons[1]).toHaveAttribute('data-role-kind', 'review');
+    expect(overview.querySelector('[data-testid="agent-orbit-spinner"]')).toBeInTheDocument();
+    expect(overview.textContent).not.toMatch(/Working/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /Inspect Codebase Researcher/i }));
+    await waitFor(() => {
+      const headerIcons = document.querySelectorAll('.subagent-inspector__header [data-testid="subagent-role-icon"]');
+      expect(headerIcons.length).toBeGreaterThanOrEqual(2);
+      expect(document.querySelector('.subagent-inspector__header [data-testid="agent-orbit-spinner"]')).toBeInTheDocument();
+      expect(document.querySelector('.subagent-inspector__header')?.textContent).not.toMatch(/Working/i);
     });
   });
 });

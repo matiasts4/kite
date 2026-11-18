@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { BrowserView } from './views/BrowserView';
 import { closeBrowserSurfaceSession, getBrowserSurfaceSession } from './views/browser/browserSurfaceRegistry';
-import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../lib/terminalLinkNav';
+import { OPEN_RIGHT_DOCK_BROWSER_EVENT, consumePendingBrowserRequest } from '../lib/terminalLinkNav';
 import {
   OPEN_DIFFS_EVENT,
   OPEN_RIGHT_DOCK_DIFFS_EVENT,
   peekPendingDiffPreview,
 } from '../lib/diffPreviewNav';
-import { openFileInRightDock } from '../lib/filePreviewNav';
+import { openFileInRightDock, peekPendingFilePreview } from '../lib/filePreviewNav';
 import { FilesView } from './views/FilesView';
 import { DiffsView } from './views/diffs/DiffsView';
 import { TicketsView } from './views/TicketsView';
@@ -15,6 +15,7 @@ import { PromptsView } from './views/PromptsView';
 import { SidePanelAppsView } from './views/SidePanelAppsView';
 import { AgentDashboardView } from './views/apps/AgentDashboardView';
 import { SubagentInspectorView } from './views/subagents/SubagentInspectorView';
+import { AgentStatusIndicator } from './ui/AgentStatusIndicator';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { getActiveAgentTerminals } from '../lib/terminalRegistry';
 import {
@@ -90,6 +91,19 @@ export const RightDock: React.FC<RightDockProps> = ({
   const [requestedSubagentTarget, setRequestedSubagentTarget] =
     useState<OpenRightDockSubagentDetail | null>(null);
   const [liveSubagentsCount, setLiveSubagentsCount] = useState<number>(0);
+  const trackedSubagentThreadId = requestedSubagentTarget?.threadId ?? selectedThreadId;
+  const trackedSubagentThreadIdRef = useRef<string | null>(trackedSubagentThreadId);
+  trackedSubagentThreadIdRef.current = trackedSubagentThreadId;
+  const prevSelectedThreadIdRef = useRef<string | null>(selectedThreadId);
+
+  useEffect(() => {
+    if (prevSelectedThreadIdRef.current === selectedThreadId) return;
+    prevSelectedThreadIdRef.current = selectedThreadId;
+    setRequestedSubagentTarget((prev) => {
+      if (!prev) return null;
+      return prev.threadId === selectedThreadId ? prev : null;
+    });
+  }, [selectedThreadId]);
   const [panelWidth, setPanelWidth] = useState<number>(() => loadInitialWidth());
   const [dragging, setDragging] = useState(false);
   const widthRef = useRef(panelWidth);
@@ -187,14 +201,16 @@ export const RightDock: React.FC<RightDockProps> = ({
       });
       setActiveTabId('files');
     };
+    if (peekPendingFilePreview()) {
+      handleOpenFile();
+    }
     window.addEventListener('kite:open-right-dock-file', handleOpenFile);
     return () => window.removeEventListener('kite:open-right-dock-file', handleOpenFile);
   }, []);
 
   // Listen for open-right-dock-browser event to switch to or open the browser tab and load URL
   useEffect(() => {
-    const handleOpenBrowser = (e: Event) => {
-      const custom = e as CustomEvent<{ url?: string; workspaceId?: string | null }>;
+    const applyBrowserRequest = (detail?: { url?: string; workspaceId?: string | null }) => {
       setTabs((prev) => {
         if (!prev.some((t) => t.id === 'browser')) {
           return [...prev, { id: 'browser', kind: 'browser' }];
@@ -203,11 +219,24 @@ export const RightDock: React.FC<RightDockProps> = ({
       });
       setActiveTabId('browser');
 
-      if (custom.detail?.url) {
-        const session = getBrowserSurfaceSession(effectiveWorkspaceId);
-        void session.openAddress(custom.detail.url);
+      if (detail?.url) {
+        const targetWorkspaceId = detail?.workspaceId ?? effectiveWorkspaceId;
+        const session = getBrowserSurfaceSession(targetWorkspaceId);
+        void session.openAddress(detail.url);
       }
     };
+
+    const handleOpenBrowser = (e: Event) => {
+      const custom = e as CustomEvent<{ url?: string; workspaceId?: string | null }>;
+      consumePendingBrowserRequest();
+      applyBrowserRequest(custom.detail);
+    };
+
+    const pendingBrowser = consumePendingBrowserRequest();
+    if (pendingBrowser) {
+      applyBrowserRequest(pendingBrowser);
+    }
+
     window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowser);
     return () => window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowser);
   }, [effectiveWorkspaceId]);
@@ -267,17 +296,12 @@ export const RightDock: React.FC<RightDockProps> = ({
         handleOpenSubagents();
       }
     };
-    const handleOpenDiffsEvent = () => {
-      setTabs((prev) => {
-        if (!prev.some((t) => t.id === 'diffs')) {
-          return [...prev, { id: 'diffs', kind: 'diffs' }];
-        }
-        return prev;
-      });
-      setActiveTabId('diffs');
-    };
     const handleSubagentCount = (e: Event) => {
-      const custom = e as CustomEvent<{ count?: number }>;
+      const custom = e as CustomEvent<{ threadId?: string; count?: number }>;
+      const incomingThreadId = custom.detail?.threadId;
+      if (incomingThreadId && incomingThreadId !== trackedSubagentThreadIdRef.current) {
+        return;
+      }
       if (typeof custom.detail?.count === 'number') {
         setLiveSubagentsCount(Math.max(0, custom.detail.count));
       }
@@ -296,12 +320,10 @@ export const RightDock: React.FC<RightDockProps> = ({
     }
 
     window.addEventListener('keydown', handleGlobalShortcuts);
-    window.addEventListener('kite:open-diffs', handleOpenDiffsEvent);
     window.addEventListener(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, handleOpenSubagent);
     window.addEventListener('kite:subagent-activity-count', handleSubagentCount);
     return () => {
       window.removeEventListener('keydown', handleGlobalShortcuts);
-      window.removeEventListener('kite:open-diffs', handleOpenDiffsEvent);
       window.removeEventListener(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, handleOpenSubagent);
       window.removeEventListener('kite:subagent-activity-count', handleSubagentCount);
     };
@@ -312,26 +334,31 @@ export const RightDock: React.FC<RightDockProps> = ({
   }, []);
 
   // Sync live subagents running count for the active thread in Tauri sessions
-  const trackedSubagentThreadId = requestedSubagentTarget?.threadId ?? selectedThreadId;
   useEffect(() => {
-    if (
-      activeSubagentsCount !== undefined ||
-      !trackedSubagentThreadId ||
-      typeof window === 'undefined' ||
-      !('__TAURI_INTERNALS__' in window)
-    ) {
+    if (activeSubagentsCount !== undefined) return;
+    setLiveSubagentsCount(0);
+    if (!trackedSubagentThreadId) {
+      return;
+    }
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
       return;
     }
     let cancelled = false;
-    void loadChatThread(trackedSubagentThreadId)
-      .then((thread) => {
-        if (!cancelled) {
-          setLiveSubagentsCount(countRunningSubagents(thread));
-        }
-      })
-      .catch(() => undefined);
+    const syncCount = () => {
+      void loadChatThread(trackedSubagentThreadId)
+        .then((thread) => {
+          if (!cancelled) {
+            setLiveSubagentsCount(countRunningSubagents(thread));
+          }
+        })
+        .catch(() => undefined);
+    };
+    syncCount();
+    const onThreadsChanged = () => syncCount();
+    window.addEventListener('kite:threads-changed', onThreadsChanged);
     return () => {
       cancelled = true;
+      window.removeEventListener('kite:threads-changed', onThreadsChanged);
     };
   }, [trackedSubagentThreadId, activeSubagentsCount]);
 
@@ -736,8 +763,11 @@ export const RightDock: React.FC<RightDockProps> = ({
                           <span className="side-panel-tab__count">{activeAgentsCount}</span>
                         )}
                         {tab.kind === 'subagents' && (activeSubagentsCount ?? liveSubagentsCount) > 0 && (
-                          <span className="side-panel-tab__count">
-                            {activeSubagentsCount ?? liveSubagentsCount}
+                          <span className="side-panel-tab__activity">
+                            <AgentStatusIndicator status="running" size={11} />
+                            <span className="side-panel-tab__count">
+                              {activeSubagentsCount ?? liveSubagentsCount}
+                            </span>
                           </span>
                         )}
                       </button>
@@ -849,6 +879,7 @@ export const RightDock: React.FC<RightDockProps> = ({
                       workspaceId={effectiveWorkspaceId}
                       selectedThreadId={selectedThreadId}
                       requestedTarget={requestedSubagentTarget}
+                      onClearTarget={() => setRequestedSubagentTarget(null)}
                     />
                   )}
                   {activeTab.kind === 'app' && (

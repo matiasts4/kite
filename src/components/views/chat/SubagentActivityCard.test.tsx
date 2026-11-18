@@ -10,7 +10,7 @@ import {
 } from '../../../lib/subagentNav';
 
 describe('SubagentActivityCard and SwarmActivityCard', () => {
-  it('renders a live subagent card with role, model, workspace, ripple dot, shine preview, and dispatches dock event on click', () => {
+  it('renders a live subagent card with role, model, workspace, orbital spinner, shine preview, and dispatches dock event on click', () => {
     const dispatched: OpenRightDockSubagentDetail[] = [];
     const listener = (ev: Event) => {
       dispatched.push((ev as CustomEvent<OpenRightDockSubagentDetail>).detail);
@@ -53,7 +53,8 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     expect(screen.getByText('Codebase Explorer')).toBeInTheDocument();
     expect(screen.getByText(/grok-3-mini/i)).toBeInTheDocument();
     expect(screen.getByText(/branch/i)).toBeInTheDocument();
-    expect(container.querySelector('.chat-working-pulse')).not.toBeNull();
+    expect(container.querySelector('[data-testid="subagent-role-icon"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="agent-orbit-spinner"]')).not.toBeNull();
     expect(container.querySelector('.live-tool-shine')?.textContent).toContain(
       'Reading src-tauri/src/chat/threads.rs',
     );

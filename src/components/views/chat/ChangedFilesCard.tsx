@@ -32,7 +32,7 @@ export function ChangedFilesCard({
   onOpenTurnDiff?: () => void;
   onOpenFile?: (path: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const totals = useMemo(
     () =>
       files.reduce(
@@ -52,8 +52,6 @@ export function ChangedFilesCard({
       })),
     [files, workspaceName]
   );
-  const hasCollapsibleGroups =
-    files.length > 2 || formattedFiles.some(({ display }) => display.includes('/'));
   if (files.length === 0) return null;
   const label = files.length === 1 ? '1 changed file' : `${files.length} changed files`;
 
@@ -66,16 +64,15 @@ export function ChangedFilesCard({
             <DiffStatLabel additions={totals.additions} deletions={totals.deletions} />
           </div>
           <div className="changed-files-card__actions">
-            {hasCollapsibleGroups ? (
-              <button
-                type="button"
-                className="changed-files-card__btn"
-                aria-label={open ? 'Collapse folders' : 'Expand folders'}
-                onClick={() => setOpen((value) => !value)}
-              >
-                {open ? 'Collapse' : 'Expand'}
-              </button>
-            ) : null}
+            <button
+              type="button"
+              className="changed-files-card__btn"
+              aria-expanded={open}
+              aria-label={open ? 'Collapse changed files' : 'Expand changed files'}
+              onClick={() => setOpen((value) => !value)}
+            >
+              {open ? 'Collapse' : 'Expand'}
+            </button>
             <button
               type="button"
               className="changed-files-card__btn changed-files-card__open-diff"

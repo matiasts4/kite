@@ -136,8 +136,17 @@ export function openExternalLink(url: string): void {
   }
 }
 
+let pendingBrowserRequest: OpenBrowserInDockRequest | null = null;
+
+export function consumePendingBrowserRequest(): OpenBrowserInDockRequest | null {
+  const req = pendingBrowserRequest;
+  pendingBrowserRequest = null;
+  return req;
+}
+
 export function openBrowserInRightDock(req: OpenBrowserInDockRequest): void {
   if (typeof window === 'undefined') return;
+  pendingBrowserRequest = req;
   window.dispatchEvent(
     new CustomEvent<OpenBrowserInDockRequest>(OPEN_RIGHT_DOCK_BROWSER_EVENT, {
       detail: req,

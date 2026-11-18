@@ -286,18 +286,38 @@ export function handoffChannel(provider: string, versionSupportsDirect: boolean)
 }
 
 export function sidebarThreads<
-  T extends { sideChat?: boolean; parentThreadId?: string | null; startedByAgent?: boolean },
+  T extends {
+    id?: string;
+    sideChat?: boolean;
+    parentThreadId?: string | null;
+    startedByAgent?: boolean;
+    archivedAtUnixMs?: number | null;
+  },
 >(threads: T[]): T[] {
+  const archivedIds = new Set<string>();
+  for (const thread of threads) {
+    if (thread.archivedAtUnixMs != null && thread.id) {
+      archivedIds.add(thread.id);
+    }
+  }
   return threads.filter(
     (thread) =>
+      thread.archivedAtUnixMs == null &&
+      !(thread.parentThreadId && archivedIds.has(thread.parentThreadId)) &&
       thread.sideChat !== true &&
       !(Boolean(thread.parentThreadId) && Boolean(thread.startedByAgent))
   );
 }
 
-/** Live roster rows. Side chats and agent-spawned child threads stay in their drawers. */
+/** Live roster rows. Side chats, archived threads, and agent-spawned child threads stay out of the main roster. */
 export function visibleRosterThreads<
-  T extends { sideChat?: boolean; parentThreadId?: string | null; startedByAgent?: boolean },
+  T extends {
+    id?: string;
+    sideChat?: boolean;
+    parentThreadId?: string | null;
+    startedByAgent?: boolean;
+    archivedAtUnixMs?: number | null;
+  },
 >(threads: T[]): T[] {
   return sidebarThreads(threads);
 }

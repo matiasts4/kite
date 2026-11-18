@@ -28,12 +28,20 @@ vi.mock('./views/apps/AgentDashboardView', () => ({
 }));
 vi.mock('./views/subagents/SubagentInspectorView', () => ({
   SubagentInspectorView: ({
+    selectedThreadId,
     requestedTarget,
   }: {
-    requestedTarget?: { subagentId?: string | null; swarmId?: string | null } | null;
+    selectedThreadId?: string | null;
+    requestedTarget?: {
+      threadId?: string | null;
+      subagentId?: string | null;
+      swarmId?: string | null;
+    } | null;
   }) => (
     <div
       data-testid="mock-subagent-inspector-view"
+      data-selected-thread-id={selectedThreadId ?? ''}
+      data-target-thread-id={requestedTarget?.threadId ?? ''}
       data-subagent-id={requestedTarget?.subagentId ?? ''}
       data-swarm-id={requestedTarget?.swarmId ?? ''}
     >
@@ -258,6 +266,7 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     const subagentsTab = container.querySelector('.side-panel-tab[data-kind="subagents"]');
     expect(subagentsTab).not.toBeNull();
     expect(subagentsTab?.querySelector('.side-panel-tab__count')?.textContent).toBe('3');
+    expect(subagentsTab?.querySelector('[data-testid="agent-orbit-spinner"]')).not.toBeNull();
   });
 
   it('updates subagents badge dynamically on kite:subagent-activity-count and lists Subagents in New tab menu', () => {
@@ -281,6 +290,97 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
 
     const tabCount = container.querySelector('.side-panel-tab[data-kind="subagents"] .side-panel-tab__count');
     expect(tabCount?.textContent).toBe('4');
+  });
+
+  it('clears stale requestedSubagentTarget when switching to a different selectedThreadId while preserving same-thread child opens', () => {
+    localStorage.clear();
+    const { rerender, container } = render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+        selectedThreadId="thread-a"
+      />
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, {
+          detail: { threadId: 'thread-a', subagentId: 'sub-a' },
+        })
+      );
+    });
+
+    const inspector = screen.getByTestId('mock-subagent-inspector-view');
+    expect(inspector.getAttribute('data-selected-thread-id')).toBe('thread-a');
+    expect(inspector.getAttribute('data-target-thread-id')).toBe('thread-a');
+    expect(inspector.getAttribute('data-subagent-id')).toBe('sub-a');
+
+    // Background thread count event should NOT override thread-a's badge.
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:subagent-activity-count', { detail: { threadId: 'thread-a', count: 2 } })
+      );
+      window.dispatchEvent(
+        new CustomEvent('kite:subagent-activity-count', { detail: { threadId: 'thread-other', count: 0 } })
+      );
+    });
+    expect(
+      container.querySelector('.side-panel-tab[data-kind="subagents"] .side-panel-tab__count')?.textContent
+    ).toBe('2');
+
+    // Switching selectedThreadId to thread-b clears stale thread-a target and badge count.
+    rerender(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+        selectedThreadId="thread-b"
+      />
+    );
+    expect(inspector.getAttribute('data-selected-thread-id')).toBe('thread-b');
+    expect(inspector.getAttribute('data-target-thread-id')).toBe('');
+    expect(inspector.getAttribute('data-subagent-id')).toBe('');
+    expect(
+      container.querySelector('.side-panel-tab[data-kind="subagents"] .side-panel-tab__count')
+    ).toBeNull();
+
+    // When no thread is tracked, thread-scoped count events from other threads are ignored.
+    rerender(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+        selectedThreadId={null}
+      />
+    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:subagent-activity-count', { detail: { threadId: 'thread-other', count: 5 } })
+      );
+    });
+    expect(
+      container.querySelector('.side-panel-tab[data-kind="subagents"] .side-panel-tab__count')
+    ).toBeNull();
+
+    // Clicking an active child row from thread-c selects thread-c and opens its target synchronously.
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, {
+          detail: { threadId: 'thread-c', childThreadId: 'child-c1', mode: 'subagent' },
+        })
+      );
+    });
+    rerender(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+        selectedThreadId="thread-c"
+      />
+    );
+    expect(inspector.getAttribute('data-selected-thread-id')).toBe('thread-c');
+    expect(inspector.getAttribute('data-target-thread-id')).toBe('thread-c');
   });
 });
 

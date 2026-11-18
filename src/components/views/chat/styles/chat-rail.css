@@ -87,9 +87,11 @@
   max-width: calc(100vw - 80px);
   padding: 12px 14px;
   border-radius: var(--card-radius);
-  background: var(--composer, #18181b);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
-  box-shadow: var(--shadow-overlay, 0 12px 32px rgba(0, 0, 0, 0.45));
+  background: var(--glass-overlay-bg, var(--composer, #18181b));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12)));
+  box-shadow: var(--glass-shadow, var(--shadow-overlay, 0 12px 32px rgba(0, 0, 0, 0.45)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   display: flex;
   flex-direction: column;
   gap: 6px;

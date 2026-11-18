@@ -15,6 +15,7 @@ import {
   PencilIcon,
   SearchIcon,
   TrashIcon,
+  RefreshIcon,
 } from './sidebarIcons';
 import { BrandLogo } from '../ui/BrandLogo';
 import { ActiveChildRows } from './ActiveChildRows';
@@ -171,6 +172,53 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       return changed ? next : prev;
     });
   }, [workspaces]);
+
+  const lastRevealedSelectionRef = useRef<{ threadId: string | null; workspaceId: string | null }>({
+    threadId: null,
+    workspaceId: null,
+  });
+
+  useEffect(() => {
+    const onWorkspaceAssigned = (e: Event) => {
+      const wsId = (e as CustomEvent<{ threadId?: string; workspaceId?: string | null }>).detail
+        ?.workspaceId;
+      if (!wsId) return;
+      setExpandedWorkspaces((prev) => {
+        if (prev.has(wsId)) return prev;
+        const next = new Set(prev);
+        next.add(wsId);
+        return next;
+      });
+    };
+    window.addEventListener('kite:thread-workspace-assigned', onWorkspaceAssigned);
+    return () => {
+      window.removeEventListener('kite:thread-workspace-assigned', onWorkspaceAssigned);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      lastRevealedSelectionRef.current = { threadId: null, workspaceId: null };
+      return;
+    }
+    const active = threads.find((t) => t.id === selectedThreadId);
+    const nextWsId = active?.workspaceId ?? null;
+    const prevRevealed = lastRevealedSelectionRef.current;
+    if (
+      prevRevealed.threadId === selectedThreadId &&
+      prevRevealed.workspaceId === nextWsId
+    ) {
+      return;
+    }
+    lastRevealedSelectionRef.current = { threadId: selectedThreadId, workspaceId: nextWsId };
+    if (!nextWsId) return;
+    setExpandedWorkspaces((prev) => {
+      if (prev.has(nextWsId)) return prev;
+      const next = new Set(prev);
+      next.add(nextWsId);
+      return next;
+    });
+  }, [selectedThreadId, threads]);
 
   useEffect(() => {
     if (renamingThreadId && renameInputRef.current) {
@@ -505,6 +553,8 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           {onRegenerateTitle && isSelected ? (
             <button
               type="button"
+              aria-label="Regenerate title"
+              title="Regenerate title"
               disabled={titlePending}
               onClick={(event) => {
                 event.stopPropagation();
@@ -512,7 +562,7 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
                 onRegenerateTitle(thread.id);
               }}
             >
-              Regenerate title
+              <RefreshIcon size={11} />
             </button>
           ) : null}
           <button

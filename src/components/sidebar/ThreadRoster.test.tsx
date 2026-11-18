@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { ThreadRoster } from './ThreadRoster';
 import type { ChatThreadSummary } from './types';
@@ -324,5 +324,42 @@ describe('ThreadRoster live shelves', () => {
     } finally {
       window.removeEventListener('kite:open-right-dock-subagent', listener);
     }
+  });
+
+  it('auto-expands a collapsed workspace folder when a thread is assigned to it', () => {
+    const view = render(
+      <ThreadRoster
+        threads={[thread({ id: 'draft-1', title: 'Draft Thread', workspaceId: null })]}
+        workspaces={[workspace]}
+        selectedThreadId="draft-1"
+      />
+    );
+
+    // Collapse Kite workspace folder
+    const kiteToggle = screen.getByRole('button', { name: 'Kite' });
+    fireEvent.click(kiteToggle);
+    expect(screen.queryByText('No threads yet')).not.toBeInTheDocument();
+
+    // Assigning draft-1 to Kite expands the Kite folder and moves the row under Kite
+    view.rerender(
+      <ThreadRoster
+        threads={[thread({ id: 'draft-1', title: 'Draft Thread', workspaceId: 'ws' })]}
+        workspaces={[workspace]}
+        selectedThreadId="draft-1"
+      />
+    );
+    expect(screen.getByText('Draft Thread')).toBeInTheDocument();
+
+    // Explicit kite:thread-workspace-assigned also expands even if user re-collapsed first
+    fireEvent.click(screen.getByRole('button', { name: 'Kite' }));
+    expect(screen.queryByText('Draft Thread')).not.toBeInTheDocument();
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:thread-workspace-assigned', {
+          detail: { threadId: 'draft-1', workspaceId: 'ws' },
+        })
+      );
+    });
+    expect(screen.getByText('Draft Thread')).toBeInTheDocument();
   });
 });

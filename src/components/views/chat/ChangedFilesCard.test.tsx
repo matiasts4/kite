@@ -19,7 +19,10 @@ describe('ChangedFilesCard', () => {
     expect(screen.getByText('-4')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Open diff' }));
     expect(onOpenTurnDiff).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse folders' }));
+    expect(screen.queryByText('src/main.rs')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand changed files' }));
+    expect(screen.getByText('src/main.rs')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse changed files' }));
     expect(screen.queryByText('src/main.rs')).not.toBeInTheDocument();
   });
 
@@ -35,10 +38,11 @@ describe('ChangedFilesCard', () => {
       />
     );
 
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand changed files' }));
     const fileBtn = screen.getByRole('button', { name: /README\.md/i });
     expect(screen.getByText('README.md')).toBeInTheDocument();
     expect(screen.queryByText(/Proyectos\/kite/)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Collapse folders' })).not.toBeInTheDocument();
     expect(screen.getAllByText('+2')).toHaveLength(2);
     expect(screen.getAllByText('-2')).toHaveLength(2);
 

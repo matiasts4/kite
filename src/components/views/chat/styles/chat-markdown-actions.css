@@ -5,6 +5,8 @@
   color: var(--text-primary);
   user-select: text;
   overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
 }
 .md-body > :first-child { margin-top: 0; }
 .md-body > :last-child { margin-bottom: 0; }
@@ -45,6 +47,7 @@
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
+  overflow-wrap: anywhere;
 }
 .md-inline-code {
   padding: 1px 4px;
@@ -53,23 +56,27 @@
   border: 1px solid var(--block-stroke);
   font-family: var(--font-mono);
   font-size: 0.86em;
+  overflow-wrap: anywhere;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 .md-inline-code--path { cursor: pointer; color: var(--accent); }
 .md-path { cursor: pointer; text-decoration: underline dotted var(--accent, #3b82f6); }
 .md-codeblock {
   margin: 0.4em 0 1em;
   border-radius: var(--radius-card);
-  border: 1px solid var(--block-stroke);
-  background: var(--block-fill);
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  background: var(--glass-code-bg, var(--block-fill));
   overflow: hidden;
+  max-width: 100%;
 }
 .md-codeblock__bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 5px 12px;
-  background: var(--chip-fill);
-  border-bottom: 1px solid var(--block-stroke);
+  background: var(--glass-elevated-bg, var(--chip-fill));
+  border-bottom: 1px solid var(--glass-border, var(--block-stroke));
   font-size: 11.5px;
   color: var(--text-secondary);
 }
@@ -93,9 +100,9 @@
   line-height: 1.6;
 }
 .md-codeblock code { font-family: inherit; background: none; border: none; padding: 0; }
-.md-table-wrap { overflow-x: auto; margin: 0 0 1em; }
+.md-table-wrap { overflow-x: auto; max-width: 100%; margin: 0 0 1em; }
 .md-body table { border-collapse: collapse; font-size: 0.93em; min-width: 50%; }
-.md-body th, .md-body td { border: 1px solid var(--block-stroke); padding: 6px 12px; text-align: left; }
+.md-body th, .md-body td { border: 1px solid var(--block-stroke); padding: 6px 12px; text-align: left; overflow-wrap: anywhere; }
 .md-body th { background: var(--chip-fill); font-weight: 600; }
 
 /* Message hover actions (Copy, Edit / Reword) */
@@ -112,8 +119,10 @@
   opacity: 0;
   transition: opacity var(--duration-ink) var(--ease-ink);
   pointer-events: none;
-  background: var(--composer);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-overlay-bg, var(--composer));
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-radius: var(--radius-chip);
   padding: 2px 4px;
   box-shadow: var(--shadow-lift, 0 2px 6px rgba(0, 0, 0, 0.15));

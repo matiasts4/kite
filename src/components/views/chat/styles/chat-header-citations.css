@@ -88,16 +88,16 @@
   width: max-content;
   min-width: 200px;
   max-width: 280px;
-  background: var(--menu-plate);
-  border: 1px solid var(--panel-stroke);
+  background: var(--glass-overlay-bg, var(--menu-plate));
+  border: 1px solid var(--glass-border, var(--panel-stroke));
   border-radius: var(--card-radius);
-  box-shadow: var(--shadow-overlay);
+  box-shadow: var(--glass-shadow, var(--shadow-overlay));
   padding: 6px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  backdrop-filter: var(--menu-backdrop);
-  -webkit-backdrop-filter: var(--menu-backdrop);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .chat-thread-header__menu--branch {
@@ -121,9 +121,9 @@
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--control-radius);
-  background: var(--input-bg, var(--background));
+  background: var(--glass-elevated-bg, var(--input-bg, var(--background)));
   margin-bottom: 2px;
 }
 
@@ -241,9 +241,9 @@
 .chat-thread-header__create-branch-box input {
   height: 28px;
   padding: 0 8px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--control-radius);
-  background: var(--input-bg, var(--background));
+  background: var(--glass-elevated-bg, var(--input-bg, var(--background)));
   color: var(--text-primary);
   font-family: inherit;
   font-size: var(--text-caption);
@@ -392,8 +392,11 @@
   width: max-content;
   max-width: 18rem;
   padding: 8px;
-  background: var(--composer, #18181b);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--glass-overlay-bg, var(--composer, #18181b));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12)));
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-radius: var(--card-radius);
   white-space: pre-wrap;
   color: var(--text-primary, #f4f4f5);

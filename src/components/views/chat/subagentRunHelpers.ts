@@ -177,8 +177,27 @@ export function plainPreviewLine(raw?: string | null): string {
     .trim();
 }
 
+const TERMINAL_STATUSES = new Set([
+  'completed',
+  'done',
+  'ok',
+  'failed',
+  'error',
+  'killed',
+  'cancelled',
+  'canceled',
+  'stopped',
+]);
+
 export function isItemRunning(item: ChatItem, run?: SubagentRun | null): boolean {
-  const rawStatus = (run?.status || item.subagentMeta?.status || item.status || 'running').toLowerCase();
+  const runStatus = run?.status?.toLowerCase();
+  if (runStatus && TERMINAL_STATUSES.has(runStatus)) {
+    return false;
+  }
+  const rawStatus = (runStatus || item.subagentMeta?.status || item.status || 'running').toLowerCase();
+  if (TERMINAL_STATUSES.has(rawStatus)) {
+    return false;
+  }
   return (
     Boolean(item.streaming) ||
     rawStatus === 'running' ||
@@ -209,4 +228,87 @@ export function matchSubagentRun(item: ChatItem, subagentRuns?: SubagentRun[] | 
         (ctid && r.childThreadId === ctid),
     ) ?? null
   );
+}
+
+type StructuredPayload = Record<string, unknown> | unknown[];
+
+function parseStructuredPayload(raw?: string | null): StructuredPayload | null {
+  const text = (raw ?? '').trim();
+  if (!text || (text[0] !== '{' && text[0] !== '[')) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object' ? (parsed as StructuredPayload) : null;
+  } catch {
+    return null;
+  }
+}
+
+function findingsOf(payload: StructuredPayload): Array<Record<string, unknown>> | null {
+  if (Array.isArray(payload)) return null;
+  const findings = payload.findings;
+  if (!Array.isArray(findings)) return null;
+  return findings.filter(
+    (f): f is Record<string, unknown> => f !== null && typeof f === 'object' && !Array.isArray(f),
+  );
+}
+
+/**
+ * One readable line for activity text that is really a structured payload (for example a
+ * verifier's JSON report), so cards and failure banners never show raw JSON.
+ */
+export function humanizeActivityText(raw?: string | null): string {
+  const text = (raw ?? '').trim();
+  if (!text || (text[0] !== '{' && text[0] !== '[')) return text;
+  const payload = parseStructuredPayload(text);
+  if (!payload) return 'Returned a structured report';
+  const findings = findingsOf(payload);
+  if (findings) {
+    return findings.length === 1 ? 'Reported 1 finding' : `Reported ${findings.length} findings`;
+  }
+  if (!Array.isArray(payload)) {
+    for (const key of ['error', 'message', 'reason']) {
+      const value = payload[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+  }
+  return 'Returned a structured report';
+}
+
+function scalarLine(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  return JSON.stringify(value);
+}
+
+/**
+ * Markdown for an assistant message whose entire body is a JSON payload: findings reports
+ * become a numbered list, any other payload a pretty-printed JSON block. Returns null for
+ * ordinary text.
+ */
+export function structuredReportToMarkdown(raw?: string | null): string | null {
+  const payload = parseStructuredPayload(raw);
+  if (!payload) return null;
+  const findings = findingsOf(payload);
+  if (!findings || Array.isArray(payload)) {
+    return `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+  }
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === 'findings' || value === null || value === undefined) continue;
+    lines.push(`**${key}:** ${scalarLine(value)}`, '');
+  }
+  lines.push(`**Findings (${findings.length})**`, '');
+  findings.forEach((finding, index) => {
+    const severity = typeof finding.severity === 'string' ? finding.severity.toUpperCase() : '';
+    const location = typeof finding.location === 'string' ? finding.location : '';
+    const claim = typeof finding.claim === 'string' ? finding.claim.trim() : '';
+    const head = [severity && `**${severity}**`, location && `\`${location}\``]
+      .filter(Boolean)
+      .join(' · ');
+    lines.push(`${index + 1}. ${head || 'Finding'}`);
+    if (claim) lines.push(`   ${claim}`);
+    const evidence = Array.isArray(finding.evidence) ? finding.evidence : [];
+    for (const entry of evidence) lines.push(`   - ${scalarLine(entry)}`);
+    lines.push('');
+  });
+  return lines.join('\n').trim();
 }

@@ -3,21 +3,29 @@ import { useReducedMotion } from 'motion/react';
 import {
   getThreadSubagentDetail,
   respondChatApproval,
-  sendSubagentMessage,
   stopSubagentRun,
+  type GlobalSubagentEntry,
 } from '../../../lib/ipc/chat';
 import type { OpenRightDockSubagentDetail } from '../../../lib/subagentNav';
 import type { SwarmMember } from '../../../types';
 import { applySubagentEvent } from '../chat/hooks/useSubagentEvents';
+import { GlobalSubagentsView } from './GlobalSubagentsView';
 import { SubagentInspectorHeader } from './SubagentInspectorHeader';
+import { SubagentRunsOverview } from './SubagentRunsOverview';
 import { SubagentStepStream } from './SubagentStepStream';
-import { SwarmBoardInspector, formatInspectorModelName } from './SwarmBoardInspector';
+import { SwarmBoardInspector } from './SwarmBoardInspector';
+import { formatInspectorModelName } from './swarmBoardHelpers';
 import {
   filterInspectorSteps,
   isRunActive,
+  resolveRequestedRunId,
   type InspectorMode,
+  type InspectorScope,
 } from './subagentInspectorHelpers';
+import { useGlobalSubagents } from './useGlobalSubagents';
 import { useSubagentInspectorThread } from './useSubagentInspectorThread';
+import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
+import '../chat.css';
 import './subagents.css';
 
 export { filterInspectorSteps };
@@ -26,30 +34,47 @@ export interface SubagentInspectorViewProps {
   workspaceId: string | null;
   selectedThreadId?: string | null;
   requestedTarget?: OpenRightDockSubagentDetail | null;
+  onClearTarget?: () => void;
 }
 
 export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   workspaceId,
   selectedThreadId = null,
   requestedTarget = null,
+  onClearTarget,
 }) => {
   const reduceMotion = useReducedMotion();
-  const activeThreadId = requestedTarget?.threadId ?? selectedThreadId;
 
+  const [scope, setScope] = useState<InspectorScope>('thread');
+  const [globalTarget, setGlobalTarget] = useState<OpenRightDockSubagentDetail | null>(null);
   const [mode, setMode] = useState<InspectorMode>('subagent');
-  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(() =>
+    resolveRequestedRunId(requestedTarget),
+  );
   const [fromSwarmRoster, setFromSwarmRoster] = useState(false);
   const [briefOverride, setBriefOverride] = useState<{ runId: string; expanded: boolean } | null>(null);
   const [autoScrollPaused, setAutoScrollPaused] = useState(false);
   const [resolvingApproval, setResolvingApproval] = useState(false);
-  const [steeringText, setSteeringText] = useState('');
-  const [sendingSteering, setSendingSteering] = useState(false);
-  const [stoppingRun, setStoppingRun] = useState(false);
+  const [stoppingRunKey, setStoppingRunKey] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const streamRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
   const seenStepIdsRef = useRef<Set<string>>(new Set());
+
+  const effectiveTarget = scope === 'all' ? globalTarget : requestedTarget;
+  const activeThreadId =
+    scope === 'all'
+      ? (globalTarget?.threadId ?? null)
+      : (requestedTarget?.threadId ?? selectedThreadId);
+
+  const prevThreadIdRef = useRef<string | null>(activeThreadId);
+
+  const {
+    snapshot: globalSnapshot,
+    loading: globalLoading,
+    refresh: refreshGlobal,
+  } = useGlobalSubagents();
 
   const {
     thread,
@@ -65,7 +90,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   } = useSubagentInspectorThread({
     workspaceId,
     activeThreadId,
-    requestedTarget,
+    requestedTarget: effectiveTarget,
     mode,
     selectedSubagentId,
     onAutoSwarmMode: () => setMode('swarm'),
@@ -73,18 +98,46 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
 
   useEffect(() => {
     if (!requestedTarget) return;
-    if (requestedTarget.mode === 'swarm' || (requestedTarget.swarmId && !requestedTarget.subagentId)) {
+    setScope('thread');
+    setGlobalTarget(null);
+    if (
+      requestedTarget.mode === 'swarm' ||
+      (requestedTarget.swarmId && !resolveRequestedRunId(requestedTarget))
+    ) {
       setMode('swarm');
-      setFromSwarmRoster(false);
+      setSelectedSubagentId(null);
     } else {
       setMode('subagent');
-      if (requestedTarget.subagentId) {
-        setSelectedSubagentId(requestedTarget.subagentId);
-      }
-      setFromSwarmRoster(false);
+      setSelectedSubagentId(resolveRequestedRunId(requestedTarget));
     }
+    setFromSwarmRoster(false);
     setBriefOverride(null);
+    atBottomRef.current = true;
+    setAutoScrollPaused(false);
+    setActionError(null);
   }, [requestedTarget]);
+
+  useEffect(() => {
+    if (prevThreadIdRef.current === activeThreadId) return;
+    prevThreadIdRef.current = activeThreadId;
+    const targetForThread =
+      effectiveTarget && effectiveTarget.threadId === activeThreadId ? effectiveTarget : null;
+    if (
+      targetForThread?.mode === 'swarm' ||
+      (targetForThread?.swarmId && !resolveRequestedRunId(targetForThread))
+    ) {
+      setMode('swarm');
+      setSelectedSubagentId(null);
+    } else {
+      setMode('subagent');
+      setSelectedSubagentId(resolveRequestedRunId(targetForThread));
+    }
+    setFromSwarmRoster(false);
+    setBriefOverride(null);
+    atBottomRef.current = true;
+    setAutoScrollPaused(false);
+    setActionError(null);
+  }, [activeThreadId, effectiveTarget]);
 
   const briefExpanded =
     briefOverride && activeRun && briefOverride.runId === activeRun.subagentId
@@ -95,7 +148,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
 
   const stepCount = visibleSteps.length;
   useEffect(() => {
-    if (mode !== 'subagent' || !atBottomRef.current) return;
+    if (mode !== 'subagent' || !activeRun || !atBottomRef.current) return;
     const el = streamRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
@@ -110,73 +163,60 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   const parentModelLabel = formatInspectorModelName(thread?.model, thread?.provider);
   const hasRuns = runs.length > 0;
   const hasSwarm = Boolean(swarmState);
+  const showingThreadOverview =
+    scope === 'thread' && mode === 'subagent' && runs.length > 1 && !activeRun;
+  const fromGlobalView = scope === 'all' && Boolean(globalTarget);
+
+  const handleJumpToThread = useCallback(
+    (targetThreadId: string, subagentId?: string | null) => {
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', {
+          detail: { threadId: targetThreadId },
+        }),
+      );
+      if (subagentId) {
+        const card = document.querySelector(`[data-subagent-id="${subagentId}"]`);
+        if (card && typeof card.scrollIntoView === 'function') {
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+    },
+    [],
+  );
 
   const handleJumpToParent = () => {
     if (!thread) return;
-    window.dispatchEvent(
-      new CustomEvent('kite:select-thread', {
-        detail: { threadId: thread.id },
-      }),
-    );
-    if (activeRun?.subagentId) {
-      const card = document.querySelector(`[data-subagent-id="${activeRun.subagentId}"]`);
-      if (card && typeof card.scrollIntoView === 'function') {
-        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }
+    handleJumpToThread(thread.id, activeRun?.subagentId);
   };
 
-  const handleStopActiveRun = async () => {
-    if (!thread || !activeRun || stoppingRun) return;
-    setStoppingRun(true);
-    setActionError(null);
-    try {
-      const res = await stopSubagentRun(thread.id, activeRun.subagentId);
-      if (res.run) {
-        setThread((prev) =>
-          prev
-            ? applySubagentEvent(prev, {
-                kind: 'subagentRunUpdated',
-                threadId: prev.id,
-                run: res.run!,
-              })
-            : prev,
-        );
+  const handleStopRun = useCallback(
+    async (targetThreadId: string, subagentId: string) => {
+      const key = `${targetThreadId}:${subagentId}`;
+      if (stoppingRunKey) return;
+      setStoppingRunKey(key);
+      setActionError(null);
+      try {
+        const res = await stopSubagentRun(targetThreadId, subagentId);
+        if (res.run) {
+          setThread((prev) =>
+            prev && prev.id === targetThreadId
+              ? applySubagentEvent(prev, {
+                  kind: 'subagentRunUpdated',
+                  threadId: prev.id,
+                  run: res.run!,
+                })
+              : prev,
+          );
+        }
+        void refreshGlobal();
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : 'Failed to stop subagent');
+      } finally {
+        setStoppingRunKey(null);
       }
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to stop subagent');
-    } finally {
-      setStoppingRun(false);
-    }
-  };
-
-  const handleSendSteering = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!thread || !activeRun || sendingSteering) return;
-    const msg = steeringText.trim();
-    if (!msg) return;
-    setSendingSteering(true);
-    setActionError(null);
-    try {
-      const res = await sendSubagentMessage(thread.id, activeRun.subagentId, msg);
-      setSteeringText('');
-      if (res.run) {
-        setThread((prev) =>
-          prev
-            ? applySubagentEvent(prev, {
-                kind: 'subagentRunUpdated',
-                threadId: prev.id,
-                run: res.run!,
-              })
-            : prev,
-        );
-      }
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to send subagent message');
-    } finally {
-      setSendingSteering(false);
-    }
-  };
+    },
+    [stoppingRunKey, setThread, refreshGlobal],
+  );
 
   const handlePopOutChildThread = () => {
     if (!activeRun?.childThreadId) return;
@@ -211,13 +251,22 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
               : prev,
           );
         }
+        void refreshGlobal();
       } catch (err) {
         setActionError(err instanceof Error ? err.message : 'Failed to resolve child approval');
       } finally {
         setResolvingApproval(false);
       }
     },
-    [activeRun?.childThreadId, activeRun?.subagentId, thread, resolvingApproval, setChildApproval, setThread],
+    [
+      activeRun?.childThreadId,
+      activeRun?.subagentId,
+      thread,
+      resolvingApproval,
+      setChildApproval,
+      setThread,
+      refreshGlobal,
+    ],
   );
 
   const handleInspectWorker = (member: SwarmMember) => {
@@ -233,21 +282,53 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
       setFromSwarmRoster(true);
       setMode('subagent');
       setBriefOverride(null);
+      atBottomRef.current = true;
+      setAutoScrollPaused(false);
     }
   };
 
-  if (!loading && (!thread || (!hasRuns && !hasSwarm))) {
-    return (
-      <div className="subagent-inspector" data-testid="subagent-inspector-view">
-        <div className="subagent-inspector__empty" data-testid="subagent-inspector-empty">
-          <strong>No subagents active yet</strong>
-          <span>
-            Subagents and Swarms launched by the main agent will stream step by step here.
-          </span>
-        </div>
-      </div>
-    );
-  }
+  const handleSelectScope = (nextScope: InspectorScope) => {
+    if (nextScope === 'thread') {
+      if (requestedTarget && selectedThreadId && requestedTarget.threadId !== selectedThreadId) {
+        onClearTarget?.();
+      }
+      setGlobalTarget(null);
+      setScope('thread');
+      setSelectedSubagentId(null);
+      setFromSwarmRoster(false);
+    } else {
+      setGlobalTarget(null);
+      setScope('all');
+      void refreshGlobal();
+    }
+    setBriefOverride(null);
+    setActionError(null);
+  };
+
+  const handleInspectGlobalEntry = (entry: GlobalSubagentEntry) => {
+    setGlobalTarget({
+      threadId: entry.threadId,
+      subagentId: entry.run.subagentId,
+      childThreadId: entry.run.childThreadId ?? null,
+      mode: 'subagent',
+      workspaceId: entry.workspaceId ?? null,
+    });
+    setSelectedSubagentId(entry.run.subagentId);
+    setMode('subagent');
+    setFromSwarmRoster(false);
+    setBriefOverride(null);
+    atBottomRef.current = true;
+    setAutoScrollPaused(false);
+  };
+
+  const isThreadEmpty =
+    scope === 'thread' && !loading && (!thread || (!hasRuns && !hasSwarm));
+  const threadScopeBadgeCount =
+    scope === 'thread'
+      ? runs.length
+      : selectedThreadId
+        ? globalSnapshot.runs.filter((entry) => entry.threadId === selectedThreadId).length
+        : 0;
 
   return (
     <div
@@ -257,15 +338,26 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
       data-thread-id={thread?.id ?? activeThreadId ?? ''}
     >
       <SubagentInspectorHeader
-        thread={thread}
+        scope={scope}
+        threadRunsCount={threadScopeBadgeCount}
+        globalTotalCount={globalSnapshot.totalCount}
+        globalActiveCount={globalSnapshot.activeCount}
+        thread={scope === 'all' && !globalTarget ? null : thread}
         mode={mode}
         hasRuns={hasRuns}
         hasSwarm={hasSwarm}
         runs={runs}
         activeRun={activeRun}
+        showingOverview={showingThreadOverview}
+        fromGlobalView={fromGlobalView}
         parentModelLabel={parentModelLabel}
-        stoppingRun={stoppingRun}
+        stoppingRun={Boolean(
+          activeRun &&
+            thread &&
+            stoppingRunKey === `${thread.id}:${activeRun.subagentId}`,
+        )}
         fromSwarmRoster={fromSwarmRoster}
+        onSelectScope={handleSelectScope}
         onJumpToParent={handleJumpToParent}
         onPopOutChildThread={handlePopOutChildThread}
         onSelectMode={(nextMode) => {
@@ -275,15 +367,69 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
         onSelectRun={(subagentId) => {
           setSelectedSubagentId(subagentId);
           setBriefOverride(null);
+          atBottomRef.current = true;
+          setAutoScrollPaused(false);
         }}
-        onStopActiveRun={() => void handleStopActiveRun()}
+        onBackToOverview={() => {
+          if (requestedTarget) {
+            onClearTarget?.();
+          }
+          setSelectedSubagentId(null);
+          setFromSwarmRoster(false);
+          setBriefOverride(null);
+        }}
+        onBackToGlobal={() => {
+          setGlobalTarget(null);
+          setSelectedSubagentId(null);
+          setBriefOverride(null);
+          void refreshGlobal();
+        }}
+        onStopActiveRun={() => {
+          if (thread && activeRun) {
+            void handleStopRun(thread.id, activeRun.subagentId);
+          }
+        }}
         onBackToSwarmRoster={() => {
           setMode('swarm');
           setFromSwarmRoster(false);
         }}
       />
 
-      {mode === 'swarm' && swarmState ? (
+      {scope === 'all' && !globalTarget ? (
+        <GlobalSubagentsView
+          workspaceId={workspaceId}
+          selectedThreadId={selectedThreadId}
+          entries={globalSnapshot.runs}
+          totalCount={globalSnapshot.totalCount}
+          activeCount={globalSnapshot.activeCount}
+          loading={globalLoading}
+          stoppingRunKey={stoppingRunKey}
+          onInspectEntry={handleInspectGlobalEntry}
+          onStopEntry={(entry) => void handleStopRun(entry.threadId, entry.run.subagentId)}
+          onFocusThread={(tid) => handleJumpToThread(tid)}
+        />
+      ) : isThreadEmpty ? (
+        <div className="subagent-inspector__empty" data-testid="subagent-inspector-empty">
+          <div style={{ margin: '0 auto 4px' }}>
+            <ThemeHeroFigure variant="card" />
+          </div>
+          <strong>No subagents active yet</strong>
+          <span>
+            Subagents and Swarms launched by the main agent will stream step by step here.
+          </span>
+          {globalSnapshot.totalCount > 0 && (
+            <button
+              type="button"
+              className="subagent-inspector__empty-cta"
+              onClick={() => handleSelectScope('all')}
+            >
+              {globalSnapshot.activeCount > 0
+                ? `View ${globalSnapshot.activeCount} live across all threads`
+                : `Browse ${globalSnapshot.totalCount} across all threads`}
+            </button>
+          )}
+        </div>
+      ) : mode === 'swarm' && swarmState ? (
         <SwarmBoardInspector
           threadId={thread?.id ?? null}
           swarmState={swarmState}
@@ -302,10 +448,31 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
             )
           }
         />
+      ) : showingThreadOverview ? (
+        <SubagentRunsOverview
+          runs={runs}
+          stoppingRunId={
+            thread && stoppingRunKey?.startsWith(`${thread.id}:`)
+              ? stoppingRunKey.slice(thread.id.length + 1)
+              : null
+          }
+          onInspectRun={(subagentId) => {
+            setSelectedSubagentId(subagentId);
+            setFromSwarmRoster(false);
+            setBriefOverride(null);
+            atBottomRef.current = true;
+            setAutoScrollPaused(false);
+          }}
+          onStopRun={(subagentId) => {
+            if (thread) {
+              void handleStopRun(thread.id, subagentId);
+            }
+          }}
+        />
       ) : activeRun ? (
         <SubagentStepStream
-          workspaceId={workspaceId}
-          threadId={thread?.id ?? null}
+          workspaceId={thread?.workspaceId ?? workspaceId ?? null}
+          parentThreadId={thread?.id ?? activeThreadId ?? ''}
           activeRun={activeRun}
           activeRunRunning={activeRunRunning}
           visibleSteps={visibleSteps}
@@ -326,10 +493,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
             void handleChildApprovalDecision(decision, reqId)
           }
           actionError={actionError}
-          steeringText={steeringText}
-          sendingSteering={sendingSteering}
-          onSteeringTextChange={setSteeringText}
-          onSendSteering={(e) => void handleSendSteering(e)}
+          onJumpToParent={handleJumpToParent}
         />
       ) : null}
     </div>

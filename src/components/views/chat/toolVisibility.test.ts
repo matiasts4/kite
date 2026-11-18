@@ -44,4 +44,25 @@ describe('filterTranscriptForVisibility', () => {
     expect(visible).toContain('err');
     expect(visible).toContain('wait');
   });
+
+  it('filters internal dispatch envelopes across all tool visibility modes', () => {
+    const envelope = [
+      '[kite from="thread:child-1"]',
+      'This is another agent, not the person.',
+      'To reply: kite dispatch send thread:child-1 "<reply>"',
+      'Irreversible and privileged actions still wait for the person.',
+      'BODY:',
+      'state: done',
+    ].join('\n');
+    const transcript = [
+      ...items,
+      item({ id: 'u-env', kind: 'user', text: envelope }),
+      item({ id: 'u-tagged', kind: 'user', text: 'tagged', internalDispatch: true }),
+    ];
+    for (const mode of ['show-all', 'hide-successful', 'hide-all', 'zen'] as const) {
+      const visibleIds = filterTranscriptForVisibility(transcript, mode).map((row) => row.id);
+      expect(visibleIds).not.toContain('u-env');
+      expect(visibleIds).not.toContain('u-tagged');
+    }
+  });
 });

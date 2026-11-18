@@ -138,7 +138,9 @@ export const MarkdownMessage: React.FC<{ text: string; workspaceId?: string | nu
           },
           pre: ({ children }) => <>{children}</>,
           code: ({ className, children }) => {
-            const raw = String(children ?? '');
+            const raw = Array.isArray(children)
+              ? children.map((part) => String(part ?? '')).join('')
+              : String(children ?? '');
             const match = /language-([\w-]+)/.exec(className || '');
             const lang = (match?.[1] ?? '').toLowerCase();
             const isBlock = Boolean(match) || raw.includes('\n');

@@ -144,31 +144,48 @@ export function activityIconKind(item: ActivityItem): ActivityIconKind {
   ) {
     return 'subagent';
   }
-  const blob = `${item.title ?? ''} ${item.toolName ?? ''} ${item.detail ?? ''}`.toLowerCase();
+  const titleLower = trimmed(item.title).toLowerCase();
+  const toolLower = trimmed(item.toolName).toLowerCase();
+  const blob = `${titleLower} ${toolLower} ${(item.detail ?? '').toLowerCase()}`;
   if (/(subagent|delegate)/.test(blob)) return 'subagent';
   if (item.toolKind === 'webSearch' || item.toolKind === 'fetch') return 'web';
-  if (/(browser|screenshot|navigate)/.test(blob)) return 'browser';
+  if (/(?:web[\s_]?search|web[\s_]?fetch)/.test(`${titleLower} ${toolLower}`)) return 'web';
+  if (item.toolKind === 'search') return 'code-search';
   if (
-    item.toolKind === 'search' ||
+    item.toolKind === 'fileChange' ||
+    item.toolKind === 'edit' ||
+    item.toolKind === 'delete' ||
+    item.toolKind === 'move'
+  ) {
+    return 'edit';
+  }
+  if (item.toolKind === 'read') return 'read';
+  if (/(browser|screenshot|navigate)/.test(blob)) return 'browser';
+  if (/^(?:edit|write|changed|replace|patch)\b/.test(titleLower) || /(edit|write|replace|patch|strreplace|apply_patch)/.test(toolLower)) {
+    return 'edit';
+  }
+  if (/^(?:read|view|analyz\w*|inspect|list)\b/.test(titleLower) || /(?:read|view|inspect|cat|list_dir)/.test(toolLower)) {
+    return 'read';
+  }
+  if (/^(?:search|searched|grep|find|glob)\b/.test(titleLower) || /(?:grep|ripgrep|search|find|glob)/.test(toolLower)) {
+    return 'code-search';
+  }
+  if (
     searchPatternLike(trimmed(item.title)) ||
     /(^|\b)(grep|ripgrep|code search|search_code|codesearch|searched|search|find)(\b|$)/.test(blob)
   ) {
     return 'code-search';
   }
   if (/(web search|web_search|\bweb\b|\bfetch\b|\burl\b)/.test(blob)) return 'web';
-  if (
-    item.toolKind === 'fileChange' ||
-    item.toolKind === 'edit' ||
-    item.toolKind === 'delete' ||
-    item.toolKind === 'move' ||
-    /(edit|write|replace|patch|strreplace|apply_patch)/.test(blob)
-  ) {
+  if (/(edit|write|replace|patch|strreplace|apply_patch)/.test(blob)) {
     return 'edit';
   }
-  if (item.toolKind === 'read' || /(^|\b)(read|cat|view|inspect|list_dir)(\b|$)/.test(blob)) {
+  if (/(^|\b)(read|cat|view|inspect|list_dir|analyz\w*)(\b|$)/.test(blob)) {
     return 'read';
   }
-  if (/(^|\b)(bash|shell|terminal|execute|executed|\brun\b)(\b|$)/.test(blob)) return 'shell';
+  if (/(^|\b)(bash|shell|terminal|execute|executed|run)(\b|$)/.test(blob) || /(?:bash|shell|terminal|exec|run)/.test(toolLower)) {
+    return 'shell';
+  }
   return 'tool';
 }
 
@@ -246,6 +263,22 @@ function oneLine(value: string | null | undefined): string {
   return trimmed(value).replace(/\s+/g, ' ');
 }
 
+/** Extracts a clean, markdown-free single-line headline from reasoning text. */
+export function liveThoughtLine(markdown?: string | null): string {
+  if (!markdown) return '';
+  const heading = /^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)/.exec(markdown)?.[1];
+  const text = (heading ?? markdown)
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+\.)[ \t]+/gm, '')
+    .replace(/`+|\*\*|~~/g, '')
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w])/g, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (heading !== undefined) return text;
+  const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
+  return end ? text.slice(0, end.index + end[0].length) : text;
+}
+
 const OUTPUT_STAT = /^(\d+)\s+lines?,\s+(\d+)\s+bytes$/i;
 
 /** Regex alternation or anchors where a tool name should be: a search pattern, not a name. */
@@ -289,6 +322,10 @@ function genericAction(value: string): boolean {
     text === '' ||
     text === 'read' ||
     text === 'read file' ||
+    text === 'view file' ||
+    text === 'view' ||
+    text === 'analyze' ||
+    text === 'analyzed' ||
     text === 'file' ||
     text === 'edit' ||
     text === 'edit file' ||
@@ -297,6 +334,14 @@ function genericAction(value: string): boolean {
     text === 'tool' ||
     text === 'tool execution'
   );
+}
+
+/** Last path segment for compact single-line live headlines. */
+export function basenamePath(filePath: string): string {
+  const withoutQuery = filePath.split(/[?#]/)[0] ?? filePath;
+  const normalized = withoutQuery.replace(/\\/g, '/').replace(/\/+$/, '');
+  const parts = normalized.split('/').filter(Boolean);
+  return parts[parts.length - 1] || displayPath(filePath);
 }
 
 /** Last few segments, so a long absolute path still names the file. */
@@ -352,8 +397,39 @@ function objectString(record: Record<string, unknown>, keys: string[]): string {
   return '';
 }
 
+function objectPositiveInt(record: Record<string, unknown>, keys: string[]): number | null {
+  const wanted = new Set(keys.map((key) => key.toLowerCase()));
+  for (const [key, value] of Object.entries(record)) {
+    if (!wanted.has(key.toLowerCase())) continue;
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && /^\d+$/.test(value.trim())
+          ? Number(value.trim())
+          : NaN;
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
 function detailRecord(item: ActivityItem): Record<string, unknown> | null {
   return firstObject(trimmed(item.detail));
+}
+
+/** Line range badge (`#L1-250` or `#L1`) from tool arguments when available. */
+export function traceLineRangeLabel(item: ActivityItem): string | null {
+  const record = detailRecord(item);
+  if (!record) return null;
+  const nested = record.Arguments ?? record.arguments ?? record.input ?? record.parameters;
+  const source =
+    nested && typeof nested === 'object' && !Array.isArray(nested)
+      ? (nested as Record<string, unknown>)
+      : record;
+  const start = objectPositiveInt(source, ['startline', 'start_line']) ?? objectPositiveInt(record, ['startline', 'start_line']);
+  if (!start) return null;
+  const end = objectPositiveInt(source, ['endline', 'end_line']) ?? objectPositiveInt(record, ['endline', 'end_line']);
+  if (end && end > start) return `#L${start}-${end}`;
+  return `#L${start}`;
 }
 
 /** File path from the tool input, including a capitalized `Path` field. */
@@ -438,6 +514,9 @@ export function expandableToolBody(text: string | null | undefined): string {
 
 /** Full expandable details for a tool or command work entry (command line, parameters, and output). */
 export function toolExpandedBody(item: ActivityItem): string {
+  if (item.kind === 'reasoning') {
+    return trimmed(item.text);
+  }
   const rawOutput = expandableToolBody(item.text);
   const kind = activityIconKind(item);
 
@@ -476,7 +555,7 @@ export function toolExpandedBody(item: ActivityItem): string {
 /** One secondary sentence for a work row. The expanded body keeps the raw output. */
 export function activityTraceLabel(item: ActivityItem): string {
   if (item.kind === 'reasoning') {
-    const line = oneLine(item.text);
+    const line = liveThoughtLine(item.text);
     if (line) return line;
     const live =
       Boolean(item.streaming) || item.status === 'running' || item.status === 'inProgress';
@@ -497,16 +576,11 @@ export function activityTraceLabel(item: ActivityItem): string {
   const plain = plainTarget(item.detail);
   const hint = argumentHint(item);
   if (kind === 'read') {
-    const fromTitle = oneLine(item.title).replace(/^read\s+/i, '');
-    const path =
-      storedPath ||
-      plain ||
-      (fromTitle && !genericAction(fromTitle) ? fromTitle : '');
+    const path = extractActionPath(item, /^(?:read|view|analyz(?:e|ed|ing)|inspect(?:ed)?|list(?:ed)?)\s+/i);
     return path ? `Read ${displayPath(path)}` : 'Read file';
   }
   if (kind === 'edit') {
-    const fromTitle = oneLine(item.title).replace(/^(?:changed|edit|edited|write|wrote)\s+/i, '');
-    const path = storedPath || plain || (fromTitle && !genericAction(fromTitle) ? fromTitle : '');
+    const path = extractActionPath(item, /^(?:changed|edit|edited|write|wrote)\s+/i);
     return path ? displayPath(path) : 'Changed files';
   }
   if (kind === 'web') {
@@ -577,4 +651,81 @@ export function burstDurationSeconds(items: ActivityItem[]): number | null {
     .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
   if (values.length === 0) return null;
   return values.reduce((sum, value) => sum + value, 0);
+}
+
+function extractActionPath(item: ActivityItem, prefixPattern: RegExp): string {
+  const fromTitle = oneLine(item.title).replace(prefixPattern, '');
+  const candidate =
+    traceFilePath(item) ||
+    plainTarget(item.detail) ||
+    (fromTitle && !genericAction(fromTitle) ? fromTitle : '');
+  return candidate && !genericAction(candidate) ? candidate : '';
+}
+
+function extractSearchQuery(item: ActivityItem): string {
+  const title = oneLine(item.title);
+  return (
+    trimmed(item.query) ||
+    argumentHint(item) ||
+    plainTarget(item.detail) ||
+    (genericAction(title) ? '' : title)
+  ).replace(/^searched\s+/i, '');
+}
+
+/** Concise single-line progressive headline for an active tool or step. */
+export function liveActivityHeadline(item: ActivityItem): string {
+  const kind = activityIconKind(item);
+  const title = oneLine(item.title) || oneLine(item.toolName);
+  const isExplore = /explore/i.test(title) || /explore/i.test(item.toolName ?? '');
+
+  if (kind === 'read') {
+    const path = extractActionPath(item, /^(?:read|view|analyz(?:e|ed|ing)|inspect(?:ed)?|list(?:ed)?)\s+/i);
+    return path ? `Reading ${basenamePath(path)}` : 'Reading file';
+  }
+  if (kind === 'edit') {
+    const path = extractActionPath(item, /^(?:changed|edit|edited|write|wrote)\s+/i);
+    return path ? `Editing ${basenamePath(path)}` : 'Editing files';
+  }
+  if (kind === 'code-search') {
+    if (isExplore) return 'Exploring';
+    const query = extractSearchQuery(item);
+    return query ? `Searching ${query}` : 'Exploring';
+  }
+  if (kind === 'web') {
+    const query = extractSearchQuery(item);
+    return query ? `Searching ${query}` : 'Searching the web';
+  }
+  if (kind === 'shell' || item.kind === 'command') {
+    const program = commandProgram(item);
+    return searchPatternLike(program) ? 'Exploring' : `Running ${program}`;
+  }
+  if (kind === 'browser') {
+    const storedPath = traceFilePath(item);
+    const where = storedPath ? basenamePath(storedPath) : plainTarget(item.detail) || argumentHint(item);
+    return where ? `Browsing ${where}` : 'Using browser';
+  }
+  if (kind === 'plan') return 'Planning';
+  if (kind === 'reasoning') return liveThoughtLine(item.text) || 'Thinking';
+  if (kind === 'mcp') {
+    if (isExplore) return 'Exploring';
+    return mcpToolLabel(item.serverName, title) || title || 'Working';
+  }
+  if (isExplore) return 'Exploring';
+  const fallback = activityTraceLabel(item);
+  return fallback && fallback !== 'Tool' ? fallback : 'Working';
+}
+
+/** Single-line header headline for a collapsed live work group, reflecting the latest active task. */
+export function liveWorkGroupHeadline(items: ActivityItem[]): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (
+      item &&
+      (item.streaming || item.status === 'running' || item.status === 'inProgress' || item.status === 'pending')
+    ) {
+      return liveActivityHeadline(item);
+    }
+  }
+  const last = items[items.length - 1];
+  return last ? liveActivityHeadline(last) : 'Working';
 }

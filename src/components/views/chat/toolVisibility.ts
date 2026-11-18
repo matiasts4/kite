@@ -1,4 +1,5 @@
 import type { ChatItem } from '../../../types';
+import { isInternalDispatchItem, visibleAssistantText } from './chatItemHelpers';
 
 export type ToolVisibilityMode = 'show-all' | 'hide-successful' | 'hide-all' | 'zen';
 
@@ -48,18 +49,21 @@ function successfulTool(item: ChatItem): boolean {
 
 /** Applies Settings → Chat visibility. Approvals, questions, and errors stay. */
 export function filterTranscriptForVisibility(items: ChatItem[], mode: ToolVisibilityMode): ChatItem[] {
-  if (mode === 'show-all') return items;
+  const visibleItems = items.filter((item) => !isInternalDispatchItem(item));
+  if (mode === 'show-all') return visibleItems;
   if (mode === 'hide-successful') {
-    return items.filter((item) => alwaysVisible(item) || !successfulTool(item));
+    return visibleItems.filter((item) => alwaysVisible(item) || !successfulTool(item));
   }
   if (mode === 'hide-all') {
-    return items.filter((item) => {
+    return visibleItems.filter((item) => {
       if (alwaysVisible(item)) return true;
       return item.kind !== 'tool' && item.kind !== 'command' && item.kind !== 'reasoning';
     });
   }
-  const lastAssistant = [...items].reverse().find((item) => item.kind === 'assistant');
-  return items.filter((item) => {
+  const lastAssistant = [...visibleItems]
+    .reverse()
+    .find((item) => item.kind === 'assistant' && visibleAssistantText(item.text).trim().length > 0);
+  return visibleItems.filter((item) => {
     if (item.kind !== 'assistant') return true;
     return item.id === lastAssistant?.id;
   });

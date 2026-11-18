@@ -43,17 +43,31 @@ export function useSubagentInspectorThread({
   const [loading, setLoading] = useState(false);
   const [childApproval, setChildApproval] = useState<ApprovalRequest | null>(null);
   const hydratedKeyRef = useRef<string | null>(null);
+  const loadedThreadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    hydratedKeyRef.current = null;
     if (!activeThreadId) {
+      loadedThreadIdRef.current = null;
       setThread(null);
+      setChildApproval(null);
+      setLoading(false);
       return;
     }
+    if (loadedThreadIdRef.current === activeThreadId && !requestedTarget) {
+      return;
+    }
+    if (loadedThreadIdRef.current !== activeThreadId) {
+      loadedThreadIdRef.current = null;
+    }
+    setThread((prev) => (prev?.id === activeThreadId ? prev : null));
+    setChildApproval(null);
     let cancelled = false;
     setLoading(true);
     void loadChatThread(activeThreadId)
       .then((loaded) => {
         if (cancelled || !loaded) return;
+        loadedThreadIdRef.current = activeThreadId;
         setThread(loaded);
         if (!requestedTarget && !loaded.subagentRuns?.length && loaded.swarmState) {
           onAutoSwarmMode();
@@ -114,6 +128,33 @@ export function useSubagentInspectorThread({
     };
   }, [activeThreadId]);
 
+  useEffect(() => {
+    if (!activeThreadId || typeof window === 'undefined') {
+      return;
+    }
+    let cancelled = false;
+    let refreshing = false;
+    const handleThreadsChanged = () => {
+      if (refreshing) return;
+      refreshing = true;
+      void loadChatThread(activeThreadId)
+        .then((loaded) => {
+          if (!cancelled && loaded) {
+            setThread(loaded);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          refreshing = false;
+        });
+    };
+    window.addEventListener('kite:threads-changed', handleThreadsChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:threads-changed', handleThreadsChanged);
+    };
+  }, [activeThreadId]);
+
   const runs = useMemo(
     () => dedupeSubagentRuns(thread?.subagentRuns),
     [thread?.subagentRuns],
@@ -140,7 +181,7 @@ export function useSubagentInspectorThread({
       );
       if (exact) return exact;
     }
-    return runs[0];
+    return runs.length === 1 ? runs[0] : null;
   }, [runs, selectedSubagentId]);
 
   const visibleSteps = useMemo(
@@ -151,6 +192,10 @@ export function useSubagentInspectorThread({
   const groupedRows = useMemo(() => groupTranscriptRows(visibleSteps), [visibleSteps]);
 
   useEffect(() => {
+    if (!activeThreadId) {
+      setActiveSubagentInspection(null);
+      return;
+    }
     if (!thread) return;
     if (mode === 'swarm' && swarmState) {
       setActiveSubagentInspection({
@@ -167,8 +212,19 @@ export function useSubagentInspectorThread({
         mode: 'subagent',
         workspaceId,
       });
+    } else if (!loading) {
+      setActiveSubagentInspection(null);
     }
-  }, [thread?.id, mode, swarmState?.swarmId, activeRun?.subagentId, activeRun?.childThreadId, workspaceId]);
+  }, [
+    activeThreadId,
+    loading,
+    thread?.id,
+    mode,
+    swarmState?.swarmId,
+    activeRun?.subagentId,
+    activeRun?.childThreadId,
+    workspaceId,
+  ]);
 
   const hydratedItemCount = activeRun?.items?.length ?? 0;
   const reportedStepCount = activeRun?.stepCount ?? 0;

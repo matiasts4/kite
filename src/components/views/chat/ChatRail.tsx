@@ -20,6 +20,7 @@ import {
   CloseIcon,
   SearchIcon,
   ChevronRightIcon,
+  RefreshIcon,
 } from './ChatIcons';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { BrandLogo } from '../../ui/BrandLogo';
@@ -341,6 +342,8 @@ export const ChatRail: React.FC<ChatRailProps> = ({
             {onRegenerateTitle && isSelected ? (
               <button
                 type="button"
+                aria-label="Regenerate title"
+                title="Regenerate title"
                 disabled={disabled || titlePending}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -348,7 +351,7 @@ export const ChatRail: React.FC<ChatRailProps> = ({
                   onRegenerateTitle(thread.id);
                 }}
               >
-                Regenerate title
+                <RefreshIcon size={11} />
               </button>
             ) : null}
             <button

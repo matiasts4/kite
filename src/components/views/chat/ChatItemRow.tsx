@@ -24,11 +24,14 @@ import {
 } from './citationChip';
 import {
   groupTranscriptRows,
+  isHiddenNoteItem,
+  isInternalDispatchItem,
   liveActivityRowIndex,
   liveThoughtLine,
   reasoningPreviewRemainder,
   sanitizeAssistantProtocolText,
   userMessageFolds,
+  visibleAssistantText,
   type TranscriptRow,
 } from './chatItemHelpers';
 import { ChatWorkEntry, ChatWorkGroup } from './ChatWorkLog';
@@ -61,7 +64,7 @@ function restoreCommandMissing(text: string): boolean {
   return /not found|unavailable/i.test(text);
 }
 
-export const ChatItemRow: React.FC<{
+export interface ChatItemRowProps {
   item: ChatItem;
   threadId?: string;
   workspaceId?: string | null;
@@ -75,7 +78,9 @@ export const ChatItemRow: React.FC<{
   fileRestoreEnabled?: boolean;
   /** False when the restore command cannot be invoked. Defaults to available. */
   restoreCommandAvailable?: boolean;
-}> = ({
+}
+
+const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   item,
   threadId,
   workspaceId = null,
@@ -100,6 +105,7 @@ export const ChatItemRow: React.FC<{
 
   // User row: no "You" or timestamp header
   if (item.kind === 'user') {
+    if (isInternalDispatchItem(item)) return null;
     const isLong = userMessageFolds(item.text);
     return (
       <motion.article
@@ -185,7 +191,15 @@ export const ChatItemRow: React.FC<{
           <ul className="chat-attachments">
             {(item.attachments as any[]).map((att, i) => (
               <li key={i} className="chat-attachment">
-                <FileCodeIcon size={12} className="chat-attachment__icon" />
+                {att.previewDataUrl ? (
+                  <img
+                    src={att.previewDataUrl}
+                    alt={att.displayName || 'Attachment'}
+                    className="chat-attachment__thumb"
+                  />
+                ) : (
+                  <FileCodeIcon size={12} className="chat-attachment__icon" />
+                )}
                 <span>{att.displayName || 'Attachment'}</span>
                 {att.byteSize && <small>{formatBytes(att.byteSize)}</small>}
               </li>
@@ -232,11 +246,8 @@ export const ChatItemRow: React.FC<{
 
   // Assistant row: no assistant label or timestamp header
   if (item.kind === 'assistant') {
-    const rawText = item.text.includes('<proposed_plan>') && item.text.includes('</proposed_plan>')
-      ? item.text.replace('<proposed_plan>', '\n').replace('</proposed_plan>', '\n')
-      : item.text;
-
-    const cleanText = sanitizeAssistantProtocolText(rawText);
+    const cleanText = visibleAssistantText(item.text);
+    if (cleanText.trim().length === 0) return null;
 
     return (
       <motion.div
@@ -401,10 +412,7 @@ export const ChatItemRow: React.FC<{
 
   // Note Row
   if (item.kind === 'note') {
-    if (
-      !item.streaming &&
-      item.text.trim() === 'The provider has not sent an update. Stop the turn if this stays quiet.'
-    ) {
+    if (isHiddenNoteItem(item)) {
       return null;
     }
     return <p className="chat-turn chat-turn--note chat-note-row">{item.text}</p>;
@@ -422,4 +430,7 @@ export const ChatItemRow: React.FC<{
 
   return null;
 };
+
+export const ChatItemRow = React.memo(ChatItemRowInner);
+ChatItemRow.displayName = 'ChatItemRow';
 

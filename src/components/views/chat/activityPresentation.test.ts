@@ -6,10 +6,13 @@ import {
   opensInFilesSidebar,
   commandStatusLabel,
   interruptedTurnLine,
+  liveActivityHeadline,
   liveStageLabel,
+  liveWorkGroupHeadline,
   splitTraceLabel,
   summarizeWorkBurst,
   toolExpandedBody,
+  traceLineRangeLabel,
   turnStartUnixMs,
   workedForLine,
   compactingForLine,
@@ -282,5 +285,132 @@ describe('tool labels', () => {
     expect(activityTraceLabel(item({ kind: 'tool', toolKind: 'execute', title: 'Execute `git status`', status: 'completed' }))).toBe(
       'Ran git',
     );
+  });
+
+  it('builds single-line live headlines and line-range labels', () => {
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          title: 'codegraph · explore',
+          toolName: 'codegraph_explore',
+          serverName: 'codegraph',
+          toolKind: 'mcpToolCall',
+        }),
+      ),
+    ).toBe('Exploring');
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          title: 'read file',
+          toolName: 'read_file',
+          detail: '{"Path":"C:/tmp/logs/output.txt","StartLine":1,"EndLine":250}',
+        }),
+      ),
+    ).toBe('Reading output.txt');
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          toolKind: 'edit',
+          filePath: 'src/components/ChatWorkLog.tsx',
+        }),
+      ),
+    ).toBe('Editing ChatWorkLog.tsx');
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'command',
+          command: 'cargo test',
+          status: 'running',
+          streaming: true,
+        }),
+      ),
+    ).toBe('Running cargo');
+
+    expect(
+      liveWorkGroupHeadline([
+        item({ kind: 'tool', title: 'codegraph · explore', toolName: 'codegraph_explore', status: 'completed' }),
+        item({
+          kind: 'tool',
+          title: 'read file',
+          toolName: 'read_file',
+          detail: '{"Path":"C:/tmp/logs/output.txt","StartLine":1,"EndLine":250}',
+          status: 'running',
+          streaming: true,
+        }),
+      ]),
+    ).toBe('Reading output.txt');
+
+    expect(
+      traceLineRangeLabel(
+        item({
+          kind: 'tool',
+          title: 'read file',
+          detail: '{"Arguments":{"Path":"output.txt","StartLine":1,"EndLine":250}}',
+        }),
+      ),
+    ).toBe('#L1-250');
+    expect(
+      traceLineRangeLabel(
+        item({
+          kind: 'tool',
+          title: 'read file',
+          detail: '{"Path":"output.txt","StartLine":1}',
+        }),
+      ),
+    ).toBe('#L1');
+
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          title: 'Analyzed output.txt',
+          detail: '{"Path":"output.txt","StartLine":1}',
+        }),
+      ),
+    ).toBe('Reading output.txt');
+
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          title: 'Edit src/find_user.ts',
+        }),
+      ),
+    ).toBe('Editing find_user.ts');
+
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          title: 'grep_search',
+          toolName: 'grep_search',
+          detail: '{"Query":"chat-work-group"}',
+        }),
+      ),
+    ).toBe('Searching chat-work-group');
+
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'reasoning',
+          text: '**Scanning components**\nChecking CSS visibility...',
+          streaming: true,
+        }),
+      ),
+    ).toBe('Scanning components');
+
+    expect(
+      liveActivityHeadline(
+        item({
+          kind: 'tool',
+          title: '',
+          text: '',
+          status: 'running',
+        }),
+      ),
+    ).toBe('Working');
   });
 });

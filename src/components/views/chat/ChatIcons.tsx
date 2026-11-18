@@ -377,14 +377,24 @@ export const PencilIcon = createIcon(
   "none"
 );
 
-export const SpinnerIcon = createIcon(
-  14,
-  <>
+export const SpinnerIcon: React.FC<
+  React.SVGProps<SVGSVGElement> & { size?: number; className?: string }
+> = ({ size = 14, className = '', ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className ? `animate-spin ${className}` : 'animate-spin'}
+    aria-hidden="true"
+    {...props}
+  >
     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-  </>,
-  "0 0 24 24",
-  2,
-  "none"
+  </svg>
 );
 
 export const EyeIcon = createIcon(

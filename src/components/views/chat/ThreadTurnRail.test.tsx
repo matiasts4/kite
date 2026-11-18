@@ -178,4 +178,38 @@ describe('ThreadTurnRail', () => {
     expect(lastDot).toHaveAttribute('aria-current', 'step');
     expect(list.scrollTop).toBe(198);
   });
+
+  it('excludes internal dispatch envelopes and coordinator wakeups from turn rail entries', () => {
+    const internalEnvelope = [
+      '[kite from="thread:child-1"]',
+      'This is another agent, not the person.',
+      'To reply: kite dispatch send thread:child-1 "<reply>"',
+      'Irreversible and privileged actions still wait for the person.',
+      'BODY:',
+      'state: done',
+    ].join('\n');
+
+    const turns = buildThreadTurns([
+      mockItem({ id: 'u1', kind: 'user', text: 'Run two subagents' }),
+      mockItem({ id: 'a1', kind: 'assistant', text: 'Initial table.' }),
+      mockItem({ id: 'u-env', kind: 'user', text: internalEnvelope }),
+      mockItem({ id: 'a2', kind: 'assistant', text: 'Final synthesis.' }),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.promptTitle).toBe('Run two subagents');
+    expect(turns[0]?.assistantPreview).toBe('Initial table. Final synthesis.');
+  });
+
+  it('ignores whitespace and protocol-only assistant items when building turn previews', () => {
+    const turns = buildThreadTurns([
+      mockItem({ id: 'u1', kind: 'user', text: 'Check logs' }),
+      mockItem({ id: 't1', kind: 'tool', text: '', title: 'Read app.log', filePath: 'app.log' }),
+      mockItem({ id: 'a-proto', kind: 'assistant', text: '{"type":"step-finish","tokens":{"input":10}}' }),
+      mockItem({ id: 'a-ws', kind: 'assistant', text: '  \n  ' }),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.assistantPreview).toBe('Read 1 file');
+  });
 });

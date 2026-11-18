@@ -52,7 +52,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
   onSend,
   onDismiss,
 }) => {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [formMode, setFormMode] = useState<'revise' | 'new' | null>(null);
   const [inputText, setInputText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -204,10 +204,10 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
                 bottom: '100%',
                 marginBottom: '4px',
                 width: '180px',
-                background: 'var(--surface-bg, #1e1e1e)',
-                border: '1px solid var(--border-subtle, #333)',
-                borderRadius: '6px',
-                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                background: 'var(--glass-overlay-bg, var(--menu-plate, #1e1e1e))',
+                border: '1px solid var(--glass-border, var(--panel-stroke, #333))',
+                borderRadius: 'var(--control-radius, 8px)',
+                boxShadow: 'var(--glass-shadow, 0 8px 24px rgba(0,0,0,0.5))',
                 zIndex: 100,
                 padding: '4px 0',
                 fontSize: '12px',
@@ -217,8 +217,8 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
                 style={{
                   padding: '4px 10px',
                   fontWeight: 600,
-                  color: 'var(--text-muted, #888)',
-                  borderBottom: '1px solid var(--border-subtle, #333)',
+                  color: 'var(--text-secondary, #888)',
+                  borderBottom: '1px solid var(--glass-border, var(--separator, #333))',
                 }}
               >
                 Choose subagent
@@ -245,7 +245,7 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
                     color: 'inherit',
                     cursor: 'pointer',
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover, #2a2a2a)')}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--hover-fill, rgba(255,255,255,0.06))')}
                   onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                   onClick={async () => {
                     setShowSubagentMenu(false);
@@ -297,9 +297,9 @@ export const ChatPlanPanel: React.FC<ChatPlanPanelProps> = ({
           style={{
             margin: '8px 0 4px 0',
             padding: '6px 10px',
-            background: 'var(--surface-secondary, rgba(255,255,255,0.04))',
-            borderRadius: '6px',
-            border: '1px solid var(--border-subtle, #333)',
+            background: 'var(--glass-elevated-bg, var(--block-fill, rgba(255,255,255,0.04)))',
+            borderRadius: 'var(--control-radius, 8px)',
+            border: '1px solid var(--glass-border, var(--block-stroke, #333))',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',

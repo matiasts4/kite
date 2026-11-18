@@ -6,6 +6,7 @@
 @import "./motion/standard/standard.css";
 @import "./visual-language.css";
 @import "./components/diffs/kiteDiffs.css";
+@import "./components/ui/agent-indicators.css";
 @import "./components/theme/theme-visuals.css";
 
 
@@ -448,7 +449,6 @@ select option:hover {
     animation: none;
   }
 }
-
 
 
 

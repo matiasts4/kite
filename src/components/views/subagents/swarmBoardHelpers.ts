@@ -5,6 +5,7 @@ import type {
   SwarmMember,
 } from '../../../types';
 import { formatShortModelLabel } from '../../../lib/subagentNav';
+import { humanizeActivityText } from '../chat/subagentRunHelpers';
 import type { SelectMenuRow } from '../../ui/SelectMenu';
 
 export type SwarmTab = 'feed' | 'roster' | 'graph';
@@ -82,7 +83,7 @@ export function memberStateDescription(
   if (state === 'working') {
     const activity =
       member.currentActivity?.trim() ||
-      matchedRun?.latestActivity?.trim() ||
+      humanizeActivityText(matchedRun?.latestActivity) ||
       'Working';
     return { dotClass: 'swarm-state-dot--working', label: activity };
   }

@@ -1,18 +1,24 @@
 import React from 'react';
-import { motion } from 'motion/react';
-import { tweens } from '../../../motion/standard/tokens';
+import { openDiffsInRightDock } from '../../../lib/diffPreviewNav';
 import type { ChatItem, SubagentRun } from '../../../types';
-import { ActivityGlyph } from '../chat/activityGlyph';
+import { ChangedFilesCard } from '../chat/ChangedFilesCard';
 import { ChatApprovalCard } from '../chat/ChatApprovalCard';
-import { ChatWorkEntry, ChatWorkGroup, type TranscriptRow } from '../chat/ChatItemRow';
-import { MarkdownMessage } from '../chat/MarkdownMessage';
+import {
+  ChatItemRow,
+  ChatWorkGroup,
+  liveActivityRowIndex,
+  type TranscriptRow,
+} from '../chat/ChatItemRow';
+import { changedFilesForTurn } from '../chat/pane/threadTurnHelpers';
 import { SubagentGroupRow } from '../chat/SubagentActivityCard';
+import { humanizeActivityText } from '../chat/subagentRunHelpers';
+import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import type { ApprovalRequest } from '../chat/types';
 import { isRunActive } from './subagentInspectorHelpers';
 
 interface SubagentStepStreamProps {
   workspaceId: string | null;
-  threadId?: string | null;
+  parentThreadId: string;
   activeRun: SubagentRun;
   activeRunRunning: boolean;
   visibleSteps: ChatItem[];
@@ -32,15 +38,12 @@ interface SubagentStepStreamProps {
     requestId: string,
   ) => void;
   actionError: string | null;
-  steeringText: string;
-  sendingSteering: boolean;
-  onSteeringTextChange: (value: string) => void;
-  onSendSteering: (e: React.FormEvent) => void;
+  onJumpToParent?: () => void;
 }
 
 export const SubagentStepStream: React.FC<SubagentStepStreamProps> = ({
   workspaceId,
-  threadId,
+  parentThreadId,
   activeRun,
   activeRunRunning,
   visibleSteps,
@@ -57,207 +60,247 @@ export const SubagentStepStream: React.FC<SubagentStepStreamProps> = ({
   resolvingApproval,
   onChildApprovalDecision,
   actionError,
-  steeringText,
-  sendingSteering,
-  onSteeringTextChange,
-  onSendSteering,
-}) => (
-  <>
-    {activeRun.status?.toLowerCase() === 'failed' && (
-      <div
-        className="subagent-inspector__failure-card"
-        data-testid="subagent-failure-card"
-        role="status"
-      >
-        <strong>Subagent execution failed</strong>
-        <span>
-          {activeRun.latestActivity ||
-            'The subagent exited with an error. Check provider credentials, model availability, or CLI arguments.'}
-        </span>
-      </div>
-    )}
+  onJumpToParent,
+}) => {
+  const normalizedStatus = (activeRun.status ?? '').toLowerCase();
+  const isInterrupted =
+    normalizedStatus === 'interrupted' ||
+    normalizedStatus === 'killed' ||
+    normalizedStatus === 'cancelled' ||
+    normalizedStatus === 'stopped';
+  const finishedAt = activeRun.completedAtUnixMs ?? activeRun.updatedAtUnixMs;
+  const durationSeconds =
+    finishedAt && activeRun.startedAtUnixMs && finishedAt >= activeRun.startedAtUnixMs
+      ? Math.max(0, Math.round((finishedAt - activeRun.startedAtUnixMs) / 1000))
+      : null;
+  const liveWorkIdx = activeRunRunning ? liveActivityRowIndex(groupedRows) : -1;
+  const enterFor = (id: string) => !reduceMotion && !seenStepIdsRef.current.has(id);
+  const changedFiles = React.useMemo(() => changedFilesForTurn(visibleSteps), [visibleSteps]);
+  const activityItems = React.useMemo<ChatItem[]>(() => {
+    if (visibleSteps.some((item) => item.kind === 'user')) {
+      return visibleSteps;
+    }
+    return [
+      {
+        id: `__subagent-start-${activeRun.subagentId}`,
+        kind: 'user',
+        text: activeRun.prompt ?? '',
+        title: null,
+        detail: null,
+        status: null,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: activeRun.startedAtUnixMs,
+        attachments: [],
+      },
+      ...visibleSteps,
+    ];
+  }, [visibleSteps, activeRun.subagentId, activeRun.prompt, activeRun.startedAtUnixMs]);
 
-    {activeRun.prompt && (
-      <div className="subagent-brief-card">
-        <button
-          type="button"
-          className="subagent-brief-card__toggle"
-          aria-expanded={briefExpanded}
-          onClick={onToggleBrief}
-        >
-          <span>Task Brief</span>
-          <span>{briefExpanded ? 'Collapse' : 'Expand'}</span>
-        </button>
+  return (
+    <>
+      {normalizedStatus === 'failed' && (
         <div
-          className={`subagent-brief-card__body${!briefExpanded ? ' subagent-brief-card__body--clamped' : ''}`}
+          className="subagent-inspector__failure-card"
+          data-testid="subagent-failure-card"
+          role="status"
         >
-          {activeRun.prompt}
+          <strong>Subagent execution failed</strong>
+          <span>
+            {humanizeActivityText(activeRun.latestActivity) ||
+              'The subagent exited with an error. Check provider credentials, model availability, or CLI arguments.'}
+          </span>
         </div>
-      </div>
-    )}
+      )}
 
-    <div className="subagent-inspector__stream-wrap">
-      <div
-        ref={streamRef}
-        className="subagent-inspector__stream"
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
-          atBottomRef.current = nearBottom;
-          onSetAutoScrollPaused(!nearBottom);
-        }}
-      >
-        {visibleSteps.length === 0 ? (
-          <div className="subagent-inspector__empty">
-            {activeRun.status?.toLowerCase() === 'failed' ? (
-              <>
-                <strong>No steps captured before failure</strong>
-                <span>
-                  {activeRun.latestActivity || 'The subagent failed before producing transcript items.'}
-                </span>
-              </>
-            ) : !isRunActive(activeRun.status) ? (
-              <>
-                <strong>
-                  {activeRun.status?.toLowerCase() === 'killed' ? 'Subagent stopped' : 'Subagent settled'}
-                </strong>
-                <span>
-                  {activeRun.latestActivity || 'No individual step items were recorded for this run.'}
-                </span>
-              </>
-            ) : (
-              <>
-                <strong>Waiting for subagent steps…</strong>
-                <span>{activeRun.latestActivity || 'Starting subagent execution.'}</span>
-              </>
-            )}
-          </div>
-        ) : (
-          groupedRows.map((row) => {
-            if (row.kind === 'work') {
-              const isNewGroup = row.items.some((it) => !seenStepIdsRef.current.has(it.id));
-              return (
-                <motion.div
-                  key={row.id}
-                  className="subagent-inspector__step subagent-inspector__step--work"
-                  initial={isNewGroup && !reduceMotion ? { opacity: 0, y: 4 } : false}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={reduceMotion ? tweens.instant : tweens.reveal}
-                >
-                  <ChatWorkGroup
-                    items={row.items}
-                    running={activeRunRunning}
-                    enterFor={(id) => !seenStepIdsRef.current.has(id)}
-                  />
-                </motion.div>
-              );
-            }
-            if (row.kind === 'subagentGroup') {
-              return (
-                <SubagentGroupRow
-                  key={row.id}
-                  items={row.items}
-                  threadId={activeRun.childThreadId ?? threadId ?? undefined}
-                  workspaceId={workspaceId}
-                  enterFor={(id) => !seenStepIdsRef.current.has(id)}
-                />
-              );
-            }
-            const step = row.item;
-            const isNew = !seenStepIdsRef.current.has(step.id);
-            return (
-              <motion.div
-                key={step.id}
-                className={`subagent-inspector__step subagent-inspector__step--${step.kind}`}
-                initial={isNew && !reduceMotion ? { opacity: 0, y: 4 } : false}
-                animate={{ opacity: 1, y: 0 }}
-                transition={reduceMotion ? tweens.instant : tweens.reveal}
-              >
-                {step.kind === 'assistant' ? (
-                  <div className="subagent-inspector__response">
-                    <MarkdownMessage text={step.text} workspaceId={workspaceId} />
-                  </div>
-                ) : step.kind === 'user' ? (
-                  <div className="subagent-inspector__user-msg">
-                    <MarkdownMessage text={step.text} workspaceId={workspaceId} />
-                  </div>
-                ) : step.kind === 'reasoning' ? (
-                  <div className="subagent-inspector__thought">
-                    <span className="subagent-inspector__thought-head">
-                      <ActivityGlyph item={step} size={14} />
-                      <span>Thought</span>
-                    </span>
-                    <p className="subagent-inspector__thought-body">{step.text}</p>
-                  </div>
-                ) : (
-                  <ChatWorkEntry
-                    item={step}
-                    running={isRunActive(step.status) || Boolean(step.streaming)}
-                    enter={isNew}
-                  />
-                )}
-              </motion.div>
-            );
-          })
-        )}
-        {childApproval && (
-          <div className="subagent-inspector__approval-wrap" data-testid="subagent-child-approval">
-            <ChatApprovalCard
-              approval={childApproval}
-              busy={resolvingApproval}
-              onDecision={onChildApprovalDecision}
-            />
-          </div>
-        )}
-      </div>
-
-      {autoScrollPaused && (
-        <button
-          type="button"
-          className="subagent-inspector__jump-latest"
-          onClick={() => {
-            atBottomRef.current = true;
-            onSetAutoScrollPaused(false);
-            if (streamRef.current) {
-              streamRef.current.scrollTop = streamRef.current.scrollHeight;
-            }
+      <div className="subagent-inspector__stream-wrap">
+        <div
+          ref={streamRef}
+          className="chat-transcript subagent-inspector__stream"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+            atBottomRef.current = nearBottom;
+            onSetAutoScrollPaused(!nearBottom);
           }}
         >
-          Jump to latest
-        </button>
-      )}
-    </div>
+          <div
+            className="chat-transcript__column subagent-inspector__transcript-column"
+            data-testid="subagent-transcript-column"
+          >
+            {activeRun.prompt ? (
+              <article
+                className="chat-turn chat-turn--user chat-user-row chat-user-row--bubble subagent-brief-card"
+                data-testid="subagent-prompt-turn"
+              >
+                <button
+                  type="button"
+                  className="subagent-brief-card__toggle"
+                  aria-expanded={briefExpanded}
+                  onClick={onToggleBrief}
+                >
+                  <span className="subagent-brief-card__label">Task Brief</span>
+                  <span className="subagent-brief-card__chevron">
+                    {briefExpanded ? 'Collapse' : 'Expand'}
+                  </span>
+                </button>
+                <p
+                  className={`subagent-brief-card__body${
+                    briefExpanded ? ' is-expanded' : ' subagent-brief-card__body--clamped'
+                  }`}
+                >
+                  {activeRun.prompt}
+                </p>
+              </article>
+            ) : null}
 
-    {actionError && (
-      <div className="subagent-inspector__error" role="alert">
-        {actionError}
+            {visibleSteps.length === 0 ? (
+              <div className="subagent-inspector__empty">
+                {normalizedStatus === 'failed' ? (
+                  <>
+                    <strong>No steps captured before failure</strong>
+                    <span>
+                      {humanizeActivityText(activeRun.latestActivity) || 'The subagent failed before producing transcript items.'}
+                    </span>
+                  </>
+                ) : !isRunActive(activeRun.status) ? (
+                  <>
+                    <strong>
+                      {normalizedStatus === 'killed' ? 'Subagent stopped' : 'Subagent settled'}
+                    </strong>
+                    <span>
+                      {humanizeActivityText(activeRun.latestActivity) || 'No individual step items were recorded for this run.'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <strong>Waiting for subagent steps…</strong>
+                    <span>{humanizeActivityText(activeRun.latestActivity) || 'Starting subagent execution.'}</span>
+                  </>
+                )}
+              </div>
+            ) : (
+              groupedRows.map((row, rowIdx) => {
+                const targetThreadId = activeRun.childThreadId ?? parentThreadId;
+                if (row.kind === 'work') {
+                  return (
+                    <ChatWorkGroup
+                      key={row.id}
+                      items={row.items}
+                      running={activeRunRunning && rowIdx === liveWorkIdx}
+                      enterFor={enterFor}
+                      interrupted={isInterrupted && rowIdx === groupedRows.length - 1}
+                    />
+                  );
+                }
+                if (row.kind === 'subagentGroup') {
+                  return (
+                    <SubagentGroupRow
+                      key={row.id}
+                      items={row.items}
+                      threadId={targetThreadId}
+                      workspaceId={workspaceId}
+                      enterFor={enterFor}
+                    />
+                  );
+                }
+                return (
+                  <ChatItemRow
+                    key={row.item.id}
+                    item={row.item}
+                    threadId={targetThreadId}
+                    workspaceId={workspaceId}
+                    subagentRuns={null}
+                    swarmState={null}
+                    enter={enterFor(row.item.id)}
+                  />
+                );
+              })
+            )}
+
+            {(visibleSteps.length > 0 || (isInterrupted && !activeRunRunning)) && (
+              <TurnActivityStatus
+                running={activeRunRunning}
+                pendingApproval={childApproval}
+                items={activityItems}
+                swarmState={null}
+                interrupted={isInterrupted && !activeRunRunning}
+                durationSeconds={durationSeconds}
+              />
+            )}
+
+            {changedFiles.length > 0 && (
+              <ChangedFilesCard
+                files={changedFiles}
+                onOpenTurnDiff={() =>
+                  openDiffsInRightDock({
+                    workspaceId: workspaceId ?? null,
+                    focusPaths: changedFiles.map((file) => file.path),
+                  })
+                }
+                onOpenFile={(path) =>
+                  openDiffsInRightDock({
+                    workspaceId: workspaceId ?? null,
+                    focusPaths: [path],
+                    selectedPath: path,
+                  })
+                }
+              />
+            )}
+
+            {childApproval && (
+              <div className="subagent-inspector__approval-wrap" data-testid="subagent-child-approval">
+                <ChatApprovalCard
+                  approval={childApproval}
+                  busy={resolvingApproval}
+                  onDecision={onChildApprovalDecision}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {autoScrollPaused && (
+          <button
+            type="button"
+            className="subagent-inspector__jump-latest"
+            onClick={() => {
+              atBottomRef.current = true;
+              onSetAutoScrollPaused(false);
+              if (streamRef.current) {
+                streamRef.current.scrollTop = streamRef.current.scrollHeight;
+              }
+            }}
+          >
+            Jump to latest
+          </button>
+        )}
       </div>
-    )}
 
-    <form
-      className="subagent-inspector__composer"
-      data-testid="subagent-steering-form"
-      onSubmit={onSendSteering}
-    >
-      <input
-        type="text"
-        className="subagent-inspector__composer-input"
-        value={steeringText}
-        placeholder={
-          activeRun.childThreadId
-            ? `Message ${activeRun.role || 'subagent'}…`
-            : 'Follow-up steering requires a child thread subagent'
-        }
-        disabled={!activeRun.childThreadId || sendingSteering}
-        onChange={(e) => onSteeringTextChange(e.target.value)}
-      />
-      <button
-        type="submit"
-        className="subagent-inspector__composer-submit"
-        disabled={!activeRun.childThreadId || sendingSteering || !steeringText.trim()}
+      {actionError && (
+        <div className="subagent-inspector__error" role="alert">
+          {actionError}
+        </div>
+      )}
+
+      <div
+        className="subagent-inspector__readonly-footer"
+        data-testid="subagent-readonly-footer"
+        role="status"
       >
-        Send
-      </button>
-    </form>
-  </>
-);
+        <span className="subagent-inspector__readonly-label">
+          Read-only subagent thread · Managed by the orchestrator
+        </span>
+        {onJumpToParent && (
+          <button
+            type="button"
+            className="subagent-inspector__readonly-action"
+            onClick={onJumpToParent}
+          >
+            Focus main thread
+          </button>
+        )}
+      </div>
+    </>
+  );
+};

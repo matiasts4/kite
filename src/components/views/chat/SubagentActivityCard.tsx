@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import type { ChatItem, SubagentRun } from '../../../types';
-import { BotIcon, CheckIcon, ChevronRightIcon, CloseIcon } from './ChatIcons';
+import { AgentStatusIndicator } from '../../ui/AgentStatusIndicator';
+import { SubagentRoleIcon } from '../../ui/SubagentRoleIcon';
+import { ChevronRightIcon } from './ChatIcons';
 import { LiveElapsedClock } from './LiveElapsedClock';
 import { prefersReducedMotion } from '../../../motion/contract';
 import { tweens } from '../../../motion/standard/tokens';
@@ -16,6 +18,7 @@ import {
   dedupeSubagentItems,
   dedupeSubagentRuns,
   extractFailureSummary,
+  humanizeActivityText,
   isItemBlocked,
   isItemFailed,
   isItemRunning,
@@ -91,7 +94,7 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
   const safeDetail = isRawDispatchCommand(item.detail) ? '' : item.detail || '';
   const safeActivity = isRawDispatchCommand(run?.latestActivity || meta?.latestActivity)
     ? ''
-    : run?.latestActivity || meta?.latestActivity || '';
+    : humanizeActivityText(run?.latestActivity || meta?.latestActivity);
   const secondaryRaw = isFailed
     ? safeActivity ||
       extractFailureSummary(item.text) ||
@@ -99,7 +102,7 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
       promptExcerpt ||
       ''
     : safeActivity || safeDetail || promptExcerpt || '';
-  const secondaryLine = plainPreviewLine(secondaryRaw);
+  const secondaryLine = plainPreviewLine(humanizeActivityText(secondaryRaw));
   const showWorkspacePill = Boolean(workspaceMode && workspaceMode !== 'inherit');
 
   const statusClass = isBlocked
@@ -125,13 +128,20 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
     <>
       <div className="chat-subagent-card__header">
         <span aria-hidden="true" className="chat-subagent-card__icon">
-          {isFailed ? (
-            <CloseIcon size={13} />
-          ) : !isRunning ? (
-            <CheckIcon size={13} />
-          ) : (
-            <BotIcon size={14} />
-          )}
+          <SubagentRoleIcon
+            typeName={run?.typeName ?? meta?.typeName}
+            role={role}
+            status={
+              isBlocked
+                ? 'waiting'
+                : isRunning
+                  ? 'running'
+                  : isFailed
+                    ? 'failed'
+                    : 'completed'
+            }
+            size={14}
+          />
         </span>
         <span className="chat-subagent-card__title">{role}</span>
         {modelLabel ? (
@@ -148,25 +158,31 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
         <span className="chat-subagent-card__telemetry">
           {isBlocked ? (
             <span className="chat-subagent-card__state chat-subagent-card__state--waiting">
+              <AgentStatusIndicator status="waiting" size={12} />
               <span>Waiting</span>
             </span>
           ) : isRunning ? (
             <>
-              <span aria-hidden="true" className="chat-working-pulse" />
+              <AgentStatusIndicator status="running" size={13} />
               <LiveElapsedClock
                 className="chat-subagent-card__clock"
                 running={true}
                 startedAtUnixMs={startedAt}
                 format="clock"
-                idleLabel="Live"
+                idleLabel=""
               />
             </>
           ) : isFailed ? (
             <span className="chat-subagent-card__state chat-subagent-card__state--failed">
+              <AgentStatusIndicator
+                status={rawStatus === 'cancelled' || rawStatus === 'killed' ? 'killed' : 'failed'}
+                size={12}
+              />
               <span>{rawStatus === 'cancelled' || rawStatus === 'killed' ? 'Stopped' : 'Failed'}</span>
             </span>
           ) : (
             <span className="chat-subagent-card__state chat-subagent-card__state--done">
+              <AgentStatusIndicator status="completed" size={12} />
               <LiveElapsedClock
                 running={false}
                 startedAtUnixMs={startedAt}
@@ -287,7 +303,20 @@ export const SubagentGroupRow: React.FC<{
         onClick={() => setExpanded((v) => !v)}
       >
         <span aria-hidden="true" className="chat-subagent-card__icon">
-          <BotIcon size={14} />
+          <SubagentRoleIcon
+            typeName="orchestrator"
+            role={title}
+            status={
+              anyRunning
+                ? 'running'
+                : blockedCount > 0
+                  ? 'waiting'
+                  : failedCount > 0
+                    ? 'failed'
+                    : 'completed'
+            }
+            size={14}
+          />
         </span>
         <span className={`chat-subagent-group__label ${anyRunning ? 'live-tool-shine' : ''}`}>
           {title}
@@ -299,7 +328,11 @@ export const SubagentGroupRow: React.FC<{
         ) : null}
         <span className="chat-subagent-card__spacer" />
         <span className="chat-subagent-card__steps">{dedupedItems.length} total</span>
-        {anyRunning ? <span aria-hidden="true" className="chat-working-pulse" /> : null}
+        {anyRunning ? (
+          <AgentStatusIndicator status="running" size={13} />
+        ) : blockedCount > 0 ? (
+          <AgentStatusIndicator status="waiting" size={13} />
+        ) : null}
         <span
           aria-hidden="true"
           className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}

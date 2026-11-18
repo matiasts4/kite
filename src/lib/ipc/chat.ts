@@ -134,7 +134,7 @@ export interface ChatTurnUpdatesResponse {
   nextSequence: number;
   events: Array<{
     sequence: number;
-    kind: 'status' | 'upsert' | 'delta' | 'finished' | 'approvalOpened' | 'approvalResolved';
+    kind: 'status' | 'upsert' | 'delta' | 'remove' | 'finished' | 'approvalOpened' | 'approvalResolved';
     status?: 'idle' | 'running' | 'waiting' | 'error';
     item?: any;
     itemId?: string;
@@ -203,6 +203,17 @@ export async function renameChatThread(threadId: string, title: string): Promise
   return invokeCommand<void>('rename_chat_thread', { supportedSchemaVersion: 1, threadId, title });
 }
 
+export async function regenerateChatThreadTitle(
+  threadId: string,
+  profileId?: string | null
+): Promise<ExtendedChatThread | null> {
+  return invokeCommand<ExtendedChatThread | null>('regenerate_chat_thread_title', {
+    supportedSchemaVersion: 1,
+    threadId,
+    ...(profileId ? { profileId } : {}),
+  });
+}
+
 export async function setChatThreadPinned(threadId: string, pinned: boolean): Promise<void> {
   return invokeCommand<void>('set_chat_thread_pinned', { supportedSchemaVersion: 1, threadId, pinned });
 }
@@ -232,6 +243,51 @@ export async function getThreadSubagentDetail(
     threadId,
     subagentId,
   });
+}
+
+export interface GlobalSubagentEntry {
+  run: import('../../types').SubagentRun;
+  threadId: string;
+  threadTitle: string;
+  workspaceId?: string | null;
+  parentProvider?: string | null;
+  parentModel?: string | null;
+  swarmId?: string | null;
+  hasPendingApproval?: boolean;
+}
+
+export interface GlobalSubagentRunsSnapshot {
+  runs: GlobalSubagentEntry[];
+  totalCount: number;
+  activeCount: number;
+  waitingCount: number;
+}
+
+export async function listAllSubagentRuns(params?: {
+  workspaceId?: string | null;
+  limit?: number;
+}): Promise<GlobalSubagentRunsSnapshot> {
+  try {
+    const res = await invokeCommand<{
+      ok?: boolean;
+      runs?: GlobalSubagentEntry[];
+      totalCount?: number;
+      activeCount?: number;
+      waitingCount?: number;
+    }>('list_all_subagent_runs', {
+      workspaceId: params?.workspaceId ?? null,
+      limit: params?.limit ?? 120,
+    });
+    const runs = Array.isArray(res?.runs) ? res.runs : [];
+    return {
+      runs,
+      totalCount: typeof res?.totalCount === 'number' ? res.totalCount : runs.length,
+      activeCount: typeof res?.activeCount === 'number' ? res.activeCount : 0,
+      waitingCount: typeof res?.waitingCount === 'number' ? res.waitingCount : 0,
+    };
+  } catch {
+    return { runs: [], totalCount: 0, activeCount: 0, waitingCount: 0 };
+  }
 }
 
 export async function getThreadSwarmState(

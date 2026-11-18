@@ -331,7 +331,6 @@ fn main() {
     // opens first imports the per-install vaults and account profiles once.
     crate::connections::ensure_shared_registry();
 
-    persist::workspaces();
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
@@ -375,16 +374,22 @@ fn main() {
                 let _ = crate::persist::initial_state();
             });
             crate::chat::persistent::start_idle_reaper();
-            crate::dispatch_wire::start_gui_background();
-            // A detached core owns terminal PTYs and background dispatch; connect eagerly
-            // so daemon-emitted events reach the WebView from startup.
-            if crate::core_daemon::ensure_core_daemon_started() {
-                std::thread::spawn(|| {
+            std::thread::spawn(|| {
+                crate::dispatch_wire::start_gui_background();
+            });
+            crate::core_daemon::mark_core_daemon_startup_pending();
+            std::thread::spawn(|| {
+                let startup_guard = crate::core_daemon::CoreDaemonStartupGuard::new();
+                // A detached core owns terminal PTYs and background dispatch; connect eagerly
+                // so daemon-emitted events reach the WebView from startup.
+                let external_owner = crate::core_daemon::ensure_core_daemon_started();
+                drop(startup_guard);
+                if external_owner {
                     let _ = crate::core_daemon::CoreConnection::get();
-                });
-            } else {
-                crate::dispatch_wire::start_background();
-            }
+                } else {
+                    crate::dispatch_wire::start_background();
+                }
+            });
             crate::system_metrics::init_benchmark_from_env();
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
@@ -781,3 +786,4 @@ fn main() {
         }
     });
 }
+

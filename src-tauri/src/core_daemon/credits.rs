@@ -1,11 +1,94 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::core_wire::{encode_rpc_frame, ChannelAttachMode, ChannelCreditTracker, Frame};
 
 pub(crate) static CORE_DAEMON_OWNER: OnceLock<bool> = OnceLock::new();
+static CORE_DAEMON_STARTUP_GATE: OnceLock<DaemonStartupGate> = OnceLock::new();
+const CORE_DAEMON_STARTUP_WAIT_CAP: Duration = Duration::from_millis(1500);
+
+/// Coordinates early IPC checks with async `ensure_core_daemon_started()`
+/// in `.setup()` so window launch never blocks while preventing early callers
+/// from misreading `CORE_DAEMON_OWNER` as `false` before initialization finishes.
+struct DaemonStartupGate {
+    pending: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl DaemonStartupGate {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(false),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn mark_pending(&self) {
+        if let Ok(mut guard) = self.pending.lock() {
+            *guard = true;
+        }
+    }
+
+    fn finish(&self) {
+        if let Ok(mut guard) = self.pending.lock() {
+            *guard = false;
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait_while_pending(&self, timeout: Duration) -> bool {
+        let Ok(mut guard) = self.pending.lock() else {
+            return false;
+        };
+        if !*guard {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        while *guard {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let Ok((next, res)) = self.ready.wait_timeout(guard, remaining) else {
+                return false;
+            };
+            guard = next;
+            if res.timed_out() && *guard {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn startup_gate() -> &'static DaemonStartupGate {
+    CORE_DAEMON_STARTUP_GATE.get_or_init(DaemonStartupGate::new)
+}
+
+pub fn mark_core_daemon_startup_pending() {
+    startup_gate().mark_pending();
+}
+
+pub fn finish_core_daemon_startup() {
+    startup_gate().finish();
+}
+
+/// Ensures `finish_core_daemon_startup()` fires even if startup initialization exits early or unwinds.
+pub struct CoreDaemonStartupGuard;
+
+impl CoreDaemonStartupGuard {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Drop for CoreDaemonStartupGuard {
+    fn drop(&mut self) {
+        finish_core_daemon_startup();
+    }
+}
 static DAEMON_SHUTDOWN_NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
 static DAEMON_ACTIVITY_NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
 static DAEMON_UI_EVENT_BROADCAST: OnceLock<tokio::sync::broadcast::Sender<Frame>> = OnceLock::new();
@@ -41,6 +124,10 @@ pub fn broadcast_daemon_ui_event(event: &str, data: Value) {
 /// Callers must forward terminal operations over the control pipe in that case
 /// instead of expecting a local `get_terminals()` entry.
 pub fn is_external_daemon_owner() -> bool {
+    if let Some(&owner) = CORE_DAEMON_OWNER.get() {
+        return owner;
+    }
+    let _ = startup_gate().wait_while_pending(CORE_DAEMON_STARTUP_WAIT_CAP);
     CORE_DAEMON_OWNER.get().copied().unwrap_or(false)
 }
 
@@ -145,5 +232,39 @@ pub fn attached_channel(
         last_title: None,
         last_cwd: None,
         last_exited: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_startup_gate_returns_immediately_when_not_pending() {
+        let gate = DaemonStartupGate::new();
+        assert!(gate.wait_while_pending(Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn daemon_startup_gate_waits_for_finish_and_wakes_waiter() {
+        use std::sync::Arc;
+        let gate = Arc::new(DaemonStartupGate::new());
+        gate.mark_pending();
+
+        let signal = Arc::clone(&gate);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            signal.finish();
+        });
+
+        assert!(gate.wait_while_pending(Duration::from_millis(500)));
+        handle.join().expect("startup waiter thread joins cleanly");
+    }
+
+    #[test]
+    fn daemon_startup_gate_times_out_cleanly_when_never_finished() {
+        let gate = DaemonStartupGate::new();
+        gate.mark_pending();
+        assert!(!gate.wait_while_pending(Duration::from_millis(15)));
     }
 }

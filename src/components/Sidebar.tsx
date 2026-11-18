@@ -125,9 +125,11 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
     return () => window.removeEventListener('studio-agent-created', onCreated);
   }, [onSelectAgent]);
 
-  // Probe agent engine availability
+  const availabilityProbedRef = useRef(false);
+
+  // Probe agent engine availability once per session instead of re-probing on every mode switch
   useEffect(() => {
-    if (mode !== 'agent') return;
+    if (mode !== 'agent' || availabilityProbedRef.current) return;
     let cancelled = false;
 
     const apply = (
@@ -148,6 +150,7 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
     };
 
     const loadAvailability = async () => {
+      let cachedProbed = false;
       try {
         const cached = await invokeCommand<{
           hasProbed?: boolean;
@@ -156,10 +159,17 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
         }>('get_agent_availability', {
           supportedSchemaVersion: 1,
         });
-        if (!cancelled) apply(cached);
+        if (!cancelled) {
+          apply(cached);
+          cachedProbed = Boolean(cached?.hasProbed ?? cached?.phase === 'ready');
+          if (cachedProbed) {
+            availabilityProbedRef.current = true;
+          }
+        }
       } catch (err) {
         console.warn('[Sidebar] get_agent_availability notice:', err);
       }
+      if (cancelled || availabilityProbedRef.current) return;
       try {
         const probed = await invokeCommand<{
           hasProbed?: boolean;
@@ -169,7 +179,10 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
           supportedSchemaVersion: 1,
           force: false,
         });
-        if (!cancelled) apply(probed);
+        if (!cancelled) {
+          apply(probed);
+          availabilityProbedRef.current = true;
+        }
       } catch (err) {
         console.warn('[Sidebar] probe_agent_availability notice:', err);
       }

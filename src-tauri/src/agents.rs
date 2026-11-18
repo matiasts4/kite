@@ -624,7 +624,13 @@ pub fn retry_agent_draft_cleanup(_request: Option<Value>) -> Value {
 }
 
 #[tauri::command]
-pub fn list_agent_rail_activity(_request: Option<Value>) -> Vec<Value> {
+pub async fn list_agent_rail_activity(request: Option<Value>) -> Result<Vec<Value>, String> {
+    tokio::task::spawn_blocking(move || list_agent_rail_activity_sync(request))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub fn list_agent_rail_activity_sync(_request: Option<Value>) -> Vec<Value> {
     let agent_rows = agents().lock().unwrap().clone();
     let thread_rows = threads().lock().unwrap().clone();
     let running = {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { invokeCommand } from '../../../../lib/ipc';
 import { useChatModels } from './useChatModels';
@@ -31,8 +31,13 @@ function invocationsFor(provider: ChatProvider) {
 
 describe('useChatModels', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.mocked(invokeCommand).mockReset();
     respondFrom((provider) => ({ models: liveModels(provider) }));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('prefetches every dynamic provider exactly once when the chat session mounts', async () => {
@@ -136,5 +141,19 @@ describe('useChatModels', () => {
     });
 
     expect(result.current.dynamicModelsMap[provider]).toEqual(good);
+  });
+
+  it('fetches the active dynamic provider immediately and staggers non-active providers', async () => {
+    vi.useFakeTimers();
+    renderHook(() => useChatModels('claude'));
+
+    expect(invocationsFor('claude')).toHaveLength(1);
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(350);
+    });
+
+    expect(vi.mocked(invokeCommand)).toHaveBeenCalledTimes(dynamicProviders.length);
   });
 });

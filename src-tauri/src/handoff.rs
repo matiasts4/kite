@@ -96,14 +96,18 @@ pub fn detect_quota_exhaustion(provider: &str, output: &str) -> Option<String> {
 }
 
 #[tauri::command]
-pub fn recommend_continuation_targets(request: Option<Value>) -> Value {
-    let req = crate::persist::body(&request);
-    let current_provider = req
-        .and_then(|r| r.get("currentProvider").or_else(|| r.get("current_provider")))
-        .and_then(|v| v.as_str())
-        .unwrap_or("agy")
-        .to_string();
-    recommend_continuation_targets_direct(current_provider)
+pub async fn recommend_continuation_targets(request: Option<Value>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let req = crate::persist::body(&request);
+        let current_provider = req
+            .and_then(|r| r.get("currentProvider").or_else(|| r.get("current_provider")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("agy")
+            .to_string();
+        recommend_continuation_targets_direct(current_provider)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 pub fn recommend_continuation_targets_direct(current_provider: String) -> Value {
@@ -344,24 +348,28 @@ No reinicies desde cero ni repitas cambios que ya están en los archivos del wor
 }
 
 #[tauri::command]
-pub fn get_handoff_preview(request: Option<Value>) -> Value {
-    let req = crate::persist::body(&request);
-    let thread_id = req
-        .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let from_provider = req
-        .and_then(|r| r.get("fromProvider").or_else(|| r.get("from_provider")))
-        .and_then(|v| v.as_str())
-        .unwrap_or("agy")
-        .to_string();
-    let partial_text = req
-        .and_then(|r| r.get("partialText").or_else(|| r.get("partial_text")))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+pub async fn get_handoff_preview(request: Option<Value>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let req = crate::persist::body(&request);
+        let thread_id = req
+            .and_then(|r| r.get("threadId").or_else(|| r.get("thread_id")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let from_provider = req
+            .and_then(|r| r.get("fromProvider").or_else(|| r.get("from_provider")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("agy")
+            .to_string();
+        let partial_text = req
+            .and_then(|r| r.get("partialText").or_else(|| r.get("partial_text")))
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
-    get_handoff_preview_direct(thread_id, from_provider, partial_text)
+        get_handoff_preview_direct(thread_id, from_provider, partial_text)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 pub fn get_handoff_preview_direct(

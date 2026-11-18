@@ -64,6 +64,59 @@ describe('grid sorting and helpers', () => {
     expect(thread?.id).toBe('t-fallback');
     expect(thread?.title).toBe('Test');
   });
+
+  it('normalizes missing items array from IPC or cached threads', async () => {
+    vi.mocked(invokeCommand).mockResolvedValueOnce({
+      id: 'parent-done-test',
+      title: 'Completed Thread',
+    });
+
+    const loadedFromIpc = await loadThreadWithFallback('parent-done-test', null);
+    expect(Array.isArray(loadedFromIpc?.items)).toBe(true);
+    expect(loadedFromIpc?.items).toEqual([]);
+
+    vi.mocked(invokeCommand).mockRejectedValueOnce(new Error('offline'));
+    localStorage.setItem(
+      `${CHAT_THREAD_STORAGE_PREFIX}t-cache-no-items`,
+      JSON.stringify({ id: 't-cache-no-items', title: 'Cached No Items' })
+    );
+    const loadedFromCache = await loadThreadWithFallback('t-cache-no-items', null);
+    expect(Array.isArray(loadedFromCache?.items)).toBe(true);
+    expect(loadedFromCache?.items).toEqual([]);
+  });
+
+  it('does not resurrect stale localStorage summaries or grid when IPC returns authoritative empty state', async () => {
+    localStorage.setItem(
+      CHAT_SUMMARIES_STORAGE_KEY,
+      JSON.stringify([
+        { id: 't-stale-general' },
+        { id: 't-agent-keep', profileId: 'agent-1' },
+      ])
+    );
+    localStorage.setItem(
+      CHAT_GRID_STORAGE_KEY,
+      JSON.stringify({ threadIds: ['t-stale-general'], focusedThreadId: 't-stale-general' })
+    );
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd) => {
+      if (cmd === 'list_chat_summaries') return { summaries: [] };
+      if (cmd === 'load_thread_grid') return { grid: null };
+      return null;
+    });
+
+    const summaries = await loadChatSummariesWithFallback(null);
+    const grid = await loadSavedGrid(null);
+
+    expect(summaries).toEqual([]);
+    expect(grid).toEqual({ threadIds: [], focusedThreadId: null });
+    expect(JSON.parse(localStorage.getItem(CHAT_SUMMARIES_STORAGE_KEY) || '[]')).toEqual([
+      { id: 't-agent-keep', profileId: 'agent-1' },
+    ]);
+    expect(JSON.parse(localStorage.getItem(CHAT_GRID_STORAGE_KEY) || '{}')).toEqual({
+      threadIds: [],
+      focusedThreadId: null,
+    });
+  });
 });
 
 describe('useChatGridPersistence hook', () => {

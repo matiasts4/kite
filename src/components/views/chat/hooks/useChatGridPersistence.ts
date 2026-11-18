@@ -13,6 +13,150 @@ export interface SavedGridState {
   focusedThreadId: string | null;
 }
 
+export const readCachedChatSummaries = (agentId?: string | null): ExtendedChatThread[] => {
+  try {
+    const raw = localStorage.getItem(CHAT_SUMMARIES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const typed = parsed.filter((t): t is ExtendedChatThread => Boolean(t && t.id));
+    if (agentId) {
+      return sortAgentSummariesByTabOrder(typed.filter((t) => t.profileId === agentId));
+    }
+    return typed.filter((t) => !t.profileId);
+  } catch {
+    return [];
+  }
+};
+
+export const readCachedSavedGrid = (): SavedGridState | null => {
+  try {
+    const raw = localStorage.getItem(CHAT_GRID_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.threadIds)) {
+      return {
+        threadIds: parsed.threadIds.filter((id: unknown): id is string => typeof id === 'string'),
+        focusedThreadId:
+          typeof parsed.focusedThreadId === 'string' ? parsed.focusedThreadId : null,
+      };
+    }
+  } catch {}
+  return null;
+};
+
+export const normalizeLoadedThread = (thread: ExtendedChatThread): ExtendedChatThread =>
+  Array.isArray(thread.items) ? thread : { ...thread, items: [] };
+
+export const readCachedThread = (tid: string): ExtendedChatThread | null => {
+  try {
+    const localRaw = localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}${tid}`);
+    if (localRaw) {
+      const parsed = JSON.parse(localRaw);
+      if (parsed && parsed.id) return normalizeLoadedThread(parsed as ExtendedChatThread);
+    }
+  } catch {}
+  return null;
+};
+
+export interface InitialChatHydration {
+  hydrated: boolean;
+  summaries: ExtendedChatThread[];
+  threadsMap: Record<string, ExtendedChatThread>;
+  grid: SavedGridState;
+}
+
+/**
+ * Reads previously persisted Thread summaries, grid layout, and pane snapshots
+ * synchronously so reopening Thread renders immediately while IPC reconciles.
+ */
+export const hydrateInitialChatState = (
+  agentId?: string | null,
+  initialThreadId?: string | null
+): InitialChatHydration => {
+  const summaries = readCachedChatSummaries(agentId);
+  const threadsMap: Record<string, ExtendedChatThread> = {};
+
+  if (agentId) {
+    const first = summaries[0];
+    const cached = first?.id ? readCachedThread(first.id) : null;
+    if (cached) {
+      threadsMap[cached.id] = cached;
+      return {
+        hydrated: true,
+        summaries,
+        threadsMap,
+        grid: { threadIds: [cached.id], focusedThreadId: cached.id },
+      };
+    }
+    return {
+      hydrated: false,
+      summaries,
+      threadsMap,
+      grid: { threadIds: [], focusedThreadId: null },
+    };
+  }
+
+  const savedGrid = readCachedSavedGrid();
+  if (initialThreadId) {
+    const targetCached = readCachedThread(initialThreadId);
+    if (targetCached) {
+      const ids = savedGrid?.threadIds.includes(initialThreadId)
+        ? savedGrid.threadIds
+        : [initialThreadId];
+      for (const tid of ids) {
+        const cached = readCachedThread(tid);
+        if (cached) threadsMap[cached.id] = cached;
+      }
+      const validIds = ids.filter((id) => Boolean(threadsMap[id]));
+      if (validIds.length > 0) {
+        return {
+          hydrated: true,
+          summaries,
+          threadsMap,
+          grid: {
+            threadIds: validIds,
+            focusedThreadId: initialThreadId,
+          },
+        };
+      }
+    }
+  } else if (savedGrid !== null) {
+    if (savedGrid.threadIds.length === 0) {
+      return {
+        hydrated: true,
+        summaries,
+        threadsMap,
+        grid: { threadIds: [], focusedThreadId: null },
+      };
+    }
+    for (const tid of savedGrid.threadIds) {
+      const cached = readCachedThread(tid);
+      if (cached) threadsMap[cached.id] = cached;
+    }
+    const validIds = savedGrid.threadIds.filter((id) => Boolean(threadsMap[id]));
+    if (validIds.length > 0) {
+      const focused =
+        savedGrid.focusedThreadId && validIds.includes(savedGrid.focusedThreadId)
+          ? savedGrid.focusedThreadId
+          : validIds[0];
+      return {
+        hydrated: true,
+        summaries,
+        threadsMap,
+        grid: { threadIds: validIds, focusedThreadId: focused },
+      };
+    }
+  }
+
+  return {
+    hydrated: false,
+    summaries,
+    threadsMap,
+    grid: { threadIds: [], focusedThreadId: null },
+  };
+};
+
 export const sortAgentSummariesByTabOrder = (
   summaries: ExtendedChatThread[]
 ): ExtendedChatThread[] => {
@@ -28,34 +172,46 @@ export const loadAgentTabOrder = (summaries: ExtendedChatThread[]): string[] => 
   return sorted.map((thread) => thread.id).filter(Boolean);
 };
 
+const syncCachedSummariesForScope = (
+  summaries: ExtendedChatThread[],
+  agentId?: string | null
+): void => {
+  try {
+    const raw = localStorage.getItem(CHAT_SUMMARIES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    const existing = Array.isArray(parsed)
+      ? parsed.filter((t): t is ExtendedChatThread => Boolean(t && t.id))
+      : [];
+    const otherScopes = agentId
+      ? existing.filter((t) => t.profileId !== agentId)
+      : existing.filter((t) => Boolean(t.profileId));
+    localStorage.setItem(CHAT_SUMMARIES_STORAGE_KEY, JSON.stringify([...summaries, ...otherScopes]));
+  } catch {}
+};
+
 export const loadChatSummariesWithFallback = async (
   agentId?: string | null
 ): Promise<ExtendedChatThread[]> => {
   let summaries: ExtendedChatThread[] = [];
+  let ipcSucceeded = false;
   try {
     const hist = agentId
       ? await invokeCommand<{ summaries: ExtendedChatThread[] }>('list_agent_chat_summaries', { agentId })
       : await invokeCommand<{ summaries: ExtendedChatThread[] }>('list_chat_summaries');
     if (hist && Array.isArray(hist.summaries)) {
       summaries = hist.summaries;
+      ipcSucceeded = true;
     }
   } catch (err) {
     console.warn('[ChatView] list_chat_summaries notice:', err);
   }
 
-  if (summaries.length === 0) {
-    try {
-      const raw = localStorage.getItem(CHAT_SUMMARIES_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          summaries = parsed;
-        }
-      }
-    } catch {}
+  if (ipcSucceeded) {
+    syncCachedSummariesForScope(summaries, agentId);
+    return summaries;
   }
 
-  return summaries;
+  return readCachedChatSummaries(agentId);
 };
 
 export const loadSavedGrid = async (initialThreadId?: string | null): Promise<SavedGridState> => {
@@ -64,31 +220,33 @@ export const loadSavedGrid = async (initialThreadId?: string | null): Promise<Sa
   }
   let loadedIds: string[] = [];
   let focused: string | null = null;
+  let ipcSucceeded = false;
   try {
     const gridRes = await invokeCommand<{ grid: { threadIds?: string[]; focusedThreadId?: string } | null }>(
       'load_thread_grid'
     );
-    if (gridRes?.grid?.threadIds && Array.isArray(gridRes.grid.threadIds) && gridRes.grid.threadIds.length > 0) {
-      loadedIds = gridRes.grid.threadIds;
-      focused = gridRes.grid.focusedThreadId ?? loadedIds[0];
+    if (gridRes && typeof gridRes === 'object' && 'grid' in gridRes) {
+      ipcSucceeded = true;
+      if (gridRes.grid?.threadIds && Array.isArray(gridRes.grid.threadIds) && gridRes.grid.threadIds.length > 0) {
+        loadedIds = gridRes.grid.threadIds;
+        focused = gridRes.grid.focusedThreadId ?? loadedIds[0];
+      }
     }
   } catch (err) {
     console.warn('[ChatView] load_thread_grid notice:', err);
   }
 
-  if (loadedIds.length === 0) {
+  if (ipcSucceeded) {
     try {
-      const raw = localStorage.getItem(CHAT_GRID_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed?.threadIds && Array.isArray(parsed.threadIds) && parsed.threadIds.length > 0) {
-          loadedIds = parsed.threadIds;
-          focused = parsed.focusedThreadId || loadedIds[0];
-        }
-      }
+      localStorage.setItem(
+        CHAT_GRID_STORAGE_KEY,
+        JSON.stringify({ threadIds: loadedIds, focusedThreadId: focused })
+      );
     } catch {}
+    return { threadIds: loadedIds, focusedThreadId: focused };
   }
-  return { threadIds: loadedIds, focusedThreadId: focused };
+
+  return readCachedSavedGrid() ?? { threadIds: [], focusedThreadId: null };
 };
 
 export const loadThreadWithFallback = async (
@@ -99,18 +257,11 @@ export const loadThreadWithFallback = async (
     const t = agentId
       ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId: tid })
       : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
-    if (t && t.id) return t;
+    if (t && t.id) return normalizeLoadedThread(t);
   } catch {
     // Fall back to localStorage if IPC fails or thread is offline
   }
-  try {
-    const localRaw = localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}${tid}`);
-    if (localRaw) {
-      const parsed = JSON.parse(localRaw);
-      if (parsed?.id) return parsed;
-    }
-  } catch {}
-  return null;
+  return readCachedThread(tid);
 };
 
 export interface UseChatGridPersistenceOptions {
@@ -125,6 +276,7 @@ export interface UseChatGridPersistenceOptions {
   attachmentsMapRef: MutableRefObject<Record<string, ChatAttachment[]>>;
   writeAttachments: (threadId: string, attachments: ChatAttachment[]) => void;
   isMountedRef: MutableRefObject<boolean>;
+  initialGrid?: SavedGridState | null;
 }
 
 export function useChatGridPersistence({
@@ -139,9 +291,12 @@ export function useChatGridPersistence({
   attachmentsMapRef,
   writeAttachments,
   isMountedRef,
+  initialGrid,
 }: UseChatGridPersistenceOptions) {
-  const [gridThreadIds, setGridThreadIds] = useState<string[]>([]);
-  const [focusedThreadId, setFocusedThreadId] = useState<string | null>(null);
+  const [gridThreadIds, setGridThreadIds] = useState<string[]>(() => initialGrid?.threadIds ?? []);
+  const [focusedThreadId, setFocusedThreadId] = useState<string | null>(
+    () => initialGrid?.focusedThreadId ?? null
+  );
 
   const persistAgentTabOrder = async (ids: string[]) => {
     if (!agentId || ids.length === 0) return;
@@ -266,11 +421,9 @@ export function useChatGridPersistence({
 
   useEffect(() => {
     if (knownThreadsList.length > 0) {
-      try {
-        localStorage.setItem(CHAT_SUMMARIES_STORAGE_KEY, JSON.stringify(knownThreadsList));
-      } catch {}
+      syncCachedSummariesForScope(knownThreadsList, agentId);
     }
-  }, [knownThreadsList]);
+  }, [knownThreadsList, agentId]);
 
   return {
     gridThreadIds,

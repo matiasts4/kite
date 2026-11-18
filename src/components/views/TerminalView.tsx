@@ -484,7 +484,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         flexDirection: 'column',
         width: '100%',
         height: '100%',
-        backgroundColor: '#0a0a0a',
+        backgroundColor: chrome === 'pane' ? 'transparent' : 'var(--glass-nested-bg, var(--pane))',
         position: 'relative',
         overflow: 'hidden',
       }}

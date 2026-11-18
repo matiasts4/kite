@@ -5,7 +5,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--pane, #0f1117);
+  background: var(--glass-island-bg, var(--background, var(--pane, #0f1117)));
+  -webkit-backdrop-filter: var(--glass-blur, none);
+  backdrop-filter: var(--glass-blur, none);
   pointer-events: auto;
 }
 

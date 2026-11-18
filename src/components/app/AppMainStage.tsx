@@ -1,12 +1,29 @@
-import React from 'react';
-import { AgentsView } from '../views/AgentsView';
-import { CodeWorkspace } from '../code/CodeWorkspace';
-import { ChatView } from '../views/ChatView';
-import { RoutinesView } from '../views/RoutinesView';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { isTauriEnvironment } from '../../lib/ipc';
+import { ErrorBoundary } from '../ui/ErrorBoundary';
 import type { WorkMode } from '../Sidebar';
 import type { Workspace, AgentProfile } from '../../types';
 import type { WorkspaceSessionTab } from '../sidebar/types';
+
+const AgentsView = lazy(() => import('../views/AgentsView').then((m) => ({ default: m.AgentsView })));
+const CodeWorkspace = lazy(() => import('../code/CodeWorkspace').then((m) => ({ default: m.CodeWorkspace })));
+const ChatView = lazy(() => import('../views/ChatView').then((m) => ({ default: m.ChatView })));
+const RoutinesView = lazy(() => import('../views/RoutinesView').then((m) => ({ default: m.RoutinesView })));
+
+const StageLoadingFallback: React.FC = () => (
+  <div
+    style={{
+      flex: 1,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--glass-island-bg, var(--pane))',
+      height: '100%',
+    }}
+  >
+    <div className="loading-spinner" style={{ width: '24px', height: '24px', borderWidth: '2px' }} />
+  </div>
+);
 
 export interface AppMainStageProps {
   workMode: WorkMode;
@@ -67,11 +84,22 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
   setRequestedCodeTabId,
   newSessionRequest,
 }) => {
+  const [hasOpenedAgent, setHasOpenedAgent] = useState<boolean>(() => workMode === 'agent');
+  const [hasOpenedCode, setHasOpenedCode] = useState<boolean>(() => workMode === 'code');
+
+  useEffect(() => {
+    if (workMode === 'agent') {
+      setHasOpenedAgent(true);
+    } else if (workMode === 'code') {
+      setHasOpenedCode(true);
+    }
+  }, [workMode]);
+
   const renderFallbackView = () => {
     if (!isTauriEnvironment()) {
       return (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--pane)', padding: '32px', height: '100%' }}>
-          <div style={{ maxWidth: '440px', width: '100%', background: 'var(--block-fill)', border: '1px solid var(--block-stroke)', borderRadius: 'var(--radius-card)', padding: '24px', boxShadow: 'var(--shadow-sheet)', textAlign: 'center' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--glass-island-bg, var(--pane))', padding: '32px', height: '100%' }}>
+          <div style={{ maxWidth: '440px', width: '100%', background: 'var(--glass-elevated-bg, var(--block-fill))', border: '1px solid var(--glass-border, var(--block-stroke))', borderRadius: 'var(--radius-card)', padding: '24px', boxShadow: 'var(--glass-shadow, var(--shadow-sheet))', textAlign: 'center' }}>
             <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'var(--accent-tint)', border: '1px solid var(--accent-tint-strong)', color: 'var(--accent)', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect width="20" height="14" x="2" y="3" rx="2" />
@@ -85,7 +113,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
             <p style={{ fontSize: 'var(--text-caption)', color: 'var(--text-secondary)', lineHeight: 'var(--leading-body)', marginBottom: '16px' }}>
               This page is running in a standard web browser at http://localhost:1420. Native desktop capabilities (frameless window cromo, child WebView2, ConPTY terminal, and local SQLite IPC) require launching the desktop application.
             </p>
-            <div style={{ background: 'var(--terminal-canvas, #0d1117)', border: '1px solid var(--separator)', borderRadius: 'var(--radius-chip)', padding: '12px', fontSize: 'var(--text-mono)', fontFamily: 'var(--font-mono)', color: 'var(--accent)', userSelect: 'all', marginBottom: '16px', textAlign: 'left' }}>
+            <div style={{ background: 'var(--glass-code-bg, #0d1117)', border: '1px solid var(--glass-border, var(--separator))', borderRadius: 'var(--radius-chip)', padding: '12px', fontSize: 'var(--text-mono)', fontFamily: 'var(--font-mono)', color: 'var(--accent)', userSelect: 'all', marginBottom: '16px', textAlign: 'left' }}>
               npm run tauri dev
             </div>
             <p style={{ fontSize: 'var(--text-meta)', color: 'var(--text-faint)', margin: 0 }}>
@@ -98,7 +126,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
 
     if (loading && workspaces.length === 0 && agents.length === 0) {
       return (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--pane)', height: '100%' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--glass-island-bg, var(--pane))', height: '100%' }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
             <div className="loading-spinner" style={{ width: '24px', height: '24px', borderWidth: '2px' }} />
             <span style={{ fontSize: 'var(--text-caption)', color: 'var(--text-secondary)' }}>Connecting to Kite Code...</span>
@@ -109,7 +137,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
 
     if (error && workspaces.length === 0 && agents.length === 0) {
       return (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--pane)', padding: '24px', height: '100%' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--glass-island-bg, var(--pane))', padding: '24px', height: '100%' }}>
           <div className="ui-status-notice ui-status-notice--warning">
             <h3 className="ui-status-notice__title">Backend Connection Issue</h3>
             <p className="ui-status-notice__message">{error}</p>
@@ -124,112 +152,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
     switch (workMode) {
       case 'agent':
         return (
-          <AgentsView
-            agents={agents}
-            workspaceId={selectedWorkspaceId}
-            selectedAgentId={selectedAgentId}
-            onSelectAgent={(id) => {
-              setSelectedAgentId(id);
-              setAgentEditorOpen(false);
-            }}
-            agentEditorOpen={agentEditorOpen}
-            onCloseAgentEditor={() => setAgentEditorOpen(false)}
-            onAgentCreated={(agent) => {
-              setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
-              setSelectedAgentId(agent.id);
-              setAgentEditorOpen(false);
-            }}
-            onAgentUpdated={(updated) => {
-              setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-            }}
-            onAgentDeleted={(agentId) => {
-              setAgents((prev) => {
-                const remaining = prev.filter((a) => a.id !== agentId);
-                if (selectedAgentId === agentId) {
-                  setSelectedAgentId(remaining[0]?.id ?? null);
-                }
-                return remaining;
-              });
-            }}
-            viewMode={agentViewMode}
-            onViewModeChange={setAgentViewMode}
-            onOpenRoutines={() => {
-              setWorkMode('agent');
-              setAgentViewMode('settings');
-            }}
-          />
-        );
-      case 'code':
-        return (
-          <CodeWorkspace
-            workspaces={workspaces}
-            selectedWorkspaceId={selectedWorkspaceId}
-            onSelectWorkspace={setSelectedWorkspaceId}
-            onRefresh={loadBootstrap}
-            onAddWorkspace={handleAddWorkspace}
-            agents={agents}
-            selectedAgentId={selectedAgentId}
-            onSessionsChange={handleCodeSessions}
-            requestedTabId={requestedCodeTabId}
-            onTabRequestedHandled={() => setRequestedCodeTabId(null)}
-          />
-        );
-      case 'chat':
-        return (
-          <ChatView
-            ownsNewThreadRequests
-            workspaceId={selectedWorkspaceId}
-            threadId={selectedThreadId}
-            agents={agents}
-          />
-        );
-      default:
-        return (
-          <AgentsView
-            agents={agents}
-            workspaceId={selectedWorkspaceId}
-            selectedAgentId={selectedAgentId}
-            onSelectAgent={(id) => {
-              setSelectedAgentId(id);
-              setAgentEditorOpen(false);
-            }}
-            agentEditorOpen={agentEditorOpen}
-            onCloseAgentEditor={() => setAgentEditorOpen(false)}
-            onAgentCreated={(agent) => {
-              setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
-              setSelectedAgentId(agent.id);
-              setAgentEditorOpen(false);
-            }}
-            onAgentUpdated={(updated) => {
-              setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-            }}
-            onAgentDeleted={(agentId) => {
-              setAgents((prev) => {
-                const remaining = prev.filter((a) => a.id !== agentId);
-                if (selectedAgentId === agentId) {
-                  setSelectedAgentId(remaining[0]?.id ?? null);
-                }
-                return remaining;
-              });
-            }}
-            viewMode={agentViewMode}
-            onViewModeChange={setAgentViewMode}
-            onOpenRoutines={() => {
-              setWorkMode('agent');
-              setAgentViewMode('settings');
-            }}
-          />
-        );
-    }
-  };
-
-  return (
-    <main className="main-pane main-pane--stacked">
-      {isTauriEnvironment() &&
-      !(loading && workspaces.length === 0 && agents.length === 0) &&
-      !(error && workspaces.length === 0 && agents.length === 0) ? (
-        <>
-          <div className={`mode-layer${workMode === 'agent' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
+          <Suspense fallback={<StageLoadingFallback />}>
             <AgentsView
               agents={agents}
               workspaceId={selectedWorkspaceId}
@@ -260,12 +183,15 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
               viewMode={agentViewMode}
               onViewModeChange={setAgentViewMode}
               onOpenRoutines={() => {
-                setRoutinesOpen(true);
-                setSettingsOpen(false);
+                setWorkMode('agent');
+                setAgentViewMode('settings');
               }}
             />
-          </div>
-          <div className={`mode-layer${workMode === 'code' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
+          </Suspense>
+        );
+      case 'code':
+        return (
+          <Suspense fallback={<StageLoadingFallback />}>
             <CodeWorkspace
               workspaces={workspaces}
               selectedWorkspaceId={selectedWorkspaceId}
@@ -277,33 +203,174 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
               onSessionsChange={handleCodeSessions}
               requestedTabId={requestedCodeTabId}
               onTabRequestedHandled={() => setRequestedCodeTabId(null)}
-              newSessionRequest={newSessionRequest}
             />
+          </Suspense>
+        );
+      case 'chat':
+        return (
+          <Suspense fallback={<StageLoadingFallback />}>
+            <ChatView
+              ownsNewThreadRequests
+              workspaceId={selectedWorkspaceId}
+              threadId={selectedThreadId}
+              agents={agents}
+              workspaces={workspaces}
+              onThreadsChanged={loadThreads}
+            />
+          </Suspense>
+        );
+      default:
+        return (
+          <Suspense fallback={<StageLoadingFallback />}>
+            <AgentsView
+              agents={agents}
+              workspaceId={selectedWorkspaceId}
+              selectedAgentId={selectedAgentId}
+              onSelectAgent={(id) => {
+                setSelectedAgentId(id);
+                setAgentEditorOpen(false);
+              }}
+              agentEditorOpen={agentEditorOpen}
+              onCloseAgentEditor={() => setAgentEditorOpen(false)}
+              onAgentCreated={(agent) => {
+                setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
+                setSelectedAgentId(agent.id);
+                setAgentEditorOpen(false);
+              }}
+              onAgentUpdated={(updated) => {
+                setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
+              }}
+              onAgentDeleted={(agentId) => {
+                setAgents((prev) => {
+                  const remaining = prev.filter((a) => a.id !== agentId);
+                  if (selectedAgentId === agentId) {
+                    setSelectedAgentId(remaining[0]?.id ?? null);
+                  }
+                  return remaining;
+                });
+              }}
+              viewMode={agentViewMode}
+              onViewModeChange={setAgentViewMode}
+              onOpenRoutines={() => {
+                setWorkMode('agent');
+                setAgentViewMode('settings');
+              }}
+            />
+          </Suspense>
+        );
+    }
+  };
+
+  return (
+    <main className="main-pane main-pane--stacked">
+      {isTauriEnvironment() &&
+      !(loading && workspaces.length === 0 && agents.length === 0) &&
+      !(error && workspaces.length === 0 && agents.length === 0) ? (
+        <>
+          <div
+            className={`mode-layer${workMode === 'agent' && !routinesOpen ? ' mode-layer--visible' : ''}`}
+            aria-hidden={!(workMode === 'agent' && !routinesOpen)}
+          >
+            {hasOpenedAgent && (
+              <ErrorBoundary name="AgentsView">
+                <Suspense fallback={<StageLoadingFallback />}>
+                  <AgentsView
+                    agents={agents}
+                    workspaceId={selectedWorkspaceId}
+                    selectedAgentId={selectedAgentId}
+                    onSelectAgent={(id) => {
+                      setSelectedAgentId(id);
+                      setAgentEditorOpen(false);
+                    }}
+                    agentEditorOpen={agentEditorOpen}
+                    onCloseAgentEditor={() => setAgentEditorOpen(false)}
+                    onAgentCreated={(agent) => {
+                      setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
+                      setSelectedAgentId(agent.id);
+                      setAgentEditorOpen(false);
+                    }}
+                    onAgentUpdated={(updated) => {
+                      setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
+                    }}
+                    onAgentDeleted={(agentId) => {
+                      setAgents((prev) => {
+                        const remaining = prev.filter((a) => a.id !== agentId);
+                        if (selectedAgentId === agentId) {
+                          setSelectedAgentId(remaining[0]?.id ?? null);
+                        }
+                        return remaining;
+                      });
+                    }}
+                    viewMode={agentViewMode}
+                    onViewModeChange={setAgentViewMode}
+                    onOpenRoutines={() => {
+                      setRoutinesOpen(true);
+                      setSettingsOpen(false);
+                    }}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+            )}
           </div>
-          <div className={`mode-layer${workMode === 'chat' && !routinesOpen ? ' mode-layer--visible' : ''}`}>
+          <div
+            className={`mode-layer${workMode === 'code' && !routinesOpen ? ' mode-layer--visible' : ''}`}
+            aria-hidden={!(workMode === 'code' && !routinesOpen)}
+          >
+            {hasOpenedCode && (
+              <ErrorBoundary name="CodeWorkspace">
+                <Suspense fallback={<StageLoadingFallback />}>
+                  <CodeWorkspace
+                    workspaces={workspaces}
+                    selectedWorkspaceId={selectedWorkspaceId}
+                    onSelectWorkspace={setSelectedWorkspaceId}
+                    onRefresh={loadBootstrap}
+                    onAddWorkspace={handleAddWorkspace}
+                    agents={agents}
+                    selectedAgentId={selectedAgentId}
+                    onSessionsChange={handleCodeSessions}
+                    requestedTabId={requestedCodeTabId}
+                    onTabRequestedHandled={() => setRequestedCodeTabId(null)}
+                    newSessionRequest={newSessionRequest}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+            )}
+          </div>
+          <div
+            className={`mode-layer${workMode === 'chat' && !routinesOpen ? ' mode-layer--visible' : ''}`}
+            aria-hidden={!(workMode === 'chat' && !routinesOpen)}
+          >
             {hasOpenedChat && (
-              <ChatView
-                ownsNewThreadRequests
-                workspaceId={selectedWorkspaceId}
-                threadId={selectedThreadId}
-                agents={agents}
-                workspaces={workspaces}
-                onThreadsChanged={loadThreads}
-              />
+              <ErrorBoundary name="ChatView">
+                <Suspense fallback={<StageLoadingFallback />}>
+                  <ChatView
+                    ownsNewThreadRequests
+                    workspaceId={selectedWorkspaceId}
+                    threadId={selectedThreadId}
+                    agents={agents}
+                    workspaces={workspaces}
+                    onThreadsChanged={loadThreads}
+                  />
+                </Suspense>
+              </ErrorBoundary>
             )}
           </div>
           {routinesOpen && (
             <div className="mode-layer mode-layer--visible">
               <div className="main-pane__surface">
-                <RoutinesView
-                  workspaceId={selectedWorkspaceId}
-                  onOpenThread={(agentId, _threadId) => {
-                    setRoutinesOpen(false);
-                    setSelectedAgentId(agentId);
-                    setWorkMode('agent');
-                    setAgentViewMode('chats');
-                  }}
-                />
+                <ErrorBoundary name="RoutinesView">
+                  <Suspense fallback={<StageLoadingFallback />}>
+                    <RoutinesView
+                      workspaceId={selectedWorkspaceId}
+                      onOpenThread={(agentId, _threadId) => {
+                        setRoutinesOpen(false);
+                        setSelectedAgentId(agentId);
+                        setWorkMode('agent');
+                        setAgentViewMode('chats');
+                      }}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
               </div>
             </div>
           )}

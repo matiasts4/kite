@@ -17,7 +17,7 @@ function dynamicProviders(): ChatProvider[] {
   );
 }
 
-export function useChatModels() {
+export function useChatModels(activeProvider?: ChatProvider) {
   const [dynamicModelsMap, setDynamicModelsMap] = useState<Record<string, ModelOption[]>>({});
   const [catalogStateMap, setCatalogStateMap] = useState<Record<string, CatalogAvailability>>({});
   const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
@@ -64,13 +64,29 @@ export function useChatModels() {
     }
   }, []);
 
-  // Prefetch every dynamic provider in the background so the model menu is ready
-  // before the user opens it. The dedupe guard keeps repeat calls cheap.
+  // Fetch the active dynamic provider immediately and stagger non-active providers
+  // so opening Thread does not burst every provider CLI probe on initial paint.
+  // When no activeProvider is specified (e.g. headless callers), fetch all immediately.
   useEffect(() => {
-    for (const provider of dynamicProviders()) {
-      void fetchDynamicModels(provider);
+    const providers = dynamicProviders();
+    if (!activeProvider) {
+      for (const provider of providers) {
+        void fetchDynamicModels(provider);
+      }
+      return;
     }
-  }, [fetchDynamicModels]);
+    if (providers.includes(activeProvider)) {
+      void fetchDynamicModels(activeProvider);
+    }
+    const timer = window.setTimeout(() => {
+      for (const provider of providers) {
+        if (provider !== activeProvider) {
+          void fetchDynamicModels(provider);
+        }
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [activeProvider, fetchDynamicModels]);
 
   const ensureDynamicModels = useCallback(
     (provider: ChatProvider) => {

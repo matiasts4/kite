@@ -1,12 +1,13 @@
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, Suspense, lazy } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar, WorkMode } from './components/Sidebar';
 import type { WorkspaceSessionTab, ChatThreadSummary } from './components/sidebar/types';
-import { RightDock } from './components/RightDock';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
-import { SettingsView } from './components/views/SettingsView';
 import { openSettingsTab } from './lib/settingsNav';
-import { readKitePref } from './lib/kitePrefs';
+
+const RightDock = lazy(() => import('./components/RightDock').then((m) => ({ default: m.RightDock })));
+const SettingsView = lazy(() => import('./components/views/SettingsView').then((m) => ({ default: m.SettingsView })));
+import { isValidWorkMode, readKitePref, readSavedWorkMode, writeSavedWorkMode } from './lib/kitePrefs';
 import { ZedStripHost, type ZedCallState } from './components/ZedStrip';
 import { releaseOperatorCapture } from './lib/operator/voice/zedVoice';
 import { useNotifications } from './lib/notifications/useNotifications';
@@ -28,6 +29,8 @@ import { APP_INTRO_MIN_MS, pulseZedOrb } from './motion/contract';
 import { AppIntro, releaseBootCover } from './motion/AppIntro';
 
 import { useAppTheme } from './components/app/useAppTheme';
+import { StageBackdrop } from './components/theme/StageBackdrop';
+import { THEME_CUSTOMIZATIONS_STORAGE_KEY } from './lib/themeCustomizations';
 import { useAppShortcuts } from './components/app/useAppShortcuts';
 import { useAppGlobalEvents } from './components/app/useAppGlobalEvents';
 import { useAppSidebarHandlers } from './components/app/useAppSidebarHandlers';
@@ -43,16 +46,18 @@ export type ShellRoute =
   | { kind: 'destination'; destination: string };
 
 export const App: React.FC = () => {
-  const [workMode, setWorkMode] = useState<WorkMode>(() => {
-    try {
-      // Default to 'code' on app launch; ignore previously persisted 'chat' (Thread) mode
-      const saved = localStorage.getItem('kite.workMode');
-      if (saved === 'code') {
-        return 'code';
-      }
-    } catch {}
-    return 'code';
-  });
+  const hadSavedWorkModeRef = useRef<boolean>(readSavedWorkMode() !== null);
+  const [workMode, setWorkModeState] = useState<WorkMode>(() => readSavedWorkMode() ?? 'code');
+
+  const workModeRef = useRef<WorkMode>(workMode);
+  workModeRef.current = workMode;
+
+  const setWorkMode = useCallback<React.Dispatch<React.SetStateAction<WorkMode>>>((next) => {
+    const resolved = typeof next === 'function' ? next(workModeRef.current) : next;
+    workModeRef.current = resolved;
+    writeSavedWorkMode(resolved);
+    setWorkModeState(resolved);
+  }, []);
 
   const [hasOpenedChat, setHasOpenedChat] = useState<boolean>(() => workMode === 'chat');
   useEffect(() => {
@@ -62,9 +67,7 @@ export const App: React.FC = () => {
   }, [workMode]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('kite.workMode', workMode);
-    } catch {}
+    writeSavedWorkMode(workMode);
   }, [workMode]);
 
   const skipModeAckRef = useRef(true);
@@ -89,6 +92,13 @@ export const App: React.FC = () => {
     return false;
   });
 
+  const [hasOpenedRightDock, setHasOpenedRightDock] = useState<boolean>(() => rightDockVisible);
+  useEffect(() => {
+    if (rightDockVisible) {
+      setHasOpenedRightDock(true);
+    }
+  }, [rightDockVisible]);
+
   useEffect(() => {
     try {
       localStorage.setItem('kite-code.side-panel.visible.v1', String(rightDockVisible));
@@ -96,14 +106,25 @@ export const App: React.FC = () => {
   }, [rightDockVisible]);
 
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [hasOpenedSettings, setHasOpenedSettings] = useState<boolean>(false);
+  useEffect(() => {
+    if (settingsOpen) {
+      setHasOpenedSettings(true);
+    }
+  }, [settingsOpen]);
 
   const {
     appearance,
+    appearanceMode,
     palette,
+    customizations,
     applyTheme,
     handleToggleAppearance,
     handleToggleMode,
     handleSelectTheme,
+    updateCustomizations,
+    resetThemeOverrides,
+    resetAllCustomizations,
   } = useAppTheme();
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>(() => {
@@ -260,6 +281,9 @@ export const App: React.FC = () => {
 
   const bootstrappedRef = useRef(false);
 
+  const selectedAgentIdRef = useRef<string | null>(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+
   const loadThreads = useCallback(async () => {
     if (!isTauriEnvironment()) return;
     try {
@@ -269,7 +293,9 @@ export const App: React.FC = () => {
         setSelectedThreadId((prev) => resolveHeldThreadSelection(prev, list.map((t) => t.id)));
       }
       try {
-        const archived = await listArchivedChats(workMode === 'agent' ? selectedAgentId : null);
+        const currentMode = workModeRef.current;
+        const currentAgentId = selectedAgentIdRef.current;
+        const archived = await listArchivedChats(currentMode === 'agent' ? currentAgentId : null);
         setArchivedCount(Array.isArray(archived) ? archived.length : 0);
       } catch {
         setArchivedCount(0);
@@ -277,7 +303,7 @@ export const App: React.FC = () => {
     } catch (err) {
       console.warn('Failed to load chat summaries:', err);
     }
-  }, [workMode, selectedAgentId]);
+  }, []);
 
   useEffect(() => {
     if (!isBrowserTestLane()) return;
@@ -312,18 +338,22 @@ export const App: React.FC = () => {
       if (data.preferences) {
         if (
           !bootstrappedRef.current &&
-          data.preferences.workMode &&
-          ['agent', 'code', 'chat'].includes(data.preferences.workMode)
+          !hadSavedWorkModeRef.current &&
+          isValidWorkMode(data.preferences.workMode)
         ) {
-          const hasSavedMode = Boolean(localStorage.getItem('kite.workMode'));
-          if (!hasSavedMode && data.preferences.workMode === 'code') {
-            setWorkMode('code');
-          }
+          setWorkMode(data.preferences.workMode);
         }
         if (typeof data.preferences.sidebarVisible === 'boolean') {
           setSidebarVisible(data.preferences.sidebarVisible);
         }
-        if (data.preferences.appearance) {
+        if (data.preferences.themeCustomizations) {
+          const hasLocalCustomizations = Boolean(
+            localStorage.getItem(THEME_CUSTOMIZATIONS_STORAGE_KEY)
+          );
+          if (!hasLocalCustomizations) {
+            updateCustomizations(data.preferences.themeCustomizations);
+          }
+        } else if (data.preferences.appearance) {
           const hasLocalTheme = Boolean(readKitePref('theme'));
           if (!hasLocalTheme) {
             const app = data.preferences.appearance === 'light' ? 'light' : 'dark';
@@ -396,6 +426,23 @@ export const App: React.FC = () => {
   useEffect(() => {
     loadBootstrap();
   }, [loadBootstrap]);
+
+  useEffect(() => {
+    if (!bootstrappedRef.current || !isTauriEnvironment()) return;
+    let cancelled = false;
+    void listArchivedChats(workMode === 'agent' ? selectedAgentId : null)
+      .then((archived) => {
+        if (!cancelled) {
+          setArchivedCount(Array.isArray(archived) ? archived.length : 0);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setArchivedCount(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workMode, selectedAgentId]);
 
   const sidebarHandlers = useAppSidebarHandlers({
     setWorkspaces,
@@ -482,8 +529,12 @@ export const App: React.FC = () => {
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
+          position: 'relative',
         } as React.CSSProperties}
       >
+        {/* Ambient Stage Backdrop & Surface Atmosphere */}
+        <StageBackdrop customizations={customizations} />
+
         {/* Top Frameless TitleBar */}
         <TitleBar
           title="Kite"
@@ -557,8 +608,8 @@ export const App: React.FC = () => {
               setAgentEditorOpen(true);
               setSettingsOpen(false);
             }}
-            onAddWorkspace={sidebarHandlers.handleAddWorkspace}
-            onNewChat={() => void handleNewChatInWorkspace(selectedWorkspaceId)}
+            onAddWorkspace={() => void sidebarHandlers.handleAddWorkspace()}
+            onNewChat={() => void handleNewChatInWorkspace(null)}
             onNewChatInWorkspace={(wsId) => void handleNewChatInWorkspace(wsId)}
             onNewAgentChat={(agentId) => {
               setSelectedAgentId(agentId);
@@ -611,63 +662,69 @@ export const App: React.FC = () => {
           />
 
           {/* Center stage. Agent, Code, and Thread stay mounted so a terminal is hidden, not killed, when the mode changes. */}
-          <AppMainStage
-            workMode={workMode}
-            setWorkMode={setWorkMode}
-            loading={loading}
-            error={error}
-            workspaces={workspaces}
-            agents={agents}
-            setAgents={setAgents}
-            selectedWorkspaceId={selectedWorkspaceId}
-            setSelectedWorkspaceId={setSelectedWorkspaceId}
-            selectedAgentId={selectedAgentId}
-            setSelectedAgentId={setSelectedAgentId}
-            selectedThreadId={selectedThreadId}
-            agentEditorOpen={agentEditorOpen}
-            setAgentEditorOpen={setAgentEditorOpen}
-            agentViewMode={agentViewMode}
-            setAgentViewMode={setAgentViewMode}
-            routinesOpen={routinesOpen}
-            setRoutinesOpen={setRoutinesOpen}
-            setSettingsOpen={setSettingsOpen}
-            hasOpenedChat={hasOpenedChat}
-            loadBootstrap={loadBootstrap}
-            loadThreads={loadThreads}
-            handleAddWorkspace={sidebarHandlers.handleAddWorkspace}
-            handleCodeSessions={handleCodeSessions}
-            requestedCodeTabId={requestedCodeTabId}
-            setRequestedCodeTabId={setRequestedCodeTabId}
-            newSessionRequest={newSessionRequest}
-          />
-
-          {/* Authentic Right Tools & Browser Dock */}
-          <ErrorBoundary name="RightDock">
-            <RightDock
-              visible={rightDockVisible}
-              onClose={() => setRightDockVisible(false)}
-              workspaceId={selectedWorkspaceId}
-              selectedThreadId={selectedThreadId}
-              isOccluded={
-                isUsageModalOpen ||
-                isWhatsNewOpen ||
-                isArchivedChatsOpen ||
-                isSshModalOpen ||
-                isNotificationsOpen ||
-                settingsOpen ||
-                isCommandPaletteOpen
-              }
+          <ErrorBoundary name="WorkspaceStage">
+            <AppMainStage
+              workMode={workMode}
+              setWorkMode={setWorkMode}
+              loading={loading}
+              error={error}
               workspaces={workspaces}
-              onSelectWorkspace={setSelectedWorkspaceId}
-              onStartAgent={() => {
-                setRightDockVisible(false);
-                if (selectedWorkspaceId) {
-                  setWorkMode('code');
-                  setNewSessionRequest((n) => n + 1);
-                }
-              }}
+              agents={agents}
+              setAgents={setAgents}
+              selectedWorkspaceId={selectedWorkspaceId}
+              setSelectedWorkspaceId={setSelectedWorkspaceId}
+              selectedAgentId={selectedAgentId}
+              setSelectedAgentId={setSelectedAgentId}
+              selectedThreadId={selectedThreadId}
+              agentEditorOpen={agentEditorOpen}
+              setAgentEditorOpen={setAgentEditorOpen}
+              agentViewMode={agentViewMode}
+              setAgentViewMode={setAgentViewMode}
+              routinesOpen={routinesOpen}
+              setRoutinesOpen={setRoutinesOpen}
+              setSettingsOpen={setSettingsOpen}
+              hasOpenedChat={hasOpenedChat}
+              loadBootstrap={loadBootstrap}
+              loadThreads={loadThreads}
+              handleAddWorkspace={sidebarHandlers.handleAddWorkspace}
+              handleCodeSessions={handleCodeSessions}
+              requestedCodeTabId={requestedCodeTabId}
+              setRequestedCodeTabId={setRequestedCodeTabId}
+              newSessionRequest={newSessionRequest}
             />
           </ErrorBoundary>
+
+          {/* Authentic Right Tools & Browser Dock */}
+          {hasOpenedRightDock && (
+            <ErrorBoundary name="RightDock">
+              <Suspense fallback={null}>
+                <RightDock
+                  visible={rightDockVisible}
+                  onClose={() => setRightDockVisible(false)}
+                  workspaceId={selectedWorkspaceId}
+                  selectedThreadId={selectedThreadId}
+                  isOccluded={
+                    isUsageModalOpen ||
+                    isWhatsNewOpen ||
+                    isArchivedChatsOpen ||
+                    isSshModalOpen ||
+                    isNotificationsOpen ||
+                    settingsOpen ||
+                    isCommandPaletteOpen
+                  }
+                  workspaces={workspaces}
+                  onSelectWorkspace={setSelectedWorkspaceId}
+                  onStartAgent={() => {
+                    setRightDockVisible(false);
+                    if (selectedWorkspaceId) {
+                      setWorkMode('code');
+                      setNewSessionRequest((n) => n + 1);
+                    }
+                  }}
+                />
+              </Suspense>
+            </ErrorBoundary>
+          )}
         </div>
 
         {/* Auxiliary Dialogs & Modals */}
@@ -709,21 +766,25 @@ export const App: React.FC = () => {
           }}
         />
 
-        <SettingsView
-          isOpen={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
-          onBack={() => setSettingsOpen(false)}
-          onOpenWhatsNew={() => setIsWhatsNewOpen(true)}
-          accountName={accountName}
-          accountEmail={accountEmail || 'developer@kite.local'}
-          accountTier={accountTier}
-          accountTierPaid={accountTierPaid}
-          creditsLabel={creditsLabel}
-          mode={appearance}
-          palette={palette}
-          onToggleMode={handleToggleMode}
-          onSelectTheme={handleSelectTheme}
-        />
+        {hasOpenedSettings && (
+          <Suspense fallback={null}>
+            <SettingsView
+              isOpen={settingsOpen}
+              onClose={() => setSettingsOpen(false)}
+              onBack={() => setSettingsOpen(false)}
+              onOpenWhatsNew={() => setIsWhatsNewOpen(true)}
+              accountName={accountName}
+              accountEmail={accountEmail || 'developer@kite.local'}
+              accountTier={accountTier}
+              accountTierPaid={accountTierPaid}
+              creditsLabel={creditsLabel}
+              mode={appearance}
+              palette={palette}
+              onToggleMode={handleToggleMode}
+              onSelectTheme={handleSelectTheme}
+            />
+          </Suspense>
+        )}
 
         {/* Notifications Popover */}
         <AppNotificationsPopover
@@ -763,8 +824,9 @@ export const App: React.FC = () => {
         <AppIntro open={!introDismissed} />
 
         {/* Ambient Sileo Toast System */}
-        <Toaster position="bottom-right" theme="dark" offset={{ bottom: 24, right: 24 }} />
+        <Toaster position="bottom-right" theme={appearance} offset={{ bottom: 24, right: 24 }} />
       </div>
     </div>
   );
 };
+

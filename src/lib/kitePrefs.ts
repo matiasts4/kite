@@ -4,9 +4,26 @@ export const KITE_PREF_NAMES = [
   'settingsTab',
   'terminalShell',
   'showPaneContext',
+  'workMode',
 ] as const;
 
 export type KitePrefName = (typeof KITE_PREF_NAMES)[number];
+
+export const VALID_WORK_MODES = ['agent', 'code', 'chat'] as const;
+export type PersistedWorkMode = (typeof VALID_WORK_MODES)[number];
+
+export function isValidWorkMode(value: unknown): value is PersistedWorkMode {
+  return value === 'agent' || value === 'code' || value === 'chat';
+}
+
+export function readSavedWorkMode(): PersistedWorkMode | null {
+  const saved = readKitePref('workMode');
+  return isValidWorkMode(saved) ? saved : null;
+}
+
+export function writeSavedWorkMode(mode: PersistedWorkMode): void {
+  writeKitePref('workMode', mode);
+}
 
 /** Previous storage prefix, built so the literal never appears in source. */
 const LEGACY_PREFIX = ['b', 'm', 'o', 'n', 'e', '.'].join('');

@@ -42,16 +42,20 @@ export function useChatAgents(activeProvider?: ChatProvider) {
   }, []);
 
   // Preload agents across all known providers on mount so switching is instant
-  useEffect(() => {
-    ALL_PROVIDERS.forEach((p) => {
-      void fetchDynamicAgents(p);
-    });
-  }, [fetchDynamicAgents]);
-
+  // Fetch the active provider immediately and stage non-active providers asynchronously
+  // so opening Thread does not blast all 7 provider queries before first paint.
   useEffect(() => {
     if (activeProvider) {
       void fetchDynamicAgents(activeProvider);
     }
+    const timer = window.setTimeout(() => {
+      ALL_PROVIDERS.forEach((p) => {
+        if (p !== activeProvider) {
+          void fetchDynamicAgents(p);
+        }
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
   }, [activeProvider, fetchDynamicAgents]);
 
   const ensureDynamicAgents = useCallback(

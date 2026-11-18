@@ -9,7 +9,7 @@ export interface CpuTabProps {
   uiFps: number;
 }
 
-export const CpuTab: React.FC<CpuTabProps> = ({
+export const CpuTab: React.FC<CpuTabProps> = React.memo(({
   snapshot,
   sysCpuHistory,
   cpuColor,
@@ -111,4 +111,4 @@ export const CpuTab: React.FC<CpuTabProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -1230,11 +1230,19 @@ html[data-surface-glass='true'] body.kite-app .workspace-roster__pinned {
   backdrop-filter: none;
 }
 
-/* Compositor isolation for smooth chat transcript scrolling */
-body.kite-app .chat-transcript {
+/* Compositor isolation for smooth chat transcript & resource popover scrolling */
+body.kite-app .chat-transcript,
+body.kite-app .system-resource-popover__scroll {
   transform: translateZ(0);
   will-change: scroll-position;
   contain: layout style;
+}
+
+body.kite-app .system-resource-popover {
+  background: var(--glass-modal-bg, var(--menu-plate, var(--pane, #141416)));
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  contain: layout style paint;
 }
 
 /* Tier 3: Elevated Cards, Composers, Inputs & Empty-State Boxes inside Scroll Containers */

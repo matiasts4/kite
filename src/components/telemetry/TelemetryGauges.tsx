@@ -6,7 +6,7 @@ export const Sparkline: React.FC<{
   color: string;
   height?: number;
   width?: number;
-}> = ({ values, maxVal, color, height = 34, width = 140 }) => {
+}> = React.memo(({ values, maxVal, color, height = 34, width = 140 }) => {
   const safeValues = values.length > 1 ? values : [values[0] || 0, values[0] || 0];
   const computedMax = Math.max(maxVal ?? 0, ...safeValues, 1);
   const minVal = 0;
@@ -48,7 +48,7 @@ export const Sparkline: React.FC<{
       />
     </svg>
   );
-};
+});
 
 export const CircularGauge: React.FC<{
   percentage: number;
@@ -56,7 +56,7 @@ export const CircularGauge: React.FC<{
   strokeWidth?: number;
   color: string;
   label?: string;
-}> = ({ percentage, size = 42, strokeWidth = 3.5, color, label }) => {
+}> = React.memo(({ percentage, size = 42, strokeWidth = 3.5, color, label }) => {
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
   const clamped = Math.max(0, Math.min(100, percentage));
@@ -119,4 +119,4 @@ export const CircularGauge: React.FC<{
       )}
     </div>
   );
-};
+});

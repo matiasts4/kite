@@ -20,7 +20,7 @@ export interface OverviewTabProps {
   onSelectTab: (tab: 'cpu' | 'disk' | 'context') => void;
 }
 
-export const OverviewTab: React.FC<OverviewTabProps> = ({
+export const OverviewTab: React.FC<OverviewTabProps> = React.memo(({
   snapshot,
   appCpuHistory,
   cpuColor,
@@ -310,4 +310,4 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
       </button>
     </>
   );
-};
+});

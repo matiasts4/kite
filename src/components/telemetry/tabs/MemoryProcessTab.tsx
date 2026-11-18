@@ -39,7 +39,7 @@ function resolveWorkspaceName(workspaceId?: string | null): string {
   return workspaceId;
 }
 
-export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
+export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
   snapshot,
   onRefresh,
   procCategoryFilter,
@@ -177,9 +177,7 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
               display: 'flex',
               flexDirection: 'column',
               gap: '6px',
-              maxHeight: '260px',
-              overflowY: 'auto',
-              paddingRight: '2px',
+              contain: 'content',
             }}
           >
             {workspaces.map((ws) => {
@@ -324,9 +322,7 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
               display: 'flex',
               flexDirection: 'column',
               gap: '6px',
-              maxHeight: '260px',
-              overflowY: 'auto',
-              paddingRight: '2px',
+              contain: 'content',
             }}
           >
             {terminals.map((term) => {
@@ -565,9 +561,7 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '5px',
-                maxHeight: '230px',
-                overflowY: 'auto',
-                paddingRight: '2px',
+                contain: 'content',
               }}
             >
               {filtered.length === 0 ? (
@@ -770,4 +764,4 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = ({
       })()}
     </div>
   );
-};
+});

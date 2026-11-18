@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import {
@@ -74,8 +74,11 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
     };
   }, [activeTab]);
 
-  // Measure live UI frame rate while popover is open
+  // Measure live UI frame rate only on tabs that render the FPS readout
   useEffect(() => {
+    if (activeTab !== 'overview' && activeTab !== 'cpu') {
+      return;
+    }
     let frameCount = 0;
     let lastTime = performance.now();
     let rafId = 0;
@@ -84,7 +87,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
       const elapsed = now - lastTime;
       if (elapsed >= 600) {
         const currentFps = Math.min(144, Math.max(1, Math.round((frameCount * 1000) / elapsed)));
-        setUiFps(currentFps);
+        setUiFps((prev) => (prev === currentFps ? prev : currentFps));
         frameCount = 0;
         lastTime = now;
       }
@@ -92,7 +95,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
     };
     rafId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(rafId);
-  }, []);
+  }, [activeTab]);
 
   // Position anchored to the TitleBar pill
   const [position, setPosition] = useState<{ top: number; right: number }>({ top: 44, right: 80 });
@@ -126,10 +129,13 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
     };
   }, [onClose]);
 
-  const pressureTheme = getPressureColors(snapshot.memory.pressure);
-  const appRamHistory = history.map((h) => h.appRamMb);
-  const appCpuHistory = history.map((h) => h.appCpuPct);
-  const sysCpuHistory = history.map((h) => h.sysCpuPct);
+  const pressureTheme = useMemo(
+    () => getPressureColors(snapshot.memory.pressure),
+    [snapshot.memory.pressure]
+  );
+  const appRamHistory = useMemo(() => history.map((h) => h.appRamMb), [history]);
+  const appCpuHistory = useMemo(() => history.map((h) => h.appCpuPct), [history]);
+  const sysCpuHistory = useMemo(() => history.map((h) => h.sysCpuPct), [history]);
 
   const cpuColor =
     snapshot.cpu.systemUsagePercent > 80
@@ -168,9 +174,10 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
         width: '416px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
-        background: 'var(--glass-overlay-bg, var(--menu-glass, #121214))',
-        backdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
-        WebkitBackdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
+        background: 'var(--glass-modal-bg, var(--menu-plate, var(--pane, #141416)))',
+        backdropFilter: 'none',
+        WebkitBackdropFilter: 'none',
+        contain: 'layout style paint',
         border: '1px solid var(--glass-border, var(--block-stroke))',
         borderRadius: 'var(--card-radius, 12px)',
         boxShadow: 'var(--glass-shadow, 0 16px 42px rgba(0, 0, 0, 0.42))',
@@ -394,6 +401,7 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
 
       {/* Main Content Area */}
       <div
+        className="system-resource-popover__scroll"
         style={{
           display: 'flex',
           flexDirection: 'column',
@@ -401,6 +409,10 @@ export const SystemResourcePopover: React.FC<SystemResourcePopoverProps> = ({
           overflowY: 'auto',
           maxHeight: '420px',
           paddingRight: '2px',
+          transform: 'translateZ(0)',
+          willChange: 'scroll-position',
+          contain: 'content',
+          overscrollBehavior: 'contain',
         }}
       >
         {/* HERO CARD: App Total RAM (Visible in Overview & Memory) */}

@@ -10,7 +10,7 @@ export interface DiskTabProps {
   diskColor: string;
 }
 
-export const DiskTab: React.FC<DiskTabProps> = ({
+export const DiskTab: React.FC<DiskTabProps> = React.memo(({
   snapshot,
   diskColor,
 }) => {
@@ -103,4 +103,4 @@ export const DiskTab: React.FC<DiskTabProps> = ({
       </div>
     </div>
   );
-};
+});

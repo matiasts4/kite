@@ -11,9 +11,11 @@ import { invokeCommand, revealFile, openFileDefault } from '../../lib/ipc';
 import { toHex64String, isValidRevision64 } from './files/syntax';
 import { CodeEditorPane, OpenFileTab } from './files/CodeEditorPane';
 import { ChangesView } from './files/ChangesView';
+import { createWorkspaceGitService, getWorkspaceChangesSignature } from './files/gitTypes';
 import { FilesToolbar } from './files/FilesToolbar';
 import { FilesTreePanel } from './files/FilesTreePanel';
 import { useWorkspaceGit } from './files/useWorkspaceGit';
+import { createDiffFileContentsLoader } from '../../lib/diffs/diffFileContents';
 import { useFilesAutoSavePreference } from '../../lib/filesAutoSavePreference';
 import {
   OPEN_RIGHT_DOCK_FILE_EVENT,
@@ -138,6 +140,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
   const isModified = activeTab ? activeTab.draftText !== activeTab.initialText : false;
 
   // Git Controller
+  const [changesRefreshNonce, setChangesRefreshNonce] = useState<number>(0);
+  const changesGitService = useMemo(() => createWorkspaceGitService(), []);
   const {
     gitChanges,
     gitLoading,
@@ -160,7 +164,39 @@ export const FilesView: React.FC<FilesViewProps> = ({
     handleCommit,
     handlePull,
     handlePush,
-  } = useWorkspaceGit(currentWsId);
+  } = useWorkspaceGit(currentWsId, changesGitService);
+
+  const gitChangesSignature = useMemo(() => getWorkspaceChangesSignature(gitChanges), [gitChanges]);
+  const prevGitStateRef = useRef<{ sig: string; loading: boolean; busy: string | null }>({
+    sig: gitChangesSignature,
+    loading: gitLoading,
+    busy: gitBusy,
+  });
+
+  useEffect(() => {
+    const prev = prevGitStateRef.current;
+    const sigChanged = prev.sig !== '' && prev.sig !== gitChangesSignature;
+    const finishedRefresh = prev.loading && !gitLoading;
+    const finishedMutation = prev.busy !== null && gitBusy === null;
+    prevGitStateRef.current = {
+      sig: gitChangesSignature,
+      loading: gitLoading,
+      busy: gitBusy,
+    };
+    if (sigChanged || finishedRefresh || finishedMutation) {
+      setChangesRefreshNonce((n) => n + 1);
+    }
+  }, [gitChangesSignature, gitLoading, gitBusy]);
+
+  const changesLoadDiffFiles = useMemo(() => {
+    if (!currentWsId) return undefined;
+    return createDiffFileContentsLoader(
+      `${currentWsId}:${changesRefreshNonce}`,
+      (oldPath, newPath) =>
+        changesGitService.readWorkspaceDiffFileContents?.(currentWsId, oldPath, newPath) ??
+        Promise.resolve({ oldContent: null, newContent: null })
+    );
+  }, [currentWsId, changesRefreshNonce, changesGitService]);
 
   // Initialize workspace files
   const initWorkspaceFiles = useCallback(async (wsId: string) => {
@@ -700,6 +736,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
         onPull={() => void handlePull()}
         onPush={() => void handlePush()}
         onRefresh={() => {
+          changesGitService.clearCache?.();
+          setChangesRefreshNonce((n) => n + 1);
           if (currentWsId) {
             void initWorkspaceFiles(currentWsId);
             void refreshGit(currentWsId);
@@ -742,6 +780,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
           onDiscardChanges={(file) => void handleDiscardChanges(file)}
           onCommit={(msg, stageAll) => void handleCommit(msg, stageAll)}
           onClearWriteError={() => setGitWriteError(null)}
+          loadDiffFiles={changesLoadDiffFiles}
         />
       ) : (
         <div

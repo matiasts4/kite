@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StrictMode, useCallback, useState } from 'react';
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
 import { DiffsView } from './DiffsView';
 import { DiffCodeViewer } from './DiffCodeViewer';
 import { openDiffsInRightDock, consumePendingDiffPreview } from '../../../lib/diffPreviewNav';
@@ -9,6 +9,17 @@ import type { DiffData } from '../chat/types';
 import { MOTION_EXIT_MS } from '../../../motion/contract';
 
 // Mock git service
+function getShadowCodeTexts(root: ParentNode): string[] {
+  const containers = Array.from(root.querySelectorAll('diffs-container'));
+  return containers
+    .map((el) =>
+      Array.from(el.shadowRoot?.querySelectorAll('[data-code]') ?? [])
+        .map((codeEl) => codeEl.textContent ?? '')
+        .join('\n')
+    )
+    .filter(Boolean);
+}
+
 const mockChanges: WorkspaceChanges = {
   isRepo: true,
   branch: 'main',
@@ -36,7 +47,7 @@ const mockFileDiff: DiffData = {
   truncated: false,
   lines: [
     { kind: 'meta', oldNumber: null, newNumber: null, text: 'diff --git a/index.html b/index.html' },
-    { kind: 'hunk', oldNumber: null, newNumber: null, text: '@@ -1,3 +1,3 @@' },
+    { kind: 'hunk', oldNumber: null, newNumber: null, text: '@@ -1,2 +1,2 @@' },
     { kind: 'context', oldNumber: 1, newNumber: 1, text: '<!DOCTYPE html>' },
     { kind: 'removed', oldNumber: 2, newNumber: null, text: '<title>Old</title>' },
     { kind: 'added', oldNumber: null, newNumber: 2, text: '<title>New Clean Diff</title>' },
@@ -65,8 +76,16 @@ const defaultWorkspaceGitState = () => ({
   handleCommit: vi.fn(),
 });
 
-const { useWorkspaceGitSpy } = vi.hoisted(() => ({
+const {
+  useWorkspaceGitSpy,
+  readWorkspaceFileDiffSpy,
+  readWorkspaceDiffFileContentsSpy,
+  clearCacheSpy,
+} = vi.hoisted(() => ({
   useWorkspaceGitSpy: vi.fn(),
+  readWorkspaceFileDiffSpy: vi.fn(),
+  readWorkspaceDiffFileContentsSpy: vi.fn(),
+  clearCacheSpy: vi.fn(),
 }));
 
 vi.mock('../files/useWorkspaceGit', () => ({
@@ -79,7 +98,9 @@ vi.mock('../files/gitTypes', async () => {
     ...actual,
     createWorkspaceGitService: () => ({
       readWorkspaceChanges: vi.fn().mockResolvedValue(mockChanges),
-      readWorkspaceFileDiff: vi.fn().mockResolvedValue(mockFileDiff),
+      readWorkspaceFileDiff: readWorkspaceFileDiffSpy,
+      readWorkspaceDiffFileContents: readWorkspaceDiffFileContentsSpy,
+      clearCache: clearCacheSpy,
       stageWorkspaceChanges: vi.fn(),
       stageAllWorkspaceChanges: vi.fn(),
       unstageWorkspaceChanges: vi.fn(),
@@ -95,6 +116,11 @@ describe('DiffsView Component Tests', () => {
     consumePendingDiffPreview();
     useWorkspaceGitSpy.mockReset();
     useWorkspaceGitSpy.mockImplementation(defaultWorkspaceGitState);
+    readWorkspaceFileDiffSpy.mockReset();
+    readWorkspaceFileDiffSpy.mockResolvedValue(mockFileDiff);
+    readWorkspaceDiffFileContentsSpy.mockReset();
+    readWorkspaceDiffFileContentsSpy.mockResolvedValue({ oldContent: null, newContent: null });
+    clearCacheSpy.mockReset();
   });
 
   it('renders top commit bar with draft message and commit buttons', () => {
@@ -175,26 +201,29 @@ describe('DiffsView Component Tests', () => {
   });
 
   it('expands a diff card when clicked and collapses it when clicked again', async () => {
-    render(<DiffsView workspaceId="ws-test" />);
+    const { container } = render(<DiffsView workspaceId="ws-test" />);
 
     // Initially collapsed
-    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('diffs-container')).toHaveLength(0);
 
     // Click on index.html chevron to expand
     const chevrons = screen.getAllByLabelText('Expand');
     fireEvent.click(chevrons[0]);
 
-    // Now diff content appears
-    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+    // Now diff content appears inside Shadow DOM
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+    });
 
     // Click again to collapse
     const collapseChevron = screen.getByLabelText('Collapse');
     fireEvent.click(collapseChevron);
-    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('diffs-container')).toHaveLength(0);
   });
 
   it('toggles all diff cards using Expand all files / Collapse all files', async () => {
-    render(<DiffsView workspaceId="ws-test" />);
+    const { container } = render(<DiffsView workspaceId="ws-test" />);
 
     // Initially all collapsed
     const toggleBtn = screen.getByLabelText('Expand all files');
@@ -204,28 +233,35 @@ describe('DiffsView Component Tests', () => {
     fireEvent.click(toggleBtn);
 
     // Now diff content for both files is loaded
-    const diffTitles = await screen.findAllByText('<title>New Clean Diff</title>');
-    expect(diffTitles.length).toBe(2);
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container).filter((t) =>
+        t.includes('<title>New Clean Diff</title>')
+      );
+      expect(texts.length).toBe(2);
+    });
     expect(screen.getByLabelText('Collapse all files')).toBeInTheDocument();
 
     // Click Collapse all
     fireEvent.click(screen.getByLabelText('Collapse all files'));
-    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('diffs-container')).toHaveLength(0);
     expect(screen.getByLabelText('Expand all files')).toBeInTheDocument();
   });
 
   it('expands file card when selected from file tree in stream mode', async () => {
-    render(<DiffsView workspaceId="ws-test" />);
+    const { container } = render(<DiffsView workspaceId="ws-test" />);
 
     // Initially collapsed
-    expect(screen.queryByText('<title>New Clean Diff</title>')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('diffs-container')).toHaveLength(0);
 
     // In file tree, click on main.ts
     const treeItems = screen.getAllByRole('button', { name: /main\.ts/i });
     fireEvent.click(treeItems[0]);
 
     // Now diff content for that file is loaded and rendered
-    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+    });
   });
 
   it('opens authentic ui-menu overflow dropdown when narrow and handles selection and Escape', () => {
@@ -280,6 +316,7 @@ describe('DiffsView Component Tests', () => {
     });
     expect(screen.queryByRole('menu', { name: /diff display options/i })).not.toBeInTheDocument();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('renders workspace folder picker and switches workspaces on click', () => {
@@ -336,11 +373,14 @@ describe('DiffsView Component Tests', () => {
       focusPaths: ['C:\\Users\\PC\\Desktop\\Proyectos\\kite\\index.html'],
     });
 
-    render(<DiffsView workspaceId="ws-test" />);
+    const { container } = render(<DiffsView workspaceId="ws-test" />);
 
     expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(1);
-    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+    });
 
     fireEvent.click(screen.getByRole('button', { name: /Show all \(2\)/i }));
     expect(screen.queryByText('Showing 1 change from thread')).not.toBeInTheDocument();
@@ -378,7 +418,7 @@ describe('DiffsView Component Tests', () => {
       selectedPath: 'Proyectos/kite/index.html',
     });
 
-    render(
+    const { container } = render(
       <StrictMode>
         <DiffsView workspaceId="ws-test" />
       </StrictMode>
@@ -395,7 +435,10 @@ describe('DiffsView Component Tests', () => {
       expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
     });
     expect(screen.getAllByRole('article')).toHaveLength(1);
-    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+    });
   });
 
   it('waits for refreshGit before clearing focus when a newly changed file arrives asynchronously while mounted', async () => {
@@ -426,7 +469,7 @@ describe('DiffsView Component Tests', () => {
       };
     });
 
-    render(<DiffsView workspaceId="ws-test" />);
+    const { container } = render(<DiffsView workspaceId="ws-test" />);
     expect(screen.getAllByRole('article')).toHaveLength(1);
 
     act(() => {
@@ -449,30 +492,160 @@ describe('DiffsView Component Tests', () => {
     const articles = screen.getAllByRole('article');
     expect(articles).toHaveLength(1);
     expect(articles[0]).toHaveAttribute('id', 'diff-file-src%2Fmain.ts');
-    expect(await screen.findByText('<title>New Clean Diff</title>')).toBeInTheDocument();
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+    });
+  });
+
+  it('supports Ignore whitespace, Hide test files, collapsible folder tree, total +X -Y stat, and path copy', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    useWorkspaceGitSpy.mockImplementation(() => ({
+      ...defaultWorkspaceGitState(),
+      gitChanges: {
+        ...mockChanges,
+        files: [
+          ...mockChanges.files,
+          {
+            path: 'src/components/Diffs.test.tsx',
+            status: 'modified',
+            oldPath: null,
+            staged: false,
+            unstaged: true,
+          },
+        ],
+      },
+    }));
+
+    render(<DiffsView workspaceId="ws-test" />);
+
+    // Collapsible folder node hides nested main.ts and restores it on re-expand
+    const treeAside = screen.getByLabelText('Modified files navigation');
+    const srcFolderBtn = within(treeAside).getByRole('button', { name: 'src' });
+    expect(within(treeAside).getByRole('button', { name: /main\.ts/i })).toBeInTheDocument();
+    fireEvent.click(srcFolderBtn);
+    expect(within(treeAside).queryByRole('button', { name: /main\.ts/i })).not.toBeInTheDocument();
+    fireEvent.click(srcFolderBtn);
+    expect(within(treeAside).getByRole('button', { name: /main\.ts/i })).toBeInTheDocument();
+
+    // Hide test files hides *.test.tsx
+    expect(within(treeAside).getByText('Diffs.test.tsx')).toBeInTheDocument();
+    const hideTestsBtn = screen.getByRole('button', { name: /Hide test files/i });
+    fireEvent.click(hideTestsBtn);
+    expect(localStorage.getItem('kite.diffs.hidetests.v1')).toBe('true');
+    expect(within(treeAside).queryByText('Diffs.test.tsx')).not.toBeInTheDocument();
+
+    // Ignore whitespace toggle persists
+    const ignoreWsBtn = screen.getByRole('button', { name: /Ignore whitespace changes/i });
+    fireEvent.click(ignoreWsBtn);
+    expect(localStorage.getItem('kite.diffs.ignorews.v1')).toBe('true');
+
+    // Expand cards and verify toolbar total +X -Y badge updates
+    fireEvent.click(screen.getByLabelText('Expand all files'));
+    await waitFor(() => {
+      const totalBadge = screen.getByTitle('Total additions and deletions across shown files');
+      expect(totalBadge).toHaveTextContent('+2');
+      expect(totalBadge).toHaveTextContent('-2');
+    });
+
+    // Click-to-copy path button copies file path
+    const copyBtns = screen.getAllByRole('button', { name: /Copy path /i });
+    fireEvent.click(copyBtns[0]);
+    expect(writeText).toHaveBeenCalledWith('index.html');
+  });
+
+  it('hides whitespace-only hunks inside viewer when Ignore whitespace is enabled', () => {
+    const wsOnlyDiff: DiffData = {
+      truncated: false,
+      lines: [
+        { kind: 'meta', oldNumber: null, newNumber: null, text: 'diff --git a/index.html b/index.html' },
+        { kind: 'hunk', oldNumber: null, newNumber: null, text: '@@ -1,1 +1,1 @@' },
+        { kind: 'removed', oldNumber: 1, newNumber: null, text: '  const a = 1;' },
+        { kind: 'added', oldNumber: null, newNumber: 1, text: '    const a = 1;' },
+      ],
+    };
+
+    localStorage.setItem('kite.diffs.viewmode.v1', 'focused');
+    localStorage.setItem('kite.diffs.ignorews.v1', 'true');
+    useWorkspaceGitSpy.mockImplementation(() => ({
+      ...defaultWorkspaceGitState(),
+      diffData: wsOnlyDiff,
+    }));
+
+    render(<DiffsView workspaceId="ws-test" />);
+    expect(
+      screen.getByText('Only whitespace or indentation changes in this file.')
+    ).toBeInTheDocument();
+  });
+
+  it('clears cache and re-fetches card diffs when clicking Refresh changes', async () => {
+    const refreshedDiff: DiffData = {
+      truncated: false,
+      lines: [
+        { kind: 'meta', oldNumber: null, newNumber: null, text: 'diff --git a/index.html b/index.html' },
+        { kind: 'hunk', oldNumber: null, newNumber: null, text: '@@ -1,2 +1,2 @@' },
+        { kind: 'context', oldNumber: 1, newNumber: 1, text: '<!DOCTYPE html>' },
+        { kind: 'removed', oldNumber: 2, newNumber: null, text: '<title>Old</title>' },
+        { kind: 'added', oldNumber: null, newNumber: 2, text: '<title>Refreshed Diff Content</title>' },
+      ],
+    };
+
+    const { container } = render(<DiffsView workspaceId="ws-test" />);
+    fireEvent.click(screen.getByLabelText('Expand all files'));
+
+    await waitFor(() => {
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+    });
+    const callsBeforeRefresh = readWorkspaceFileDiffSpy.mock.calls.length;
+    expect(callsBeforeRefresh).toBeGreaterThanOrEqual(2);
+
+    readWorkspaceFileDiffSpy.mockResolvedValue(refreshedDiff);
+    fireEvent.click(screen.getByRole('button', { name: /Refresh changes/i }));
+
+    expect(clearCacheSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(readWorkspaceFileDiffSpy.mock.calls.length).toBeGreaterThan(callsBeforeRefresh);
+      const texts = getShadowCodeTexts(container);
+      expect(texts.some((t) => t.includes('<title>Refreshed Diff Content</title>'))).toBe(true);
+    });
   });
 });
 
 describe('DiffCodeViewer Component Tests', () => {
-  it('renders meaningful lines without raw git meta headers', () => {
+  it('renders unified mode with a single gutter and no raw git meta headers', async () => {
     const { container } = render(
       <DiffCodeViewer diff={mockFileDiff} layout="unified" wordWrap={true} />
     );
 
-    // Meta header shouldn't be rendered as code row
-    expect(container.textContent).not.toContain('diff --git');
-    // Code lines should be rendered
-    expect(container.textContent).toContain('<title>Old</title>');
-    expect(container.textContent).toContain('<title>New Clean Diff</title>');
+    await waitFor(() => {
+      const shadowRoot = container.querySelector('diffs-container')?.shadowRoot;
+      expect(shadowRoot?.querySelector('[data-diff-type="single"]')).toBeTruthy();
+      expect(shadowRoot?.querySelectorAll('[data-gutter]').length).toBe(1);
+      const codeText = shadowRoot?.querySelector('[data-code]')?.textContent ?? '';
+      expect(codeText).not.toContain('diff --git');
+      expect(codeText).toContain('<title>Old</title>');
+      expect(codeText).toContain('<title>New Clean Diff</title>');
+    });
   });
 
-  it('renders split side-by-side mode properly paired', () => {
+  it('renders split side-by-side mode properly paired', async () => {
     const { container } = render(
       <DiffCodeViewer diff={mockFileDiff} layout="split" wordWrap={false} />
     );
 
-    expect(container.querySelector('.diff-split-table')).toBeInTheDocument();
-    expect(container.textContent).toContain('<title>Old</title>');
-    expect(container.textContent).toContain('<title>New Clean Diff</title>');
+    await waitFor(() => {
+      const shadowRoot = container.querySelector('diffs-container')?.shadowRoot;
+      expect(shadowRoot?.querySelector('[data-diff-type="split"]')).toBeTruthy();
+      expect(shadowRoot?.querySelectorAll('[data-code]').length).toBe(2);
+      const codeText = getShadowCodeTexts(container).join('\n');
+      expect(codeText).toContain('<title>Old</title>');
+      expect(codeText).toContain('<title>New Clean Diff</title>');
+    });
   });
 });

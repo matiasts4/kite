@@ -2,6 +2,7 @@ import type React from 'react';
 import { useGlobalShortcuts } from '../../lib/shortcuts/useGlobalShortcuts';
 import type { SupportedPlatform } from '../../lib/shortcuts/types';
 import type { WorkMode } from '../Sidebar';
+import { openDiffsInRightDock } from '../../lib/diffPreviewNav';
 
 export interface UseAppShortcutsOptions {
   platform: SupportedPlatform;
@@ -113,7 +114,7 @@ export function useAppShortcuts({
       },
       'toggle-diffs': () => {
         setRightDockVisible(true);
-        window.dispatchEvent(new CustomEvent('kite:open-diffs'));
+        openDiffsInRightDock();
       },
       'toggle-operator': () => {
         setOperatorOpen((prev) => !prev);

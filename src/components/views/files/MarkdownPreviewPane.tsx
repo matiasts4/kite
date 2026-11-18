@@ -448,7 +448,7 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
                     margin: '14px 0',
                     borderRadius: '6px',
                     border: '1px solid var(--block-stroke, rgba(255,255,255,0.12))',
-                    background: 'var(--block-fill, #16181d)',
+                    background: 'var(--glass-code-bg, var(--terminal-canvas, #0a0b0e))',
                     overflow: 'hidden',
                     maxWidth: '100%',
                     minWidth: 0,
@@ -534,7 +534,7 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
                     margin: '12px 0',
                     padding: '10px 16px',
                     borderLeft: `3px solid ${alertColor}`,
-                    backgroundColor: 'var(--block-fill, rgba(255,255,255,0.03))',
+                    backgroundColor: 'var(--glass-elevated-bg, var(--block-fill))',
                     borderRadius: '0 6px 6px 0',
                     maxWidth: '100%',
                     minWidth: 0,
@@ -579,7 +579,7 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
                     boxSizing: 'border-box',
                     border: '1px solid var(--block-stroke, rgba(255,255,255,0.12))',
                     borderRadius: '6px',
-                    background: 'var(--block-fill, rgba(255,255,255,0.02))',
+                    background: 'var(--glass-elevated-bg, var(--block-fill))',
                   }}
                 >
                   <table
@@ -705,7 +705,7 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
               style={{
                 position: 'absolute',
                 inset: 0,
-                background: 'rgba(0, 0, 0, 0.4)',
+                background: 'var(--glass-backdrop-scrim, rgba(0, 0, 0, 0.4))',
                 zIndex: 35,
               }}
             />
@@ -721,7 +721,7 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
                     right: 0,
                     bottom: 0,
                     width: '250px',
-                    boxShadow: '-4px 0 20px rgba(0, 0, 0, 0.5)',
+                    boxShadow: 'var(--glass-shadow, -4px 0 20px rgba(0, 0, 0, 0.5))',
                     zIndex: 40,
                   }
                 : {
@@ -732,8 +732,10 @@ export const MarkdownPreviewPane: React.FC<MarkdownPreviewPaneProps> = ({
               display: 'flex',
               flexDirection: 'column',
               height: '100%',
-              background: 'var(--pane, #16181d)',
-              borderLeft: '1px solid var(--separator, rgba(255, 255, 255, 0.08))',
+              background: isNarrow
+                ? 'var(--glass-overlay-bg, var(--pane))'
+                : 'var(--glass-nested-bg, var(--pane))',
+              borderLeft: '1px solid var(--glass-border, var(--separator, rgba(255, 255, 255, 0.08)))',
               overflow: 'hidden',
               boxSizing: 'border-box',
             }}

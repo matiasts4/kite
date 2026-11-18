@@ -2,12 +2,19 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import type {
   GitFileChange,
   WorkspaceChanges,
+  WorkspaceGitService,
 } from './gitTypes';
 import { createWorkspaceGitService } from './gitTypes';
 import type { DiffData } from '../chat/types';
 
-export function useWorkspaceGit(currentWsId: string | null) {
-  const gitService = useMemo(() => createWorkspaceGitService(), []);
+export function useWorkspaceGit(
+  currentWsId: string | null,
+  externalGitService?: WorkspaceGitService
+) {
+  const gitService = useMemo(
+    () => externalGitService ?? createWorkspaceGitService(),
+    [externalGitService]
+  );
 
   const [gitChanges, setGitChanges] = useState<WorkspaceChanges | null>(null);
   const [gitLoading, setGitLoading] = useState<boolean>(false);

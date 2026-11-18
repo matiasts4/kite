@@ -5,6 +5,7 @@
 @import "./motion/appIntro.css";
 @import "./motion/standard/standard.css";
 @import "./visual-language.css";
+@import "./components/diffs/kiteDiffs.css";
 @import "./components/theme/theme-visuals.css";
 
 

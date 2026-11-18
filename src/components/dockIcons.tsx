@@ -723,4 +723,56 @@ export const SubagentsGlyph: React.FC<{ size?: number; className?: string }> = (
   </svg>
 );
 
+export const PilcrowGlyph: React.FC<{ size?: number; className?: string }> = ({
+  size = 12,
+  className,
+}) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.75}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    focusable="false"
+    className={className}
+    style={{ flexShrink: 0 }}
+  >
+    <path d="M13 4v16" />
+    <path d="M17 4v16" />
+    <path d="M19 4H9.5a4.5 4.5 0 0 0 0 9H13" />
+  </svg>
+);
+
+export const HideTestsGlyph: React.FC<{ size?: number; className?: string }> = ({
+  size = 12,
+  className,
+}) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.75}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    focusable="false"
+    className={className}
+    style={{ flexShrink: 0 }}
+  >
+    <path d="M10 2v2" />
+    <path d="M14 2v6.5" />
+    <path d="M8.5 2h7" />
+    <path d="M6 20a2 2 0 0 1-1.7-3l4.2-6.8" />
+    <path d="M15.4 15.4 19.7 17A2 2 0 0 1 18 20H6" />
+    <path d="m2 2 20 20" />
+  </svg>
+);
+
+
 

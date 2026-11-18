@@ -7,7 +7,7 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  background: var(--pane, #0f141c);
+  background: var(--glass-nested-bg, var(--pane, #0f141c));
   color: var(--text-primary, #e2e8f0);
   position: relative;
   overflow: hidden;
@@ -23,7 +23,7 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 14px;
-  background: var(--block-fill, rgba(255, 255, 255, 0.02));
+  background: var(--glass-nested-bg, var(--pane));
   border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
 }
 
@@ -39,7 +39,7 @@
   min-height: 38px;
   max-height: 120px;
   padding: 8px 12px;
-  background: var(--vl-surface-canvas, #0b0f14);
+  background: var(--glass-elevated-bg, var(--block-fill, #0b0f14));
   border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.1));
   border-radius: var(--control-radius, 8px);
   box-shadow: var(--vl-inset-field);
@@ -152,7 +152,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 10px;
-  background: var(--pane, #0f141c);
+  background: var(--glass-nested-bg, var(--pane, #0f141c));
   border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
   user-select: none;
   gap: 8px;
@@ -165,12 +165,12 @@
 }
 
 .diffs-filter-pill {
-  height: 24px;
+  height: var(--vl-control-sm, 26px);
   padding: 0 8px;
   font-size: 11px;
   font-weight: 500;
   border: none;
-  border-radius: var(--radius-chip, 12px);
+  border-radius: var(--vl-radius-xs, 4px);
   background: transparent;
   color: var(--text-secondary, #94a3b8);
   cursor: pointer;
@@ -205,17 +205,17 @@
   font-size: 11px;
   padding: 2px 7px;
   border-radius: var(--radius-chip, 10px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.05));
+  background: var(--chip-fill, rgba(255, 255, 255, 0.05));
   border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
 }
 
 .diffs-stat-add {
-  color: var(--status-running, #10b981);
+  color: var(--diff-addition, var(--status-running, #10b981));
   font-weight: 600;
 }
 
 .diffs-stat-del {
-  color: var(--status-failed, #f43f5e);
+  color: var(--diff-deletion, var(--status-failed, #f43f5e));
   font-weight: 600;
 }
 
@@ -264,7 +264,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 5px 10px;
-  background: color-mix(in srgb, var(--accent, #6366f1) 10%, var(--pane, #0f141c));
+  background: color-mix(in srgb, var(--accent, #6366f1) 12%, var(--glass-sticky-pane-bg, var(--pane, #0f141c)));
   border-bottom: 1px solid color-mix(in srgb, var(--accent, #6366f1) 24%, var(--separator, rgba(255, 255, 255, 0.08)));
   font-size: 11px;
 }
@@ -281,7 +281,7 @@
   padding: 0 10px;
   border-radius: var(--control-radius, 8px);
   border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
-  background: var(--block-fill, rgba(255, 255, 255, 0.06));
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06));
   color: var(--text-primary, #f1f5f9);
   font-size: 11px;
   font-weight: 500;
@@ -312,7 +312,7 @@
   min-width: 160px;
   max-width: 320px;
   border-right: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
-  background: var(--pane, #0c1017);
+  background: var(--glass-nested-bg, var(--pane, #0c1017));
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -329,12 +329,12 @@
 
 .diffs-tree-search {
   width: 100%;
-  height: 24px;
+  height: var(--vl-control-sm, 26px);
   padding: 0 8px;
   font-size: 11px;
-  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)));
   border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
-  border-radius: 4px;
+  border-radius: var(--vl-radius-xs, 4px);
   color: var(--text-primary, #e2e8f0);
   outline: none;
 }
@@ -356,15 +356,16 @@
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 5px 8px;
-  border-radius: 4px;
+  min-height: var(--vl-control-sm, 26px);
+  padding: 3px 8px;
+  border-radius: var(--vl-radius-xs, 4px);
   font-size: 11px;
   color: var(--text-secondary, #94a3b8);
   background: transparent;
   border: none;
   text-align: left;
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -388,7 +389,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: var(--pane, #0f141c);
+  background: var(--glass-nested-bg, var(--pane, #0f141c));
 }
 
 .diffs-focused-content {
@@ -432,17 +433,21 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  min-height: 36px;
-  background: var(--block-fill, rgba(255, 255, 255, 0.02));
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius-card, 8px);
+  min-height: 32px;
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.02)));
+  border: 1px solid var(--glass-border, var(--panel-stroke, var(--block-stroke, rgba(255, 255, 255, 0.08))));
+  border-radius: var(--card-radius, 12px);
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--glass-highlight, 0 1px 3px rgba(0, 0, 0, 0.2));
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .diff-file-card:hover {
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--block-stroke-strong, rgba(255, 255, 255, 0.16));
+}
+
+.diff-file-card:hover .diff-file-card-header {
+  box-shadow: inset 2px 0 0 var(--accent, #818cf8);
 }
 
 /* Discrete, GPU-accelerated card expand animation */
@@ -478,12 +483,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 34px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 10px;
-  background: var(--pane, #121824);
+  background: var(--glass-sticky-pane-bg, var(--pane, #121824));
   border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
   user-select: none;
   gap: 8px;
+  transition: box-shadow 140ms ease;
 }
 
 .diff-file-card-title-group {
@@ -504,7 +511,7 @@
   background: transparent;
   border: none;
   color: var(--text-secondary, #94a3b8);
-  border-radius: 3px;
+  border-radius: var(--vl-radius-xs, 4px);
   cursor: pointer;
   flex-shrink: 0;
   transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), color 120ms ease;
@@ -522,7 +529,7 @@
 .diff-status-pill {
   width: 18px;
   height: 18px;
-  border-radius: var(--radius-chip, 3px);
+  border-radius: var(--vl-radius-xs, 4px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -596,12 +603,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
   border: none;
   background: transparent;
   color: var(--text-secondary, #94a3b8);
-  border-radius: 4px;
+  border-radius: var(--vl-radius-xs, 4px);
   cursor: pointer;
   transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
   will-change: transform;
@@ -619,224 +626,6 @@
 .diff-card-btn.danger:hover {
   background: rgba(244, 63, 94, 0.15);
   color: #f43f5e;
-}
-
-/* --------------------------------------------------------------------------
-   Code Viewer: Unified & Split
-   -------------------------------------------------------------------------- */
-.diff-code-container {
-  width: 100%;
-  font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
-  line-height: 19px;
-  background: var(--code-bg, #0b0f17);
-  overflow-x: auto;
-}
-
-.diff-code-container.wrap-enabled {
-  overflow-x: hidden;
-}
-
-.diff-table {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  min-width: max-content;
-}
-
-.diff-code-container.wrap-enabled .diff-table {
-  min-width: 100%;
-  width: 100%;
-}
-
-/* Hunk Separator Row */
-.diff-hunk-row {
-  display: flex;
-  align-items: center;
-  height: 24px;
-  min-height: 24px;
-  padding: 0 10px;
-  background: rgba(255, 255, 255, 0.02);
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  user-select: none;
-}
-
-.diff-hunk-cell {
-  padding: 4px 10px;
-  color: var(--text-secondary, #64748b);
-  font-size: 10.5px;
-  font-weight: 500;
-  user-select: none;
-}
-
-.diff-hunk-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 8px;
-  background: rgba(99, 102, 241, 0.12);
-  border: 1px solid rgba(99, 102, 241, 0.22);
-  border-radius: 4px;
-  color: #a5b4fc;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-/* Unified Diff Row (Native Chromium Compositor Virtualization) */
-.diff-row {
-  display: flex;
-  align-items: stretch;
-  min-height: 20px;
-  line-height: 20px;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 20px;
-  transition: background-color 60ms ease;
-}
-
-.diff-row:hover {
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.diff-row.added {
-  background: rgba(16, 185, 129, 0.10);
-}
-
-.diff-row.removed {
-  background: rgba(244, 63, 94, 0.10);
-}
-
-/* Gutter Columns */
-.diff-gutter-num {
-  flex: 0 0 38px;
-  width: 38px;
-  min-width: 38px;
-  max-width: 38px;
-  padding: 0 6px;
-  color: var(--text-secondary, #475569);
-  text-align: right;
-  vertical-align: top;
-  user-select: none;
-  font-size: 10.5px;
-  border-right: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-.diff-row.added .diff-gutter-num {
-  color: rgba(52, 211, 153, 0.85);
-}
-
-.diff-row.removed .diff-gutter-num {
-  color: rgba(251, 113, 133, 0.85);
-}
-
-/* Marker Column (+ / -) with Left Accent Bar */
-.diff-gutter-marker {
-  flex: 0 0 18px;
-  width: 18px;
-  min-width: 18px;
-  max-width: 18px;
-  text-align: center;
-  vertical-align: top;
-  user-select: none;
-  font-weight: 600;
-  position: relative;
-}
-
-.diff-row.added .diff-gutter-marker {
-  color: var(--status-running, #10b981);
-}
-
-.diff-row.added .diff-gutter-marker::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background-color: var(--status-running, #10b981);
-}
-
-.diff-row.removed .diff-gutter-marker {
-  color: var(--status-failed, #f43f5e);
-}
-
-.diff-row.removed .diff-gutter-marker::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background-color: var(--status-failed, #f43f5e);
-}
-
-/* Code Content Column */
-.diff-code-cell {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 0 8px;
-  vertical-align: top;
-  white-space: pre;
-  word-break: normal;
-  overflow-x: visible;
-  color: var(--text-primary, #e2e8f0);
-}
-
-.wrap-enabled .diff-code-cell {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.diff-row.added .diff-code-cell {
-  color: #ecfdf5;
-}
-
-.diff-row.removed .diff-code-cell {
-  color: #fff1f2;
-}
-
-/* Split View Layout */
-.diff-split-table {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-.diff-split-col {
-  width: 50%;
-  vertical-align: top;
-}
-
-.diff-split-row {
-  display: flex;
-  align-items: stretch;
-  width: 100%;
-  min-height: 20px;
-  line-height: 20px;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 20px;
-}
-
-.diff-split-side {
-  flex: 1 1 50%;
-  width: 50%;
-  min-width: 0;
-  display: flex;
-  align-items: stretch;
-  min-height: 20px;
-  border-right: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-.diff-split-side.empty {
-  background: rgba(255, 255, 255, 0.01);
-}
-
-.diff-split-side.added {
-  background: rgba(16, 185, 129, 0.10);
-}
-
-.diff-split-side.removed {
-  background: rgba(244, 63, 94, 0.10);
 }
 
 /* Empty State & Clean State */
@@ -882,10 +671,10 @@
   min-width: 210px;
   max-width: 260px;
   width: max-content;
-  background: var(--menu-plate, #141720);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
-  border-radius: var(--radius-card, 10px);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--glass-overlay-bg, var(--pane, #141720));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
+  border-radius: var(--card-radius, var(--radius-card, 12px));
+  box-shadow: var(--glass-shadow, 0 16px 36px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4));
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -893,8 +682,8 @@
   animation: diffsPopIn var(--motion-enter, 180ms) var(--motion-ease, cubic-bezier(0.16, 1, 0.3, 1)) forwards;
   transform-origin: top right;
   will-change: transform, opacity;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 @keyframes diffsPopIn {
@@ -1032,15 +821,23 @@
    -------------------------------------------------------------------------- */
 .diff-focused-header {
   flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 38px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 10px;
-  background: var(--pane, #121824);
+  background: var(--glass-sticky-pane-bg, var(--pane, #121824));
   border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
   user-select: none;
   gap: 8px;
+}
+
+.diff-focused-header:hover {
+  box-shadow: inset 2px 0 0 var(--accent, #818cf8);
 }
 
 .diff-focused-header-left {
@@ -1062,11 +859,11 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
-  border-radius: 4px;
+  border-radius: var(--vl-radius-xs, 4px);
   color: var(--text-secondary, #94a3b8);
   cursor: pointer;
   transition: all 120ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -1103,7 +900,7 @@
   padding: 0 8px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 11px;
+  border-radius: var(--pill-radius, 9999px);
   color: var(--text-secondary, #94a3b8);
   font-family: var(--font-mono, monospace);
   font-size: 10.5px;
@@ -1134,10 +931,10 @@
   right: 0;
   z-index: 60;
   width: 280px;
-  background: var(--menu-plate, #141720);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
-  border-radius: var(--radius-card, 10px);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--glass-overlay-bg, var(--pane, #141720));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
+  border-radius: var(--card-radius, var(--radius-card, 12px));
+  box-shadow: var(--glass-shadow, 0 16px 36px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.4));
   padding: 6px;
   display: flex;
   flex-direction: column;
@@ -1145,18 +942,18 @@
   animation: diffsPopIn var(--motion-enter, 180ms) var(--motion-ease, cubic-bezier(0.16, 1, 0.3, 1)) forwards;
   transform-origin: top right;
   will-change: transform, opacity;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .diff-quick-jump-search {
   width: 100%;
   height: 26px;
   padding: 0 8px;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--glass-code-bg, rgba(0, 0, 0, 0.25));
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 4px;
-  color: #f1f5f9;
+  color: var(--text-primary, #f1f5f9);
   font-size: 11px;
   outline: none;
   box-sizing: border-box;

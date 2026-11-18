@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import type { FileDiffContentsLoader } from '@pierre/diffs';
 import type {
   GitFileChange,
   WorkspaceChanges,
@@ -42,6 +43,7 @@ export interface ChangesViewProps {
   onDiscardChanges: (file: GitFileChange) => void;
   onCommit: (message: string, stageAll: boolean) => void;
   onClearWriteError: () => void;
+  loadDiffFiles?: FileDiffContentsLoader;
 }
 
 export const ChangesView: React.FC<ChangesViewProps> = ({
@@ -65,6 +67,7 @@ export const ChangesView: React.FC<ChangesViewProps> = ({
   onDiscardChanges,
   onCommit,
   onClearWriteError,
+  loadDiffFiles,
 }) => {
   const [discardCandidate, setDiscardCandidate] = useState<GitFileChange | null>(null);
 
@@ -309,7 +312,13 @@ export const ChangesView: React.FC<ChangesViewProps> = ({
                   {diffError}
                 </p>
               ) : diff ? (
-                <UnifiedDiffView diff={diff} />
+                <UnifiedDiffView
+                  diff={diff}
+                  filePath={selectedPath}
+                  oldPath={changes.files.find((f) => f.path === selectedPath)?.oldPath}
+                  status={changes.files.find((f) => f.path === selectedPath)?.status}
+                  loadDiffFiles={loadDiffFiles}
+                />
               ) : null}
             </section>
           )}

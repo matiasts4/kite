@@ -34,13 +34,11 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
   onDecision,
 }) => {
   const isLocked = busy || disabled;
-  const isDiff = approval.detail && (
-    approval.risk === 'fileChange' ||
-    approval.toolName === 'edit' ||
-    approval.toolName === 'write' ||
-    approval.detail.includes('@@') ||
-    approval.detail.startsWith('diff --git') ||
-    approval.detail.startsWith('---')
+  const isDiff = Boolean(
+    approval.detail &&
+      (approval.detail.includes('@@') ||
+        approval.detail.startsWith('diff --git') ||
+        (approval.detail.startsWith('--- ') && approval.detail.includes('\n+++ ')))
   );
 
   return (
@@ -64,7 +62,7 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
         {approval.impact && <p>{approval.impact}</p>}
         {approval.detail && (
           isDiff ? (
-            <div style={{ margin: 'var(--space-2) 0', borderRadius: 'var(--radius-card)', border: '1px solid var(--block-stroke)', background: 'var(--block-fill)', overflowX: 'auto', padding: 'var(--space-2)' }}>
+            <div style={{ margin: 'var(--space-2) 0' }}>
               <UnifiedDiffView diff={approval.detail} />
             </div>
           ) : (

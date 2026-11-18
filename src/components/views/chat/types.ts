@@ -42,6 +42,7 @@ export interface DiffLine {
 export interface DiffData {
   lines: DiffLine[];
   truncated?: boolean;
+  rawPatch?: string | null;
 }
 
 export interface EffortChoice {
@@ -112,7 +113,7 @@ export interface ExtendedChatThread extends ChatThread {
   sideChat?: boolean;
   usageReported?: boolean;
   contextWindowTokens?: number;
-  queuedRuns?: Array<{ id: string; text: string }>;
+  queuedRuns?: QueuedRunItem[];
   pendingUserInput?: {
     requestId?: string;
     questions?: Array<{
@@ -139,6 +140,16 @@ export interface ChatAttachment {
   displayName: string;
   isDirectory: boolean;
   byteSize: number | null;
+  mimeType?: string | null;
+  path?: string | null;
+  previewDataUrl?: string | null;
+}
+
+export interface QueuedRunItem {
+  id: string;
+  text: string;
+  attachments?: ChatAttachment[];
+  createdAtUnixMs?: number;
 }
 
 export interface ModelOption {
@@ -151,6 +162,7 @@ export interface ModelOption {
 }
 
 export interface LiveChatRun {
+  runId?: string;
   threadId: string;
   profileId: string | null;
   workspaceId: string | null;
@@ -158,6 +170,7 @@ export interface LiveChatRun {
   title: string;
   needsYou: boolean;
   startedAtUnixMs: number;
+  nextSequence?: number;
   line: string | null;
 }
 

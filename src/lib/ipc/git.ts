@@ -36,6 +36,12 @@ export interface DiffLine {
 export interface WorkspaceFileDiff {
   lines: DiffLine[];
   truncated: boolean;
+  rawPatch?: string | null;
+}
+
+export interface WorkspaceDiffFileContents {
+  oldContent: string | null;
+  newContent: string | null;
 }
 
 export async function readWorkspaceChanges(workspaceId: string): Promise<WorkspaceChanges> {
@@ -65,6 +71,18 @@ export async function readWorkspaceFileDiff(
   untracked = false
 ): Promise<WorkspaceFileDiff> {
   return invokeCommand<WorkspaceFileDiff>('read_workspace_file_diff', { workspaceId, path, untracked });
+}
+
+export async function readWorkspaceDiffFileContents(
+  workspaceId: string,
+  oldPath?: string | null,
+  newPath?: string | null
+): Promise<WorkspaceDiffFileContents> {
+  return invokeCommand<WorkspaceDiffFileContents>('read_workspace_diff_file_contents', {
+    workspaceId,
+    oldPath: oldPath ?? null,
+    newPath: newPath ?? null,
+  });
 }
 
 export async function stageWorkspaceChanges(

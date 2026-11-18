@@ -570,6 +570,7 @@ fn main() {
             dump_terminal_diagnostics,
             clear_terminal_vt,
             read_workspace_changes,
+            read_workspace_diff_file_contents,
             read_workspace_file_diff,
             reconnect_ssh_workspace,
             recover_chat_thread,

@@ -1,4 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import type { FileDiffContentsLoader } from '@pierre/diffs';
+import {
+  getDiffDataLineStat,
+  type DiffLineStat,
+} from '../../../lib/diffs/diffRendering';
 import type { GitFileChange, WorkspaceGitService } from '../files/gitTypes';
 import { STATUS_LETTERS, splitPath } from '../files/gitTypes';
 import {
@@ -8,7 +13,8 @@ import {
   MinusIcon,
   Undo2Icon,
 } from '../files/FileIcons';
-import { CopyGlyph, CheckGlyph } from '../../dockIcons';
+import { DiffFilePathCopyButton } from '../../diffs/DiffFilePathCopyButton';
+import { DiffStatBadge } from '../../diffs/DiffStatBadge';
 import { SpinnerIcon } from '../chat/ChatIcons';
 import { DiffCodeViewer } from './DiffCodeViewer';
 import type { DiffData } from '../chat/types';
@@ -20,7 +26,11 @@ export interface DiffFileCardProps {
   collapsed: boolean;
   layout: 'unified' | 'split';
   wordWrap: boolean;
+  ignoreWhitespace?: boolean;
+  loadDiffFiles?: FileDiffContentsLoader;
+  refreshKey?: number;
   busy: boolean;
+  onStatsComputed?: (filePath: string, stat: DiffLineStat) => void;
   onToggleCollapse: () => void;
   onToggleStage: (file: GitFileChange, isStaged: boolean) => void;
   onDiscard: (file: GitFileChange) => void;
@@ -34,7 +44,11 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
   collapsed,
   layout,
   wordWrap,
+  ignoreWhitespace = false,
+  loadDiffFiles,
+  refreshKey = 0,
   busy,
+  onStatsComputed,
   onToggleCollapse,
   onToggleStage,
   onDiscard,
@@ -43,13 +57,12 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
   const [diff, setDiff] = useState<DiffData | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [isCopied, setIsCopied] = useState<boolean>(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState<boolean>(false);
 
   const { name, directory } = useMemo(() => splitPath(file.path), [file.path]);
   const letter = STATUS_LETTERS[file.status] || 'M';
 
-  // Fetch file diff when expanded and not yet loaded (lazy loading prevents IPC flooding)
+  // Fetch file diff when expanded (lazy loading prevents IPC flooding)
   useEffect(() => {
     if (collapsed) return;
     let cancelled = false;
@@ -74,26 +87,24 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, file.path, file.status, gitService, collapsed]);
+  }, [workspaceId, file.path, file.status, gitService, collapsed, refreshKey]);
 
-  // Calculate additions & deletions
-  const stats = useMemo(() => {
-    if (!diff || !diff.lines) return { additions: 0, deletions: 0 };
-    let add = 0;
-    let del = 0;
-    for (const l of diff.lines) {
-      if (l.kind === 'added') add++;
-      if (l.kind === 'removed') del++;
+  const stats = useMemo(
+    () =>
+      getDiffDataLineStat(diff, {
+        ignoreWhitespace,
+        filePath: file.path,
+        oldPath: file.oldPath,
+        status: file.status,
+      }),
+    [diff, ignoreWhitespace, file.path, file.oldPath, file.status]
+  );
+
+  useEffect(() => {
+    if (diff && onStatsComputed) {
+      onStatsComputed(file.path, stats);
     }
-    return { additions: add, deletions: del };
-  }, [diff]);
-
-  const handleCopyPath = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    navigator.clipboard.writeText(file.path);
-    setIsCopied(true);
-    setTimeout(() => setIsCopied(false), 2000);
-  };
+  }, [diff, file.path, stats, onStatsComputed]);
 
   return (
     <article
@@ -102,7 +113,7 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
       data-path={file.path}
       data-status={file.status}
     >
-      {/* Sticky Header */}
+      {/* Sticky Header (32px) */}
       <header className="diff-file-card-header">
         <div
           className="diff-file-card-title-group"
@@ -142,30 +153,12 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
             <span className="diff-file-name">{name}</span>
           </div>
 
-          {/* Copy relative path button */}
-          <button
-            type="button"
-            className="diff-card-btn"
-            onClick={handleCopyPath}
-            title={isCopied ? 'Path copied!' : 'Copy relative path'}
-            aria-label="Copy relative path"
-          >
-            {isCopied ? <CheckGlyph size={12} /> : <CopyGlyph size={12} />}
-          </button>
+          <DiffFilePathCopyButton path={file.path} className="diff-card-btn" />
         </div>
 
         {/* Right Actions & Stats */}
         <div className="diff-file-card-actions">
-          {(stats.additions > 0 || stats.deletions > 0) && (
-            <span className="diffs-stat-badge">
-              {stats.additions > 0 && (
-                <span className="diffs-stat-add">+{stats.additions}</span>
-              )}
-              {stats.deletions > 0 && (
-                <span className="diffs-stat-del">-{stats.deletions}</span>
-              )}
-            </span>
-          )}
+          <DiffStatBadge additions={stats.additions} deletions={stats.deletions} />
 
           {/* Open in Editor */}
           {file.status !== 'deleted' && (
@@ -252,7 +245,17 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
       {!collapsed && (
         <div className="diff-file-card-content">
           {loading ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', padding: '16px', color: 'var(--text-secondary, #64748b)', fontSize: '11px' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                padding: '16px',
+                color: 'var(--text-secondary, #64748b)',
+                fontSize: '11px',
+              }}
+            >
               <SpinnerIcon size={13} />
               <span>Loading diff…</span>
             </div>
@@ -261,7 +264,17 @@ export const DiffFileCard = React.memo<DiffFileCardProps>(({
               {error}
             </div>
           ) : (
-            <DiffCodeViewer diff={diff} layout={layout} wordWrap={wordWrap} />
+            <DiffCodeViewer
+              diff={diff}
+              layout={layout}
+              wordWrap={wordWrap}
+              ignoreWhitespace={ignoreWhitespace}
+              filePath={file.path}
+              oldPath={file.oldPath}
+              status={file.status}
+              cacheKey={`${workspaceId}:${file.path}:${file.status}:${file.staged ? 's' : 'u'}:${refreshKey}`}
+              loadDiffFiles={loadDiffFiles}
+            />
           )}
         </div>
       )}

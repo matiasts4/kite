@@ -1,5 +1,11 @@
-import { invokeCommand } from '../../../lib/ipc';
+import {
+  invokeCommand,
+  readWorkspaceDiffFileContents as ipcReadWorkspaceDiffFileContents,
+  type WorkspaceDiffFileContents,
+} from '../../../lib/ipc';
 import type { DiffData } from '../chat/types';
+
+export type { WorkspaceDiffFileContents };
 
 export type GitFileStatus =
   | 'modified'
@@ -63,9 +69,22 @@ export function formatUpstreamDistance(upstream: { ahead: number; behind: number
   return parts.join(' ');
 }
 
+/** Builds a structural signature so callers only bust caches when tracked git state actually changes. */
+export function getWorkspaceChangesSignature(changes: WorkspaceChanges | null): string {
+  if (!changes) return '';
+  return `${changes.isRepo}:${changes.branch ?? ''}:${changes.files
+    .map((f) => `${f.path}|${f.status}|${f.oldPath ?? ''}|${f.staged}|${f.unstaged}`)
+    .join(',')}`;
+}
+
 export interface WorkspaceGitService {
   readWorkspaceChanges(workspaceId: string): Promise<WorkspaceChanges>;
   readWorkspaceFileDiff(workspaceId: string, path: string, untracked: boolean): Promise<DiffData>;
+  readWorkspaceDiffFileContents?(
+    workspaceId: string,
+    oldPath?: string | null,
+    newPath?: string | null
+  ): Promise<WorkspaceDiffFileContents>;
   stageWorkspaceChanges(workspaceId: string, paths: string[]): Promise<WorkspaceChanges>;
   stageAllWorkspaceChanges(workspaceId: string): Promise<WorkspaceChanges>;
   unstageWorkspaceChanges(workspaceId: string, paths: string[]): Promise<WorkspaceChanges>;
@@ -78,9 +97,11 @@ export interface WorkspaceGitService {
 
 export function createWorkspaceGitService(): WorkspaceGitService {
   const fileDiffCache = new Map<string, Promise<DiffData>>();
+  const diffFileContentsCache = new Map<string, Promise<WorkspaceDiffFileContents>>();
 
   const invalidateCache = () => {
     fileDiffCache.clear();
+    diffFileContentsCache.clear();
   };
 
   return {
@@ -127,6 +148,30 @@ export function createWorkspaceGitService(): WorkspaceGitService {
       });
 
       fileDiffCache.set(cacheKey, promise);
+      return promise;
+    },
+
+    async readWorkspaceDiffFileContents(
+      workspaceId: string,
+      oldPath: string | null = null,
+      newPath: string | null = null
+    ): Promise<WorkspaceDiffFileContents> {
+      const normalizedOld = oldPath || null;
+      const normalizedNew = newPath || null;
+      const cacheKey = JSON.stringify([workspaceId, normalizedOld, normalizedNew]);
+      const existing = diffFileContentsCache.get(cacheKey);
+      if (existing) return existing;
+
+      const promise = ipcReadWorkspaceDiffFileContents(
+        workspaceId,
+        normalizedOld,
+        normalizedNew
+      ).catch((err) => {
+        diffFileContentsCache.delete(cacheKey);
+        throw err;
+      });
+
+      diffFileContentsCache.set(cacheKey, promise);
       return promise;
     },
 

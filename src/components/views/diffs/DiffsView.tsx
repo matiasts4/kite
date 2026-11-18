@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { createWorkspaceGitService, splitPath } from '../files/gitTypes';
+import { createWorkspaceGitService, getWorkspaceChangesSignature, splitPath } from '../files/gitTypes';
 import { useWorkspaceGit } from '../files/useWorkspaceGit';
 import { DiffFileCard } from './DiffFileCard';
 import { DiffFileTree } from './DiffFileTree';
 import { DiffCodeViewer } from './DiffCodeViewer';
+import { DiffWorkerPoolProvider } from '../../diffs/DiffWorkerPoolProvider';
 import { DiffsCommitBar } from './DiffsCommitBar';
 import { DiffsToolbar } from './DiffsToolbar';
 import { DiffFocusedHeader } from './DiffFocusedHeader';
@@ -19,6 +20,12 @@ import {
   consumePendingDiffPreview,
   resolveRepoDiffPaths,
 } from '../../../lib/diffPreviewNav';
+import {
+  getDiffDataLineStat,
+  isTestFilePath,
+  type DiffLineStat,
+} from '../../../lib/diffs/diffRendering';
+import { createDiffFileContentsLoader } from '../../../lib/diffs/diffFileContents';
 import './diffs.css';
 
 export interface DiffsViewProps {
@@ -93,7 +100,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     handleUnstageAll,
     handleDiscardChanges,
     handleCommit,
-  } = useWorkspaceGit(currentWsId);
+  } = useWorkspaceGit(currentWsId, gitService);
 
   // Layout & Visibility preferences with localStorage
   const [layout, setLayout] = useState<'unified' | 'split'>(() => {
@@ -128,11 +135,47 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     return 'stream'; // Default to stream with all cards collapsed for instant load and easy one-by-one review
   });
 
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('kite.diffs.ignorews.v1') === 'true';
+    } catch {}
+    return false;
+  });
+
+  const [hideTestFiles, setHideTestFiles] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('kite.diffs.hidetests.v1') === 'true';
+    } catch {}
+    return false;
+  });
+
   const [filter, setFilter] = useState<'all' | 'staged' | 'unstaged'>('all');
   const [turnFocusPaths, setTurnFocusPaths] = useState<string[] | null>(null);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
-  const [copiedPath, setCopiedPath] = useState<boolean>(false);
+  const [fileStatsMap, setFileStatsMap] = useState<Map<string, DiffLineStat>>(() => new Map());
+  const [refreshNonce, setRefreshNonce] = useState<number>(0);
   const [focusTick, setFocusTick] = useState<number>(0);
+  const gitChangesSignature = useMemo(() => getWorkspaceChangesSignature(gitChanges), [gitChanges]);
+  const prevGitStateRef = useRef<{ sig: string; loading: boolean; busy: string | null }>({
+    sig: gitChangesSignature,
+    loading: gitLoading,
+    busy: gitBusy,
+  });
+
+  useEffect(() => {
+    const prev = prevGitStateRef.current;
+    const sigChanged = prev.sig !== '' && prev.sig !== gitChangesSignature;
+    const finishedRefresh = prev.loading && !gitLoading;
+    const finishedMutation = prev.busy !== null && gitBusy === null;
+    prevGitStateRef.current = {
+      sig: gitChangesSignature,
+      loading: gitLoading,
+      busy: gitBusy,
+    };
+    if (sigChanged || finishedRefresh || finishedMutation) {
+      setRefreshNonce((n) => n + 1);
+    }
+  }, [gitChangesSignature, gitLoading, gitBusy]);
   const pendingFocusRequestRef = useRef<DiffPreviewRequest | null>(null);
   const focusSeqRef = useRef<number>(0);
   const pendingFocusRefreshSeqRef = useRef<number>(0);
@@ -185,6 +228,18 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     } catch {}
   }, [viewMode]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('kite.diffs.ignorews.v1', String(ignoreWhitespace));
+    } catch {}
+  }, [ignoreWhitespace]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('kite.diffs.hidetests.v1', String(hideTestFiles));
+    } catch {}
+  }, [hideTestFiles]);
+
   // Staged / Unstaged grouping
   const allFiles = gitChanges?.files || [];
   const stagedFiles = useMemo(() => allFiles.filter((f) => f.staged), [allFiles]);
@@ -192,7 +247,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const hasNoStaged = stagedFiles.length === 0;
 
   // Filtered files (scoped to thread turn paths when focused)
-  const displayedFiles = useMemo(() => {
+  const baseDisplayedFiles = useMemo(() => {
     if (turnFocusPaths && turnFocusPaths.length > 0) {
       const focusSet = new Set(turnFocusPaths);
       const focused = allFiles.filter((f) => focusSet.has(f.path));
@@ -204,6 +259,11 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     if (filter === 'unstaged') return unstagedFiles;
     return allFiles;
   }, [turnFocusPaths, filter, stagedFiles, unstagedFiles, allFiles]);
+
+  const displayedFiles = useMemo(() => {
+    if (!hideTestFiles) return baseDisplayedFiles;
+    return baseDisplayedFiles.filter((f) => !isTestFilePath(f.path));
+  }, [baseDisplayedFiles, hideTestFiles]);
 
   const isTurnFocusActive = useMemo(() => {
     if (!turnFocusPaths || turnFocusPaths.length === 0) return false;
@@ -272,6 +332,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         setTurnFocusPaths(null);
         setExpandedFiles(new Set());
       }
+      setFileStatsMap(new Map());
     }
   }, [currentWsId]);
 
@@ -457,23 +518,56 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
     }
   };
 
-  // Stats for active selected file
-  const activeStats = useMemo(() => {
-    if (!diffData || !diffData.lines) return { additions: 0, deletions: 0 };
-    let add = 0;
-    let del = 0;
-    for (const l of diffData.lines) {
-      if (l.kind === 'added') add++;
-      if (l.kind === 'removed') del++;
-    }
-    return { additions: add, deletions: del };
-  }, [diffData]);
+  const loadDiffFiles = useMemo(() => {
+    if (!currentWsId) return undefined;
+    return createDiffFileContentsLoader(`${currentWsId}:${refreshNonce}`, (oldPath, newPath) =>
+      gitService.readWorkspaceDiffFileContents?.(currentWsId, oldPath, newPath) ??
+      Promise.resolve({ oldContent: null, newContent: null })
+    );
+  }, [currentWsId, refreshNonce, gitService]);
 
-  const handleCopyPath = (path: string) => {
-    navigator.clipboard.writeText(path);
-    setCopiedPath(true);
-    setTimeout(() => setCopiedPath(false), 2000);
-  };
+  const handleCardStatsComputed = useCallback((filePath: string, stat: DiffLineStat) => {
+    setFileStatsMap((prev) => {
+      const existing = prev.get(filePath);
+      if (existing && existing.additions === stat.additions && existing.deletions === stat.deletions) {
+        return prev;
+      }
+      const next = new Map(prev);
+      next.set(filePath, stat);
+      return next;
+    });
+  }, []);
+
+  // Stats for active selected file
+  const activeStats = useMemo(
+    () =>
+      getDiffDataLineStat(diffData, {
+        ignoreWhitespace,
+        filePath: activeSelectedFile?.path,
+        oldPath: activeSelectedFile?.oldPath,
+        status: activeSelectedFile?.status,
+      }),
+    [diffData, ignoreWhitespace, activeSelectedFile]
+  );
+
+  useEffect(() => {
+    if (activeSelectedFile && diffData) {
+      handleCardStatsComputed(activeSelectedFile.path, activeStats);
+    }
+  }, [activeSelectedFile, diffData, activeStats, handleCardStatsComputed]);
+
+  const totalStats = useMemo<DiffLineStat>(() => {
+    let additions = 0;
+    let deletions = 0;
+    for (const file of displayedFiles) {
+      const stat = fileStatsMap.get(file.path);
+      if (stat) {
+        additions += stat.additions;
+        deletions += stat.deletions;
+      }
+    }
+    return { additions, deletions };
+  }, [displayedFiles, fileStatsMap]);
 
   // Commit Submission
   const canCommit = Boolean(
@@ -569,7 +663,8 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
   const isClean = allFiles.length === 0;
 
   return (
-    <div className="diffs-container" ref={containerRef}>
+    <DiffWorkerPoolProvider>
+      <div className="diffs-container" ref={containerRef}>
       {/* Top Zone 1: Commit Bar */}
       <DiffsCommitBar
         commitDraft={commitDraft}
@@ -613,6 +708,9 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         unstagedFilesCount={unstagedFiles.length}
         gitLoading={gitLoading}
         onRefresh={() => {
+          gitService.clearCache?.();
+          setRefreshNonce((n) => n + 1);
+          setFileStatsMap(new Map());
           if (currentWsId) void refreshGit(currentWsId);
         }}
         isNarrow={isNarrow}
@@ -622,6 +720,11 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         setLayout={setLayout}
         wordWrap={wordWrap}
         setWordWrap={setWordWrap}
+        ignoreWhitespace={ignoreWhitespace}
+        setIgnoreWhitespace={setIgnoreWhitespace}
+        hideTestFiles={hideTestFiles}
+        setHideTestFiles={setHideTestFiles}
+        totalStats={totalStats}
         fileTreeOpen={fileTreeOpen}
         setFileTreeOpen={setFileTreeOpen}
         allCollapsed={allCollapsed}
@@ -656,6 +759,7 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
             files={displayedFiles}
             activePath={selectedDiffPath}
             onSelectFile={handleSelectFileFromTree}
+            fileStats={fileStatsMap}
           />
         )}
 
@@ -670,10 +774,25 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
           </div>
         ) : displayedFiles.length === 0 ? (
           <div className="diffs-empty-state">
-            <p className="diffs-empty-title">No files match the filter</p>
-            <p className="diffs-empty-desc">
-              No files found in the '{filter}' category.
+            <p className="diffs-empty-title">
+              {hideTestFiles && baseDisplayedFiles.length > 0
+                ? 'All matching changes are test files'
+                : 'No files match the filter'}
             </p>
+            <p className="diffs-empty-desc">
+              {hideTestFiles && baseDisplayedFiles.length > 0
+                ? 'Show test files to inspect modified specs and test suites.'
+                : `No files found in the '${filter}' category.`}
+            </p>
+            {hideTestFiles && baseDisplayedFiles.length > 0 && (
+              <button
+                type="button"
+                className="diffs-turn-focus-bar__clear"
+                onClick={() => setHideTestFiles(false)}
+              >
+                Show test files
+              </button>
+            )}
           </div>
         ) : viewMode === 'focused' && activeSelectedFile ? (
           /* Focused Single-File Master-Detail View */
@@ -686,8 +805,6 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
               onNextFile={handleNextFile}
               onSelectDiffPath={setSelectedDiffPath}
               activeStats={activeStats}
-              copiedPath={copiedPath}
-              onCopyPath={handleCopyPath}
               onOpenFileInEditor={onOpenFileInEditor}
               gitBusy={gitBusy}
               onToggleStage={handleToggleStage}
@@ -716,7 +833,17 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                   {diffError}
                 </div>
               ) : (
-                <DiffCodeViewer diff={diffData} layout={layout} wordWrap={wordWrap} />
+                <DiffCodeViewer
+                  diff={diffData}
+                  layout={layout}
+                  wordWrap={wordWrap}
+                  ignoreWhitespace={ignoreWhitespace}
+                  filePath={activeSelectedFile.path}
+                  oldPath={activeSelectedFile.oldPath}
+                  status={activeSelectedFile.status}
+                  cacheKey={`${currentWsId}:${activeSelectedFile.path}:${activeSelectedFile.status}:${activeSelectedFile.staged ? 's' : 'u'}:${refreshNonce}`}
+                  loadDiffFiles={loadDiffFiles}
+                />
               )}
             </div>
           </div>
@@ -729,10 +856,14 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
                 file={file}
                 workspaceId={currentWsId}
                 gitService={gitService}
+                refreshKey={refreshNonce}
                 collapsed={!expandedFiles.has(file.path)}
                 layout={layout}
                 wordWrap={wordWrap}
+                ignoreWhitespace={ignoreWhitespace}
+                loadDiffFiles={loadDiffFiles}
                 busy={gitBusy !== null}
+                onStatsComputed={handleCardStatsComputed}
                 onToggleCollapse={() => toggleFileCollapse(file.path)}
                 onToggleStage={handleToggleStage}
                 onDiscard={(target) => void handleDiscardChanges(target)}
@@ -747,5 +878,6 @@ export const DiffsView: React.FC<DiffsViewProps> = ({
         )}
       </div>
     </div>
+    </DiffWorkerPoolProvider>
   );
 };

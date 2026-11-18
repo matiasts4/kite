@@ -9,7 +9,7 @@
 .token-punctuation { color: var(--code-punctuation, #a1a1a1); }
 
 .files-pane {
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   width: 100%;
   min-width: 0;
   height: 100%;
@@ -28,7 +28,7 @@
   align-items: center;
   gap: var(--space-1);
   border-bottom: 1px solid var(--separator);
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   flex: none;
   padding: 0 8px;
   display: flex;
@@ -46,7 +46,7 @@
   scrollbar-width: none;
   padding: 6px 12px;
   border-bottom: 1px solid var(--separator);
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
 }
 .files-breadcrumbs::-webkit-scrollbar {
   display: none;
@@ -104,7 +104,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   position: relative;
   overflow: hidden;
 }
@@ -117,7 +117,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   font-size: var(--text-meta);
   color: var(--text-secondary);
   flex-wrap: nowrap;
@@ -209,7 +209,7 @@
   justify-content: center;
   padding: var(--space-3);
   overflow: auto;
-  background: #0a0a0a;
+  background: var(--glass-code-bg, var(--terminal-canvas, #0a0b0e));
 }
 
 .files-preview-image {
@@ -244,7 +244,7 @@
   align-items: center;
   justify-content: center;
   padding: var(--space-5);
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   overflow: auto;
 }
 
@@ -256,17 +256,17 @@
   align-items: center;
   text-align: center;
   padding: var(--space-6) var(--space-5);
-  background: var(--raised-fill, rgba(255, 255, 255, 0.03));
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--card-radius);
-  box-shadow: var(--shadow-raised, none);
+  box-shadow: var(--glass-highlight, var(--shadow-raised, none));
 }
 
 .files-unsupported-icon-wrap {
   width: 72px;
   height: 72px;
   border-radius: var(--control-radius);
-  background: var(--block-fill, rgba(255, 255, 255, 0.06));
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06));
   border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
   display: flex;
   align-items: center;
@@ -439,7 +439,7 @@
 
 .side-panel-file__body {
   border-radius: 0 0 var(--radius-panel) var(--radius-panel);
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   flex-direction: column;
   flex: auto;
   min-height: 0;
@@ -592,7 +592,7 @@
 
 ._modeSwitch {
   border-radius: var(--radius-chip, 4px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06));
   border: 0;
   flex: none;
   gap: 1px;
@@ -654,7 +654,7 @@
 ._commitMessage {
   border: 1px solid var(--separator, rgba(255, 255, 255, 0.08));
   border-radius: var(--radius-chip, 4px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)));
   min-height: 48px;
   max-height: 140px;
   color: var(--text-primary, #f0f6fc);
@@ -887,10 +887,10 @@
   bottom: var(--space-2, 8px);
   left: var(--space-2, 8px);
   padding: var(--space-3, 12px);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--radius-panel, 8px);
-  background: var(--pane, #161b22);
-  box-shadow: var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5));
+  background: var(--glass-overlay-bg, var(--pane));
+  box-shadow: var(--glass-shadow, var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5)));
   color: var(--text-primary, #f0f6fc);
   font-size: var(--text-meta, 12px);
   position: absolute;
@@ -918,7 +918,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
 }
 
 .files-tabs {
@@ -1028,7 +1028,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-mono);
   color: var(--code-gutter, var(--text-faint));
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   border-right: 1px solid var(--separator);
   text-align: right;
   min-width: 3rem;
@@ -1039,7 +1039,7 @@
 .files-edit-surface {
   flex: 1;
   position: relative;
-  background: var(--terminal-canvas, #0a0a0c);
+  background: var(--glass-code-bg, var(--terminal-canvas, #0a0b0e));
 }
 
 .files-edit-text {
@@ -1061,7 +1061,7 @@
   flex: 1;
   overflow: auto;
   position: relative;
-  background: var(--terminal-canvas, #0a0a0c);
+  background: var(--glass-code-bg, var(--terminal-canvas, #0a0b0e));
 }
 
 .files-code {
@@ -1075,7 +1075,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-mono);
   color: var(--code-gutter, var(--text-faint));
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   border-right: 1px solid var(--separator);
   text-align: right;
   min-width: 3rem;
@@ -1105,7 +1105,7 @@
   height: 22px;
   padding: 0 var(--space-3);
   border-top: 1px solid var(--separator);
-  background: var(--pane);
+  background: var(--glass-nested-bg, var(--pane));
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1202,7 +1202,7 @@
 
 .files-tree-panel {
   border-right: 1px solid var(--separator);
-  background: var(--block-fill);
+  background: var(--glass-nested-bg, var(--pane));
   overflow-y: auto;
 }
 

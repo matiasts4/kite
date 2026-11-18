@@ -136,10 +136,10 @@ export const FilesToolbar: React.FC<FilesToolbarProps> = ({
                 marginTop: '4px',
                 zIndex: 50,
                 minWidth: '200px',
-                background: 'var(--pane, #161b22)',
-                border: '1px solid var(--separator, rgba(255, 255, 255, 0.1))',
+                background: 'var(--glass-overlay-bg, var(--pane))',
+                border: '1px solid var(--glass-border, var(--separator, rgba(255, 255, 255, 0.1)))',
                 borderRadius: 'var(--radius-panel, 8px)',
-                boxShadow: 'var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5))',
+                boxShadow: 'var(--glass-shadow, var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5)))',
                 padding: '4px 0',
               }}
             >
@@ -298,10 +298,10 @@ export const FilesToolbar: React.FC<FilesToolbarProps> = ({
                   marginTop: '4px',
                   zIndex: 50,
                   minWidth: '180px',
-                  background: 'var(--pane, #161b22)',
-                  border: '1px solid var(--separator, rgba(255, 255, 255, 0.1))',
+                  background: 'var(--glass-overlay-bg, var(--pane))',
+                  border: '1px solid var(--glass-border, var(--separator, rgba(255, 255, 255, 0.1)))',
                   borderRadius: 'var(--radius-panel, 8px)',
-                  boxShadow: 'var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5))',
+                  boxShadow: 'var(--glass-shadow, var(--shadow-lift, 0 8px 24px rgba(0, 0, 0, 0.5)))',
                   padding: '4px 0',
                 }}
               >

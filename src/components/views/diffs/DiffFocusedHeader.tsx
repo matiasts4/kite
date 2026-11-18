@@ -1,10 +1,8 @@
 import React, { useRef, useState, useEffect } from 'react';
 import type { GitFileChange } from '../files/gitTypes';
 import { STATUS_LETTERS, splitPath } from '../files/gitTypes';
-import {
-  CopyGlyph,
-  CheckGlyph,
-} from '../../dockIcons';
+import { DiffFilePathCopyButton } from '../../diffs/DiffFilePathCopyButton';
+import { DiffStatBadge } from '../../diffs/DiffStatBadge';
 import {
   FileTextIcon,
   PlusIcon,
@@ -24,8 +22,6 @@ export interface DiffFocusedHeaderProps {
   onNextFile: () => void;
   onSelectDiffPath: (path: string) => void;
   activeStats: { additions: number; deletions: number };
-  copiedPath: boolean;
-  onCopyPath: (path: string) => void;
   onOpenFileInEditor?: (filePath: string) => void;
   gitBusy: string | null;
   onToggleStage: (file: GitFileChange, staged: boolean) => void | Promise<void>;
@@ -40,8 +36,6 @@ export const DiffFocusedHeader: React.FC<DiffFocusedHeaderProps> = ({
   onNextFile,
   onSelectDiffPath,
   activeStats,
-  copiedPath,
-  onCopyPath,
   onOpenFileInEditor,
   gitBusy,
   onToggleStage,
@@ -128,16 +122,7 @@ export const DiffFocusedHeader: React.FC<DiffFocusedHeaderProps> = ({
             <span className="diff-file-name">{name}</span>
           </div>
 
-          {(activeStats.additions > 0 || activeStats.deletions > 0) && (
-            <span className="diffs-stat-badge">
-              {activeStats.additions > 0 && (
-                <span className="diffs-stat-add">+{activeStats.additions}</span>
-              )}
-              {activeStats.deletions > 0 && (
-                <span className="diffs-stat-del">-{activeStats.deletions}</span>
-              )}
-            </span>
-          )}
+          <DiffStatBadge additions={activeStats.additions} deletions={activeStats.deletions} />
         </div>
 
         <div className="diff-focused-header-right">
@@ -219,15 +204,7 @@ export const DiffFocusedHeader: React.FC<DiffFocusedHeaderProps> = ({
             </div>
           )}
 
-          <button
-            type="button"
-            className="diff-card-btn"
-            onClick={() => onCopyPath(activeSelectedFile.path)}
-            title={copiedPath ? 'Path copied!' : 'Copy relative path'}
-            aria-label="Copy relative path"
-          >
-            {copiedPath ? <CheckGlyph size={12} /> : <CopyGlyph size={12} />}
-          </button>
+          <DiffFilePathCopyButton path={activeSelectedFile.path} className="diff-card-btn" />
 
           {activeSelectedFile.status !== 'deleted' && onOpenFileInEditor && (
             <button

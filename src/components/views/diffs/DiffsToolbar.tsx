@@ -1,4 +1,6 @@
 import React from 'react';
+import type { DiffLineStat } from '../../../lib/diffs/diffRendering';
+import { DiffStatBadge } from '../../diffs/DiffStatBadge';
 import {
   ColumnsGlyph,
   RowsGlyph,
@@ -8,6 +10,8 @@ import {
   ChevronsDownUpGlyph,
   CheckGlyph,
   ListGlyph,
+  PilcrowGlyph,
+  HideTestsGlyph,
 } from '../../dockIcons';
 import {
   FolderIcon,
@@ -38,6 +42,11 @@ export interface DiffsToolbarProps {
   setLayout: (l: 'unified' | 'split') => void;
   wordWrap: boolean;
   setWordWrap: React.Dispatch<React.SetStateAction<boolean>>;
+  ignoreWhitespace: boolean;
+  setIgnoreWhitespace: React.Dispatch<React.SetStateAction<boolean>>;
+  hideTestFiles: boolean;
+  setHideTestFiles: React.Dispatch<React.SetStateAction<boolean>>;
+  totalStats?: DiffLineStat;
   fileTreeOpen: boolean;
   setFileTreeOpen: React.Dispatch<React.SetStateAction<boolean>>;
   allCollapsed: boolean;
@@ -64,6 +73,11 @@ export const DiffsToolbar: React.FC<DiffsToolbarProps> = ({
   setLayout,
   wordWrap,
   setWordWrap,
+  ignoreWhitespace,
+  setIgnoreWhitespace,
+  hideTestFiles,
+  setHideTestFiles,
+  totalStats,
   fileTreeOpen,
   setFileTreeOpen,
   allCollapsed,
@@ -243,6 +257,14 @@ export const DiffsToolbar: React.FC<DiffsToolbarProps> = ({
 
       {/* Right: Controls & Toggles */}
       <div className="diffs-toolbar-right">
+        {totalStats && (
+          <DiffStatBadge
+            additions={totalStats.additions}
+            deletions={totalStats.deletions}
+            title="Total additions and deletions across shown files"
+          />
+        )}
+
         {/* Refresh git */}
         <button
           type="button"
@@ -263,7 +285,7 @@ export const DiffsToolbar: React.FC<DiffsToolbarProps> = ({
               onClick={() => setViewMode((m) => (m === 'focused' ? 'stream' : 'focused'))}
               title={viewMode === 'focused' ? 'Switch to All Files Stream' : 'Switch to Focused File View'}
               aria-label="Toggle view mode"
-              style={{ height: '22px', fontSize: '10.5px' }}
+              style={{ fontSize: '10.5px' }}
             >
               {viewMode === 'focused' ? 'Focused' : 'Stream'}
             </button>
@@ -305,11 +327,36 @@ export const DiffsToolbar: React.FC<DiffsToolbarProps> = ({
 
             <div className="diffs-sep" />
 
+            {/* Ignore Whitespace Toggle */}
+            <button
+              type="button"
+              className={`diffs-tool-btn ${ignoreWhitespace ? 'active' : ''}`}
+              onClick={() => setIgnoreWhitespace((v) => !v)}
+              aria-pressed={ignoreWhitespace}
+              title={ignoreWhitespace ? 'Show whitespace changes' : 'Ignore whitespace changes'}
+              aria-label={ignoreWhitespace ? 'Show whitespace changes' : 'Ignore whitespace changes'}
+            >
+              <PilcrowGlyph size={13} />
+            </button>
+
+            {/* Hide Test Files Toggle */}
+            <button
+              type="button"
+              className={`diffs-tool-btn ${hideTestFiles ? 'active' : ''}`}
+              onClick={() => setHideTestFiles((v) => !v)}
+              aria-pressed={hideTestFiles}
+              title={hideTestFiles ? 'Show test files' : 'Hide test files'}
+              aria-label={hideTestFiles ? 'Show test files' : 'Hide test files'}
+            >
+              <HideTestsGlyph size={13} />
+            </button>
+
             {/* Word Wrap Toggle */}
             <button
               type="button"
               className={`diffs-tool-btn ${wordWrap ? 'active' : ''}`}
               onClick={() => setWordWrap((v) => !v)}
+              aria-pressed={wordWrap}
               title={wordWrap ? 'Disable line wrapping' : 'Enable line wrapping'}
               aria-label={wordWrap ? 'Disable line wrapping' : 'Enable line wrapping'}
             >
@@ -456,6 +503,48 @@ export const DiffsToolbar: React.FC<DiffsToolbarProps> = ({
                     <span className="ui-menu__row-title">Wrap lines</span>
                   </span>
                   {wordWrap && (
+                    <span className="ui-menu__status">
+                      <CheckGlyph size={11} />
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`ui-menu__row ${ignoreWhitespace ? 'active' : ''}`}
+                  onClick={() => {
+                    setIgnoreWhitespace((v) => !v);
+                  }}
+                >
+                  <span aria-hidden="true" className="ui-menu__icon">
+                    <PilcrowGlyph size={12} />
+                  </span>
+                  <span className="ui-menu__label">
+                    <span className="ui-menu__row-title">Ignore whitespace</span>
+                  </span>
+                  {ignoreWhitespace && (
+                    <span className="ui-menu__status">
+                      <CheckGlyph size={11} />
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`ui-menu__row ${hideTestFiles ? 'active' : ''}`}
+                  onClick={() => {
+                    setHideTestFiles((v) => !v);
+                  }}
+                >
+                  <span aria-hidden="true" className="ui-menu__icon">
+                    <HideTestsGlyph size={12} />
+                  </span>
+                  <span className="ui-menu__label">
+                    <span className="ui-menu__row-title">Hide test files</span>
+                  </span>
+                  {hideTestFiles && (
                     <span className="ui-menu__status">
                       <CheckGlyph size={11} />
                     </span>

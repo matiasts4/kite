@@ -305,7 +305,7 @@ export const ProviderConnectionPanel: React.FC<ProviderConnectionPanelProps> = (
                     </div>
 
                     {job?.lastLine && isRunning && (
-                      <div style={{ marginTop: '8px', fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-secondary)', background: 'rgba(0,0,0,0.2)', padding: '4px 8px', borderRadius: '4px' }}>
+                      <div style={{ marginTop: '8px', fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-secondary)', background: 'var(--glass-elevated-bg, rgba(0,0,0,0.2))', border: '1px solid var(--glass-border, var(--block-stroke))', padding: '4px 8px', borderRadius: '4px' }}>
                         {job.lastLine}
                       </div>
                     )}
@@ -460,8 +460,8 @@ export const ProviderConnectionPanel: React.FC<ProviderConnectionPanelProps> = (
                   justifyContent: 'space-between',
                   padding: '8px 12px',
                   borderRadius: 'var(--radius-chip)',
-                  background: 'var(--composer)',
-                  border: '1px solid var(--block-stroke)',
+                  background: 'var(--glass-elevated-bg, var(--composer))',
+                  border: '1px solid var(--glass-border, var(--block-stroke))',
                   marginBottom: '10px',
                 }}
               >

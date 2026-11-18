@@ -102,15 +102,18 @@ fn collect_new_exhausted_alerts_in(
 }
 
 #[cfg(not(test))]
-fn publish_synced_quota_effects(synced_statuses: &[(String, ProviderQuotaStatus)]) {
+fn publish_synced_quota_effects(
+    fresh_statuses: &[(String, ProviderQuotaStatus)],
+    updated_providers: &[String],
+) {
     use tauri::Emitter;
 
-    if synced_statuses.is_empty() {
+    if fresh_statuses.is_empty() && updated_providers.is_empty() {
         return;
     }
 
     let mut new_alerts = Vec::new();
-    for (prov, status) in synced_statuses {
+    for (prov, status) in fresh_statuses {
         crate::account_switcher::record_active_quota_snapshot_for_provider(prov, status);
         crate::account_switcher::auto_switch::on_fresh_quota_status(prov, status);
 
@@ -134,14 +137,16 @@ fn publish_synced_quota_effects(synced_statuses: &[(String, ProviderQuotaStatus)
     }
 
     if let Some(app) = app.as_ref() {
-        let targets: Vec<&str> = synced_statuses.iter().map(|(p, _)| p.as_str()).collect();
-        let updated_payload = build_cache_result(&targets);
-        let _ = app.emit("kite://subscription-quotas-updated", updated_payload);
+        if !updated_providers.is_empty() {
+            let targets: Vec<&str> = updated_providers.iter().map(|p| p.as_str()).collect();
+            let updated_payload = build_cache_result(&targets);
+            let _ = app.emit("kite://subscription-quotas-updated", updated_payload);
+        }
     }
 }
 
 struct QuotaCache {
-    entries: HashMap<String, (Instant, ProviderQuotaStatus)>,
+    entries: HashMap<String, (Option<Instant>, ProviderQuotaStatus)>,
     epochs: HashMap<String, u64>,
 }
 
@@ -152,6 +157,51 @@ impl QuotaCache {
             epochs: HashMap::new(),
         }
     }
+}
+
+fn has_usable_quota_data(status: &ProviderQuotaStatus) -> bool {
+    status.is_available && status.is_auth && status.error.is_none()
+}
+
+fn is_usable_quota_update(
+    prev: Option<&ProviderQuotaStatus>,
+    incoming: &ProviderQuotaStatus,
+) -> bool {
+    if !has_usable_quota_data(incoming) {
+        return false;
+    }
+    if let Some(previous) = prev {
+        if !previous.windows.is_empty()
+            && incoming.windows.is_empty()
+            && !incoming.metadata.contains_key("note")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn merge_quota_status(
+    prev: Option<&ProviderQuotaStatus>,
+    incoming: ProviderQuotaStatus,
+    now: i64,
+) -> (ProviderQuotaStatus, bool) {
+    if let Some(previous) = prev.filter(|p| has_usable_quota_data(p)) {
+        if !is_usable_quota_update(Some(previous), &incoming) {
+            let mut preserved = previous.clone();
+            let err_msg = incoming
+                .error
+                .unwrap_or_else(|| "No se pudo obtener respuesta al actualizar la cuota".to_string());
+            preserved
+                .metadata
+                .insert("lastRefreshError".to_string(), serde_json::json!(err_msg));
+            preserved
+                .metadata
+                .insert("lastRefreshErrorAtMs".to_string(), serde_json::json!(now));
+            return (preserved, false);
+        }
+    }
+    (incoming, true)
 }
 
 fn bump_epoch_in_cache(cache: &mut QuotaCache, provider: &str) -> u64 {
@@ -166,26 +216,44 @@ fn bump_epoch_in_cache(cache: &mut QuotaCache, provider: &str) -> u64 {
     next
 }
 
-fn commit_swr_results_if_epoch_matches(
+fn commit_swr_results_with_freshness(
     cache: &mut QuotaCache,
     results: Vec<(String, u64, ProviderQuotaStatus)>,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     let mut updated = Vec::new();
+    let mut fresh = Vec::new();
+    let now = now_ms();
     for (p, captured_epoch, status) in results {
         let current_epoch = cache.epochs.get(&p).copied().unwrap_or(0);
         if current_epoch != captured_epoch {
             continue;
         }
-        cache.entries.insert(p.clone(), (Instant::now(), status));
+        let prev = cache.entries.get(&p).map(|(_, s)| s);
+        let (mut merged, is_fresh) = merge_quota_status(prev, status, now);
+        if is_fresh {
+            merged.metadata.remove("lastRefreshError");
+            merged.metadata.remove("lastRefreshErrorAtMs");
+            fresh.push(p.clone());
+        }
+        cache.entries.insert(p.clone(), (Some(Instant::now()), merged));
         updated.push(p);
     }
-    updated
+    (updated, fresh)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn commit_swr_results_if_epoch_matches(
+    cache: &mut QuotaCache,
+    results: Vec<(String, u64, ProviderQuotaStatus)>,
+) -> Vec<String> {
+    commit_swr_results_with_freshness(cache, results).0
 }
 
 static CACHE: Mutex<Option<QuotaCache>> = Mutex::new(None);
 const CACHE_TTL_SECS: u64 = 180;
 // OpenCode Go exposes short-lived 5-hour windows; refresh it more aggressively.
 const OPENCODE_CACHE_TTL_SECS: u64 = 60;
+const FAILED_RETRY_SECS: u64 = 30;
 
 fn cache_ttl_secs(provider: &str) -> u64 {
     if provider == "opencode" {
@@ -207,34 +275,43 @@ fn quota_cache_path() -> PathBuf {
     dir.join("quota_cache.json")
 }
 
-fn load_persisted_cache() -> HashMap<String, (Instant, ProviderQuotaStatus)> {
-    let p = quota_cache_path();
+fn parse_persisted_cache_bytes(
+    data: &[u8],
+    now: i64,
+) -> HashMap<String, (Option<Instant>, ProviderQuotaStatus)> {
     let mut map = HashMap::new();
-    let now = now_ms();
-    if let Ok(data) = std::fs::read(&p) {
-        if let Ok(saved) = serde_json::from_slice::<HashMap<String, ProviderQuotaStatus>>(&data) {
-            for (k, v) in saved {
-                // Drop pre-v2 OpenCode entries: they reported a fake 0% without calling the API.
-                if k == "opencode"
-                    && v.metadata
-                        .get("quotaSchema")
-                        .and_then(|value| value.as_i64())
-                        != Some(2)
-                {
-                    continue;
-                }
-                let ttl_ms = (cache_ttl_secs(&k) * 1000) as i64;
-                let age_ms = now.saturating_sub(v.last_updated_ms);
-                if age_ms >= 0 && age_ms < ttl_ms {
-                    let instant = Instant::now()
-                        .checked_sub(Duration::from_millis(age_ms as u64))
-                        .unwrap_or_else(Instant::now);
-                    map.insert(k, (instant, v));
-                }
+    if let Ok(saved) = serde_json::from_slice::<HashMap<String, ProviderQuotaStatus>>(data) {
+        for (k, v) in saved {
+            // Drop pre-v2 OpenCode entries: they reported a fake 0% without calling the API.
+            if k == "opencode"
+                && v.metadata
+                    .get("quotaSchema")
+                    .and_then(|value| value.as_i64())
+                    != Some(2)
+            {
+                continue;
+            }
+            let ttl_ms = (cache_ttl_secs(&k) * 1000) as i64;
+            let age_ms = now.saturating_sub(v.last_updated_ms);
+            if age_ms >= 0 && age_ms < ttl_ms && !v.metadata.contains_key("lastRefreshError") {
+                let instant = Instant::now().checked_sub(Duration::from_millis(age_ms as u64));
+                map.insert(k, (instant, v));
+            } else if has_usable_quota_data(&v) {
+                // Keep the last usable snapshot past TTL so SWR serves it immediately
+                // while refreshing in the background instead of blanking out on failure.
+                map.insert(k, (None, v));
             }
         }
     }
     map
+}
+
+fn load_persisted_cache() -> HashMap<String, (Option<Instant>, ProviderQuotaStatus)> {
+    let p = quota_cache_path();
+    let Ok(data) = std::fs::read(&p) else {
+        return HashMap::new();
+    };
+    parse_persisted_cache_bytes(&data, now_ms())
 }
 
 fn save_persisted_cache(cache: &QuotaCache) {
@@ -254,7 +331,12 @@ pub fn get_cached_provider_status(provider: &str) -> Option<ProviderQuotaStatus>
         *cache_guard = Some(QuotaCache::open());
     }
     let cache = cache_guard.as_ref()?;
-    let (cached_instant, s) = cache.entries.get(provider)?;
+    let (Some(cached_instant), s) = cache.entries.get(provider)? else {
+        return None;
+    };
+    if s.metadata.contains_key("lastRefreshError") || s.error.is_some() {
+        return None;
+    }
     if cached_instant.elapsed() > Duration::from_secs(cache_ttl_secs(provider)) {
         return None;
     }
@@ -413,8 +495,13 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
         for &p in &target_providers {
             let needs_fetch = if is_force {
                 true
-            } else if let Some((fetched_at, _)) = cache.entries.get(p) {
-                fetched_at.elapsed() > Duration::from_secs(cache_ttl_secs(p))
+            } else if let Some((Some(fetched_at), status)) = cache.entries.get(p) {
+                let max_age_secs = if status.metadata.contains_key("lastRefreshError") {
+                    FAILED_RETRY_SECS
+                } else {
+                    cache_ttl_secs(p)
+                };
+                fetched_at.elapsed() > Duration::from_secs(max_age_secs)
             } else {
                 true
             };
@@ -461,28 +548,13 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
                             .collect()
                     });
 
-                    #[cfg_attr(test, allow(unused_variables, unused_assignments))]
-                    let mut updated_providers: Vec<String> = Vec::new();
-                    #[cfg_attr(test, allow(unused_variables, unused_mut))]
-                    let mut synced_statuses: Vec<(String, ProviderQuotaStatus)> = Vec::new();
-                    if let Ok(mut guard) = CACHE.lock() {
-                        if let Some(cache) = guard.as_mut() {
-                            updated_providers =
-                                commit_swr_results_if_epoch_matches(cache, fresh_entries);
-                            if !updated_providers.is_empty() {
-                                save_persisted_cache(cache);
-                                for prov in &updated_providers {
-                                    if let Some((_, status)) = cache.entries.get(prov) {
-                                        synced_statuses.push((prov.clone(), status.clone()));
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let (updated_providers, fresh_statuses) = commit_entries_to_cache(fresh_entries);
                     drop(_reset_guard);
 
                     #[cfg(not(test))]
-                    publish_synced_quota_effects(&synced_statuses);
+                    publish_synced_quota_effects(&fresh_statuses, &updated_providers);
+                    #[cfg(test)]
+                    let _ = (updated_providers, fresh_statuses);
                 });
             }
         }
@@ -510,28 +582,36 @@ pub fn get_subscription_quotas_direct(request: Option<Value>, force: Option<bool
             }
         });
 
-        #[cfg_attr(test, allow(unused_variables))]
-        let mut synced_statuses: Vec<(String, ProviderQuotaStatus)> = Vec::new();
-        {
-            let mut cache_guard = CACHE.lock().unwrap();
-            if let Some(cache) = cache_guard.as_mut() {
-                let updated_providers =
-                    commit_swr_results_if_epoch_matches(cache, newly_fetched);
-                if !updated_providers.is_empty() {
-                    save_persisted_cache(cache);
-                    for prov in &updated_providers {
-                        if let Some((_, status)) = cache.entries.get(prov) {
-                            synced_statuses.push((prov.clone(), status.clone()));
-                        }
+        let (updated_providers, fresh_statuses) = commit_entries_to_cache(newly_fetched);
+        #[cfg(not(test))]
+        publish_synced_quota_effects(&fresh_statuses, &updated_providers);
+        #[cfg(test)]
+        let _ = (updated_providers, fresh_statuses);
+    }
+
+    build_cache_result(&target_providers)
+}
+
+fn commit_entries_to_cache(
+    entries: Vec<(String, u64, ProviderQuotaStatus)>,
+) -> (Vec<String>, Vec<(String, ProviderQuotaStatus)>) {
+    let mut updated_providers: Vec<String> = Vec::new();
+    let mut fresh_statuses: Vec<(String, ProviderQuotaStatus)> = Vec::new();
+    if let Ok(mut guard) = CACHE.lock() {
+        if let Some(cache) = guard.as_mut() {
+            let (updated, fresh) = commit_swr_results_with_freshness(cache, entries);
+            updated_providers = updated;
+            if !updated_providers.is_empty() {
+                save_persisted_cache(cache);
+                for prov in &fresh {
+                    if let Some((_, status)) = cache.entries.get(prov) {
+                        fresh_statuses.push((prov.clone(), status.clone()));
                     }
                 }
             }
         }
-        #[cfg(not(test))]
-        publish_synced_quota_effects(&synced_statuses);
     }
-
-    build_cache_result(&target_providers)
+    (updated_providers, fresh_statuses)
 }
 
 #[cfg(test)]
@@ -606,6 +686,171 @@ mod tests {
         status.windows[1].resets_at = Some("2026-11-29T05:16:50Z".to_string());
         let rearmed = collect_new_exhausted_alerts_in(&mut seen, "antigravity", &status);
         assert_eq!(rearmed.len(), 1);
+    }
+
+    #[test]
+    fn test_failed_refresh_preserves_last_valid_quota_and_records_refresh_error() {
+        let mut cache = QuotaCache {
+            entries: HashMap::new(),
+            epochs: HashMap::new(),
+        };
+        let mut valid_status = default_provider_status("antigravity");
+        valid_status.is_available = true;
+        valid_status.is_auth = true;
+        valid_status.primary_usage_percent = 28.0;
+        valid_status.primary_remaining_percent = 72.0;
+        valid_status.last_updated_ms = 1_000_000;
+        valid_status
+            .metadata
+            .insert("email".to_string(), serde_json::json!("user@example.com"));
+        valid_status.windows = vec![crate::quota::types::QuotaWindow {
+            name: "Gemini Models (Five Hour)".to_string(),
+            usage_percent: 28.0,
+            remaining_fraction: 0.72,
+            resets_at: Some("2026-11-17T22:00:00Z".to_string()),
+            time_until_reset_ms: Some(300_000),
+            is_exhausted: false,
+        }];
+        cache
+            .entries
+            .insert("antigravity".to_string(), (Some(Instant::now()), valid_status));
+
+        let mut failed_status = default_provider_status("antigravity");
+        failed_status.is_available = false;
+        failed_status.is_auth = false;
+        failed_status.error = Some("CLI de Antigravity (agy) no respondió".to_string());
+        failed_status.last_updated_ms = 2_000_000;
+
+        let (updated, fresh) = commit_swr_results_with_freshness(
+            &mut cache,
+            vec![("antigravity".to_string(), 0, failed_status)],
+        );
+
+        assert_eq!(updated, vec!["antigravity".to_string()]);
+        assert!(
+            fresh.is_empty(),
+            "preserved fallback must NOT trigger fresh-quota effects like auto-switch or alerts"
+        );
+
+        let (_, preserved) = cache
+            .entries
+            .get("antigravity")
+            .expect("cached entry must remain present");
+        assert!(preserved.is_available);
+        assert!(preserved.is_auth);
+        assert_eq!(preserved.primary_remaining_percent, 72.0);
+        assert_eq!(preserved.windows.len(), 1);
+        assert_eq!(preserved.last_updated_ms, 1_000_000);
+        assert_eq!(preserved.error, None);
+        assert_eq!(
+            preserved.metadata.get("email").and_then(|v| v.as_str()),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            preserved
+                .metadata
+                .get("lastRefreshError")
+                .and_then(|v| v.as_str()),
+            Some("CLI de Antigravity (agy) no respondió")
+        );
+        assert!(preserved
+            .metadata
+            .get("lastRefreshErrorAtMs")
+            .and_then(|v| v.as_i64())
+            .is_some());
+    }
+
+    #[test]
+    fn test_successful_refresh_clears_previous_refresh_error() {
+        let mut cache = QuotaCache {
+            entries: HashMap::new(),
+            epochs: HashMap::new(),
+        };
+        let mut stale_with_err = default_provider_status("codex");
+        stale_with_err.is_available = true;
+        stale_with_err.is_auth = true;
+        stale_with_err.primary_remaining_percent = 70.0;
+        stale_with_err.last_updated_ms = 1_000_000;
+        stale_with_err.windows = vec![crate::quota::types::QuotaWindow {
+            name: "5-Hour Session".to_string(),
+            usage_percent: 30.0,
+            remaining_fraction: 0.70,
+            resets_at: None,
+            time_until_reset_ms: None,
+            is_exhausted: false,
+        }];
+        stale_with_err.metadata.insert(
+            "lastRefreshError".to_string(),
+            serde_json::json!("Timeout"),
+        );
+        stale_with_err
+            .metadata
+            .insert("lastRefreshErrorAtMs".to_string(), serde_json::json!(1_500_000));
+        cache
+            .entries
+            .insert("codex".to_string(), (Some(Instant::now()), stale_with_err));
+
+        let mut fresh_status = default_provider_status("codex");
+        fresh_status.is_available = true;
+        fresh_status.is_auth = true;
+        fresh_status.primary_usage_percent = 35.0;
+        fresh_status.primary_remaining_percent = 65.0;
+        fresh_status.last_updated_ms = 2_000_000;
+        fresh_status.windows = vec![crate::quota::types::QuotaWindow {
+            name: "5-Hour Session".to_string(),
+            usage_percent: 35.0,
+            remaining_fraction: 0.65,
+            resets_at: None,
+            time_until_reset_ms: None,
+            is_exhausted: false,
+        }];
+
+        let (updated, fresh) = commit_swr_results_with_freshness(
+            &mut cache,
+            vec![("codex".to_string(), 0, fresh_status)],
+        );
+
+        assert_eq!(updated, vec!["codex".to_string()]);
+        assert_eq!(fresh, vec!["codex".to_string()]);
+        let (_, current) = cache.entries.get("codex").unwrap();
+        assert_eq!(current.primary_remaining_percent, 65.0);
+        assert_eq!(current.last_updated_ms, 2_000_000);
+        assert!(!current.metadata.contains_key("lastRefreshError"));
+        assert!(!current.metadata.contains_key("lastRefreshErrorAtMs"));
+    }
+
+    #[test]
+    fn test_load_persisted_cache_preserves_expired_valid_entries_for_swr() {
+        let mut stale_valid = default_provider_status("claude");
+        stale_valid.is_available = true;
+        stale_valid.is_auth = true;
+        stale_valid.primary_usage_percent = 22.0;
+        stale_valid.primary_remaining_percent = 78.0;
+        stale_valid.last_updated_ms = 1_000_000;
+        stale_valid.windows = vec![crate::quota::types::QuotaWindow {
+            name: "5-Hour Limit".to_string(),
+            usage_percent: 22.0,
+            remaining_fraction: 0.78,
+            resets_at: None,
+            time_until_reset_ms: None,
+            is_exhausted: false,
+        }];
+
+        let mut map = HashMap::new();
+        map.insert("claude".to_string(), stale_valid);
+        let bytes = serde_json::to_vec(&map).unwrap();
+
+        // Simulate startup 1 hour later (well past CACHE_TTL_SECS)
+        let loaded = parse_persisted_cache_bytes(&bytes, 1_000_000 + 3_600_000);
+        let (instant_opt, entry) = loaded
+            .get("claude")
+            .expect("expired valid entry must still hydrate for SWR");
+        assert!(
+            instant_opt.is_none(),
+            "expired persisted entry must be marked stale (None) so SWR triggers refresh"
+        );
+        assert_eq!(entry.primary_remaining_percent, 78.0);
+        assert_eq!(entry.windows.len(), 1);
     }
 }
 

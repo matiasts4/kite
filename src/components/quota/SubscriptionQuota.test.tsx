@@ -415,5 +415,158 @@ describe('Subscription Quota UI', () => {
     expect(badge).toHaveTextContent('73%');
     expect(screen.getByTestId('quota-partial-exhausted-dot')).toBeInTheDocument();
   });
+
+  it('keeps displaying last stored quota silently on recent refresh failure and shows inline stale notice after 30 minutes', async () => {
+    const { subscriptionQuotaManager } = await import('../../lib/quota/quotaManager');
+    render(<SubscriptionQuotaBadge />);
+
+    // 1. Recent refresh error (< 30 min since last successful update): keep 82% silently without warning dot
+    act(() => {
+      subscriptionQuotaManager.applyExternalQuotas({
+        antigravity: {
+          providerId: 'antigravity',
+          displayName: 'Antigravity',
+          isAvailable: true,
+          isAuth: true,
+          primaryUsagePercent: 18,
+          primaryRemainingPercent: 82,
+          primaryResetAt: '2026-11-17T23:00:00Z',
+          timeUntilResetMs: 3_600_000,
+          windows: [
+            {
+              name: 'Gemini Models (Five Hour)',
+              usagePercent: 18,
+              remainingFraction: 0.82,
+              resetsAt: '2026-11-17T23:00:00Z',
+              timeUntilResetMs: 3_600_000,
+              isExhausted: false,
+            },
+          ],
+          metadata: {
+            lastRefreshError: 'CLI no respondió',
+            lastRefreshErrorAtMs: Date.now(),
+          },
+          lastUpdatedMs: Date.now() - 5 * 60 * 1000,
+          error: null,
+        },
+      });
+    });
+
+    const recentBadge = await screen.findByRole('button', { name: /82%/i });
+    expect(recentBadge).toHaveTextContent('82%');
+    expect(screen.queryByTestId('quota-stale-warning-dot')).toBeNull();
+
+    // 2. Prolonged refresh error (>= 30 min): keep 82% visible AND show subtle warning dot + accessible notice
+    act(() => {
+      subscriptionQuotaManager.applyExternalQuotas({
+        antigravity: {
+          providerId: 'antigravity',
+          displayName: 'Antigravity',
+          isAvailable: true,
+          isAuth: true,
+          primaryUsagePercent: 18,
+          primaryRemainingPercent: 82,
+          primaryResetAt: '2026-11-17T23:00:00Z',
+          timeUntilResetMs: 3_600_000,
+          windows: [
+            {
+              name: 'Gemini Models (Five Hour)',
+              usagePercent: 18,
+              remainingFraction: 0.82,
+              resetsAt: '2026-11-17T23:00:00Z',
+              timeUntilResetMs: 3_600_000,
+              isExhausted: false,
+            },
+          ],
+          metadata: {
+            lastRefreshError: 'CLI no respondió',
+            lastRefreshErrorAtMs: Date.now(),
+          },
+          lastUpdatedMs: Date.now() - 35 * 60 * 1000,
+          error: null,
+        },
+      });
+    });
+
+    const staleBadge = await screen.findByRole('button', { name: /82%.*no se pudo actualizar/i });
+    expect(staleBadge).toHaveTextContent('82%');
+    expect(screen.getByTestId('quota-stale-warning-dot')).toBeInTheDocument();
+
+    // 3. Subsequent raw failure update must preserve 82% and warning dot rather than showing "--"
+    act(() => {
+      subscriptionQuotaManager.applyExternalQuotas({
+        antigravity: {
+          providerId: 'antigravity',
+          displayName: 'Antigravity',
+          isAvailable: false,
+          isAuth: false,
+          primaryUsagePercent: 0,
+          primaryRemainingPercent: 100,
+          primaryResetAt: null,
+          timeUntilResetMs: null,
+          windows: [],
+          metadata: {},
+          lastUpdatedMs: Date.now(),
+          error: 'CLI no respondió',
+        },
+      });
+    });
+
+    expect(await screen.findByRole('button', { name: /82%/i })).toHaveTextContent('82%');
+    expect(screen.getByTestId('quota-stale-warning-dot')).toBeInTheDocument();
+  });
+
+  it('shows inline stale-refresh notice inside SubscriptionQuotaPopover after 30 minutes while keeping windows visible', () => {
+    const staleQuota = {
+      antigravity: {
+        providerId: 'antigravity',
+        displayName: 'Antigravity',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 18,
+        primaryRemainingPercent: 82,
+        primaryResetAt: '2026-11-17T23:00:00Z',
+        timeUntilResetMs: 3_600_000,
+        windows: [
+          {
+            name: 'Gemini Models (Five Hour)',
+            usagePercent: 18,
+            remainingFraction: 0.82,
+            resetsAt: '2026-11-17T23:00:00Z',
+            timeUntilResetMs: 3_600_000,
+            isExhausted: false,
+          },
+        ],
+        metadata: {
+          email: 'developer@kite.local',
+          lastRefreshError: 'CLI de Antigravity (agy) no respondió',
+          lastRefreshErrorAtMs: Date.now(),
+        },
+        lastUpdatedMs: Date.now() - 40 * 60 * 1000,
+        error: null,
+      },
+    };
+
+    render(
+      <SubscriptionQuotaPopover
+        allQuotas={staleQuota}
+        selectedProvider={PROVIDERS.ANTIGRAVITY}
+        onSelectProvider={vi.fn()}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+        prefs={{
+          ...DEFAULT_QUOTA_PREFERENCES,
+          setupVersion: QUOTA_SETUP_VERSION,
+          enabledProviders: [PROVIDERS.ANTIGRAVITY],
+        }}
+      />
+    );
+
+    expect(screen.getByText('82%')).toBeInTheDocument();
+    expect(screen.getByText('Gemini Models (Five Hour)')).toBeInTheDocument();
+    const notice = screen.getByTestId('quota-stale-notice');
+    expect(notice).toBeInTheDocument();
+    expect(notice.textContent).toMatch(/40 min/i);
+  });
 });
 

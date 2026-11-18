@@ -165,4 +165,132 @@ describe('SubscriptionQuotaManager concurrency & lifecycle', () => {
     expect(writesAfterSecond).toBe(1);
     setItemSpy.mockRestore();
   });
+
+  it('preserves last valid quota and records lastRefreshError when fetch returns error or empty failure', async () => {
+    const updatedAt = Date.now() - 60_000;
+    const validPayload = {
+      antigravity: {
+        providerId: PROVIDERS.ANTIGRAVITY,
+        displayName: 'Antigravity',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 18,
+        primaryRemainingPercent: 82,
+        primaryResetAt: '2026-11-17T23:00:00Z',
+        timeUntilResetMs: 3_600_000,
+        windows: [
+          {
+            name: 'Gemini Models (Five Hour)',
+            usagePercent: 18,
+            remainingFraction: 0.82,
+            resetsAt: '2026-11-17T23:00:00Z',
+            timeUntilResetMs: 3_600_000,
+            isExhausted: false,
+          },
+        ],
+        metadata: { email: 'user@kite.local', planType: 'Pro' },
+        lastUpdatedMs: updatedAt,
+        error: null,
+      },
+    };
+
+    vi.mocked(getSubscriptionQuotas).mockResolvedValueOnce(validPayload);
+    await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.ANTIGRAVITY]);
+
+    vi.mocked(getSubscriptionQuotas).mockResolvedValueOnce({
+      antigravity: {
+        providerId: PROVIDERS.ANTIGRAVITY,
+        displayName: 'Antigravity',
+        isAvailable: false,
+        isAuth: false,
+        primaryUsagePercent: 0,
+        primaryRemainingPercent: 100,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        windows: [],
+        metadata: {},
+        lastUpdatedMs: Date.now(),
+        error: 'CLI de Antigravity (agy) no respondió',
+      },
+    });
+    const afterFailure = await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.ANTIGRAVITY]);
+    const preserved = afterFailure.antigravity;
+
+    expect(preserved?.isAvailable).toBe(true);
+    expect(preserved?.isAuth).toBe(true);
+    expect(preserved?.primaryRemainingPercent).toBe(82);
+    expect(preserved?.windows).toHaveLength(1);
+    expect(preserved?.lastUpdatedMs).toBe(updatedAt);
+    expect(preserved?.error).toBeNull();
+    expect(preserved?.metadata?.email).toBe('user@kite.local');
+    expect(preserved?.metadata?.lastRefreshError).toBe('CLI de Antigravity (agy) no respondió');
+    expect(typeof preserved?.metadata?.lastRefreshErrorAtMs).toBe('number');
+  });
+
+  it('preserves last valid quota and records lastRefreshError when IPC fetch rejects', async () => {
+    const updatedAt = Date.now() - 120_000;
+    vi.mocked(getSubscriptionQuotas).mockResolvedValueOnce({
+      codex: {
+        providerId: PROVIDERS.CODEX,
+        displayName: 'Codex',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 40,
+        primaryRemainingPercent: 60,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        windows: [
+          {
+            name: '5-Hour Session',
+            usagePercent: 40,
+            remainingFraction: 0.6,
+            resetsAt: null,
+            timeUntilResetMs: null,
+            isExhausted: false,
+          },
+        ],
+        metadata: {},
+        lastUpdatedMs: updatedAt,
+        error: null,
+      },
+    });
+    await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.CODEX]);
+
+    vi.mocked(getSubscriptionQuotas).mockRejectedValueOnce(new Error('IPC timeout'));
+    const afterReject = await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.CODEX]);
+    expect(afterReject.codex?.isAvailable).toBe(true);
+    expect(afterReject.codex?.primaryRemainingPercent).toBe(60);
+    expect(afterReject.codex?.windows).toHaveLength(1);
+    expect(afterReject.codex?.lastUpdatedMs).toBe(updatedAt);
+    expect(afterReject.codex?.metadata?.lastRefreshError).toContain('IPC timeout');
+
+    vi.mocked(getSubscriptionQuotas).mockResolvedValueOnce({
+      codex: {
+        providerId: PROVIDERS.CODEX,
+        displayName: 'Codex',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 45,
+        primaryRemainingPercent: 55,
+        primaryResetAt: null,
+        timeUntilResetMs: null,
+        windows: [
+          {
+            name: '5-Hour Session',
+            usagePercent: 45,
+            remainingFraction: 0.55,
+            resetsAt: null,
+            timeUntilResetMs: null,
+            isExhausted: false,
+          },
+        ],
+        metadata: {},
+        lastUpdatedMs: Date.now(),
+        error: null,
+      },
+    });
+    const afterRecovery = await subscriptionQuotaManager.fetchAll(true, [PROVIDERS.CODEX]);
+    expect(afterRecovery.codex?.primaryRemainingPercent).toBe(55);
+    expect(afterRecovery.codex?.metadata?.lastRefreshError).toBeUndefined();
+  });
 });

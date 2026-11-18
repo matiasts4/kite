@@ -5,6 +5,29 @@ import { BrandLogo } from '../../views/agents/engineMetadata';
 import { QuotaProgressRing } from '../QuotaProgressRing';
 import { QuotaAccountSwitcher } from '../QuotaAccountSwitcher';
 import { formatDetailedReset } from '../../../lib/quota/useResetCountdownClock';
+import { getQuotaRefreshNotice, type QuotaRefreshNotice } from '../../../lib/quota/providerState';
+
+const QuotaStaleBanner: React.FC<{ notice: QuotaRefreshNotice | null }> = ({ notice }) => {
+  if (!notice) return null;
+  return (
+    <div
+      data-testid="quota-stale-notice"
+      role="status"
+      title={notice.detail}
+      style={{
+        padding: '6px 10px',
+        borderRadius: 'var(--control-radius, 8px)',
+        backgroundColor: 'var(--warning-tint)',
+        border: '1px solid var(--warning-tint)',
+        color: 'var(--warning-text)',
+        fontSize: '11px',
+        lineHeight: 1.35,
+      }}
+    >
+      {notice.message}
+    </div>
+  );
+};
 import type {
   AntigravityAuthTelemetry,
   AutoSwitchPolicy,
@@ -95,6 +118,8 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
     authTelemetry?.credEmail ||
     (currentQuota?.metadata?.email ? String(currentQuota.metadata.email) : null) ||
     'Sesión nativa activa';
+
+  const staleNotice = getQuotaRefreshNotice(currentQuota);
 
   const hasAutoSwitchStrip = Boolean(
     autoSwitchPolicy?.enabled ||
@@ -334,12 +359,12 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                           fontWeight: 500,
                           padding: '1px 5px',
                           borderRadius: 'var(--vl-radius-xs, 4px)',
-                          backgroundColor: 'var(--accent-tint)',
-                          color: 'var(--accent)',
-                          border: '1px solid var(--accent-tint-strong)',
+                          backgroundColor: staleNotice ? 'var(--warning-tint)' : 'var(--accent-tint)',
+                          color: staleNotice ? 'var(--warning-text)' : 'var(--accent)',
+                          border: `1px solid ${staleNotice ? 'var(--warning-tint)' : 'var(--accent-tint-strong)'}`,
                         }}
                       >
-                        En línea
+                        {staleNotice ? 'Sin respuesta' : 'En línea'}
                       </span>
                     </div>
                     <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
@@ -376,10 +401,14 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                 </div>
               </div>
 
+              <QuotaStaleBanner notice={staleNotice} />
+
               {/* Badges / Metadata row */}
-              {currentQuota.metadata && Object.keys(currentQuota.metadata).length > 0 && (
+              {(currentQuota.metadata?.planType ||
+                currentQuota.metadata?.email ||
+                resolvedActiveEmail !== 'Sesión nativa activa') && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
-                  {currentQuota.metadata.planType && (
+                  {currentQuota.metadata?.planType && (
                     <span
                       style={{
                         fontSize: '10px',
@@ -393,7 +422,7 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                       Plan: {currentQuota.metadata.planType}
                     </span>
                   )}
-                  {(currentQuota.metadata.email || resolvedActiveEmail !== 'Sesión nativa activa') && (
+                  {(currentQuota.metadata?.email || resolvedActiveEmail !== 'Sesión nativa activa') && (
                     <span
                       style={{
                         fontSize: '10px',
@@ -406,7 +435,7 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
                     >
                       {resolvedActiveEmail !== 'Sesión nativa activa'
                         ? resolvedActiveEmail
-                        : String(currentQuota.metadata.email)}
+                        : String(currentQuota.metadata?.email)}
                     </span>
                   )}
                 </div>
@@ -585,6 +614,8 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
               >
                 Este proveedor no expone cuotas ni créditos mediante una API de facturación en vivo. Está listo para ser usado directamente por los agentes de Kite.
               </div>
+
+              <QuotaStaleBanner notice={staleNotice} />
 
               <button
                 type="button"

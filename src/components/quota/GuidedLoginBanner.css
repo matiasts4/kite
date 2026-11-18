@@ -6,8 +6,10 @@
   margin: 8px 12px 0;
   padding: 8px 12px;
   border-radius: var(--card-radius);
-  border: 1px solid var(--block-stroke);
-  background: var(--block-fill);
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  background: var(--glass-elevated-bg, var(--block-fill));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--text-primary);
   font-size: 12px;
   line-height: 1.4;
@@ -15,7 +17,7 @@
 
 .guided-login-banner[data-tone='ok'] {
   border-color: color-mix(in srgb, var(--status-running) 35%, transparent);
-  background: color-mix(in srgb, var(--status-running) 12%, var(--block-fill));
+  background: color-mix(in srgb, var(--status-running) 12%, var(--glass-elevated-bg, var(--block-fill)));
 }
 
 .guided-login-banner[data-tone='error'] {
@@ -26,7 +28,7 @@
 
 .guided-login-banner[data-tone='warn'] {
   border-color: color-mix(in srgb, var(--warning-text) 35%, transparent);
-  background: color-mix(in srgb, var(--warning-tint) 65%, var(--block-fill));
+  background: color-mix(in srgb, var(--warning-tint) 65%, var(--glass-elevated-bg, var(--block-fill)));
 }
 
 .guided-login-banner__body {

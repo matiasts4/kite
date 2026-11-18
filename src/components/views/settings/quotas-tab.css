@@ -72,9 +72,11 @@
   width: 100%;
   min-width: 0;
   padding: 7px 10px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-chip);
-  background: var(--composer);
+  background: var(--glass-elevated-bg, var(--composer));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--text-primary);
   font: inherit;
   font-size: 12px;
@@ -138,8 +140,10 @@
   gap: 2px;
   padding: 3px;
   border-radius: var(--radius-card);
-  background: var(--block-fill);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   align-self: flex-start;
 }
 .qt-segment__item {
@@ -200,14 +204,16 @@
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-4);
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-card);
-  background: var(--block-fill);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   min-width: 0;
 }
 .qt-account[data-active] {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  background: color-mix(in srgb, var(--accent) 7%, var(--block-fill));
+  background: color-mix(in srgb, var(--accent) 10%, var(--glass-elevated-bg, var(--block-fill)));
 }
 .qt-account__head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .qt-account__avatar {
@@ -307,9 +313,11 @@
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-4);
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-card);
-  background: var(--block-fill);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .qt-save__copy h4 { margin: 0; color: var(--text-primary); font-size: 13px; font-weight: var(--weight-semibold, 600); }
 .qt-save__copy p { margin: 3px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
@@ -459,9 +467,11 @@
 .qt-providers-container {
   display: grid;
   grid-template-columns: 260px 1fr;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-card);
-  background: var(--block-fill);
+  background: var(--glass-nested-bg, var(--pane));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   overflow: hidden;
   min-height: 380px;
 }
@@ -473,7 +483,9 @@
 
 .qt-providers-sidebar {
   border-right: 1px solid var(--separator);
-  background: color-mix(in srgb, var(--block-fill) 60%, transparent);
+  background: var(--glass-nested-bg, color-mix(in srgb, var(--block-fill) 60%, transparent));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   display: flex;
   flex-direction: column;
 }
@@ -596,8 +608,10 @@
 .qt-spec-card {
   padding: var(--space-3);
   border-radius: var(--radius-row);
-  background: color-mix(in srgb, var(--block-fill) 80%, transparent);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-elevated-bg, var(--composer));
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -641,8 +655,10 @@
   gap: 4px;
   padding: 3px;
   border-radius: var(--radius-chip);
-  background: var(--composer);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-elevated-bg, var(--composer));
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   margin-top: 4px;
 }
 .qt-conn-panel__tab-btn {
@@ -666,7 +682,7 @@
   background: var(--hover-fill);
 }
 .qt-conn-panel__tab-btn[data-active] {
-  background: var(--block-fill);
+  background: var(--selected-fill);
   color: var(--text-primary);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
@@ -685,9 +701,11 @@
 }
 .qt-usage-card {
   padding: var(--space-4);
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-card);
-  background: var(--block-fill);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
@@ -783,7 +801,7 @@
   position: fixed;
   inset: 0;
   z-index: 10100;
-  background: var(--scrim, rgba(0, 0, 0, 0.72));
+  background: var(--glass-backdrop-scrim, var(--scrim, rgba(0, 0, 0, 0.72)));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -793,10 +811,12 @@
   width: 100%;
   max-width: min(640px, calc(100vw - 64px));
   max-height: min(540px, calc(100vh - 120px));
-  background: var(--pane, #141416);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  background: var(--glass-overlay-bg, var(--pane, #141416));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--dialog-radius, 14px);
-  box-shadow: 0 14px 32px -8px rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: var(--glass-shadow, 0 14px 32px -8px rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(255, 255, 255, 0.08));
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
@@ -818,8 +838,8 @@
   overflow-y: auto;
   padding: 8px 10px;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid var(--block-stroke);
-  background: var(--block-fill);
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  background: var(--glass-elevated-bg, var(--block-fill));
 }
 .qt-busy-item {
   display: flex;
@@ -841,7 +861,7 @@
   justify-content: space-between;
   padding: 16px 20px;
   border-bottom: 1px solid var(--separator);
-  background: color-mix(in srgb, var(--block-fill) 50%, transparent);
+  background: color-mix(in srgb, var(--glass-elevated-bg, var(--block-fill)) 50%, transparent);
 }
 .qt-modal-header__brand {
   display: flex;
@@ -891,7 +911,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: color-mix(in srgb, var(--block-fill) 25%, transparent);
+  background: color-mix(in srgb, var(--glass-elevated-bg, var(--block-fill)) 25%, transparent);
 }
 .qt-modal-search-wrapper {
   position: relative;
@@ -908,9 +928,11 @@
   width: 100%;
   height: 32px;
   padding: 0 28px 0 32px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-chip);
-  background: var(--composer);
+  background: var(--glass-elevated-bg, var(--composer));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--text-primary);
   font: inherit;
   font-size: 12.5px;
@@ -949,7 +971,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  background: color-mix(in srgb, var(--block-fill) 40%, transparent);
+  background: color-mix(in srgb, var(--glass-elevated-bg, var(--block-fill)) 40%, transparent);
 }
 .qt-modal-footer__count {
   font-size: 12px;
@@ -974,9 +996,11 @@
   align-items: flex-start;
   gap: var(--space-3);
   padding: 12px 14px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-border, var(--block-stroke));
   border-radius: var(--radius-card);
-  background: var(--block-fill);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
 }
@@ -1080,8 +1104,10 @@
   justify-content: space-between;
   padding: 10px 14px;
   border-radius: var(--radius-card);
-  border: 1px solid var(--block-stroke);
-  background: var(--block-fill);
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  background: var(--glass-elevated-bg, var(--block-fill));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
 }
@@ -1090,7 +1116,7 @@
 }
 .qt-account-row[data-active] {
   border-color: color-mix(in srgb, var(--status-running) 70%, transparent);
-  background: color-mix(in srgb, var(--status-running) 10%, var(--block-fill));
+  background: color-mix(in srgb, var(--status-running) 10%, var(--glass-elevated-bg, var(--block-fill)));
 }
 .qt-account-row__main {
   display: flex;
@@ -1124,8 +1150,8 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--pane);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-overlay-bg, var(--pane));
+  border: 1px solid var(--glass-border, var(--block-stroke));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1179,8 +1205,10 @@
   margin-top: 8px;
   padding: 14px;
   border-radius: var(--radius-card);
-  background: color-mix(in srgb, var(--block-fill) 80%, transparent);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--block-fill) 80%, transparent));
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1233,8 +1261,8 @@
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  background: var(--pane);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-overlay-bg, var(--pane));
+  border: 1px solid var(--glass-border, var(--block-stroke));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1275,8 +1303,10 @@
    ------------------------------------------------------------------------- */
 .qt-auto-panel {
   border-radius: var(--card-radius, 12px);
-  border: 1px solid var(--block-stroke);
-  background: color-mix(in srgb, var(--block-fill) 78%, transparent);
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--block-fill) 78%, transparent));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -1438,8 +1468,10 @@
   gap: 8px;
   padding: 5px 8px;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid var(--block-stroke);
-  background: color-mix(in srgb, var(--pane) 65%, transparent);
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  background: var(--glass-elevated-bg, color-mix(in srgb, var(--pane) 65%, transparent));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .qt-auto-account-row[data-excluded='true'] {

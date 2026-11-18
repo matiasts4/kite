@@ -192,12 +192,12 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         width: '410px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 60px)',
-        backgroundColor: 'var(--menu-glass, #121214)',
-        backdropFilter: 'var(--menu-backdrop, blur(20px))',
-        WebkitBackdropFilter: 'var(--menu-backdrop, blur(20px))',
-        border: '1px solid var(--block-stroke)',
+        background: 'var(--glass-overlay-bg, var(--menu-glass, #121214))',
+        backdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
+        WebkitBackdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
+        border: '1px solid var(--glass-border, var(--block-stroke))',
         borderRadius: 'var(--card-radius, 12px)',
-        boxShadow: '0 16px 40px rgba(0, 0, 0, 0.35)',
+        boxShadow: 'var(--glass-shadow, 0 16px 40px rgba(0, 0, 0, 0.35))',
         padding: '14px',
         color: 'var(--text-primary)',
         fontSize: '12px',
@@ -300,8 +300,8 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
               onOpenTokenUsage();
             }}
             style={{
-              background: 'var(--block-stroke)',
-              border: '1px solid var(--block-stroke)',
+              background: 'var(--glass-elevated-bg, var(--chip-fill))',
+              border: '1px solid var(--glass-border, var(--block-stroke))',
               borderRadius: 'var(--control-radius, 8px)',
               padding: '4px 9px',
               fontSize: '11px',

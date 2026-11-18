@@ -5,7 +5,7 @@ import {
   SHORT_PROVIDER_LABELS,
 } from '../../../lib/quota/types';
 import { BrandLogo } from '../../views/agents/engineMetadata';
-import { diagnoseProvider } from '../../../lib/quota/providerState';
+import { diagnoseProvider, getQuotaRefreshNotice } from '../../../lib/quota/providerState';
 
 export interface QuotaPopoverHeaderProps {
   activeIds: string[];
@@ -107,6 +107,7 @@ export const QuotaPopoverHeader: React.FC<QuotaPopoverHeaderProps> = ({
             const fullLabel = PROVIDER_LABELS[id] || id;
             const q = allQuotas[id];
             const d = diagnoseProvider(q);
+            const staleNotice = getQuotaRefreshNotice(q);
             const isActive = id === selectedProvider;
 
             return (
@@ -115,7 +116,11 @@ export const QuotaPopoverHeader: React.FC<QuotaPopoverHeaderProps> = ({
                 type="button"
                 data-provider-tab={id}
                 onClick={() => onSelectProvider(id)}
-                title={`${fullLabel} (${d.statusLabel})`}
+                title={
+                  staleNotice
+                    ? `${fullLabel} (Sin respuesta · ${staleNotice.lastUpdatedLabel})`
+                    : `${fullLabel} (${d.statusLabel})`
+                }
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -134,6 +139,8 @@ export const QuotaPopoverHeader: React.FC<QuotaPopoverHeaderProps> = ({
                     : 'transparent',
                   color: isActive
                     ? 'var(--accent)'
+                    : staleNotice
+                    ? 'var(--warning-text)'
                     : d.state === 'ok'
                     ? 'var(--text-primary)'
                     : d.state === 'detected'
@@ -155,7 +162,7 @@ export const QuotaPopoverHeader: React.FC<QuotaPopoverHeaderProps> = ({
                       width: '5px',
                       height: '5px',
                       borderRadius: '50%',
-                      backgroundColor: 'var(--status-running)',
+                      backgroundColor: staleNotice ? 'var(--warning-text)' : 'var(--status-running)',
                       display: 'inline-block',
                     }}
                   />

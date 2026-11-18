@@ -22,7 +22,7 @@ import {
   saveQuotaPreferences,
   subscriptionQuotaManager,
 } from '../../../lib/quota/quotaManager';
-import { diagnoseProvider } from '../../../lib/quota/providerState';
+import { diagnoseProvider, getQuotaRefreshNotice } from '../../../lib/quota/providerState';
 import { PROVIDER_CONFIGS_ES } from '../../../config/quotaProviderMetadata';
 import { useAccountVault } from '../../../lib/accounts/useAccountVault';
 import { resolveLiveAccountEmail } from '../../../lib/accounts/accountVaultStore';
@@ -850,6 +850,7 @@ export const QuotasTab: React.FC = () => {
               const q = quotas[id];
               const s = detectedSessions[id];
               const diag = diagnoseProvider(q);
+              const staleNotice = getQuotaRefreshNotice(q);
               const pct = diag.state === 'ok' && q ? Math.round(q.primaryRemainingPercent ?? 0) : null;
               const resetLabel = formatReset(q?.timeUntilResetMs, q?.primaryResetAt);
               const isWindowsExpanded = expandedWindows[id] ?? false;
@@ -904,6 +905,19 @@ export const QuotasTab: React.FC = () => {
                       </span>
                     )}
                   </div>
+
+                  {staleNotice ? (
+                    <div
+                      data-testid="quota-stale-notice"
+                      className="qt-banner"
+                      data-tone="warn"
+                      role="status"
+                      title={staleNotice.detail}
+                      style={{ fontSize: '11px', padding: '5px 8px' }}
+                    >
+                      {staleNotice.message}
+                    </div>
+                  ) : null}
 
                   {/* Collapsible Sub-windows for models to prevent vertical explosion */}
                   {hasWindows ? (

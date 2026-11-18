@@ -15,6 +15,7 @@ import {
   resolveEnabledProviderIds,
 } from '../../lib/quota/types';
 import { isWindowExhausted } from '../../lib/quota/modelQuota';
+import { getQuotaRefreshNotice } from '../../lib/quota/providerState';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { usePresence } from '../../motion/usePresence';
 
@@ -116,6 +117,7 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
   };
 
   const windowLabel = currentQuota?.metadata?.primaryWindowLabel || (currentQuota?.metadata?.primaryWindow === '5h' ? '5h' : null);
+  const staleNotice = getQuotaRefreshNotice(currentQuota);
   const exhaustedWindows = hasData
     ? (currentQuota?.windows ?? []).filter(isWindowExhausted)
     : [];
@@ -125,10 +127,13 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
     exhaustedWindows.length > 0
       ? ` Cuota agotada en: ${exhaustedWindows.map((w) => w.name).join(', ')}.`
       : '';
+  const staleNote = staleNotice ? ` ${staleNotice.message}` : '';
   const badgeTitle = !displayProvider
     ? 'Cuotas de suscripción IA: agregá un proveedor para empezar'
     : hasData
-    ? `${label}${windowLabel ? ` (${windowLabel})` : ''}: ${remPct}% de cuota restante.${exhaustedNote}${currentQuota?.error ? ` (${currentQuota.error})` : ''} Clic para ver detalles y límites.`
+    ? `${label}${windowLabel ? ` (${windowLabel})` : ''}: ${remPct}% de cuota restante.${exhaustedNote}${staleNote}${currentQuota?.error ? ` (${currentQuota.error})` : ''} Clic para ver detalles y límites.`
+    : staleNotice
+    ? `${label}: ${staleNotice.message}`
     : currentQuota?.error || 'Comprobando cuota de suscripción IA...';
 
   const isUsedMode = prefs.displayMode === 'percent_used';
@@ -250,6 +255,19 @@ export const SubscriptionQuotaBadge: React.FC<SubscriptionQuotaBadgeProps> = ({
               height: '6px',
               borderRadius: '9999px',
               backgroundColor: 'var(--status-failed, #ef4444)',
+              flexShrink: 0,
+            }}
+          />
+        )}
+        {staleNotice && (
+          <span
+            data-testid="quota-stale-warning-dot"
+            aria-hidden="true"
+            style={{
+              width: '6px',
+              height: '6px',
+              borderRadius: '9999px',
+              backgroundColor: 'var(--warning-text, #f59e0b)',
               flexShrink: 0,
             }}
           />

@@ -225,4 +225,60 @@ describe('QuotasTab Component', () => {
       expect(ipc.getProviderCredentials).toHaveBeenCalledTimes(1);
     });
   });
+
+  it('keeps last stored quota visible and shows inline stale notice in QuotasTab after 30 minutes of failed refreshes', async () => {
+    const { subscriptionQuotaManager } = await import('../../../lib/quota/quotaManager');
+    const ipc = await import('../../../lib/ipc');
+    vi.mocked(ipc.getSubscriptionQuotas).mockResolvedValueOnce({
+      antigravity: {
+        providerId: 'antigravity',
+        displayName: 'Antigravity',
+        isAvailable: true,
+        isAuth: true,
+        primaryUsagePercent: 10,
+        primaryRemainingPercent: 90,
+        primaryResetAt: '2026-10-25T20:00:00Z',
+        timeUntilResetMs: 7200000,
+        windows: [
+          {
+            name: 'Gemini 3.8 Flash',
+            usagePercent: 10,
+            remainingFraction: 0.9,
+            resetsAt: '2026-10-25T20:00:00Z',
+            timeUntilResetMs: 7200000,
+            isExhausted: false,
+          },
+        ],
+        metadata: { email: 'developer@kite.local', planType: 'Pro' },
+        lastUpdatedMs: Date.now() - 45 * 60 * 1000,
+        error: null,
+      },
+    });
+
+    render(<QuotasTab />);
+
+    expect(await screen.findByText('90% disponible')).toBeInTheDocument();
+
+    act(() => {
+      subscriptionQuotaManager.applyExternalQuotas({
+        antigravity: {
+          providerId: 'antigravity',
+          displayName: 'Antigravity',
+          isAvailable: false,
+          isAuth: false,
+          primaryUsagePercent: 0,
+          primaryRemainingPercent: 100,
+          primaryResetAt: null,
+          timeUntilResetMs: null,
+          windows: [],
+          metadata: {},
+          lastUpdatedMs: Date.now(),
+          error: 'CLI no respondió',
+        },
+      });
+    });
+
+    expect(screen.getByText('90% disponible')).toBeInTheDocument();
+    expect(screen.getByTestId('quota-stale-notice')).toBeInTheDocument();
+  });
 });

@@ -60,12 +60,11 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
       style={{
         margin: '12px 0',
         padding: '16px',
-        borderRadius: '12px',
-        backgroundColor: 'rgba(28, 20, 14, 0.75)',
-        border: '1px solid rgba(245, 158, 11, 0.4)',
-        boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.04)',
-        backdropFilter: 'blur(16px)',
-        color: '#f4f4f5',
+        borderRadius: 'var(--card-radius, 12px)',
+        background: 'color-mix(in srgb, var(--warning, #f59e0b) 10%, var(--glass-elevated-bg, var(--composer, rgba(28, 20, 14, 0.75))))',
+        border: '1px solid color-mix(in srgb, var(--warning, #f59e0b) 38%, var(--glass-border, rgba(245, 158, 11, 0.4)))',
+        boxShadow: 'var(--glass-highlight, 0 8px 30px rgba(0, 0, 0, 0.4))',
+        color: 'var(--text-primary, #f4f4f5)',
         fontSize: '13px',
       }}
     >
@@ -106,10 +105,10 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
               Interrupción por cuota
             </span>
           </div>
-          <p style={{ margin: '4px 0 0', color: '#d4d4d8', fontSize: '12px', lineHeight: '1.4' }}>
+          <p style={{ margin: '4px 0 0', color: 'var(--text-secondary, #d4d4d8)', fontSize: '12px', lineHeight: '1.4' }}>
             {offer.reason}
           </p>
-          <p style={{ margin: '4px 0 0', color: '#a1a1aa', fontSize: '12px' }}>
+          <p style={{ margin: '4px 0 0', color: 'var(--text-secondary, #a1a1aa)', fontSize: '12px' }}>
             ¿Deseas transferir esta tarea de inmediato a otra cuenta o a otro agente con cuota disponible?
           </p>
         </div>
@@ -117,11 +116,11 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
 
       {/* Suggestions List */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' }}>
-        <div style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#a1a1aa' }}>
+        <div style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-secondary, #a1a1aa)' }}>
           Opciones sugeridas con cuota activa:
         </div>
         {offer.suggestions.length === 0 ? (
-          <div style={{ padding: '10px', borderRadius: '8px', backgroundColor: 'rgba(0,0,0,0.2)', color: '#a1a1aa', fontSize: '12px' }}>
+          <div style={{ padding: '10px', borderRadius: 'var(--control-radius, 8px)', backgroundColor: 'var(--glass-nested-bg, rgba(0,0,0,0.2))', color: 'var(--text-secondary, #a1a1aa)', fontSize: '12px' }}>
             No se detectaron otras cuentas con cuota disponible en este momento.
           </div>
         ) : (
@@ -138,20 +137,20 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   padding: '10px 14px',
-                  borderRadius: '8px',
+                  borderRadius: 'var(--control-radius, 8px)',
                   border: isSelected
                     ? '1px solid rgba(52, 211, 153, 0.7)'
-                    : '1px solid rgba(255, 255, 255, 0.08)',
+                    : '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
                   backgroundColor: isSelected
                     ? 'rgba(16, 185, 129, 0.12)'
-                    : 'rgba(255, 255, 255, 0.03)',
+                    : 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.03))',
                   cursor: 'pointer',
                   transition: 'all 120ms ease',
                 }}
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ fontWeight: isSelected ? 600 : 500, color: isSelected ? '#34d399' : '#f4f4f5' }}>
+                    <span style={{ fontWeight: isSelected ? 600 : 500, color: isSelected ? '#34d399' : 'var(--text-primary, #f4f4f5)' }}>
                       {sug.title}
                     </span>
                     {sug.isRecommended && (
@@ -239,7 +238,7 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
 
         {isCustomizing && (
           <div style={{ marginTop: '8px' }}>
-            <p style={{ margin: '0 0 6px', fontSize: '11px', color: '#a1a1aa' }}>
+            <p style={{ margin: '0 0 6px', fontSize: '11px', color: 'var(--text-secondary, #a1a1aa)' }}>
               Esta cápsula empaqueta el objetivo original, turnos recientes, el avance que alcanzó a hacer el agente anterior y el estado git real del workspace. Puedes editarlo antes de transferir:
             </p>
             <textarea
@@ -249,10 +248,10 @@ export const QuotaHandoffBanner: React.FC<QuotaHandoffBannerProps> = ({
               style={{
                 width: '100%',
                 padding: '10px',
-                borderRadius: '8px',
-                backgroundColor: 'rgba(0, 0, 0, 0.45)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                color: '#e4e4e7',
+                borderRadius: 'var(--control-radius, 8px)',
+                backgroundColor: 'var(--glass-code-bg, var(--composer, rgba(0, 0, 0, 0.45)))',
+                border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.12))',
+                color: 'var(--text-primary, #e4e4e7)',
                 fontSize: '11px',
                 fontFamily: 'monospace',
                 resize: 'vertical',

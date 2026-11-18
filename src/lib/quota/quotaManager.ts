@@ -1,4 +1,5 @@
 import { getSubscriptionQuotas, listConnections, type ConnectionSummary } from '../ipc';
+import { hasUsableQuotaData, isUsableQuotaUpdate } from './providerState';
 import {
   type ProviderQuotaStatus,
   type QuotaPreferences,
@@ -387,11 +388,51 @@ class SubscriptionQuotaManager {
 
   private mergePayloadIntoCache(payload: Record<string, ProviderQuotaStatus>): boolean {
     let changed = false;
+    const now = Date.now();
     for (const [key, val] of Object.entries(payload)) {
       if (!val || typeof val !== 'object') continue;
       const prev = this.cache.get(key);
-      if (!prev || JSON.stringify(prev) !== JSON.stringify(val)) {
-        this.cache.set(key, val);
+      let nextVal = val;
+      if (prev && hasUsableQuotaData(prev) && !isUsableQuotaUpdate(prev, val)) {
+        const errMsg =
+          typeof val.error === 'string' && val.error.trim().length > 0
+            ? val.error.trim()
+            : 'No se pudo obtener respuesta al actualizar la cuota';
+        nextVal = {
+          ...prev,
+          error: null,
+          metadata: {
+            ...(prev.metadata ?? {}),
+            lastRefreshError: errMsg,
+            lastRefreshErrorAtMs: now,
+          },
+        };
+      }
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(nextVal)) {
+        this.cache.set(key, nextVal);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private markRequestedProvidersFailed(providers: string[], errorMessage: string): boolean {
+    let changed = false;
+    const now = Date.now();
+    for (const id of providers) {
+      const prev = this.cache.get(id);
+      if (!prev || !hasUsableQuotaData(prev)) continue;
+      const nextVal: ProviderQuotaStatus = {
+        ...prev,
+        error: null,
+        metadata: {
+          ...(prev.metadata ?? {}),
+          lastRefreshError: errorMessage,
+          lastRefreshErrorAtMs: now,
+        },
+      };
+      if (JSON.stringify(prev) !== JSON.stringify(nextVal)) {
+        this.cache.set(id, nextVal);
         changed = true;
       }
     }
@@ -402,25 +443,50 @@ class SubscriptionQuotaManager {
     force: boolean,
     providersOverride?: string[]
   ): Promise<Record<string, ProviderQuotaStatus>> {
+    let providers: string[] = [];
     try {
       let prefs = readQuotaPreferences();
       if (needsQuotaSetupMigration()) {
         prefs = this.migrateLegacySetup();
       }
-      const providers = providersOverride ?? resolveEnabledProviderIds(prefs);
+      providers = providersOverride ?? resolveEnabledProviderIds(prefs);
       // Nothing added: do not poll every backend provider behind the user's back.
       if (providers.length === 0) {
         return this.getAllQuotas();
       }
       const data = await getSubscriptionQuotas(force, providers);
+      let changed = false;
       if (data && typeof data === 'object') {
-        if (this.mergePayloadIntoCache(data as Record<string, ProviderQuotaStatus>)) {
-          saveQuotaCache(this.getAllQuotas());
-          this.notify();
+        const payload = data as Record<string, ProviderQuotaStatus>;
+        if (this.mergePayloadIntoCache(payload)) {
+          changed = true;
         }
+        const missing = providers.filter((id) => !(id in payload));
+        if (
+          missing.length > 0 &&
+          this.markRequestedProvidersFailed(missing, 'No se recibió respuesta del proveedor de cuotas')
+        ) {
+          changed = true;
+        }
+      } else if (
+        this.markRequestedProvidersFailed(providers, 'No se recibió respuesta del servicio de cuotas')
+      ) {
+        changed = true;
+      }
+      if (changed) {
+        saveQuotaCache(this.getAllQuotas());
+        this.notify();
       }
     } catch (err) {
       console.warn('[SubscriptionQuotaManager] fetch failed:', err);
+      const msg =
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message.trim()
+          : 'No se pudo consultar la cuota';
+      if (providers.length > 0 && this.markRequestedProvidersFailed(providers, msg)) {
+        saveQuotaCache(this.getAllQuotas());
+        this.notify();
+      }
     }
     return this.getAllQuotas();
   }

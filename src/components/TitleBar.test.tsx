@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TitleBar } from './TitleBar';
+import {
+  DEFAULT_THEME_CUSTOMIZATIONS,
+  applyThemeCustomizationsToDocument,
+  sanitizeThemeCustomizations,
+} from '../lib/themeCustomizations';
 
 // Mock ipc windowControls
 vi.mock('../lib/ipc', () => ({
@@ -136,5 +141,30 @@ describe('TitleBar - Behavioral Tests', () => {
 
     await user.click(closeBtn);
     expect(windowControls.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves TitleBar stadium mode switcher structure and tokens under frosted glass and contrast customization', () => {
+    const glassState = sanitizeThemeCustomizations({
+      ...DEFAULT_THEME_CUSTOMIZATIONS,
+      darkThemeId: 'aurora-studio',
+      surface: {
+        translucent: true,
+        opacity: 72,
+        blur: 24,
+        contrast: 85,
+      },
+    });
+    applyThemeCustomizationsToDocument(glassState);
+
+    const { container } = render(<TitleBar activeMode="code" />);
+    expect(document.documentElement.getAttribute('data-surface-glass')).toBe('true');
+    expect(document.documentElement.style.getPropertyValue('--theme-surface-opacity')).toBe('72%');
+    expect(document.documentElement.style.getPropertyValue('--theme-surface-blur')).toBe('24px');
+    expect(document.documentElement.style.getPropertyValue('--theme-contrast')).toBe('85');
+
+    const stadium = container.querySelector('.mode-toggle--stadium');
+    expect(stadium).toBeInTheDocument();
+    expect(stadium).toHaveAttribute('data-mode', 'code');
+    expect(container.querySelectorAll('.mode-toggle--stadium .mode-toggle__item')).toHaveLength(3);
   });
 });

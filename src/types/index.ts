@@ -1,3 +1,5 @@
+import type { KiteThemeCustomizations } from '../lib/themeCustomizations';
+
 export interface Workspace {
   id: string;
   displayName: string;
@@ -40,6 +42,7 @@ export interface BootstrapResponse {
     };
     darkTheme: string;
     lightTheme: string;
+    themeCustomizations?: Partial<KiteThemeCustomizations> | null;
     quitBehavior: string;
   };
   workspaces: Workspace[];
@@ -254,6 +257,7 @@ export interface ChatItem {
   subagentMeta?: SubagentMeta | null;
   swarmMeta?: SwarmMeta | null;
   parentToolUseId?: string | null;
+  internalDispatch?: boolean;
 }
 
 export interface NotificationRecord {

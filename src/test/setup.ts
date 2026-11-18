@@ -21,6 +21,14 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
   });
 }
 
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof globalThis.ResizeObserver;
+}
+
 if (typeof HTMLDialogElement !== 'undefined') {
   HTMLDialogElement.prototype.showModal =
     HTMLDialogElement.prototype.showModal ||

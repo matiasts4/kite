@@ -24,7 +24,7 @@ describe('Kite Toast System (Sileo integration)', () => {
     vi.clearAllMocks();
   });
 
-  it('triggers success toast with obsidian dark fill by default', () => {
+  it('triggers success toast resolving fill from the active theme surface token with dark fallback', () => {
     const id = toast.success('Operation Complete', 'Files were indexed.');
     expect(id).toBe('toast-1');
     expect(sileo.success).toHaveBeenCalledWith(
@@ -35,6 +35,19 @@ describe('Kite Toast System (Sileo integration)', () => {
         duration: 4500,
       })
     );
+
+    document.documentElement.style.setProperty('--menu-plate', '#ffffff');
+    try {
+      toast.info('Tema claro', 'Adaptado al tema activo.');
+      expect(sileo.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Tema claro',
+          fill: '#ffffff',
+        })
+      );
+    } finally {
+      document.documentElement.style.removeProperty('--menu-plate');
+    }
   });
 
   it('triggers error toast with longer duration', () => {

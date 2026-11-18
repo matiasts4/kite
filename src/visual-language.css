@@ -3,6 +3,7 @@
    Scoped to body.kite-app so the dev-only ?animate lab keeps its own values. */
 
 :root {
+  --text-tertiary: var(--text-faint, #6e6e6e);
   --control-radius: 8px;
   --card-radius: 12px;
   --dialog-radius: 14px;
@@ -11,6 +12,7 @@
 }
 
 body.kite-app {
+  --text-tertiary: var(--text-faint, #6e6e6e);
   --vl-radius-xs: 4px;
   --vl-radius-sm: 6px;
   --vl-radius-md: 8px;
@@ -42,8 +44,33 @@ body.kite-app {
   --vl-focus: var(--accent);
 
   --vl-surface-canvas: var(--background);
-  --vl-surface-raised: var(--raised-fill);
-  --vl-surface-overlay: var(--menu-plate);
+  --vl-surface-raised: var(--glass-elevated-bg);
+  --vl-surface-overlay: var(--glass-overlay-bg);
+
+  /* 4-Tier Semantic Glass Surface Tokens (solid defaults when glass is off) */
+  --glass-island-bg: var(--pane, #141414);
+  --glass-sidebar-bg: var(--sidebar-fill, var(--pane, #141414));
+  --glass-nested-bg: var(--pane, #141414);
+  --glass-sticky-bg: var(--sidebar-fill, var(--pane, #141414));
+  --glass-sticky-pane-bg: var(--pane, #141414);
+  --glass-elevated-bg: var(--composer, var(--block-fill, #18181b));
+  --glass-code-bg: var(--terminal-canvas, #0a0b0e);
+  --glass-terminal-bg: var(--terminal-canvas, #0a0b0e);
+  --glass-overlay-bg: var(--menu-plate, var(--pane, #1c1c1f));
+  --glass-modal-bg: var(--pane, #141416);
+  --glass-backdrop-scrim: var(--scrim, rgba(0, 0, 0, 0.56));
+  --glass-modal-scrim: var(--scrim, rgba(0, 0, 0, 0.72));
+  --glass-blur: none;
+  --glass-overlay-blur: var(--menu-backdrop, blur(24px) saturate(160%));
+  --glass-border: var(--vl-stroke-strong);
+  --glass-highlight: var(--vl-inset);
+  --glass-shadow: var(--vl-shadow-card);
+
+  /* Orphaned legacy surface aliases reconciled onto active theme tiers */
+  --surface: var(--glass-nested-bg);
+  --surface-raised: var(--glass-elevated-bg);
+  --surface-elevated: var(--glass-elevated-bg);
+  --popover: var(--glass-overlay-bg);
 
   --vl-inset: inset 0 1px 0 color-mix(in srgb, var(--text-primary) 6%, transparent);
   --vl-inset-field: inset 0 1px 2px rgba(0, 0, 0, 0.38);
@@ -864,4 +891,437 @@ body.kite-app .workspace-pane-item__engine {
   border-radius: var(--vl-radius-xs, 4px);
   line-height: 1.3;
   text-transform: uppercase;
+}
+
+/* Stage Atmosphere, Frosted Glass Surfaces & Contrast Scaling -------------- */
+
+[data-palette='aurora-studio'] {
+  --background: #070b14;
+  --pane: #0d1424;
+  --composer: #111a2e;
+  --sidebar-fill: #0a101d;
+  --menu-plate: #0f172a;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-faint: #64748b;
+  --accent: #38bdf8;
+  --accent-fill: #0284c7;
+  --accent-fill-hover: #0369a1;
+  --accent-fill-active: #075985;
+}
+
+[data-palette='ember-editorial'] {
+  --background: #141210;
+  --pane: #1c1916;
+  --composer: #24201c;
+  --sidebar-fill: #171412;
+  --menu-plate: #26211d;
+  --text-primary: #f5f2eb;
+  --text-secondary: #a8a29e;
+  --text-faint: #78716c;
+  --accent: #d97757;
+  --accent-fill: #c25e3e;
+  --accent-fill-hover: #d97757;
+  --accent-fill-active: #9a4429;
+}
+
+[data-palette='warm-atelier'] {
+  --background: #faf8f4;
+  --pane: #fffdf9;
+  --composer: #ffffff;
+  --sidebar-fill: #f3efe6;
+  --menu-plate: #ffffff;
+  --text-primary: #1f1c18;
+  --text-secondary: #665f54;
+  --text-faint: #8c8273;
+  --accent: #c86446;
+  --accent-fill: #c86446;
+  --accent-fill-hover: #b55336;
+  --accent-fill-active: #984228;
+}
+
+body.kite-app .app-frame > .workspace-shell {
+  position: relative;
+  z-index: 1;
+}
+
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .app-frame {
+  background: var(--background, #090a0c);
+}
+
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .main-pane,
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .main-pane__layer,
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .main-pane__surface,
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .mode-layer,
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .workspace-pane-canvas,
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .workspace-tab-layer,
+html[data-backdrop]:not([data-backdrop='none']) body.kite-app .workspace-tab-layer__tree {
+  background: transparent !important;
+}
+
+/* Contrast scaling driven by --theme-contrast (0-100, default 50) */
+html[data-theme] body.kite-app {
+  --vl-contrast-border: clamp(6%, calc(4% + var(--theme-contrast, 50) * 0.2%), 32%);
+  --vl-contrast-border-strong: clamp(12%, calc(8% + var(--theme-contrast, 50) * 0.3%), 46%);
+  --vl-stroke: color-mix(in srgb, var(--text-primary) var(--vl-contrast-border), transparent);
+  --vl-stroke-strong: color-mix(in srgb, var(--text-primary) var(--vl-contrast-border-strong), transparent);
+  --panel-stroke: var(--vl-stroke);
+  --block-stroke: color-mix(in srgb, var(--text-primary) clamp(4%, calc(2% + var(--theme-contrast, 50) * 0.16%), 26%), transparent);
+}
+
+html[data-contrast-custom='true'] body.kite-app {
+  --text-secondary: color-mix(
+    in srgb,
+    var(--text-primary) clamp(42%, calc(38% + var(--theme-contrast, 50) * 0.56%), 94%),
+    var(--background)
+  );
+}
+
+/* ==========================================================================
+   Reusable 4-Tier Frosted Glass System (`html[data-surface-glass='true']`)
+   ========================================================================== */
+
+html[data-surface-glass='true'],
+html[data-surface-glass='true'] body.kite-app {
+  --glass-island-bg: color-mix(
+    in srgb,
+    var(--pane, #141414) var(--theme-surface-opacity, 56%),
+    transparent
+  );
+  --glass-sidebar-bg: color-mix(
+    in srgb,
+    var(--sidebar-fill, var(--pane, #141414)) var(--theme-surface-opacity, 56%),
+    transparent
+  );
+  --glass-nested-bg: transparent;
+  --glass-sticky-bg: color-mix(
+    in srgb,
+    var(--sidebar-fill, var(--pane, #141414)) clamp(64%, calc(var(--theme-surface-opacity, 56%) + 22%), 90%),
+    transparent
+  );
+  --glass-sticky-pane-bg: color-mix(
+    in srgb,
+    var(--pane, #141414) clamp(64%, calc(var(--theme-surface-opacity, 56%) + 22%), 90%),
+    transparent
+  );
+  --glass-elevated-bg: color-mix(
+    in srgb,
+    var(--composer, var(--pane, #18181b)) clamp(28%, calc(var(--theme-surface-opacity, 56%) * 0.82), 84%),
+    transparent
+  );
+  --glass-code-bg: color-mix(
+    in srgb,
+    var(--terminal-canvas, #0a0b0e) clamp(16%, calc(var(--theme-surface-opacity, 56%) * 0.48), 54%),
+    transparent
+  );
+  --glass-terminal-bg: color-mix(
+    in srgb,
+    var(--terminal-canvas, #0a0b0e) clamp(14%, calc(var(--theme-surface-opacity, 56%) * 0.44), 52%),
+    transparent
+  );
+  --glass-overlay-bg: color-mix(
+    in srgb,
+    var(--menu-plate, var(--pane, #1c1c1f)) clamp(68%, calc(var(--theme-surface-opacity, 56%) + 20%), 90%),
+    transparent
+  );
+  --glass-modal-bg: color-mix(
+    in srgb,
+    var(--pane, #141414) clamp(84%, calc(var(--theme-surface-opacity, 56%) + 32%), 96%),
+    transparent
+  );
+  --glass-backdrop-scrim: rgba(0, 0, 0, 0.46);
+  --glass-modal-scrim: rgba(4, 6, 10, 0.68);
+  --glass-blur: blur(var(--theme-surface-blur, 20px)) saturate(140%);
+  --glass-overlay-blur: blur(max(var(--theme-surface-blur, 20px), 24px)) saturate(160%);
+  --glass-border: color-mix(in srgb, var(--accent, #5c8fff) 18%, var(--vl-stroke-strong));
+  --glass-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent);
+  --glass-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent),
+    0 18px 42px -18px rgba(0, 0, 0, 0.52);
+}
+
+html[data-surface-glass='true'][data-theme='light'],
+html[data-surface-glass='true'][data-theme='light'] body.kite-app {
+  --glass-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff 45%, transparent);
+  --glass-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 45%, transparent),
+    0 18px 42px -18px rgba(15, 23, 42, 0.2);
+  --glass-backdrop-scrim: rgba(15, 23, 42, 0.28);
+  --glass-modal-scrim: rgba(15, 23, 42, 0.42);
+}
+
+/* Reusable semantic glass utility classes for components & views */
+body.kite-app .glass-island {
+  background: var(--glass-island-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+body.kite-app .glass-nested {
+  background: var(--glass-nested-bg);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+
+body.kite-app .glass-sticky {
+  background: var(--glass-sticky-pane-bg);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+body.kite-app .glass-elevated {
+  background: var(--glass-elevated-bg);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+body.kite-app .glass-terminal {
+  background: var(--glass-terminal-bg);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+body.kite-app .glass-overlay {
+  background: var(--glass-overlay-bg);
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+/* Top-level Translucent Frosted Glass Islands layered over StageBackdrop */
+html[data-surface-glass='true'] body.kite-app .sidebar,
+html[data-surface-glass='true'] body.kite-app .SettingsSidebar,
+html[data-surface-glass='true'] body.kite-app .app-browser-sidebar:not(.app-browser-sidebar--fullscreen),
+html[data-surface-glass='true'] body.kite-app .right-dock {
+  background: var(--glass-sidebar-bg) !important;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+  transform: translateZ(0);
+}
+
+html[data-surface-glass='true'] body.kite-app .pane,
+html[data-surface-glass='true'] body.kite-app .chat-surface,
+html[data-surface-glass='true'] body.kite-app .code-pane-panel,
+html[data-surface-glass='true'] body.kite-app .empty-surface:not(.empty-surface--embedded),
+html[data-surface-glass='true'] body.kite-app .settings-view:not(.settings-modal-window),
+html[data-surface-glass='true'] body.kite-app .app-browser-sidebar--fullscreen {
+  background: var(--glass-island-bg) !important;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+  transform: translateZ(0);
+}
+
+html[data-surface-glass='true'] body.kite-app .settings-modal-window,
+html[data-surface-glass='true'] body.kite-app .ui-sheet {
+  background: var(--glass-modal-bg) !important;
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+  transform: translateZ(0);
+}
+
+body.kite-app .ui-sheet::backdrop {
+  background: var(--glass-modal-scrim, var(--scrim, rgba(0, 0, 0, 0.72)));
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+/* Tier 2: Nested child views inside top-level glass islands & bundle/chunk CSS-module shells */
+html[data-surface-glass='true'] body.kite-app .pane .pane,
+html[data-surface-glass='true'] body.kite-app .settings-modal-window .SettingsSidebar,
+html[data-surface-glass='true'] body.kite-app .settings-modal-window .settings-view,
+html[data-surface-glass='true'] body.kite-app .application-settings-pane,
+html[data-surface-glass='true'] body.kite-app .pane .chat-surface,
+html[data-surface-glass='true'] body.kite-app .code-pane-panel .chat-surface,
+html[data-surface-glass='true'] body.kite-app .code-pane-panel .code-thread-pane,
+html[data-surface-glass='true'] body.kite-app .code-pane-body,
+html[data-surface-glass='true'] body.kite-app .code-pane-state,
+html[data-surface-glass='true'] body.kite-app .pane .empty-surface,
+html[data-surface-glass='true'] body.kite-app .empty-surface--embedded,
+html[data-surface-glass='true'] body.kite-app .app-browser-sidebar__page,
+html[data-surface-glass='true'] body.kite-app .side-panel-header,
+html[data-surface-glass='true'] body.kite-app .code-pane-header,
+html[data-surface-glass='true'] body.kite-app .chat-thread-header,
+html[data-surface-glass='true'] body.kite-app .subagent-inspector,
+html[data-surface-glass='true'] body.kite-app .subagent-inspector__header,
+html[data-surface-glass='true'] body.kite-app .subagent-overview,
+html[data-surface-glass='true'] body.kite-app .subagent-global,
+html[data-surface-glass='true'] body.kite-app .diffs-container,
+html[data-surface-glass='true'] body.kite-app .diffs-view,
+html[data-surface-glass='true'] body.kite-app .diffs-commit-bar,
+html[data-surface-glass='true'] body.kite-app .diffs-toolbar,
+html[data-surface-glass='true'] body.kite-app .diff-file-tree,
+html[data-surface-glass='true'] body.kite-app .diff-code-viewer,
+html[data-surface-glass='true'] body.kite-app .files-view,
+html[data-surface-glass='true'] body.kite-app .files-pane,
+html[data-surface-glass='true'] body.kite-app .files-toolbar,
+html[data-surface-glass='true'] body.kite-app .files-breadcrumbs,
+html[data-surface-glass='true'] body.kite-app .files-editor-container,
+html[data-surface-glass='true'] body.kite-app .files-editor-toolbar,
+html[data-surface-glass='true'] body.kite-app .files-unsupported-surface,
+html[data-surface-glass='true'] body.kite-app .files-editor,
+html[data-surface-glass='true'] body.kite-app .files-edit-gutter,
+html[data-surface-glass='true'] body.kite-app .files-gutter,
+html[data-surface-glass='true'] body.kite-app .files-status-bar,
+html[data-surface-glass='true'] body.kite-app .files-tree-panel,
+html[data-surface-glass='true'] body.kite-app .side-panel-file,
+html[data-surface-glass='true'] body.kite-app .side-panel-file__body,
+html[data-surface-glass='true'] body.kite-app ._treePanel_114f5_87,
+html[data-surface-glass='true'] body.kite-app ._editor_114f5_313,
+html[data-surface-glass='true'] body.kite-app ._dropHint_114f5_639,
+html[data-surface-glass='true'] body.kite-app ._gutter_114f5_863,
+html[data-surface-glass='true'] body.kite-app ._gutterActive_114f5_919,
+html[data-surface-glass='true'] body.kite-app .inspector-files,
+html[data-surface-glass='true'] body.kite-app .thread-inspector:not(.thread-inspector--compact),
+html[data-surface-glass='true'] body.kite-app .changes-panel,
+html[data-surface-glass='true'] body.kite-app .terminal-view-container,
+html[data-surface-glass='true'] body.kite-app .terminal-toolbar,
+html[data-surface-glass='true'] body.kite-app .terminal-surface-host,
+html[data-surface-glass='true'] body.kite-app .terminal-surface,
+html[data-surface-glass='true'] body.kite-app .terminal-canvas,
+html[data-surface-glass='true'] body.kite-app .terminal-canvas-surface-container,
+html[data-surface-glass='true'] body.kite-app .terminal-surface-host .xterm,
+html[data-surface-glass='true'] body.kite-app .terminal-surface-host .xterm .xterm-viewport,
+html[data-surface-glass='true'] body.kite-app .terminal-surface-host .xterm .xterm-screen,
+html[data-surface-glass='true'] body.kite-app .agent-terminal,
+html[data-surface-glass='true'] body.kite-app .agent-terminal__toolbar,
+html[data-surface-glass='true'] body.kite-app .agent-install-pane,
+html[data-surface-glass='true'] body.kite-app .agent-install-pane__body,
+html[data-surface-glass='true'] body.kite-app .agent-resume-list,
+html[data-surface-glass='true'] body.kite-app .workspaces-container,
+html[data-surface-glass='true'] body.kite-app .workspaces-list-panel,
+html[data-surface-glass='true'] body.kite-app .workspaces-preview-panel,
+html[data-surface-glass='true'] body.kite-app .workspaces-top-bar,
+html[data-surface-glass='true'] body.kite-app .workspace-launcher,
+html[data-surface-glass='true'] body.kite-app ._pane_114f5_19,
+html[data-surface-glass='true'] body.kite-app ._panel_byshc_15,
+html[data-surface-glass='true'] body.kite-app ._panel_v2cfp_11,
+html[data-surface-glass='true'] body.kite-app .pane .destination-pane,
+html[data-surface-glass='true'] body.kite-app .pane .plugin-pane,
+html[data-surface-glass='true'] body.kite-app .pane .agent-pane,
+html[data-surface-glass='true'] body.kite-app .pane .glass-island,
+html[data-surface-glass='true'] body.kite-app .sidebar .glass-island,
+html[data-surface-glass='true'] body.kite-app .right-dock .glass-island,
+html[data-surface-glass='true'] body.kite-app .tickets-body--board,
+html[data-surface-glass='true'] body.kite-app .ticket-board {
+  background: var(--glass-nested-bg) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  box-shadow: none;
+  transform: none;
+}
+
+/* Sticky Sidebar & Scroll Header Surfaces (translucency without overlap bleed or blur stalls) */
+html[data-surface-glass='true'] body.kite-app .workspace-roster__pinned {
+  background: var(--glass-sticky-bg) !important;
+  box-shadow: 0 1px 0 var(--vl-stroke);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Compositor isolation for smooth chat transcript scrolling */
+body.kite-app .chat-transcript {
+  transform: translateZ(0);
+  will-change: scroll-position;
+  contain: layout style;
+}
+
+/* Tier 3: Elevated Cards, Composers, Inputs & Empty-State Boxes inside Scroll Containers */
+html[data-surface-glass='true'] body.kite-app .ui-card,
+html[data-surface-glass='true'] body.kite-app .plugin-card,
+html[data-surface-glass='true'] body.kite-app .ticket-card,
+html[data-surface-glass='true'] body.kite-app .ticket-composer,
+html[data-surface-glass='true'] body.kite-app .tickets-config,
+html[data-surface-glass='true'] body.kite-app .tickets-pane textarea,
+html[data-surface-glass='true'] body.kite-app .agent-dashboard__card,
+html[data-surface-glass='true'] body.kite-app .subagent-inspector__empty,
+html[data-surface-glass='true'] body.kite-app .subagent-global__group,
+html[data-surface-glass='true'] body.kite-app .chat-user-row,
+html[data-surface-glass='true'] body.kite-app .chat-user-row--bubble,
+html[data-surface-glass='true'] body.kite-app .chat-plan-panel,
+html[data-surface-glass='true'] body.kite-app .chat-approval-card,
+html[data-surface-glass='true'] body.kite-app .rail-landing-slot,
+html[data-surface-glass='true'] body.kite-app .chat-rail-rename input,
+html[data-surface-glass='true'] body.kite-app ._renameLabel_33zx5_553 input,
+html[data-surface-glass='true'] body.kite-app .code-pane-rename input,
+html[data-surface-glass='true'] body.kite-app .workspace-notice,
+html[data-surface-glass='true'] body.kite-app .bv-help,
+html[data-surface-glass='true'] body.kite-app .bv-sound {
+  background: var(--glass-elevated-bg) !important;
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-highlight);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+html[data-surface-glass='true'] body.kite-app .files-edit-surface,
+html[data-surface-glass='true'] body.kite-app .files-code-scroll,
+html[data-surface-glass='true'] body.kite-app .files-binary-preview,
+html[data-surface-glass='true'] body.kite-app .pane-flip-cover {
+  background: var(--glass-code-bg) !important;
+}
+
+/* Tier 4: Floating Menus, Popovers, Tooltips, Modals, Sheets & Drag Chips */
+html[data-surface-glass='true'] body.kite-app .ui-menu,
+html[data-surface-glass='true'] body.kite-app .ui-popover,
+html[data-surface-glass='true'] body.kite-app .ui-popover[data-arrow]::before,
+html[data-surface-glass='true'] body.kite-app .ui-tooltip,
+html[data-surface-glass='true'] body.kite-app .select-menu,
+html[data-surface-glass='true'] body.kite-app .notification-center,
+html[data-surface-glass='true'] body.kite-app .whats-new,
+html[data-surface-glass='true'] body.kite-app .whats-new__hero,
+html[data-surface-glass='true'] body.kite-app .whats-new__release-title,
+html[data-surface-glass='true'] body.kite-app .bv-sheet,
+html[data-surface-glass='true'] body.kite-app .workspace-tab-row--lifted,
+html[data-surface-glass='true'] body.kite-app .workspace-row--lifted,
+html[data-surface-glass='true'] body.kite-app ._list_33zx5_149 ._row_33zx5_181[data-drag='carried'] ._selectButton_33zx5_229,
+html[data-surface-glass='true'] body.kite-app ._dragChip_114f5_715,
+html[data-surface-glass='true'] body.kite-app ._dragChip_v2cfp_389,
+html[data-surface-glass='true'] body.kite-app ._confirm_byshc_807,
+html[data-surface-glass='true'] body.kite-app .code-pane-dock-preview__label,
+html[data-surface-glass='true'] body.kite-app .pane-drag-ghost {
+  background: var(--glass-overlay-bg) !important;
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+}
+
+/* Floating tooltip & composers (drop nested backdrop-filter when hosted inside blurred islands) */
+html[data-surface-glass='true'] body.kite-app .chat-turn-rail__card {
+  background: var(--glass-overlay-bg) !important;
+  border-color: var(--glass-border) !important;
+  -webkit-backdrop-filter: blur(calc(var(--theme-surface-blur, 20px) * 0.7)) saturate(135%);
+  backdrop-filter: blur(calc(var(--theme-surface-blur, 20px) * 0.7)) saturate(135%);
+}
+
+html[data-surface-glass='true'] body.kite-app .composer,
+html[data-surface-glass='true'] body.kite-app .chat-composer {
+  background: var(--glass-elevated-bg) !important;
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-highlight);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+html[data-surface-glass='true'] body.kite-app :is(.sidebar, .pane, .right-dock, .code-pane-panel, .app-browser-sidebar, .settings-modal-window, .chat-surface) :is(.glass-overlay, .ui-menu, .ui-popover, .ui-tooltip, .select-menu, .composer, .chat-composer, .chat-turn-rail__card, .update-detail-card) {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Translucent terminal canvas tint without stacked backdrop-filter stalls */
+html[data-surface-glass='true'] body.kite-app .terminal-canvas-area,
+html[data-surface-glass='true'] body.kite-app .agent-terminal__live {
+  background: var(--glass-terminal-bg) !important;
 }

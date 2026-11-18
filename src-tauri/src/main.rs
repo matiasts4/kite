@@ -602,6 +602,7 @@ fn main() {
             save_files_text,
             save_launch_preset,
             save_shell_state,
+            save_theme_preferences,
             save_thread_grid,
             save_workspace_layout,
             search_transcripts,

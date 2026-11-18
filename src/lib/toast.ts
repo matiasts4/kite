@@ -26,9 +26,29 @@ export function registerToastNavigator(handlers: ToastNavigationHandlers | null)
 }
 
 /**
- * Default visual configuration for Kite Toasts
+ * Default fallback background color when theme tokens are unavailable
  */
-const DEFAULT_FILL = '#161922'; // Obsidian capsule matching Kite dark cards
+const DEFAULT_FILL = '#161922';
+
+function resolveToastFill(): string {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return DEFAULT_FILL;
+  }
+  const rootStyle = getComputedStyle(document.documentElement);
+  const rootPlate = rootStyle.getPropertyValue('--menu-plate').trim();
+  if (rootPlate) return rootPlate;
+  const rootPane = rootStyle.getPropertyValue('--pane').trim();
+  if (rootPane) return rootPane;
+
+  if (document.body) {
+    const bodyStyle = getComputedStyle(document.body);
+    const bodyPlate = bodyStyle.getPropertyValue('--menu-plate').trim();
+    if (bodyPlate) return bodyPlate;
+    const bodyPane = bodyStyle.getPropertyValue('--pane').trim();
+    if (bodyPane) return bodyPane;
+  }
+  return DEFAULT_FILL;
+}
 
 export interface KiteToastOptions extends Omit<SileoOptions, 'title'> {
   title?: string;
@@ -49,7 +69,7 @@ function resolveOptions(
   return {
     title,
     description,
-    fill: DEFAULT_FILL,
+    fill: resolveToastFill(),
     duration: 4500,
     ...options,
   };
@@ -162,23 +182,23 @@ export const toast = {
     const loadingOpts: SileoOptions =
       typeof messages.loading === 'string'
         ? resolveOptions(messages.loading, undefined, options)
-        : { fill: DEFAULT_FILL, ...messages.loading };
+        : { fill: resolveToastFill(), ...messages.loading };
 
     const rawSuccess = messages.success;
     const successOpts =
       typeof rawSuccess === 'function'
-        ? (data: T) => ({ fill: DEFAULT_FILL, ...rawSuccess(data) })
+        ? (data: T) => ({ fill: resolveToastFill(), ...rawSuccess(data) })
         : typeof rawSuccess === 'string'
         ? resolveOptions(rawSuccess, undefined, options)
-        : { fill: DEFAULT_FILL, ...rawSuccess };
+        : { fill: resolveToastFill(), ...rawSuccess };
 
     const rawError = messages.error;
     const errorOpts =
       typeof rawError === 'function'
-        ? (err: unknown) => ({ fill: DEFAULT_FILL, ...rawError(err) })
+        ? (err: unknown) => ({ fill: resolveToastFill(), ...rawError(err) })
         : typeof rawError === 'string'
         ? resolveOptions(rawError, undefined, options)
-        : { fill: DEFAULT_FILL, ...rawError };
+        : { fill: resolveToastFill(), ...rawError };
 
     return sileo.promise(promise, {
       loading: loadingOpts,
@@ -233,7 +253,7 @@ export const toast = {
     return sileo.action({
       title: `${actor}: Approval Required`,
       description: detail,
-      fill: DEFAULT_FILL,
+      fill: resolveToastFill(),
       duration: null, // Persistent until attended
       button: {
         title: 'Review',
@@ -269,7 +289,7 @@ export const toast = {
       return sileo.error({
         title: `${actor}: Attention Required`,
         description: detail,
-        fill: DEFAULT_FILL,
+        fill: resolveToastFill(),
         duration: 7000,
         button: {
           title: 'Inspect',
@@ -281,7 +301,7 @@ export const toast = {
     return sileo.success({
       title: `${actor}: Completed`,
       description: detail,
-      fill: DEFAULT_FILL,
+      fill: resolveToastFill(),
       duration: 5000,
       button: {
         title: 'Open',

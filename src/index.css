@@ -5,6 +5,7 @@
 @import "./motion/appIntro.css";
 @import "./motion/standard/standard.css";
 @import "./visual-language.css";
+@import "./components/theme/theme-visuals.css";
 
 
 /* Root theme presets */
@@ -37,13 +38,42 @@
   z-index: 0;
   min-width: 0;
   min-height: 0;
-  display: none;
+  display: flex;
   flex-direction: column;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mode-layer:not(.mode-layer--visible) .workspace-tab-layer--active,
+.mode-layer:not(.mode-layer--visible) .main-pane__layer--visible,
+.mode-layer[aria-hidden='true'] .workspace-tab-layer--active,
+.mode-layer[aria-hidden='true'] .main-pane__layer--visible {
+  visibility: hidden !important;
+  opacity: 0;
+  pointer-events: none !important;
 }
 
 .mode-layer--visible {
   z-index: 1;
-  display: flex;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Hide background workspace panes and sidebar while RightDock is maximized fullscreen */
+.workspace-shell:has(> .app-browser-sidebar--fullscreen) > .main-pane,
+.workspace-shell:has(> .app-browser-sidebar--fullscreen) > .sidebar {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-shell:has(> .app-browser-sidebar--fullscreen) > .main-pane .workspace-tab-layer--active,
+.workspace-shell:has(> .app-browser-sidebar--fullscreen) > .main-pane .main-pane__layer--visible {
+  visibility: hidden !important;
+  opacity: 0;
+  pointer-events: none !important;
 }
 
 /* Fullscreen mode for the right dock/browser sidebar */
@@ -61,9 +91,9 @@
   height: auto !important;
   margin-left: 0 !important;
   z-index: 10 !important;
-  background: var(--pane, #141414) !important;
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
+  background: var(--glass-island-bg, var(--pane, #141414)) !important;
+  -webkit-backdrop-filter: var(--glass-blur, none) !important;
+  backdrop-filter: var(--glass-blur, none) !important;
 }
 
 .app-browser-sidebar__spacer {
@@ -265,11 +295,9 @@ html, body, #root {
   margin: 0 8px 8px;
   padding: 10px 12px;
   border-radius: 14px;
-  background: rgba(22, 22, 26, 0.92);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  background: var(--glass-overlay-bg, rgba(22, 22, 26, 0.92));
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.09));
+  box-shadow: var(--glass-shadow, 0 8px 24px -2px rgba(0, 0, 0, 0.45));
   animation: update-card-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   display: flex;
   flex-direction: column;
@@ -280,24 +308,14 @@ html, body, #root {
   z-index: 10;
 }
 
-[data-theme="light"] .update-detail-card {
-  background: rgba(255, 255, 255, 0.95);
-  border-color: rgba(0, 0, 0, 0.1);
-  box-shadow: 0 8px 24px -2px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.05);
-}
-
-/* ==========================================================================
-   Right dock and menu styling
-   ========================================================================== */
-
 .ui-menu.side-panel-add-menu {
   min-width: 210px;
   max-width: 260px;
   width: max-content;
-  background: var(--menu-plate, #202020);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  background: var(--glass-overlay-bg, var(--menu-plate, #202020));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--radius-card, 10px);
-  box-shadow: var(--shadow-overlay, 0 16px 36px rgba(0, 0, 0, 0.55));
+  box-shadow: var(--glass-shadow, var(--shadow-overlay, 0 16px 36px rgba(0, 0, 0, 0.55)));
   padding: 4px;
 }
 
@@ -381,22 +399,25 @@ button.ui-menu__row {
   color: inherit;
 }
 
-/* ==========================================================================
-   Dark Select and Option Styling for Windows WebView2 / Chromium Popups
-   ========================================================================== */
+/* Native Select and Option Styling for Windows WebView2 / Chromium Popups */
 
-select,
+select {
+  color-scheme: inherit;
+  background-color: var(--glass-elevated-bg, #18181d);
+  color: var(--text-primary, #f4f4f6);
+}
+
 option,
 optgroup {
-  color-scheme: dark !important;
-  background-color: #18181d !important;
-  color: #f4f4f6 !important;
+  color-scheme: inherit;
+  background-color: var(--menu-plate, #18181d);
+  color: var(--text-primary, #f4f4f6);
 }
 
 select option:checked,
 select option:hover {
-  background-color: #27272a !important;
-  color: #ffffff !important;
+  background-color: var(--hover-fill, #27272a);
+  color: var(--text-primary, #ffffff);
 }
 
 /* Sidebar Archived Threads badge */
@@ -410,6 +431,23 @@ select option:hover {
   background: var(--chip-fill);
   color: var(--text-secondary);
 }
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin {
+    animation: none;
+  }
+}
+
 
 
 

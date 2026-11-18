@@ -1,5 +1,5 @@
 use crate::logger::log_trace;
-use crate::persist::{agents, workspaces, AgentProfile, Workspace};
+use crate::persist::{agents, app_state_get, app_state_set, workspaces, AgentProfile, Workspace};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -110,6 +110,27 @@ pub fn auth_sign_out(_request: Option<serde_json::Value>) -> serde_json::Value {
 }
 
 fn bootstrap_preferences() -> serde_json::Value {
+    let saved_theme_raw = app_state_get("themeCustomizations");
+    let saved_theme_json: Option<serde_json::Value> = saved_theme_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
+
+    let appearance = saved_theme_json
+        .as_ref()
+        .and_then(|v| v.get("appearanceMode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("dark");
+    let dark_theme = saved_theme_json
+        .as_ref()
+        .and_then(|v| v.get("darkThemeId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("kite-dark");
+    let light_theme = saved_theme_json
+        .as_ref()
+        .and_then(|v| v.get("lightThemeId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("kite-light");
+
     serde_json::json!({
         "schemaVersion": 1,
         "workMode": "code",
@@ -117,14 +138,26 @@ fn bootstrap_preferences() -> serde_json::Value {
         "selectedWorkspaceId": "a1111111-1111-4111-8111-111111111111",
         "selectedAgentId": "c3333333-3333-4333-8333-333333333333",
         "sidebarVisible": true,
-        "appearance": "dark",
+        "appearance": appearance,
         "zoomPercent": 100,
         "terminalPreference": { "kind": "default" },
         "usageMeter": { "showPlanUsage": true, "showPaneContext": true },
-        "darkTheme": "kite-dark",
-        "lightTheme": "kite-light",
+        "darkTheme": dark_theme,
+        "lightTheme": light_theme,
+        "themeCustomizations": saved_theme_json,
         "quitBehavior": "keepSessionsRunning"
     })
+}
+
+#[tauri::command]
+pub fn save_theme_preferences(preferences: Option<serde_json::Value>) -> serde_json::Value {
+    if let Some(pref) = preferences {
+        if let Ok(serialized) = serde_json::to_string(&pref) {
+            app_state_set("themeCustomizations", &serialized);
+            return serde_json::json!({ "ok": true });
+        }
+    }
+    serde_json::json!({ "ok": false })
 }
 
 pub fn bootstrap_sync() -> BootstrapResponse {
@@ -171,5 +204,21 @@ mod tests {
         let second = bootstrap_sync();
         assert_eq!(second.workspaces.len(), first.workspaces.len());
         assert_eq!(second.agents.len(), first.agents.len());
+    }
+
+    #[test]
+    fn save_theme_preferences_round_trips_into_bootstrap_preferences() {
+        let payload = serde_json::json!({
+            "schemaVersion": 1,
+            "appearanceMode": "dark",
+            "darkThemeId": "aurora-studio",
+            "lightThemeId": "warm-atelier"
+        });
+        let res = save_theme_preferences(Some(payload));
+        assert_eq!(res.get("ok").and_then(|v| v.as_bool()), Some(true));
+
+        let prefs = bootstrap_preferences();
+        assert_eq!(prefs.get("darkTheme").and_then(|v| v.as_str()), Some("aurora-studio"));
+        assert_eq!(prefs.get("lightTheme").and_then(|v| v.as_str()), Some("warm-atelier"));
     }
 }

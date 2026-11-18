@@ -7,6 +7,14 @@ import {
   redactSecrets,
 } from '../../../lib/operator/runLedger';
 
+const OUTCOME_LABELS: Record<string, string> = {
+  all: 'Todos los resultados',
+  success: 'Éxito',
+  failure: 'Fallo',
+  timeout: 'Tiempo agotado',
+  cancelled: 'Cancelado',
+};
+
 interface TelemetryTabProps {
   telemetryPrefs: TelemetryPrefs;
   telemetryIdentity: TelemetryIdentity | null;
@@ -166,17 +174,17 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
   return (
     <div className="space-y-6">
       <section className="settings-group">
-        <h2 className="settings-group__title">Privacy</h2>
+        <h2 className="settings-group__title">Privacidad</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Product analytics</h3>
-              <p>Share feature usage to improve Kite Code. No prompts, files, or email addresses.</p>
+              <h3 className="settings-row__title">Analítica de producto</h3>
+              <p>Comparte el uso de funciones para mejorar Kite Code. Sin prompts, archivos ni direcciones de correo.</p>
             </div>
             <div className="settings-row__control">
               <button
                 aria-checked={telemetryPrefs.analytics}
-                aria-label="Product analytics"
+                aria-label="Analítica de producto"
                 className="ui-switch"
                 onClick={() => onToggleTelemetry('analytics')}
                 role="switch"
@@ -189,13 +197,13 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Crash and error reports</h3>
-              <p>Share redacted crash reports and failure categories to help fix production errors.</p>
+              <h3 className="settings-row__title">Informes de fallos y errores</h3>
+              <p>Comparte informes redactados de fallos y categorías de error para corregir problemas de producción.</p>
             </div>
             <div className="settings-row__control">
               <button
                 aria-checked={telemetryPrefs.diagnostics}
-                aria-label="Crash and error reports"
+                aria-label="Informes de fallos y errores"
                 className="ui-switch"
                 onClick={() => onToggleTelemetry('diagnostics')}
                 role="switch"
@@ -208,43 +216,43 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Anonymous identifier</h3>
+              <h3 className="settings-row__title">Identificador anónimo</h3>
               <p>
                 {telemetryIdentity?.id
                   ? `${telemetryIdentity.id.slice(0, 32)}…`
-                  : 'Local hardware signature generated on device.'}
+                  : 'Firma local de hardware generada en el dispositivo.'}
               </p>
             </div>
             <div className="settings-row__control">
               <span className="settings-badge" data-tone={telemetryIdentity?.ready ? 'running' : 'accent'}>
-                {telemetryIdentity?.ready ? 'Ready' : 'Local'}
+                {telemetryIdentity?.ready ? 'Listo' : 'Local'}
               </span>
             </div>
           </div>
         </div>
         <p className="settings-note">
-          Privacy settings are preserved locally on this device.
+          La configuración de privacidad se conserva localmente en este dispositivo.
         </p>
       </section>
 
       {/* Operator Run History & Execution Observability */}
       <section className="settings-group">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="settings-group__title">Operator Latency & Run History</h2>
+          <h2 className="settings-group__title">Latencia del operador e historial de ejecuciones</h2>
           <div className="flex items-center gap-2">
             <button
               className="px-2.5 py-1 text-xs rounded border border-neutral-700 hover:bg-neutral-800 text-neutral-300 transition"
               onClick={() => handleExport('json')}
-              title="Export filtered runs as JSON"
+              title="Exportar ejecuciones filtradas como JSON"
             >
-              Export JSON
+              Exportar JSON
             </button>
             <button
               className="px-2.5 py-1 text-xs rounded border border-neutral-700 hover:bg-neutral-800 text-neutral-300 transition"
               onClick={() => handleExport('jsonl')}
-              title="Export filtered runs as JSONL"
+              title="Exportar ejecuciones filtradas como JSONL"
             >
-              Export JSONL
+              Exportar JSONL
             </button>
             <button
               className={`px-2.5 py-1 text-xs rounded border transition ${
@@ -254,9 +262,9 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
               }`}
               onClick={handleClearHistory}
               onMouseLeave={() => setConfirmClear(false)}
-              title="Clear all stored local operator runs"
+              title="Borrar todas las ejecuciones locales almacenadas del operador"
             >
-              {confirmClear ? 'Click again to confirm' : 'Clear history'}
+              {confirmClear ? 'Haz clic de nuevo para confirmar' : 'Limpiar historial'}
             </button>
           </div>
         </div>
@@ -270,50 +278,50 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
         {/* Aggregated Stats Badges */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
           <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800">
-            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">p50 Latency</div>
+            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Latencia p50</div>
             <div className="text-xl font-semibold text-neutral-100">{stats.p50} ms</div>
           </div>
           <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800">
-            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">p95 Latency</div>
+            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Latencia p95</div>
             <div className="text-xl font-semibold text-neutral-100">{stats.p95} ms</div>
           </div>
           <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800">
-            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Avg Latency</div>
+            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Latencia prom.</div>
             <div className="text-xl font-semibold text-neutral-100">{stats.avg} ms</div>
           </div>
           <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800">
-            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Total Runs</div>
+            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Ejecuciones</div>
             <div className="text-xl font-semibold text-neutral-100">{filteredRuns.length}</div>
           </div>
           <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800">
-            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Success Rate</div>
+            <div className="text-[11px] text-neutral-400 uppercase tracking-wider">Tasa de éxito</div>
             <div className="text-xl font-semibold text-emerald-400">{successRate}%</div>
           </div>
         </div>
 
         {/* Filters Grid */}
         <div className="p-3 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-3 mb-4">
-          <div className="text-xs font-medium text-neutral-300">Filter History</div>
+          <div className="text-xs font-medium text-neutral-300">Filtrar historial</div>
           <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 gap-2 text-xs">
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Run ID</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">ID de ejecución</label>
               <input
                 type="text"
                 value={runIdFilter}
                 onChange={(e) => setRunIdFilter(e.target.value)}
-                placeholder="Search runId…"
+                placeholder="Buscar runId…"
                 className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
               />
             </div>
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Provider</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">Proveedor</label>
               <SelectMenu
-                label="Provider"
+                label="Proveedor"
                 variant="field"
                 className="settings-select"
                 value={providerFilter}
                 rows={[
-                  { id: 'all', title: 'All Providers' },
+                  { id: 'all', title: 'Todos los proveedores' },
                   { id: 'local', title: 'local' },
                   { id: 'opencode', title: 'opencode' },
                   { id: 'vercel', title: 'vercel' },
@@ -321,29 +329,29 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                   { id: 'grok', title: 'grok' },
                   { id: 'antigravity', title: 'antigravity' },
                 ]}
-                triggerLabel={providerFilter === 'all' ? 'All Providers' : providerFilter}
+                triggerLabel={providerFilter === 'all' ? 'Todos los proveedores' : providerFilter}
                 onSelect={setProviderFilter}
               />
             </div>
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Model</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">Modelo</label>
               <input
                 type="text"
                 value={modelFilter}
                 onChange={(e) => setModelFilter(e.target.value)}
-                placeholder="e.g. deepseek, gpt-4o…"
+                placeholder="ej. deepseek, gpt-4o…"
                 className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
               />
             </div>
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Task Type</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">Tipo de tarea</label>
               <SelectMenu
-                label="Task Type"
+                label="Tipo de tarea"
                 variant="field"
                 className="settings-select"
                 value={taskTypeFilter}
                 rows={[
-                  { id: 'all', title: 'All Tasks' },
+                  { id: 'all', title: 'Todas las tareas' },
                   { id: 'open_terminals', title: 'open_terminals' },
                   { id: 'close_terminals', title: 'close_terminals' },
                   { id: 'inject_prompt', title: 'inject_prompt' },
@@ -353,38 +361,34 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                   { id: 'chat_response', title: 'chat_response' },
                   { id: 'deterministic', title: 'deterministic' },
                 ]}
-                triggerLabel={taskTypeFilter === 'all' ? 'All Tasks' : taskTypeFilter}
+                triggerLabel={taskTypeFilter === 'all' ? 'Todas las tareas' : taskTypeFilter}
                 onSelect={setTaskTypeFilter}
               />
             </div>
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Outcome</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">Resultado</label>
               <SelectMenu
-                label="Outcome"
+                label="Resultado"
                 variant="field"
                 className="settings-select"
                 value={outcomeFilter}
                 rows={[
-                  { id: 'all', title: 'All Outcomes' },
-                  { id: 'success', title: 'Success' },
-                  { id: 'failure', title: 'Failure' },
-                  { id: 'timeout', title: 'Timeout' },
-                  { id: 'cancelled', title: 'Cancelled' },
+                  { id: 'all', title: 'Todos los resultados' },
+                  { id: 'success', title: 'Éxito' },
+                  { id: 'failure', title: 'Fallo' },
+                  { id: 'timeout', title: 'Tiempo agotado' },
+                  { id: 'cancelled', title: 'Cancelado' },
                 ]}
-                triggerLabel={
-                  outcomeFilter === 'all'
-                    ? 'All Outcomes'
-                    : outcomeFilter.charAt(0).toUpperCase() + outcomeFilter.slice(1)
-                }
+                triggerLabel={OUTCOME_LABELS[outcomeFilter] ?? outcomeFilter}
                 onSelect={setOutcomeFilter}
               />
             </div>
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Latency Range (ms)</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">Rango de latencia (ms)</label>
               <div className="flex items-center gap-1">
                 <input
                   type="number"
-                  placeholder="Min"
+                  placeholder="Mín"
                   value={minLatency}
                   onChange={(e) => setMinLatency(e.target.value)}
                   className="w-1/2 px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
@@ -392,7 +396,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                 <span className="text-neutral-500">-</span>
                 <input
                   type="number"
-                  placeholder="Max"
+                  placeholder="Máx"
                   value={maxLatency}
                   onChange={(e) => setMaxLatency(e.target.value)}
                   className="w-1/2 px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 focus:outline-none focus:border-neutral-600"
@@ -400,7 +404,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
               </div>
             </div>
             <div>
-              <label className="block text-[10px] text-neutral-400 mb-0.5">Date</label>
+              <label className="block text-[10px] text-neutral-400 mb-0.5">Fecha</label>
               <input
                 type="date"
                 value={dateFilter}
@@ -422,7 +426,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                   setDateFilter('');
                 }}
               >
-                Reset filters
+                Restablecer filtros
               </button>
             </div>
           </div>
@@ -432,17 +436,17 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
         <div className="border border-neutral-800 rounded-lg overflow-hidden bg-neutral-950">
           {filteredRuns.length === 0 ? (
             <div className="p-8 text-center text-xs text-neutral-500">
-              No operator runs match the selected criteria.
+              Ninguna ejecución del operador coincide con los criterios seleccionados.
             </div>
           ) : (
             <div className="divide-y divide-neutral-900 text-xs">
               <div className="grid grid-cols-12 gap-2 p-2.5 bg-neutral-900/80 font-medium text-neutral-400 text-[11px]">
-                <div className="col-span-3">Run ID</div>
-                <div className="col-span-2">Task Type</div>
-                <div className="col-span-3">Provider / Model</div>
-                <div className="col-span-1 text-right">Latency</div>
-                <div className="col-span-1 text-center">Status</div>
-                <div className="col-span-2 text-right">Timestamp</div>
+                <div className="col-span-3">ID de ejecución</div>
+                <div className="col-span-2">Tipo de tarea</div>
+                <div className="col-span-3">Proveedor / Modelo</div>
+                <div className="col-span-1 text-right">Latencia</div>
+                <div className="col-span-1 text-center">Estado</div>
+                <div className="col-span-2 text-right">Hora</div>
               </div>
               {filteredRuns.map((r) => {
                 const isExpanded = expandedRunId === r.runId;
@@ -478,7 +482,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                       </div>
                       <div className="col-span-1 text-center">
                         <span className={`px-1.5 py-0.5 rounded text-[10px] border ${statusColor}`}>
-                          {r.outcome || 'unknown'}
+                          {(r.outcome && OUTCOME_LABELS[r.outcome]) || r.outcome || 'desconocido'}
                         </span>
                       </div>
                       <div className="col-span-2 text-right text-neutral-500 text-[11px]">
@@ -490,46 +494,46 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                     {isExpanded && (
                       <div className="p-3 bg-neutral-900/40 border-t border-neutral-900 space-y-2 text-[11px]">
                         <div>
-                          <span className="text-neutral-500 font-medium">Input: </span>
+                          <span className="text-neutral-500 font-medium">Entrada: </span>
                           <span className="text-neutral-200 font-mono">{redactSecrets(r.input)}</span>
                         </div>
                         {r.reply && (
                           <div>
-                            <span className="text-neutral-500 font-medium">Reply: </span>
+                            <span className="text-neutral-500 font-medium">Respuesta: </span>
                             <span className="text-neutral-200">{redactSecrets(r.reply)}</span>
                           </div>
                         )}
                         {r.errorCategory && (
                           <div>
-                            <span className="text-rose-400 font-medium">Error Category: </span>
+                            <span className="text-rose-400 font-medium">Categoría de error: </span>
                             <span className="text-rose-300 font-mono">{r.errorCategory}</span>
                           </div>
                         )}
                         {/* Timestamps */}
                         <div className="pt-1">
-                          <span className="text-neutral-500 font-medium">Timeline Timestamps:</span>
+                          <span className="text-neutral-500 font-medium">Marcas de tiempo:</span>
                           <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-mono text-neutral-400">
-                            {r.timestamps.input && <span>input: {r.timestamps.input}</span>}
-                            {r.timestamps.providerRequest && <span>request: +{r.timestamps.providerRequest - r.startedAt}ms</span>}
-                            {r.timestamps.firstToken && <span>first_token: +{r.timestamps.firstToken - r.startedAt}ms</span>}
-                            {r.timestamps.toolCallEmission && <span>tool_emission: +{r.timestamps.toolCallEmission - r.startedAt}ms</span>}
-                            {r.timestamps.toolStart && <span>tool_start: +{r.timestamps.toolStart - r.startedAt}ms</span>}
-                            {r.timestamps.toolEnd && <span>tool_end: +{r.timestamps.toolEnd - r.startedAt}ms</span>}
-                            {r.timestamps.terminalExecution && <span>terminal_exec: +{r.timestamps.terminalExecution - r.startedAt}ms</span>}
-                            {r.timestamps.finalResponse && <span>final_response: +{r.timestamps.finalResponse - r.startedAt}ms</span>}
+                            {r.timestamps.input && <span>entrada: {r.timestamps.input}</span>}
+                            {r.timestamps.providerRequest && <span>solicitud: +{r.timestamps.providerRequest - r.startedAt}ms</span>}
+                            {r.timestamps.firstToken && <span>primer_token: +{r.timestamps.firstToken - r.startedAt}ms</span>}
+                            {r.timestamps.toolCallEmission && <span>emisión_herramienta: +{r.timestamps.toolCallEmission - r.startedAt}ms</span>}
+                            {r.timestamps.toolStart && <span>inicio_herramienta: +{r.timestamps.toolStart - r.startedAt}ms</span>}
+                            {r.timestamps.toolEnd && <span>fin_herramienta: +{r.timestamps.toolEnd - r.startedAt}ms</span>}
+                            {r.timestamps.terminalExecution && <span>ejec_terminal: +{r.timestamps.terminalExecution - r.startedAt}ms</span>}
+                            {r.timestamps.finalResponse && <span>respuesta_final: +{r.timestamps.finalResponse - r.startedAt}ms</span>}
                           </div>
                         </div>
 
                         {/* Tool Calls */}
                         {r.toolCalls.length > 0 && (
                           <div className="pt-1">
-                            <span className="text-neutral-500 font-medium">Tool Calls ({r.toolCalls.length}):</span>
+                            <span className="text-neutral-500 font-medium">Llamadas a herramientas ({r.toolCalls.length}):</span>
                             <div className="mt-1 space-y-1">
                               {r.toolCalls.map((tc, idx) => (
                                 <div key={idx} className="p-1.5 rounded bg-neutral-950 border border-neutral-800 font-mono text-[10px]">
                                   <div className="flex justify-between text-neutral-300">
                                     <span>{tc.name}</span>
-                                    <span>hash: {tc.argumentsHash} | {tc.ok !== false ? 'OK' : 'FAIL'}</span>
+                                    <span>hash: {tc.argumentsHash} | {tc.ok !== false ? 'OK' : 'FALLO'}</span>
                                   </div>
                                   {tc.arguments && (
                                     <div className="text-neutral-400 truncate mt-0.5">
@@ -545,11 +549,11 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                         {/* Terminal Outputs */}
                         {r.terminalOutputs.length > 0 && (
                           <div className="pt-1">
-                            <span className="text-neutral-500 font-medium">Terminal Output Excerpts:</span>
+                            <span className="text-neutral-500 font-medium">Extractos de salida de terminal:</span>
                             <div className="mt-1 space-y-1">
                               {r.terminalOutputs.map((to, idx) => (
                                 <div key={idx} className="p-1.5 rounded bg-neutral-950 border border-neutral-800 font-mono text-[10px] text-neutral-400">
-                                  <div className="text-neutral-500 mb-0.5">Terminal: {to.terminalId || 'unknown'} (exit {to.exitCode ?? 0})</div>
+                                  <div className="text-neutral-500 mb-0.5">Terminal: {to.terminalId || 'desconocida'} (código de salida {to.exitCode ?? 0})</div>
                                   <div className="break-all whitespace-pre-wrap">{redactSecrets(to.excerpt)}</div>
                                 </div>
                               ))}
@@ -560,7 +564,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
                         {/* Tokens */}
                         {r.tokenCounts && (
                           <div className="text-[10px] text-neutral-500 pt-1">
-                            Tokens: prompt={r.tokenCounts.prompt ?? 0}, completion={r.tokenCounts.completion ?? 0}, cache={r.tokenCounts.cache ?? 0}
+                            Tokens: entrada={r.tokenCounts.prompt ?? 0}, salida={r.tokenCounts.completion ?? 0}, caché={r.tokenCounts.cache ?? 0}
                           </div>
                         )}
                       </div>
@@ -572,7 +576,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({
           )}
         </div>
         <p className="settings-note mt-2">
-          Raw secrets, API keys, and unbounded terminal output are never persisted or displayed.
+          Los secretos sin cifrar, claves de API y salidas extensas de terminal nunca se almacenan ni se muestran.
         </p>
       </section>
     </div>

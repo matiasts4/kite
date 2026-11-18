@@ -102,7 +102,7 @@
   width: 100%;
   min-height: 0;
   min-width: 0;
-  background-color: var(--pane, #0d1117);
+  background-color: var(--glass-island-bg, var(--pane, #0d1117));
   color: var(--text-primary, #f0f6fc);
   position: relative;
   overflow: hidden;
@@ -115,7 +115,9 @@
   gap: 12px;
   display: flex;
   flex: none;
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-bottom: 1px solid var(--separator, #21262d);
   z-index: 10;
 }
@@ -182,8 +184,8 @@
 }
 
 .agent-roster-select {
-  background: var(--block-fill, #161b22);
-  border: 1px solid var(--block-stroke, #30363d);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
+  border: 1px solid var(--glass-border, var(--block-stroke, #30363d));
   border-radius: var(--radius-chip, 6px);
   color: var(--text-primary, #f0f6fc);
   font-size: var(--text-caption, 12px);
@@ -258,7 +260,9 @@
   border-bottom: 1px solid var(--separator, #21262d);
   align-items: flex-end;
   display: flex;
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   flex: none;
 }
 
@@ -370,9 +374,9 @@
 /* Feedback & alerts */
 .agent-feedback {
   margin: 0 0 var(--space-4);
-  border: 1px solid var(--block-stroke, #30363d);
+  border: 1px solid var(--glass-border, var(--block-stroke, #30363d));
   border-radius: var(--radius-row, 8px);
-  background: var(--block-fill, #161b22);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
   font-size: var(--text-row, 13px);
   line-height: var(--leading-row, 18px);
   padding: 9px 12px;
@@ -397,7 +401,9 @@
    Agent terminal surface
    ========================================================================== */
 .agent-terminal {
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   min-height: 0;
   animation: agent-terminal-in var(--duration-nav, 200ms) var(--ease-snappy, cubic-bezier(0.16, 1, 0.3, 1)) both;
   flex-direction: column;
@@ -494,7 +500,7 @@
 }
 
 .agent-terminal__live {
-  background: var(--terminal-canvas, #000000);
+  background: var(--glass-terminal-bg, var(--terminal-canvas, #000000));
   flex-direction: column;
   flex: 1 1 0%;
   min-height: 0;
@@ -503,7 +509,9 @@
 
 .agent-terminal__toolbar {
   border-bottom: 1px solid var(--block-stroke, #30363d);
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   align-items: center;
   gap: 6px;
   min-height: 34px;
@@ -544,7 +552,9 @@
 
 .agent-terminal__readonly,
 .agent-terminal__inline-error {
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--text-secondary, #8b949e);
   font-size: var(--text-caption, 12px);
   line-height: var(--leading-caption, 16px);

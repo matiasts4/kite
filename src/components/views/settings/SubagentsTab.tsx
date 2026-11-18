@@ -29,19 +29,19 @@ const POLICY_OPTIONS: Array<{
 }> = [
   {
     id: 'allow',
-    label: 'Allow',
-    description: 'Agents may launch any connected provider or model freely.',
+    label: 'Permitir',
+    description: 'Los agentes pueden iniciar cualquier proveedor o modelo conectado libremente.',
   },
   {
     id: 'ask',
-    label: 'Ask',
+    label: 'Preguntar',
     description:
-      'Agents stay inside your enabled stack unless you request an explicit --override-stack run.',
+      'Los agentes permanecen dentro de tu stack habilitado salvo que solicites explícitamente una ejecución con --override-stack.',
   },
   {
     id: 'strict',
-    label: 'Strict',
-    description: 'Only enabled models in your curated stack are permitted.',
+    label: 'Estricto',
+    description: 'Solo se permiten los modelos habilitados en tu stack curado.',
   },
 ];
 
@@ -74,9 +74,9 @@ function emptyRoleDraft(defaultScope: 'global' | 'workspace'): RoleDraft {
 }
 
 function providerStatusLabel(state: string): string {
-  if (state === 'ready') return 'Ready';
-  if (state === 'missing-binary') return 'Missing CLI';
-  if (state === 'signed-out') return 'Signed out';
+  if (state === 'ready') return 'Listo';
+  if (state === 'missing-binary') return 'Falta CLI';
+  if (state === 'signed-out') return 'Sesión cerrada';
   return state;
 }
 
@@ -176,7 +176,7 @@ export const SubagentsTab: React.FC = () => {
       })
       .catch((err) => {
         if (!active) return;
-        setError(err instanceof Error ? err.message : 'Failed to load subagent settings.');
+        setError(err instanceof Error ? err.message : 'No se pudo cargar la configuración de subagentes.');
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -234,7 +234,7 @@ export const SubagentsTab: React.FC = () => {
         const snap = await saveSubagentSettings(next, { workspacePath });
         applySnapshot(snap);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to save subagent settings.');
+        setError(err instanceof Error ? err.message : 'No se pudo guardar la configuración de subagentes.');
       } finally {
         setSaving(false);
       }
@@ -362,7 +362,7 @@ export const SubagentsTab: React.FC = () => {
     if (!roleDraft || saving) return;
     const slug = roleDraft.slug.trim();
     if (!slug) {
-      setError('Role slug is required.');
+      setError('El identificador del rol es obligatorio.');
       return;
     }
     const provider = roleDraft.provider.trim() || null;
@@ -385,7 +385,7 @@ export const SubagentsTab: React.FC = () => {
       setRoles(res.roles);
       setRoleDraft(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save role profile.');
+      setError(err instanceof Error ? err.message : 'No se pudo guardar el perfil de rol.');
     } finally {
       setSaving(false);
     }
@@ -402,7 +402,7 @@ export const SubagentsTab: React.FC = () => {
         setRoleDraft(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete role profile.');
+      setError(err instanceof Error ? err.message : 'No se pudo eliminar el perfil de rol.');
     } finally {
       setSaving(false);
     }
@@ -413,7 +413,7 @@ export const SubagentsTab: React.FC = () => {
       providers.map((p) => ({
         id: p.provider,
         title: getEngineDisplayName(p.provider),
-        detail: `${providerStatusLabel(p.state)}${p.modelCount > 0 ? ` · ${p.modelCount} models` : ''}`,
+        detail: `${providerStatusLabel(p.state)}${p.modelCount > 0 ? ` · ${p.modelCount} modelos` : ''}`,
         badge: providerStatusLabel(p.state),
         engine: p.provider,
       })),
@@ -431,7 +431,7 @@ export const SubagentsTab: React.FC = () => {
         ? selectedModelMeta.effortLevels
         : DEFAULT_EFFORT_LEVELS;
     return [
-      { id: AUTO_SENTINEL, title: 'Provider default', detail: 'Use model default effort' },
+      { id: AUTO_SENTINEL, title: 'Por defecto del proveedor', detail: 'Usar el esfuerzo predeterminado del modelo' },
       ...levels.map((level) => ({ id: level, title: level })),
     ];
   }, [selectedModelMeta]);
@@ -441,12 +441,12 @@ export const SubagentsTab: React.FC = () => {
       id: m.id,
       title: m.label || m.name || m.id,
       detail: m.name && m.name !== m.id ? m.id : undefined,
-      badge: m.defaultEffort ? `default: ${m.defaultEffort}` : undefined,
+      badge: m.defaultEffort ? `por defecto: ${m.defaultEffort}` : undefined,
     }));
     rows.push({
       id: CUSTOM_MODEL_SENTINEL,
-      title: 'Custom model ID...',
-      detail: 'Type an exact model identifier for this provider',
+      title: 'ID de modelo personalizado...',
+      detail: 'Escribe el identificador exacto del modelo para este proveedor',
       ruleBefore: rows.length > 0,
     });
     return rows;
@@ -456,15 +456,15 @@ export const SubagentsTab: React.FC = () => {
     const rows: SelectMenuRow[] = [
       {
         id: AUTO_SENTINEL,
-        title: 'Automatic',
-        detail: 'Orchestrator chooses a connected provider and model dynamically',
+        title: 'Automático',
+        detail: 'El orquestador elige dinámicamente un proveedor y modelo conectado',
       },
     ];
     for (const entry of settings.stack.filter((s) => s.enabled)) {
       rows.push({
         id: `${entry.provider}::${entry.model}`,
         title: `${getEngineDisplayName(entry.provider)} · ${entry.model}`,
-        detail: entry.effort ? `Effort: ${entry.effort} (Curated stack)` : 'Curated stack entry',
+        detail: entry.effort ? `Esfuerzo: ${entry.effort} (Stack curado)` : 'Entrada del stack curado',
         badge: 'Stack',
         engine: entry.provider,
       });
@@ -478,7 +478,7 @@ export const SubagentsTab: React.FC = () => {
           rows.push({
             id: key,
             title: `${getEngineDisplayName(p.provider)} · ${sample}`,
-            detail: `Connected ${providerStatusLabel(p.state).toLowerCase()}`,
+            detail: `Conectado · ${providerStatusLabel(p.state).toLowerCase()}`,
             engine: p.provider,
           });
         }
@@ -493,14 +493,14 @@ export const SubagentsTab: React.FC = () => {
 
   const activeDefaultLabel = settings.defaultDelegation
     ? `${getEngineDisplayName(settings.defaultDelegation.provider)} · ${settings.defaultDelegation.model}`
-    : 'Automatic';
+    : 'Automático';
 
   const activePolicyMeta =
     POLICY_OPTIONS.find((opt) => opt.id === settings.overridePolicy) ?? POLICY_OPTIONS[0];
 
   const roleProviderRows: SelectMenuRow[] = useMemo(
     () => [
-      { id: AUTO_SENTINEL, title: 'Inherit / Stack default', detail: 'Use configured stack default' },
+      { id: AUTO_SENTINEL, title: 'Heredar / Por defecto del stack', detail: 'Usar el valor predeterminado configurado en el stack' },
       ...providers.map((p) => ({
         id: p.provider,
         title: getEngineDisplayName(p.provider),
@@ -512,14 +512,14 @@ export const SubagentsTab: React.FC = () => {
   );
 
   const roleWorkspaceRows: SelectMenuRow[] = [
-    { id: AUTO_SENTINEL, title: 'Default (inherit)', detail: 'Let caller decide workspace mode' },
-    { id: 'inherit', title: 'inherit', detail: 'Share the active repository directory' },
-    { id: 'share', title: 'share', detail: 'Create an isolated shared worktree' },
-    { id: 'branch', title: 'branch', detail: 'Clone an isolated git branch copy' },
+    { id: AUTO_SENTINEL, title: 'Por defecto (heredar)', detail: 'Permitir que quien delega decida el modo de espacio de trabajo' },
+    { id: 'inherit', title: 'inherit', detail: 'Compartir el directorio del repositorio activo' },
+    { id: 'share', title: 'share', detail: 'Crear un worktree compartido aislado' },
+    { id: 'branch', title: 'branch', detail: 'Clonar una copia aislada en rama git' },
   ];
 
   const roleEffortRows: SelectMenuRow[] = [
-    { id: AUTO_SENTINEL, title: 'Default effort', detail: 'Inherit provider default effort' },
+    { id: AUTO_SENTINEL, title: 'Esfuerzo por defecto', detail: 'Heredar el esfuerzo predeterminado del proveedor' },
     ...DEFAULT_EFFORT_LEVELS.map((level) => ({ id: level, title: level })),
   ];
 
@@ -533,7 +533,7 @@ export const SubagentsTab: React.FC = () => {
             className="ghost-button subagent-settings__dismiss"
             onClick={() => setError(null)}
           >
-            Dismiss
+            Descartar
           </button>
         </div>
       )}
@@ -541,16 +541,16 @@ export const SubagentsTab: React.FC = () => {
       {/* 1. Override Policy & Default Lightweight Delegation */}
       <section className="settings-group" aria-labelledby="settings-subagents-policy-title">
         <h2 id="settings-subagents-policy-title" className="settings-group__title">
-          Delegation Policy &amp; Default
+          Política de delegación y modelo predeterminado
         </h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Stack override policy</h3>
+              <h3 className="settings-row__title">Política de cambios del stack</h3>
               <p>{activePolicyMeta.description}</p>
             </div>
             <div className="settings-row__control">
-              <fieldset aria-label="Stack override policy" className="ui-segmented">
+              <fieldset aria-label="Política de cambios del stack" className="ui-segmented">
                 {POLICY_OPTIONS.map((option) => (
                   <button
                     key={option.id}
@@ -572,12 +572,12 @@ export const SubagentsTab: React.FC = () => {
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Default lightweight model</h3>
-              <p>Used when an agent delegates without specifying `--provider` or `--model`.</p>
+              <h3 className="settings-row__title">Modelo ligero predeterminado</h3>
+              <p>Se usa cuando un agente delega sin especificar `--provider` ni `--model`.</p>
             </div>
             <div className="settings-row__control settings-row__control--menu">
               <SelectMenu
-                label="Default lightweight model"
+                label="Modelo ligero predeterminado"
                 variant="field"
                 className="settings-select"
                 searchable
@@ -597,10 +597,10 @@ export const SubagentsTab: React.FC = () => {
       <section className="settings-group" aria-labelledby="settings-subagents-stack-title">
         <div className="subagent-settings__section-head">
           <h2 id="settings-subagents-stack-title" className="settings-group__title">
-            Curated Model Stack ({settings.stack.filter((s) => s.enabled).length} enabled)
+            Stack de modelos curado ({settings.stack.filter((s) => s.enabled).length} habilitados)
           </h2>
           <span className="subagent-settings__hint">
-            Leave empty to allow any discovered model when policy is Allow.
+            Déjalo vacío para permitir cualquier modelo detectado cuando la política es Permitir.
           </span>
         </div>
 
@@ -608,10 +608,10 @@ export const SubagentsTab: React.FC = () => {
           {settings.stack.length === 0 ? (
             <div className="ui-card__row settings-row">
               <div className="settings-row__copy">
-                <h3 className="settings-row__title">No curated stack entries yet</h3>
+                <h3 className="settings-row__title">Aún no hay modelos en el stack curado</h3>
                 <p>
-                  Add preferred models below so orchestrators and swarms stay on your chosen
-                  subscriptions.
+                  Agrega abajo tus modelos preferidos para que los orquestadores y enjambres usen
+                  tus suscripciones elegidas.
                 </p>
               </div>
             </div>
@@ -628,8 +628,8 @@ export const SubagentsTab: React.FC = () => {
                     )}
                   </h3>
                   <p>
-                    Provider: {entry.provider}
-                    {entry.enabled ? ' · Active in stack' : ' · Paused'}
+                    Proveedor: {entry.provider}
+                    {entry.enabled ? ' · Activo en el stack' : ' · En pausa'}
                   </p>
                 </div>
                 <div className="settings-row__control">
@@ -637,7 +637,7 @@ export const SubagentsTab: React.FC = () => {
                     type="button"
                     role="switch"
                     aria-checked={entry.enabled}
-                    aria-label={`Toggle ${entry.provider}/${entry.model}`}
+                    aria-label={`Alternar ${entry.provider}/${entry.model}`}
                     className="ui-switch"
                     disabled={saving}
                     onClick={() => handleToggleEntry(idx)}
@@ -647,8 +647,8 @@ export const SubagentsTab: React.FC = () => {
                   <button
                     type="button"
                     className="ghost-button subagent-settings__icon-btn"
-                    aria-label={`Remove ${entry.provider}/${entry.model}`}
-                    title="Remove from stack"
+                    aria-label={`Quitar ${entry.provider}/${entry.model}`}
+                    title="Quitar del stack"
                     disabled={saving}
                     onClick={() => handleRemoveEntry(idx)}
                   >
@@ -663,7 +663,7 @@ export const SubagentsTab: React.FC = () => {
             <div className="subagent-settings__builder">
               <div className="subagent-settings__builder-field">
                 <SelectMenu
-                  label="Provider"
+                  label="Proveedor"
                   variant="field"
                   className="settings-select"
                   value={selectedProvider}
@@ -681,16 +681,16 @@ export const SubagentsTab: React.FC = () => {
 
               <div className="subagent-settings__builder-field subagent-settings__builder-field--wide">
                 <SelectMenu
-                  label="Model"
+                  label="Modelo"
                   variant="field"
                   className="settings-select"
                   searchable
                   value={selectedModel}
                   triggerLabel={
                     loadingModels
-                      ? 'Loading models...'
+                      ? 'Cargando modelos...'
                       : selectedModel === CUSTOM_MODEL_SENTINEL
-                        ? customModel.trim() || 'Custom model ID...'
+                        ? customModel.trim() || 'ID de modelo personalizado...'
                         : selectedModelMeta?.label ||
                           selectedModelMeta?.name ||
                           selectedModel
@@ -704,8 +704,8 @@ export const SubagentsTab: React.FC = () => {
               <button
                 type="button"
                 className="ghost-button subagent-settings__icon-btn"
-                aria-label="Refresh provider models"
-                title="Refresh model list"
+                aria-label="Actualizar modelos del proveedor"
+                title="Actualizar lista de modelos"
                 disabled={loadingModels || saving}
                 onClick={() => void fetchModelsForProvider(selectedProvider, true)}
               >
@@ -714,12 +714,12 @@ export const SubagentsTab: React.FC = () => {
 
               <div className="subagent-settings__builder-field">
                 <SelectMenu
-                  label="Effort"
+                  label="Esfuerzo"
                   variant="field"
                   className="settings-select"
                   value={selectedEffort}
                   triggerLabel={
-                    selectedEffort === AUTO_SENTINEL ? 'Effort: Default' : `Effort: ${selectedEffort}`
+                    selectedEffort === AUTO_SENTINEL ? 'Esfuerzo: Por defecto' : `Esfuerzo: ${selectedEffort}`
                   }
                   rows={effortOptions}
                   disabled={saving}
@@ -734,7 +734,7 @@ export const SubagentsTab: React.FC = () => {
                 onClick={handleAddStackEntry}
               >
                 <PlusIcon size={13} />
-                <span>Add to stack</span>
+                <span>Agregar al stack</span>
               </button>
             </div>
 
@@ -743,8 +743,8 @@ export const SubagentsTab: React.FC = () => {
                 <input
                   type="text"
                   className="ui-field subagent-settings__input"
-                  aria-label="Custom model ID"
-                  placeholder={`Enter exact model ID for ${getEngineDisplayName(selectedProvider)}...`}
+                  aria-label="ID de modelo personalizado"
+                  placeholder={`Ingresa el ID exacto del modelo para ${getEngineDisplayName(selectedProvider)}...`}
                   value={customModel}
                   onChange={(e) => setCustomModel(e.target.value)}
                 />
@@ -758,7 +758,7 @@ export const SubagentsTab: React.FC = () => {
       <section className="settings-group" aria-labelledby="settings-subagents-roles-title">
         <div className="subagent-settings__section-head">
           <h2 id="settings-subagents-roles-title" className="settings-group__title">
-            Role Profiles ({roles.length})
+            Perfiles de rol ({roles.length})
           </h2>
           {!roleDraft && (
             <button
@@ -767,7 +767,7 @@ export const SubagentsTab: React.FC = () => {
               onClick={() => setRoleDraft(emptyRoleDraft(workspacePath ? 'workspace' : 'global'))}
             >
               <PlusIcon size={13} />
-              <span>New role</span>
+              <span>Nuevo rol</span>
             </button>
           )}
         </div>
@@ -779,7 +779,7 @@ export const SubagentsTab: React.FC = () => {
                 <div className="subagent-settings__role-row">
                   <div className="subagent-settings__field-group">
                     <label className="subagent-settings__label" htmlFor="role-slug-input">
-                      Role slug (--role)
+                      Identificador del rol (--role)
                     </label>
                     <input
                       id="role-slug-input"
@@ -795,8 +795,8 @@ export const SubagentsTab: React.FC = () => {
                   </div>
 
                   <div className="subagent-settings__field-group">
-                    <span className="subagent-settings__label">Scope</span>
-                    <fieldset aria-label="Role scope" className="ui-segmented">
+                    <span className="subagent-settings__label">Ámbito</span>
+                    <fieldset aria-label="Ámbito del rol" className="ui-segmented">
                       <button
                         type="button"
                         className="ui-segmented__item"
@@ -816,7 +816,7 @@ export const SubagentsTab: React.FC = () => {
                         className="ui-segmented__item"
                         aria-pressed={roleDraft.scope === 'workspace'}
                         disabled={roleDraft.editingExisting || !workspacePath || saving}
-                        title={workspacePath ? `Save under ${workspacePath}` : 'Open a workspace to create workspace roles'}
+                        title={workspacePath ? `Guardar en ${workspacePath}` : 'Abre un espacio de trabajo para crear roles locales'}
                         onClick={() =>
                           setRoleDraft((prev) => (prev ? { ...prev, scope: 'workspace' } : prev))
                         }
@@ -824,7 +824,7 @@ export const SubagentsTab: React.FC = () => {
                         {roleDraft.scope === 'workspace' && (
                           <SegmentedIndicator group="settings-subagents-role-scope" />
                         )}
-                        <span>Workspace</span>
+                        <span>Espacio de trabajo</span>
                       </button>
                     </fieldset>
                   </div>
@@ -832,16 +832,16 @@ export const SubagentsTab: React.FC = () => {
 
                 <div className="subagent-settings__role-row">
                   <div className="subagent-settings__field-group">
-                    <span className="subagent-settings__label">Provider</span>
+                    <span className="subagent-settings__label">Proveedor</span>
                     <SelectMenu
-                      label="Role provider"
+                      label="Proveedor del rol"
                       variant="field"
                       className="settings-select"
                       value={roleDraft.provider || AUTO_SENTINEL}
                       triggerLabel={
                         roleDraft.provider
                           ? getEngineDisplayName(roleDraft.provider)
-                          : 'Inherit / Stack default'
+                          : 'Heredar / Por defecto del stack'
                       }
                       triggerEngine={roleDraft.provider || undefined}
                       rows={roleProviderRows}
@@ -871,13 +871,13 @@ export const SubagentsTab: React.FC = () => {
 
                   <div className="subagent-settings__field-group">
                     <label className="subagent-settings__label" htmlFor="role-command-input">
-                      Command (optional)
+                      Comando (opcional)
                     </label>
                     <input
                       id="role-command-input"
                       type="text"
                       className="ui-field subagent-settings__input"
-                      placeholder={roleDraft.provider || 'auto (inherit stack default)'}
+                      placeholder={roleDraft.provider || 'auto (heredar por defecto del stack)'}
                       value={roleDraft.command === 'auto' && !roleDraft.provider ? '' : roleDraft.command}
                       disabled={saving}
                       onChange={(e) =>
@@ -888,13 +888,13 @@ export const SubagentsTab: React.FC = () => {
 
                   <div className="subagent-settings__field-group">
                     <label className="subagent-settings__label" htmlFor="role-model-input">
-                      Model (optional)
+                      Modelo (opcional)
                     </label>
                     <input
                       id="role-model-input"
                       type="text"
                       className="ui-field subagent-settings__input"
-                      placeholder="e.g. grok-4.7-build-fast"
+                      placeholder="ej. grok-4.7-build-fast"
                       value={roleDraft.model}
                       disabled={saving}
                       onChange={(e) =>
@@ -904,13 +904,13 @@ export const SubagentsTab: React.FC = () => {
                   </div>
 
                   <div className="subagent-settings__field-group">
-                    <span className="subagent-settings__label">Effort</span>
+                    <span className="subagent-settings__label">Esfuerzo</span>
                     <SelectMenu
-                      label="Role effort"
+                      label="Esfuerzo del rol"
                       variant="field"
                       className="settings-select"
                       value={roleDraft.effort || AUTO_SENTINEL}
-                      triggerLabel={roleDraft.effort || 'Default'}
+                      triggerLabel={roleDraft.effort || 'Por defecto'}
                       rows={roleEffortRows}
                       disabled={saving}
                       onSelect={(id) =>
@@ -922,9 +922,9 @@ export const SubagentsTab: React.FC = () => {
                   </div>
 
                   <div className="subagent-settings__field-group">
-                    <span className="subagent-settings__label">Workspace mode</span>
+                    <span className="subagent-settings__label">Modo de espacio de trabajo</span>
                     <SelectMenu
-                      label="Role workspace mode"
+                      label="Modo de espacio de trabajo del rol"
                       variant="field"
                       className="settings-select"
                       value={roleDraft.workspace || AUTO_SENTINEL}
@@ -942,13 +942,13 @@ export const SubagentsTab: React.FC = () => {
 
                 <div className="subagent-settings__field-group">
                   <label className="subagent-settings__label" htmlFor="role-desc-input">
-                    Description
+                    Descripción
                   </label>
                   <input
                     id="role-desc-input"
                     type="text"
                     className="ui-field subagent-settings__input"
-                    placeholder="Concise description shown in skills and Settings"
+                    placeholder="Descripción breve visible en skills y Configuración"
                     value={roleDraft.description}
                     disabled={saving}
                     onChange={(e) =>
@@ -961,13 +961,13 @@ export const SubagentsTab: React.FC = () => {
 
                 <div className="subagent-settings__field-group">
                   <label className="subagent-settings__label" htmlFor="role-body-input">
-                    System prompt instructions (.md body)
+                    Instrucciones de sistema (cuerpo .md)
                   </label>
                   <textarea
                     id="role-body-input"
                     rows={4}
                     className="ui-field ui-field--area subagent-settings__textarea"
-                    placeholder="Instructions prepended when launching --role <slug>..."
+                    placeholder="Instrucciones antepuestas al iniciar --role <slug>..."
                     value={roleDraft.body}
                     disabled={saving}
                     onChange={(e) =>
@@ -983,7 +983,7 @@ export const SubagentsTab: React.FC = () => {
                     disabled={saving}
                     onClick={() => setRoleDraft(null)}
                   >
-                    Cancel
+                    Cancelar
                   </button>
                   <button
                     type="button"
@@ -991,7 +991,7 @@ export const SubagentsTab: React.FC = () => {
                     disabled={saving || !roleDraft.slug.trim()}
                     onClick={() => void handleSaveRoleDraft()}
                   >
-                    Save role
+                    Guardar rol
                   </button>
                 </div>
               </div>
@@ -1003,10 +1003,10 @@ export const SubagentsTab: React.FC = () => {
           {roles.length === 0 ? (
             <div className="ui-card__row settings-row">
               <div className="settings-row__copy">
-                <h3 className="settings-row__title">No role profiles found</h3>
+                <h3 className="settings-row__title">No se encontraron perfiles de rol</h3>
                 <p>
-                  Define reusable `.md` specialist profiles in global settings or `.kite/agents/`
-                  for `--role &lt;slug&gt;`.
+                  Define perfiles especialistas reutilizables `.md` en la configuración global o en
+                  `.kite/agents/` para `--role &lt;slug&gt;`.
                 </p>
               </div>
             </div>
@@ -1047,13 +1047,13 @@ export const SubagentsTab: React.FC = () => {
                       })
                     }
                   >
-                    Edit
+                    Editar
                   </button>
                   <button
                     type="button"
                     className="ghost-button subagent-settings__icon-btn"
-                    aria-label={`Delete role ${role.slug}`}
-                    title="Delete role profile"
+                    aria-label={`Eliminar rol ${role.slug}`}
+                    title="Eliminar perfil de rol"
                     disabled={saving}
                     onClick={() => void handleDeleteRole(role)}
                   >

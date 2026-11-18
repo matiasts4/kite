@@ -7,9 +7,9 @@ import {
   type CursorSnapshot,
   type HoveredLinkSpan,
   type SelectionPoint,
-  DEFAULT_BG_HEX,
-  DEFAULT_FG_HEX,
-  SELECTION_BG,
+  type TerminalCanvasThemeColors,
+  resolveTerminalCanvasTheme,
+  remapTerminalCellRgb,
   PAD_X,
   PAD_Y,
   isPrivateUseNerdIcon,
@@ -35,6 +35,7 @@ export interface CanvasRenderState {
   dirtyRows?: number[] | null;
   cursorBlinkOn?: boolean;
   onPaintRow?: (row: number) => void;
+  theme?: TerminalCanvasThemeColors;
 }
 
 export function renderCanvasGrid(state: CanvasRenderState): number {
@@ -57,9 +58,10 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     dirtyRows,
     cursorBlinkOn = true,
     onPaintRow,
+    theme = resolveTerminalCanvasTheme(),
   } = state;
 
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const ctx = canvas.getContext('2d', { alpha: true });
   if (!ctx) return 0;
 
   const benchActive = isTerminalBenchmarkActive();
@@ -89,8 +91,14 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   ctx.scale(dpr, dpr);
 
   if (!partial) {
-    ctx.fillStyle = DEFAULT_BG_HEX;
-    ctx.fillRect(0, 0, displayW, displayH);
+    if (theme.transparentBg) {
+      if (typeof ctx.clearRect === 'function') {
+        ctx.clearRect(0, 0, displayW, displayH);
+      }
+    } else {
+      ctx.fillStyle = theme.bg;
+      ctx.fillRect(0, 0, displayW, displayH);
+    }
   }
 
   const fontFamily = resolveTerminalFontFamily(prefs.fontFamilyId);
@@ -129,12 +137,18 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     const row = matrix[r];
     if (!row) continue;
     const y0 = snap(oy + r * cellH);
-    if (partial) {
-      ctx.fillStyle = DEFAULT_BG_HEX;
-      ctx.fillRect(0, y0, displayW, snap(oy + (r + 1) * cellH) - y0);
-    }
     const y1 = snap(oy + (r + 1) * cellH);
     const rh = y1 - y0;
+    if (partial) {
+      if (theme.transparentBg) {
+        if (typeof ctx.clearRect === 'function') {
+          ctx.clearRect(0, y0, displayW, rh);
+        }
+      } else {
+        ctx.fillStyle = theme.bg;
+        ctx.fillRect(0, y0, displayW, rh);
+      }
+    }
     const maxCol = Math.min(row.length, visibleCols);
 
     let c = 0;
@@ -144,7 +158,8 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
         c++;
         continue;
       }
-      const [br, bg, bb] = cell.bg;
+      const [rawBr, rawBg, rawBb] = cell.bg;
+      const [br, bg, bb] = remapTerminalCellRgb(cell.bg, theme);
       let endCol = c + Math.max(1, cell.width);
       while (endCol < maxCol) {
         const next = row[endCol];
@@ -155,9 +170,9 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
         }
         if (
           next.hasBg &&
-          next.bg[0] === br &&
-          next.bg[1] === bg &&
-          next.bg[2] === bb
+          next.bg[0] === rawBr &&
+          next.bg[1] === rawBg &&
+          next.bg[2] === rawBb
         ) {
           endCol += Math.max(1, next.width);
         } else {
@@ -166,8 +181,16 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
       }
       const x0 = snap(ox + c * cellW);
       const x1 = snap(ox + endCol * cellW);
-      ctx.fillStyle = `rgb(${br},${bg},${bb})`;
-      ctx.fillRect(x0, y0, x1 - x0, rh);
+      const matchesDefaultBg =
+        theme.transparentBg &&
+        !cell.inverse &&
+        br === theme.bgRgb[0] &&
+        bg === theme.bgRgb[1] &&
+        bb === theme.bgRgb[2];
+      if (!matchesDefaultBg) {
+        ctx.fillStyle = `rgb(${br},${bg},${bb})`;
+        ctx.fillRect(x0, y0, x1 - x0, rh);
+      }
       c = endCol;
     }
 
@@ -178,7 +201,7 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
       if (endC > startC) {
         const sx0 = snap(ox + startC * cellW);
         const sx1 = snap(ox + endC * cellW);
-        ctx.fillStyle = SELECTION_BG;
+        ctx.fillStyle = theme.selection;
         ctx.fillRect(sx0, y0, sx1 - sx0, rh);
       }
     }
@@ -218,9 +241,11 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
       const ch = cell.ch;
       const cp = ch ? ch.codePointAt(0) ?? 32 : 32;
 
+      const [fgR, fgG, fgB] = remapTerminalCellRgb(cell.fg, theme);
+      const fgCss = `rgb(${fgR},${fgG},${fgB})`;
+
       // Underline decoration
       if (cell.underline) {
-        const fgCss = `rgb(${cell.fg[0]},${cell.fg[1]},${cell.fg[2]})`;
         if (currentFill !== fgCss) {
           ctx.fillStyle = fgCss;
           currentFill = fgCss;
@@ -234,8 +259,6 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
         c++;
         continue;
       }
-
-      const fgCss = `rgb(${cell.fg[0]},${cell.fg[1]},${cell.fg[2]})`;
 
       // Procedural sprite (Box Drawing, Block Elements, Braille, Powerline, Legacy computing)
       if (isProceduralSpriteChar(cp)) {
@@ -349,7 +372,7 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     const ly = snap(oy + (hoveredLink.row + 1) * cellH - 2);
     const lx0 = snap(ox + hoveredLink.startCol * cellW);
     const lx1 = snap(ox + hoveredLink.endCol * cellW);
-    ctx.fillStyle = '#5c8fff';
+    ctx.fillStyle = theme.cursor;
     ctx.fillRect(lx0, ly, Math.max(2, lx1 - lx0), 1.5);
   }
 
@@ -372,12 +395,12 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     const ch = snap(oy + (cursor.row + 1) * cellH) - cy;
 
     if (!isFocused) {
-      ctx.strokeStyle = 'rgba(250, 250, 250, 0.45)';
+      ctx.strokeStyle = `rgba(${theme.fgRgb[0]}, ${theme.fgRgb[1]}, ${theme.fgRgb[2]}, 0.45)`;
       ctx.lineWidth = 1;
       ctx.strokeRect(cx + 0.5, cy + 0.5, Math.max(1, cw - 1), Math.max(1, ch - 1));
     } else {
       const shape = cursor.shape || prefs.cursorStyle || 'bar';
-      ctx.fillStyle = DEFAULT_FG_HEX;
+      ctx.fillStyle = theme.cursor;
       if (shape === 'bar') {
         ctx.fillRect(cx, cy, Math.max(2, Math.round(2 * dpr) / dpr), ch);
       } else if (shape === 'underline') {
@@ -385,7 +408,7 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
       } else {
         ctx.fillRect(cx, cy, cw, ch);
         if (curCell && curCell.ch && curCell.ch !== ' ') {
-          ctx.fillStyle = DEFAULT_BG_HEX;
+          ctx.fillStyle = theme.bg;
           ctx.font = curCell.bold ? boldFont : normalFont;
           ctx.fillText(curCell.ch, ox + cursor.col * cellW, oy + cursor.row * cellH + baseline);
         }
@@ -401,12 +424,12 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
     const badgeH = 20;
     const bx = displayW - badgeW - 22;
     const by = 8;
-    ctx.fillStyle = 'rgba(24, 24, 28, 0.88)';
+    ctx.fillStyle = `rgba(${theme.bgRgb[0]}, ${theme.bgRgb[1]}, ${theme.bgRgb[2]}, 0.9)`;
     ctx.fillRect(bx, by, badgeW, badgeH);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.strokeStyle = `rgba(${theme.fgRgb[0]}, ${theme.fgRgb[1]}, ${theme.fgRgb[2]}, 0.16)`;
     ctx.lineWidth = 1;
     ctx.strokeRect(bx + 0.5, by + 0.5, badgeW - 1, badgeH - 1);
-    ctx.fillStyle = '#e8c87a';
+    ctx.fillStyle = theme.cursor;
     ctx.fillText(label, bx + 7, by + 14);
   }
 

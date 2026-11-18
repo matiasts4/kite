@@ -774,3 +774,80 @@ export const XIcon: React.FC<IconProps> = ({ size = 14, strokeWidth = 2, classNa
     <path d="m6 6 12 12" />
   </svg>
 );
+
+export const MonitorIcon: React.FC<IconProps> = ({ size = 12, strokeWidth = 2, className = '', style }) => (
+  <svg
+    aria-hidden="true"
+    className={className}
+    fill="none"
+    height={size}
+    stroke="currentColor"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    strokeWidth={strokeWidth}
+    style={style}
+    viewBox="0 0 24 24"
+    width={size}
+  >
+    <rect width="20" height="14" x="2" y="3" rx="2" />
+    <line x1="8" x2="16" y1="21" y2="21" />
+    <line x1="12" x2="12" y1="17" y2="21" />
+  </svg>
+);
+
+export const UploadIcon: React.FC<IconProps> = ({ size = 13, strokeWidth = 2, className = '', style }) => (
+  <svg
+    aria-hidden="true"
+    className={className}
+    fill="none"
+    height={size}
+    stroke="currentColor"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    strokeWidth={strokeWidth}
+    style={style}
+    viewBox="0 0 24 24"
+    width={size}
+  >
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="17 8 12 3 7 8" />
+    <line x1="12" x2="12" y1="3" y2="15" />
+  </svg>
+);
+
+export const RotateCcwIcon: React.FC<IconProps> = ({ size = 13, strokeWidth = 2, className = '', style }) => (
+  <svg
+    aria-hidden="true"
+    className={className}
+    fill="none"
+    height={size}
+    stroke="currentColor"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    strokeWidth={strokeWidth}
+    style={style}
+    viewBox="0 0 24 24"
+    width={size}
+  >
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </svg>
+);
+
+export const MessageSquareIcon: React.FC<IconProps> = ({ size = 14, strokeWidth = 1.75, className = '', style }) => (
+  <svg
+    aria-hidden="true"
+    className={className}
+    fill="none"
+    height={size}
+    stroke="currentColor"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    strokeWidth={strokeWidth}
+    style={style}
+    viewBox="0 0 24 24"
+    width={size}
+  >
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </svg>
+);

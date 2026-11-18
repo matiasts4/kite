@@ -4,9 +4,9 @@
    Design System Variables & Fallbacks (Kite Dark)
    ------------------------------------------------------------------------- */
 :root {
-  --notif-bg: var(--pane, #141414);
-  --notif-card-bg: var(--block-fill, rgba(255, 255, 255, 0.04));
-  --notif-card-border: var(--block-stroke, rgba(255, 255, 255, 0.08));
+  --notif-bg: var(--glass-nested-bg, var(--pane, #141414));
+  --notif-card-bg: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)));
+  --notif-card-border: var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
   --notif-hover: var(--hover-fill, rgba(255, 255, 255, 0.05));
   --notif-active: var(--selected-fill, rgba(255, 255, 255, 0.1));
   --notif-separator: var(--separator, rgba(255, 255, 255, 0.08));
@@ -18,97 +18,128 @@
   --notif-warning: var(--warning, #fbbf24);
   --notif-success: var(--status-running, #4ade80);
   --notif-danger: var(--status-failed, #ff6568);
-  --notif-radius-card: var(--radius-card, 10px);
-  --notif-radius-row: var(--radius-row, 7px);
-  --notif-radius-chip: var(--radius-chip, 6px);
-  --notif-radius-pill: var(--radius-pill, 999px);
+  --notif-radius-card: var(--card-radius, 12px);
+  --notif-radius-row: var(--control-radius, 8px);
+  --notif-radius-chip: var(--vl-radius-sm, 6px);
+  --notif-radius-pill: var(--pill-radius, 9999px);
 }
 
 /* -------------------------------------------------------------------------
-   Notification center
+   Notification center popover & embedded panel
    ------------------------------------------------------------------------- */
-/* -------------------------------------------------------------------------
-   Notification popover
-   ------------------------------------------------------------------------- */
-.notification-popover-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: transparent;
-}
-
-.notification-popover-anchor {
-  position: fixed;
-  z-index: 1001;
-}
-
 .notification-center {
   position: relative;
-  width: 320px;
-  max-width: calc(100vw - 20px);
-  background: var(--pane, #161618);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
-  border-radius: 10px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.35);
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  max-height: min(520px, calc(100vh - 60px));
+  background: var(--glass-overlay-bg, var(--menu-glass, var(--menu-plate, var(--pane, #161618))));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.14)));
+  border-radius: var(--card-radius, 12px);
+  box-shadow: var(--glass-shadow, 0 18px 42px rgba(0, 0, 0, 0.45));
+  color: var(--notif-text-primary);
   display: flex;
   flex-direction: column;
-  overflow: visible;
+  overflow: hidden;
   user-select: none;
 }
 
-.notification-center::before {
-  content: "";
-  position: absolute;
-  top: -5px;
-  right: var(--arrow-right, 24px);
-  width: 10px;
-  height: 10px;
-  background: var(--pane, #161618);
-  border-top: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
-  border-left: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12));
-  transform: rotate(45deg);
-  z-index: 3;
+.notification-center--popover {
+  box-sizing: border-box;
+}
+
+.notification-center__content {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  max-height: inherit;
 }
 
 .notification-center__header {
-  height: 38px;
-  padding: 0 14px;
+  min-height: 44px;
+  padding: 10px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: transparent;
+  gap: 10px;
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  border-bottom: 1px solid var(--glass-border, var(--notif-separator));
+}
+
+.notification-center__header-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.notification-center__icon-badge {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--control-radius, 8px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-tint, color-mix(in srgb, var(--notif-accent) 16%, transparent));
+  border: 1px solid var(--accent-tint-strong, color-mix(in srgb, var(--notif-accent) 34%, transparent));
+  color: var(--notif-accent);
 }
 
 .notification-center__header strong {
   font-size: 13px;
   font-weight: 600;
-  color: var(--notif-text-primary, #ffffff);
+  color: var(--notif-text-primary);
   letter-spacing: -0.01em;
 }
 
+.notification-center__unread-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--pill-radius, 9999px);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--accent-tint, color-mix(in srgb, var(--notif-accent) 16%, transparent));
+  border: 1px solid var(--accent-tint-strong, color-mix(in srgb, var(--notif-accent) 32%, transparent));
+  color: var(--notif-accent);
+}
+
 .notification-center__mark-read {
-  color: var(--notif-accent, #5c8fff);
+  color: var(--notif-accent);
   cursor: pointer;
   font-size: 11.5px;
   font-weight: 500;
-  background: transparent;
-  border: 0;
+  background: var(--chip-fill, transparent);
+  border: 1px solid transparent;
   padding: 4px 8px;
-  border-radius: 4px;
-  transition: background-color 150ms ease, color 150ms ease;
+  border-radius: var(--control-radius, 8px);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
 .notification-center__mark-read:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--accent-tint, color-mix(in srgb, var(--notif-accent) 14%, transparent));
+  border-color: var(--accent-tint-strong, color-mix(in srgb, var(--notif-accent) 28%, transparent));
+}
+
+.notification-center__footer {
+  border-top: 1px solid var(--glass-border, var(--notif-separator));
+  background: var(--block-fill, rgba(255, 255, 255, 0.02));
 }
 
 .notification-center__settings {
   gap: 8px;
-  border-radius: 0 0 10px 10px;
+  border-radius: 0 0 var(--card-radius, 12px) var(--card-radius, 12px);
   width: 100%;
-  height: 38px;
+  height: var(--vl-control-md, 32px);
   padding: 0 14px;
-  color: var(--notif-text-secondary, #a1a1aa);
+  color: var(--notif-text-secondary);
   font-size: 12px;
   font-weight: 500;
   justify-content: flex-start;
@@ -121,31 +152,51 @@
 }
 
 .notification-center__settings:hover {
-  background: var(--notif-hover, rgba(255, 255, 255, 0.05));
-  color: var(--notif-text-primary, #ffffff);
+  background: var(--notif-hover);
+  color: var(--notif-text-primary);
 }
 
 .notification-center__settings:active {
-  background: var(--notif-active, rgba(255, 255, 255, 0.08));
+  background: var(--notif-active);
 }
 
 .notification-center__divider {
-  background: var(--notif-separator, rgba(255, 255, 255, 0.08));
+  background: var(--notif-separator);
   height: 1px;
   width: 100%;
   margin: 0;
+}
+
+.notification-center__body {
+  padding: 12px;
 }
 
 .notification-center__empty {
   justify-content: center;
   align-items: center;
   gap: 8px;
-  min-height: 160px;
+  min-height: 156px;
   padding: 20px 16px;
+  border-radius: var(--card-radius, 12px);
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
   color: var(--notif-text-secondary);
   text-align: center;
   flex-direction: column;
   display: flex;
+}
+
+.notification-center__empty-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--card-radius, 12px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-tint, color-mix(in srgb, var(--notif-accent) 14%, transparent));
+  border: 1px solid var(--accent-tint-strong, color-mix(in srgb, var(--notif-accent) 28%, transparent));
+  color: var(--notif-accent);
+  margin-bottom: 2px;
 }
 
 .notification-center__empty strong {
@@ -163,18 +214,27 @@
 }
 
 .notification-center__list {
-  max-height: 340px;
+  max-height: 356px;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notification-center__group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .notification-center__section {
-  padding: 8px 14px 4px 14px;
+  padding: 4px 6px 2px;
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--notif-text-faint, #71717a);
+  color: var(--notif-text-faint);
   background: transparent;
   border: 0;
   margin: 0;
@@ -182,23 +242,23 @@
 }
 
 .notification-center__section--needs-you {
-  color: var(--notif-warning, #fbbf24);
+  color: var(--warning-text, var(--notif-warning));
 }
 
 /* -------------------------------------------------------------------------
    Notification Row Components
    ------------------------------------------------------------------------- */
 .notification-row {
-  width: calc(100% - 12px);
-  margin: 1px 6px;
-  padding: 7px 8px;
+  width: 100%;
+  margin: 0;
+  padding: 9px 10px;
   color: inherit;
   cursor: pointer;
   text-align: left;
-  transition: background-color 120ms ease;
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
+  transition: background-color 140ms ease, border-color 140ms ease;
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--block-stroke, var(--glass-border, rgba(255, 255, 255, 0.07)));
+  border-radius: var(--control-radius, 8px);
   gap: 10px;
   display: flex;
   position: relative;
@@ -206,42 +266,59 @@
 }
 
 .notification-row:hover {
-  background: var(--notif-hover, rgba(255, 255, 255, 0.06));
+  background: var(--notif-hover);
+  border-color: var(--glass-border, var(--block-stroke));
 }
 
 .notification-row:active {
-  background: var(--notif-active, rgba(255, 255, 255, 0.1));
+  background: var(--notif-active);
 }
 
 .notification-row--unread {
-  background: rgba(92, 143, 255, 0.03);
+  background: color-mix(in srgb, var(--notif-accent) 9%, var(--block-fill, transparent));
+  border-color: color-mix(in srgb, var(--notif-accent) 26%, var(--block-stroke, transparent));
+}
+
+.notification-row--unread:hover {
+  background: color-mix(in srgb, var(--notif-accent) 14%, var(--notif-hover));
+  border-color: color-mix(in srgb, var(--notif-accent) 36%, var(--glass-border, transparent));
 }
 
 .notification-row__icon {
   flex: none;
   justify-content: center;
   align-items: center;
-  width: 18px;
-  height: 18px;
-  background: transparent;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--vl-radius-sm, 6px);
+  background: var(--chip-fill, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--block-stroke, transparent);
   display: inline-flex;
   margin-top: 1px;
 }
 
 .notification-row__icon--waiting {
-  color: var(--notif-warning, #fbbf24);
-  background: transparent;
+  color: var(--warning-text, var(--notif-warning));
+  background: color-mix(in srgb, var(--notif-warning) 14%, transparent);
+  border-color: color-mix(in srgb, var(--notif-warning) 28%, transparent);
 }
 
-.notification-row__icon--quiet,
 .notification-row__icon--done {
-  color: #22c55e;
-  background: transparent;
+  color: var(--notif-success);
+  background: color-mix(in srgb, var(--notif-success) 14%, transparent);
+  border-color: color-mix(in srgb, var(--notif-success) 26%, transparent);
+}
+
+.notification-row__icon--quiet {
+  color: var(--notif-text-faint);
+  background: var(--chip-fill, transparent);
+  border-color: var(--block-stroke, transparent);
 }
 
 .notification-row__icon--failed {
-  color: var(--notif-danger, #ef4444);
-  background: transparent;
+  color: var(--notif-danger);
+  background: color-mix(in srgb, var(--notif-danger) 14%, transparent);
+  border-color: color-mix(in srgb, var(--notif-danger) 28%, transparent);
 }
 
 .notification-row__copy {
@@ -260,7 +337,7 @@
 }
 
 .notification-row__actor {
-  color: var(--notif-text-primary, #ffffff);
+  color: var(--notif-text-primary);
   font-size: 12.5px;
   font-weight: 500;
   text-overflow: ellipsis;
@@ -273,13 +350,13 @@
 }
 
 .notification-row__topline time {
-  color: var(--notif-text-faint, #71717a);
+  color: var(--notif-text-faint);
   font-size: 11px;
   white-space: nowrap;
 }
 
 .notification-row__detail {
-  color: var(--notif-text-secondary, #a1a1aa);
+  color: var(--notif-text-secondary);
   font-size: 11.5px;
   line-height: 1.35;
   white-space: nowrap;
@@ -311,7 +388,9 @@
   flex-direction: column;
   height: 100%;
   width: 100%;
-  background: var(--pane, #141414);
+  background: var(--glass-nested-bg, var(--pane, #141414));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--notif-text-primary);
   overflow-y: auto;
   padding: 24px 32px;
@@ -379,7 +458,7 @@
 }
 
 .notif-stat-card:hover {
-  border-color: rgba(255, 255, 255, 0.16);
+  border-color: var(--glass-border, var(--notif-card-border));
   background: var(--notif-hover);
 }
 
@@ -444,9 +523,9 @@
 }
 
 .notif-filter-btn--active {
-  background: var(--selected-fill, rgba(255, 255, 255, 0.12));
+  background: var(--selected-fill, var(--notif-active));
   color: var(--notif-text-primary);
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--glass-border, var(--notif-card-border));
 }
 
 .notif-badge-pill {
@@ -454,7 +533,7 @@
   border-radius: var(--notif-radius-pill);
   font-size: 10px;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--chip-fill, rgba(255, 255, 255, 0.1));
 }
 
 .notif-badge-pill--warning {
@@ -471,8 +550,14 @@
    Attention Report Panel
    ------------------------------------------------------------------------- */
 .notif-attention-panel {
-  background: linear-gradient(135deg, rgba(42, 98, 234, 0.12) 0%, rgba(20, 20, 20, 0.8) 100%);
-  border: 1px solid rgba(92, 143, 255, 0.28);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-fill, #2a62ea) 14%, var(--glass-elevated-bg, var(--composer))) 0%,
+    var(--glass-elevated-bg, var(--composer)) 100%
+  );
+  border: 1px solid color-mix(in srgb, var(--accent, #5c8fff) 30%, var(--glass-border, var(--notif-card-border)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-radius: var(--notif-radius-card);
   padding: 16px 20px;
   display: flex;
@@ -485,7 +570,8 @@
   width: 36px;
   height: 36px;
   border-radius: var(--notif-radius-chip);
-  background: rgba(92, 143, 255, 0.2);
+  background: var(--accent-tint, color-mix(in srgb, var(--notif-accent) 16%, transparent));
+  border: 1px solid var(--accent-tint-strong, color-mix(in srgb, var(--notif-accent) 30%, transparent));
   color: var(--notif-accent);
   display: flex;
   align-items: center;
@@ -524,8 +610,7 @@
 .notif-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(6px);
+  background: var(--glass-modal-scrim, var(--glass-backdrop-scrim, rgba(0, 0, 0, 0.75)));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -534,14 +619,16 @@
 }
 
 .notif-modal-dialog {
-  background: var(--pane, #161b22);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.14));
-  border-radius: var(--radius-panel, 14px);
+  background: var(--glass-modal-bg, var(--glass-overlay-bg, var(--pane, #161b22)));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.14)));
+  border-radius: var(--dialog-radius, 14px);
   width: 100%;
   max-width: 580px;
   max-height: 90vh;
   overflow-y: auto;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--glass-shadow, 0 20px 50px rgba(0, 0, 0, 0.6));
   display: flex;
   flex-direction: column;
 }
@@ -568,7 +655,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
-  background: rgba(0, 0, 0, 0.2);
+  background: color-mix(in srgb, var(--glass-elevated-bg, var(--notif-card-bg)) 55%, transparent);
 }
 
 /* -------------------------------------------------------------------------
@@ -579,7 +666,9 @@
   flex-direction: column;
   height: 100%;
   width: 100%;
-  background: var(--pane, #141414);
+  background: var(--glass-nested-bg, var(--pane, #141414));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--notif-text-primary);
   overflow-y: auto;
   padding: 24px 32px;
@@ -629,7 +718,7 @@
 }
 
 .routine-card:hover {
-  border-color: rgba(255, 255, 255, 0.16);
+  border-color: var(--glass-border, var(--notif-card-border));
   background: var(--notif-hover);
 }
 
@@ -656,8 +745,8 @@
 }
 
 .routine-card__prompt-box {
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  border: 1px solid var(--glass-border, var(--notif-card-border));
   border-radius: var(--notif-radius-row);
   padding: 8px 12px;
   font-size: 12px;
@@ -675,7 +764,7 @@
   font-size: 11px;
   color: var(--notif-text-faint);
   padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid var(--notif-separator);
 }
 
 .routine-cadence-badge {
@@ -684,11 +773,11 @@
   gap: 5px;
   padding: 2px 8px;
   border-radius: var(--notif-radius-pill);
-  background: rgba(92, 143, 255, 0.12);
-  color: #7aa2f7;
+  background: var(--accent-tint, color-mix(in srgb, var(--notif-accent) 12%, transparent));
+  color: var(--notif-accent);
   font-size: 11px;
   font-weight: 500;
-  border: 1px solid rgba(92, 143, 255, 0.25);
+  border: 1px solid var(--accent-tint-strong, color-mix(in srgb, var(--notif-accent) 26%, transparent));
 }
 
 .routine-switch-custom {
@@ -697,16 +786,16 @@
   width: 40px;
   height: 22px;
   cursor: pointer;
-  background: var(--switch-track-off, #2a2a2e);
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: background-color 200ms ease;
+  background: var(--switch-track-off, var(--vl-surface-canvas, #2a2a2e));
+  border-radius: var(--pill-radius, 9999px);
+  border: 1px solid var(--vl-stroke-strong, var(--notif-card-border));
+  transition: background-color 200ms ease, border-color 200ms ease;
   padding: 0;
 }
 
 .routine-switch-custom[aria-checked="true"] {
   background: var(--accent-fill, #2a62ea);
-  border-color: rgba(92, 143, 255, 0.4);
+  border-color: color-mix(in srgb, var(--accent, #5c8fff) 55%, transparent);
 }
 
 .routine-switch-custom__knob {
@@ -716,7 +805,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: white;
+  background: var(--accent-on-fill, #ffffff);
   transition: transform 200ms ease;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
@@ -735,7 +824,7 @@
   padding: 10px 10px;
   border-radius: var(--card-radius, 12px);
   background: var(--notif-card-bg);
-  border: 1px solid rgba(251, 191, 36, 0.28);
+  border: 1px solid color-mix(in srgb, var(--notif-warning) 32%, transparent);
   cursor: default;
 }
 
@@ -756,9 +845,9 @@
   margin-top: 6px;
   padding: 5px 8px;
   border-radius: var(--control-radius, 8px);
-  background: rgba(251, 191, 36, 0.12);
-  border: 1px solid rgba(251, 191, 36, 0.28);
-  color: #fcd34d;
+  background: color-mix(in srgb, var(--notif-warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--notif-warning) 30%, transparent);
+  color: var(--warning-text, var(--notif-warning));
   font-size: 11.5px;
   line-height: 1.35;
   white-space: normal;
@@ -786,12 +875,19 @@
   height: var(--vl-control-sm, 28px);
   padding: 0 8px;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid var(--notif-card-border);
-  background: var(--bg-input, rgba(0, 0, 0, 0.35));
+  border: 1px solid var(--glass-border, var(--notif-card-border));
+  background: var(--glass-elevated-bg, var(--composer, rgba(0, 0, 0, 0.35)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   color: var(--notif-text-primary);
   font-size: 12px;
   font-family: inherit;
   width: 100%;
+}
+
+.notification-confirm-card__select option {
+  background-color: var(--menu-plate, #18181d);
+  color: var(--text-primary, #f4f4f6);
 }
 
 .notification-confirm-card__checkbox {
@@ -808,9 +904,9 @@
   margin-top: 7px;
   padding: 7px 9px;
   border-radius: var(--control-radius, 8px);
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.32);
-  color: #fca5a5;
+  background: color-mix(in srgb, var(--notif-danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--notif-danger) 32%, transparent);
+  color: var(--danger-ink, var(--notif-danger));
   font-size: 11.5px;
   line-height: 1.35;
   display: flex;
@@ -850,20 +946,20 @@
 
 .notification-confirm-card__btn--primary {
   background: var(--accent-fill, #2a62ea);
-  border-color: rgba(92, 143, 255, 0.55);
-  color: #ffffff;
+  border-color: var(--accent-tint-strong, color-mix(in srgb, var(--accent, #5c8fff) 55%, transparent));
+  color: var(--accent-on-fill, #ffffff);
 }
 
 .notification-confirm-card__btn--primary:hover:not(:disabled) {
   filter: brightness(1.08);
-  background: var(--accent-fill, #2a62ea);
+  background: var(--accent-fill-hover, var(--accent-fill, #2a62ea));
 }
 
 .notification-confirm-card__btn--danger {
   align-self: flex-start;
-  background: rgba(239, 68, 68, 0.16);
-  border-color: rgba(239, 68, 68, 0.42);
-  color: #fecaca;
+  background: color-mix(in srgb, var(--notif-danger) 14%, transparent);
+  border-color: color-mix(in srgb, var(--notif-danger) 38%, transparent);
+  color: var(--danger-ink, var(--notif-danger));
 }
 
 

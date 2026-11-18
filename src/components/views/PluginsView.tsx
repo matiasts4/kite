@@ -133,7 +133,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
           <label className="plugin-search" style={{ flex: 1 }}>
             <SearchIcon size={13} />
             <input
-              aria-label="Search plugins"
+              aria-label="Buscar plugins"
               onChange={(e) => setSearchQuery(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Escape' && searchQuery) {
@@ -141,13 +141,13 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
                   setSearchQuery('');
                 }
               }}
-              placeholder="Search plugins by name, vendor, capabilities..."
+              placeholder="Buscar plugins por nombre, proveedor o capacidades..."
               type="search"
               value={searchQuery}
             />
             {searchQuery ? (
               <button
-                aria-label="Clear search"
+                aria-label="Limpiar búsqueda"
                 onClick={() => setSearchQuery('')}
                 type="button"
               >
@@ -161,17 +161,17 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
             style={{
               display: 'flex',
               gap: '4px',
-              backgroundColor: 'rgba(255, 255, 255, 0.03)',
+              backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, transparent))',
               padding: '2px',
-              borderRadius: '6px',
-              border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+              borderRadius: 'var(--control-radius, 8px)',
+              border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
             }}
           >
             {(
               [
-                { id: 'all', label: `All (${OFFICIAL_PLUGINS.length})` },
-                { id: 'installed', label: `Installed (${installedCount})` },
-                { id: 'available', label: 'Available' },
+                { id: 'all', label: `Todos (${OFFICIAL_PLUGINS.length})` },
+                { id: 'installed', label: `Instalados (${installedCount})` },
+                { id: 'available', label: 'Disponibles' },
               ] as const
             ).map((s) => {
               const active = statusFilter === s.id;
@@ -181,11 +181,13 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
                   type="button"
                   onClick={() => setStatusFilter(s.id)}
                   style={{
-                    padding: '4px 8px',
-                    borderRadius: '4px',
+                    padding: '4px 10px',
+                    borderRadius: 'var(--vl-radius-sm, 6px)',
                     border: 0,
-                    backgroundColor: active ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
-                    color: active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
+                    backgroundColor: active
+                      ? 'var(--accent-tint, color-mix(in srgb, var(--accent, #5c8fff) 18%, transparent))'
+                      : 'transparent',
+                    color: active ? 'var(--text-primary, #fafafa)' : 'var(--text-secondary, #a1a1a1)',
                     fontSize: '11px',
                     fontWeight: active ? 600 : 400,
                     cursor: 'pointer',
@@ -202,12 +204,12 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
         <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '2px' }}>
           {(
             [
-              { id: 'all', label: 'All Categories' },
-              { id: 'developer', label: 'Developer Tools' },
-              { id: 'productivity', label: 'Productivity' },
-              { id: 'creative', label: 'Creative & 3D' },
-              { id: 'marketing', label: 'Social & Marketing' },
-              { id: 'finance', label: 'Finance & Commerce' },
+              { id: 'all', label: 'Todas las categorías' },
+              { id: 'developer', label: 'Herramientas de desarrollo' },
+              { id: 'productivity', label: 'Productividad' },
+              { id: 'creative', label: 'Creatividad y 3D' },
+              { id: 'marketing', label: 'Redes y marketing' },
+              { id: 'finance', label: 'Finanzas y comercio' },
             ] as const
           ).map((cat) => {
             const active = selectedCategory === cat.id;
@@ -218,14 +220,14 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
                 onClick={() => setSelectedCategory(cat.id)}
                 style={{
                   padding: '4px 10px',
-                  borderRadius: '14px',
+                  borderRadius: 'var(--pill-radius, 9999px)',
                   border: active
-                    ? '1px solid var(--accent, #5c8fff)'
-                    : '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+                    ? '1px solid var(--accent-tint-strong, var(--accent, #5c8fff))'
+                    : '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
                   backgroundColor: active
-                    ? 'rgba(92, 143, 255, 0.16)'
-                    : 'var(--block-fill, rgba(255, 255, 255, 0.03))',
-                  color: active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
+                    ? 'var(--accent-tint, color-mix(in srgb, var(--accent, #5c8fff) 16%, transparent))'
+                    : 'var(--block-fill, transparent)',
+                  color: active ? 'var(--text-primary, #fafafa)' : 'var(--text-secondary, #a1a1a1)',
                   fontSize: '11px',
                   fontWeight: active ? 600 : 400,
                   whiteSpace: 'nowrap',
@@ -244,8 +246,8 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
       {filteredPlugins.length === 0 ? (
         <p className="plugin-grid__empty">
           {searchQuery.trim()
-            ? `No plugins match “${searchQuery.trim()}”.`
-            : 'No plugins match the selected filter.'}
+            ? `Ningún plugin coincide con “${searchQuery.trim()}”.`
+            : 'Ningún plugin coincide con el filtro seleccionado.'}
         </p>
       ) : (
         <div className="plugin-grid" style={{ marginTop: '4px' }}>
@@ -263,7 +265,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
 
       {/* Canonical Footnote */}
       <p className="plugin-pane__footnote" style={{ marginTop: '12px' }}>
-        Connect once to Kite. Choose each agent’s plugins in Agent Settings. Its access mode controls approvals; Read only keeps plugins read-only.
+        Conecta una sola vez en Kite. Elige los plugins de cada agente en Ajustes del Agente. Su modo de acceso controla las aprobaciones; Solo lectura mantiene los plugins en modo de solo lectura.
       </p>
 
       {/* Plugin Details & Settings Drawer */}
@@ -294,7 +296,7 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
         </span>
         <span className="pane-titlebar__copy">
           <strong>Plugins</strong>
-          <small>Connect accounts for your agents.</small>
+          <small>Conecta cuentas para tus agentes.</small>
         </span>
 
         {/* Global info pill */}
@@ -302,18 +304,18 @@ export const PluginsView: React.FC<PluginsViewProps> = ({ embedded = false }) =>
           style={{
             marginLeft: 'auto',
             fontSize: '11px',
-            color: 'var(--text-secondary, #9da2b4)',
-            backgroundColor: 'rgba(255, 255, 255, 0.05)',
+            color: 'var(--text-secondary, #a1a1a1)',
+            backgroundColor: 'var(--chip-fill, var(--block-fill, transparent))',
             padding: '2px 8px',
-            borderRadius: '12px',
-            border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+            borderRadius: 'var(--pill-radius, 9999px)',
+            border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
             display: 'inline-flex',
             alignItems: 'center',
             gap: '5px',
           }}
         >
           <LayersIcon size={12} />
-          <span>29 authentic integrations</span>
+          <span>29 integraciones oficiales</span>
         </span>
       </header>
       <div className="agent-pane__rule" />

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, waitFor } from '@testing-library/react';
+import { render, fireEvent, waitFor, act } from '@testing-library/react';
 import { TerminalCanvasSurface, measureTerminalCanvasGrid } from './TerminalCanvasSurface';
 import { invokeCommand } from '../../lib/ipc';
+import {
+  DEFAULT_THEME_CUSTOMIZATIONS,
+  sanitizeThemeCustomizations,
+  writeThemeCustomizations,
+} from '../../lib/themeCustomizations';
 
 vi.mock('../../lib/ipc', () => ({
   invokeCommand: vi.fn(),
@@ -242,6 +247,88 @@ describe('TerminalCanvasSurface', () => {
       expect(writeTextMock).toHaveBeenLastCalledWith(
         'Line 01\nLine 02\nLine 03\nLine 04\nLine 05\nLine 06\nLine 07\nLine 08',
       );
+    });
+  });
+
+  it('updates terminal container background and theme live when kite:theme-changed fires', () => {
+    localStorage.clear();
+    (invokeCommand as any).mockResolvedValue({ kind: 'unchanged', seq: 0 });
+    const { container } = render(<TerminalCanvasSurface sessionId="theme-sync-1" />);
+    const wrapper = container.querySelector('.terminal-canvas-surface-container') as HTMLElement;
+    expect(wrapper.style.backgroundColor).toBe('rgb(10, 11, 14)');
+
+    const solarized = sanitizeThemeCustomizations({
+      ...DEFAULT_THEME_CUSTOMIZATIONS,
+      appearanceMode: 'light',
+      lightThemeId: 'solarized-light',
+    });
+    writeThemeCustomizations(solarized);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:theme-changed', {
+          detail: {
+            theme: 'light',
+            palette: 'solarized-light',
+            customizations: solarized,
+          },
+        })
+      );
+    });
+
+    expect(wrapper.style.backgroundColor).toBe('rgb(253, 246, 227)');
+  });
+
+  it('uses a transparent container background when frosted glass / backdrop translucency is enabled', () => {
+    const frosted = sanitizeThemeCustomizations({
+      ...DEFAULT_THEME_CUSTOMIZATIONS,
+      appearanceMode: 'dark',
+      darkThemeId: 'aurora-studio',
+      surface: {
+        ...DEFAULT_THEME_CUSTOMIZATIONS.surface,
+        translucent: true,
+      },
+    });
+    writeThemeCustomizations(frosted);
+    (invokeCommand as any).mockResolvedValue({ kind: 'unchanged', seq: 0 });
+
+    const { container } = render(<TerminalCanvasSurface sessionId="theme-glass-1" />);
+    const wrapper = container.querySelector('.terminal-canvas-surface-container') as HTMLElement;
+    expect(wrapper.getAttribute('data-transparent-bg')).toBe('true');
+    expect(wrapper.style.backgroundColor).toBe('transparent');
+  });
+
+  it('toggles terminal live presentation when an ancestor mode-layer updates aria-hidden', async () => {
+    localStorage.clear();
+    (invokeCommand as any).mockResolvedValue({ kind: 'unchanged', seq: 0 });
+
+    const { container, rerender } = render(
+      <div className="mode-layer mode-layer--visible" aria-hidden="false">
+        <TerminalCanvasSurface sessionId="visibility-aria-1" />
+      </div>
+    );
+
+    const layer = container.querySelector('.mode-layer') as HTMLElement;
+    expect(layer).not.toBeNull();
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith('set_terminal_presentation', {
+        sessionId: 'visibility-aria-1',
+        live: true,
+      });
+    });
+
+    rerender(
+      <div className="mode-layer" aria-hidden="true">
+        <TerminalCanvasSurface sessionId="visibility-aria-1" />
+      </div>
+    );
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith('set_terminal_presentation', {
+        sessionId: 'visibility-aria-1',
+        live: false,
+      });
     });
   });
 });

@@ -72,12 +72,12 @@ export const AboutTab: React.FC<AboutTabProps> = ({
   return (
     <>
       <section className="settings-group">
-        <h2 className="settings-group__title">Application</h2>
+        <h2 className="settings-group__title">Aplicación</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
               <h3 className="settings-row__title">Kite Code</h3>
-              <p>Studio Edition · Version {currentVersion} (Production Native)</p>
+              <p>Edición Studio · Versión {currentVersion} (Nativa de producción)</p>
             </div>
             <div className="settings-row__control">
               <span className="settings-badge" data-tone="running">v{currentVersion}</span>
@@ -86,8 +86,8 @@ export const AboutTab: React.FC<AboutTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Runtime environment</h3>
-              <p>Native ConPTY daemon, WebView2, and hardware-accelerated rendering.</p>
+              <h3 className="settings-row__title">Entorno de ejecución</h3>
+              <p>Demonio nativo ConPTY, WebView2 y renderizado acelerado por hardware.</p>
             </div>
             <div className="settings-row__control">
               <span className="settings-badge">Tauri 2.0</span>
@@ -96,18 +96,18 @@ export const AboutTab: React.FC<AboutTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Software update</h3>
+              <h3 className="settings-row__title">Actualización de software</h3>
               <p>
                 {updateError ? (
                   <span style={{ color: 'var(--danger-fill, #ef4444)' }}>
                     {updateError}
                   </span>
                 ) : updateInfo?.available ? (
-                  `Version ${updateInfo.version} is available to install.`
+                  `La versión ${updateInfo.version} está disponible para instalar.`
                 ) : updateChecked ? (
-                  `Kite Code v${currentVersion} is up to date.`
+                  `Kite Code v${currentVersion} está actualizado.`
                 ) : (
-                  'Running latest official release build.'
+                  'Ejecutando la última compilación oficial.'
                 )}
               </p>
             </div>
@@ -123,7 +123,7 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                     fontWeight: 600,
                   }}
                 >
-                  Update &amp; Restart
+                  Actualizar y reiniciar
                 </button>
               )}
               <button
@@ -135,10 +135,10 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                 {isCheckingUpdate ? (
                   <>
                     <RefreshCwIcon className="animate-spin" size={13} />
-                    Checking…
+                    Buscando…
                   </>
                 ) : (
-                  'Check for updates'
+                  'Buscar actualizaciones'
                 )}
               </button>
             </div>
@@ -147,17 +147,17 @@ export const AboutTab: React.FC<AboutTabProps> = ({
       </section>
 
       <section className="settings-group">
-        <h2 className="settings-group__title">Offline Telemetry & Privacy</h2>
+        <h2 className="settings-group__title">Telemetría sin conexión y privacidad</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Product analytics</h3>
-              <p>Store feature usage locally on device. No external network telemetry calls are ever made.</p>
+              <h3 className="settings-row__title">Analítica de producto</h3>
+              <p>Guarda el uso de funciones localmente en el dispositivo. Nunca se realizan envíos de telemetría por red.</p>
             </div>
             <div className="settings-row__control">
               <button
                 aria-checked={telemetryPrefs.analytics}
-                aria-label="Product analytics"
+                aria-label="Analítica de producto"
                 className="ui-switch"
                 onClick={() => onToggleTelemetry('analytics')}
                 role="switch"
@@ -170,13 +170,13 @@ export const AboutTab: React.FC<AboutTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Crash diagnostics</h3>
-              <p>Redacted local crash logs preserved on this device for offline debugging.</p>
+              <h3 className="settings-row__title">Diagnósticos de fallos</h3>
+              <p>Registros locales redactados de fallos conservados en este equipo para depuración sin conexión.</p>
             </div>
             <div className="settings-row__control">
               <button
                 aria-checked={telemetryPrefs.diagnostics}
-                aria-label="Crash diagnostics"
+                aria-label="Diagnósticos de fallos"
                 className="ui-switch"
                 onClick={() => onToggleTelemetry('diagnostics')}
                 role="switch"
@@ -189,31 +189,31 @@ export const AboutTab: React.FC<AboutTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Device identity</h3>
+              <h3 className="settings-row__title">Identificador del dispositivo</h3>
               <p>
                 {telemetryIdentity?.id
                   ? `${telemetryIdentity.id.slice(0, 32)}…`
-                  : 'Local hardware signature generated on device.'}
+                  : 'Firma local de hardware generada en el dispositivo.'}
               </p>
             </div>
             <div className="settings-row__control">
               <span className="settings-badge" data-tone={telemetryIdentity?.ready ? 'running' : 'accent'}>
-                Offline
+                Sin conexión
               </span>
             </div>
           </div>
         </div>
         <p className="settings-note">
-          Kite operates completely offline for telemetry. No diagnostic or usage packets leave this computer.
+          Kite funciona completamente sin conexión para telemetría. Ningún paquete de diagnóstico o uso sale de este equipo.
         </p>
       </section>
 
       <section className="settings-group">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
-          <h2 className="settings-group__title">What&apos;s new in {currentVersion}</h2>
+          <h2 className="settings-group__title">Novedades en {currentVersion}</h2>
           {onOpenWhatsNew ? (
             <button className="settings-control ui-button" onClick={onOpenWhatsNew} type="button">
-              Open full release notes
+              Abrir notas completas de la versión
             </button>
           ) : null}
         </div>
@@ -224,9 +224,9 @@ export const AboutTab: React.FC<AboutTabProps> = ({
             className="settings-changelog__release"
           >
             <h3 className="settings-changelog__heading">
-              <span>Version {rel.version}</span>
+              <span>Versión {rel.version}</span>
               {rel.date ? <span className="settings-changelog__date">{rel.date}</span> : null}
-              {rel.isCurrent ? <span className="settings-changelog__current">Installed</span> : null}
+              {rel.isCurrent ? <span className="settings-changelog__current">Instalada</span> : null}
             </h3>
             <div className="settings-changelog__card">
               <ul className="whats-new__items">
@@ -248,7 +248,7 @@ export const AboutTab: React.FC<AboutTabProps> = ({
         ))}
       </section>
 
-      <p className="settings-note settings-footer">Kite Code · Build 2026.10.14</p>
+      <p className="settings-note settings-footer">Kite Code · Compilación 2026.10.14</p>
     </>
   );
 };

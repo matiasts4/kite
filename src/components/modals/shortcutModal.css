@@ -2,9 +2,7 @@
   position: fixed;
   inset: 0;
   z-index: 10100;
-  background: var(--scrim, rgba(0, 0, 0, 0.72));
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  background: var(--glass-modal-scrim, var(--glass-backdrop-scrim, var(--scrim, rgba(0, 0, 0, 0.72))));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -16,10 +14,12 @@
   width: 100%;
   max-width: min(460px, calc(100vw - 64px));
   max-height: min(480px, calc(100vh - 140px));
-  background: var(--menu-plate, #1e1e1e);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--glass-modal-bg, var(--glass-overlay-bg, var(--menu-plate, #1e1e1e)));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.12)));
   border-radius: var(--dialog-radius, 14px);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: var(--glass-shadow, 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08));
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -55,9 +55,11 @@
 
 .shortcut-recorder-box {
   min-height: 100px;
-  border: 1px dashed var(--control-stroke-hover, rgba(255, 255, 255, 0.25));
+  border: 1px dashed var(--glass-border, var(--control-stroke-hover, rgba(255, 255, 255, 0.25)));
   border-radius: var(--card-radius, 12px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.04));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -89,8 +91,8 @@
   min-width: 34px;
   height: 32px;
   padding: 0 10px;
-  background: var(--raised-fill, #2a2a2a);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.15));
+  background: var(--glass-elevated-bg, var(--raised-fill, #2a2a2a));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.15)));
   border-bottom-width: 2px;
   border-radius: var(--vl-radius-sm, 6px);
   color: var(--text-primary, #fff);

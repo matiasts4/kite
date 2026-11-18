@@ -18,7 +18,9 @@
   min-height: 40px;
   padding: 0 var(--space-6);
   display: flex;
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .agent-mind-subtabs {
@@ -50,8 +52,8 @@
 .agent-subtab-btn--active {
   color: var(--text-primary, #f0f6fc);
   font-weight: var(--weight-semibold, 600);
-  background: var(--block-fill, #161b22);
-  border-color: var(--block-stroke, #30363d);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
+  border-color: var(--glass-border, var(--block-stroke, #30363d));
 }
 
 .agent-memory__budget {
@@ -139,9 +141,9 @@
 
 .agent-memory__cluster {
   padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--block-stroke, #30363d);
+  border: 1px solid var(--glass-border, var(--block-stroke, #30363d));
   border-radius: var(--radius-card, 12px);
-  background: var(--block-fill, #161b22);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
 }
 
 .agent-memory__cluster h2,
@@ -241,9 +243,9 @@
 .agent-memory__inline-editor textarea {
   min-height: var(--control-regular, 36px);
   resize: vertical;
-  border: 1px solid var(--panel-stroke, #484f58);
+  border: 1px solid var(--glass-border, var(--panel-stroke, #484f58));
   border-radius: var(--radius-chip, 6px);
-  background: var(--composer, #090d13);
+  background: var(--glass-elevated-bg, var(--composer, #090d13));
   color: var(--text-primary, #f0f6fc);
   font-size: var(--text-body, 14px);
   line-height: var(--leading-body, 20px);
@@ -269,9 +271,9 @@
   min-height: 42px;
   margin: var(--space-2) 0 var(--space-4);
   padding: 8px var(--space-4);
-  border: 1px solid var(--block-stroke, #30363d);
+  border: 1px solid var(--glass-border, var(--block-stroke, #30363d));
   border-radius: var(--radius-card, 12px);
-  background: var(--block-fill, #161b22);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
   transition: border-color var(--duration-ink) var(--ease-ink);
   align-items: flex-end;
   gap: 10px;
@@ -350,7 +352,9 @@
   border-bottom: 1px solid var(--separator, #21262d);
   flex: none;
   display: flex;
-  background: var(--pane, #0d1117);
+  background: var(--glass-nested-bg, var(--pane, #0d1117));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .agent-memory__raw-toolbar strong {
@@ -374,7 +378,7 @@
   width: 100%;
   min-height: 0;
   padding: var(--space-5);
-  background: var(--composer, #090d13);
+  background: var(--glass-code-bg, var(--composer, #090d13));
   color: var(--text-primary, #f0f6fc);
   font-family: var(--font-mono);
   font-size: var(--text-mono, 12.5px);

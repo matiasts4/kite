@@ -39,7 +39,9 @@
 
 .app-browser-sidebar__page {
   border-radius: 0 0 var(--radius-panel, 14px) var(--radius-panel, 14px);
-  background: var(--pane, #141414);
+  background: var(--glass-nested-bg, var(--pane, #141414));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   flex: auto;
   min-height: 0;
   display: flex;
@@ -62,7 +64,9 @@
   min-width: 0;
   padding: 0 8px;
   display: flex;
-  background: var(--sidebar-fill, #1e1e1f);
+  background: var(--glass-nested-bg, var(--pane, var(--sidebar-fill, #1e1e1f)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .app-browser-toolbar .browser-pane-address {
@@ -288,7 +292,9 @@
   border-bottom: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
   min-width: 0;
   color: var(--text-secondary, #a1a1a1);
-  background: var(--pane, #141414);
+  background: var(--glass-nested-bg, var(--pane, #141414));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   flex-shrink: 0;
   align-items: center;
   gap: 2px;
@@ -432,9 +438,9 @@
 }
 
 .browser-start__form {
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius-row, 7px);
-  background: var(--composer, #1c1c1c);
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-elevated-bg, var(--composer, #1c1c1c));
   width: min(460px, 100%);
   height: 34px;
   display: flex;
@@ -550,9 +556,10 @@
   position: absolute;
   bottom: 8px;
   left: 8px;
-  background: rgba(20, 20, 20, 0.85);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  background: var(--glass-overlay-bg, rgba(20, 20, 20, 0.85));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--radius-chip, 6px);
   padding: 2px 8px;
   font-family: var(--font-mono, monospace);
@@ -573,7 +580,9 @@
   flex: 1;
   position: relative;
   overflow: hidden;
-  background: var(--pane, #141414);
+  background: var(--glass-nested-bg, var(--pane, #141414));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .browser-start__icon {

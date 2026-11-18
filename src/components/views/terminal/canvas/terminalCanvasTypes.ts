@@ -1,4 +1,13 @@
 import { resolveTerminalFontFamily, getTerminalAppearancePrefs, type TerminalAppearancePrefs } from '../../../../lib/terminalAppearancePrefs';
+import {
+  getActivePaletteForState,
+  getThemePackById,
+  readThemeCustomizations,
+  resolveEffectiveBackdropPreset,
+  resolveThemeMode,
+  type KiteThemeCustomizations,
+  type ResolvedThemeMode,
+} from '../../../../lib/themeCustomizations';
 
 export interface CellSnapshot {
   ch: string;
@@ -172,6 +181,136 @@ export const DEFAULT_FG_HEX = '#fafafa';
 export const SELECTION_BG = 'rgba(92, 143, 255, 0.32)';
 export const PAD_X = 12;
 export const PAD_Y = 8;
+
+const RUST_ANSI_BASE: readonly [number, number, number][] = [
+  [23, 23, 23],
+  [224, 108, 117],
+  [127, 217, 154],
+  [232, 200, 122],
+  [92, 143, 255],
+  [212, 160, 140],
+  [94, 200, 197],
+  [212, 212, 212],
+  [118, 124, 138],
+  [255, 138, 138],
+  [168, 240, 184],
+  [255, 224, 138],
+  [138, 176, 255],
+  [232, 196, 176],
+  [138, 232, 228],
+  [250, 250, 250],
+];
+
+export interface TerminalCanvasThemeColors {
+  mode: ResolvedThemeMode;
+  paletteId: string;
+  transparentBg: boolean;
+  bg: string;
+  fg: string;
+  cursor: string;
+  selection: string;
+  bgRgb: [number, number, number];
+  fgRgb: [number, number, number];
+  cursorRgb: [number, number, number];
+  ansi: readonly string[];
+  ansiRgb: readonly [number, number, number][];
+  colorRemap: Map<number, [number, number, number]>;
+}
+
+export function parseCssHexToRgb(
+  color: string,
+  fallback: [number, number, number]
+): [number, number, number] {
+  const trimmed = color.trim();
+  const shortHex = /^#([0-9a-fA-F]{3})$/.exec(trimmed);
+  if (shortHex) {
+    const h = shortHex[1];
+    return [
+      parseInt(h[0] + h[0], 16),
+      parseInt(h[1] + h[1], 16),
+      parseInt(h[2] + h[2], 16),
+    ];
+  }
+  const fullHex = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$/.exec(trimmed);
+  if (fullHex) {
+    const h = fullHex[1];
+    return [
+      parseInt(h.slice(0, 2), 16),
+      parseInt(h.slice(2, 4), 16),
+      parseInt(h.slice(4, 6), 16),
+    ];
+  }
+  const rgbMatch = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(trimmed);
+  if (rgbMatch) {
+    return [
+      Math.min(255, Math.max(0, Number(rgbMatch[1]))),
+      Math.min(255, Math.max(0, Number(rgbMatch[2]))),
+      Math.min(255, Math.max(0, Number(rgbMatch[3]))),
+    ];
+  }
+  return fallback;
+}
+
+function rgbKey(rgb: readonly [number, number, number]): number {
+  return ((rgb[0] & 0xff) << 16) | ((rgb[1] & 0xff) << 8) | (rgb[2] & 0xff);
+}
+
+export function resolveTerminalCanvasTheme(
+  customizationsInput?: KiteThemeCustomizations
+): TerminalCanvasThemeColors {
+  const state = customizationsInput ?? readThemeCustomizations();
+  const mode = resolveThemeMode(state.appearanceMode);
+  const paletteId = getActivePaletteForState(state, mode);
+  const pack = getThemePackById(paletteId);
+  const effectiveBackdrop = resolveEffectiveBackdropPreset(state, pack);
+  const transparentBg = state.surface.translucent || effectiveBackdrop !== 'none';
+
+  const bg = state.overrides.surface ?? pack.tokens.terminalBg;
+  const fg = state.overrides.ink ?? pack.tokens.terminalFg;
+  const cursor = state.overrides.accent ?? pack.tokens.terminalCursor;
+  const bgRgb = parseCssHexToRgb(bg, mode === 'light' ? [248, 250, 252] : [10, 10, 10]);
+  const fgRgb = parseCssHexToRgb(fg, mode === 'light' ? [15, 23, 42] : [250, 250, 250]);
+  const cursorRgb = parseCssHexToRgb(cursor, [92, 143, 255]);
+
+  const selection = state.overrides.accent
+    ? `rgba(${cursorRgb[0]}, ${cursorRgb[1]}, ${cursorRgb[2]}, ${mode === 'light' ? 0.22 : 0.30})`
+    : pack.tokens.terminalSelection;
+
+  const ansiRgb = pack.tokens.ansi.map((hex, index) =>
+    parseCssHexToRgb(hex, RUST_ANSI_BASE[index] ?? fgRgb)
+  );
+
+  const colorRemap = new Map<number, [number, number, number]>();
+  for (let i = 0; i < RUST_ANSI_BASE.length; i += 1) {
+    colorRemap.set(rgbKey(RUST_ANSI_BASE[i]), ansiRgb[i] ?? fgRgb);
+  }
+  // Map Rust DEFAULT_FG ([250, 250, 250]) and DEFAULT_BG ([10, 10, 10]) to the active theme
+  colorRemap.set(rgbKey([250, 250, 250]), fgRgb);
+  colorRemap.set(rgbKey([10, 10, 10]), bgRgb);
+
+  return {
+    mode,
+    paletteId,
+    transparentBg,
+    bg,
+    fg,
+    cursor,
+    selection,
+    bgRgb,
+    fgRgb,
+    cursorRgb,
+    ansi: pack.tokens.ansi,
+    ansiRgb,
+    colorRemap,
+  };
+}
+
+export function remapTerminalCellRgb(
+  rgb: readonly [number, number, number],
+  theme: TerminalCanvasThemeColors
+): readonly [number, number, number] {
+  return theme.colorRemap.get(rgbKey(rgb)) ?? rgb;
+}
 
 export interface TerminalCanvasGridMetrics {
   cols: number;

@@ -33,8 +33,10 @@
   width: 100%;
   height: var(--control-regular);
   padding: 0 32px;
-  background: var(--control-fill);
-  border: 1px solid var(--control-stroke);
+  background: var(--glass-elevated-bg, var(--control-fill));
+  border: 1px solid var(--glass-border, var(--control-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-radius: var(--control-radius);
   color: var(--text-primary);
   font-size: var(--text-caption);
@@ -112,8 +114,10 @@
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-radius: var(--control-radius);
-  background: var(--block-fill);
-  border: 1px solid var(--block-stroke);
+  background: var(--glass-elevated-bg, var(--block-fill));
+  border: 1px solid var(--glass-border, var(--block-stroke));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   transition: background-color var(--duration-ink) var(--ease-ink), border-color var(--duration-ink) var(--ease-ink);
 }
 

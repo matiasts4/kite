@@ -93,11 +93,13 @@ export const AgentUpdatesPopover: React.FC<AgentUpdatesPopoverProps> = ({
         width: '360px',
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'min(520px, calc(100vh - 80px))',
-        backgroundColor: 'var(--surface-elevated, #1a1a1f)',
+        background: 'var(--glass-overlay-bg, var(--menu-plate, #1a1a1f))',
+        WebkitBackdropFilter: 'var(--glass-overlay-blur)',
+        backdropFilter: 'var(--glass-overlay-blur)',
         color: 'var(--text-primary, #e2e8f0)',
         borderRadius: 'var(--card-radius, 12px)',
-        border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))',
-        boxShadow: 'var(--shadow-popover, 0 12px 36px rgba(0, 0, 0, 0.45))',
+        border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
+        boxShadow: 'var(--glass-shadow, var(--shadow-popover, 0 12px 36px rgba(0, 0, 0, 0.45)))',
         zIndex: 9999,
         display: 'flex',
         flexDirection: 'column',
@@ -111,8 +113,8 @@ export const AgentUpdatesPopover: React.FC<AgentUpdatesPopoverProps> = ({
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '12px 14px',
-          borderBottom: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.06))',
-          backgroundColor: 'var(--surface-card, rgba(255, 255, 255, 0.02))',
+          borderBottom: '1px solid var(--glass-border, rgba(255, 255, 255, 0.06))',
+          backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.02))',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -244,8 +246,8 @@ export const AgentUpdatesPopover: React.FC<AgentUpdatesPopoverProps> = ({
                   justifyContent: 'space-between',
                   padding: '8px 10px',
                   borderRadius: 'var(--control-radius, 8px)',
-                  backgroundColor: 'var(--surface-sunken, rgba(255, 255, 255, 0.03))',
-                  border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.04))',
+                  backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.03))',
+                  border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
                   gap: '10px',
                 }}
               >
@@ -365,8 +367,8 @@ export const AgentUpdatesPopover: React.FC<AgentUpdatesPopoverProps> = ({
       <div
         style={{
           padding: '10px 14px',
-          borderTop: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.06))',
-          backgroundColor: 'var(--surface-card, rgba(255, 255, 255, 0.015))',
+          borderTop: '1px solid var(--glass-border, rgba(255, 255, 255, 0.06))',
+          backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.015))',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',

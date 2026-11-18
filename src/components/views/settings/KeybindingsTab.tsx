@@ -17,6 +17,13 @@ export interface KeybindingsTabProps {
 
 const SHORTCUT_CATEGORIES: ShortcutCategory[] = ['Navigation', 'Modes', 'Terminal & Code', 'Voice'];
 
+const CATEGORY_LABELS: Record<ShortcutCategory, string> = {
+  Navigation: 'Navegación',
+  Modes: 'Modos',
+  'Terminal & Code': 'Terminal y Código',
+  Voice: 'Voz',
+};
+
 export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPlatform }) => {
   const platform = propPlatform || getPlatform();
   const [query, setQuery] = useState('');
@@ -82,7 +89,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
       <section className="settings-group">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
           <h2 className="settings-group__title" style={{ margin: 0 }}>
-            Keyboard Shortcuts
+            Atajos de teclado
           </h2>
           {customCount > 0 && (
             <button
@@ -105,7 +112,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
             </div>
             <div className="settings-row__control settings-row__control--menu">
               <input
-                aria-label="Filter keybindings"
+                aria-label="Filtrar atajos de teclado"
                 className="settings-control ui-button"
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Buscar atajos por nombre o tecla…"
@@ -120,7 +127,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
 
       {groupedCategories.map(({ category: cat, items }) => (
           <section key={cat} className="settings-group">
-            <h2 className="settings-group__title">{cat}</h2>
+            <h2 className="settings-group__title">{CATEGORY_LABELS[cat]}</h2>
             <div className="ui-card">
               {items.map((item) => {
                 const activeKeys = item.customKeys || item.defaultKeys;

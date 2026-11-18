@@ -124,8 +124,7 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'rgba(0, 0, 0, 0.65)',
-        backdropFilter: 'blur(4px)',
+        backgroundColor: 'var(--glass-modal-scrim, var(--glass-backdrop-scrim, rgba(0, 0, 0, 0.65)))',
       }}
     >
       <motion.div
@@ -142,11 +141,13 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
           maxHeight: '85vh',
           display: 'flex',
           flexDirection: 'column',
-          backgroundColor: 'var(--surface-primary, #1e1e1e)',
-          color: 'var(--text-primary, #fff)',
-          borderRadius: '12px',
-          border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.12))',
-          boxShadow: '0 20px 48px rgba(0, 0, 0, 0.5)',
+          background: 'var(--glass-modal-bg, var(--glass-overlay-bg, var(--menu-plate, #1e1e1e)))',
+          WebkitBackdropFilter: 'var(--glass-overlay-blur)',
+          backdropFilter: 'var(--glass-overlay-blur)',
+          color: 'var(--text-primary, #fafafa)',
+          borderRadius: 'var(--dialog-radius, 14px)',
+          border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.12))',
+          boxShadow: 'var(--glass-shadow, 0 20px 48px rgba(0, 0, 0, 0.5))',
           padding: '24px',
           overflowY: 'auto',
         }}
@@ -185,9 +186,9 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
               textAlign: 'center',
               color: 'var(--text-secondary, #888)',
               fontSize: '13px',
-              backgroundColor: 'var(--surface-secondary, rgba(255, 255, 255, 0.03))',
-              borderRadius: '8px',
-              border: '1px dashed var(--border-subtle, rgba(255, 255, 255, 0.1))',
+              backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.03))',
+              borderRadius: 'var(--control-radius, 8px)',
+              border: '1px dashed var(--glass-border, rgba(255, 255, 255, 0.1))',
               marginBottom: '16px',
             }}
           >
@@ -216,9 +217,9 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   padding: '10px 12px',
-                  borderRadius: '8px',
-                  backgroundColor: 'var(--surface-secondary, rgba(255, 255, 255, 0.05))',
-                  border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))',
+                  borderRadius: 'var(--control-radius, 8px)',
+                  backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.05))',
+                  border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
@@ -249,9 +250,10 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
                   disabled={busyKey !== null}
                   onClick={() => handleResume(conv.key)}
                   style={{
-                    padding: '6px 14px',
+                    height: 'var(--vl-control-md, 32px)',
+                    padding: '0 14px',
                     fontSize: '12px',
-                    borderRadius: '6px',
+                    borderRadius: 'var(--control-radius, 8px)',
                     cursor: busyKey !== null ? 'not-allowed' : 'pointer',
                   }}
                 >
@@ -268,7 +270,7 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
             alignItems: 'center',
             justifyContent: 'space-between',
             marginTop: '8px',
-            borderTop: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))',
+            borderTop: '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
             paddingTop: '16px',
           }}
         >
@@ -278,9 +280,10 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
             disabled={busyKey !== null}
             onClick={handleFresh}
             style={{
-              padding: '8px 14px',
+              height: 'var(--vl-control-md, 32px)',
+              padding: '0 14px',
               fontSize: '13px',
-              borderRadius: '6px',
+              borderRadius: 'var(--control-radius, 8px)',
               cursor: busyKey !== null ? 'not-allowed' : 'pointer',
             }}
           >
@@ -291,9 +294,10 @@ export const AgentPaneResumeModal: React.FC<AgentPaneResumeModalProps> = ({
             className="secondary-button"
             onClick={onClose}
             style={{
-              padding: '8px 16px',
+              height: 'var(--vl-control-md, 32px)',
+              padding: '0 16px',
               fontSize: '13px',
-              borderRadius: '6px',
+              borderRadius: 'var(--control-radius, 8px)',
               cursor: 'pointer',
             }}
           >

@@ -471,9 +471,9 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             disabled={loading || busy}
             className="secondary-button"
             style={{
-              padding: '0 10px',
-              height: '28px',
-              borderRadius: '6px',
+              padding: '0 12px',
+              height: 'var(--vl-control-md, 32px)',
+              borderRadius: 'var(--control-radius, 8px)',
               fontSize: '12px',
               display: 'inline-flex',
               alignItems: 'center',
@@ -495,17 +495,17 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             disabled={busy || readOnly}
             className="primary-button"
             style={{
-              padding: '0 12px',
-              height: '28px',
-              borderRadius: '6px',
+              padding: '0 14px',
+              height: 'var(--vl-control-md, 32px)',
+              borderRadius: 'var(--control-radius, 8px)',
               fontSize: '12px',
               fontWeight: 600,
               display: 'inline-flex',
               alignItems: 'center',
               gap: '6px',
               cursor: 'pointer',
-              backgroundColor: 'var(--accent, #5c8fff)',
-              color: '#fff',
+              backgroundColor: 'var(--accent-fill, #2a62ea)',
+              color: 'var(--accent-on-fill, #fff)',
             }}
           >
             <Plus size={13} />
@@ -578,11 +578,11 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
               style={{
                 flex: 1,
                 minWidth: '220px',
-                height: '32px',
-                borderRadius: '6px',
+                height: 'var(--vl-control-md, 32px)',
+                borderRadius: 'var(--control-radius, 8px)',
                 padding: '0 10px',
-                backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
+                backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '8px',
@@ -619,10 +619,10 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
               style={{
                 display: 'flex',
                 gap: '4px',
-                backgroundColor: 'rgba(255, 255, 255, 0.03)',
+                backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.03))',
                 padding: '2px',
-                borderRadius: '6px',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+                borderRadius: 'var(--control-radius, 8px)',
+                border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
               }}
             >
               {(
@@ -641,11 +641,13 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
                     type="button"
                     onClick={() => setTriggerFilter(f.id)}
                     style={{
-                      padding: '4px 8px',
-                      borderRadius: '4px',
+                      padding: '4px 10px',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
                       border: 0,
-                      backgroundColor: active ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
-                      color: active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
+                      backgroundColor: active
+                        ? 'var(--accent-tint, color-mix(in srgb, var(--accent, #5c8fff) 18%, transparent))'
+                        : 'transparent',
+                      color: active ? 'var(--text-primary, #fafafa)' : 'var(--text-secondary, #a1a1a1)',
                       fontSize: '11px',
                       fontWeight: active ? 600 : 400,
                       cursor: 'pointer',
@@ -662,10 +664,10 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
               style={{
                 display: 'flex',
                 gap: '4px',
-                backgroundColor: 'rgba(255, 255, 255, 0.03)',
+                backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.03))',
                 padding: '2px',
-                borderRadius: '6px',
-                border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+                borderRadius: 'var(--control-radius, 8px)',
+                border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
               }}
             >
               {(
@@ -682,11 +684,13 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
                     type="button"
                     onClick={() => setStatusFilter(s.id)}
                     style={{
-                      padding: '4px 8px',
-                      borderRadius: '4px',
+                      padding: '4px 10px',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
                       border: 0,
-                      backgroundColor: active ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
-                      color: active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
+                      backgroundColor: active
+                        ? 'var(--accent-tint, color-mix(in srgb, var(--accent, #5c8fff) 18%, transparent))'
+                        : 'transparent',
+                      color: active ? 'var(--text-primary, #fafafa)' : 'var(--text-secondary, #a1a1a1)',
                       fontSize: '11px',
                       fontWeight: active ? 600 : 400,
                       cursor: 'pointer',
@@ -702,7 +706,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
           {/* Loading state */}
           {loading && rawRoutines.length === 0 ? (
             <div className="routine-loading" style={{ padding: '60px 0', textAlign: 'center' }}>
-              <Loader2 size={24} className="animate-spin text-[#5c8fff]" />
+              <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent, #5c8fff)' }} />
               <span className="sr-only">Opening routines…</span>
             </div>
           ) : rawRoutines.length === 0 ? (
@@ -711,10 +715,10 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
               <div aria-hidden="true" className="routine-empty__icon" style={{ marginBottom: '16px' }}>
                 <Clock size={32} strokeWidth={1.5} />
               </div>
-              <h1 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary, #fff)', marginBottom: '8px' }}>
+              <h1 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary, #fafafa)', marginBottom: '8px' }}>
                 No routines yet
               </h1>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary, #9da2b4)', maxWidth: '480px', margin: '0 auto 20px', lineHeight: 1.5 }}>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary, #a1a1a1)', maxWidth: '480px', margin: '0 auto 20px', lineHeight: 1.5 }}>
                 {agents.length === 0
                   ? 'Create an agent first, then add a job here — or let the agent schedule one itself while you work.'
                   : 'A routine is a job an agent picks up on a clock or trigger: morning triage, an hourly sweep, or repository checks. You can add one, or an agent can create one with the schedule tool.'}
@@ -729,10 +733,11 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
                   }}
                   className="primary-button routine-empty__button"
                   style={{
-                    padding: '8px 20px',
-                    borderRadius: '6px',
-                    backgroundColor: 'var(--accent, #5c8fff)',
-                    color: '#fff',
+                    height: 'var(--vl-control-md, 32px)',
+                    padding: '0 20px',
+                    borderRadius: 'var(--control-radius, 8px)',
+                    backgroundColor: 'var(--accent-fill, #2a62ea)',
+                    color: 'var(--accent-on-fill, #fff)',
                     fontWeight: 600,
                     fontSize: '13px',
                     border: 0,
@@ -801,8 +806,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             position: 'fixed',
             inset: 0,
             zIndex: 99999,
-            backgroundColor: 'rgba(0, 0, 0, 0.72)',
-            backdropFilter: 'blur(3px)',
+            backgroundColor: 'var(--glass-modal-scrim, var(--glass-backdrop-scrim, rgba(0, 0, 0, 0.72)))',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -815,21 +819,23 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             style={{
               width: '440px',
               maxWidth: '100%',
-              backgroundColor: 'var(--dialog, #16171d)',
-              borderRadius: '10px',
-              border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.12))',
-              boxShadow: '0 20px 45px rgba(0, 0, 0, 0.55)',
+              background: 'var(--glass-modal-bg, var(--glass-overlay-bg, var(--menu-plate, #16171d)))',
+              WebkitBackdropFilter: 'var(--glass-overlay-blur)',
+              backdropFilter: 'var(--glass-overlay-blur)',
+              borderRadius: 'var(--dialog-radius, 14px)',
+              border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12)))',
+              boxShadow: 'var(--glass-shadow, 0 20px 45px rgba(0, 0, 0, 0.55))',
               padding: '20px',
             }}
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--status-failed, #ff6568)', marginBottom: '12px' }}>
               <Trash2 size={18} />
-              <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>
+              <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600, color: 'var(--text-primary, #fafafa)' }}>
                 Delete Routine
               </h3>
             </div>
-            <p style={{ fontSize: '13px', color: 'var(--text-primary, #eee)', lineHeight: 1.4, margin: '0 0 8px' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-primary, #fafafa)', lineHeight: 1.4, margin: '0 0 8px' }}>
               Are you sure you want to delete routine <strong>&quot;{deleteConfirmRoutine.name}&quot;</strong>?
             </p>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary, #9da2b4)', lineHeight: 1.4, margin: '0 0 20px' }}>
@@ -842,12 +848,13 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
                 disabled={busy}
                 onClick={() => setDeleteConfirmRoutine(null)}
                 style={{
-                  padding: '6px 14px',
-                  borderRadius: '6px',
+                  height: 'var(--vl-control-md, 32px)',
+                  padding: '0 14px',
+                  borderRadius: 'var(--control-radius, 8px)',
                   fontSize: '12px',
-                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.12))',
+                  border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12)))',
                   backgroundColor: 'transparent',
-                  color: 'var(--text-primary, #fff)',
+                  color: 'var(--text-primary, #fafafa)',
                   cursor: 'pointer',
                 }}
               >
@@ -858,12 +865,13 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
                 disabled={busy}
                 onClick={() => handleDeleteRoutine(deleteConfirmRoutine)}
                 style={{
-                  padding: '6px 16px',
-                  borderRadius: '6px',
+                  height: 'var(--vl-control-md, 32px)',
+                  padding: '0 16px',
+                  borderRadius: 'var(--control-radius, 8px)',
                   fontSize: '12px',
                   fontWeight: 600,
                   backgroundColor: 'var(--status-failed, #ff6568)',
-                  color: '#fff',
+                  color: 'var(--accent-on-fill, #fff)',
                   border: 0,
                   cursor: 'pointer',
                 }}

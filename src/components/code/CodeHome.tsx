@@ -1,5 +1,6 @@
 import React from 'react';
 import { FolderPlusIcon, PlusIcon } from './codeIcons';
+import { ThemeHeroFigure } from '../theme/ThemeHeroFigure';
 
 export interface CodeHomeProps {
   onAddWorkspace: () => void;
@@ -9,6 +10,7 @@ export interface CodeHomeProps {
 export const CodeHome: React.FC<CodeHomeProps> = ({ onAddWorkspace, isAdding = false }) => {
   return (
     <section className="empty-surface pane empty-roster-surface">
+      <ThemeHeroFigure variant="hero" />
       <span aria-hidden="true" className="empty-surface__icon">
         <FolderPlusIcon size={30} />
       </span>

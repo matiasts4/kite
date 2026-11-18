@@ -156,13 +156,13 @@ describe('SubagentsTab', () => {
 
     expect((await screen.findAllByText('grok-4.7-build-fast')).length).toBeGreaterThan(0);
     expect(screen.getByText('fast-reviewer')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Ask' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Preguntar' })).toHaveAttribute('aria-pressed', 'true');
 
     // Switch renders animated knob element and clears defaultDelegation when disabling active default.
-    const toggleBtn = screen.getByRole('switch', { name: 'Toggle grok/grok-4.7-build-fast' });
+    const toggleBtn = screen.getByRole('switch', { name: 'Alternar grok/grok-4.7-build-fast' });
     expect(toggleBtn.querySelector('.ui-switch__knob')).not.toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Strict' }));
+    await user.click(screen.getByRole('button', { name: 'Estricto' }));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         'save_subagent_settings',
@@ -178,13 +178,13 @@ describe('SubagentsTab', () => {
       expect(state.settings.defaultDelegation).toBeNull();
     });
 
-    await user.click(screen.getByRole('button', { name: /Add to stack/i }));
+    await user.click(screen.getByRole('button', { name: /Agregar al stack/i }));
     await waitFor(() => {
       expect(state.settings.stack[0].enabled).toBe(true);
     });
 
     // When curated stack is non-empty, default delegation options exclude out-of-stack sample models.
-    const defaultSelectBtn = screen.getByRole('combobox', { name: 'Default lightweight model' });
+    const defaultSelectBtn = screen.getByRole('combobox', { name: 'Modelo ligero predeterminado' });
     await user.click(defaultSelectBtn);
     expect(screen.queryByText(/gemini-3-flash/)).not.toBeInTheDocument();
     await user.click(defaultSelectBtn);
@@ -196,11 +196,11 @@ describe('SubagentsTab', () => {
 
     expect(await screen.findByText('fast-reviewer')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /New role/i }));
-    await user.type(screen.getByLabelText(/Role slug/i), 'security-auditor');
-    await user.type(screen.getByLabelText(/Description/i), 'Checks auth boundaries');
-    await user.type(screen.getByLabelText(/System prompt instructions/i), 'Inspect auth flows.');
-    await user.click(screen.getByRole('button', { name: /Save role/i }));
+    await user.click(screen.getByRole('button', { name: /Nuevo rol/i }));
+    await user.type(screen.getByLabelText(/Identificador del rol/i), 'security-auditor');
+    await user.type(screen.getByLabelText(/Descripción/i), 'Checks auth boundaries');
+    await user.type(screen.getByLabelText(/Instrucciones de sistema/i), 'Inspect auth flows.');
+    await user.click(screen.getByRole('button', { name: /Guardar rol/i }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
@@ -219,7 +219,7 @@ describe('SubagentsTab', () => {
     });
     expect(await screen.findByText('security-auditor')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Delete role security-auditor' }));
+    await user.click(screen.getByRole('button', { name: 'Eliminar rol security-auditor' }));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         'delete_subagent_role',
@@ -235,10 +235,10 @@ describe('SubagentsTab', () => {
     const user = userEvent.setup();
     render(<SettingsView isOpen={true} onClose={vi.fn()} />);
 
-    const navBtn = screen.getByRole('button', { name: /Subagents/i });
+    const navBtn = screen.getByRole('button', { name: /Subagentes/i });
     await user.click(navBtn);
 
-    expect(await screen.findByText('Delegation Policy & Default')).toBeInTheDocument();
+    expect(await screen.findByText('Política de delegación y modelo predeterminado')).toBeInTheDocument();
     expect(await screen.findByText('fast-reviewer')).toBeInTheDocument();
   });
 
@@ -252,7 +252,7 @@ describe('SubagentsTab', () => {
     render(<SubagentsTab />);
 
     const defaultSelectBtn = await screen.findByRole('combobox', {
-      name: 'Default lightweight model',
+      name: 'Modelo ligero predeterminado',
     });
     await user.click(defaultSelectBtn);
     await user.click(screen.getByText(/gemini-3-flash/));

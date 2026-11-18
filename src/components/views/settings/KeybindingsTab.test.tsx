@@ -13,11 +13,11 @@ describe('KeybindingsTab', () => {
   it('renders all keybinding categories and actions', () => {
     render(<KeybindingsTab platform="windows" />);
 
-    expect(screen.getByText('Keyboard Shortcuts')).toBeDefined();
-    expect(screen.getByText('Navigation')).toBeDefined();
-    expect(screen.getByText('Modes')).toBeDefined();
-    expect(screen.getByText('Terminal & Code')).toBeDefined();
-    expect(screen.getByText('Voice')).toBeDefined();
+    expect(screen.getByText('Atajos de teclado')).toBeDefined();
+    expect(screen.getByText('Navegación')).toBeDefined();
+    expect(screen.getByText('Modos')).toBeDefined();
+    expect(screen.getByText('Terminal y Código')).toBeDefined();
+    expect(screen.getByText('Voz')).toBeDefined();
     expect(screen.getByText('Toggle lateral sidebar')).toBeDefined();
     expect(screen.getByText('Switch to Agent mode')).toBeDefined();
   });

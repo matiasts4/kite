@@ -20,9 +20,9 @@
 }
 
 .agent-skills__rows {
-  border: 1px solid var(--block-stroke, #30363d);
+  border: 1px solid var(--glass-border, var(--block-stroke, #30363d));
   border-radius: var(--radius-card, 12px);
-  background: var(--block-fill, #161b22);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
   overflow: hidden;
 }
 
@@ -244,8 +244,8 @@
 }
 
 .agent-starter-card {
-  background: var(--block-fill, #161b22);
-  border: 1px solid var(--block-stroke, #30363d);
+  background: var(--glass-elevated-bg, var(--block-fill, #161b22));
+  border: 1px solid var(--glass-border, var(--block-stroke, #30363d));
   border-radius: var(--radius-card, 12px);
   padding: 16px;
   display: flex;

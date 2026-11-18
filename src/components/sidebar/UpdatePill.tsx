@@ -413,7 +413,7 @@ export const UpdateDetailCard: React.FC<UpdateDetailCardProps> = ({ isOpen, onCl
             width: '100%',
             height: 4,
             borderRadius: 9999,
-            background: 'rgba(255, 255, 255, 0.08)',
+            background: 'var(--chip-fill, rgba(255, 255, 255, 0.08))',
             overflow: 'hidden',
           }}
         >
@@ -436,9 +436,9 @@ export const UpdateDetailCard: React.FC<UpdateDetailCardProps> = ({ isOpen, onCl
             maxHeight: 65,
             overflowY: 'auto',
             padding: '5px 7px',
-            borderRadius: 8,
-            background: 'rgba(0, 0, 0, 0.25)',
-            border: '1px solid rgba(255, 255, 255, 0.05)',
+            borderRadius: 'var(--control-radius, 8px)',
+            background: 'var(--glass-elevated-bg, rgba(0, 0, 0, 0.25))',
+            border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.05))',
             fontSize: 10,
             lineHeight: 1.4,
             color: 'var(--text-secondary, #a1a1aa)',

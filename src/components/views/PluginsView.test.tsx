@@ -21,7 +21,7 @@ describe('PluginsView Component', () => {
   it('renders all 29 canonical plugins from catalog', async () => {
     render(<PluginsView />);
 
-    expect(screen.getByText('29 authentic integrations')).toBeInTheDocument();
+    expect(screen.getByText('29 integraciones oficiales')).toBeInTheDocument();
     const articles = screen.getAllByRole('article');
     expect(articles).toHaveLength(29);
   });
@@ -30,7 +30,7 @@ describe('PluginsView Component', () => {
     render(<PluginsView />);
 
     const footnote = screen.getByText(
-      'Connect once to Kite. Choose each agent’s plugins in Agent Settings. Its access mode controls approvals; Read only keeps plugins read-only.'
+      'Conecta una sola vez en Kite. Elige los plugins de cada agente en Ajustes del Agente. Su modo de acceso controla las aprobaciones; Solo lectura mantiene los plugins en modo de solo lectura.'
     );
     expect(footnote).toBeInTheDocument();
     expect(footnote).toHaveClass('plugin-pane__footnote');
@@ -40,7 +40,7 @@ describe('PluginsView Component', () => {
     const user = userEvent.setup();
     render(<PluginsView />);
 
-    const searchInput = screen.getByPlaceholderText(/Search plugins by name, vendor, capabilities/i);
+    const searchInput = screen.getByPlaceholderText(/Buscar plugins por nombre, proveedor o capacidades/i);
 
     // Search by name
     await user.type(searchInput, 'Stripe');
@@ -58,11 +58,11 @@ describe('PluginsView Component', () => {
     const user = userEvent.setup();
     render(<PluginsView />);
 
-    const searchInput = screen.getByPlaceholderText(/Search plugins by name, vendor, capabilities/i);
+    const searchInput = screen.getByPlaceholderText(/Buscar plugins por nombre, proveedor o capacidades/i);
     await user.type(searchInput, 'nonexistentxyz123');
 
     expect(screen.queryAllByRole('article')).toHaveLength(0);
-    expect(screen.getByText('No plugins match “nonexistentxyz123”.')).toBeInTheDocument();
+    expect(screen.getByText('Ningún plugin coincide con “nonexistentxyz123”.')).toBeInTheDocument();
   });
 
   it('opens details drawer when a plugin card is clicked', async () => {

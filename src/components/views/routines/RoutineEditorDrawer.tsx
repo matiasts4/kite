@@ -198,7 +198,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
         position: 'fixed',
         inset: 0,
         zIndex: 9999,
-        backgroundColor: 'rgba(0, 0, 0, 0.72)',
+        backgroundColor: 'var(--glass-modal-scrim, rgba(0, 0, 0, 0.72))',
         backdropFilter: 'blur(3px)',
         display: 'flex',
         alignItems: 'center',
@@ -216,10 +216,12 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
           width: '640px',
           maxWidth: '100%',
           maxHeight: '90vh',
-          backgroundColor: 'var(--dialog, #16171d)',
-          borderRadius: '12px',
-          border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.12))',
-          boxShadow: '0 20px 45px rgba(0, 0, 0, 0.55)',
+          background: 'var(--glass-modal-bg, var(--menu-plate, #16171d))',
+          WebkitBackdropFilter: 'var(--glass-overlay-blur)',
+          backdropFilter: 'var(--glass-overlay-blur)',
+          borderRadius: 'var(--dialog-radius, 14px)',
+          border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12)))',
+          boxShadow: 'var(--glass-shadow, 0 20px 45px rgba(0, 0, 0, 0.55))',
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
@@ -315,11 +317,11 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                 placeholder="e.g. Daily Health Sweep & Issue Triage"
                 style={{
                   width: '100%',
-                  height: '34px',
+                  height: 'var(--vl-control-md, 32px)',
                   padding: '0 12px',
-                  backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                  borderRadius: '6px',
+                  backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                  border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
+                  borderRadius: 'var(--control-radius, 8px)',
                   color: 'var(--text-primary, #fff)',
                   fontSize: '13px',
                   boxSizing: 'border-box',
@@ -341,11 +343,11 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                   onChange={(e) => setAgentId(e.target.value)}
                   style={{
                     flex: 1,
-                    height: '34px',
+                    height: 'var(--vl-control-md, 32px)',
                     padding: '0 10px',
-                    backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                    border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                    borderRadius: '6px',
+                    backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                    border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
+                    borderRadius: 'var(--control-radius, 8px)',
                     color: 'var(--text-primary, #fff)',
                     fontSize: '13px',
                     outline: 'none',
@@ -400,9 +402,9 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                   width: '100%',
                   minHeight: '96px',
                   padding: '10px 12px',
-                  backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                  borderRadius: '6px',
+                  backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                  border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
+                  borderRadius: 'var(--control-radius, 8px)',
                   color: 'var(--text-primary, #fff)',
                   fontSize: '13px',
                   lineHeight: '1.5',
@@ -445,13 +447,13 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                       onClick={() => setTriggerType(t.id)}
                       style={{
                         padding: '8px 10px',
-                        borderRadius: '6px',
+                        borderRadius: 'var(--control-radius, 8px)',
                         border: active
                           ? '1px solid var(--accent, #5c8fff)'
-                          : '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+                          : '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
                         backgroundColor: active
                           ? 'rgba(92, 143, 255, 0.16)'
-                          : 'var(--block-fill, rgba(255, 255, 255, 0.03))',
+                          : 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)))',
                         color: active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
                         fontSize: '12px',
                         fontWeight: active ? 600 : 400,
@@ -476,9 +478,9 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
               <div
                 style={{
                   padding: '14px',
-                  backgroundColor: 'rgba(255, 255, 255, 0.02)',
-                  border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
-                  borderRadius: '8px',
+                  backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.02))',
+                  border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+                  borderRadius: 'var(--control-radius, 8px)',
                   display: 'flex',
                   flexDirection: 'column',
                   gap: '12px',
@@ -552,13 +554,13 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                           style={{
                             padding: '10px 12px',
                             textAlign: 'left',
-                            borderRadius: '6px',
+                            borderRadius: 'var(--vl-radius-sm, 6px)',
                             border: isSel
                               ? '1px solid var(--accent, #5c8fff)'
-                              : '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+                              : '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
                             backgroundColor: isSel
                               ? 'rgba(92, 143, 255, 0.12)'
-                              : 'var(--block-fill, rgba(255, 255, 255, 0.03))',
+                              : 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)))',
                             color: isSel ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
                             fontSize: '12px',
                             fontWeight: isSel ? 600 : 400,
@@ -587,12 +589,12 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                         onChange={(e) => setCustomIntervalMinutes(Number(e.target.value))}
                         style={{
                           width: '120px',
-                          height: '32px',
+                          height: 'var(--vl-control-md, 32px)',
                           padding: '0 10px',
-                          backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                          border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                          borderRadius: '6px',
-                          color: '#fff',
+                          backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                          border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
+                          borderRadius: 'var(--vl-radius-sm, 6px)',
+                          color: 'var(--text-primary, #fff)',
                           fontSize: '13px',
                         }}
                       />
@@ -620,12 +622,12 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                           onChange={(e) => setCustomHour(Number(e.target.value))}
                           style={{
                             width: '70px',
-                            height: '32px',
+                            height: 'var(--vl-control-md, 32px)',
                             padding: '0 8px',
-                            backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                            border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                            borderRadius: '6px',
-                            color: '#fff',
+                            backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                            border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
+                            borderRadius: 'var(--vl-radius-sm, 6px)',
+                            color: 'var(--text-primary, #fff)',
                             fontSize: '13px',
                           }}
                         />
@@ -642,12 +644,12 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                           onChange={(e) => setCustomMinute(Number(e.target.value))}
                           style={{
                             width: '70px',
-                            height: '32px',
+                            height: 'var(--vl-control-md, 32px)',
                             padding: '0 8px',
-                            backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.04))',
-                            border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.1))',
-                            borderRadius: '6px',
-                            color: '#fff',
+                            backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
+                            border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
+                            borderRadius: 'var(--vl-radius-sm, 6px)',
+                            color: 'var(--text-primary, #fff)',
                             fontSize: '13px',
                           }}
                         />
@@ -762,7 +764,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
             style={{
               padding: '14px 20px',
               borderTop: '1px solid var(--separator, rgba(255, 255, 255, 0.08))',
-              backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.02))',
+              backgroundColor: 'var(--glass-nested-bg, transparent)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',

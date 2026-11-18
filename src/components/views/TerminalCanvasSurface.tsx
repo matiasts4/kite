@@ -14,9 +14,12 @@ import {
   type CursorSnapshot,
   type RenderSnapshot,
   measureTerminalCanvasGrid,
+  resolveTerminalCanvasTheme,
+  type TerminalCanvasThemeColors,
   type TerminalCanvasSurfaceProps,
   type TerminalSurfaceHandle,
 } from './terminal/canvas/terminalCanvasTypes';
+import type { KiteThemeCustomizations } from '../../lib/themeCustomizations';
 import { renderCanvasGrid } from './terminal/canvas/canvasGridRenderer';
 import { cursorPaintPhase } from './terminal/canvas/cursorPaintPhase';
 import { type GridFindHit } from './terminal/canvas/terminalGridText';
@@ -48,6 +51,11 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const [prefs, setPrefs] = useState<TerminalAppearancePrefs>(() =>
     getTerminalAppearancePrefs()
   );
+  const [terminalTheme, setTerminalTheme] = useState<TerminalCanvasThemeColors>(() =>
+    resolveTerminalCanvasTheme()
+  );
+  const terminalThemeRef = useRef<TerminalCanvasThemeColors>(terminalTheme);
+  terminalThemeRef.current = terminalTheme;
   const [viewport, setViewport] = useState({ offset: 0, depth: 0, alt: false });
   const [liveText, setLiveText] = useState('');
 
@@ -232,6 +240,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       baseline: baselineOffsetRef.current,
       gridRows: gridRowsRef.current,
       gridCols: gridColsRef.current,
+      theme: terminalThemeRef.current,
     });
     hasFullPaintRef.current = true;
 
@@ -371,11 +380,28 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         ? new IntersectionObserver(() => publish())
         : null;
     if (observer && el) observer.observe(el);
+    const mutObserver =
+      typeof MutationObserver !== 'undefined' && el
+        ? new MutationObserver(() => publish())
+        : null;
+    if (mutObserver && el) {
+      let ancestor: HTMLElement | null = el.parentElement;
+      while (ancestor) {
+        if (ancestor.hasAttribute('aria-hidden') || ancestor.classList.contains('mode-layer')) {
+          mutObserver.observe(ancestor, {
+            attributes: true,
+            attributeFilter: ['aria-hidden'],
+          });
+        }
+        ancestor = ancestor.parentElement;
+      }
+    }
     return () => {
       stopHeartbeat();
       document.removeEventListener('visibilitychange', publish);
       window.removeEventListener('resize', publish);
       observer?.disconnect();
+      mutObserver?.disconnect();
       surfaceLiveRef.current = false;
       setSurfaceLive(false);
       void invokeCommand('set_terminal_presentation', { sessionId, live: false }).catch(() => {});
@@ -657,6 +683,20 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     return () => window.removeEventListener(TERMINAL_APPEARANCE_CHANGED_EVENT, onAppearanceChange);
   }, []);
 
+  // Theme pack & customization change subscription
+  useEffect(() => {
+    const onThemeChange = (e: Event) => {
+      const detail = (e as CustomEvent<{ customizations?: KiteThemeCustomizations }>).detail;
+      const nextTheme = resolveTerminalCanvasTheme(detail?.customizations);
+      terminalThemeRef.current = nextTheme;
+      setTerminalTheme(nextTheme);
+      scheduleRender();
+    };
+
+    window.addEventListener('kite:theme-changed', onThemeChange);
+    return () => window.removeEventListener('kite:theme-changed', onThemeChange);
+  }, [scheduleRender]);
+
   // Sync isFocused prop to native input focus and internal tracking
   useEffect(() => {
     if (isFocused) {
@@ -754,12 +794,14 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     <div
       ref={containerRef}
       className={`terminal-canvas-surface-container ${className}`}
+      data-transparent-bg={terminalTheme.transparentBg ? 'true' : 'false'}
+      data-terminal-bg={terminalTheme.bg}
       onClick={handleContainerClick}
       style={{
         position: 'relative',
         width: '100%',
         height: '100%',
-        backgroundColor: '#0a0a0a',
+        backgroundColor: terminalTheme.transparentBg ? 'transparent' : terminalTheme.bg,
         overflow: 'hidden',
         outline: 'none',
       }}

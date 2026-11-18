@@ -34,27 +34,48 @@ export interface SettingsTabConfig {
   hasDividerBefore?: boolean;
 }
 
+import {
+  VISUAL_THEME_PACKS,
+  type BackdropPresetId,
+  type HeroFigureId,
+} from '../../../lib/themeCustomizations';
+
 export interface ThemeItem {
   id: string;
   name: string;
   mode: 'dark' | 'light';
   blurb: string;
+  badge?: string;
+  defaultBackdrop?: Exclude<BackdropPresetId, 'theme-default' | 'custom-image'>;
+  defaultFigure?: Exclude<HeroFigureId, 'theme-default'>;
+  defaultTranslucent?: boolean;
 }
 
-export const DARK_THEMES: ThemeItem[] = [
-  { id: 'kite-dark', name: 'Kite Dark', mode: 'dark', blurb: 'The house palette, tuned for night' },
-  { id: 'tokyo-night', name: 'Tokyo Night', mode: 'dark', blurb: 'Neon blues on deep indigo' },
-  { id: 'catppuccin-mocha', name: 'Catppuccin Mocha', mode: 'dark', blurb: 'Pastel accents on warm charcoal' },
-  { id: 'nord', name: 'Nord', mode: 'dark', blurb: 'Frosted blues from the Arctic' },
-  { id: 'dracula', name: 'Dracula', mode: 'dark', blurb: 'Vivid pinks on vampire purple' },
-];
+export const DARK_THEMES: ThemeItem[] = VISUAL_THEME_PACKS.filter(
+  (pack) => pack.mode === 'dark'
+).map((pack) => ({
+  id: pack.id,
+  name: pack.name,
+  mode: pack.mode,
+  blurb: pack.blurb,
+  badge: pack.badge,
+  defaultBackdrop: pack.defaultBackdrop,
+  defaultFigure: pack.defaultFigure,
+  defaultTranslucent: pack.defaultTranslucent,
+}));
 
-export const LIGHT_THEMES: ThemeItem[] = [
-  { id: 'kite-light', name: 'Kite Light', mode: 'light', blurb: 'The house palette, in daylight' },
-  { id: 'catppuccin-latte', name: 'Catppuccin Latte', mode: 'light', blurb: 'Pastel accents on soft cream' },
-  { id: 'solarized-light', name: 'Solarized Light', mode: 'light', blurb: 'Balanced tones on warm paper' },
-  { id: 'github-light', name: 'GitHub Light', mode: 'light', blurb: 'The pull-request page you know' },
-];
+export const LIGHT_THEMES: ThemeItem[] = VISUAL_THEME_PACKS.filter(
+  (pack) => pack.mode === 'light'
+).map((pack) => ({
+  id: pack.id,
+  name: pack.name,
+  mode: pack.mode,
+  blurb: pack.blurb,
+  badge: pack.badge,
+  defaultBackdrop: pack.defaultBackdrop,
+  defaultFigure: pack.defaultFigure,
+  defaultTranslucent: pack.defaultTranslucent,
+}));
 
 export interface TelemetryPrefs {
   diagnostics: boolean;

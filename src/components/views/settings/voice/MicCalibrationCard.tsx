@@ -147,13 +147,13 @@ export const MicCalibrationCard: React.FC<MicCalibrationCardProps> = ({
   };
 
   const rows = [
-    { id: 'automatic', title: 'Automatic' },
+    { id: 'automatic', title: 'Automático' },
     ...devices.map((device) => ({ id: device.id, title: device.name })),
   ];
   if (!rows.some((row) => row.id === selectedId)) {
     rows.push({ id: selectedId, title: selectedId });
   }
-  const selectedTitle = rows.find((row) => row.id === selectedId)?.title ?? 'Automatic';
+  const selectedTitle = rows.find((row) => row.id === selectedId)?.title ?? 'Automático';
 
   return (
     <section className="settings-group">
@@ -161,12 +161,12 @@ export const MicCalibrationCard: React.FC<MicCalibrationCardProps> = ({
       <div className="ui-card">
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
-            <h3 className="settings-row__title">Microphone</h3>
-            <p>Device names are private to this computer. Automatic chooses a safe input.</p>
+            <h3 className="settings-row__title">Micrófono</h3>
+            <p>Los nombres de dispositivos son privados en esta PC. Automático elige una entrada segura.</p>
           </div>
           <div className="settings-row__control settings-row__control--menu">
             <SelectMenu
-              label="Microphone"
+              label="Micrófono"
               variant="field"
               className="settings-select"
               value={selectedId}

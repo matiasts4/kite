@@ -41,10 +41,11 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           role="alert"
           style={{
             padding: '16px',
-            color: 'var(--text-danger, #ef4444)',
-            backgroundColor: 'var(--pane, #181818)',
-            border: '1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1))',
-            borderRadius: '6px',
+            color: 'var(--danger-ink, var(--status-failed, #ef4444))',
+            backgroundColor: 'var(--glass-elevated-bg, var(--pane, #181818))',
+            border: '1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)))',
+            boxShadow: 'var(--glass-highlight)',
+            borderRadius: 'var(--vl-radius-sm, 6px)',
             margin: '8px',
             fontSize: '12px',
           }}
@@ -60,9 +61,9 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             style={{
               marginTop: '10px',
               padding: '4px 10px',
-              borderRadius: '4px',
-              background: 'var(--subtle-fill, rgba(255, 255, 255, 0.08))',
-              border: '1px solid var(--panel-stroke, rgba(255, 255, 255, 0.15))',
+              borderRadius: 'var(--vl-radius-xs, 4px)',
+              background: 'var(--chip-fill, rgba(255, 255, 255, 0.08))',
+              border: '1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.15)))',
               color: 'inherit',
               cursor: 'pointer',
               fontSize: '12px',

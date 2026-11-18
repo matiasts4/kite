@@ -1,9 +1,30 @@
 import React, { useEffect, useRef, useState, useId } from 'react';
-import mermaid from 'mermaid';
+import type mermaidType from 'mermaid';
 import { CopyIcon, CheckIcon } from '../views/chat/ChatIcons';
 
-// Initialize mermaid with appropriate theme
-function initMermaid(isLight: boolean) {
+let mermaidModulePromise: Promise<typeof mermaidType> | null = null;
+function loadMermaid(): Promise<typeof mermaidType> {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import('mermaid').then((m) => m.default);
+  }
+  return mermaidModulePromise;
+}
+
+function readCssToken(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+// Initialize mermaid with active theme tokens
+function initMermaid(mermaid: typeof mermaidType, isLight: boolean) {
+  const background = readCssToken('--pane', isLight ? '#ffffff' : '#141414');
+  const secondaryColor = readCssToken('--composer', isLight ? '#f3f4f6' : '#1c1c1c');
+  const tertiaryColor = readCssToken('--menu-plate', isLight ? '#ffffff' : '#22242a');
+  const primaryColor = readCssToken('--accent', isLight ? '#3b82f6' : '#5c8fff');
+  const primaryTextColor = readCssToken('--text-primary', isLight ? '#1f2937' : '#f8fafc');
+  const lineColor = readCssToken('--text-secondary', isLight ? '#6b7280' : '#94a3b8');
+
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: 'loose',
@@ -12,24 +33,25 @@ function initMermaid(isLight: boolean) {
       ? {
           fontFamily: 'var(--font-sans, system-ui, -apple-system, sans-serif)',
           fontSize: '13px',
-          primaryColor: '#3b82f6',
-          primaryTextColor: '#1f2937',
-          primaryBorderColor: '#93c5fd',
-          lineColor: '#6b7280',
-          secondaryColor: '#f3f4f6',
-          tertiaryColor: '#ffffff',
+          background,
+          primaryColor,
+          primaryTextColor,
+          primaryBorderColor: primaryColor,
+          lineColor,
+          secondaryColor,
+          tertiaryColor,
         }
       : {
           fontFamily: 'var(--font-sans, system-ui, -apple-system, sans-serif)',
           fontSize: '13px',
           darkMode: true,
-          background: '#16181d',
-          primaryColor: '#1e293b',
-          primaryTextColor: '#f8fafc',
-          primaryBorderColor: '#38bdf8',
-          lineColor: '#94a3b8',
-          secondaryColor: '#0f172a',
-          tertiaryColor: '#1e293b',
+          background,
+          primaryColor: secondaryColor,
+          primaryTextColor,
+          primaryBorderColor: primaryColor,
+          lineColor,
+          secondaryColor: background,
+          tertiaryColor,
         },
     flowchart: {
       useMaxWidth: true,
@@ -55,11 +77,18 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
   const [copied, setCopied] = useState(false);
+  const [themeTick, setThemeTick] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rawId = useId().replace(/[:]/g, '_');
   const diagramId = `mermaid_${rawId}`;
 
   const cleanCode = code.trim();
+
+  useEffect(() => {
+    const handleThemeChange = () => setThemeTick((t) => t + 1);
+    window.addEventListener('kite:theme-changed', handleThemeChange);
+    return () => window.removeEventListener('kite:theme-changed', handleThemeChange);
+  }, []);
 
   useEffect(() => {
     if (!cleanCode) {
@@ -70,10 +99,13 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
 
     let isMounted = true;
     const isLight = typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light';
-    initMermaid(isLight);
 
     const renderDiagram = async () => {
       try {
+        const mermaid = await loadMermaid();
+        if (!isMounted) return;
+        initMermaid(mermaid, isLight);
+
         // Clear any old error elements mermaid might have appended to document.body
         const oldErr = document.getElementById(`d${diagramId}`);
         if (oldErr) oldErr.remove();
@@ -103,7 +135,7 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
       const errEl = document.getElementById(`d${diagramId}`);
       if (errEl) errEl.remove();
     };
-  }, [cleanCode, diagramId]);
+  }, [cleanCode, diagramId, themeTick]);
 
   const handleCopy = () => {
     void navigator.clipboard.writeText(cleanCode);
@@ -116,9 +148,9 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
       className={`mermaid-container ${className}`}
       style={{
         margin: '14px 0',
-        borderRadius: '8px',
-        border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.12))',
-        background: 'var(--block-fill, #16181d)',
+        borderRadius: 'var(--card-radius, 12px)',
+        border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12)))',
+        background: 'var(--glass-elevated-bg, var(--block-fill, var(--pane, #141414)))',
         overflow: 'hidden',
         maxWidth: '100%',
         boxSizing: 'border-box',
@@ -131,8 +163,8 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '6px 12px',
-          background: 'var(--chip-fill, rgba(255, 255, 255, 0.05))',
-          borderBottom: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+          background: 'var(--block-fill, var(--chip-fill, rgba(255, 255, 255, 0.05)))',
+          borderBottom: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
           fontSize: '11px',
           color: 'var(--text-secondary, #8b949e)',
         }}
@@ -145,8 +177,9 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
             <div
               style={{
                 display: 'inline-flex',
-                background: 'var(--surface-inset, rgba(0, 0, 0, 0.25))',
-                borderRadius: '4px',
+                background: 'var(--glass-nested-bg, var(--chip-fill, rgba(0, 0, 0, 0.25)))',
+                border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+                borderRadius: 'var(--vl-radius-sm, 6px)',
                 padding: '2px',
                 gap: '2px',
               }}
@@ -156,12 +189,12 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
                 onClick={() => setViewMode('diagram')}
                 style={{
                   padding: '2px 8px',
-                  borderRadius: '3px',
+                  borderRadius: 'var(--vl-radius-xs, 4px)',
                   border: 'none',
                   fontSize: '10.5px',
                   cursor: 'pointer',
-                  background: viewMode === 'diagram' ? 'var(--accent, #3b82f6)' : 'transparent',
-                  color: viewMode === 'diagram' ? '#ffffff' : 'inherit',
+                  background: viewMode === 'diagram' ? 'var(--accent-fill, var(--accent, #3b82f6))' : 'transparent',
+                  color: viewMode === 'diagram' ? 'var(--accent-on-fill, #ffffff)' : 'inherit',
                   fontWeight: viewMode === 'diagram' ? 600 : 400,
                   transition: 'all 0.15s ease',
                 }}
@@ -173,12 +206,12 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
                 onClick={() => setViewMode('code')}
                 style={{
                   padding: '2px 8px',
-                  borderRadius: '3px',
+                  borderRadius: 'var(--vl-radius-xs, 4px)',
                   border: 'none',
                   fontSize: '10.5px',
                   cursor: 'pointer',
-                  background: viewMode === 'code' ? 'var(--accent, #3b82f6)' : 'transparent',
-                  color: viewMode === 'code' ? '#ffffff' : 'inherit',
+                  background: viewMode === 'code' ? 'var(--accent-fill, var(--accent, #3b82f6))' : 'transparent',
+                  color: viewMode === 'code' ? 'var(--accent-on-fill, #ffffff)' : 'inherit',
                   fontWeight: viewMode === 'code' ? 600 : 400,
                   transition: 'all 0.15s ease',
                 }}
@@ -231,8 +264,9 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
                 textAlign: 'left',
                 margin: 0,
                 padding: '10px',
-                background: 'var(--surface-inset, rgba(0, 0, 0, 0.3))',
-                borderRadius: '4px',
+                background: 'var(--glass-code-bg, var(--terminal-canvas, rgba(0, 0, 0, 0.3)))',
+                border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+                borderRadius: 'var(--control-radius, 8px)',
                 fontFamily: 'var(--font-mono, monospace)',
                 fontSize: '11.5px',
                 overflowX: 'auto',
@@ -248,8 +282,9 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
               textAlign: 'left',
               margin: 0,
               padding: '10px',
-              background: 'var(--surface-inset, rgba(0, 0, 0, 0.3))',
-              borderRadius: '4px',
+              background: 'var(--glass-code-bg, var(--terminal-canvas, rgba(0, 0, 0, 0.3)))',
+              border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+              borderRadius: 'var(--control-radius, 8px)',
               fontFamily: 'var(--font-mono, monospace)',
               fontSize: '11.5px',
               overflowX: 'auto',

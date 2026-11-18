@@ -117,12 +117,12 @@ aside.zed-float {
   margin: 8px auto 0 !important;
   padding: 4px 8px !important;
   box-sizing: border-box !important;
-  background: rgba(18, 20, 26, 0.94) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: var(--glass-overlay-bg, rgba(18, 20, 26, 0.94)) !important;
+  backdrop-filter: var(--glass-overlay-blur, blur(16px)) !important;
+  -webkit-backdrop-filter: var(--glass-overlay-blur, blur(16px)) !important;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.14)) !important;
   border-radius: 9999px !important;
-  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45) !important;
+  box-shadow: var(--glass-shadow, 0 6px 22px rgba(0, 0, 0, 0.45)) !important;
   pointer-events: auto !important;
   z-index: 10 !important;
   white-space: nowrap !important;
@@ -133,8 +133,8 @@ aside.zed-float {
 }
 
 .zed-float__controls:hover {
-  background: rgba(24, 28, 38, 0.98) !important;
-  border-color: rgba(255, 255, 255, 0.22) !important;
+  background: color-mix(in srgb, var(--glass-overlay-bg, rgba(24, 28, 38, 0.98)) 92%, var(--text-primary, #ffffff) 8%) !important;
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.22)) !important;
 }
 
 .zed-float__control {
@@ -151,8 +151,8 @@ aside.zed-float {
   padding: 0 !important;
   box-sizing: border-box !important;
   border-radius: 50% !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08)) !important;
+  background: var(--chip-fill, rgba(255, 255, 255, 0.06)) !important;
   color: var(--text-primary, #f4f4f6) !important;
   cursor: pointer !important;
   transition: all 0.15s ease !important;
@@ -161,9 +161,9 @@ aside.zed-float {
 }
 
 .zed-float__control:hover {
-  background: rgba(255, 255, 255, 0.16) !important;
-  border-color: rgba(255, 255, 255, 0.22) !important;
-  color: #ffffff !important;
+  background: var(--hover-fill, rgba(255, 255, 255, 0.16)) !important;
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.22)) !important;
+  color: var(--text-primary, #ffffff) !important;
   transform: scale(1.08) !important;
 }
 
@@ -215,15 +215,15 @@ aside.zed-float {
   max-width: 360px !important;
   padding: 5px 12px !important;
   border-radius: 9999px !important;
-  background: rgba(18, 20, 26, 0.94) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.14) !important;
-  color: #f4f4f6 !important;
+  background: var(--glass-overlay-bg, rgba(18, 20, 26, 0.94)) !important;
+  backdrop-filter: var(--glass-overlay-blur, blur(16px)) !important;
+  -webkit-backdrop-filter: var(--glass-overlay-blur, blur(16px)) !important;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.14)) !important;
+  color: var(--text-primary, #f4f4f6) !important;
   font-size: 11px !important;
   font-weight: 500 !important;
   line-height: 1.4 !important;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4) !important;
+  box-shadow: var(--glass-shadow, 0 6px 20px rgba(0, 0, 0, 0.4)) !important;
   pointer-events: auto !important;
   white-space: nowrap !important;
   animation: zedNotePop 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
@@ -232,14 +232,14 @@ aside.zed-float {
 }
 
 .zed-float__note:hover {
-  border-color: rgba(96, 165, 250, 0.4) !important;
-  background: rgba(24, 28, 38, 0.96) !important;
+  border-color: color-mix(in srgb, var(--accent, #60a5fa) 45%, transparent) !important;
+  background: color-mix(in srgb, var(--glass-overlay-bg, rgba(24, 28, 38, 0.96)) 92%, var(--text-primary, #ffffff) 8%) !important;
   transform: scale(1.02) !important;
 }
 
 .zed-float__note--listening {
-  border-color: rgba(59, 130, 246, 0.55) !important;
-  background: rgba(15, 23, 42, 0.96) !important;
+  border-color: color-mix(in srgb, var(--accent, #3b82f6) 55%, transparent) !important;
+  background: color-mix(in srgb, var(--accent, #3b82f6) 14%, var(--glass-overlay-bg, rgba(15, 23, 42, 0.96))) !important;
   box-shadow: 0 0 14px rgba(59, 130, 246, 0.35) !important;
 }
 
@@ -256,9 +256,9 @@ aside.zed-float {
 }
 
 .zed-float__note--error {
-  border-color: rgba(239, 68, 68, 0.5) !important;
-  background: rgba(28, 12, 14, 0.95) !important;
-  color: #fca5a5 !important;
+  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 50%, transparent) !important;
+  background: color-mix(in srgb, var(--status-failed, #ef4444) 16%, var(--glass-overlay-bg, rgba(28, 12, 14, 0.95))) !important;
+  color: var(--danger-ink, #fca5a5) !important;
 }
 
 .zed-float__latency-badge {
@@ -298,9 +298,9 @@ aside.zed-float {
 }
 
 .zed-float__action-btn--secondary {
-  background: rgba(255, 255, 255, 0.08) !important;
-  border-color: rgba(255, 255, 255, 0.12) !important;
-  color: #f4f4f6 !important;
+  background: var(--glass-elevated-bg, rgba(255, 255, 255, 0.08)) !important;
+  border-color: var(--glass-border, rgba(255, 255, 255, 0.12)) !important;
+  color: var(--text-primary, #f4f4f6) !important;
 }
 
 .zed-float__action-btn--secondary:hover {
@@ -352,8 +352,8 @@ aside.zed-float {
   height: 32px !important;
   padding: 0 10px !important;
   border-radius: var(--radius-chip, 6px) !important;
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.12)) !important;
-  background: var(--block-fill, rgba(0, 0, 0, 0.35)) !important;
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.12))) !important;
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(0, 0, 0, 0.35))) !important;
   color: var(--text-primary, #f4f4f6) !important;
   font-size: var(--text-caption, 12px) !important;
 }
@@ -376,8 +376,10 @@ aside.zed-float {
   padding: 6px 10px;
   max-width: 320px;
   border-radius: var(--radius-chip, 6px);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.1));
-  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)));
+  background: var(--glass-overlay-bg, rgba(0, 0, 0, 0.35));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
   color: var(--text-secondary, #c4c4cc);
   font-size: var(--text-caption, 12px);
   line-height: 1.35;

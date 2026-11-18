@@ -242,7 +242,7 @@ export const CreateTicketModal: React.FC<CreateTicketModalProps> = ({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'rgba(0, 0, 0, 0.65)',
+        backgroundColor: 'var(--glass-modal-scrim, var(--scrim, rgba(0, 0, 0, 0.65)))',
         backdropFilter: 'blur(3px)',
         padding: '24px',
         boxSizing: 'border-box',
@@ -256,10 +256,12 @@ export const CreateTicketModal: React.FC<CreateTicketModalProps> = ({
         style={{
           width: '560px',
           maxWidth: 'calc(100vw - 32px)',
-          borderRadius: '12px',
-          backgroundColor: 'var(--dialog, #1a1a1f)',
-          border: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
-          boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6)',
+          borderRadius: 'var(--dialog-radius, 14px)',
+          background: 'var(--glass-modal-bg, var(--menu-plate, #1a1a1f))',
+          WebkitBackdropFilter: 'var(--glass-overlay-blur)',
+          backdropFilter: 'var(--glass-overlay-blur)',
+          border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+          boxShadow: 'var(--glass-shadow, 0 20px 50px rgba(0, 0, 0, 0.6))',
           padding: '24px',
           boxSizing: 'border-box',
           position: 'relative',
@@ -345,6 +347,8 @@ export const CreateTicketModal: React.FC<CreateTicketModalProps> = ({
                       left: 0,
                       zIndex: 80,
                       minWidth: '150px',
+                      WebkitBackdropFilter: 'none',
+                      backdropFilter: 'none',
                     }}
                   >
                     <div className="select-menu__rows">
@@ -410,6 +414,8 @@ export const CreateTicketModal: React.FC<CreateTicketModalProps> = ({
                       left: 0,
                       zIndex: 80,
                       minWidth: '150px',
+                      WebkitBackdropFilter: 'none',
+                      backdropFilter: 'none',
                     }}
                   >
                     <div className="select-menu__rows">
@@ -486,6 +492,8 @@ export const CreateTicketModal: React.FC<CreateTicketModalProps> = ({
                       left: 0,
                       zIndex: 80,
                       minWidth: '170px',
+                      WebkitBackdropFilter: 'none',
+                      backdropFilter: 'none',
                     }}
                   >
                     <div className="select-menu__rows">
@@ -554,6 +562,8 @@ export const CreateTicketModal: React.FC<CreateTicketModalProps> = ({
                       left: 0,
                       zIndex: 80,
                       minWidth: '170px',
+                      WebkitBackdropFilter: 'none',
+                      backdropFilter: 'none',
                     }}
                   >
                     <div className="select-menu__rows">

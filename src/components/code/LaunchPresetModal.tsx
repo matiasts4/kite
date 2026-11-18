@@ -109,8 +109,8 @@ export const LaunchPresetModal: React.FC<LaunchPresetModalProps> = ({
                     style={{
                       padding: 'var(--space-3)',
                       borderRadius: 'var(--radius-card)',
-                      border: `1px solid ${active ? 'var(--accent)' : 'var(--block-stroke)'}`,
-                      background: active ? 'var(--selected-fill)' : 'var(--block-fill)',
+                      border: `1px solid ${active ? 'var(--accent)' : 'var(--glass-border, var(--block-stroke))'}`,
+                      background: active ? 'var(--selected-fill)' : 'var(--glass-elevated-bg, var(--block-fill))',
                       color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                       textAlign: 'left',
                       cursor: 'pointer',
@@ -221,8 +221,8 @@ export const LaunchPresetModal: React.FC<LaunchPresetModalProps> = ({
                   gap: 'var(--space-3)',
                   padding: 'var(--space-2)',
                   borderRadius: 'var(--radius-chip)',
-                  background: 'var(--block-fill)',
-                  border: '1px solid var(--block-stroke)',
+                  background: 'var(--glass-elevated-bg, var(--block-fill))',
+                  border: '1px solid var(--glass-border, var(--block-stroke))',
                   fontSize: 'var(--text-row)',
                 }}
               >
@@ -246,8 +246,8 @@ export const LaunchPresetModal: React.FC<LaunchPresetModalProps> = ({
                     fontSize: 'var(--text-row)',
                     padding: '4px 8px',
                     borderRadius: 'var(--radius-chip)',
-                    background: 'var(--composer)',
-                    border: '1px solid var(--block-stroke)',
+                    background: 'var(--glass-elevated-bg, var(--composer))',
+                    border: '1px solid var(--glass-border, var(--block-stroke))',
                     color: 'var(--text-primary)',
                     outline: 'none',
                   }}
@@ -310,8 +310,8 @@ export const LaunchPresetModal: React.FC<LaunchPresetModalProps> = ({
               fontSize: 'var(--text-row)',
               padding: 'var(--space-2)',
               borderRadius: 'var(--radius-chip)',
-              background: 'var(--composer)',
-              border: '1px solid var(--block-stroke)',
+              background: 'var(--glass-elevated-bg, var(--composer))',
+              border: '1px solid var(--glass-border, var(--block-stroke))',
               color: 'var(--text-primary)',
               resize: 'none',
               outline: 'none',

@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import './agents/agent-surface.css';
 import { invokeCommand } from '../../lib/ipc';
 import type { AgentProfile } from '../../types';
 import { AgentAvatar } from '../AgentAvatar';
+import { ThemeHeroFigure } from '../theme/ThemeHeroFigure';
 import { ChatView } from './ChatView';
 import {
   LearnedSkillDocument,
@@ -282,7 +284,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   // Poll live running tasks for active agent
   useEffect(() => {
     let isMounted = true;
+    let inFlight = false;
     const pollLiveRuns = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const runs = await invokeCommand<Array<{ agentId?: string; status?: string }>>('list_live_chat_runs');
         if (isMounted && Array.isArray(runs) && selectedAgentId) {
@@ -293,6 +298,8 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
         }
       } catch {
         // Silent background fallback
+      } finally {
+        inFlight = false;
       }
     };
 
@@ -674,6 +681,7 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   if (!selectedAgent) {
     return (
       <section className="pane empty-roster-surface empty-surface">
+        <ThemeHeroFigure variant="hero" />
         <span aria-hidden="true" className="empty-surface__icon">
           <BotIcon size={30} />
         </span>
@@ -730,51 +738,23 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           <div
             role="group"
             aria-label="Interaction surface"
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              padding: '2px',
-              borderRadius: '6px',
-              background: 'var(--chip-fill, rgba(255,255,255,0.06))',
-              border: '1px solid var(--block-stroke, rgba(255,255,255,0.08))',
-              gap: '2px',
-            }}
+            className="agent-surface-toggle"
           >
             <button
               type="button"
+              className={`agent-surface-toggle__btn${surfacePreference === 'chat' ? ' agent-surface-toggle__btn--active' : ''}`}
               onClick={() => setSurfacePreference('chat')}
               aria-pressed={surfacePreference === 'chat'}
               title="Use conversational Chat UI"
-              style={{
-                height: '22px',
-                padding: '0 8px',
-                fontSize: '11px',
-                fontWeight: 500,
-                borderRadius: '4px',
-                border: 'none',
-                cursor: 'pointer',
-                background: surfacePreference === 'chat' ? 'var(--selected-fill, rgba(255,255,255,0.12))' : 'transparent',
-                color: surfacePreference === 'chat' ? 'var(--text-primary)' : 'var(--text-secondary)',
-              }}
             >
               Chat
             </button>
             <button
               type="button"
+              className={`agent-surface-toggle__btn${surfacePreference === 'terminal' ? ' agent-surface-toggle__btn--active' : ''}`}
               onClick={() => setSurfacePreference('terminal')}
               aria-pressed={surfacePreference === 'terminal'}
               title="Open interactive CLI Terminal"
-              style={{
-                height: '22px',
-                padding: '0 8px',
-                fontSize: '11px',
-                fontWeight: 500,
-                borderRadius: '4px',
-                border: 'none',
-                cursor: 'pointer',
-                background: surfacePreference === 'terminal' ? 'var(--selected-fill, rgba(255,255,255,0.12))' : 'transparent',
-                color: surfacePreference === 'terminal' ? 'var(--text-primary)' : 'var(--text-secondary)',
-              }}
             >
               Terminal
             </button>

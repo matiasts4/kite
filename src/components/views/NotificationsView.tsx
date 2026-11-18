@@ -20,6 +20,7 @@ export interface NotificationsViewProps {
   onClose?: () => void;
   onOpenSettings?: () => void;
   externalSnapshot?: NotificationsSnapshot | null;
+  embedded?: boolean;
 }
 
 const DISMISSED_STORAGE_KEY = 'kite_dismissed_notifications';
@@ -225,6 +226,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   onClose,
   onOpenSettings,
   externalSnapshot,
+  embedded = false,
 }) => {
   const [snapshot, setSnapshot] = useState<NotificationsSnapshot | null>(null);
   const [dismissedIds] = useState<Set<string>>(() => getDismissedSet());
@@ -641,11 +643,19 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     return 'notification-row__icon--done';
   };
 
-  return (
-    <div className="notification-center">
+  const content = (
+    <>
       {/* Notifications Header */}
       <header className="notification-center__header">
-        <strong>Notifications</strong>
+        <div className="notification-center__header-title">
+          <span className="notification-center__icon-badge" aria-hidden="true">
+            <BellIcon size={13} strokeWidth={1.9} />
+          </span>
+          <strong>Notifications</strong>
+          {unreadCount > 0 && (
+            <span className="notification-center__unread-pill">{unreadCount}</span>
+          )}
+        </div>
         {unreadCount > 0 && (
           <button
             type="button"
@@ -657,19 +667,21 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         )}
       </header>
 
-      <div className="notification-center__divider" />
-
       {/* Notifications List or Empty State */}
       {allRecords.length === 0 ? (
-        <div className="notification-center__empty">
-          <BellIcon aria-hidden="true" size={24} strokeWidth={1.4} />
-          <strong>No notifications yet</strong>
-          <p>Agent updates land here when work finishes or an agent needs you.</p>
+        <div className="notification-center__body">
+          <div className="notification-center__empty">
+            <span className="notification-center__empty-icon" aria-hidden="true">
+              <BellIcon size={20} strokeWidth={1.6} />
+            </span>
+            <strong>No notifications yet</strong>
+            <p>Agent updates land here when work finishes or an agent needs you.</p>
+          </div>
         </div>
       ) : (
         <div className="notification-center__list scroll-quiet">
           {groupedSections.map((group) => (
-            <section key={group.title}>
+            <section key={group.title} className="notification-center__group">
               <h2
                 className={`ui-eyebrow notification-center__section${
                   group.isNeedsYou ? ' notification-center__section--needs-you' : ''
@@ -695,7 +707,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                   <button
                     key={rec.id}
                     aria-label={`${actor}, ${detail}, ${statusStr}`}
-                    className="notification-row"
+                    className={`notification-row${rec.isRead ? '' : ' notification-row--unread'}`}
                     onClick={() => handleRowClick(rec)}
                     type="button"
                   >
@@ -732,17 +744,23 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         </div>
       )}
 
-      <div className="notification-center__divider" />
-
       {/* Footer Settings Button */}
-      <button
-        className="notification-center__settings"
-        onClick={handleSettingsClick}
-        type="button"
-      >
-        <SettingsIcon aria-hidden="true" size={13} strokeWidth={1.8} />
-        Notification settings…
-      </button>
-    </div>
+      <div className="notification-center__footer">
+        <button
+          className="notification-center__settings"
+          onClick={handleSettingsClick}
+          type="button"
+        >
+          <SettingsIcon aria-hidden="true" size={13} strokeWidth={1.8} />
+          Notification settings…
+        </button>
+      </div>
+    </>
   );
+
+  if (embedded) {
+    return <div className="notification-center__content">{content}</div>;
+  }
+
+  return <div className="notification-center">{content}</div>;
 };

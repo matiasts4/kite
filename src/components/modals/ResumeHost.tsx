@@ -99,8 +99,7 @@ export const ResumeHost: React.FC = () => {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'rgba(0, 0, 0, 0.65)',
-        backdropFilter: 'blur(4px)',
+        backgroundColor: 'var(--glass-modal-scrim, var(--glass-backdrop-scrim, rgba(0, 0, 0, 0.65)))',
       }}
     >
       <div
@@ -114,11 +113,13 @@ export const ResumeHost: React.FC = () => {
           maxHeight: '85vh',
           display: 'flex',
           flexDirection: 'column',
-          backgroundColor: 'var(--surface-primary, #1e1e1e)',
-          color: 'var(--text-primary, #fff)',
-          borderRadius: '12px',
-          border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.12))',
-          boxShadow: '0 20px 48px rgba(0, 0, 0, 0.5)',
+          background: 'var(--glass-modal-bg, var(--glass-overlay-bg, var(--menu-plate, #1e1e1e)))',
+          WebkitBackdropFilter: 'var(--glass-overlay-blur)',
+          backdropFilter: 'var(--glass-overlay-blur)',
+          color: 'var(--text-primary, #fafafa)',
+          borderRadius: 'var(--dialog-radius, 14px)',
+          border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.12))',
+          boxShadow: 'var(--glass-shadow, 0 20px 48px rgba(0, 0, 0, 0.5))',
           padding: '24px',
           overflowY: 'auto',
         }}
@@ -169,9 +170,9 @@ export const ResumeHost: React.FC = () => {
                 alignItems: 'center',
                 gap: '12px',
                 padding: '10px 12px',
-                borderRadius: '8px',
-                backgroundColor: 'var(--surface-secondary, rgba(255, 255, 255, 0.05))',
-                border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))',
+                borderRadius: 'var(--control-radius, 8px)',
+                backgroundColor: 'var(--glass-elevated-bg, rgba(255, 255, 255, 0.05))',
+                border: '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
               }}
             >
               <BrandLogo engine={agent.engine} size={18} />
@@ -249,7 +250,7 @@ export const ResumeHost: React.FC = () => {
             alignItems: 'center',
             justifyContent: 'space-between',
             padding: '10px 0',
-            borderTop: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))',
+            borderTop: '1px solid var(--glass-border, rgba(255, 255, 255, 0.08))',
             marginBottom: '20px',
           }}
         >
@@ -308,9 +309,10 @@ export const ResumeHost: React.FC = () => {
             disabled={submitting !== null}
             onClick={() => handleAnswer('startFresh')}
             style={{
-              padding: '8px 16px',
+              height: 'var(--vl-control-md, 32px)',
+              padding: '0 16px',
               fontSize: '13px',
-              borderRadius: '6px',
+              borderRadius: 'var(--control-radius, 8px)',
               cursor: submitting !== null ? 'not-allowed' : 'pointer',
             }}
           >
@@ -322,10 +324,11 @@ export const ResumeHost: React.FC = () => {
             disabled={submitting === 'startFresh'}
             onClick={() => handleAnswer('resumeAll')}
             style={{
-              padding: '8px 16px',
+              height: 'var(--vl-control-md, 32px)',
+              padding: '0 16px',
               fontSize: '13px',
               fontWeight: 500,
-              borderRadius: '6px',
+              borderRadius: 'var(--control-radius, 8px)',
               cursor: submitting === 'startFresh' ? 'not-allowed' : 'pointer',
             }}
           >

@@ -48,7 +48,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
               <h3 className="settings-row__title">Modo</h3>
-              <p>Oscuro o claro. Personaliza la paleta de colores en la pestaña Customizations.</p>
+              <p>Oscuro o claro. Personaliza la paleta y el fondo en la pestaña Personalización.</p>
             </div>
             <div className="settings-row__control">
               <fieldset aria-label="Modo de color" className="ui-segmented">
@@ -62,7 +62,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   <span aria-hidden="true" className="ui-segmented__icon">
                     <SunIcon size={12} strokeWidth={2} />
                   </span>
-                  <span>Light</span>
+                  <span>Claro</span>
                 </button>
                 <button
                   aria-pressed={mode === 'dark'}
@@ -74,7 +74,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   <span aria-hidden="true" className="ui-segmented__icon">
                     <MoonIcon size={12} strokeWidth={2} />
                   </span>
-                  <span>Dark</span>
+                  <span>Oscuro</span>
                 </button>
               </fieldset>
             </div>

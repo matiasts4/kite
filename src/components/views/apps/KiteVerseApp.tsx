@@ -169,7 +169,7 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
         height: '100%',
         width: '100%',
         userSelect: 'none',
-        background: embedded ? 'transparent' : 'var(--pane)',
+        background: embedded ? 'transparent' : 'var(--glass-island-bg, var(--pane))',
         overflow: 'hidden',
         color: 'var(--text-primary)',
       }}
@@ -291,7 +291,7 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
             gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
             gap: 'var(--space-3)',
             overflowY: 'auto',
-            background: 'var(--block-fill)',
+            background: 'var(--glass-nested-bg, transparent)',
           }}
         >
           {ROOMS.map((room) => {
@@ -300,8 +300,8 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
               <div
                 key={room}
                 style={{
-                  background: 'var(--pane)',
-                  border: '1px solid var(--block-stroke)',
+                  background: 'var(--glass-elevated-bg, var(--pane))',
+                  border: '1px solid var(--glass-border, var(--block-stroke))',
                   borderRadius: 'var(--radius-card)',
                   padding: 'var(--space-3)',
                   display: 'flex',
@@ -367,8 +367,8 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
                           padding: 'var(--space-2)',
                           borderRadius: 'var(--radius-row)',
                           cursor: 'pointer',
-                          border: `1px solid ${selectedAgent.id === ag.id ? 'var(--accent)' : 'var(--block-stroke)'}`,
-                          background: selectedAgent.id === ag.id ? 'var(--selected-fill)' : 'var(--block-fill)',
+                          border: `1px solid ${selectedAgent.id === ag.id ? 'var(--accent)' : 'var(--glass-border, var(--block-stroke))'}`,
+                          background: selectedAgent.id === ag.id ? 'var(--selected-fill)' : 'var(--glass-elevated-bg, var(--block-fill))',
                           transition: 'background-color var(--duration-ink) var(--ease-ink)',
                         }}
                       >
@@ -451,7 +451,7 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
           style={{
             width: '240px',
             borderLeft: '1px solid var(--separator)',
-            background: 'var(--pane)',
+            background: 'var(--glass-nested-bg, var(--pane))',
             padding: 'var(--space-4)',
             display: 'flex',
             flexDirection: 'column',
@@ -559,10 +559,10 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
                   style={{
                     fontSize: 'var(--text-meta)',
                     fontFamily: 'monospace',
-                    background: 'var(--block-fill)',
+                    background: 'var(--glass-code-bg, var(--block-fill))',
                     padding: '4px 6px',
                     borderRadius: 'var(--radius-chip)',
-                    border: '1px solid var(--block-stroke)',
+                    border: '1px solid var(--glass-border, var(--block-stroke))',
                     wordBreak: 'break-all',
                     margin: '0 0 var(--space-2)',
                   }}
@@ -630,10 +630,10 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
                   style={{
                     fontSize: 'var(--text-caption)',
                     color: 'var(--text-secondary)',
-                    background: 'var(--block-fill)',
+                    background: 'var(--glass-elevated-bg, var(--block-fill))',
                     padding: 'var(--space-2)',
                     borderRadius: 'var(--radius-chip)',
-                    border: '1px solid var(--block-stroke)',
+                    border: '1px solid var(--glass-border, var(--block-stroke))',
                     lineHeight: 'var(--leading-caption)',
                     margin: 0,
                   }}
@@ -664,10 +664,10 @@ export const KiteVerseApp: React.FC<KiteVerseAppProps> = ({ embedded = false }) 
                     fontSize: 'var(--text-meta)',
                     color: 'var(--text-secondary)',
                     fontFamily: 'monospace',
-                    background: 'var(--block-fill)',
+                    background: 'var(--glass-elevated-bg, var(--block-fill))',
                     padding: 'var(--space-2)',
                     borderRadius: 'var(--radius-chip)',
-                    border: '1px solid var(--block-stroke)',
+                    border: '1px solid var(--glass-border, var(--block-stroke))',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>

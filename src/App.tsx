@@ -781,9 +781,14 @@ export const App: React.FC = () => {
               accountTierPaid={accountTierPaid}
               creditsLabel={creditsLabel}
               mode={appearance}
+              appearanceMode={appearanceMode}
               palette={palette}
+              customizations={customizations}
               onToggleMode={handleToggleMode}
               onSelectTheme={handleSelectTheme}
+              onUpdateCustomizations={updateCustomizations}
+              onResetThemeOverrides={resetThemeOverrides}
+              onResetAllCustomizations={resetAllCustomizations}
             />
           </Suspense>
         )}
@@ -831,4 +836,3 @@ export const App: React.FC = () => {
     </div>
   );
 };
-

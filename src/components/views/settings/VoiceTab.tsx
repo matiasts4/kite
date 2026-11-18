@@ -168,15 +168,15 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
   return (
     <>
       <section className="settings-group">
-        <h2 className="settings-group__title">Voice to text</h2>
+        <h2 className="settings-group__title">Voz a texto</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Voice transcription</h3>
-              <p>Choose where each take is transcribed.</p>
+              <h3 className="settings-row__title">Transcripción de voz</h3>
+              <p>Elige dónde se transcribe cada grabación.</p>
             </div>
             <div className="settings-row__control">
-              <fieldset aria-label="Voice transcription" className="ui-segmented">
+              <fieldset aria-label="Transcripción de voz" className="ui-segmented">
                 <button
                   aria-pressed={dictationSettings.mode === 'local'}
                   className="ui-segmented__item"
@@ -186,7 +186,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                   {dictationSettings.mode === 'local' && (
                     <SegmentedIndicator group="settings-voice-transcription" />
                   )}
-                  <span>On this PC</span>
+                  <span>En esta PC</span>
                 </button>
                 <button
                   aria-pressed={dictationSettings.mode === 'cloud'}
@@ -197,7 +197,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                   {dictationSettings.mode === 'cloud' && (
                     <SegmentedIndicator group="settings-voice-transcription" />
                   )}
-                  <span>Cloud</span>
+                  <span>En la nube</span>
                 </button>
               </fieldset>
             </div>
@@ -205,12 +205,12 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Voice privacy</h3>
+              <h3 className="settings-row__title">Privacidad de voz</h3>
               <p>
                 {dictationAvailability.guidance ||
                   (dictationSettings.mode === 'cloud'
-                    ? 'Cloud transcription is unavailable in this local studio.'
-                    : 'No installed local transcription engine is ready.')}
+                    ? 'La transcripción en la nube no está disponible en este estudio local.'
+                    : 'No hay ningún motor de transcripción local instalado y listo.')}
               </p>
             </div>
             <div className="settings-row__control">
@@ -218,7 +218,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                 className="settings-badge"
                 data-tone={dictationSettings.mode === 'local' ? 'running' : 'accent'}
               >
-                {dictationSettings.mode === 'local' ? 'Local' : 'Cloud'}
+                {dictationSettings.mode === 'local' ? 'Local' : 'En la nube'}
               </span>
             </div>
           </div>
@@ -226,12 +226,12 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
               <h3 className="settings-row__title">
-                {dictationSettings.mode === 'local' ? 'On-device engine' : 'Cloud model'}
+                {dictationSettings.mode === 'local' ? 'Motor local en el dispositivo' : 'Modelo en la nube'}
               </h3>
               <p>
                 {dictationSettings.mode === 'local'
-                  ? 'Only installed engines can be selected. Local failure never sends audio to Cloud.'
-                  : 'Cloud transcription is unavailable in this local studio. Audio is not sent anywhere.'}
+                  ? 'Solo se pueden seleccionar motores instalados. Si falla el modo local, nunca se envía audio a la nube.'
+                  : 'La transcripción en la nube no está disponible en este estudio local. El audio no se envía a ningún servidor.'}
               </p>
             </div>
             <div className="settings-row__control">
@@ -241,11 +241,11 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                   onClick={onChooseWhisperModel}
                   type="button"
                 >
-                  Choose Whisper model…
+                  Elegir modelo Whisper…
                 </button>
               ) : (
                 <span className="settings-badge" data-tone="warning">
-                  Unavailable
+                  No disponible
                 </span>
               )}
             </div>
@@ -253,27 +253,27 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Language</h3>
-              <p>Automatic detects the spoken language for each take.</p>
+              <h3 className="settings-row__title">Idioma</h3>
+              <p>Automático detecta el idioma hablado en cada grabación.</p>
             </div>
             <div className="settings-row__control">
-              <span className="settings-badge">Automatic (detect)</span>
+              <span className="settings-badge">Automático (detectar)</span>
             </div>
           </div>
         </div>
       </section>
 
       <section className="settings-group">
-        <h2 className="settings-group__title">Dictation</h2>
+        <h2 className="settings-group__title">Dictado</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Dictation shortcut</h3>
-              <p>Starts dictation in the composer you&apos;re working in while Kite is in front. Press it again to transcribe.</p>
+              <h3 className="settings-row__title">Atajo de dictado</h3>
+              <p>Inicia el dictado en el compositor donde estés trabajando cuando Kite esté en primer plano. Pulsa de nuevo para transcribir.</p>
             </div>
             <div className="settings-row__control">
               <button
-                aria-label="Dictation shortcut"
+                aria-label="Atajo de dictado"
                 className="settings-control dictation-shortcut__recorder ui-button"
                 type="button"
               >
@@ -284,13 +284,13 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Audio cues & atenuación</h3>
+              <h3 className="settings-row__title">Señales de audio y atenuación</h3>
               <p>Reproduce el tono Zen armónico y atenúa el volumen de fondo al iniciar y finalizar la grabación.</p>
             </div>
             <div className="settings-row__control">
               <button
                 aria-checked={dictationSettings.cuesEnabled}
-                aria-label="Audio cues"
+                aria-label="Señales de audio"
                 className="ui-switch"
                 onClick={onToggleCues}
                 role="switch"
@@ -303,30 +303,30 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Microphone access</h3>
-              <p>{dictationAvailability.guidance || 'Checking the local microphone.'}</p>
+              <h3 className="settings-row__title">Acceso al micrófono</h3>
+              <p>{dictationAvailability.guidance || 'Comprobando el micrófono local.'}</p>
             </div>
             <div className="settings-row__control">
               <button className="settings-control ui-button" onClick={onRequestMicrophone} type="button">
-                Allow microphone…
+                Permitir micrófono…
               </button>
               <span
                 className="settings-badge"
                 data-tone={dictationAvailability.canStart ? 'running' : 'warning'}
               >
-                {dictationAvailability.canStart ? 'Ready' : 'Unavailable'}
+                {dictationAvailability.canStart ? 'Listo' : 'No disponible'}
               </span>
             </div>
           </div>
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Reset shortcut</h3>
-              <p>Restore the default keyboard combination.</p>
+              <h3 className="settings-row__title">Restablecer atajo</h3>
+              <p>Restaura la combinación de teclas predeterminada.</p>
             </div>
             <div className="settings-row__control">
               <button className="settings-control ui-button" onClick={onResetShortcut} type="button">
-                Reset
+                Restablecer
               </button>
             </div>
           </div>

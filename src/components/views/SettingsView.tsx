@@ -8,6 +8,7 @@ import {
   PaletteIcon,
   SquareTerminalIcon,
   BellIcon,
+  MessageSquareIcon,
   MicIcon,
   AudioWaveformIcon,
   UsersIcon,
@@ -39,6 +40,17 @@ import {
 import { listAudioInputDevices } from '../../lib/operator/voice/zedVoice';
 import { useFilesAutoSavePreference } from '../../lib/filesAutoSavePreference';
 import { useAppUpdater } from '../../hooks/useAppUpdater';
+import {
+  DEFAULT_THEME_CUSTOMIZATIONS,
+  applyThemeCustomizationsToDocument,
+  isDarkThemeId,
+  isLightThemeId,
+  readThemeCustomizations,
+  sanitizeThemeCustomizations,
+  writeThemeCustomizations,
+  type AppearanceMode,
+  type KiteThemeCustomizations,
+} from '../../lib/themeCustomizations';
 import './settings.css';
 
 const tabLoaders = {
@@ -99,7 +111,7 @@ const DEFAULT_DICTATION_AVAILABILITY: DictationAvailability = {
   state: 'unavailable',
   canRequestPermission: false,
   canStart: false,
-  guidance: 'No installed local transcription engine is ready.',
+  guidance: 'No hay ningún motor de transcripción local instalado y listo.',
   localEngines: [],
 };
 
@@ -223,7 +235,7 @@ const SettingsTabFallback: React.FC = () => (
     className="settings-tab-fallback"
     role="status"
     aria-busy="true"
-    aria-label="Loading settings section"
+    aria-label="Cargando sección de configuración"
   >
     <div className="settings-tab-fallback__card" aria-hidden="true">
       <span className="settings-tab-fallback__line settings-tab-fallback__line--title" />
@@ -235,22 +247,27 @@ const SettingsTabFallback: React.FC = () => (
 
 const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'general', label: 'General', blurb: 'Apariencia, autoguardado y actualizaciones de software.', icon: SettingsIcon },
-  { id: 'customizations', label: 'Customizations', blurb: 'Temas, colores y aspecto visual.', icon: PaletteIcon },
+  {
+    id: 'customizations',
+    label: 'Personalización',
+    blurb: 'Temas visuales, fondos de escenario, figuras, vidrio esmerilado e importar/exportar.',
+    icon: PaletteIcon,
+  },
   { id: 'terminal', label: 'Terminal', blurb: 'Apariencia, tipografía, motor de renderizado, shell y enlaces web.', icon: SquareTerminalIcon },
-  { id: 'notifications', label: 'Notifications', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
-  { id: 'chat', label: 'Chat', blurb: 'Visibilidad de las acciones del hilo.', icon: BellIcon },
+  { id: 'notifications', label: 'Notificaciones', blurb: 'Avisos y alertas sonoras de agentes.', icon: BellIcon },
+  { id: 'chat', label: 'Chat', blurb: 'Visibilidad de las acciones del hilo.', icon: MessageSquareIcon },
   {
     id: 'subagents',
-    label: 'Subagents',
-    blurb: 'Curated model stack, default delegation model, override policy, and role profiles.',
+    label: 'Subagentes',
+    blurb: 'Stack de modelos, modelo de delegación por defecto, política de cambios y perfiles de rol.',
     icon: UsersIcon,
   },
-  { id: 'voice', label: 'Voice & Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
+  { id: 'voice', label: 'Voz y Dictado', blurb: 'Dictado por voz, micrófono y transcripción.', icon: MicIcon, hasDividerBefore: true },
   { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
   { id: 'quotas', label: 'Cuentas y Proveedores', blurb: 'Bóveda de credenciales, cuentas CLI y límites de cuota.', icon: GaugeIcon },
   { id: 'plugins', label: 'Plugins', blurb: 'Herramientas y servicios para los agentes.', icon: PuzzleIcon },
-  { id: 'keybindings', label: 'Shortcuts', blurb: 'Atajos de teclado y comandos rápidos.', icon: SquareTerminalIcon },
-  { id: 'changelog', label: 'Changelog', blurb: 'Novedades y notas de cada versión.', icon: ScrollTextIcon, hasDividerBefore: true },
+  { id: 'keybindings', label: 'Atajos', blurb: 'Atajos de teclado y comandos rápidos.', icon: SquareTerminalIcon },
+  { id: 'changelog', label: 'Novedades', blurb: 'Novedades y notas de cada versión.', icon: ScrollTextIcon, hasDividerBefore: true },
 ];
 
 export interface SettingsViewProps {
@@ -264,9 +281,14 @@ export interface SettingsViewProps {
   accountTierPaid?: boolean;
   creditsLabel?: string | null;
   mode?: 'dark' | 'light';
+  appearanceMode?: AppearanceMode;
   palette?: string;
-  onToggleMode?: (newMode: 'dark' | 'light') => void;
+  customizations?: KiteThemeCustomizations;
+  onToggleMode?: (newMode: AppearanceMode) => void;
   onSelectTheme?: (paletteId: string, themeMode?: 'dark' | 'light') => void;
+  onUpdateCustomizations?: (patch: Partial<KiteThemeCustomizations>) => void;
+  onResetThemeOverrides?: () => void;
+  onResetAllCustomizations?: () => void;
   embedded?: boolean;
   initialTab?: SettingsTabId | null;
 }
@@ -277,9 +299,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onBack,
   onOpenWhatsNew,
   mode: propMode,
+  appearanceMode: propAppearanceMode,
   palette: propPalette,
+  customizations: propCustomizations,
   onToggleMode: propOnToggleMode,
   onSelectTheme: propOnSelectTheme,
+  onUpdateCustomizations: propOnUpdateCustomizations,
+  onResetThemeOverrides: propOnResetThemeOverrides,
+  onResetAllCustomizations: propOnResetAllCustomizations,
   embedded = false,
   initialTab,
 }) => {
@@ -297,11 +324,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     return 'general';
   });
   const reduceMotion = useReducedMotion();
+  const [localCustomizations, setLocalCustomizations] = useState<KiteThemeCustomizations>(() =>
+    readThemeCustomizations()
+  );
   const [localMode, setLocalMode] = useState<'dark' | 'light'>('dark');
   const [localPalette, setLocalPalette] = useState<string>('kite-dark');
 
+  const currentCustomizations = propCustomizations ?? localCustomizations;
+  const currentAppearanceMode = propAppearanceMode ?? currentCustomizations.appearanceMode;
   const currentMode = propMode ?? localMode;
   const currentPalette = propPalette ?? localPalette;
+
+  useEffect(() => {
+    if (propCustomizations) setLocalCustomizations(propCustomizations);
+  }, [propCustomizations]);
 
   useEffect(() => {
     if (propMode) setLocalMode(propMode);
@@ -313,9 +349,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   useEffect(() => {
     const handleThemeEvent = (e: Event) => {
-      const detail = (e as CustomEvent<{ theme?: 'dark' | 'light'; palette?: string }>).detail;
+      const detail = (
+        e as CustomEvent<{
+          theme?: 'dark' | 'light';
+          palette?: string;
+          customizations?: KiteThemeCustomizations;
+        }>
+      ).detail;
       if (detail?.theme) setLocalMode(detail.theme);
       if (detail?.palette) setLocalPalette(detail.palette);
+      if (detail?.customizations) setLocalCustomizations(detail.customizations);
     };
     window.addEventListener('kite:theme-changed', handleThemeEvent);
     return () => window.removeEventListener('kite:theme-changed', handleThemeEvent);
@@ -481,43 +524,95 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   }, [handleClose]);
 
-  const handleSelectTheme = (paletteId: string, themeMode?: 'dark' | 'light') => {
-    const nextMode = themeMode ?? currentMode;
-    setLocalPalette(paletteId);
-    if (themeMode) setLocalMode(themeMode);
+  const commitLocalCustomizations = useCallback((nextRaw: KiteThemeCustomizations) => {
+    const sanitized = sanitizeThemeCustomizations(nextRaw);
+    setLocalCustomizations(sanitized);
+    writeThemeCustomizations(sanitized);
+    const applied = applyThemeCustomizationsToDocument(sanitized);
+    setLocalMode(applied.resolvedMode);
+    setLocalPalette(applied.activePalette);
+    window.dispatchEvent(
+      new CustomEvent('kite:theme-changed', {
+        detail: {
+          theme: applied.resolvedMode,
+          palette: applied.activePalette,
+          appearanceMode: sanitized.appearanceMode,
+          customizations: sanitized,
+        },
+      })
+    );
+  }, []);
 
+  const handleSelectTheme = (paletteId: string, themeMode?: 'dark' | 'light') => {
     if (propOnSelectTheme) {
       propOnSelectTheme(paletteId, themeMode);
     } else {
-      try {
-        writeKitePref('palette', paletteId);
-        if (themeMode) writeKitePref('theme', nextMode);
-        document.documentElement.setAttribute('data-palette', paletteId);
-        document.documentElement.setAttribute('data-theme', nextMode);
-        document.documentElement.classList.toggle('dark', nextMode === 'dark');
-        document.documentElement.classList.toggle('light', nextMode === 'light');
-        const appFrame = document.querySelector('.app-frame');
-        if (appFrame) {
-          appFrame.setAttribute('data-palette', paletteId);
-          appFrame.setAttribute('data-theme', nextMode);
-        }
-        window.dispatchEvent(
-          new CustomEvent('kite:theme-changed', {
-            detail: { theme: nextMode, palette: paletteId },
-          })
-        );
-      } catch (err) {
-        console.warn('[SettingsView] Failed to save theme preference:', err);
-      }
+      const inferredMode =
+        themeMode ??
+        (isLightThemeId(paletteId)
+          ? 'light'
+          : isDarkThemeId(paletteId)
+            ? 'dark'
+            : currentMode);
+      commitLocalCustomizations({
+        ...currentCustomizations,
+        appearanceMode: inferredMode,
+        darkThemeId: inferredMode === 'dark' ? paletteId : currentCustomizations.darkThemeId,
+        lightThemeId: inferredMode === 'light' ? paletteId : currentCustomizations.lightThemeId,
+      });
     }
   };
 
-  const handleToggleMode = (newMode: 'dark' | 'light') => {
+  const handleToggleMode = (newMode: AppearanceMode) => {
     if (propOnToggleMode) {
       propOnToggleMode(newMode);
     } else {
-      const newPalette = newMode === 'dark' ? 'kite-dark' : 'kite-light';
-      handleSelectTheme(newPalette, newMode);
+      commitLocalCustomizations({
+        ...currentCustomizations,
+        appearanceMode: newMode,
+      });
+    }
+  };
+
+  const handleUpdateCustomizations = (patch: Partial<KiteThemeCustomizations>) => {
+    if (propOnUpdateCustomizations) {
+      propOnUpdateCustomizations(patch);
+    } else {
+      commitLocalCustomizations({
+        ...currentCustomizations,
+        ...patch,
+        backdrop: patch.backdrop
+          ? { ...currentCustomizations.backdrop, ...patch.backdrop }
+          : currentCustomizations.backdrop,
+        figure: patch.figure
+          ? { ...currentCustomizations.figure, ...patch.figure }
+          : currentCustomizations.figure,
+        surface: patch.surface
+          ? { ...currentCustomizations.surface, ...patch.surface }
+          : currentCustomizations.surface,
+        overrides: patch.overrides
+          ? { ...currentCustomizations.overrides, ...patch.overrides }
+          : currentCustomizations.overrides,
+      });
+    }
+  };
+
+  const handleResetThemeOverrides = () => {
+    if (propOnResetThemeOverrides) {
+      propOnResetThemeOverrides();
+    } else {
+      commitLocalCustomizations({
+        ...currentCustomizations,
+        overrides: { ...DEFAULT_THEME_CUSTOMIZATIONS.overrides },
+      });
+    }
+  };
+
+  const handleResetAllCustomizations = () => {
+    if (propOnResetAllCustomizations) {
+      propOnResetAllCustomizations();
+    } else {
+      commitLocalCustomizations({ ...DEFAULT_THEME_CUSTOMIZATIONS });
     }
   };
 
@@ -633,7 +728,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     SETTINGS_TABS.find((t) => t.id === activeTab) || {
       id: activeTab,
       label: activeTab.charAt(0).toUpperCase() + activeTab.slice(1),
-      blurb: 'Manage Kite settings and preferences.',
+      blurb: 'Administra la configuración y preferencias de Kite.',
       icon: SettingsIcon,
     };
 
@@ -654,21 +749,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <section aria-labelledby="settings-heading" className="sidebar__primary">
           <div className="sidebar__section-heading">
             <h1 className="settings-rail__title" id="settings-heading">
-              Settings
+              Configuración
             </h1>
             <button
               className="settings-rail__back"
               onClick={handleClose}
-              title="Close (Esc)"
+              title="Cerrar (Esc)"
               type="button"
-              aria-label="Close settings"
+              aria-label="Cerrar configuración"
             >
               <ChevronLeftIcon aria-hidden="true" size={12} strokeWidth={2.2} />
-              Close
+              Cerrar
             </button>
           </div>
 
-          <nav aria-label="Settings sections" className="sidebar__list settings-rail">
+          <nav aria-label="Secciones de configuración" className="sidebar__list settings-rail">
             {SETTINGS_TABS.map((tab) => {
               const isSelected = activeTab === tab.id;
               const TabIcon = tab.icon;
@@ -822,9 +917,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
                 {(activeTab === 'appearance' || activeTab === 'customizations') && (
                   <AppearanceTab
+                    appearanceMode={currentAppearanceMode}
+                    customizations={currentCustomizations}
                     mode={currentMode}
+                    onResetAllCustomizations={handleResetAllCustomizations}
+                    onResetThemeOverrides={handleResetThemeOverrides}
                     onSelectTheme={handleSelectTheme}
                     onToggleMode={handleToggleMode}
+                    onUpdateCustomizations={handleUpdateCustomizations}
                     palette={currentPalette}
                   />
                 )}

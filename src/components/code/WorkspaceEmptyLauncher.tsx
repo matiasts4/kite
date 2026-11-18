@@ -3,6 +3,7 @@ import type { Workspace } from '../../types';
 import type { AgentEngineDescriptor } from './types';
 import { BrandLogo } from '../views/agents/engineMetadata';
 import { SquareTerminalIcon } from './codeIcons';
+import { ThemeHeroFigure } from '../theme/ThemeHeroFigure';
 
 export interface WorkspaceEmptyLauncherProps {
   workspace: Workspace;
@@ -43,6 +44,7 @@ export const WorkspaceEmptyLauncher: React.FC<WorkspaceEmptyLauncherProps> = ({
 }) => {
   return (
     <section className="empty-surface empty-surface--embedded workspace-empty">
+      <ThemeHeroFigure variant="hero" />
       <span aria-hidden="true" className="empty-surface__icon">
         <SparklesIcon />
       </span>

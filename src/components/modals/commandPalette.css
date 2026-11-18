@@ -2,8 +2,7 @@
   position: fixed;
   inset: 0;
   z-index: 9998;
-  background: var(--scrim, rgba(0, 0, 0, 0.65));
-  backdrop-filter: blur(8px);
+  background: var(--glass-modal-scrim, var(--glass-backdrop-scrim, var(--scrim, rgba(0, 0, 0, 0.65))));
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -14,10 +13,12 @@
 .command-palette-card {
   width: 100%;
   max-width: 620px;
-  background: var(--menu-plate, #1e1e1e);
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.12));
+  background: var(--glass-modal-bg, var(--glass-overlay-bg, var(--menu-plate, #1e1e1e)));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.12)));
   border-radius: var(--dialog-radius, 14px);
-  box-shadow: var(--shadow-sheet, 0 24px 60px rgba(0, 0, 0, 0.55));
+  box-shadow: var(--glass-shadow, var(--shadow-sheet, 0 24px 60px rgba(0, 0, 0, 0.55)));
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -94,8 +95,8 @@
   width: 28px;
   height: 28px;
   border-radius: var(--vl-radius-sm, 6px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.1));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -179,7 +180,7 @@
   justify-content: space-between;
   font-size: var(--text-caption, 11px);
   color: var(--text-faint, #6e6e6e);
-  background: var(--block-fill, rgba(255, 255, 255, 0.02));
+  background: color-mix(in srgb, var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.02))) 45%, transparent);
 }
 
 .command-palette-footer-hints {

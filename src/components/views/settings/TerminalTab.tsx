@@ -324,15 +324,15 @@ export const TerminalTab: React.FC = () => {
       </section>
 
       <section className="settings-group">
-        <h2 className="settings-group__title">Sessions</h2>
+        <h2 className="settings-group__title">Sesiones</h2>
         <div className="ui-card">
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Terminal host runtime</h3>
-              <p>Integrated native daemon managing active shell sessions and scrollback.</p>
+              <h3 className="settings-row__title">Motor del host de terminal</h3>
+              <p>Servicio nativo integrado que gestiona las sesiones de shell activas y el historial de desplazamiento.</p>
             </div>
             <div className="settings-row__control">
-              <span className="settings-badge" data-tone="running">Online</span>
+              <span className="settings-badge" data-tone="running">En línea</span>
             </div>
           </div>
         </div>

@@ -78,7 +78,7 @@ describe('SettingsModal / SettingsView as Modal', () => {
     const user = userEvent.setup();
     render(<SettingsModal isOpen={true} onClose={onClose} />);
 
-    const sidebarCloseBtn = screen.getByRole('button', { name: /Close settings/i });
+    const sidebarCloseBtn = screen.getByRole('button', { name: /Cerrar configuración/i });
     await user.click(sidebarCloseBtn);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -113,14 +113,14 @@ describe('SettingsModal / SettingsView as Modal', () => {
     const user = userEvent.setup();
     render(<SettingsModal isOpen={true} onClose={vi.fn()} />);
 
-    // Click on Shortcuts tab
-    const shortcutsTab = screen.getByRole('button', { name: /Shortcuts/i });
+    // Click on Atajos tab
+    const shortcutsTab = screen.getByRole('button', { name: /Atajos/i });
     await user.click(shortcutsTab);
 
-    // Header updates to Shortcuts and lazy chunk resolves
-    expect(screen.getByRole('heading', { level: 2, name: 'Shortcuts' })).toBeInTheDocument();
+    // Header updates to Atajos and lazy chunk resolves
+    expect(screen.getByRole('heading', { level: 2, name: 'Atajos' })).toBeInTheDocument();
     expect(
-      await screen.findByText('Keyboard Shortcuts', {}, { timeout: 5000 })
+      await screen.findByText('Atajos de teclado', {}, { timeout: 5000 })
     ).toBeInTheDocument();
   });
 
@@ -230,7 +230,7 @@ describe('SettingsModal / SettingsView as Modal', () => {
       invokeSpy.mock.calls.filter(([cmd]) => DICTATION_COMMANDS.has(String(cmd)))
     ).toHaveLength(0);
 
-    await user.click(screen.getByRole('button', { name: /Voice & Dictado/i }));
+    await user.click(screen.getByRole('button', { name: /Voz y Dictado/i }));
 
     await waitFor(
       () => {
@@ -242,14 +242,14 @@ describe('SettingsModal / SettingsView as Modal', () => {
       { timeout: 5000 }
     );
     expect(
-      await screen.findByText('Voice privacy', {}, { timeout: 5000 })
+      await screen.findByText('Privacidad de voz', {}, { timeout: 5000 })
     ).toBeInTheDocument();
 
     unmount();
 
     render(<SettingsModal isOpen={true} onClose={vi.fn()} initialTab="voice" />);
     expect(
-      await screen.findByText('Voice privacy', {}, { timeout: 5000 })
+      await screen.findByText('Privacidad de voz', {}, { timeout: 5000 })
     ).toBeInTheDocument();
 
     const dictationCallsAfterReopen = invokeSpy.mock.calls.map(([cmd]) => String(cmd));
@@ -262,5 +262,39 @@ describe('SettingsModal / SettingsView as Modal', () => {
     expect(
       dictationCallsAfterReopen.filter((c) => c === 'list_dictation_input_devices')
     ).toHaveLength(1);
+  });
+
+  it('renders Chat tab with standard settings card radio group and updates tool visibility preference', async () => {
+    const user = userEvent.setup();
+    render(<SettingsModal isOpen={true} onClose={vi.fn()} initialTab="chat" />);
+
+    const radioGroup = await screen.findByRole('radiogroup', { name: /Visibilidad de herramientas/i });
+    expect(radioGroup).toHaveClass('ui-card');
+
+    const zenRadio = screen.getByRole('radio', { name: /Modo Zen/i });
+    expect(zenRadio).toHaveClass('ui-card__row', 'settings-row', 'settings-choice-row');
+    expect(zenRadio).toHaveAttribute('aria-checked', 'false');
+
+    await user.click(zenRadio);
+    expect(zenRadio).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('renders follow-up action preference radio group in Chat tab and persists Queue vs Steer', async () => {
+    const user = userEvent.setup();
+    render(<SettingsModal isOpen={true} onClose={vi.fn()} initialTab="chat" />);
+
+    const followUpGroup = await screen.findByRole('radiogroup', {
+      name: /Acción al enviar con turno activo/i,
+    });
+    expect(followUpGroup).toHaveClass('ui-card');
+
+    const queueRadio = screen.getByRole('radio', { name: /Encolar mensaje/i });
+    const steerRadio = screen.getByRole('radio', { name: /Redirigir turno/i });
+    expect(queueRadio).toHaveAttribute('aria-checked', 'true');
+    expect(steerRadio).toHaveAttribute('aria-checked', 'false');
+
+    await user.click(steerRadio);
+    expect(steerRadio).toHaveAttribute('aria-checked', 'true');
+    expect(localStorage.getItem('kite_default_follow_up')).toBe('steer');
   });
 });

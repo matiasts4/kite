@@ -5,14 +5,14 @@
   bottom: 8px;
   width: 6px;
   border-radius: var(--pill-radius, 9999px);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--block-fill, rgba(255, 255, 255, 0.06));
   z-index: 2;
   touch-action: none;
   transition: background-color 0.15s ease;
 }
 
 .terminal-canvas-scrollbar:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--hover-fill, rgba(255, 255, 255, 0.1));
 }
 
 .terminal-canvas-scrollbar__thumb {
@@ -20,14 +20,14 @@
   left: 1px;
   width: 4px;
   border-radius: var(--pill-radius, 9999px);
-  background: rgba(255, 255, 255, 0.32);
+  background: var(--scrollbar-thumb, rgba(255, 255, 255, 0.32));
   touch-action: none;
   transition: background-color 0.15s ease;
 }
 
 .terminal-canvas-scrollbar:hover .terminal-canvas-scrollbar__thumb,
 .terminal-canvas-scrollbar__thumb:hover {
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--control-stroke-hover, rgba(255, 255, 255, 0.5));
 }
 
 .terminal-canvas-find {
@@ -41,9 +41,12 @@
   height: var(--control-row, 28px);
   padding: 0 4px 0 8px;
   border-radius: var(--control-radius, 8px);
-  background: rgba(20, 20, 24, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #fafafa;
+  background: var(--glass-overlay-bg, color-mix(in srgb, var(--pane, #141418) 94%, transparent));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.12)));
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: var(--text-primary, #fafafa);
 }
 
 .terminal-canvas-find input {

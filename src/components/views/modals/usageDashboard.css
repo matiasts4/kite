@@ -4,12 +4,11 @@
   position: fixed;
   inset: 0;
   z-index: 10000;
-  background: var(--scrim, rgba(0, 0, 0, 0.65));
+  background: var(--glass-modal-scrim, var(--glass-backdrop-scrim, var(--scrim, rgba(0, 0, 0, 0.65))));
   display: flex;
   align-items: center;
   justify-content: center;
   padding: var(--space-4, 16px);
-  backdrop-filter: blur(2px);
 }
 
 .ui-sheet.usage-dash {
@@ -24,10 +23,12 @@
   width: min(var(--sheet-width, 840px), calc((100vw - 32px) / var(--sheet-scale, 1)));
   max-width: none;
   max-height: calc((100vh - 32px) / var(--sheet-scale, 1));
-  border: 1px solid var(--panel-stroke, rgba(255, 255, 255, 0.1));
+  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--radius-panel, 12px);
-  background: var(--pane, #121213);
-  box-shadow: var(--shadow-sheet, 0 20px 50px rgba(0, 0, 0, 0.6));
+  background: var(--glass-modal-bg, var(--glass-overlay-bg, var(--pane, #121213)));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  box-shadow: var(--glass-shadow, var(--shadow-sheet, 0 20px 50px rgba(0, 0, 0, 0.6)));
   color: var(--text-primary, #fafafa);
   font-size: var(--text-body, 13px);
   line-height: var(--leading-body, 18px);
@@ -187,9 +188,11 @@
 .usage-dash__tile {
   min-width: 0;
   padding: var(--panel-padding, 14px);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
   border-radius: var(--radius-card, 10px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   flex-direction: column;
   gap: 2px;
   display: flex;
@@ -222,9 +225,11 @@
 
 .usage-dash__card {
   padding: var(--panel-padding, 16px);
-  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
   border-radius: var(--radius-card, 10px);
-  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .usage-dash__card h2 {

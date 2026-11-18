@@ -290,4 +290,61 @@ describe('NotificationsView Component', () => {
     expect(onClose).toHaveBeenCalled();
     openSpy.mockRestore();
   });
+
+  it('portals AppNotificationsPopover to document.body without nested scrim/arrow overlap or Tier 3 section boxes', async () => {
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const visualLangCss = fs.readFileSync('src/visual-language.css', 'utf8');
+    const notifCss = fs.readFileSync('src/components/views/notifications.css', 'utf8');
+
+    // Section eyebrow headers must not receive Tier 3 card box styling
+    expect(visualLangCss).not.toMatch(/\.notification-center__section\s*,[\s\S]{0,600}--glass-elevated-bg/);
+    // No overlapping rotated arrow pseudo-element creating a duplicate blurred seam
+    expect(notifCss).not.toContain('.notification-center::before');
+    expect(visualLangCss).not.toContain('.notification-center::before');
+
+    const { AppNotificationsPopover } = await import('../app/AppNotificationsPopover');
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    try {
+      render(
+        <AppNotificationsPopover
+          isOpen={true}
+          anchor={new DOMRect(900, 10, 28, 28)}
+          notifSnapshot={{
+            schemaVersion: 1,
+            revision: 1,
+            records: [],
+            unreadCount: 0,
+            openInputRequestCount: 0,
+            authorization: 'authorized',
+            preferences: {
+              schemaVersion: 1,
+              osNotificationsEnabled: true,
+              finishSoundEnabled: true,
+              inputRequestsEnabled: true,
+            },
+            archiveReadOnly: false,
+            openRecordId: null,
+          }}
+          onClose={vi.fn()}
+          setSelectedAgentId={vi.fn()}
+          setSelectedThreadId={vi.fn()}
+          setWorkMode={vi.fn()}
+          setSettingsOpen={vi.fn()}
+        />,
+        { container: host },
+      );
+
+      const dialog = await screen.findByRole('dialog', { name: /Notifications/i });
+      expect(dialog.parentElement).toBe(document.body);
+      expect(host.querySelector('.notification-popover-overlay')).toBeNull();
+      expect(dialog.classList.contains('notification-center')).toBe(true);
+      expect(dialog.querySelector('.notification-center__icon-badge')).not.toBeNull();
+    } finally {
+      host.remove();
+    }
+  });
 });

@@ -113,7 +113,7 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
                     fontWeight: 600,
                   }}
                 >
-                  Update &amp; Restart
+                  Actualizar y reiniciar
                 </button>
               )}
               <button
@@ -125,10 +125,10 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
                 {isCheckingUpdate ? (
                   <>
                     <RefreshCwIcon className="animate-spin" size={13} />
-                    Checking…
+                    Buscando…
                   </>
                 ) : (
-                  'Check for updates'
+                  'Buscar actualizaciones'
                 )}
               </button>
             </div>
@@ -166,7 +166,7 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
                   data-tone="running"
                   style={{ fontSize: '11px', padding: '1px 8px' }}
                 >
-                  Installed
+                  Instalada
                 </span>
               )}
               {rel.isIncoming && (

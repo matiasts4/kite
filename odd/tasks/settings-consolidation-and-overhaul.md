@@ -162,7 +162,7 @@ La navegación lateral de `SettingsView.tsx` quedará estructurada en grupos ló
 - [ ] **T7 — Verificación de Calidad y Tests**:
   - Ejecutar `npx tsc --noEmit` y resolver cualquier discrepancia de tipos.
   - Ejecutar `npx vitest run src/components/views/settings` asegurando que todos los tests pasen.
-  - Ejecutar `node .kite/sanitizer/audit-references.mjs --check` para garantizar 0 fugas de referencias donor.
+  - Ejecutar `node .kite/sanitizer/audit-references.mjs --check` para garantizar 0 fugas de referencias a proyectos externos.
 
 ---
 

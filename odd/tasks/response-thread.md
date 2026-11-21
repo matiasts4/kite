@@ -86,7 +86,7 @@ Acceptance:
 Checks: the existing dictation button test, plus a render assertion for the shared class and icon size.
 
 ### S6. Cite a passage from an assistant response
-User words: "No te limites solamente a las correcciones que yo dije. También investiga otros puntos de mejora que podamos copiar también."
+User words: "No te limites solamente a las correcciones que yo dije. También investiga otros puntos de mejora [...]."
 Current fact:
 - A finished assistant message has a copy button. There is no way to send a selected passage back into the composer.
 Acceptance:
@@ -182,7 +182,7 @@ Acceptance:
 Checks: a question-row test, and a test that a choice-only question has no attach control.
 
 ### S15. A visual reply is a sandboxed page above the text
-User words: "El chat se lo podemos copiar tal cual."
+User request (sanitized for public spec): render self-contained HTML replies cleanly in the thread above the written text.
 Acceptance:
 - When the agent answers with a self-contained HTML page, that page appears in the thread above the written reply.
 - Scripts run inside the page. The page cannot reach the session. Links open in the system browser. An expand control opens it full screen.

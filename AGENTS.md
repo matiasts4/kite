@@ -78,4 +78,38 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
    - A missing instruction channel, environment gate, skill-file install, or presentation detail is a missed feature.
    - Discovery before specs: suggest every copyable part with its behavior and look, confirm totality, then land detailed `S#` on the ODD. Do not implement one slice as the whole feature.
    - Public `odd/tasks`, docs, UI copy, and comments stay product-focused. They never name the source product. Internal notes live under `.kite/tasks/` (gitignored).
-   - Follow `port-from-product` when that skill is loaded.
+   - Follow `.agents/skills/port-from-product/SKILL.md` when triggered.
+
+---
+
+## 5. Repository Architecture & Environment Boundary
+
+| Path | Ownership & Purpose |
+| :--- | :--- |
+| `src/` | React 18 + TypeScript + Vite frontend (`App.tsx`, `views/chat`, `views/agents`, `views/subagents`, `views/diffs`, `views/settings`, `sidebar/`, `lib/operator/`, `motion/`). |
+| `src-tauri/src/` | Rust / Tauri 2 native backend (`chat/`, `acp/`, `agent_mind/`, `agents.rs`, `dispatch/`, `dispatch_wire/`, `persist.rs`, `operator_runtime.rs`, `terminal/`, `vt_engine/`). |
+| `src-tauri/crates/kite-ctx/` | Standalone pure-Rust context optimization crate (`lossless`, `cmd_filters`, `crusher`, `ccr_store`, `read_cache`, `shared_ctx`, `kv_aligner`, `ledger`, `hooks`). |
+| `odd/tasks/*.md` | Public clean-room Organic Driven Development (ODD) feature specs (`Header -> ## Specs -> ## Tasks -> ## Log`). |
+| `docs/` | Project architecture, QA catalog (`docs/qa/catalog.md`), release guides, and AI Studio setup (`docs/AI_STUDIO_AGENT_SETUP.md`). |
+| `.agents/skills/` | Portable LLM-first runtime skill contracts shared across local agents and GitHub-synced cloud environments. |
+| `scripts/e2e/` | Playwright CDP verification specs against real Windows Tauri WebView2 builds (`npm run verify:desktop:e2e`). |
+
+### Cloud / Browser Sandboxes (e.g., Google AI Studio Build) vs Local Machine
+- **Supported in browser/cloud sandboxes**: Reading repo files and `.agents/skills/`, authoring/updating `odd/tasks/*.md` specs and `docs/`, React/CSS/TypeScript edits, `npx tsc --noEmit`, `npx vitest run`, and Vite builds when Node deps are present.
+- **Local-only (mark `[NEEDS LOCAL VERIFICATION]` if working from cloud)**: Rust/Cargo (`cargo test --manifest-path src-tauri/Cargo.toml --workspace`), Tauri native desktop CDP tests (`npm run verify:desktop:e2e`), Windows process/Job Object checks, local Engram/CodeGraph tools, and `node .kite/sanitizer/audit-references.mjs --check`.
+
+---
+
+## 6. Portable Agent Skills Registry (`.agents/skills/`)
+
+Before executing matching work, read the full `SKILL.md` file rather than guessing from memory:
+
+| Skill | Trigger / When to Load | Path |
+| :--- | :--- | :--- |
+| `odd-workflow` | ODD specs, task sizing, `Risk:` lines, RED/GREEN test-first workflow, requirement sync | [`.agents/skills/odd-workflow/SKILL.md`](.agents/skills/odd-workflow/SKILL.md) |
+| `work-unit-commits` | Splitting changes into commits, Conventional Commits, PR slices, clean commit hygiene | [`.agents/skills/work-unit-commits/SKILL.md`](.agents/skills/work-unit-commits/SKILL.md) |
+| `judgment-day` | Explicit adversarial/dual review (`judgment day`, `juzgar`, blind pre-release diff audit) | [`.agents/skills/judgment-day/SKILL.md`](.agents/skills/judgment-day/SKILL.md) |
+| `port-from-product` | Feature parity requests (`copy from`, `match`, `parity`, `port`) and full surface inventories | [`.agents/skills/port-from-product/SKILL.md`](.agents/skills/port-from-product/SKILL.md) |
+| `cognitive-doc-design` | Writing or refactoring guides, READMEs, RFCs, or review docs with low cognitive load | [`.agents/skills/cognitive-doc-design/SKILL.md`](.agents/skills/cognitive-doc-design/SKILL.md) |
+| `kite-desktop-qa` | Desktop E2E, Tauri CDP verification, layout matrix, and sabotage fault checks | [`.agents/skills/kite-desktop-qa/SKILL.md`](.agents/skills/kite-desktop-qa/SKILL.md) |
+| `skill-creator` | Creating or updating skills inside `.agents/skills/` | [`.agents/skills/skill-creator/SKILL.md`](.agents/skills/skill-creator/SKILL.md) |

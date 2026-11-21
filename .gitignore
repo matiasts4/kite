@@ -47,7 +47,7 @@ test-results/
 .atl/
 scratch/
 seguimiento/
-skills/
+/skills/
 contracts/
 frontend/
 *-clipboard/

@@ -2,9 +2,12 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use super::{normalize_npx_tool, resolve_subcommand_index, NPX_VALUE_FLAGS, PKG_VALUE_FLAGS};
+
 pub fn filter_npx(args: &[String], output: &str, exit_code: i32) -> Option<(&'static str, String)> {
-    let tool = args.iter().find(|a| !a.starts_with('-')).map(String::as_str)?;
-    match tool {
+    let idx = resolve_subcommand_index(args, NPX_VALUE_FLAGS, false)?;
+    let tool = normalize_npx_tool(&args[idx]);
+    match tool.as_str() {
         "vitest" | "jest" => filter_js_test(output, exit_code),
         "tsc" => filter_tsc(output),
         _ => None,
@@ -16,9 +19,11 @@ pub fn filter_pkg_runner(
     output: &str,
     exit_code: i32,
 ) -> Option<(&'static str, String)> {
-    let first = args.first().map(String::as_str)?;
+    let idx = resolve_subcommand_index(args, PKG_VALUE_FLAGS, false)?;
+    let first = args[idx].as_str();
+    let tail = &args[idx + 1..];
     if first == "run" {
-        if let Some(script) = args.get(1).map(String::as_str) {
+        if let Some(script) = tail.iter().find(|a| !a.starts_with('-')).map(String::as_str) {
             if script.contains("test") || script == "vitest" || script == "jest" {
                 return filter_js_test(output, exit_code);
             }
@@ -27,8 +32,11 @@ pub fn filter_pkg_runner(
             }
         }
     }
-    if first == "test" {
+    if first == "test" || first == "vitest" || first == "jest" {
         return filter_js_test(output, exit_code);
+    }
+    if first == "tsc" || first == "typecheck" {
+        return filter_tsc(output);
     }
 
     let kept: Vec<&str> = output

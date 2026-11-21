@@ -25,9 +25,12 @@ use std::time::Instant;
 
 pub use ccr_store::{CcrEntry, CcrRetrieveResult, CcrStore};
 pub use cmd_filters::{
-    apply_custom_filter_rules, filter_command_output, load_custom_filter_rules, CustomFilterRule,
-    FilterOutput,
+    apply_custom_filter_rules, canonical_command_label, filter_command_output,
+    filter_command_output_with_ccr, load_custom_filter_rules, normalize_bin_name,
+    resolve_subcommand_for_bin, resolve_subcommand_index, CustomFilterRule, FilterOutput,
 };
+
+pub const MAX_EXEC_OUTPUT_CHARS: usize = 16_000;
 pub use crusher::{CrushResult, CrusherConfig, DataPattern, SmartCrusher};
 pub use discover::{discover_from_host, scan_command_strings, DiscoverCandidate, DiscoverySummary};
 pub use error::{CtxError, Result};
@@ -197,7 +200,8 @@ impl ContextEngine {
         Ok(res)
     }
 
-    /// Filter captured command output and record ledger telemetry.
+    /// Filter captured command output, enforcing the universal Auto-CCR spill ceiling,
+    /// and record ledger telemetry.
     #[allow(clippy::too_many_arguments)]
     pub fn filter_command_with_telemetry(
         &self,
@@ -213,15 +217,33 @@ impl ContextEngine {
         let start = Instant::now();
         let raw_combined = cmd_filters::merge_streams(stdout, stderr);
         let raw_tokens = estimate_tokens(&raw_combined);
-        let filtered = filter_command_output(command, stdout, stderr, exit_code);
-        let compressed_tokens = estimate_tokens(&filtered.text);
+        let mut filtered =
+            filter_command_output_with_ccr(command, stdout, stderr, exit_code, Some(&self.ccr));
 
-        let cmd_label = command
-            .iter()
-            .take(2)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let cmd_label = cmd_filters::canonical_command_label(command);
+        let label_for_ccr = if cmd_label.is_empty() {
+            filtered.filter_name.to_string()
+        } else {
+            cmd_label.clone()
+        };
+
+        if filtered.text.chars().count() > MAX_EXEC_OUTPUT_CHARS {
+            let source_for_ccr = if raw_combined.is_empty() {
+                filtered.text.as_str()
+            } else {
+                raw_combined.as_str()
+            };
+            filtered.text = spill_oversized_exec_output(
+                source_for_ccr,
+                &filtered.text,
+                &label_for_ccr,
+                &self.ccr,
+                MAX_EXEC_OUTPUT_CHARS,
+            );
+            filtered.compressed = filtered.text.len() < raw_combined.len();
+        }
+
+        let compressed_tokens = estimate_tokens(&filtered.text);
 
         self.ledger.record(&LedgerEventInput {
             session_id: session_id.to_string(),
@@ -229,11 +251,7 @@ impl ContextEngine {
             provider: provider.to_string(),
             model: model.to_string(),
             category: "exec".to_string(),
-            command_or_tool: if cmd_label.is_empty() {
-                filtered.filter_name.to_string()
-            } else {
-                cmd_label
-            },
+            command_or_tool: label_for_ccr,
             raw_tokens,
             compressed_tokens,
             cache_hit: false,
@@ -453,6 +471,138 @@ impl ContextEngine {
     }
 }
 
+fn spill_oversized_exec_output(
+    raw_source: &str,
+    current_text: &str,
+    label: &str,
+    ccr: &CcrStore,
+    max_chars: usize,
+) -> String {
+    let total_chars = current_text.chars().count();
+    let lines: Vec<&str> = current_text.lines().collect();
+
+    let head_budget = 4_500usize.min(max_chars / 3);
+    let anomaly_budget = 3_500usize.min(max_chars / 4);
+    let tail_budget = 3_500usize.min(max_chars / 4);
+
+    let (head, head_end_idx, tail, tail_start_idx) = if lines.len() <= 2 {
+        let head_str: String = current_text.chars().take(head_budget).collect();
+        let tail_str: String = current_text
+            .chars()
+            .rev()
+            .take(tail_budget)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        (head_str, 0, tail_str, lines.len())
+    } else {
+        let mut head_lines = Vec::new();
+        let mut head_chars = 0usize;
+        let mut h_idx = 0usize;
+        while h_idx < lines.len() {
+            let line = lines[h_idx];
+            let next_len = line.chars().count() + 1;
+            if !head_lines.is_empty() && head_chars + next_len > head_budget {
+                break;
+            }
+            if head_lines.is_empty() && next_len > head_budget {
+                head_lines.push(line.chars().take(head_budget).collect::<String>());
+                h_idx += 1;
+                break;
+            }
+            head_lines.push(line.to_string());
+            head_chars += next_len;
+            h_idx += 1;
+        }
+
+        let mut tail_lines = Vec::new();
+        let mut tail_chars = 0usize;
+        let mut t_idx = lines.len();
+        while t_idx > h_idx {
+            let line = lines[t_idx - 1];
+            let next_len = line.chars().count() + 1;
+            if !tail_lines.is_empty() && tail_chars + next_len > tail_budget {
+                break;
+            }
+            if tail_lines.is_empty() && next_len > tail_budget {
+                let clipped: String = line
+                    .chars()
+                    .rev()
+                    .take(tail_budget)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                tail_lines.push(clipped);
+                t_idx -= 1;
+                break;
+            }
+            tail_lines.push(line.to_string());
+            tail_chars += next_len;
+            t_idx -= 1;
+        }
+        tail_lines.reverse();
+        (head_lines.join("\n"), h_idx, tail_lines.join("\n"), t_idx)
+    };
+
+    let mut anomalies = Vec::new();
+    let mut seen_anomalies = std::collections::HashSet::new();
+    let mut anomaly_chars = 0usize;
+    if tail_start_idx > head_end_idx {
+        for line in &lines[head_end_idx..tail_start_idx] {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            let is_signal = lower.contains("error")
+                || lower.contains("failed")
+                || lower.contains("panic")
+                || lower.contains("exception")
+                || lower.contains("fatal")
+                || lower.contains("assertion");
+            if is_signal && seen_anomalies.insert(trimmed.to_string()) {
+                let clipped: String = trimmed.chars().take(280).collect();
+                if anomaly_chars + clipped.len() + 1 > anomaly_budget {
+                    break;
+                }
+                anomaly_chars += clipped.len() + 1;
+                anomalies.push(clipped);
+            }
+        }
+    }
+
+    let mut preview = String::new();
+    preview.push_str(head.trim_end());
+    if !anomalies.is_empty() {
+        preview.push_str("\n... [key error/failure signals from middle] ...\n");
+        preview.push_str(&anomalies.join("\n"));
+    }
+
+    let raw_chars = raw_source.chars().count();
+    let omitted_chars = raw_chars.saturating_sub(head.chars().count() + tail.chars().count());
+    let omitted_tokens = omitted_chars / 4;
+    let footer_preview = format!("{preview}\n...\n{}", tail.trim_start());
+    let hash = ccr
+        .put(raw_source, &footer_preview, "auto_ccr", label)
+        .ok();
+
+    match hash {
+        Some(h) => preview.push_str(&format!(
+            "\n... [kite-ctx auto-CCR spilled {omitted_chars} chars (~{omitted_tokens} tokens from {total_chars} filtered chars) — run `kite ctx retrieve {h} [--lines N-M] [--search <term>]` for full output] <<ccr:{h}>> ..."
+        )),
+        None => preview.push_str(&format!(
+            "\n... [kite-ctx truncated {omitted_chars} chars] ..."
+        )),
+    }
+    if !tail.trim().is_empty() {
+        preview.push('\n');
+        preview.push_str(tail.trim_start());
+    }
+    preview
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +761,59 @@ mod tests {
             .features
             .iter()
             .any(|f| f.feature == "runtime:thread_history"));
+    }
+
+    #[test]
+    fn spills_oversized_exec_output_to_auto_ccr_and_normalizes_feature_labels() {
+        let engine = ContextEngine::open_in_memory().unwrap();
+        let mut huge = String::from("HEAD_LINE_1: boot sequence started\n");
+        for i in 0..450 {
+            if i == 220 {
+                huge.push_str("ERROR: critical failure at module 220\n");
+            } else {
+                huge.push_str(&format!(
+                    "diagnostic line {i:03}: verbose uncompressible payload token_{i}_alpha_beta_gamma\n"
+                ));
+            }
+        }
+        huge.push_str("TAIL_LINE_END: finished with status 1\n");
+
+        let cmd = vec![
+            "npx".to_string(),
+            "--prefix".to_string(),
+            "frontend".to_string(),
+            "custom-tool".to_string(),
+        ];
+        let res = engine
+            .filter_command_with_telemetry(
+                &cmd,
+                &huge,
+                "",
+                1,
+                "s-auto-ccr",
+                "Orion",
+                "antigravity",
+                "gemini-4",
+            )
+            .unwrap();
+
+        assert!(res.text.chars().count() <= 16_000);
+        assert!(res.text.contains("HEAD_LINE_1: boot sequence started"));
+        assert!(res.text.contains("ERROR: critical failure at module 220"));
+        assert!(res.text.contains("TAIL_LINE_END: finished with status 1"));
+        assert!(res.text.contains("<<ccr:"));
+
+        let marker_start = res.text.find("<<ccr:").unwrap() + 6;
+        let marker_end = res.text[marker_start..].find(">>").unwrap() + marker_start;
+        let hash = &res.text[marker_start..marker_end];
+        let full = engine.ccr().retrieve(hash).unwrap();
+        assert_eq!(full.original_text, huge);
+
+        let snap = engine.ledger().snapshot(Some("s-auto-ccr")).unwrap();
+        assert!(
+            snap.features.iter().any(|f| f.feature == "exec:npx custom-tool"),
+            "expected canonical feature label exec:npx custom-tool, got {:?}",
+            snap.features
+        );
     }
 }

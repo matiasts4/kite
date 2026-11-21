@@ -238,6 +238,40 @@ fn split_shell_chain(command: &str) -> Option<Vec<(String, &'static str)>> {
     }
 }
 
+fn split_shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = segment.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
 fn rewrite_single_segment(segment: &str) -> Option<String> {
     let trimmed = segment.trim();
     if trimmed.is_empty()
@@ -248,23 +282,30 @@ fn rewrite_single_segment(segment: &str) -> Option<String> {
         return None;
     }
 
-    let mut words = trimmed.split_whitespace();
-    let first_word = words.next()?;
-    let second_word = words.next().unwrap_or("");
+    let words = split_shell_words(trimmed);
+    let first_word = words.first()?;
+    let bin = crate::cmd_filters::normalize_bin_name(first_word);
 
-    // Skip git interactive/commit mutations
-    if first_word == "git" && matches!(second_word, "commit" | "rebase" | "merge" | "add" | "checkout" | "switch" | "reset" | "clean") {
-        return None;
+    // Skip git interactive/commit mutations even when preceded by `-C <dir>` or `-c <k=v>`
+    if bin == "git" {
+        if let Some((_, sub)) = crate::cmd_filters::resolve_subcommand_for_bin("git", &words[1..]) {
+            if matches!(
+                sub.as_str(),
+                "commit" | "rebase" | "merge" | "add" | "checkout" | "switch" | "reset" | "clean"
+            ) {
+                return None;
+            }
+        }
     }
 
     let eligible = matches!(
-        first_word,
+        bin.as_str(),
         "git" | "cargo" | "vitest" | "jest" | "tsc" | "pytest" | "ruff" | "mypy" | "rg" | "grep" | "tree"
-    ) || ((first_word == "npx"
-        || first_word == "npm"
-        || first_word == "pnpm"
-        || first_word == "yarn"
-        || first_word == "bun")
+    ) || ((bin == "npx"
+        || bin == "npm"
+        || bin == "pnpm"
+        || bin == "yarn"
+        || bin == "bun")
         && (trimmed.contains("test")
             || trimmed.contains("vitest")
             || trimmed.contains("jest")
@@ -1106,6 +1147,14 @@ mod tests {
         assert_eq!(rewrite_hook_command("cargo test | tee out.log"), None);
         assert_eq!(rewrite_hook_command("git status > status.txt"), None);
         assert_eq!(rewrite_hook_command("git commit -m \"feat: init\""), None);
+        assert_eq!(
+            rewrite_hook_command("git -C C:\\repo commit -m \"feat: init\""),
+            None
+        );
+        assert_eq!(
+            rewrite_hook_command("git -C C:\\repo diff"),
+            Some("kite ctx exec -- git -C C:\\repo diff".to_string())
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");

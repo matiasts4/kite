@@ -8,8 +8,54 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ccr_store::CcrStore;
 use crate::lossless::{compact_lossless, strip_ansi};
 use crate::pipeline::ContentKind;
+
+pub(crate) const GIT_VALUE_FLAGS: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--exec-path",
+    "--config-env",
+];
+
+pub(crate) const CARGO_VALUE_FLAGS: &[&str] = &[
+    "-C",
+    "-Z",
+    "--manifest-path",
+    "--target-dir",
+    "--color",
+    "--config",
+    "--explain",
+];
+
+pub(crate) const NPX_VALUE_FLAGS: &[&str] = &[
+    "--prefix",
+    "-p",
+    "--package",
+    "-c",
+    "--call",
+    "--userconfig",
+    "--cache",
+    "--node-options",
+];
+
+pub(crate) const PKG_VALUE_FLAGS: &[&str] = &[
+    "--prefix",
+    "-C",
+    "--dir",
+    "--cwd",
+    "--filter",
+    "--workspace",
+    "-w",
+    "--userconfig",
+    "--cache",
+    "--loglevel",
+];
 
 /// Result emitted by deterministic CLI output compressors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +229,84 @@ pub fn normalize_bin_name(raw: &str) -> String {
     lower
 }
 
+/// Normalize an `npx` tool token (`C:\...\vitest.cmd` or `vitest@2.1` -> `vitest`).
+pub(crate) fn normalize_npx_tool(raw: &str) -> String {
+    let base = normalize_bin_name(raw);
+    if !base.starts_with('@') {
+        if let Some((pkg, _ver)) = base.split_once('@') {
+            return pkg.to_string();
+        }
+    }
+    base
+}
+
+/// Skip leading flags (including known flags that take a separate value) to locate
+/// the subcommand or tool argument index inside `args`.
+pub fn resolve_subcommand_index(
+    args: &[String],
+    value_flags: &[&str],
+    skip_plus_prefix: bool,
+) -> Option<usize> {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return (i + 1 < args.len()).then_some(i + 1);
+        }
+        if value_flags.contains(&arg) {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') || (skip_plus_prefix && arg.starts_with('+')) {
+            i += 1;
+            continue;
+        }
+        return Some(i);
+    }
+    None
+}
+
+/// Resolve `(index, normalized_subcommand)` for binaries that accept global flags before
+/// their subcommand (`git`, `cargo`, `npx`, `npm`, `pnpm`, `yarn`, `bun`).
+pub fn resolve_subcommand_for_bin(bin: &str, args: &[String]) -> Option<(usize, String)> {
+    match bin {
+        "git" => resolve_subcommand_index(args, GIT_VALUE_FLAGS, false)
+            .map(|idx| (idx, args[idx].to_ascii_lowercase())),
+        "cargo" => resolve_subcommand_index(args, CARGO_VALUE_FLAGS, true)
+            .map(|idx| (idx, args[idx].to_ascii_lowercase())),
+        "npx" => resolve_subcommand_index(args, NPX_VALUE_FLAGS, false)
+            .map(|idx| (idx, normalize_npx_tool(&args[idx]))),
+        "npm" | "pnpm" | "yarn" | "bun" => resolve_subcommand_index(args, PKG_VALUE_FLAGS, false)
+            .map(|idx| (idx, args[idx].to_ascii_lowercase())),
+        _ => None,
+    }
+}
+
+/// Canonical feature label (`<bin> <subcommand>` or `<bin>`) for ledger & discovery telemetry.
+pub fn canonical_command_label(command: &[String]) -> String {
+    let Some(first) = command.first() else {
+        return String::new();
+    };
+    let bin = normalize_bin_name(first);
+    if bin.is_empty() {
+        return String::new();
+    }
+    let rest = &command[1..];
+    if let Some((_, sub)) = resolve_subcommand_for_bin(&bin, rest) {
+        return format!("{bin} {sub}");
+    }
+    if let Some(arg1) = rest.first().map(|s| s.trim()) {
+        if !arg1.is_empty()
+            && !arg1.starts_with('-')
+            && !arg1.contains(char::is_whitespace)
+            && arg1.len() <= 40
+        {
+            return format!("{bin} {arg1}");
+        }
+    }
+    bin
+}
+
 /// Combine stdout/stderr cleanly after stripping ANSI sequences.
 pub(crate) fn merge_streams(stdout: &str, stderr: &str) -> String {
     let out = strip_ansi(stdout);
@@ -203,6 +327,18 @@ pub fn filter_command_output(
     stdout: &str,
     stderr: &str,
     exit_code: i32,
+) -> FilterOutput {
+    filter_command_output_with_ccr(command, stdout, stderr, exit_code, None)
+}
+
+/// Route executed command output through deterministic filters with optional CCR spillover
+/// for large search/diff/status/build outputs.
+pub fn filter_command_output_with_ccr(
+    command: &[String],
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    ccr: Option<&CcrStore>,
 ) -> FilterOutput {
     let combined = merge_streams(stdout, stderr);
     if combined.is_empty() {
@@ -242,15 +378,15 @@ pub fn filter_command_output(
     }
 
     let routed: Option<(&'static str, String)> = match bin.as_str() {
-        "git" => git::filter_git(rest, &combined, exit_code),
-        "cargo" => rust::filter_cargo(rest, &combined, exit_code),
+        "git" => git::filter_git_with_ccr(rest, &combined, exit_code, ccr),
+        "cargo" => rust::filter_cargo_with_ccr(rest, &combined, exit_code, ccr),
         "vitest" | "jest" => js::filter_js_test(&combined, exit_code),
         "tsc" => js::filter_tsc(&combined),
         "npm" | "pnpm" | "yarn" | "bun" => js::filter_pkg_runner(rest, &combined, exit_code),
         "npx" => js::filter_npx(rest, &combined, exit_code),
         "pytest" => python::filter_pytest(&combined, exit_code),
         "ruff" | "mypy" => python::filter_python_lint(&combined),
-        "grep" | "rg" => fs::filter_search(&combined),
+        "grep" | "rg" => fs::filter_search_with_ccr(&combined, ccr),
         "ls" | "dir" | "tree" | "find" => fs::filter_listing(&combined),
         _ => None,
     };
@@ -323,5 +459,55 @@ mod tests {
         assert!(filtered.contains("Step 1/6 : FROM rust:1.82"));
         assert!(filtered.contains("Successfully built abcdef"));
         assert!(filtered.contains("omitted by custom filter 'docker-build'"));
+    }
+
+    #[test]
+    fn resolves_commands_past_leading_value_flags() {
+        let npx_cmd: Vec<String> = vec![
+            "npx".into(),
+            "--prefix".into(),
+            "C:\\projects\\app".into(),
+            "vitest".into(),
+            "run".into(),
+        ];
+        let vitest_raw = " ✓ a.test.ts (3)\n Test Files  1 passed (1)\n      Tests  3 passed (3)\n";
+        let npx_res = filter_command_output(&npx_cmd, vitest_raw, "", 0);
+        assert_eq!(npx_res.filter_name, "vitest_text");
+        assert!(!npx_res.text.contains("a.test.ts"));
+
+        let npm_cmd: Vec<String> = vec![
+            "npm".into(),
+            "--prefix".into(),
+            "frontend".into(),
+            "run".into(),
+            "test".into(),
+        ];
+        let npm_res = filter_command_output(&npm_cmd, vitest_raw, "", 0);
+        assert_eq!(npm_res.filter_name, "vitest_text");
+
+        let git_cmd: Vec<String> = vec![
+            "git".into(),
+            "-C".into(),
+            "C:\\repo".into(),
+            "-c".into(),
+            "core.quotepath=false".into(),
+            "status".into(),
+        ];
+        let status_raw = "On branch main\nChanges not staged for commit:\n\tmodified:   src/main.rs\n";
+        let git_res = filter_command_output(&git_cmd, status_raw, "", 0);
+        assert_eq!(git_res.filter_name, "git_status");
+        assert!(git_res.text.contains("src/main.rs"));
+
+        let cargo_cmd: Vec<String> = vec![
+            "cargo".into(),
+            "+nightly".into(),
+            "--manifest-path".into(),
+            "src-tauri/Cargo.toml".into(),
+            "test".into(),
+        ];
+        let cargo_raw = "   Compiling app v0.1.0\ntest a ... ok\ntest result: ok. 1 passed; 0 failed\n";
+        let cargo_res = filter_command_output(&cargo_cmd, cargo_raw, "", 0);
+        assert_eq!(cargo_res.filter_name, "cargo_test");
+        assert!(!cargo_res.text.contains("Compiling app"));
     }
 }

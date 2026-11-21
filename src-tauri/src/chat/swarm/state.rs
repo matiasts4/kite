@@ -84,20 +84,22 @@ pub(super) fn valid_worker_name(name: &str) -> bool {
 }
 
 pub(super) fn resolve_base_dir(coord_thread_id: &str, cwd: Option<&str>) -> Option<PathBuf> {
-    let from_thread = threads().lock().ok().and_then(|all| {
+    let thread_dirs = threads().lock().ok().and_then(|all| {
         let t = all
             .iter()
             .find(|t| t.get("id").and_then(Value::as_str) == Some(coord_thread_id))?;
-        t.get("worktreePath")
-            .or_else(|| t.get("workingDirectory"))
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .or_else(|| {
-                t.get("workspaceId")
-                    .and_then(Value::as_str)
-                    .and_then(workspace_path)
-                    .map(PathBuf::from)
-            })
+        Some((
+            t.get("worktreePath")
+                .or_else(|| t.get("workingDirectory"))
+                .and_then(Value::as_str)
+                .map(PathBuf::from),
+            t.get("workspaceId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        ))
+    });
+    let from_thread = thread_dirs.and_then(|(direct_dir, ws_id)| {
+        direct_dir.or_else(|| ws_id.as_deref().and_then(workspace_path).map(PathBuf::from))
     });
     from_thread
         .or_else(|| {

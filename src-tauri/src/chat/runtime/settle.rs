@@ -1,4 +1,7 @@
-use crate::chat::threads::{chat_item, load_thread, replace_thread, touch, upsert_item};
+use crate::chat::threads::{
+    apply_derived_title_if_needed, chat_item, human_user_prompt, load_thread, replace_thread,
+    touch, upsert_item,
+};
 use crate::chat::utils::{chat_log, now_ms};
 use crate::persist::{notifications, persist, threads};
 use serde_json::{json, Value};
@@ -7,6 +10,287 @@ use uuid::Uuid;
 use super::pipeline::{flush_pipeline_deltas, pipeline_runs};
 use super::state::{live_cv, live_turns, prune_stale_runs};
 use super::turn::{append_event, start_turn};
+
+fn is_in_flight_status(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("running" | "waiting" | "queued" | "inProgress" | "in_progress" | "pending" | "started")
+    )
+}
+
+fn is_non_terminal_subagent_status(status: Option<&str>) -> bool {
+    !matches!(status, Some("completed" | "failed" | "killed"))
+}
+
+fn has_pending_approval_or_input(thread: &Value) -> bool {
+    thread.get("pendingApproval").is_some_and(|v| !v.is_null())
+        || thread
+            .get("pendingUserInput")
+            .is_some_and(|v| !v.is_null())
+}
+
+fn is_quiet_turn_note(item: &Value) -> bool {
+    item.get("kind").and_then(|v| v.as_str()) == Some("note")
+        && item.get("text").and_then(|v| v.as_str()) == Some(super::turn::QUIET_TURN_NOTE_TEXT)
+}
+
+fn prune_quiet_turn_notes(items: &mut Vec<Value>) -> bool {
+    let before = items.len();
+    items.retain(|it| !is_quiet_turn_note(it));
+    items.len() != before
+}
+
+fn settle_implementing_plan_slot(thread: &mut Value, target_status: &str) {
+    let Some(aid) = thread
+        .get("activePlanId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let Some(plans) = thread.get_mut("plans").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    if let Some(slot) = plans
+        .iter_mut()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(aid.as_str()))
+    {
+        if slot.get("status").and_then(|v| v.as_str()) == Some("implementing") {
+            slot["status"] = json!(target_status);
+        }
+    }
+}
+
+fn has_in_flight_thread_work(thread: &Value) -> bool {
+    let has_item = thread
+        .get("items")
+        .and_then(Value::as_array)
+        .is_some_and(|arr| {
+            arr.iter().any(|it| {
+                it.get("streaming").and_then(Value::as_bool) == Some(true)
+                    || is_in_flight_status(it.get("status").and_then(Value::as_str))
+                    || is_in_flight_status(it.pointer("/subagentMeta/status").and_then(Value::as_str))
+                    || is_quiet_turn_note(it)
+            })
+        });
+    let has_run = thread
+        .get("subagentRuns")
+        .and_then(Value::as_array)
+        .is_some_and(|runs| {
+            runs.iter()
+                .any(|r| is_non_terminal_subagent_status(r.get("status").and_then(Value::as_str)))
+        });
+    let has_worker = thread
+        .pointer("/swarmState/members")
+        .and_then(Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|m| m.get("state").and_then(Value::as_str) == Some("working"))
+        });
+    has_item || has_run || has_worker
+}
+
+struct SettledSubagents {
+    statuses: std::collections::HashMap<String, String>,
+    preserved_async_child_ids: std::collections::HashSet<String>,
+}
+
+fn has_non_empty_child_thread_id(val: &Value) -> bool {
+    val.get("childThreadId")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn settle_in_flight_subagent_runs(
+    thread: &mut Value,
+    fallback_status: &str,
+    settle_async_children: bool,
+) -> SettledSubagents {
+    let mut out = SettledSubagents {
+        statuses: std::collections::HashMap::new(),
+        preserved_async_child_ids: std::collections::HashSet::new(),
+    };
+    let now = now_ms();
+    let Some(runs) = thread.get_mut("subagentRuns").and_then(Value::as_array_mut) else {
+        return out;
+    };
+    for run in runs.iter_mut() {
+        let cur = run.get("status").and_then(Value::as_str);
+        if !settle_async_children && has_non_empty_child_thread_id(run) && is_non_terminal_subagent_status(cur) {
+            if let Some(sid) = run.get("subagentId").and_then(Value::as_str) {
+                out.preserved_async_child_ids.insert(sid.to_string());
+            }
+            if let Some(call_id) = run.get("parentToolCallId").and_then(Value::as_str) {
+                out.preserved_async_child_ids.insert(call_id.to_string());
+            }
+            continue;
+        }
+        let resolved = if is_non_terminal_subagent_status(cur) {
+            let next = if fallback_status == "completed"
+                || crate::chat::subagents::child_transcript_ended_with_final_response(
+                    run.get("transcriptUri").and_then(Value::as_str),
+                )
+            {
+                "completed"
+            } else {
+                fallback_status
+            };
+            run["status"] = json!(next);
+            if run.get("completedAtUnixMs").is_none_or(Value::is_null) {
+                run["completedAtUnixMs"] = json!(now);
+            }
+            run["updatedAtUnixMs"] = json!(now);
+            next.to_string()
+        } else {
+            cur.unwrap_or("completed").to_string()
+        };
+        if let Some(sid) = run.get("subagentId").and_then(Value::as_str) {
+            out.statuses.insert(sid.to_string(), resolved.clone());
+        }
+        if let Some(call_id) = run.get("parentToolCallId").and_then(Value::as_str) {
+            out.statuses.insert(call_id.to_string(), resolved);
+        }
+    }
+    out
+}
+
+/// Shared settlement pass for both live turn completion (`finish_run`, where async
+/// child threads and swarm workers may still be active) and orphaned-turn recovery
+/// (`heal_orphaned_running_thread`, where no runtime processes remain).
+fn settle_in_flight_thread_work(
+    thread: &mut Value,
+    waiting_for_permission: bool,
+    tool_settled_status: &str,
+    subagent_fallback_status: &str,
+    settle_async_children: bool,
+) {
+    let subagents = if waiting_for_permission {
+        SettledSubagents {
+            statuses: std::collections::HashMap::new(),
+            preserved_async_child_ids: std::collections::HashSet::new(),
+        }
+    } else {
+        settle_in_flight_subagent_runs(thread, subagent_fallback_status, settle_async_children)
+    };
+
+    const BOGUS_INTERRUPTED_TEXT: &str =
+        "Interrupted before completion; retried in subsequent steps.";
+    if let Some(arr) = thread.get_mut("items").and_then(|v| v.as_array_mut()) {
+        prune_quiet_turn_notes(arr);
+        for it in arr.iter_mut() {
+            if it.get("streaming").and_then(|v| v.as_bool()) == Some(true) {
+                it["streaming"] = json!(false);
+            }
+            if waiting_for_permission {
+                continue;
+            }
+            let is_subagent = it.get("toolKind").and_then(Value::as_str) == Some("subagent")
+                || it.get("subagentMeta").is_some();
+            if is_subagent {
+                let item_id = it.get("id").and_then(Value::as_str);
+                let meta_sid = it.pointer("/subagentMeta/subagentId").and_then(Value::as_str);
+                let is_preserved_async = !settle_async_children
+                    && (meta_sid.is_some_and(|sid| subagents.preserved_async_child_ids.contains(sid))
+                        || item_id.is_some_and(|id| subagents.preserved_async_child_ids.contains(id))
+                        || it
+                            .get("subagentMeta")
+                            .is_some_and(has_non_empty_child_thread_id));
+                if is_preserved_async {
+                    continue;
+                }
+                let it_cur = it.get("status").and_then(Value::as_str);
+                let meta_cur = it.pointer("/subagentMeta/status").and_then(Value::as_str);
+                if is_in_flight_status(it_cur)
+                    || meta_cur.is_some_and(|s| is_non_terminal_subagent_status(Some(s)))
+                {
+                    let matched = meta_sid
+                        .and_then(|sid| subagents.statuses.get(sid))
+                        .or_else(|| item_id.and_then(|id| subagents.statuses.get(id)))
+                        .map(String::as_str)
+                        .unwrap_or(subagent_fallback_status);
+                    if is_non_terminal_subagent_status(it_cur) {
+                        it["status"] = json!(matched);
+                    }
+                    if matched == "completed"
+                        && it.get("text").and_then(Value::as_str) == Some(BOGUS_INTERRUPTED_TEXT)
+                    {
+                        it["status"] = json!("completed");
+                        it["text"] = json!("");
+                        it["exitCode"] = Value::Null;
+                    }
+                    if let Some(meta) = it.get_mut("subagentMeta").and_then(Value::as_object_mut) {
+                        let m_cur = meta.get("status").and_then(Value::as_str);
+                        if is_non_terminal_subagent_status(m_cur) {
+                            meta.insert("status".into(), json!(matched));
+                        }
+                    }
+                }
+            } else if is_in_flight_status(it.get("status").and_then(Value::as_str)) {
+                it["status"] = json!(tool_settled_status);
+            }
+        }
+    }
+
+    if !waiting_for_permission && settle_async_children {
+        if let Some(members) = thread
+            .pointer_mut("/swarmState/members")
+            .and_then(Value::as_array_mut)
+        {
+            for member in members.iter_mut() {
+                if member.get("state").and_then(Value::as_str) == Some("working") {
+                    member["state"] = json!("stopped");
+                }
+            }
+        }
+    }
+}
+
+/// Idempotently settles a persisted thread left in `"running"` (or, when
+/// `settle_idle_work` is true, an idle/error thread still holding orphaned
+/// streaming items, non-terminal subagent runs, or `"working"` swarm workers).
+/// Returns `true` when any field changed so callers can persist safely.
+pub fn heal_orphaned_thread_with_options(
+    thread: &mut Value,
+    stopped_by_user: bool,
+    settle_idle_work: bool,
+) -> bool {
+    let status_str = thread.get("status").and_then(Value::as_str);
+    let waiting_for_permission = has_pending_approval_or_input(thread);
+    let is_running = status_str == Some("running");
+    let has_in_flight = has_in_flight_thread_work(thread);
+    if !is_running
+        && !((stopped_by_user || settle_idle_work) && !waiting_for_permission && has_in_flight)
+    {
+        return false;
+    }
+
+    if waiting_for_permission {
+        thread["status"] = json!("waiting");
+    } else if status_str != Some("error") {
+        thread["status"] = json!("idle");
+    }
+    if stopped_by_user && !waiting_for_permission {
+        thread["stoppedByBuilder"] = json!(true);
+    }
+
+    if !waiting_for_permission {
+        settle_implementing_plan_slot(thread, "interrupted");
+        settle_in_flight_thread_work(thread, false, "stopped", "killed", true);
+    }
+
+    if is_running || stopped_by_user {
+        apply_derived_title_if_needed(thread, "generated", true);
+    }
+    true
+}
+
+/// Idempotently settles a persisted thread left in `"running"` after an app
+/// restart or forced stop without inventing error items or `turnFailure`.
+/// Returns `true` when any field changed so callers can persist safely.
+pub fn heal_orphaned_running_thread(thread: &mut Value, stopped_by_user: bool) -> bool {
+    heal_orphaned_thread_with_options(thread, stopped_by_user, stopped_by_user)
+}
 
 pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     chat_log(&format!("finish_run starting: run_id={}, ok={}, stopped={}", run_id, ok, stopped));
@@ -25,6 +309,7 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
         flush_pipeline_deltas(&thread_id, run_id, &assistant_id);
         pipeline_runs().lock().unwrap().remove(run_id);
     }
+    super::stream_json::clear_stream_run_state(run_id);
     let (thread_id, assistant_id, assistant_text, routine_id) = {
         let mut live = live_turns().lock().unwrap();
         let thread_id = live.by_thread.iter().find(|(_, id)| id.as_str() == run_id).map(|(thread, _)| thread.clone());
@@ -40,12 +325,16 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
         (thread_id, run.assistant_id.clone(), run.assistant_text.clone(), run.routine_id.clone())
     };
     let thread_id = thread_id.unwrap_or_default();
+    // A dropped connection after the reply was delivered is a notice, not a failed turn.
+    let ok = ok
+        || (!stopped
+            && super::post_reply::absorb_connection_loss_after_reply(&thread_id, run_id, error_text));
     let mut profile_for_routine: Option<String> = None;
     let mut reflection_task: Option<(String, String, String)> = None;
     let mut quota_events: Option<(Value, Value)> = None;
     let mut exhausted_turn_ctx: Option<ExhaustedThreadTurnContext> = None;
 
-    let error_item = if !ok && !stopped && assistant_text.is_empty() && !error_text.is_empty() {
+    let mut error_item = if !ok && !stopped && assistant_text.is_empty() && !error_text.is_empty() {
         Some(chat_item(&format!("e{}", Uuid::new_v4().simple()), "error", error_text, false))
     } else {
         None
@@ -60,10 +349,45 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     if !thread_id.is_empty() {
         let mut items = threads().lock().unwrap();
         if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id.as_str())) {
-            waiting_for_permission = thread
-                .get("pendingApproval")
-                .and_then(|value| value.as_object())
-                .is_some();
+            waiting_for_permission = has_pending_approval_or_input(thread);
+            if ok && !stopped && !waiting_for_permission {
+                if let Some(obj) = thread.as_object_mut() {
+                    obj.remove("turnFailure");
+                }
+            }
+            if !ok && !stopped && !waiting_for_permission && error_item.is_none() {
+                let transient_failure_msg = match thread.pointer("/turnFailure/kind").and_then(Value::as_str) {
+                    Some("processError" | "cliUsageError") => thread
+                        .pointer("/turnFailure/message")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|msg| !msg.is_empty())
+                        .map(str::to_string),
+                    _ => None,
+                };
+                if let Some(msg) = transient_failure_msg {
+                    let already_in_items = thread
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .is_some_and(|arr| {
+                            arr.iter()
+                                .rev()
+                                .take_while(|it| it.get("kind").and_then(Value::as_str) != Some("user"))
+                                .any(|it| {
+                                    it.get("kind").and_then(Value::as_str) == Some("error")
+                                        && it.get("text").and_then(Value::as_str) == Some(msg.as_str())
+                                })
+                        });
+                    if !already_in_items {
+                        error_item = Some(chat_item(
+                            &format!("e{}", Uuid::new_v4().simple()),
+                            "error",
+                            &msg,
+                            false,
+                        ));
+                    }
+                }
+            }
             if let Some(ref err_it) = error_item {
                 if !waiting_for_permission {
                     upsert_item(thread, err_it);
@@ -84,35 +408,30 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 let _ = crate::chat::kill_registry::try_mark_thread_settled(&thread_id);
             }
 
-            if let Some(arr) = thread.get_mut("items").and_then(|v| v.as_array_mut()) {
-                arr.retain(|it| {
-                    !(it.get("kind").and_then(|v| v.as_str()) == Some("note")
-                        && it.get("text").and_then(|v| v.as_str())
-                            == Some(super::turn::QUIET_TURN_NOTE_TEXT))
-                });
-                for it in arr.iter_mut() {
-                    if it.get("streaming").and_then(|v| v.as_bool()) == Some(true) {
-                        it["streaming"] = json!(false);
-                    }
-                }
-            }
+            let settled_tool_status = if ok && !stopped {
+                "completed"
+            } else if stopped {
+                "stopped"
+            } else {
+                "failed"
+            };
+            let settled_subagent_status = if ok && !stopped {
+                "completed"
+            } else if stopped {
+                "killed"
+            } else {
+                "failed"
+            };
+            settle_in_flight_thread_work(
+                thread,
+                waiting_for_permission,
+                settled_tool_status,
+                settled_subagent_status,
+                stopped,
+            );
             crate::chat::subagents::reconcile_duplicate_subagent_state(thread);
 
-            let title = thread.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            if matches!(title, "New Chat" | "New Agent Chat" | "Chat" | "") {
-                if let Some(first_user) = thread.get("items")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.iter().find(|it| it.get("kind").and_then(|k| k.as_str()) == Some("user")))
-                    .and_then(|it| it.get("text").and_then(|t| t.as_str()))
-                {
-                    let first_line = first_user.lines().next().unwrap_or("").trim();
-                    if !first_line.is_empty() {
-                        let concise: String = first_line.chars().take(60).collect();
-                        thread["title"] = json!(concise);
-                        thread["titleOrigin"] = json!("generated");
-                    }
-                }
-            }
+            apply_derived_title_if_needed(thread, "generated", true);
 
             touch(thread);
 
@@ -161,105 +480,137 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                     thread["plans"] = Value::Array(plans);
                 }
             } else {
-                let aid = thread.get("activePlanId").and_then(|v| v.as_str()).map(|s| s.to_string());
-                if let Some(aid) = aid {
-                    if let Some(plans) = thread.get_mut("plans").and_then(|v| v.as_array_mut()) {
-                        if let Some(slot) = plans.iter_mut().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(aid.as_str())) {
-                            if slot.get("status").and_then(|v| v.as_str()) == Some("implementing") {
-                                slot["status"] = json!(if ok { "completed" } else if stopped { "interrupted" } else { "failed" });
-                            }
-                        }
-                    }
-                }
+                let target_plan_status = if ok {
+                    "completed"
+                } else if stopped {
+                    "interrupted"
+                } else {
+                    "failed"
+                };
+                settle_implementing_plan_slot(thread, target_plan_status);
             }
 
-            // ── Quota Exhaustion & Handoff Detection ──
+            // ── Quota Exhaustion & Handoff Detection (snapshot only under lock) ──
             let current_provider = thread.get("provider").and_then(|v| v.as_str()).unwrap_or("antigravity").to_string();
             let combined_output = format!("{}\n{}", assistant_text, error_text);
-            if !ok || !stopped {
-                if let Some(reason) = crate::handoff::detect_quota_exhaustion(&current_provider, &combined_output) {
-                    let workspace_id = thread.get("workspaceId").and_then(|v| v.as_str());
-                    let handoff_capsule = crate::handoff::build_handoff_capsule_from_thread(
-                        Some(thread),
-                        &current_provider,
-                        &assistant_text,
-                        workspace_id,
-                    );
-                    let suggestions_val = crate::handoff::recommend_continuation_targets_direct(current_provider.clone());
-                    let suggestions = suggestions_val.get("suggestions").cloned().unwrap_or(json!([]));
-
-                    let offer = json!({
-                        "failedProvider": current_provider,
-                        "reason": reason,
-                        "partialOutput": assistant_text,
-                        "handoffPrompt": handoff_capsule,
-                        "suggestions": suggestions,
-                        "offeredAtUnixMs": now_ms()
-                    });
-                    thread["quotaHandoffOffer"] = offer.clone();
-
-                    let handoff_item = json!({
-                        "id": format!("qho_{}", Uuid::new_v4().simple()),
-                        "kind": "quotaHandoff",
-                        "text": format!("Quota exhausted on {}: {}", current_provider, reason),
-                        "title": "Quota limit reached",
-                        "detail": Value::Null,
-                        "status": "ready",
-                        "streaming": false,
-                        "exitCode": Value::Null,
-                        "createdAtUnixMs": now_ms(),
-                        "attachments": [],
-                        "handoffOffer": offer
-                    });
-                    upsert_item(thread, &handoff_item);
-                    quota_events = Some((handoff_item, offer));
-
-                    if !waiting_for_permission && !stopped {
-                        let account_provider =
-                            crate::account_switcher::canon_provider(&current_provider);
-                        if !account_provider.is_empty() {
-                            let requested_model = thread
-                                .get("model")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .map(String::from);
-                            exhausted_turn_ctx = Some(ExhaustedThreadTurnContext {
-                                thread_id: thread_id.clone(),
-                                account_provider,
-                                requested_model,
-                                profile_id: thread
-                                    .get("profileId")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from),
-                                handoff_prompt: handoff_capsule.clone(),
-                                now_unix_ms: now_ms(),
-                            });
-                        }
-                    }
-                }
-            }
+            let quota_snapshot = if !ok && !stopped {
+                crate::handoff::detect_quota_exhaustion(&current_provider, &combined_output).map(|reason| {
+                    (
+                        thread.clone(),
+                        current_provider,
+                        reason,
+                        thread.get("workspaceId").and_then(|v| v.as_str()).map(String::from),
+                        thread
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                        thread
+                            .get("profileId")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    )
+                })
+            } else {
+                None
+            };
 
             profile_for_routine = thread.get("profileId").and_then(|v| v.as_str()).map(|s| s.to_string());
             if ok {
                 if let Some(ref pid) = profile_for_routine {
-                    let user_prompt = thread.get("items")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| arr.iter().rev().find(|it| it.get("kind").and_then(|k| k.as_str()) == Some("user")))
-                        .and_then(|it| it.get("text").and_then(|t| t.as_str()))
-                        .unwrap_or("");
+                    let user_prompt = human_user_prompt(&thread, true).unwrap_or("");
                     if !user_prompt.is_empty() {
                         reflection_task = Some((pid.clone(), user_prompt.to_string(), assistant_text.clone()));
                     }
                 }
             }
+            touch(thread);
+            drop(items);
+
+            if let Some((
+                thread_snap,
+                failed_provider,
+                reason,
+                workspace_id,
+                requested_model,
+                profile_id,
+            )) = quota_snapshot
+            {
+                let handoff_capsule = crate::handoff::build_handoff_capsule_from_thread(
+                    Some(&thread_snap),
+                    &failed_provider,
+                    &assistant_text,
+                    workspace_id.as_deref(),
+                );
+                let suggestions_val =
+                    crate::handoff::recommend_continuation_targets_direct(failed_provider.clone());
+                let suggestions = suggestions_val
+                    .get("suggestions")
+                    .cloned()
+                    .unwrap_or(json!([]));
+
+                let offer = json!({
+                    "failedProvider": failed_provider,
+                    "reason": reason,
+                    "partialOutput": assistant_text,
+                    "handoffPrompt": handoff_capsule,
+                    "suggestions": suggestions,
+                    "offeredAtUnixMs": now_ms()
+                });
+
+                let handoff_item = json!({
+                    "id": format!("qho_{}", Uuid::new_v4().simple()),
+                    "kind": "quotaHandoff",
+                    "text": format!("Quota exhausted on {}: {}", failed_provider, reason),
+                    "title": "Quota limit reached",
+                    "detail": Value::Null,
+                    "status": "ready",
+                    "streaming": false,
+                    "exitCode": Value::Null,
+                    "createdAtUnixMs": now_ms(),
+                    "attachments": [],
+                    "handoffOffer": offer
+                });
+
+                {
+                    let mut relocked = threads().lock().unwrap();
+                    if let Some(t) = relocked
+                        .iter_mut()
+                        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id.as_str()))
+                    {
+                        t["quotaHandoffOffer"] = offer.clone();
+                        upsert_item(t, &handoff_item);
+                        touch(t);
+                    }
+                }
+                quota_events = Some((handoff_item, offer));
+
+                if !waiting_for_permission && !stopped {
+                    let account_provider =
+                        crate::account_switcher::canon_provider(&failed_provider);
+                    if !account_provider.is_empty() {
+                        exhausted_turn_ctx = Some(ExhaustedThreadTurnContext {
+                            thread_id: thread_id.clone(),
+                            account_provider,
+                            requested_model,
+                            profile_id,
+                            handoff_prompt: handoff_capsule,
+                            now_unix_ms: now_ms(),
+                        });
+                    }
+                }
+            }
+        } else {
+            drop(items);
         }
-        drop(items);
     }
 
-    if let Some((ref pid, ref user_prompt, ref a_text)) = reflection_task {
-        crate::agent_mind::apply_post_turn_reflection(pid, user_prompt, a_text);
-    }
+    let reflection_candidate = if let Some((ref pid, ref user_prompt, ref a_text)) = reflection_task {
+        crate::agent_mind::apply_post_turn_reflection(pid, user_prompt, a_text)
+    } else {
+        None
+    };
 
     // The process already exited, but the person still has to answer. A settled
     // notice here would announce a finished turn, including a failure chime.
@@ -285,6 +636,9 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 append_event(run, json!({ "kind": "upsert", "item": handoff_item }), true);
                 append_event(run, json!({ "kind": "quotaHandoff", "offer": offer }), true);
             }
+            if let Some(ref candidate) = reflection_candidate {
+                append_event(run, json!({ "kind": "reflectionCandidate", "candidate": candidate }), true);
+            }
             if !run.finished {
                 if !assistant_text.is_empty() {
                     append_event(run, json!({ "kind": "upsert", "item": final_item }), true);
@@ -299,6 +653,7 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                     append_event(run, json!({ "kind": "finished", "ok": ok && !stopped, "stoppedByBuilder": stopped }), true);
                 }
                 run.finished = true;
+                run.finished_at_ms = Some(now_ms());
             }
         }
         prune_stale_runs(&mut live);
@@ -307,6 +662,7 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
     live_cv().notify_all();
     if !thread_id.is_empty() {
         crate::chat::subagents::sync_child_thread_to_parent(&thread_id);
+        crate::chat::subagents::reconcile_antigravity_subagents_for_thread(&thread_id, None);
     }
     persist();
     if !thread_id.is_empty() {
@@ -355,8 +711,54 @@ pub fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_i
     }
 }
 
+fn is_subagent_child_thread(thread: &Value) -> bool {
+    if thread.get("startedByAgent").and_then(Value::as_bool) == Some(true)
+        || thread.get("sideChat").and_then(Value::as_bool) == Some(true)
+    {
+        return true;
+    }
+    ["parentThreadId", "swarmParentThreadId", "subagentRole", "swarmMemberName"]
+        .iter()
+        .any(|key| {
+            thread
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+        })
+}
+
+fn is_subagent_thread_by_id(thread_id: &str) -> bool {
+    // Acquire and drop `threads()` before `notifications()` is ever locked in callers.
+    let Ok(items) = threads().lock() else {
+        return false;
+    };
+    items.iter().any(|t| {
+        if t.get("id").and_then(Value::as_str) == Some(thread_id) {
+            return is_subagent_child_thread(t);
+        }
+        let in_subagent_runs = t
+            .get("subagentRuns")
+            .and_then(Value::as_array)
+            .is_some_and(|runs| {
+                runs.iter().any(|run| {
+                    run.get("childThreadId").and_then(Value::as_str) == Some(thread_id)
+                })
+            });
+        if in_subagent_runs {
+            return true;
+        }
+        t.pointer("/swarmState/members")
+            .and_then(Value::as_array)
+            .is_some_and(|members| {
+                members.iter().any(|member| {
+                    member.get("childThreadId").and_then(Value::as_str) == Some(thread_id)
+                })
+            })
+    })
+}
+
 pub fn settle_turn_notification(run_id: &str, thread_id: &str, profile_id: Option<&str>, ok: bool, stopped: bool) {
-    if thread_id.is_empty() || stopped {
+    if thread_id.is_empty() || stopped || is_subagent_thread_by_id(thread_id) {
         return;
     }
     let outcome = if stopped {
@@ -1070,6 +1472,20 @@ mod tests {
         assert_eq!(
             pending[0].handoff_prompt.as_deref(),
             Some("Keep prompt for fallback confirm")
+        );
+    }
+
+    #[test]
+    fn finish_run_clears_stream_json_run_maps() {
+        let run_id = format!("s4-stream-clean-{}", Uuid::new_v4().simple());
+        super::super::stream_json::seed_stream_run_state_for_test(&run_id, 42);
+        assert!(super::super::stream_json::has_stream_run_state_for_test(&run_id));
+
+        finish_run(&run_id, true, false, "");
+
+        assert!(
+            !super::super::stream_json::has_stream_run_state_for_test(&run_id),
+            "finish_run must remove finished run_id from streaming_sys_msg_runs, last_agent_step_by_run, and fallback_projected_steps_by_run"
         );
     }
 }

@@ -83,8 +83,12 @@ impl<P: Port> Service<P> {
         }
         let from_label = from.unwrap_or("session:unknown").to_string();
         let effective_body = if body.chars().count() > 2400 && body.chars().count() <= BODY_LIMIT {
-            kite_ctx::ContextEngine::open_default()
-                .ok()
+            let engine = if cfg!(test) && std::env::var_os(kite_ctx::ENV_DB_PATH).is_none() {
+                kite_ctx::ContextEngine::open_in_memory().ok()
+            } else {
+                kite_ctx::ContextEngine::open_default().ok()
+            };
+            engine
                 .and_then(|eng| {
                     eng.compress_runtime_segment(
                         body,

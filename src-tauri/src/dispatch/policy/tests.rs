@@ -229,6 +229,11 @@ fn role_starts_one_command_and_one_first_send_after_idle() {
     assert!(svc.port_mut().starts.is_empty());
 
     crate::dispatch::role::ensure_sample_role(&dir).unwrap();
+    std::fs::write(
+        crate::dispatch::role::roles_dir(&dir).join("reviewer.md"),
+        "command: codex\ndescription: Terminal reviewer.\n\nReview the task. Report defects, risks, and a recommendation.\n",
+    )
+    .unwrap();
     let started = svc.run_role(
         "run-1",
         &dir,
@@ -804,28 +809,39 @@ fn suppress_parent_notice_on_wait_purges_queued_and_future_child_notices() {
 }
 
 #[test]
-fn children_wait_does_not_suppress_child_notices() {
+fn children_wait_all_suppresses_all_live_child_notices_and_resets_on_new_turn() {
     let mut svc = service();
     svc.attach(Family::Thread, "p-children", None, None, false)
         .unwrap();
     svc.publish_pane("thread:p-children", "working", 1, 1_000, None, None)
         .unwrap();
-    svc.attach(
-        Family::Thread,
-        "c-all-1",
-        None,
-        Some("thread:p-children"),
-        false,
-    )
-    .unwrap();
-    svc.publish_pane("thread:c-all-1", "working", 1, 1_100, None, None)
+    for id in ["c-all-1", "c-all-2"] {
+        svc.attach(
+            Family::Thread,
+            id,
+            None,
+            Some("thread:p-children"),
+            false,
+        )
         .unwrap();
+        svc.publish_pane(&format!("thread:{id}"), "working", 1, 1_100, None, None)
+            .unwrap();
+    }
     svc.publish_pane(
         "thread:c-all-1",
         "done",
         2,
         1_200,
-        Some("child via children wait"),
+        Some("child one via children wait"),
+        None,
+    )
+    .unwrap();
+    svc.publish_pane(
+        "thread:c-all-2",
+        "done",
+        2,
+        1_210,
+        Some("child two via children wait"),
         None,
     )
     .unwrap();
@@ -844,11 +860,97 @@ fn children_wait_does_not_suppress_child_notices() {
     svc.publish_pane("thread:p-children", "idle", 2, 1_300, None, None)
         .unwrap();
     assert!(
-        svc.port_mut().writes.iter().any(|w| {
-            w.text.contains("from=\"thread:c-all-1\"")
-                && w.text.contains("child via children wait")
+        svc.port_mut().writes.iter().all(|w| {
+            !w.text.contains("from=\"thread:c-all-1\"")
+                && !w.text.contains("from=\"thread:c-all-2\"")
         }),
-        "expected --children wait not to suppress individual child notice, got: {:?}",
+        "expected wait --children all to purge and suppress child notices, got: {:?}",
+        svc.port_mut().writes
+    );
+
+    // Starting a new working turn on a child clears suppression for that new turn.
+    svc.publish_pane("thread:c-all-1", "working", 3, 1_400, None, None)
+        .unwrap();
+    svc.publish_pane(
+        "thread:c-all-1",
+        "done",
+        4,
+        1_500,
+        Some("second turn result"),
+        None,
+    )
+    .unwrap();
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .any(|w| w.text.contains("from=\"thread:c-all-1\"")
+                && w.text.contains("second turn result")),
+        "expected new child turn after suppression to still notify parent, got: {:?}",
+        svc.port_mut().writes
+    );
+}
+
+#[test]
+fn children_wait_any_suppresses_only_settled_children() {
+    let mut svc = service();
+    svc.attach(Family::Thread, "p-any", None, None, false)
+        .unwrap();
+    svc.publish_pane("thread:p-any", "working", 1, 1_000, None, None)
+        .unwrap();
+    for id in ["c-any-done", "c-any-work"] {
+        svc.attach(Family::Thread, id, None, Some("thread:p-any"), false)
+            .unwrap();
+        svc.publish_pane(&format!("thread:{id}"), "working", 1, 1_100, None, None)
+            .unwrap();
+    }
+    svc.publish_pane(
+        "thread:c-any-done",
+        "done",
+        2,
+        1_200,
+        Some("settled child report"),
+        None,
+    )
+    .unwrap();
+
+    let wait = svc.wait(WaitInput {
+        id: "w-any-1".into(),
+        address: Some("thread:p-any".into()),
+        until: vec![PresenceState::Done],
+        children: Some(ChildrenMode::Any),
+        timeout_ms: 0,
+        started_ms: 1_200,
+        now_ms: 1_250,
+    });
+    assert_eq!(wait.status, ReceiptStatus::Settled);
+
+    svc.publish_pane("thread:p-any", "idle", 2, 1_300, None, None)
+        .unwrap();
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .all(|w| !w.text.contains("from=\"thread:c-any-done\"")),
+        "settled child notice should be suppressed by wait --children any: {:?}",
+        svc.port_mut().writes
+    );
+
+    svc.publish_pane(
+        "thread:c-any-work",
+        "done",
+        2,
+        1_400,
+        Some("late working child"),
+        None,
+    )
+    .unwrap();
+    assert!(
+        svc.port_mut().writes.iter().any(|w| {
+            w.text.contains("from=\"thread:c-any-work\"")
+                && w.text.contains("late working child")
+        }),
+        "still-working child must still notify parent after wait --children any: {:?}",
         svc.port_mut().writes
     );
 }

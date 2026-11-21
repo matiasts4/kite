@@ -10,7 +10,7 @@ use crate::chat::models::canonical_thread_provider_id;
 use crate::dispatch::address::is_alias_name;
 use crate::dispatch::cli::{normalize_effort, normalize_workspace_mode};
 use crate::dispatch::role::{
-    format_role_markdown, parse_role, roles_dir, workspace_agents_dir, RoleFile,
+    format_role_markdown, load_role_from_path, roles_dir, workspace_agents_dir, RoleFile,
 };
 use crate::persist::{app_state_get, app_state_set_checked, roaming_app_dir};
 
@@ -253,6 +253,10 @@ pub fn get_subagent_settings() -> SubagentSettings {
         .unwrap_or_default()
 }
 
+pub fn load_subagent_settings() -> SubagentSettings {
+    get_subagent_settings()
+}
+
 pub fn save_subagent_settings(input: SubagentSettings) -> Result<SubagentSettings, String> {
     let normalized = normalize_settings(input)?;
     let encoded = serde_json::to_string(&normalized)
@@ -270,7 +274,7 @@ pub fn resolve_default_delegation(
         let allowed = settings.stack.is_empty()
             || settings.stack.iter().any(|entry| {
                 entry.enabled
-                    && entry.provider == def.provider
+                    && entry.provider.eq_ignore_ascii_case(&def.provider)
                     && entry.model.eq_ignore_ascii_case(&def.model)
             });
         if allowed {
@@ -290,6 +294,118 @@ pub fn resolve_default_delegation(
         })
 }
 
+impl SubagentSettings {
+    /// Applies configured default delegation or enabled stack defaults when the
+    /// caller omits `--provider` and/or `--model` for a thread subagent.
+    pub fn resolve_thread_selection_defaults(
+        &self,
+        requested_provider: Option<&str>,
+        requested_model: Option<&str>,
+        requested_effort: Option<&str>,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let canon_prov = requested_provider
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))
+            .map(|raw| {
+                canonical_thread_provider_id(raw)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| raw.to_string())
+            });
+        let clean_model = requested_model
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))
+            .map(str::to_string);
+        let clean_effort = requested_effort
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))
+            .map(str::to_string);
+
+        if clean_model.is_none() {
+            if let Some(ref p) = canon_prov {
+                if let Some(def) = self
+                    .default_delegation
+                    .as_ref()
+                    .filter(|d| d.provider.eq_ignore_ascii_case(p))
+                {
+                    let allowed = self.stack.is_empty()
+                        || self.stack.iter().any(|entry| {
+                            entry.enabled
+                                && entry.provider.eq_ignore_ascii_case(&def.provider)
+                                && entry.model.eq_ignore_ascii_case(&def.model)
+                        });
+                    if allowed {
+                        return (
+                            canon_prov,
+                            Some(def.model.clone()),
+                            clean_effort.or_else(|| def.effort.clone()),
+                        );
+                    }
+                }
+                if let Some(first) = self
+                    .stack
+                    .iter()
+                    .find(|e| e.enabled && e.provider.eq_ignore_ascii_case(p))
+                {
+                    return (
+                        canon_prov,
+                        Some(first.model.clone()),
+                        clean_effort.or_else(|| first.effort.clone()),
+                    );
+                }
+                return (canon_prov, None, clean_effort);
+            }
+            if let Some((dp, dm, de)) = resolve_default_delegation(self) {
+                return (Some(dp), Some(dm), clean_effort.or(de));
+            }
+            return (None, None, clean_effort);
+        }
+
+        if let (None, Some(ref m)) = (&canon_prov, &clean_model) {
+            if let Some(def) = self
+                .default_delegation
+                .as_ref()
+                .filter(|d| d.model.eq_ignore_ascii_case(m.trim()))
+            {
+                return (
+                    Some(def.provider.clone()),
+                    clean_model,
+                    clean_effort.or_else(|| def.effort.clone()),
+                );
+            }
+            if let Some(matched) = self
+                .stack
+                .iter()
+                .find(|e| e.enabled && e.model.eq_ignore_ascii_case(m.trim()))
+            {
+                return (
+                    Some(matched.provider.clone()),
+                    clean_model,
+                    clean_effort.or_else(|| matched.effort.clone()),
+                );
+            }
+        }
+
+        if let (Some(ref p), Some(ref m)) = (&canon_prov, &clean_model) {
+            if clean_effort.is_none() {
+                if let Some(def) = self.default_delegation.as_ref().filter(|d| {
+                    d.provider.eq_ignore_ascii_case(p) && d.model.eq_ignore_ascii_case(m)
+                }) {
+                    return (canon_prov, clean_model, def.effort.clone());
+                }
+                if let Some(matched) = self.stack.iter().find(|e| {
+                    e.enabled
+                        && e.provider.eq_ignore_ascii_case(p)
+                        && e.model.eq_ignore_ascii_case(m)
+                }) {
+                    return (canon_prov, clean_model, matched.effort.clone());
+                }
+            }
+        }
+
+        (canon_prov, clean_model, clean_effort)
+    }
+}
+
 /// Applies configured default delegation or single-entry stack defaults when the
 /// caller omits `--provider` and/or `--model` for a thread subagent.
 pub fn resolve_thread_selection_defaults(
@@ -298,71 +414,165 @@ pub fn resolve_thread_selection_defaults(
     model: Option<String>,
     effort: Option<String>,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let canon_prov = provider
-        .as_deref()
-        .and_then(canonical_thread_provider_id)
-        .map(str::to_string)
-        .or(provider);
-    if canon_prov.is_none() && model.is_none() {
-        if let Some((dp, dm, de)) = resolve_default_delegation(settings) {
-            return (Some(dp), Some(dm), effort.or(de));
-        }
-        return (None, None, effort);
-    }
-    if let (Some(ref p), None) = (&canon_prov, &model) {
-        if let Some(def) = settings.default_delegation.as_ref().filter(|d| &d.provider == p) {
-            let allowed = settings.stack.is_empty()
-                || settings.stack.iter().any(|entry| {
-                    entry.enabled
-                        && entry.provider == def.provider
-                        && entry.model.eq_ignore_ascii_case(&def.model)
-                });
-            if allowed {
-                return (
-                    canon_prov,
-                    Some(def.model.clone()),
-                    effort.or_else(|| def.effort.clone()),
-                );
+    settings.resolve_thread_selection_defaults(
+        provider.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+    )
+}
+
+pub fn is_heavy_or_deep_thinking_model(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.contains("thinking")
+        || lower.contains("argon")
+        || lower.contains("opus")
+        || lower.contains("pro-high")
+        || lower.contains("heavy")
+}
+
+pub fn is_lightweight_model_id(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.contains("flash")
+        || lower.contains("haiku")
+        || lower.contains("mini")
+        || lower.contains("lite")
+        || lower.contains("fast")
+        || lower.contains("sonnet-5-5")
+}
+
+/// Picks a fast/lightweight model for `provider` from `available_models` (if non-empty)
+/// or known fast defaults before ever falling back to a heavy parent model.
+pub fn preferred_lightweight_model(
+    provider: &str,
+    available_models: &[String],
+    parent_model: Option<&str>,
+) -> Option<String> {
+    let canon = canonical_thread_provider_id(provider).unwrap_or(provider);
+    let valid_available: Vec<&String> = available_models
+        .iter()
+        .filter(|m| {
+            let trimmed = m.trim();
+            !trimmed.is_empty()
+                && !trimmed.eq_ignore_ascii_case("inherit")
+                && !crate::chat::models::model_likely_belongs_to_another_provider(canon, trimmed)
+        })
+        .collect();
+
+    let find_matching = |needles: &[&str]| -> Option<String> {
+        for needle in needles {
+            if let Some(found) = valid_available
+                .iter()
+                .find(|m| m.to_ascii_lowercase().contains(needle))
+            {
+                return Some((*found).clone());
             }
         }
-        let enabled_for_provider: Vec<&SubagentStackEntry> = settings
-            .stack
+        None
+    };
+
+    let first_non_heavy = || -> Option<String> {
+        valid_available
             .iter()
-            .filter(|e| e.enabled && &e.provider == p)
-            .collect();
-        if let Some(first) = enabled_for_provider.first() {
-            return (
-                canon_prov,
-                Some(first.model.clone()),
-                effort.or_else(|| first.effort.clone()),
-            );
+            .find(|m| !is_heavy_or_deep_thinking_model(m))
+            .map(|m| (*m).clone())
+    };
+
+    let fallback_parent = || -> Option<String> {
+        parent_model
+            .map(str::trim)
+            .filter(|m| {
+                !m.is_empty()
+                    && !m.eq_ignore_ascii_case("inherit")
+                    && !is_heavy_or_deep_thinking_model(m)
+                    && !crate::chat::models::model_likely_belongs_to_another_provider(canon, m)
+            })
+            .map(str::to_string)
+    };
+
+    match canon.to_ascii_lowercase().as_str() {
+        "antigravity" => {
+            if let Some(exact) = valid_available
+                .iter()
+                .find(|m| m.eq_ignore_ascii_case("gemini-4-hydrogen"))
+            {
+                return Some((*exact).clone());
+            }
+            if let Some(hydrogen) = find_matching(&["hydrogen", "flash", "lite", "haiku"]) {
+                return Some(hydrogen);
+            }
+            if let Some(non_heavy) = first_non_heavy() {
+                return Some(non_heavy);
+            }
+            Some("gemini-4-hydrogen".to_string())
+        }
+        "claude" => {
+            if let Some(fast) = find_matching(&["haiku", "sonnet"]) {
+                return Some(fast);
+            }
+            if let Some(non_heavy) = first_non_heavy() {
+                return Some(non_heavy);
+            }
+            Some("claude-haiku-4-5".to_string())
+        }
+        "grok" => find_matching(&["fast", "mini"])
+            .or_else(first_non_heavy)
+            .or_else(|| valid_available.first().map(|m| (*m).clone()))
+            .or_else(fallback_parent),
+        "codex" => find_matching(&["mini", "fast"])
+            .or_else(first_non_heavy)
+            .or_else(|| valid_available.first().map(|m| (*m).clone()))
+            .or_else(fallback_parent),
+        "gemini" => find_matching(&["flash", "lite"])
+            .or_else(first_non_heavy)
+            .or_else(|| valid_available.first().map(|m| (*m).clone()))
+            .or_else(fallback_parent),
+        _ => find_matching(&["flash", "haiku", "mini", "fast", "lite"])
+            .or_else(first_non_heavy)
+            .or_else(|| valid_available.first().map(|m| (*m).clone()))
+            .or_else(fallback_parent),
+    }
+}
+
+/// Alias for `preferred_lightweight_model` used across subagent and swarm spawn paths.
+pub fn pick_lightweight_model_for_provider(
+    provider: &str,
+    available_models: &[String],
+    parent_model: Option<&str>,
+) -> Option<String> {
+    preferred_lightweight_model(provider, available_models, parent_model)
+}
+
+/// Sanitizes subagent reasoning effort so parent `persist::last_effort()` values such as
+/// `"xhigh"`, `"max"`, or `"ultra"` are never inherited implicitly, and explicit ultra-high
+/// efforts are clamped to `"high"` on lightweight/non-thinking models.
+pub fn sanitize_subagent_effort(
+    provider: &str,
+    target_model: Option<&str>,
+    parent_model: Option<&str>,
+    requested_effort: Option<&str>,
+) -> Option<String> {
+    let _ = provider;
+    let raw = requested_effort
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))?;
+    let eff = normalize_effort(raw).unwrap_or_else(|| raw.to_ascii_lowercase());
+    if matches!(eff.as_str(), "xhigh" | "max" | "ultra") {
+        let should_clamp = match target_model.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(target) => {
+                let differs_from_parent = parent_model
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none_or(|pm| !pm.eq_ignore_ascii_case(target));
+                is_lightweight_model_id(target)
+                    || (differs_from_parent && !is_heavy_or_deep_thinking_model(target))
+            }
+            None => true,
+        };
+        if should_clamp {
+            return Some("high".to_string());
         }
     }
-    if let (None, Some(ref m)) = (&canon_prov, &model) {
-        if let Some(def) = settings
-            .default_delegation
-            .as_ref()
-            .filter(|d| d.model.eq_ignore_ascii_case(m.trim()))
-        {
-            return (
-                Some(def.provider.clone()),
-                model,
-                effort.or_else(|| def.effort.clone()),
-            );
-        }
-        if let Some(matched) = settings
-            .stack
-            .iter()
-            .find(|e| e.enabled && e.model.eq_ignore_ascii_case(m.trim()))
-        {
-            return (
-                Some(matched.provider.clone()),
-                model,
-                effort.or_else(|| matched.effort.clone()),
-            );
-        }
-    }
-    (canon_prov, model, effort)
+    Some(eff)
 }
 
 /// Enforces `Settings -> Subagents` stack and override rules before spawning or
@@ -478,10 +688,7 @@ fn scan_roles_in_dir(dir: &Path, scope: &str, out: &mut Vec<SubagentRoleRecord>)
         let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(parsed) = parse_role(&text) else {
+        let Ok(parsed) = load_role_from_path(&path) else {
             continue;
         };
         out.push(SubagentRoleRecord {
@@ -854,5 +1061,102 @@ mod tests {
 
         let _ = fs::remove_dir_all(&cfg);
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn lightweight_model_picker_effort_clamp_and_partial_provider_stack_resolution() {
+        let agy_catalog = vec![
+            "gemini-4-argon".to_string(),
+            "gemini-4-hydrogen".to_string(),
+            "gemini-3.8-flash".to_string(),
+            "claude-opus-4-6".to_string(),
+        ];
+        assert_eq!(
+            pick_lightweight_model_for_provider("antigravity", &agy_catalog, Some("gemini-4-argon")).as_deref(),
+            Some("gemini-4-hydrogen")
+        );
+        assert_eq!(
+            pick_lightweight_model_for_provider("antigravity", &[], Some("gemini-4-hydrogen")).as_deref(),
+            Some("gemini-4-hydrogen")
+        );
+
+        let claude_catalog = vec![
+            "claude-opus-4-6".to_string(),
+            "claude-haiku-4-5".to_string(),
+        ];
+        assert_eq!(
+            pick_lightweight_model_for_provider("claude", &claude_catalog, Some("claude-opus-4-6")).as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            pick_lightweight_model_for_provider("claude", &[], Some("claude-opus-4-6")).as_deref(),
+            Some("claude-haiku-4-5")
+        );
+
+        // Effort sanitizer: None / "inherit" -> None; clamps xhigh/max/ultra to high on lightweight models; preserves low/medium/high.
+        assert_eq!(
+            sanitize_subagent_effort("antigravity", Some("gemini-3.8-flash"), Some("gemini-4-argon"), None),
+            None
+        );
+        assert_eq!(
+            sanitize_subagent_effort("antigravity", Some("gemini-3.8-flash"), Some("gemini-4-argon"), Some("inherit")),
+            None
+        );
+        for ultra_eff in ["xhigh", "max", "ultra"] {
+            assert_eq!(
+                sanitize_subagent_effort(
+                    "antigravity",
+                    Some("gemini-3.8-flash"),
+                    Some("gemini-4-argon"),
+                    Some(ultra_eff),
+                )
+                .as_deref(),
+                Some("high"),
+                "expected {ultra_eff} to clamp to high on lightweight model"
+            );
+        }
+        for safe_eff in ["low", "medium", "high"] {
+            assert_eq!(
+                sanitize_subagent_effort(
+                    "antigravity",
+                    Some("gemini-3.8-flash"),
+                    Some("gemini-4-argon"),
+                    Some(safe_eff),
+                )
+                .as_deref(),
+                Some(safe_eff)
+            );
+        }
+
+        // Partial `--provider` stack resolution when `--model` is omitted
+        let settings = normalize_settings(SubagentSettings {
+            stack: vec![
+                SubagentStackEntry {
+                    provider: "antigravity".to_string(),
+                    model: "gemini-3.8-flash".to_string(),
+                    effort: Some("low".to_string()),
+                    enabled: true,
+                },
+                SubagentStackEntry {
+                    provider: "grok".to_string(),
+                    model: "grok-4.7-build-fast".to_string(),
+                    effort: Some("medium".to_string()),
+                    enabled: true,
+                },
+            ],
+            default_delegation: Some(DefaultDelegation {
+                provider: "antigravity".to_string(),
+                model: "gemini-3.8-flash".to_string(),
+                effort: Some("low".to_string()),
+            }),
+            override_policy: OverridePolicy::Ask,
+        })
+        .unwrap();
+
+        let (prov, model, effort) =
+            settings.resolve_thread_selection_defaults(Some("grok"), None, None);
+        assert_eq!(prov.as_deref(), Some("grok"));
+        assert_eq!(model.as_deref(), Some("grok-4.7-build-fast"));
+        assert_eq!(effort.as_deref(), Some("medium"));
     }
 }

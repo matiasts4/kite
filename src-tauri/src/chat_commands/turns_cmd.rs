@@ -32,7 +32,7 @@ pub fn list_provider_agents(request: Option<Value>) -> Value {
 
 pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
     // Snapshot active runs under live_turns lock, then drop live_turns BEFORE acquiring threads
-    let active_runs: Vec<(String, Option<String>, Option<String>, i64)> = {
+    let active_runs: Vec<(String, Option<String>, Option<String>, i64, u64)> = {
         let live = live_turns().lock().unwrap();
         let mut list = Vec::new();
         for (run_id, run) in &live.runs {
@@ -49,14 +49,20 @@ pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
                 .lines()
                 .last()
                 .map(|s| s.chars().take(240).collect::<String>());
-            list.push((run_id.clone(), thread_id, line, run.started_at_ms));
+            list.push((
+                run_id.clone(),
+                thread_id,
+                line,
+                run.started_at_ms,
+                run.next_sequence,
+            ));
         }
         list
     };
 
     let items = threads().lock().unwrap();
     let mut active = Vec::new();
-    for (_run_id, thread_id, line, started_at_ms) in active_runs {
+    for (run_id, thread_id, line, started_at_ms, next_sequence) in active_runs {
         let thread = thread_id
             .as_deref()
             .and_then(|tid| items.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(tid)));
@@ -81,6 +87,7 @@ pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
             .unwrap_or(false);
 
         active.push(json!({
+            "runId": run_id,
             "threadId": tid,
             "profileId": profile_id,
             "workspaceId": workspace_id,
@@ -88,6 +95,7 @@ pub fn list_live_chat_runs(_request: Option<Value>) -> Vec<Value> {
             "title": title,
             "needsYou": needs_you,
             "startedAtUnixMs": started_at_ms,
+            "nextSequence": next_sequence,
             "line": line
         }));
     }
@@ -211,6 +219,7 @@ pub fn start_chat_turn(request: Option<Value>) -> Value {
     apply_launch_choices(thread_id, req);
     handle_plan_action(thread_id, req.and_then(|r| r.get("planAction")));
     let attachments = parse_attachments(req);
+    crate::chat::consume_staged_attachments(&attachments);
     let binding = send_binding(req);
     start_turn_with_binding(thread_id, None, prompt, attachments, None, Some(&binding))
 }
@@ -223,6 +232,7 @@ pub fn start_agent_chat_turn(request: Option<Value>) -> Value {
     apply_launch_choices(thread_id, req);
     handle_plan_action(thread_id, req.and_then(|r| r.get("planAction")));
     let attachments = parse_attachments(req);
+    crate::chat::consume_staged_attachments(&attachments);
     let binding = send_binding(req);
     start_turn_with_binding(thread_id, Some(agent_id), prompt, attachments, None, Some(&binding))
 }

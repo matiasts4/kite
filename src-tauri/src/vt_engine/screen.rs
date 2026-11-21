@@ -37,11 +37,13 @@ pub struct TerminalVtEngine {
     pub(crate) pending_timeouts: Vec<Dec2026TimeoutNotice>,
 }
 
+pub const DEFAULT_VT_SCROLLBACK_LINES: usize = 2000;
+
 impl TerminalVtEngine {
     pub fn new(cols: u16, rows: u16) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        let parser = vt100::Parser::new(rows, cols, 5000);
+        let parser = vt100::Parser::new(rows, cols, DEFAULT_VT_SCROLLBACK_LINES);
         let empty_cursor = CursorSnapshot {
             visible: true,
             col: 0,

@@ -343,6 +343,7 @@ pub fn save_subagent_settings(request: Option<Value>) -> Value {
     match crate::subagent_settings::save_subagent_settings(parsed) {
         Ok(settings) => {
             crate::chat::models::invalidate_thread_providers_cache();
+            let _ = crate::dispatch::cli::install_dispatch_skill();
             let discovery =
                 crate::chat::models::discover_thread_providers_with_settings(
                     false,
@@ -390,6 +391,7 @@ pub fn save_subagent_role(request: Option<Value>) -> Value {
         };
     match crate::subagent_settings::save_role(workspace_path.as_deref(), input) {
         Ok(role) => {
+            let _ = crate::dispatch::cli::install_dispatch_skill();
             let roles = crate::subagent_settings::list_roles(workspace_path.as_deref());
             json!({
                 "ok": true,
@@ -419,6 +421,7 @@ pub fn delete_subagent_role(request: Option<Value>) -> Value {
     };
     match crate::subagent_settings::delete_role(workspace_path.as_deref(), scope, slug) {
         Ok(()) => {
+            let _ = crate::dispatch::cli::install_dispatch_skill();
             let roles = crate::subagent_settings::list_roles(workspace_path.as_deref());
             json!({
                 "ok": true,

@@ -117,9 +117,21 @@ pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut
     }
     let status = shared.lock().ok().and_then(|mut child| child.wait().ok());
     let exit_code = status.map(|code| code as i32);
-    let ok = exit_code.unwrap_or(1) == 0;
+    let result_failure = super::stream_json::take_result_failure(&run_id);
+    let ok = exit_code.unwrap_or(1) == 0 && result_failure.is_none();
     chat_log(&format!("stream_child: process exited for run_id={}, pid={}, ok={}", run_id, pid, ok));
     let stderr_text = take_run_stderr(&run_id);
+    let failure_detail = match (stderr_text.trim().is_empty(), result_failure.as_deref()) {
+        (false, Some(res)) if !stderr_text.contains(res) => format!("{stderr_text}\n{res}"),
+        (false, _) => stderr_text,
+        (true, Some(res)) => res.to_string(),
+        (true, None) => String::new(),
+    };
+    let effective_exit = if ok {
+        Some(0)
+    } else {
+        exit_code.filter(|&c| c != 0).or(Some(1))
+    };
     let provider = threads()
         .lock()
         .unwrap()
@@ -129,8 +141,8 @@ pub fn stream_child(thread_id: String, run_id: String, assistant_id: String, mut
         .unwrap_or("")
         .to_string();
     let projected = crate::chat::normalize::project_process_failure(
-        if ok { Some(0) } else { exit_code },
-        &stderr_text,
+        effective_exit,
+        &failure_detail,
         &provider,
         &[],
     );
@@ -382,17 +394,28 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
     if let Some(deletions) = snap.deletions {
         item["removedLines"] = json!(deletions);
     }
+    let runtime_active = super::state::is_thread_runtime_active(thread_id);
     let mut sub_meta = snap.subagent_meta.clone();
     let mut swarm_meta = snap.swarm_meta.clone();
+    let mut thread_active = false;
     {
         let items = threads().lock().unwrap();
-        if let Some(existing) = items
+        if let Some(thread) = items
             .iter()
             .find(|thread| thread.get("id").and_then(|v| v.as_str()) == Some(thread_id))
-            .and_then(|thread| thread.get("items"))
-            .and_then(|v| v.as_array())
-            .and_then(|list| list.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(snap.id.as_str())))
         {
+            thread_active = matches!(
+                thread.get("status").and_then(Value::as_str),
+                Some("running" | "waiting")
+            );
+            if let Some(existing) = thread
+                .get("items")
+                .and_then(|v| v.as_array())
+                .and_then(|list| {
+                    list.iter()
+                        .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(snap.id.as_str()))
+                })
+            {
             if snap.output.is_empty() {
                 if let Some(text) = existing.get("text") {
                     item["text"] = text.clone();
@@ -431,8 +454,14 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
                     }
                 }
             }
+            if let Some(prev_ts) = existing
+                .get("createdAtUnixMs")
+                .and_then(Value::as_i64)
+                .filter(|&ts| ts > 0)
+            {
+                item["createdAtUnixMs"] = json!(prev_ts);
+            }
             for key in [
-                "createdAtUnixMs",
                 "serverName",
                 "query",
                 "filePath",
@@ -446,6 +475,37 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
                     }
                 }
             }
+            }
+        }
+    }
+    let parent_active = runtime_active || thread_active;
+    let item_tool_name = item
+        .get("toolName")
+        .and_then(Value::as_str)
+        .unwrap_or(&snap.title);
+    if let Some(ref mut meta) = sub_meta {
+        if parent_active
+            && crate::chat::subagents::is_invoke_subagent_tool_name(item_tool_name)
+            && resolved_status == "completed"
+            && !crate::chat::subagents::child_transcript_ended_with_final_response(
+                meta.transcript_uri.as_deref(),
+            )
+        {
+            meta.status = "running".to_string();
+            item["status"] = json!("running");
+            streaming = false;
+            item["streaming"] = json!(false);
+        } else if snap.subagent_meta.is_none()
+            && matches!(
+                resolved_status.as_str(),
+                "completed" | "failed" | "cancelled" | "killed"
+            )
+        {
+            meta.status = if resolved_status == "cancelled" {
+                "killed".to_string()
+            } else {
+                resolved_status.clone()
+            };
         }
     }
     if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
@@ -498,8 +558,21 @@ pub fn upsert_tool_snapshot(thread_id: &str, run_id: &str, snap: &ToolCallSnapsh
         crate::chat::subagents::record_swarm_tool_call(thread_id, &item);
     }
     crate::chat::subagents::sync_child_thread_to_parent(thread_id);
+    if !streaming
+        && (item.get("toolKind").and_then(Value::as_str) == Some("subagent")
+            || item
+                .get("toolName")
+                .and_then(Value::as_str)
+                .is_some_and(|n| {
+                    let (_, clean) = crate::acp::strip_mcp_prefix(n, &Value::Null);
+                    crate::chat::subagents::is_invoke_subagent_tool_name(&clean)
+                        || clean.eq_ignore_ascii_case("manage_subagents")
+                }))
+    {
+        crate::chat::subagents::reconcile_antigravity_subagents_for_thread(thread_id, Some(run_id));
+    }
     if !streaming {
-        persist();
+        crate::persist::persist_async();
     }
 }
 

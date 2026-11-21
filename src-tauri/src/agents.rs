@@ -214,7 +214,75 @@ fn plain_text(value: &str, limit: usize) -> String {
         .to_string()
 }
 
+#[derive(Default)]
+struct CreateAgentOptions {
+    avatar: Option<String>,
+    default_model: Option<String>,
+    default_mode: Option<String>,
+    default_provider_options: Vec<Value>,
+}
+
+fn parse_create_options(req: Option<&Value>) -> CreateAgentOptions {
+    let avatar = req
+        .and_then(|r| r.get("avatar"))
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else if let Some(s) = v.as_str() {
+                let trimmed = s.trim();
+                if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+            } else {
+                Some(v.to_string())
+            }
+        });
+    let default_model = req
+        .and_then(|r| r.get("defaultModel"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let default_mode = req
+        .and_then(|r| r.get("defaultMode"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let mut default_provider_options = req
+        .and_then(|r| r.get("defaultProviderOptions"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(effort) = req
+        .and_then(|r| r.get("effort"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let has_effort = default_provider_options
+            .iter()
+            .any(|o| o.get("id").and_then(|v| v.as_str()) == Some("effort"));
+        if !has_effort {
+            default_provider_options.push(json!({ "id": "effort", "value": effort }));
+        }
+    }
+    CreateAgentOptions {
+        avatar,
+        default_model,
+        default_mode,
+        default_provider_options,
+    }
+}
+
 fn push_agent(name: &str, engine: &str, purpose: &str) -> Value {
+    push_agent_with_options(name, engine, purpose, CreateAgentOptions::default())
+}
+
+fn push_agent_with_options(
+    name: &str,
+    engine: &str,
+    purpose: &str,
+    options: CreateAgentOptions,
+) -> Value {
     let agent_id = Uuid::new_v4().to_string();
     let now = now_ms();
     let safe_name = {
@@ -224,16 +292,16 @@ fn push_agent(name: &str, engine: &str, purpose: &str) -> Value {
     let safe_engine = teammate_engine(Some(engine));
     let safe_purpose = plain_text(purpose, 4000);
     let safe_brief = safe_purpose.clone();
-    let order = {
+    let profile = {
         let mut state = agents().lock().unwrap();
         let next_order = state.len() as i32;
-        state.push(AgentProfile {
+        let p = AgentProfile {
             id: agent_id.clone(),
             name: safe_name.clone(),
             engine: safe_engine.clone(),
             purpose: safe_purpose.clone(),
             brief: safe_brief.clone(),
-            avatar: None,
+            avatar: options.avatar.clone(),
             created_at_unix_ms: now,
             pinned: false,
             order: next_order,
@@ -241,31 +309,34 @@ fn push_agent(name: &str, engine: &str, purpose: &str) -> Value {
             reflection_mode: None,
             allow_agent_scheduling: None,
             allow_agent_messaging: None,
-            default_mode: None,
+            default_mode: options.default_mode.clone(),
             default_plan: None,
-            default_model: None,
-            default_provider_options: vec![],
+            default_model: options.default_model.clone(),
+            default_provider_options: options.default_provider_options.clone(),
             place_display_names: vec![],
             disabled_plugin_ids: vec![],
-        });
-        next_order
+        };
+        state.push(p.clone());
+        p
     };
     persist();
     let _ = crate::agent_mind::sync_agent_instructions(&crate::agent_mind::agents_root(), &agent_id);
-    json!({
+    serde_json::to_value(&profile).unwrap_or_else(|_| json!({
         "id": agent_id,
         "name": safe_name,
         "engine": safe_engine,
         "purpose": safe_purpose,
         "brief": safe_brief,
-        "avatar": Value::Null,
+        "avatar": options.avatar,
         "createdAtUnixMs": now,
         "pinned": false,
-        "order": order,
-        "defaultProviderOptions": [],
+        "order": profile.order,
+        "defaultMode": options.default_mode,
+        "defaultModel": options.default_model,
+        "defaultProviderOptions": options.default_provider_options,
         "placeDisplayNames": [],
         "disabledPluginIds": []
-    })
+    }))
 }
 
 #[tauri::command]
@@ -274,7 +345,8 @@ pub fn create_agent(request: Option<Value>) -> Value {
     let name = req.and_then(|r| r.get("name")).and_then(|v| v.as_str()).unwrap_or("New Agent");
     let engine = req.and_then(|r| r.get("engine")).and_then(|v| v.as_str()).unwrap_or("antigravity");
     let purpose = req.and_then(|r| r.get("purpose")).or_else(|| req.and_then(|r| r.get("brief"))).and_then(|v| v.as_str()).unwrap_or("");
-    push_agent(name, engine, purpose)
+    let options = parse_create_options(req);
+    push_agent_with_options(name, engine, purpose, options)
 }
 
 #[tauri::command]
@@ -517,6 +589,175 @@ fn draft_copy(seed: &str) -> (String, String) {
     (name, brief)
 }
 
+fn draft_provider_for_engine(engine: &str) -> Option<&'static str> {
+    match engine.trim().to_ascii_lowercase().as_str() {
+        "antigravity" | "agy" => Some("antigravity"),
+        "claude-code" | "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "cursor" => Some("cursor"),
+        "grok" => Some("grok"),
+        "open-code" | "opencode" => Some("opencode"),
+        "gemini" => Some("gemini"),
+        _ => None,
+    }
+}
+
+fn draft_provider_id_from_label(label: &str) -> Option<&'static str> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "antigravity" => Some("antigravity"),
+        "codex" => Some("codex"),
+        "claude" => Some("claude"),
+        "cursor" => Some("cursor"),
+        "grok" => Some("grok"),
+        "opencode" => Some("opencode"),
+        "gemini" => Some("gemini"),
+        _ => None,
+    }
+}
+
+fn extract_json_object_str(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Strip markdown code fences if present
+    let without_fences = if trimmed.starts_with("```") {
+        let mut lines: Vec<&str> = trimmed.lines().collect();
+        if !lines.is_empty() && lines[0].trim().starts_with("```") {
+            lines.remove(0);
+        }
+        if lines.last().is_some_and(|l| l.trim() == "```") {
+            lines.pop();
+        }
+        lines.join("\n")
+    } else {
+        trimmed.to_string()
+    };
+    let start = without_fences.find('{')?;
+    let end = without_fences.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(without_fences[start..=end].to_string())
+}
+
+fn parse_draft_json(raw: &str) -> Option<(String, String)> {
+    // Direct JSON or fenced JSON
+    if let Some(json_str) = extract_json_object_str(raw) {
+        if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+            let name = val.get("name").and_then(Value::as_str).map(|s| plain_text(s, 48)).unwrap_or_default();
+            let brief = val.get("brief").and_then(Value::as_str).map(|s| plain_text(s, 8000)).unwrap_or_default();
+            if !name.is_empty() && !brief.is_empty() {
+                return Some((name, brief));
+            }
+        }
+    }
+    // NDJSON stream fallback: collect assistant text chunks
+    let mut collected = String::new();
+    for line in raw.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(text) = val
+            .get("text")
+            .or_else(|| val.get("delta"))
+            .or_else(|| val.get("content"))
+            .and_then(Value::as_str)
+        {
+            collected.push_str(text);
+        } else if let Some(msg) = val
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        {
+            for part in msg {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    collected.push_str(t);
+                }
+            }
+        }
+    }
+    if !collected.is_empty() {
+        if let Some(json_str) = extract_json_object_str(&collected) {
+            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                let name = val.get("name").and_then(Value::as_str).map(|s| plain_text(s, 48)).unwrap_or_default();
+                let brief = val.get("brief").and_then(Value::as_str).map(|s| plain_text(s, 8000)).unwrap_or_default();
+                if !name.is_empty() && !brief.is_empty() {
+                    return Some((name, brief));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn run_provider_draft_prompt(provider: &str, prompt: &str) -> Result<String, String> {
+    use std::time::Duration;
+
+    if cfg!(test) {
+        let _ = (provider, prompt);
+        return Err("live provider draft disabled in unit tests".to_string());
+    }
+
+    let values = crate::chat::runtime::spawn::SendValues {
+        connection_id: None,
+        model: None,
+        session_id: None,
+        supported_endpoint: None,
+        verified_endpoints: &[],
+        agent: None,
+    };
+    let plan = crate::chat::runtime::spawn::build_spawn(provider, "readOnly", &values, None, prompt)?;
+    let args_refs: Vec<&str> = plan.args.iter().map(String::as_str).collect();
+    let output = crate::hidden_exec::run(&plan.program, &args_refs, Duration::from_secs(12))
+        .map_err(|e| format!("spawn failed: {e}"))?;
+    if output.timed_out {
+        return Err("draft generation timed out".to_string());
+    }
+    let stdout = output.stdout_lossy();
+    if output.success() && !stdout.trim().is_empty() {
+        return Ok(stdout);
+    }
+    Err(format!("provider exited with status {:?}", output.code))
+}
+
+pub(crate) fn draft_agent_with_runner<F>(seed: &str, desired_engine: &str, mut runner: F) -> (String, String)
+where
+    F: FnMut(&str, &str) -> Result<String, String>,
+{
+    let brief_source = plain_text(seed, 8000);
+    if brief_source.is_empty() {
+        return draft_copy(seed);
+    }
+
+    let prompt = format!(
+        "Create a concise specialist AI agent profile for this request:\n\"{}\"\n\nRespond ONLY with valid JSON matching:\n{{\"name\":\"<2-4 word role name>\",\"brief\":\"<clear markdown charter with ## Role and ## Execution Standards>\"}}",
+        brief_source
+    );
+
+    let mut candidates: Vec<&'static str> = Vec::new();
+    if let Some(preferred) = draft_provider_for_engine(desired_engine) {
+        candidates.push(preferred);
+    }
+    for label in crate::chat::runtime::spawn::list_available_providers() {
+        if let Some(pid) = draft_provider_id_from_label(label) {
+            if !candidates.contains(&pid) {
+                candidates.push(pid);
+            }
+        }
+    }
+
+    for provider in candidates {
+        if let Ok(raw) = runner(provider, &prompt) {
+            if let Some((name, brief)) = parse_draft_json(&raw) {
+                return (name, brief);
+            }
+        }
+    }
+
+    draft_copy(seed)
+}
+
 #[tauri::command]
 pub fn draft_agent_with_ai(request: Option<Value>) -> Value {
     let req = request_body(&request);
@@ -527,7 +768,7 @@ pub fn draft_agent_with_ai(request: Option<Value>) -> Value {
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let seed = req.and_then(|r| r.get("seed")).and_then(|v| v.as_str()).unwrap_or("");
     let engine = teammate_engine(req.and_then(|r| r.get("desiredEngine")).and_then(|v| v.as_str()));
-    let (name, brief) = draft_copy(seed);
+    let (name, brief) = draft_agent_with_runner(seed, &engine, run_provider_draft_prompt);
     let mut drafts = read_json_array(&drafts_path());
     drafts.retain(|draft| draft.get("requestId").and_then(|v| v.as_str()) != Some(request_id.as_str()));
     drafts.push(json!({
@@ -555,13 +796,19 @@ pub fn accept_agent_draft(request: Option<Value>) -> Value {
     let custom_name = req.and_then(|r| r.get("name")).and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
     let custom_brief = req.and_then(|r| r.get("brief")).and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
     let custom_engine = req.and_then(|r| r.get("engine")).and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
+    let options = parse_create_options(req);
 
     let mut drafts = read_json_array(&drafts_path());
     let position = drafts.iter().position(|draft| {
         draft.get("requestId").and_then(|v| v.as_str()) == Some(request_id) && !request_id.is_empty()
     });
     let Some(index) = position else {
-        return push_agent(custom_name.unwrap_or("New Agent"), custom_engine.unwrap_or("antigravity"), custom_brief.unwrap_or(""));
+        return push_agent_with_options(
+            custom_name.unwrap_or("New Agent"),
+            custom_engine.unwrap_or("antigravity"),
+            custom_brief.unwrap_or(""),
+            options,
+        );
     };
     if let Some(agent_id) = drafts[index].get("agentId").and_then(|v| v.as_str()) {
         if !agent_id.is_empty() {
@@ -580,7 +827,7 @@ pub fn accept_agent_draft(request: Option<Value>) -> Value {
         .map(|s| teammate_engine(Some(s)))
         .or_else(|| drafts[index].get("engine").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .unwrap_or_else(|| "antigravity".to_string());
-    let created = push_agent(&name, &engine, &brief);
+    let created = push_agent_with_options(&name, &engine, &brief, options);
     drafts[index]["agentId"] = created.get("id").cloned().unwrap_or(Value::Null);
     drafts[index]["idempotencyKey"] = json!(idempotency_key);
     drafts[index]["cleanupPending"] = json!(false);
@@ -927,4 +1174,93 @@ pub fn send_agent_message(request: Option<Value>) -> Result<Value, String> {
         sender_name,
         None,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn create_agent_persists_avatar_model_mode_and_effort() {
+        let created = create_agent(Some(json!({
+            "name": "Creation Integrity Agent",
+            "engine": "claude-code",
+            "purpose": "Verify create_agent persistence",
+            "avatar": "{\"glyph\":\"rocket\"}",
+            "defaultModel": "claude-sonnet-4-5",
+            "defaultMode": "acceptEdits",
+            "effort": "high"
+        })));
+        let id = created.get("id").and_then(Value::as_str).unwrap().to_string();
+        assert_eq!(created.get("avatar").and_then(Value::as_str), Some("{\"glyph\":\"rocket\"}"));
+        assert_eq!(created.get("defaultModel").and_then(Value::as_str), Some("claude-sonnet-4-5"));
+        assert_eq!(created.get("defaultMode").and_then(Value::as_str), Some("acceptEdits"));
+        let opts = created.get("defaultProviderOptions").and_then(Value::as_array).unwrap();
+        assert!(opts.iter().any(|o| o.get("id").and_then(Value::as_str) == Some("effort") && o.get("value").and_then(Value::as_str) == Some("high")));
+
+        // Clean up from in-memory roster
+        let mut items = agents().lock().unwrap();
+        items.retain(|a| a.id != id);
+    }
+
+    #[test]
+    fn accept_agent_draft_persists_avatar_model_mode_and_effort() {
+        let req_id = Uuid::new_v4().to_string();
+        let drafted = draft_agent_with_ai(Some(json!({
+            "requestId": req_id,
+            "seed": "Security auditor",
+            "desiredEngine": "codex"
+        })));
+        assert!(drafted.get("draft").is_some());
+
+        let accepted = accept_agent_draft(Some(json!({
+            "requestId": req_id,
+            "idempotencyKey": "idem-1",
+            "name": "Security Auditor",
+            "brief": "Audit security.",
+            "engine": "codex",
+            "avatar": "shield",
+            "defaultModel": "gpt-5",
+            "defaultMode": "readOnly",
+            "effort": "medium"
+        })));
+        let id = accepted.get("id").and_then(Value::as_str).unwrap().to_string();
+        assert_eq!(accepted.get("avatar").and_then(Value::as_str), Some("shield"));
+        assert_eq!(accepted.get("defaultModel").and_then(Value::as_str), Some("gpt-5"));
+        assert_eq!(accepted.get("defaultMode").and_then(Value::as_str), Some("readOnly"));
+        let opts = accepted.get("defaultProviderOptions").and_then(Value::as_array).unwrap();
+        assert!(opts.iter().any(|o| o.get("id").and_then(Value::as_str) == Some("effort") && o.get("value").and_then(Value::as_str) == Some("medium")));
+
+        let mut items = agents().lock().unwrap();
+        items.retain(|a| a.id != id);
+    }
+
+    #[test]
+    fn draft_agent_with_runner_parses_live_json_and_falls_back_on_error() {
+        let (name, brief) = draft_agent_with_runner(
+            "Build a release engineer",
+            "claude-code",
+            |_provider, _prompt| {
+                Ok("```json\n{\"name\":\"Release Engineer\",\"brief\":\"## Role\\nManage releases safely.\"}\n```".to_string())
+            },
+        );
+        assert_eq!(name, "Release Engineer");
+        assert!(brief.contains("Manage releases safely."));
+
+        let (fallback_name, fallback_brief) = draft_agent_with_runner(
+            "Create a frontend accessibility reviewer",
+            "claude-code",
+            |_provider, _prompt| Err("provider unavailable".to_string()),
+        );
+        assert!(!fallback_name.is_empty());
+        assert!(fallback_brief.contains("## Execution Standards"));
+    }
+
+    #[test]
+    fn run_provider_draft_prompt_refuses_live_cli_spawn_in_tests() {
+        let err = run_provider_draft_prompt("grok", "Security auditor")
+            .expect_err("unit tests must never spawn live external provider CLIs");
+        assert!(err.contains("disabled in unit tests"), "got: {err}");
+    }
 }

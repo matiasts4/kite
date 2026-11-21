@@ -653,6 +653,7 @@ fn coordinator_auto_wake_fires_when_idle_skips_when_waiting_and_matches_blocked(
                 closing: false,
                 finished: false,
                 started_at_ms: now_ms(),
+                finished_at_ms: None,
                 routine_id: None,
                 delivered_through: 0,
                 file_baselines: std::collections::HashMap::new(),
@@ -987,3 +988,90 @@ fn execute_swarm_add_replaces_streamed_placeholder_and_rejects_live_duplicate() 
 
     crate::chat::threads::remove_thread(&scout_cid);
 }
+
+#[test]
+fn swarm_add_resolves_agent_profile_and_persists_profile_id_and_mode() {
+    let coord_id = format!("swarm-prof-coord-{}", uuid::Uuid::new_v4().simple());
+    let repo_dir = std::env::temp_dir().join(format!(
+        "kite-swarm-profile-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let cwd_str = repo_dir.to_string_lossy().to_string();
+
+    let agent_id = format!("agent-swarm-{}", uuid::Uuid::new_v4().simple());
+    {
+        let mut list = crate::persist::agents().lock().unwrap();
+        list.push(crate::persist::AgentProfile {
+            id: agent_id.clone(),
+            name: "Gemini Reviewer".to_string(),
+            engine: "gemini".to_string(),
+            purpose: "Review code".to_string(),
+            brief: "Review PRs thoroughly.".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_700_000_000_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(4000),
+            reflection_mode: Some("ask".to_string()),
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("readOnly".to_string()),
+            default_plan: Some(false),
+            default_model: Some("gemini-2.5-pro".to_string()),
+            default_provider_options: vec![json!({ "id": "effort", "value": "high" })],
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+
+    {
+        let mut all = threads().lock().unwrap();
+        all.push(json!({
+            "id": coord_id,
+            "provider": "antigravity",
+            "model": "gemini-3-flash",
+            "workspaceId": "ws-prof",
+            "workingDirectory": cwd_str,
+        }));
+    }
+
+    let noop_launcher = |_cid: &str, _prompt: &str| -> Result<(), String> { Ok(()) };
+    let coord_addr = format!("thread:{coord_id}");
+    execute_swarm_action(
+        &SwarmCommand::Add {
+            name: "reviewer".into(),
+            provider: None,
+            model: None,
+            effort: None,
+            workspace: Some("inherit".into()),
+            channels: Vec::new(),
+            fork: None,
+            role: Some(format!("agent:{agent_id}")),
+            override_stack: true,
+            brief: "Review the diff".into(),
+        },
+        &coord_addr,
+        Some(&cwd_str),
+        Some(&noop_launcher),
+    )
+    .unwrap();
+
+    let (state, _) = load_swarm_state(&coord_id, Some(&cwd_str));
+    let worker_cid = state.members[0].child_thread_id.clone().unwrap();
+    let child = {
+        let all = threads().lock().unwrap();
+        all.iter().find(|t| t["id"] == worker_cid).unwrap().clone()
+    };
+    assert_eq!(child["profileId"].as_str(), Some(agent_id.as_str()));
+    assert_eq!(child["provider"].as_str(), Some("gemini"));
+    assert_eq!(child["model"].as_str(), Some("gemini-2.5-pro"));
+    assert_eq!(child["mode"].as_str(), Some("readOnly"));
+    assert_eq!(child["effort"].as_str(), Some("high"));
+
+    crate::chat::threads::remove_thread(&worker_cid);
+    crate::chat::threads::remove_thread(&coord_id);
+    crate::persist::agents().lock().unwrap().retain(|a| a.id != agent_id);
+    let _ = std::fs::remove_dir_all(&repo_dir);
+}
+

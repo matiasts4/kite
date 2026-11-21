@@ -7,9 +7,79 @@ use crate::agent_mind::utils::{
     prepare_file, read_regular, require_confirmation, require_known_agent, sha256_hex,
     skill_id_ok,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillMeta {
+    #[serde(default = "default_skill_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub uses: u64,
+    #[serde(default)]
+    pub last_used: Option<i64>,
+    #[serde(default)]
+    pub last_outcome: Option<String>,
+}
+
+fn default_skill_enabled() -> bool {
+    true
+}
+
+impl Default for SkillMeta {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            uses: 0,
+            last_used: None,
+            last_outcome: None,
+        }
+    }
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn skills_meta_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("skills-meta.json")
+}
+
+pub(crate) fn read_skills_meta(agent_dir: &Path) -> BTreeMap<String, SkillMeta> {
+    let path = skills_meta_path(agent_dir);
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str::<BTreeMap<String, SkillMeta>>(&raw).unwrap_or_default()
+}
+
+pub(crate) fn write_skills_meta(
+    root: &Path,
+    agent_id: &str,
+    meta: &BTreeMap<String, SkillMeta>,
+) -> Result<(), AgentMindError> {
+    ensure_agent_id(agent_id)?;
+    let path = skills_meta_path(&root.join(agent_id));
+    prepare_file(root, &path)?;
+    let serialized = serde_json::to_string_pretty(meta).map_err(|_| {
+        AgentMindError::new("agent_data_failed", "Kite could not store this agent data.")
+    })?;
+    fs::write(&path, serialized).map_err(|_| {
+        AgentMindError::new("agent_data_failed", "Kite could not store this agent data.")
+    })
+}
+
+pub(crate) fn is_skill_enabled(meta: &BTreeMap<String, SkillMeta>, skill_id: &str) -> bool {
+    meta.get(skill_id).map(|m| m.enabled).unwrap_or(true)
+}
 
 pub(crate) fn unquote(value: &str) -> String {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
@@ -48,6 +118,21 @@ pub(crate) fn frontmatter_fields(source: &str) -> (Option<String>, Option<String
 }
 
 pub(crate) fn skill_summary(skill_id: &str, source: &str, path: &Path) -> (Value, Option<Value>) {
+    let meta = path
+        .parent()
+        .and_then(|skills_dir| skills_dir.parent())
+        .map(read_skills_meta)
+        .unwrap_or_default();
+    let entry = meta.get(skill_id).cloned().unwrap_or_default();
+    skill_summary_with_meta(skill_id, source, path, &entry)
+}
+
+pub(crate) fn skill_summary_with_meta(
+    skill_id: &str,
+    source: &str,
+    path: &Path,
+    entry: &SkillMeta,
+) -> (Value, Option<Value>) {
     let (raw_name, raw_description) = frontmatter_fields(source);
     let mut invalid = false;
     let name = match raw_name {
@@ -70,15 +155,20 @@ pub(crate) fn skill_summary(skill_id: &str, source: &str, path: &Path) -> (Value
         }
         None => String::new(),
     };
+    let last_used = entry
+        .last_used
+        .map(|ms| json!(ms.to_string()))
+        .unwrap_or(Value::Null);
     let summary = json!({
         "id": skill_id,
         "name": name,
         "description": description,
         "updatedAtUnixMs": modified_ms(path).unwrap_or(0),
         "revision": sha256_hex(source.as_bytes()),
-        "uses": 0,
-        "lastUsed": Value::Null,
-        "lastOutcome": Value::Null,
+        "enabled": entry.enabled,
+        "uses": entry.uses,
+        "lastUsed": last_used,
+        "lastOutcome": entry.last_outcome,
     });
     let issue = if invalid {
         Some(issue("skillInvalid", Some(skill_id), None))
@@ -112,6 +202,7 @@ pub(crate) fn read_skills(dir: &Path) -> (Vec<Value>, Vec<Value>) {
         paths.push(entry.path());
     }
     paths.sort();
+    let mut meta_map = dir.parent().map(read_skills_meta).unwrap_or_default();
     let mut skills = Vec::new();
     let mut issues = Vec::new();
     let mut truncated = false;
@@ -142,7 +233,11 @@ pub(crate) fn read_skills(dir: &Path) -> (Vec<Value>, Vec<Value>) {
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(_) => {
-                issues.push(issue("skillUnreadable", Some(skill_id), None));
+                issues.push(issue(
+                    "skillUnreadable",
+                    Some(skill_id),
+                    None,
+                ));
                 continue;
             }
         };
@@ -162,7 +257,8 @@ pub(crate) fn read_skills(dir: &Path) -> (Vec<Value>, Vec<Value>) {
             truncated = true;
             continue;
         }
-        let (summary, skill_issue) = skill_summary(skill_id, &source, &path);
+        let skill_meta = meta_map.remove(skill_id).unwrap_or_default();
+        let (summary, skill_issue) = skill_summary_with_meta(skill_id, &source, &path, &skill_meta);
         skills.push(summary);
         if let Some(skill_issue) = skill_issue {
             issues.push(skill_issue);
@@ -309,11 +405,76 @@ pub(crate) fn remove_agent_skill_at(
             "Kite could not complete the agent data operation.",
         )
     })?;
+    let agent_dir = root.join(agent_id);
+    let mut meta = read_skills_meta(&agent_dir);
+    if meta.remove(skill_id).is_some() {
+        let _ = write_skills_meta(root, agent_id, &meta);
+    }
     let _ = sync_agent_instructions(root, agent_id);
     let mind = load_agent_mind_at(root, agent_id)?;
     Ok(json!({
         "removed": true,
         "mind": mind,
     }))
+}
+
+pub(crate) fn set_agent_skill_enabled_at(
+    root: &Path,
+    agent_id: &str,
+    skill_id: &str,
+    enabled: bool,
+) -> Result<Value, AgentMindError> {
+    ensure_agent_id(agent_id)?;
+    ensure_skill_id(skill_id)?;
+    let path = skill_path(root, agent_id, skill_id);
+    if read_skill_source(&path)?.is_none() {
+        return Err(AgentMindError::new(
+            "agent_data_unreadable",
+            "That skill does not exist.",
+        ));
+    }
+    let agent_dir = root.join(agent_id);
+    let mut meta = read_skills_meta(&agent_dir);
+    let entry = meta.entry(skill_id.to_string()).or_default();
+    entry.enabled = enabled;
+    write_skills_meta(root, agent_id, &meta)?;
+    let _ = sync_agent_instructions(root, agent_id);
+    load_agent_mind_at(root, agent_id)
+}
+
+pub fn record_skills_used_at(
+    root: &Path,
+    agent_id: &str,
+    skill_ids: &[String],
+    outcome: Option<&str>,
+) {
+    if skill_ids.is_empty() || ensure_agent_id(agent_id).is_err() {
+        return;
+    }
+    let agent_dir = root.join(agent_id);
+    if !agent_dir.exists() {
+        return;
+    }
+    let mut meta = read_skills_meta(&agent_dir);
+    let now = now_unix_ms();
+    let mut changed = false;
+    for skill_id in skill_ids {
+        if ensure_skill_id(skill_id).is_err() {
+            continue;
+        }
+        let entry = meta.entry(skill_id.clone()).or_default();
+        if !entry.enabled {
+            continue;
+        }
+        entry.uses = entry.uses.saturating_add(1);
+        entry.last_used = Some(now);
+        if let Some(out) = outcome {
+            entry.last_outcome = Some(out.to_string());
+        }
+        changed = true;
+    }
+    if changed {
+        let _ = write_skills_meta(root, agent_id, &meta);
+    }
 }
 

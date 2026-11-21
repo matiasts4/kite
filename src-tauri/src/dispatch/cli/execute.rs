@@ -90,6 +90,8 @@ pub fn execute<P: Port>(
             explicit_role,
             file,
             task,
+            tasks,
+            count,
             wait,
             timeout_ms: _,
             hidden,
@@ -126,12 +128,12 @@ pub fn execute<P: Port>(
                         if let Some(canon) = canonical_thread_provider(word) {
                             resolved_provider = Some(canon.to_string());
                         } else if resolved_role.is_none()
-                            && crate::dispatch::role::find_role_across_roots(
+                            && crate::dispatch::role::resolve_role_target(
                                 ctx.config_dir,
                                 ctx.workspace,
                                 word,
                             )
-                            .is_ok()
+                            .is_some()
                         {
                             resolved_role = Some(word.clone());
                         } else {
@@ -146,62 +148,157 @@ pub fn execute<P: Port>(
                 } else {
                     Some(words_vec.join(" "))
                 };
-                let task = combine_task(file_text, raw_words.or_else(|| task.clone()));
-                if *wait && task.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                    return Err(DispatchError::BadArgs);
-                }
-                let loaded_role = resolved_role.as_deref().and_then(|role_name| {
-                    crate::dispatch::role::find_role_across_roots(
+                let resolved_target = resolved_role.as_deref().and_then(|role_name| {
+                    crate::dispatch::role::resolve_role_target(
                         ctx.config_dir,
                         ctx.workspace,
                         role_name,
                     )
-                    .ok()
                 });
-                let role_provider = loaded_role.as_ref().and_then(|rf| {
-                    rf.provider
-                        .as_deref()
-                        .and_then(canonical_thread_provider)
-                        .or_else(|| canonical_thread_provider(&rf.command))
-                        .map(str::to_string)
-                });
-                let effective_provider = resolved_provider.or(role_provider);
-                let effective_model = model
-                    .clone()
-                    .or_else(|| loaded_role.as_ref().and_then(|rf| rf.model.clone()));
-                let effective_effort = effort
-                    .clone()
-                    .or_else(|| loaded_role.as_ref().and_then(|rf| rf.effort.clone()));
-                let effective_workspace = workspace
-                    .clone()
-                    .or_else(|| loaded_role.as_ref().and_then(|rf| rf.workspace.clone()));
-                let explicit_thread_name = if *explicit_name { name.clone() } else { None };
-                let receipt = service.run(RunInput {
-                    id: ctx.id.to_string(),
-                    via: Family::Thread,
-                    engine: effective_provider.clone(),
-                    provider: effective_provider,
-                    model: effective_model,
-                    effort: effective_effort,
-                    workspace: effective_workspace,
-                    command: None,
-                    name: explicit_thread_name,
-                    parent,
-                    outlive: *outlive,
-                    role: loaded_role,
-                    subagent_role: resolved_role,
-                    role_missing: false,
-                    task,
-                    caller: ctx.caller,
-                    cwd,
-                    now_ms: ctx.now_ms,
-                    hidden: hide_pane,
-                    argv: Vec::new(),
-                });
-                if *wait && !receipt.address.is_empty() {
-                    service.suppress_parent_notice_for(&receipt.address);
+                let (loaded_role, role_provider, role_model, role_effort, role_workspace) =
+                    match resolved_target {
+                        Some(crate::dispatch::role::ResolvedRoleTarget::AgentProfile(ap)) => {
+                            (None, ap.provider, ap.model, ap.effort, None)
+                        }
+                        Some(crate::dispatch::role::ResolvedRoleTarget::MarkdownRole(rf)) => {
+                            let rp = rf
+                                .provider
+                                .as_deref()
+                                .and_then(canonical_thread_provider)
+                                .or_else(|| canonical_thread_provider(&rf.command))
+                                .map(str::to_string);
+                            let rm = rf.model.clone();
+                            let re = rf.effort.clone();
+                            let rw = rf.workspace.clone();
+                            (Some(rf), rp, rm, re, rw)
+                        }
+                        None => (None, None, None, None, None),
+                    };
+                let mut effective_provider = resolved_provider.or(role_provider);
+                let mut effective_model = model.clone().or(role_model);
+                let mut effective_effort = effort.clone().or(role_effort);
+                if effective_model.is_none() {
+                    let (next_p, next_m, next_e) =
+                        crate::subagent_settings::resolve_thread_selection_defaults(
+                            &crate::subagent_settings::get_subagent_settings(),
+                            effective_provider,
+                            effective_model,
+                            effective_effort,
+                        );
+                    effective_provider = next_p;
+                    effective_model = next_m;
+                    effective_effort = next_e;
                 }
-                return Ok(receipt);
+                let effective_workspace = workspace.clone().or(role_workspace);
+                let explicit_thread_name = if *explicit_name { name.clone() } else { None };
+
+                let batch_tasks: Vec<Option<String>> = if !tasks.is_empty() {
+                    tasks
+                        .iter()
+                        .map(|t| combine_task(file_text.clone(), Some(t.clone())))
+                        .collect()
+                } else if count.unwrap_or(1) > 1 {
+                    let single = combine_task(file_text, raw_words.or_else(|| task.clone()));
+                    vec![single; count.unwrap_or(1)]
+                } else {
+                    vec![combine_task(file_text, raw_words.or_else(|| task.clone()))]
+                };
+
+                if *wait
+                    && batch_tasks
+                        .iter()
+                        .any(|t| t.as_deref().map(str::trim).unwrap_or("").is_empty())
+                {
+                    return Err(DispatchError::BadArgs);
+                }
+
+                if batch_tasks.len() == 1 {
+                    let single_task = batch_tasks.into_iter().next().unwrap_or(None);
+                    let receipt = service.run(RunInput {
+                        id: ctx.id.to_string(),
+                        via: Family::Thread,
+                        engine: effective_provider.clone(),
+                        provider: effective_provider,
+                        model: effective_model,
+                        effort: effective_effort,
+                        workspace: effective_workspace,
+                        command: None,
+                        name: explicit_thread_name,
+                        parent,
+                        outlive: *outlive,
+                        role: loaded_role,
+                        subagent_role: resolved_role,
+                        role_missing: false,
+                        task: single_task,
+                        caller: ctx.caller,
+                        cwd,
+                        now_ms: ctx.now_ms,
+                        hidden: hide_pane,
+                        argv: Vec::new(),
+                    });
+                    if *wait && !receipt.address.is_empty() {
+                        service.suppress_parent_notice_for(&receipt.address);
+                    }
+                    return Ok(receipt);
+                }
+
+                let mut first_receipt: Option<Receipt> = None;
+                let mut spawned_addresses: Vec<String> = Vec::new();
+                for (idx, item_task) in batch_tasks.into_iter().enumerate() {
+                    let run_id = if idx == 0 {
+                        ctx.id.to_string()
+                    } else {
+                        format!("{}-{}", ctx.id, idx + 1)
+                    };
+                    let run_name = explicit_thread_name
+                        .as_ref()
+                        .map(|n| format!("{n}-{}", idx + 1));
+                    let run_role = resolved_role.as_ref().map(|r| {
+                        if loaded_role.is_some() {
+                            r.clone()
+                        } else {
+                            format!("{r} #{}", idx + 1)
+                        }
+                    });
+                    let r = service.run(RunInput {
+                        id: run_id,
+                        via: Family::Thread,
+                        engine: effective_provider.clone(),
+                        provider: effective_provider.clone(),
+                        model: effective_model.clone(),
+                        effort: effective_effort.clone(),
+                        workspace: effective_workspace.clone(),
+                        command: None,
+                        name: run_name,
+                        parent: parent.clone(),
+                        outlive: *outlive,
+                        role: loaded_role.clone(),
+                        subagent_role: run_role,
+                        role_missing: false,
+                        task: item_task,
+                        caller: ctx.caller,
+                        cwd: cwd.clone(),
+                        now_ms: ctx.now_ms,
+                        hidden: hide_pane,
+                        argv: Vec::new(),
+                    });
+                    if r.status == ReceiptStatus::Rejected || r.status == ReceiptStatus::Failed {
+                        return Ok(r);
+                    }
+                    if *wait && !r.address.is_empty() {
+                        service.suppress_parent_notice_for(&r.address);
+                    }
+                    if !r.address.is_empty() {
+                        spawned_addresses.push(r.address.clone());
+                    }
+                    if first_receipt.is_none() {
+                        first_receipt = Some(r);
+                    }
+                }
+                let mut first_receipt = first_receipt.ok_or(DispatchError::BadArgs)?;
+                first_receipt.address = spawned_addresses.first().cloned().unwrap_or_default();
+                first_receipt.text = Some(spawned_addresses.join(","));
+                return Ok(first_receipt);
             }
             let task = combine_task(file_text, task.clone());
             if *explicit_role {
@@ -376,6 +473,8 @@ pub fn execute<P: Port>(
             force,
             only_ready,
             allow_queue,
+            wait,
+            timeout_ms: _,
         } => {
             let input = SendInput {
                 id: ctx.id.to_string(),
@@ -395,12 +494,26 @@ pub fn execute<P: Port>(
                 system: false,
                 presentation_emitted: false,
             };
-            if let Some(path) = file {
+            let receipt = if let Some(path) = file {
                 let workspace = ctx.workspace.ok_or(DispatchError::PathRejected)?;
-                Ok(service.send_file(input, workspace, path))
+                service.send_file(input, workspace, path)
             } else {
-                Ok(service.send(input))
+                service.send(input)
+            };
+            if receipt.submitted && address.starts_with("thread:") {
+                let _ = service.publish_pane(
+                    address,
+                    PresenceState::Working.as_str(),
+                    ctx.now_ms.max(1),
+                    ctx.now_ms.max(1),
+                    None,
+                    None,
+                );
+                if *wait {
+                    service.suppress_parent_notice_for(address);
+                }
             }
+            Ok(receipt)
         }
         Command::Wait {
             address,
@@ -426,7 +539,14 @@ pub fn execute<P: Port>(
             address,
             lines,
             last_assistant,
-        } => Ok(service.read_with_mode(ctx.id, address, *lines, *last_assistant)),
+        } => {
+            let receipt = service.read_with_mode(ctx.id, address, *lines, *last_assistant);
+            if ctx.caller != Caller::Human && receipt.status == ReceiptStatus::Settled {
+                let reader = (!ctx.from.trim().is_empty()).then_some(ctx.from);
+                service.suppress_if_settled_child(address, reader);
+            }
+            Ok(receipt)
+        }
         Command::Report {
             to,
             from,

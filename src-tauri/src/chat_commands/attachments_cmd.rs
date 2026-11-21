@@ -95,6 +95,20 @@ pub fn stage_dropped_chat_attachments(request: Option<Value>) -> Value {
     Value::Array(stage_dropped_paths(thread_id, &paths))
 }
 
+pub fn read_chat_attachment_preview(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let thread_id = req.and_then(|item| item.get("threadId")).and_then(|value| value.as_str());
+    let resource_id = req
+        .and_then(|item| item.get("resourceId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let path = req.and_then(|item| item.get("path")).and_then(|value| value.as_str());
+    match crate::chat::read_attachment_preview(thread_id, resource_id, path) {
+        Some(url) => Value::String(url),
+        None => Value::Null,
+    }
+}
+
 pub fn rewind_thread_transcript(request: Option<Value>) -> Value {
     let req = body(&request);
     let thread_id = req.and_then(|item| item.get("threadId")).and_then(|value| value.as_str()).unwrap_or("");

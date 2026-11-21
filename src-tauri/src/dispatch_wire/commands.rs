@@ -55,6 +55,8 @@ pub fn dispatch_send(request: Option<Value>) -> Value {
         force: request.get("force").and_then(Value::as_bool).unwrap_or(false),
         only_ready: request.get("onlyReady").and_then(Value::as_bool).unwrap_or(false),
         allow_queue: request.get("allowQueue").and_then(Value::as_bool).unwrap_or(true),
+        wait: request.get("wait").and_then(Value::as_bool).unwrap_or(false),
+        timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
     };
     let receipt = execute_command(&request, &command, &id);
     serde_json::to_value(&receipt).unwrap_or(Value::Null)
@@ -216,6 +218,8 @@ pub fn dispatch_run(request: Option<Value>) -> Value {
         explicit_role,
         file: request.get("file").and_then(Value::as_str).map(|s| s.to_string()),
         task: request.get("task").and_then(Value::as_str).map(|s| s.to_string()),
+        tasks: Vec::new(),
+        count: None,
         wait: request.get("wait").and_then(Value::as_bool).unwrap_or(false),
         timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
         hidden: request.get("hidden").and_then(Value::as_bool).unwrap_or(false),

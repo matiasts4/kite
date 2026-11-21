@@ -142,24 +142,17 @@ fn turns_remaining(turn: &AcceptedTurn) -> i64 {
     (limit - turn.turns_completed).clamp(0, 65535)
 }
 
-pub fn autopilot_next(request: Option<Value>) -> Value {
-    let value = request_value(&request);
-    let accepted = parse_autopilot(&value);
-    let Some(turn) = accepted else {
-        return stuck_decision(0);
-    };
-
-    let remaining = turns_remaining(&turn);
-    let _ = with_document(|document| {
-        document["schemaVersion"] = json!(1);
-        document["autopilotActive"] = json!(true);
-        Ok(())
-    });
-
-    if cfg!(test) && std::env::var("KITE_LIVE_AUTOPILOT").is_err() {
-        return stuck_decision(remaining);
+fn resolve_turn_transcript(transcript: &str, session_id: &str) -> String {
+    if !transcript.trim().is_empty() {
+        return transcript.to_string();
     }
+    if session_id.trim().is_empty() {
+        return String::new();
+    }
+    crate::terminal::scrollback::terminal_recent_text(session_id)
+}
 
+fn evaluate_autopilot_turn(turn: &AcceptedTurn, remaining: i64) -> Value {
     let transcript_lower = turn.transcript.to_lowercase();
     let is_busy = transcript_lower.contains("compiling ")
         || transcript_lower.contains("building ")
@@ -252,6 +245,29 @@ pub fn autopilot_next(request: Option<Value>) -> Value {
     })
 }
 
+pub fn autopilot_next(request: Option<Value>) -> Value {
+    let value = request_value(&request);
+    let Some(mut turn) = parse_autopilot(&value) else {
+        return stuck_decision(0);
+    };
+
+    let remaining = turns_remaining(&turn);
+    let _ = with_document(|document| {
+        document["schemaVersion"] = json!(1);
+        document["autopilotActive"] = json!(true);
+        Ok(())
+    });
+
+    if cfg!(test) && std::env::var("KITE_LIVE_AUTOPILOT").is_err() {
+        return stuck_decision(remaining);
+    }
+
+    let session_id = value.get("sessionId").and_then(Value::as_str).unwrap_or("");
+    turn.transcript = resolve_turn_transcript(&turn.transcript, session_id);
+
+    evaluate_autopilot_turn(&turn, remaining)
+}
+
 pub fn cancel_autopilot(_request: Option<Value>) -> Value {
     let path = tasks_file_path();
     let _guard = store_lock().lock().unwrap_or_else(|err| err.into_inner());
@@ -263,4 +279,45 @@ pub fn cancel_autopilot(_request: Option<Value>) -> Value {
     }
     Value::Null
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_turn(mode: &str, turns_completed: i64, transcript: &str) -> AcceptedTurn {
+        AcceptedTurn {
+            task: "Ship feature".to_string(),
+            mode: mode.to_string(),
+            transcript: transcript.to_string(),
+            turns_completed,
+        }
+    }
+
+    #[test]
+    fn evaluate_autopilot_turn_handles_wait_prompt_advance_and_complete() {
+        let busy = sample_turn("complete", 1, "Compiling kite-code v0.1.0...");
+        let wait_res = evaluate_autopilot_turn(&busy, 59);
+        assert_eq!(wait_res["action"], "wait");
+
+        let first = sample_turn("complete", 0, "");
+        let prompt_res = evaluate_autopilot_turn(&first, 60);
+        assert_eq!(prompt_res["action"], "prompt");
+        assert!(!prompt_res["prompt"].as_str().unwrap().is_empty());
+
+        let done_turn = sample_turn("complete", 1, "All tests passed in 1.2s");
+        let complete_res = evaluate_autopilot_turn(&done_turn, 59);
+        assert_eq!(complete_res["action"], "complete");
+
+        let dream_turn = sample_turn("dream", 1, "All tests passed in 1.2s");
+        let advance_res = evaluate_autopilot_turn(&dream_turn, 239);
+        assert_eq!(advance_res["action"], "advance");
+    }
+
+    #[test]
+    fn resolve_turn_transcript_uses_non_empty_input_or_terminal_fallback() {
+        assert_eq!(resolve_turn_transcript("live output", ""), "live output");
+        assert_eq!(resolve_turn_transcript("   ", ""), "");
+    }
+}
+
 

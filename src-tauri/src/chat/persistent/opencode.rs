@@ -111,6 +111,10 @@ pub fn opencode_turn_args_with_model(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
+    for file_path in crate::chat::extract_attachment_file_paths(prompt) {
+        args.push("--file".to_string());
+        args.push(file_path);
+    }
     args.push(prompt.to_string());
     args
 }

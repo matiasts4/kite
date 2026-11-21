@@ -57,6 +57,16 @@ fn launch_pending_turns(
             continue;
         }
         if let Err(err) = invoke_launcher(launcher, &child_id, &prompt) {
+            if let Ok(mut all) = threads().lock() {
+                if let Some(child) = all
+                    .iter_mut()
+                    .find(|t| t.get("id").and_then(Value::as_str) == Some(child_id.as_str()))
+                {
+                    child["status"] = json!("error");
+                    crate::chat::threads::touch(child);
+                }
+            }
+            crate::chat::subagents::sync_child_thread_to_parent(&child_id);
             let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
             let (mut state, path) = load_swarm_state(coord_tid, cwd);
             if let Some(m) = state
@@ -98,34 +108,58 @@ fn execute_swarm_add(
     } else {
         Some(crate::persist::roaming_app_dir())
     };
-    let resolved_role_file = role.and_then(|role_name| {
-        crate::dispatch::role::find_role_across_roots(
+    let resolved_target = role.and_then(|role_name| {
+        crate::dispatch::role::resolve_role_target(
             cfg_dir.as_deref(),
             cwd.map(std::path::Path::new),
             role_name,
         )
-        .ok()
     });
-    let role_provider = resolved_role_file.as_ref().and_then(|rf| {
-        rf.provider
-            .as_deref()
-            .and_then(crate::chat::models::canonical_thread_provider_id)
-            .or_else(|| crate::chat::models::canonical_thread_provider_id(&rf.command))
-    });
-    let eff_provider_owned = provider.map(str::to_string).or_else(|| role_provider.map(str::to_string));
-    let eff_model_owned = model
-        .map(str::to_string)
-        .or_else(|| resolved_role_file.as_ref().and_then(|rf| rf.model.clone()));
-    let eff_effort_owned = effort
-        .map(str::to_string)
-        .or_else(|| resolved_role_file.as_ref().and_then(|rf| rf.effort.clone()));
-    let eff_workspace_owned = workspace
-        .map(str::to_string)
-        .or_else(|| resolved_role_file.as_ref().and_then(|rf| rf.workspace.clone()));
-    let role_body_owned = resolved_role_file
-        .as_ref()
-        .map(|rf| rf.body.trim().to_string())
-        .filter(|b| !b.is_empty());
+    let (
+        role_provider,
+        role_model,
+        role_effort,
+        role_workspace,
+        role_mode,
+        role_agent_id,
+        role_label_owned,
+        role_body_owned,
+    ) = match resolved_target {
+        Some(crate::dispatch::role::ResolvedRoleTarget::AgentProfile(ap)) => (
+            ap.provider,
+            ap.model,
+            ap.effort,
+            None,
+            ap.mode,
+            Some(ap.agent_id),
+            Some(ap.display_name),
+            None,
+        ),
+        Some(crate::dispatch::role::ResolvedRoleTarget::MarkdownRole(rf)) => {
+            let rp = rf
+                .provider
+                .as_deref()
+                .and_then(crate::chat::models::canonical_thread_provider_id)
+                .or_else(|| crate::chat::models::canonical_thread_provider_id(&rf.command))
+                .map(str::to_string);
+            let body = Some(rf.body.trim().to_string()).filter(|b| !b.is_empty());
+            (
+                rp,
+                rf.model,
+                rf.effort,
+                rf.workspace,
+                None,
+                None,
+                role.map(str::to_string),
+                body,
+            )
+        }
+        None => (None, None, None, None, None, None, role.map(str::to_string), None),
+    };
+    let eff_provider_owned = provider.map(str::to_string).or(role_provider);
+    let eff_model_owned = model.map(str::to_string).or(role_model);
+    let eff_effort_owned = effort.map(str::to_string).or(role_effort);
+    let eff_workspace_owned = workspace.map(str::to_string).or(role_workspace);
 
     let member_channels = normalize_member_channels(channels);
     let primary_channel = member_channels[0].clone();
@@ -170,8 +204,10 @@ fn execute_swarm_add(
         eff_provider_owned.as_deref(),
         eff_model_owned.as_deref(),
         eff_effort_owned.as_deref(),
+        role_mode.as_deref(),
+        role_agent_id.as_deref(),
         ws_mode,
-        role,
+        role_label_owned.as_deref(),
         fork,
         fork_source_thread_id.as_deref(),
         cwd,

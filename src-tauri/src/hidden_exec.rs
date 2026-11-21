@@ -52,6 +52,8 @@ pub struct HiddenChild {
     h_process: *mut std::ffi::c_void,
     #[cfg(windows)]
     h_thread: *mut std::ffi::c_void,
+    #[cfg(windows)]
+    h_job: *mut std::ffi::c_void,
 
     #[cfg(not(windows))]
     child: std::process::Child,
@@ -79,7 +81,17 @@ impl HiddenChild {
     pub fn kill(&mut self) -> std::io::Result<()> {
         #[cfg(windows)]
         {
-            if !self.h_process.is_null() && self.h_process as isize != -1 {
+            let mut killed = false;
+            if !self.h_job.is_null() && self.h_job as isize != -1 {
+                unsafe {
+                    if windows_impl::TerminateJobObject(self.h_job, 1) != 0 {
+                        killed = true;
+                    }
+                }
+                windows_impl::close(self.h_job);
+                self.h_job = std::ptr::null_mut();
+            }
+            if !killed && !self.h_process.is_null() && self.h_process as isize != -1 {
                 unsafe {
                     if windows_impl::TerminateProcess(self.h_process, 1) != 0 {
                         return Ok(());
@@ -122,6 +134,7 @@ impl HiddenChild {
 #[cfg(windows)]
 impl Drop for HiddenChild {
     fn drop(&mut self) {
+        windows_impl::close(self.h_job);
         windows_impl::close(self.h_thread);
         windows_impl::close(self.h_process);
     }
@@ -210,6 +223,41 @@ mod windows_impl {
     const FILE_SHARE_WRITE: u32 = 0x0000_0002;
     const OPEN_EXISTING: u32 = 3;
     const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: u32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+    #[repr(C)]
+    struct JobObjectBasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    struct JobObjectExtendedLimitInformation {
+        basic_limit_information: JobObjectBasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
 
     #[repr(C)]
     struct SecurityAttributes {
@@ -306,6 +354,15 @@ mod windows_impl {
         pub(super) fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
         pub(super) fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> Bool;
         pub(super) fn TerminateProcess(process: Handle, exit_code: u32) -> Bool;
+        fn CreateJobObjectW(attributes: *mut SecurityAttributes, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            info_class: u32,
+            info: *const c_void,
+            info_len: u32,
+        ) -> Bool;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> Bool;
+        pub(super) fn TerminateJobObject(job: Handle, exit_code: u32) -> Bool;
         fn ReadFile(
             file: Handle,
             buffer: *mut u8,
@@ -413,6 +470,26 @@ mod windows_impl {
         }
     }
 
+    unsafe fn create_kill_on_close_job_for_process(h_process: Handle) -> Handle {
+        let h_job = CreateJobObjectW(null_mut(), null());
+        if h_job.is_null() || h_job as isize == -1 {
+            return null_mut();
+        }
+        let mut info: JobObjectExtendedLimitInformation = std::mem::zeroed();
+        info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set_ok = SetInformationJobObject(
+            h_job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            &info as *const _ as *const c_void,
+            std::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+        );
+        if set_ok == 0 || AssignProcessToJobObject(h_job, h_process) == 0 {
+            close(h_job);
+            return null_mut();
+        }
+        h_job
+    }
+
     pub(super) fn close(handle: Handle) {
         if !handle.is_null() && handle as isize != -1 {
             unsafe {
@@ -499,6 +576,8 @@ mod windows_impl {
                 return Err(error);
             }
 
+            let h_job = create_kill_on_close_job_for_process(process_info.h_process);
+
             // Raw handles are plain pointers; the two reader threads own one
             // pipe each, so moving them across threads is sound.
             let stdout_handle = stdout_read as usize;
@@ -510,12 +589,25 @@ mod windows_impl {
             let waited = WaitForSingleObject(process_info.h_process, wait_ms);
             let timed_out = waited == WAIT_TIMEOUT;
             if timed_out {
-                TerminateProcess(process_info.h_process, 1);
+                if !h_job.is_null() && h_job as isize != -1 {
+                    TerminateJobObject(h_job, 1);
+                } else {
+                    TerminateProcess(process_info.h_process, 1);
+                }
                 WaitForSingleObject(process_info.h_process, WAIT_INFINITE);
             }
 
             let mut exit_code: u32 = 1;
             GetExitCodeProcess(process_info.h_process, &mut exit_code);
+
+            // Terminate any surviving background descendants (e.g., CLI helper
+            // daemons that inherited our stdout/stderr pipes) before joining
+            // the reader threads so one-shot `run()` cannot leak orphans or
+            // deadlock waiting for pipe EOF after the main process exited.
+            if !h_job.is_null() && h_job as isize != -1 {
+                TerminateJobObject(h_job, 1);
+                close(h_job);
+            }
 
             let stdout = stdout_thread.join().unwrap_or_default();
             let stderr = stderr_thread.join().unwrap_or_default();
@@ -669,6 +761,8 @@ mod windows_impl {
                 return Err(error);
             }
 
+            let h_job = create_kill_on_close_job_for_process(process_info.h_process);
+
             use std::os::windows::io::{FromRawHandle, RawHandle};
             let stdin_file = std::fs::File::from_raw_handle(stdin_write as RawHandle);
             let stdout_file = std::fs::File::from_raw_handle(stdout_read as RawHandle);
@@ -678,6 +772,7 @@ mod windows_impl {
                 pid: process_info.dw_process_id,
                 h_process: process_info.h_process,
                 h_thread: process_info.h_thread,
+                h_job,
                 stdin: Some(Box::new(stdin_file)),
                 stdout: Some(Box::new(stdout_file)),
                 stderr: Some(Box::new(stderr_file)),
@@ -888,6 +983,127 @@ mod tests {
         assert!(
             std::env::var_os(sentinel_key).is_none(),
             "child extra_env must never mutate parent process environment"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn job_object_kills_descendant_process_tree_on_kill() {
+        use std::io::{BufRead, BufReader};
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+        }
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+
+        fn is_pid_alive(pid: u32) -> bool {
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if h.is_null() {
+                    return false;
+                }
+                let mut code: u32 = 0;
+                let ok = windows_impl::GetExitCodeProcess(h, &mut code);
+                windows_impl::close(h);
+                ok != 0 && code == STILL_ACTIVE
+            }
+        }
+
+        let mut child = spawn_streaming(
+            Path::new("powershell.exe"),
+            &[
+                "-NoProfile",
+                "-Command",
+                "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c ping -n 30 127.0.0.1 >nul' -PassThru -WindowStyle Hidden; Write-Output ('CHILD_PID=' + $p.Id); Start-Sleep -Seconds 30",
+            ],
+            None,
+        )
+        .expect("streaming powershell should start");
+
+        let stdout = child.stdout.take().expect("stdout pipe");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let mut descendant_pid: Option<u32> = None;
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if let Some(rest) = line.trim().strip_prefix("CHILD_PID=") {
+                descendant_pid = rest.trim().parse::<u32>().ok();
+                break;
+            }
+            line.clear();
+        }
+        let descendant_pid = descendant_pid.expect("should report spawned descendant PID");
+        assert!(is_pid_alive(descendant_pid), "descendant should be alive before kill()");
+
+        child.kill().expect("kill should succeed");
+        let _ = child.wait();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while is_pid_alive(descendant_pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !is_pid_alive(descendant_pid),
+            "descendant process (pid {descendant_pid}) survived HiddenChild::kill() — Job Object cleanup missing"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_kills_leaked_descendant_holding_stdout_pipe_on_exit() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+        }
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+
+        fn is_pid_alive(pid: u32) -> bool {
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if h.is_null() {
+                    return false;
+                }
+                let mut code: u32 = 0;
+                let ok = windows_impl::GetExitCodeProcess(h, &mut code);
+                windows_impl::close(h);
+                ok != 0 && code == STILL_ACTIVE
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let out = run(
+            Path::new("powershell.exe"),
+            &[
+                "-NoProfile",
+                "-Command",
+                "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c ping -n 10 127.0.0.1 >nul' -PassThru -WindowStyle Hidden; Write-Output ('CHILD_PID=' + $p.Id)",
+            ],
+            Duration::from_secs(15),
+        )
+        .expect("hidden_exec::run should succeed");
+        let elapsed = started.elapsed();
+
+        let stdout = out.stdout_lossy();
+        let descendant_pid = stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("CHILD_PID="))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .expect("should report spawned descendant PID");
+
+        assert!(out.success(), "main powershell exited cleanly: {out:?}");
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "hidden_exec::run waited {elapsed:?} for leaked descendant (pid {descendant_pid})"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while is_pid_alive(descendant_pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !is_pid_alive(descendant_pid),
+            "leaked descendant (pid {descendant_pid}) survived hidden_exec::run()"
         );
     }
 }

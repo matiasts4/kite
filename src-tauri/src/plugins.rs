@@ -589,6 +589,37 @@ pub async fn save_plugin_config(
     .map_err(|e| format!("save_plugin_config task failed: {e}"))?
 }
 
+/// Normalize a list of disabled plugin IDs (trimmed, lowercased, deduplicated).
+pub fn normalize_disabled_plugins(disabled_plugin_ids: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in disabled_plugin_ids {
+        let norm = raw.trim().to_ascii_lowercase();
+        if !norm.is_empty() && !out.iter().any(|existing| existing == &norm) {
+            out.push(norm);
+        }
+    }
+    out
+}
+
+/// Return `true` if `plugin_id` (or its canonical alias) is present in `disabled_plugin_ids`.
+pub fn is_plugin_disabled(disabled_plugin_ids: &[String], plugin_id: &str) -> bool {
+    let target = plugin_id.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return false;
+    }
+    disabled_plugin_ids.iter().any(|raw| {
+        let norm = raw.trim().to_ascii_lowercase();
+        if norm == target {
+            return true;
+        }
+        match target.as_str() {
+            "kite-dispatch" | "dispatch" => norm == "kite-dispatch" || norm == "dispatch",
+            "kite-ctx" | "ctx" => norm == "kite-ctx" || norm == "ctx",
+            _ => false,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -146,7 +146,8 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
             if step_type == "user_input" {
                 ParsedLine::default()
             } else if step_type == "agent_response" {
-                let text = step
+                let has_step_index = step.get("step_index").and_then(Value::as_i64).is_some();
+                let raw_text = step
                     .get("text_delta")
                     .or_else(|| step.get("text"))
                     .or_else(|| step.get("content"))
@@ -157,18 +158,26 @@ pub fn parse_antigravity_line(line: &str) -> ParsedLine {
                     .or_else(|| step.get("thought"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if !text.is_empty() {
-                    ParsedLine {
-                        conversation_id: None,
-                        events: vec![TransportEvent::Text(text.to_string())],
-                    }
-                } else if !thought.is_empty() {
+                if has_step_index && (!raw_text.is_empty() || !thought.is_empty()) {
                     ParsedLine {
                         conversation_id: None,
                         events: vec![TransportEvent::Activity(trimmed.to_string())],
                     }
                 } else {
-                    ParsedLine::default()
+                    let clean_text = crate::chat::threads::sanitize_chat_text(raw_text);
+                    if !clean_text.is_empty() {
+                        ParsedLine {
+                            conversation_id: None,
+                            events: vec![TransportEvent::Text(clean_text)],
+                        }
+                    } else if !thought.is_empty() {
+                        ParsedLine {
+                            conversation_id: None,
+                            events: vec![TransportEvent::Activity(trimmed.to_string())],
+                        }
+                    } else {
+                        ParsedLine::default()
+                    }
                 }
             } else {
                 ParsedLine {

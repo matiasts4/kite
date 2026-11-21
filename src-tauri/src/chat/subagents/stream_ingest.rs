@@ -30,17 +30,19 @@ pub(super) fn parse_nested_frame_items(subagent_id: &str, id_hint: &str, frame: 
                 match part.get("type").and_then(Value::as_str).unwrap_or("") {
                     "thinking" => {
                         if let Some(text) = part.get("thinking").or_else(|| part.get("text")).and_then(Value::as_str) {
-                            if !text.trim().is_empty() {
+                            let cleaned = crate::chat::threads::sanitize_chat_text(text);
+                            if !cleaned.trim().is_empty() {
                                 let item_id = format!("sub_{subagent_id}_{id_hint}_th_{idx}");
-                                out.push(chat_item(&item_id, "reasoning", text, false));
+                                out.push(chat_item(&item_id, "reasoning", &cleaned, false));
                             }
                         }
                     }
                     "text" => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            if !text.trim().is_empty() {
+                            let cleaned = crate::chat::threads::sanitize_chat_text(text);
+                            if !cleaned.trim().is_empty() {
                                 let item_id = format!("sub_{subagent_id}_{id_hint}_tx_{idx}");
-                                out.push(chat_item(&item_id, "assistant", text, false));
+                                out.push(chat_item(&item_id, "assistant", &cleaned, false));
                             }
                         }
                     }
@@ -391,6 +393,23 @@ pub fn build_swarm_state(thread_id: &str) -> Value {
                     "error" => member.state = "stopped".to_string(),
                     "waiting" if member.state.is_empty() => member.state = "waiting".to_string(),
                     "idle" if member.state.is_empty() => member.state = "waiting".to_string(),
+                    "idle" if member.state == "working" => {
+                        let cid = child.get("id").and_then(Value::as_str).unwrap_or("");
+                        let run_terminal = parent
+                            .get("subagentRuns")
+                            .and_then(Value::as_array)
+                            .and_then(|runs| {
+                                runs.iter().find(|r| {
+                                    r.get("childThreadId").and_then(Value::as_str) == Some(cid)
+                                        || r.get("subagentId").and_then(Value::as_str) == Some(cid)
+                                })
+                            })
+                            .and_then(|r| r.get("status").and_then(Value::as_str))
+                            .filter(|s| matches!(*s, "completed" | "failed" | "killed"));
+                        if let Some(rs) = run_terminal {
+                            member.state = if rs == "killed" { "killed" } else { "stopped" }.to_string();
+                        }
+                    }
                     _ => {}
                 }
             }

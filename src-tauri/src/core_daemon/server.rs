@@ -456,6 +456,17 @@ pub fn on_client_window_close() {
     // Do NOT call snapshot_and_shutdown_all_terminals!
 }
 
+pub(crate) const DAEMON_TOKIO_WORKER_THREADS: usize = 2;
+const DAEMON_TOKIO_MAX_BLOCKING_THREADS: usize = 8;
+
+pub(crate) fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(DAEMON_TOKIO_WORKER_THREADS)
+        .max_blocking_threads(DAEMON_TOKIO_MAX_BLOCKING_THREADS)
+        .enable_all()
+        .build()
+}
+
 /// Starts the standalone daemon server event loop on this build's pipe.
 pub fn run_core_daemon_main() {
     CORE_DAEMON_RUNNING.store(true, Ordering::SeqCst);
@@ -472,10 +483,7 @@ pub fn run_core_daemon_main() {
         pipe_path
     ));
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to build tokio runtime for kite-core");
+    let rt = build_daemon_runtime().expect("Failed to build tokio runtime for kite-core");
 
     rt.block_on(async move {
         #[cfg(windows)]
@@ -902,4 +910,17 @@ async fn handle_pipe_client(
 #[allow(dead_code)]
 async fn handle_unix_client(stream: tokio::net::UnixStream, expected_token: String) {
     handle_stream_client(stream, expected_token).await;
+}
+
+#[cfg(test)]
+mod daemon_runtime_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_runtime_builds_with_bounded_worker_pool() {
+        assert_eq!(DAEMON_TOKIO_WORKER_THREADS, 2);
+        let rt = build_daemon_runtime().expect("bounded daemon runtime should build");
+        let val = rt.block_on(async { 42usize });
+        assert_eq!(val, 42);
+    }
 }

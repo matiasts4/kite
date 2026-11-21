@@ -4,7 +4,7 @@ use crate::dispatch::address::is_alias_name;
 use crate::dispatch::envelope::{last_lines, wrap_envelope};
 use crate::dispatch::files::read_workspace_file;
 use crate::dispatch::keys::encode_key;
-use crate::dispatch::policy::service::Service;
+use crate::dispatch::policy::service::{endpoint_wait_state, is_settled_child_state, Service};
 use crate::dispatch::policy::types::*;
 use crate::dispatch::port::{Port, StartRequest, StartThreadRequest, SubmitMeta};
 use crate::dispatch::presence::{choose_effective, is_ready, BlockKind, Presence, PresenceState};
@@ -308,13 +308,10 @@ impl<P: Port> Service<P> {
                     .filter(|ep| ep.live && ep.parent.as_deref() == Some(parent.as_str()))
                     .collect();
                 Ok(kids.iter().all(|ep| {
-                    let state = choose_effective(ep.reported.as_ref(), ep.observed.as_ref()).state;
-                    let counted = if ep.reported.is_none() && ep.observed.is_none() {
-                        PresenceState::Working
-                    } else {
-                        state
-                    };
-                    !matches!(counted, PresenceState::Working | PresenceState::Unknown)
+                    !matches!(
+                        endpoint_wait_state(ep),
+                        PresenceState::Working | PresenceState::Unknown
+                    )
                 }))
             }
             Some(ChildrenMode::Any) => {
@@ -326,13 +323,7 @@ impl<P: Port> Service<P> {
                 Ok(self.endpoints.values().any(|ep| {
                     ep.live
                         && ep.parent.as_deref() == Some(parent.as_str())
-                        && matches!(
-                            choose_effective(ep.reported.as_ref(), ep.observed.as_ref()).state,
-                            PresenceState::Blocked
-                                | PresenceState::Done
-                                | PresenceState::Error
-                                | PresenceState::Gone
-                        )
+                        && is_settled_child_state(endpoint_wait_state(ep))
                 }))
             }
         }

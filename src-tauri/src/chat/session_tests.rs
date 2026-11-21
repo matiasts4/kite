@@ -600,3 +600,144 @@ fn mutable_transport_updates_controls_in_place_without_respawn() {
     assert_eq!(first.controls_snapshot(), Some(next_controls));
     assert_eq!(incoming.spawn_count(), 0);
 }
+
+#[test]
+fn transport_resume_handle_survives_running_account_eviction() {
+    let mut manager = SessionManager::new();
+    let mut s = spec("thread-agy-evict", SessionMode::Persistent, None);
+    s.driver = "antigravity".to_string();
+    let transport = attach(
+        &mut manager,
+        s,
+        ScriptedTransport::new().with_resume_handle("conv-active-123"),
+    );
+    manager.start("thread-agy-evict").unwrap();
+    manager.send_turn("thread-agy-evict", "cmd-1", "hi").unwrap();
+    assert_eq!(transport.spawn_count(), 1);
+
+    manager.evict_provider_sessions("antigravity");
+    assert_eq!(manager.status("thread-agy-evict").unwrap().resume_handle, None);
+    assert_eq!(
+        manager.transport_resume_handle("thread-agy-evict").as_deref(),
+        Some("conv-active-123")
+    );
+}
+
+#[test]
+fn default_warm_cap_is_one_and_idle_timeout_is_five_minutes() {
+    assert_eq!(DEFAULT_MAX_WARM_SESSIONS, 1);
+    assert_eq!(DEFAULT_IDLE_TIMEOUT_MS, 5 * 60 * 1000);
+
+    let mut manager = SessionManager::new();
+    let t1 = attach(
+        &mut manager,
+        spec("warm-1", SessionMode::Persistent, None),
+        ScriptedTransport::new().with_resume_handle("resume-warm-1"),
+    );
+    let t2 = attach(
+        &mut manager,
+        spec("warm-2", SessionMode::Persistent, None),
+        ScriptedTransport::new().with_resume_handle("resume-warm-2"),
+    );
+
+    manager.start("warm-1").unwrap();
+    t1.script(TransportEvent::TurnEnded);
+    manager.poll("warm-1").unwrap();
+    assert_eq!(manager.warm_count(), 1);
+
+    // Starting a second persistent session with cap=1 reaps the idle first one
+    // while preserving its resume handle for seamless resurrection.
+    manager.start("warm-2").unwrap();
+    assert_eq!(manager.status("warm-1").unwrap().state, SessionState::Reaped);
+    assert_eq!(
+        manager.status("warm-1").unwrap().resume_handle.as_deref(),
+        Some("resume-warm-1")
+    );
+    assert_eq!(manager.warm_count(), 1);
+
+    t2.script(TransportEvent::TurnEnded);
+    manager.poll("warm-2").unwrap();
+    manager.send_turn("warm-1", "cmd-resurrect", "hello again").unwrap();
+    assert_eq!(manager.status("warm-1").unwrap().state, SessionState::Running);
+    assert_eq!(manager.status("warm-2").unwrap().state, SessionState::Reaped);
+    assert_eq!(t1.spawn_count(), 2);
+}
+
+#[test]
+fn session_events_and_commands_are_bounded_and_reaped_clears_events() {
+    let mut manager = SessionManager::new();
+    let t1 = attach(
+        &mut manager,
+        spec("bounded-1", SessionMode::Persistent, None),
+        ScriptedTransport::new().with_resume_handle("resume-bounded-1"),
+    );
+    manager.start("bounded-1").unwrap();
+
+    for idx in 0..600 {
+        t1.script(TransportEvent::Text(format!("msg-{idx}")));
+    }
+    manager.poll("bounded-1").unwrap();
+    let retained = manager.events_since("bounded-1", 0);
+    assert!(
+        retained.len() <= 500,
+        "expected ManagedSession.events to be capped at <= 500, got {}",
+        retained.len()
+    );
+    assert!(
+        retained.last().unwrap().payload["text"]
+            .as_str()
+            .unwrap()
+            == "msg-599"
+    );
+
+    t1.script(TransportEvent::TurnEnded);
+    manager.poll("bounded-1").unwrap();
+
+    for idx in 0..600 {
+        let cmd = format!("cmd-{idx}");
+        let prompt = format!("prompt-{idx}");
+        manager.send_turn("bounded-1", &cmd, &prompt).unwrap();
+        t1.script(TransportEvent::TurnEnded);
+        manager.poll("bounded-1").unwrap();
+    }
+    assert!(
+        manager.commands.len() <= 500,
+        "expected SessionManager.commands to be capped at <= 500, got {}",
+        manager.commands.len()
+    );
+    assert!(!manager.commands.contains_key("cmd-0"));
+    assert!(manager.commands.contains_key("cmd-599"));
+
+    manager.reap_session("bounded-1").unwrap();
+    let after_reap = manager.events_since("bounded-1", 0);
+    assert!(
+        after_reap.len() <= 1,
+        "expected reaped session to clear old events, got {}",
+        after_reap.len()
+    );
+    assert_eq!(
+        manager.status("bounded-1").unwrap().resume_handle.as_deref(),
+        Some("resume-bounded-1")
+    );
+
+    // Terminal session pruning beyond 64 must preserve reaped resumable sessions.
+    for idx in 0..80 {
+        let tid = format!("closed-{idx}");
+        attach(&mut manager, spec(&tid, SessionMode::OneShot, None), ScriptedTransport::new());
+        manager.start(&tid).unwrap();
+        manager.stop(&tid).unwrap();
+    }
+    assert!(
+        manager.status("bounded-1").is_some(),
+        "reaped session with resume_handle must be preserved when pruning terminal sessions"
+    );
+    let closed_count = manager
+        .sessions
+        .values()
+        .filter(|s| s.record.state == SessionState::Closed)
+        .count();
+    assert!(
+        closed_count <= 64,
+        "expected terminal Closed sessions to be pruned to <= 64, got {closed_count}"
+    );
+}

@@ -3,14 +3,32 @@
 use serde_json::Value;
 
 use crate::dispatch::audit::{import_agent_messages, AuditRow};
-use crate::dispatch::types::{Caller, Receipt};
+use crate::dispatch::types::{Caller, Receipt, ReceiptStatus};
 
 use super::protocol::{import_marker, now_ms};
 
 pub fn record_audit(receipt: &Receipt, body: &str, caller: Caller) {
-    if receipt.replayed {
+    record_audit_with_target(receipt, body, caller, &receipt.address, None);
+}
+
+pub fn record_audit_with_target(
+    receipt: &Receipt,
+    body: &str,
+    caller: Caller,
+    target_address: &str,
+    profile_id_hint: Option<&str>,
+) {
+    if receipt.replayed || (receipt.op == "wait" && receipt.status == ReceiptStatus::Queued) {
         return;
     }
+    let profile_id = receipt
+        .address
+        .strip_prefix("agent:")
+        .or_else(|| target_address.strip_prefix("agent:"))
+        .or(profile_id_hint)
+        .unwrap_or("")
+        .to_string();
+    let thread_id = receipt.address.strip_prefix("thread:");
     let row = AuditRow {
         id: receipt.id.clone(),
         op: receipt.op.clone(),
@@ -24,14 +42,10 @@ pub fn record_audit(receipt: &Receipt, body: &str, caller: Caller) {
             Caller::Agent => "Agent".into(),
             Caller::Script => "Script".into(),
         },
-        profile_id: receipt
-            .address
-            .strip_prefix("agent:")
-            .unwrap_or("")
-            .to_string(),
+        profile_id,
         created_ms: now_ms(),
     };
-    let _ = insert_audit(&row);
+    let _ = insert_audit_with_thread(&row, thread_id);
 }
 
 pub fn audit_db() -> Option<rusqlite::Connection> {
@@ -52,19 +66,37 @@ pub fn audit_db() -> Option<rusqlite::Connection> {
             sender_name TEXT NOT NULL,
             profile_id TEXT NOT NULL,
             error TEXT,
-            created_ms INTEGER NOT NULL
+            created_ms INTEGER NOT NULL,
+            thread_id TEXT
         );",
     )
     .ok()?;
+    let has_thread_id = conn
+        .prepare("PRAGMA table_info(dispatch_audit)")
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .ok()
+                .map(|rows| rows.flatten().any(|name| name == "thread_id"))
+        })
+        .unwrap_or(false);
+    if !has_thread_id {
+        conn.execute("ALTER TABLE dispatch_audit ADD COLUMN thread_id TEXT", [])
+            .ok()?;
+    }
     Some(conn)
 }
 
 pub fn insert_audit(row: &AuditRow) -> Option<()> {
+    insert_audit_with_thread(row, None)
+}
+
+pub fn insert_audit_with_thread(row: &AuditRow, thread_id: Option<&str>) -> Option<()> {
     let conn = audit_db()?;
     conn.execute(
         "INSERT OR IGNORE INTO dispatch_audit
-         (id, op, address, body, status, submitted, historical, sender_name, profile_id, error, created_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
+         (id, op, address, body, status, submitted, historical, sender_name, profile_id, error, created_ms, thread_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11)",
         rusqlite::params![
             row.id,
             row.op,
@@ -76,6 +108,7 @@ pub fn insert_audit(row: &AuditRow) -> Option<()> {
             row.sender_name,
             row.profile_id,
             row.created_ms as i64,
+            thread_id,
         ],
     )
     .ok()?;

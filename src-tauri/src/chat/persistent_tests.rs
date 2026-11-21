@@ -622,3 +622,28 @@
         assert!(oc.update_controls(&controls(Some("anthropic/claude-sonnet-4"), Some("high"), None)));
         assert_eq!(oc.model_arg_for_test(), Some("anthropic/claude-sonnet-4#high"));
     }
+
+    #[test]
+    fn antigravity_step_update_agent_response_tracks_step_index_and_strips_system_message() {
+        let with_step = parse_antigravity_line(
+            r#"{"event":"step_update","step_update":{"step_index":479,"step_type":"agent_response","text_delta":"hola"}}"#,
+        );
+        assert!(
+            matches!(with_step.events.first(), Some(TransportEvent::Activity(_))),
+            "agent_response with step_index must emit Activity so stdout step_index stays monotonic, got {:?}",
+            with_step.events
+        );
+
+        let sanitized_text = parse_antigravity_line(
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"Before.\nuser\nThe following is a <SYSTEM_MESSAGE> not actually sent by the user.\n</SYSTEM_MESSAGE>Confirmado."}}"#,
+        );
+        assert_eq!(
+            sanitized_text.events,
+            vec![TransportEvent::Text("Before.\n\nConfirmado.".to_string())]
+        );
+
+        let protocol_only = parse_antigravity_line(
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"user\n<SYSTEM_MESSAGE>\n[Message] sender=x\n</SYSTEM_MESSAGE>"}}"#,
+        );
+        assert!(protocol_only.events.is_empty());
+    }

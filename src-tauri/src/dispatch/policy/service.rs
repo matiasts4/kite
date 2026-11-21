@@ -10,6 +10,21 @@ use crate::dispatch::presence::{
 use crate::dispatch::programs;
 use crate::dispatch::types::{exit_code, Caller, DispatchError, Family, Receipt, ReceiptStatus, NOTICE_TAIL_LINES};
 
+pub(crate) fn endpoint_wait_state(ep: &Endpoint) -> PresenceState {
+    if ep.reported.is_none() && ep.observed.is_none() {
+        PresenceState::Working
+    } else {
+        choose_effective(ep.reported.as_ref(), ep.observed.as_ref()).state
+    }
+}
+
+pub(crate) fn is_settled_child_state(state: PresenceState) -> bool {
+    matches!(
+        state,
+        PresenceState::Blocked | PresenceState::Done | PresenceState::Error | PresenceState::Gone
+    )
+}
+
 pub struct Service<P: Port> {
     pub(crate) endpoints: HashMap<String, Endpoint>,
     pub(crate) aliases: HashMap<String, String>,
@@ -438,6 +453,54 @@ impl<P: Port> Service<P> {
                         .retain(|q| q.source.as_deref() != Some(key.as_str()));
                 }
             }
+        }
+    }
+
+    pub fn suppress_parent_notices_for_children(
+        &mut self,
+        parent_address: &str,
+        only_settled: bool,
+    ) {
+        let Ok(parent) = self.resolve(parent_address) else {
+            return;
+        };
+        let child_keys: Vec<String> = self
+            .endpoints
+            .iter()
+            .filter(|(_, ep)| {
+                ep.live
+                    && ep.parent.as_deref() == Some(parent.as_str())
+                    && (!only_settled || is_settled_child_state(endpoint_wait_state(ep)))
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for child_key in child_keys {
+            self.suppress_parent_notice_for(&child_key);
+        }
+    }
+
+    pub fn suppress_if_settled_child(&mut self, address: &str, reader: Option<&str>) {
+        let Ok(key) = self.resolve(address) else {
+            return;
+        };
+        let reader_addr = reader.map(str::trim).filter(|value| !value.is_empty());
+        let resolved_reader = match reader_addr {
+            Some(value) => match self.resolve(value) {
+                Ok(rk) => Some(rk),
+                Err(_) => return,
+            },
+            None => None,
+        };
+        let should_suppress = self.endpoints.get(&key).is_some_and(|ep| {
+            let parent_matches = match (&ep.parent, &resolved_reader) {
+                (Some(parent), Some(reader_id)) => parent == reader_id,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            parent_matches && is_settled_child_state(endpoint_wait_state(ep))
+        });
+        if should_suppress {
+            self.suppress_parent_notice_for(&key);
         }
     }
 

@@ -246,6 +246,10 @@ fn main() {
         let code = crate::dispatch_wire::run_dispatch_cli(&args[2..]);
         std::process::exit(code);
     }
+    if args.len() >= 2 && args[1] == "agent" {
+        let code = crate::dispatch_wire::run_dispatch_cli(&args[1..]);
+        std::process::exit(code);
+    }
 
     let mut ondemand_panel: Option<String> = None;
     for idx in 1..args.len() {
@@ -333,7 +337,6 @@ fn main() {
     // opens first imports the per-install vaults and account profiles once.
     crate::connections::ensure_shared_registry();
 
-
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
 
@@ -376,6 +379,7 @@ fn main() {
                 let _ = crate::persist::initial_state();
             });
             crate::chat::persistent::start_idle_reaper();
+            crate::routines::start_routine_scheduler();
             std::thread::spawn(|| {
                 crate::dispatch_wire::start_gui_background();
             });
@@ -486,6 +490,7 @@ fn main() {
             get_chat_session_status,
             get_subscription_quotas,
             get_thread_subagent_detail,
+            list_all_subagent_runs,
             get_thread_swarm_state,
             send_subagent_message,
             stop_subagent_run,
@@ -568,6 +573,7 @@ fn main() {
             read_files_preview,
             read_files_text,
             read_terminal_output,
+            terminal::commands::read_terminal_transcript,
             poll_terminal_snapshot,
             set_terminal_presentation,
             scroll_terminal_viewport,
@@ -581,6 +587,7 @@ fn main() {
             read_workspace_file_diff,
             reconnect_ssh_workspace,
             recover_chat_thread,
+            regenerate_chat_thread_title,
             release_chat_attachment,
             remove_agent_skill,
             remove_workspace_from_list,
@@ -625,6 +632,7 @@ fn main() {
             stage_all_workspace_changes,
             stage_chat_blob,
             stage_dropped_chat_attachments,
+            read_chat_attachment_preview,
             stage_terminal_clipboard_image,
             stage_workspace_changes,
             start_agent_chat_turn,
@@ -677,6 +685,7 @@ fn main() {
             voice_resolve_work,
             write_agent_memory,
             write_agent_skill,
+            set_agent_skill_enabled,
             write_terminal,
             updater_check,
             updater_install,
@@ -718,6 +727,10 @@ fn main() {
             get_odd_task_content,
             query_operator_agent,
             proxy_operator_http,
+            proxy_operator_http_stream,
+            cancel_operator_http_stream,
+            operator_memory_load,
+            operator_memory_save,
             operator_trace_path,
             operator_trace_reveal,
             operator_trace_append,
@@ -773,11 +786,13 @@ fn main() {
         match event {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
+                crate::operator_runtime::shutdown_warm_operator_sessions();
                 crate::dispatch_wire::shutdown_gui_bridge();
                 crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, detaching GUI from persistent core");
+                crate::operator_runtime::shutdown_warm_operator_sessions();
                 crate::dispatch_wire::shutdown_gui_bridge();
                 crate::core_daemon::on_client_window_close();
             }
@@ -789,5 +804,3 @@ fn main() {
         }
     });
 }
-
-

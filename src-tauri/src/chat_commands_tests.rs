@@ -22,6 +22,7 @@ fn test_live_chat_runs_and_approval() {
         closing: false,
         finished: false,
         started_at_ms: 1234567890,
+        finished_at_ms: None,
         routine_id: None,
         delivered_through: 0,
         file_baselines: Default::default(),
@@ -32,15 +33,17 @@ fn test_live_chat_runs_and_approval() {
         live.by_thread.insert(thread_id.into(), run_id.into());
     }
 
-    let runs = list_live_chat_runs(None);
+    let runs = turns_cmd::list_live_chat_runs(None);
     assert!(!runs.is_empty());
     let found = runs.iter().find(|r| r["threadId"] == thread_id).expect("run found");
+    assert_eq!(found["runId"], run_id);
+    assert_eq!(found["nextSequence"], 1);
     assert_eq!(found["line"], "Thinking about the task...");
     assert_eq!(found["startedAtUnixMs"], 1234567890);
     assert_eq!(found["needsYou"], false);
 
     // Test responding to approval
-    let resp = respond_chat_approval(Some(json!({
+    let resp = turns_cmd::respond_chat_approval(Some(json!({
         "request": {
             "threadId": thread_id,
             "runId": run_id,
@@ -73,7 +76,7 @@ fn archived_chat_is_hidden_then_restored_and_purged() {
     let thread_id = created.get("id").and_then(|value| value.as_str()).unwrap().to_string();
     let _cleanup = RemoveThread(thread_id.clone());
 
-    let archived = archive_chat_thread(Some(json!({ "threadId": thread_id })));
+    let archived = threads_cmd::archive_chat_thread(Some(json!({ "threadId": thread_id })));
     assert_eq!(archived["deleted"], json!(true));
     let live = archived["history"]["summaries"].as_array().unwrap();
     assert!(live.iter().all(|row| row["id"] != thread_id));
@@ -83,7 +86,7 @@ fn archived_chat_is_hidden_then_restored_and_purged() {
         .iter()
         .all(|row| row["id"] != thread_id));
 
-    let listed = list_archived_chats(Some(json!({ "profileId": Value::Null })));
+    let listed = threads_cmd::list_archived_chats(Some(json!({ "profileId": Value::Null })));
     let row = listed.iter().find(|row| row["id"] == thread_id).expect("archived summary");
     assert_eq!(row["schemaVersion"], 1);
     assert_eq!(row["title"], "Archive Probe");
@@ -97,21 +100,21 @@ fn archived_chat_is_hidden_then_restored_and_purged() {
     });
     assert!(stored, "archived thread stays stored");
 
-    let restored = restore_archived_chat(Some(json!({ "threadId": thread_id })));
+    let restored = threads_cmd::restore_archived_chat(Some(json!({ "threadId": thread_id })));
     assert!(restored.is_null());
     assert!(history(None)["summaries"]
         .as_array()
         .unwrap()
         .iter()
         .any(|row| row["id"] == thread_id));
-    assert!(list_archived_chats(Some(json!({ "profileId": Value::Null })))
+    assert!(threads_cmd::list_archived_chats(Some(json!({ "profileId": Value::Null })))
         .iter()
         .all(|row| row["id"] != thread_id));
 
-    archive_chat_thread(Some(json!({ "threadId": thread_id })));
-    let purged = purge_archived_chat(Some(json!({ "threadId": thread_id })));
+    threads_cmd::archive_chat_thread(Some(json!({ "threadId": thread_id })));
+    let purged = threads_cmd::purge_archived_chat(Some(json!({ "threadId": thread_id })));
     assert!(purged.is_null());
-    assert!(list_archived_chats(Some(json!({ "profileId": Value::Null })))
+    assert!(threads_cmd::list_archived_chats(Some(json!({ "profileId": Value::Null })))
         .iter()
         .all(|row| row["id"] != thread_id));
     let gone = threads()
@@ -158,10 +161,10 @@ fn missing_agent_engine_falls_back_to_antigravity() {
 
 #[test]
 fn test_get_chat_session_status_command() {
-    let missing = get_chat_session_status(None);
+    let missing = turns_cmd::get_chat_session_status(None);
     assert!(missing.get("error").is_some());
 
-    let unknown = get_chat_session_status(Some(json!({ "threadId": "non-existent-thread-xyz" })));
+    let unknown = turns_cmd::get_chat_session_status(Some(json!({ "threadId": "non-existent-thread-xyz" })));
     assert_eq!(unknown["state"], "closed");
     assert_eq!(unknown["isWarm"], false);
     assert_eq!(unknown["hasResumeHandle"], false);
@@ -272,6 +275,19 @@ fn thread_persists_subagent_and_swarm_metadata_and_serves_detail_commands() {
     assert_eq!(child_summary["parentThreadId"], parent_id);
     assert_eq!(child_summary["startedByAgent"], true);
     assert_eq!(child_summary["swarmMemberName"], "reviewer");
+
+    let parent_snap = threads()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == parent_id)
+        .cloned()
+        .unwrap();
+    let parent_summary = summary_of(&parent_snap).expect("parent summary_of");
+    let active_subs = parent_summary["activeSubagents"].as_array().expect("activeSubagents array");
+    assert_eq!(active_subs.len(), 1);
+    assert_eq!(active_subs[0]["subagentId"], "sub_1");
+    assert_eq!(active_subs[0]["role"], "Code Reviewer");
 
     let detail = subagents_ui::get_thread_subagent_detail(Some(json!({
         "threadId": parent_id,
@@ -545,4 +561,105 @@ fn list_all_subagent_runs_groups_active_first_and_excludes_archived() {
     let ws_a_runs = snap_ws_a["runs"].as_array().expect("ws_a runs");
     assert_eq!(ws_a_runs.len(), 1);
     assert_eq!(ws_a_runs[0]["threadId"], parent_done);
+}
+
+#[test]
+fn regenerate_chat_thread_title_derives_concise_title_from_transcript() {
+    let tid = format!("regen-title-{}", uuid::Uuid::new_v4().simple());
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Ok(mut list) = threads().lock() {
+                list.retain(|t| t.get("id").and_then(Value::as_str) != Some(self.0.as_str()));
+            }
+        }
+    }
+    let _cleanup = Cleanup(tid.clone());
+    {
+        let mut all = threads().lock().unwrap();
+        let mut thread = blank_thread(&tid, None, "New Chat", "claude", None);
+        thread["items"] = json!([
+            crate::chat::chat_item("u1", "user", "\n# Associate new thread with selected workspace", false),
+            crate::chat::chat_item("a1", "assistant", "Done.", false)
+        ]);
+        all.push(thread);
+    }
+
+    let updated = threads_cmd::regenerate_chat_thread_title(Some(json!({
+        "supportedSchemaVersion": 1,
+        "threadId": tid
+    })));
+    assert_eq!(
+        updated.get("title").and_then(Value::as_str),
+        Some("Associate new thread with selected workspace")
+    );
+    assert_eq!(
+        updated.get("titleOrigin").and_then(Value::as_str),
+        Some("generated")
+    );
+}
+
+#[test]
+fn create_agent_chat_preserves_workspace_id_and_overrides() {
+    let agent_id = format!("test-agent-{}", uuid::Uuid::new_v4().simple());
+    let ws_id = format!("test-ws-{}", uuid::Uuid::new_v4().simple());
+    {
+        let mut agents = crate::persist::agents().lock().unwrap();
+        agents.push(crate::persist::AgentProfile {
+            id: agent_id.clone(),
+            name: "Workspace Agent".into(),
+            engine: "claude".into(),
+            purpose: "Test".into(),
+            brief: "Test brief".into(),
+            avatar: None,
+            created_at_unix_ms: 1_700_000_000_000,
+            pinned: false,
+            order: 99,
+            memory_budget: Some(6000),
+            reflection_mode: None,
+            allow_agent_scheduling: None,
+            allow_agent_messaging: None,
+            default_mode: Some("readOnly".into()),
+            default_plan: Some(false),
+            default_model: Some("claude-sonnet-4-5".into()),
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+    struct AgentCleanup(String);
+    impl Drop for AgentCleanup {
+        fn drop(&mut self) {
+            if let Ok(mut agents) = crate::persist::agents().lock() {
+                agents.retain(|a| a.id != self.0);
+            }
+        }
+    }
+    let _agent_cleanup = AgentCleanup(agent_id.clone());
+
+    let created = threads_cmd::create_agent_chat(Some(json!({
+        "request": {
+            "agentId": agent_id,
+            "workspaceId": format!("  {}  ", ws_id),
+            "plan": true,
+            "effort": "high"
+        }
+    })));
+    let tid = created.get("id").and_then(Value::as_str).unwrap().to_string();
+    let _thread_cleanup = RemoveThread(tid);
+
+    assert_eq!(created.get("workspaceId").and_then(Value::as_str), Some(ws_id.as_str()));
+    assert_eq!(created.get("profileId").and_then(Value::as_str), Some(agent_id.as_str()));
+    assert_eq!(created.get("plan").and_then(Value::as_bool), Some(true));
+    assert_eq!(created.get("effort").and_then(Value::as_str), Some("high"));
+
+    let blank_ws = threads_cmd::create_agent_chat(Some(json!({
+        "request": {
+            "agentId": agent_id,
+            "workspaceId": "   "
+        }
+    })));
+    let tid2 = blank_ws.get("id").and_then(Value::as_str).unwrap().to_string();
+    let _thread_cleanup2 = RemoveThread(tid2);
+    assert!(blank_ws.get("workspaceId").is_none_or(Value::is_null));
 }

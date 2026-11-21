@@ -1,6 +1,8 @@
+mod antigravity;
 mod dedup;
 mod events;
 mod lifecycle;
+mod placeholders;
 mod record;
 mod spawn;
 mod stream_ingest;
@@ -8,6 +10,7 @@ mod transcript;
 mod types;
 mod worktree;
 
+pub use antigravity::*;
 pub use dedup::*;
 pub use events::*;
 pub use lifecycle::*;

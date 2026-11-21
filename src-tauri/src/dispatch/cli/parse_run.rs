@@ -138,6 +138,17 @@ pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
     }
 }
 
+pub fn blocking_send_wait_ms(args: &[String]) -> Option<u64> {
+    match parse_args(args) {
+        Ok(Command::Send {
+            wait: true,
+            timeout_ms,
+            ..
+        }) => Some(timeout_ms.unwrap_or(300_000)),
+        _ => None,
+    }
+}
+
 pub fn blocking_swarm_wait_ms(args: &[String]) -> Option<u64> {
     match parse_args(args) {
         Ok(Command::Swarm(SwarmCommand::Wait { timeout_ms, .. })) => Some(timeout_ms),
@@ -161,7 +172,7 @@ pub fn canonical_thread_provider(raw: &str) -> Option<&'static str> {
 pub fn normalize_workspace_mode(raw: &str) -> Option<String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "inherit" => Some("inherit".to_string()),
-        "share" => Some("share".to_string()),
+        "share" | "worktree" => Some("share".to_string()),
         "branch" => Some("branch".to_string()),
         _ => None,
     }
@@ -232,6 +243,8 @@ pub(super) fn parse_run_detailed<'a>(
     let mut role = None;
     let mut explicit_role = false;
     let mut file = None;
+    let mut tasks: Vec<String> = Vec::new();
+    let mut count: Option<usize> = None;
     let mut wait = false;
     let mut timeout_ms = None;
     let mut hidden = false;
@@ -291,6 +304,25 @@ pub(super) fn parse_run_detailed<'a>(
                 explicit_role = true;
             }
             "--file" => file = Some(need_flag_detailed(items, "--file", inline_val)?),
+            "--task" => {
+                let raw = need_flag_detailed(items, "--task", inline_val)?;
+                if raw.trim().is_empty() {
+                    return Err(bad_args("`--task` value cannot be empty."));
+                }
+                tasks.push(raw);
+            }
+            "--count" | "-n" => {
+                let raw = need_flag_detailed(items, flag, inline_val)?;
+                let parsed: usize = raw
+                    .parse()
+                    .map_err(|_| bad_args(format!("Invalid `{flag}` integer `{raw}` (expected 1..=8).")))?;
+                if !(1..=8).contains(&parsed) {
+                    return Err(bad_args(format!(
+                        "Invalid `{flag}` value `{parsed}` (expected 1..=8)."
+                    )));
+                }
+                count = Some(parsed);
+            }
             "--wait" if inline_val.is_none() => wait = true,
             "--timeout-ms" | "--timeout" => {
                 let raw = need_flag_detailed(items, flag, inline_val)?;
@@ -334,11 +366,14 @@ pub(super) fn parse_run_detailed<'a>(
         program = Some(word);
     }
     let words = positionals.clone();
-    let task = if positionals.is_empty() {
+    let mut task = if positionals.is_empty() {
         None
     } else {
         Some(positionals.join(" "))
     };
+    if !tasks.is_empty() && task.is_none() {
+        task = Some(tasks[0].clone());
+    }
     Ok(Command::Run {
         via,
         explicit_via,
@@ -356,6 +391,8 @@ pub(super) fn parse_run_detailed<'a>(
         explicit_role,
         file,
         task,
+        tasks,
+        count,
         wait,
         timeout_ms,
         hidden,

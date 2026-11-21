@@ -1,9 +1,9 @@
 use crate::chat::{
     apply_launch_choices, archived_at_ms, cancel_turn, configure_thread, create_thread, history, live_turns,
     load_thread, parse_attachments, provider_models_for, provider_ok, read_turn_updates, recover_thread,
-    release_staged_attachment, remove_thread, rename_thread, set_agent_model, set_agent_plan, set_pinned,
-    stage_blob_attachment, stage_dropped_path, stage_dropped_paths, start_turn_with_binding, touch,
-    SendBinding, ThreadEventLog,
+    regenerate_thread_title, release_staged_attachment, remove_thread, rename_thread, set_agent_model,
+    set_agent_plan, set_pinned, stage_blob_attachment, stage_dropped_path, stage_dropped_paths,
+    start_turn_with_binding, touch, SendBinding, ThreadEventLog,
 };
 use crate::persist::{body, load_grid, persist, save_grid, threads};
 use serde_json::{json, Value};
@@ -64,8 +64,13 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
     let requested_provider = req.and_then(|r| r.get("provider")).and_then(|v| v.as_str());
     let engine = agent_opt.as_ref().map(|agent| agent.engine.as_str());
     let initial_provider = resolve_initial_provider(requested_provider, engine);
+    let workspace_id = req
+        .and_then(|r| r.get("workspaceId"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
-    let mut thread = create_thread(Some(agent_id), "New Agent Chat", &initial_provider, None);
+    let mut thread = create_thread(Some(agent_id), "New Agent Chat", &initial_provider, workspace_id);
 
     if let Some(agent) = agent_opt {
         if let Some(mode) = agent.default_mode {
@@ -85,7 +90,13 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
 
     let requested_mode = req.and_then(|r| r.get("mode")).and_then(|v| v.as_str());
     let requested_model = req.and_then(|r| r.get("model"));
-    if requested_mode.is_some() || requested_model.is_some() {
+    let requested_plan = req.and_then(|r| r.get("plan")).and_then(|v| v.as_bool());
+    let requested_effort = req.and_then(|r| r.get("effort"));
+    if requested_mode.is_some()
+        || requested_model.is_some()
+        || requested_plan.is_some()
+        || requested_effort.is_some()
+    {
         let mut patch = serde_json::Map::new();
         patch.insert("provider".into(), json!(initial_provider));
         if let Some(mode) = requested_mode {
@@ -93,6 +104,12 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
         }
         if let Some(model) = requested_model {
             patch.insert("model".into(), model.clone());
+        }
+        if let Some(plan) = requested_plan {
+            patch.insert("plan".into(), json!(plan));
+        }
+        if let Some(effort) = requested_effort {
+            patch.insert("effort".into(), effort.clone());
         }
         let thread_id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("");
         return configure_thread(thread_id, &Value::Object(patch));
@@ -165,6 +182,17 @@ pub fn rename_agent_chat_thread(request: Option<Value>) -> Value {
     rename_thread(thread_id, Some(agent_id), title)
 }
 
+pub fn regenerate_chat_thread_title(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let Some(thread_id) = req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()) else {
+        return Value::Null;
+    };
+    let profile_id = req
+        .and_then(|r| r.get("profileId").or_else(|| r.get("agentId")))
+        .and_then(|v| v.as_str());
+    regenerate_thread_title(thread_id, profile_id)
+}
+
 pub fn set_chat_thread_pinned(request: Option<Value>) -> Value {
     let req = body(&request);
     let thread_id = req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()).unwrap_or("11111111-1111-4111-8111-111111111111");
@@ -198,6 +226,8 @@ struct FlatThreadMeta {
     side_chat: bool,
     started_by_agent: bool,
     has_parent: bool,
+    parent_id: Option<String>,
+    archived: bool,
     status: String,
     has_approval: bool,
     has_user_input: bool,
@@ -216,10 +246,13 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
                         .get("startedByAgent")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let has_parent = t
+                    let parent_id = t
                         .get("parentThreadId")
                         .and_then(Value::as_str)
-                        .is_some_and(|p| !p.trim().is_empty());
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty());
+                    let has_parent = parent_id.is_some();
+                    let archived = archived_at_ms(t).is_some();
                     let status = t
                         .get("status")
                         .and_then(Value::as_str)
@@ -237,6 +270,8 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
                             side_chat,
                             started_by_agent,
                             has_parent,
+                            parent_id,
+                            archived,
                             status,
                             has_approval,
                             has_user_input,
@@ -247,10 +282,38 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
         })
         .unwrap_or_default();
 
+    let has_archived_ancestor = |start_parent: Option<&str>| -> bool {
+        let mut cursor = start_parent;
+        let mut hops = 0usize;
+        while let Some(pid) = cursor {
+            if hops >= 16 {
+                break;
+            }
+            hops += 1;
+            let Some(meta) = raw_meta.get(pid) else {
+                break;
+            };
+            if meta.archived {
+                return true;
+            }
+            cursor = meta.parent_id.as_deref();
+        }
+        false
+    };
+
     if let Some(arr) = res.get_mut("summaries").and_then(Value::as_array_mut) {
         arr.retain(|s| {
             let id = s.get("id").and_then(Value::as_str).unwrap_or("");
             let raw = raw_meta.get(id);
+            let parent_id = s
+                .get("parentThreadId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .or_else(|| raw.and_then(|r| r.parent_id.as_deref()));
+            if raw.is_some_and(|r| r.archived) || has_archived_ancestor(parent_id) {
+                return false;
+            }
             let side_chat = s
                 .get("sideChat")
                 .and_then(Value::as_bool)
@@ -261,11 +324,7 @@ fn filter_flat_history(mut res: Value, is_agent_chat: bool) -> Value {
                 .and_then(Value::as_bool)
                 .or_else(|| raw.map(|r| r.started_by_agent))
                 .unwrap_or(false);
-            let has_parent = s
-                .get("parentThreadId")
-                .and_then(Value::as_str)
-                .is_some_and(|p| !p.trim().is_empty())
-                || raw.is_some_and(|r| r.has_parent);
+            let has_parent = parent_id.is_some() || raw.is_some_and(|r| r.has_parent);
 
             if is_agent_chat {
                 return !side_chat && !(started_by_agent && has_parent);
@@ -595,6 +654,61 @@ mod tests {
                 && id != active_child_tid
                 && id != input_child_tid
                 && id != top_tid
+        });
+    }
+
+    #[test]
+    fn flat_history_excludes_active_children_of_archived_parents() {
+        let arch_parent = format!("arch-parent-{}", Uuid::new_v4().simple());
+        let arch_active_child = format!("arch-child-{}", Uuid::new_v4().simple());
+        let arch_wait_child = format!("arch-wait-{}", Uuid::new_v4().simple());
+
+        {
+            let mut all = threads().lock().unwrap();
+            all.push(json!({
+                "id": arch_parent,
+                "title": "Archived Parent",
+                "provider": "antigravity",
+                "status": "idle",
+                "archivedAtUnixMs": 1794746728540i64,
+                "updatedAtUnixMs": 100
+            }));
+            all.push(json!({
+                "id": arch_active_child,
+                "title": "Orphan Running Child",
+                "provider": "grok",
+                "status": "running",
+                "sideChat": true,
+                "startedByAgent": true,
+                "parentThreadId": arch_parent,
+                "updatedAtUnixMs": 200
+            }));
+            all.push(json!({
+                "id": arch_wait_child,
+                "title": "Orphan Waiting Child",
+                "provider": "claude",
+                "status": "waiting",
+                "startedByAgent": false,
+                "parentThreadId": arch_parent,
+                "pendingApproval": { "id": "apr-x", "title": "Approve tool" },
+                "updatedAtUnixMs": 300
+            }));
+        }
+
+        let res = list_chat_summaries(None);
+        let ids: Vec<&str> = res["summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(!ids.contains(&arch_parent.as_str()), "ids={ids:?}");
+        assert!(!ids.contains(&arch_active_child.as_str()), "ids={ids:?}");
+        assert!(!ids.contains(&arch_wait_child.as_str()), "ids={ids:?}");
+
+        threads().lock().unwrap().retain(|t| {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            id != arch_parent && id != arch_active_child && id != arch_wait_child
         });
     }
 }

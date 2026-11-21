@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,7 @@ pub(super) struct CommandRecord {
 pub(super) struct ManagedSession {
     pub(super) record: SessionRecord,
     pub(super) transport: Box<dyn SessionTransport>,
-    pub(super) events: Vec<SessionEvent>,
+    pub(super) events: VecDeque<SessionEvent>,
 }
 
 /// Owns every live session. One thread has at most one session at a time.
@@ -25,6 +25,7 @@ pub(super) struct ManagedSession {
 pub struct SessionManager {
     pub(super) sessions: HashMap<String, ManagedSession>,
     pub(super) commands: HashMap<String, CommandRecord>,
+    pub(super) command_order: VecDeque<String>,
 }
 
 fn canon_driver(driver: &str) -> &str {
@@ -140,9 +141,10 @@ impl SessionManager {
             ManagedSession {
                 record,
                 transport,
-                events: Vec::new(),
+                events: VecDeque::new(),
             },
         );
+        self.prune_terminal_sessions(DEFAULT_MAX_TERMINAL_SESSIONS);
         Ok(AttachOutcome::Attached { generation })
     }
 
@@ -160,7 +162,7 @@ impl SessionManager {
             })
             .unwrap_or(false);
         if is_persistent_and_needs_spawn {
-            self.enforce_lru_capacity(DEFAULT_MAX_WARM_SESSIONS.saturating_sub(1));
+            self.enforce_lru_capacity(max_warm_sessions().saturating_sub(1));
         }
 
         let session = self
@@ -241,7 +243,7 @@ impl SessionManager {
             })
             .unwrap_or(false);
         if is_persistent_and_needs_spawn {
-            self.enforce_lru_capacity(DEFAULT_MAX_WARM_SESSIONS.saturating_sub(1));
+            self.enforce_lru_capacity(max_warm_sessions().saturating_sub(1));
         }
 
         let session = self
@@ -317,13 +319,7 @@ impl SessionManager {
             accepted: true,
             duplicate: false,
         };
-        self.commands.insert(
-            command_id.to_string(),
-            CommandRecord {
-                prompt: prompt.to_string(),
-                receipt: receipt.clone(),
-            },
-        );
+        self.record_command(command_id, prompt, receipt.clone());
         Ok(receipt)
     }
 
@@ -395,7 +391,9 @@ impl SessionManager {
         session.transport.stop().map_err(SessionError::Transport)?;
         settle_approvals(session, "stopped");
         session.record.state = SessionState::Closed;
+        clear_heavy_session_payloads(session);
         push_event(session, "stopped", json!({}));
+        self.prune_terminal_sessions(DEFAULT_MAX_TERMINAL_SESSIONS);
         Ok(())
     }
 

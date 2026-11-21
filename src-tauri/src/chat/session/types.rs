@@ -38,8 +38,21 @@ impl SessionMode {
 }
 
 /// Lifecycle state of one session. A thread is readable in every state.
-pub const DEFAULT_MAX_WARM_SESSIONS: usize = 3;
-pub const DEFAULT_IDLE_TIMEOUT_MS: i64 = 30 * 60 * 1000;
+pub const DEFAULT_MAX_WARM_SESSIONS: usize = 1;
+pub const DEFAULT_IDLE_TIMEOUT_MS: i64 = 5 * 60 * 1000;
+pub const DEFAULT_MAX_SESSION_EVENTS: usize = 500;
+pub const DEFAULT_MAX_COMMAND_RECORDS: usize = 500;
+pub const DEFAULT_MAX_TERMINAL_SESSIONS: usize = 64;
+
+/// Returns the effective warm-session limit, honoring `KITE_MAX_WARM_SESSIONS`
+/// clamped to `1..=2` when set.
+pub fn max_warm_sessions() -> usize {
+    std::env::var("KITE_MAX_WARM_SESSIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 2))
+        .unwrap_or(DEFAULT_MAX_WARM_SESSIONS)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -93,6 +106,28 @@ pub struct RecipeSnapshot {
     pub memory: String,
     pub user: String,
     pub skills: Vec<String>,
+}
+
+impl RecipeSnapshot {
+    /// Compiles complete agent instructions at a custom agents root directory,
+    /// preserving snapshot isolation (using frozen role, memory, and user from the snapshot)
+    /// while enriching skills with full active bodies and metadata.
+    pub fn compile_instructions_at(&self, root: &std::path::Path) -> String {
+        crate::agent_mind::memory::compile_snapshot_instructions_at(
+            root,
+            &self.agent_id,
+            &self.role,
+            &self.memory,
+            &self.user,
+            &self.skills,
+        )
+    }
+
+    /// Compiles complete agent instructions against the canonical agents root directory.
+    pub fn compile_instructions(&self) -> String {
+        let root = crate::agent_mind::agents_root();
+        self.compile_instructions_at(&root)
+    }
 }
 
 /// What a thread asks for when it prepares a session.

@@ -830,3 +830,483 @@ fn cli_execute_run_via_thread_wait_suppresses_child_notice() {
     );
 }
 
+#[test]
+fn cli_execute_agent_read_suppresses_settled_child_notice_only() {
+    let mut svc = Service::new(FakePort::default());
+    svc.attach(Family::Thread, "p-read", None, None, false).unwrap();
+    svc.publish_pane("thread:p-read", "working", 1, 1_000, None, None)
+        .unwrap();
+
+    for (cid, done, body) in [
+        ("c-read-done", true, Some("settled output")),
+        ("c-read-work", false, None),
+    ] {
+        svc.attach(Family::Thread, cid, None, Some("thread:p-read"), false)
+            .unwrap();
+        svc.publish_pane(&format!("thread:{cid}"), "working", 1, 1_100, None, None)
+            .unwrap();
+        if done {
+            svc.publish_pane(&format!("thread:{cid}"), "done", 2, 1_150, body, None)
+                .unwrap();
+        }
+    }
+
+    // Reading while still working must NOT suppress the child's later completion wakeup.
+    let read_working = parse_args(&owned(&["kite", "dispatch", "read", "thread:c-read-work"]))
+        .expect("parse read working child");
+    let r_work = execute(
+        &mut svc,
+        &read_working,
+        &ExecContext {
+            id: "cli-read-work",
+            caller: Caller::Agent,
+            from: "thread:p-read",
+            now_ms: 1_160,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("execute read working child");
+    assert_eq!(r_work.status, ReceiptStatus::Settled);
+
+    // Agent read from parent on a settled child DOES suppress the queued/delayed wakeup.
+    let read_done = parse_args(&owned(&["kite", "dispatch", "read", "thread:c-read-done"]))
+        .expect("parse read done child");
+    execute(
+        &mut svc,
+        &read_done,
+        &ExecContext {
+            id: "cli-read-agent",
+            caller: Caller::Agent,
+            from: "thread:p-read",
+            now_ms: 1_180,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("agent read");
+
+    svc.publish_pane(
+        "thread:c-read-work",
+        "done",
+        2,
+        1_200,
+        Some("finished later"),
+        None,
+    )
+    .unwrap();
+    svc.publish_pane("thread:p-read", "idle", 2, 1_300, None, None)
+        .unwrap();
+
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .all(|w| !w.text.contains("from=\"thread:c-read-done\"")),
+        "agent read on settled child should suppress queued wakeup: {:?}",
+        svc.port_mut().writes
+    );
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .any(|w| w.text.contains("from=\"thread:c-read-work\"")
+                && w.text.contains("finished later")),
+        "reading a working child early must still deliver completion wakeup: {:?}",
+        svc.port_mut().writes
+    );
+}
+
+#[test]
+fn cli_execute_human_or_unowned_read_does_not_suppress_child_notice() {
+    let mut svc = Service::new(FakePort::default());
+    svc.attach(Family::Thread, "p-own", None, None, false).unwrap();
+    svc.publish_pane("thread:p-own", "working", 1, 1_000, None, None)
+        .unwrap();
+    svc.attach(Family::Thread, "c-own", None, Some("thread:p-own"), false)
+        .unwrap();
+    svc.publish_pane("thread:c-own", "working", 1, 1_100, None, None)
+        .unwrap();
+    svc.publish_pane("thread:c-own", "done", 2, 1_150, Some("unowned read report"), None)
+        .unwrap();
+
+    let read_cmd =
+        parse_args(&owned(&["kite", "dispatch", "read", "thread:c-own"])).expect("parse read");
+    execute(
+        &mut svc,
+        &read_cmd,
+        &ExecContext {
+            id: "cli-read-human-own",
+            caller: Caller::Human,
+            from: "thread:p-own",
+            now_ms: 1_160,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("human read");
+    execute(
+        &mut svc,
+        &read_cmd,
+        &ExecContext {
+            id: "cli-read-unknown-own",
+            caller: Caller::Agent,
+            from: "agent",
+            now_ms: 1_170,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("unknown agent read");
+
+    svc.publish_pane("thread:p-own", "idle", 2, 1_200, None, None)
+        .unwrap();
+
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .any(|w| w.text.contains("from=\"thread:c-own\"")
+                && w.text.contains("unowned read report")),
+        "human or unowned agent read must not suppress child wakeup: {:?}",
+        svc.port_mut().writes
+    );
+}
+
+#[test]
+fn cli_multi_task_and_count_fanout_spawns_distinct_threads_and_suppresses_wait_notices() {
+    assert_eq!(normalize_workspace_mode("worktree").as_deref(), Some("share"));
+    assert_eq!(normalize_workspace_mode("WORKTREE").as_deref(), Some("share"));
+    let ws_cmd = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "--workspace",
+        "worktree",
+        "Check worktree alias",
+    ]))
+    .expect("worktree workspace alias must parse");
+    match ws_cmd {
+        Command::Run { workspace, .. } => {
+            assert_eq!(workspace.as_deref(), Some("share"));
+        }
+        other => panic!("expected Command::Run, got {other:?}"),
+    }
+
+    let mut svc = Service::new(FakePort::default());
+    svc.attach(Family::Thread, "parent-batch", None, None, false)
+        .unwrap();
+    svc.publish_pane("thread:parent-batch", "working", 1, 1_000, None, None)
+        .unwrap();
+
+    let multi_task_cmd = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "--role",
+        "Fast Executor",
+        "--task",
+        "Audit A",
+        "--task",
+        "Audit B",
+        "--wait",
+    ]))
+    .expect("parse multi-task run");
+    match &multi_task_cmd {
+        Command::Run {
+            tasks,
+            task,
+            wait,
+            ..
+        } => {
+            assert_eq!(tasks, &vec!["Audit A".to_string(), "Audit B".to_string()]);
+            assert_eq!(task.as_deref(), Some("Audit A"));
+            assert!(*wait);
+        }
+        other => panic!("expected Command::Run, got {other:?}"),
+    }
+
+    let receipt = execute(
+        &mut svc,
+        &multi_task_cmd,
+        &ExecContext {
+            id: "batch-run-1",
+            caller: Caller::Agent,
+            from: "thread:parent-batch",
+            now_ms: 1_100,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("execute multi-task run");
+    assert_eq!(receipt.status, ReceiptStatus::Submitted);
+    assert_eq!(receipt.address, "thread:th-1");
+    assert_eq!(receipt.text.as_deref(), Some("thread:th-1,thread:th-2"));
+    assert_eq!(svc.port_mut().thread_starts.len(), 2);
+    assert_eq!(svc.port_mut().thread_starts[0].task, "Audit A");
+    assert_eq!(
+        svc.port_mut().thread_starts[0].role.as_deref(),
+        Some("Fast Executor #1")
+    );
+    assert_eq!(svc.port_mut().thread_starts[1].task, "Audit B");
+    assert_eq!(
+        svc.port_mut().thread_starts[1].role.as_deref(),
+        Some("Fast Executor #2")
+    );
+
+    svc.publish_pane("thread:th-1", "done", 2, 1_200, Some("Audit A done"), None)
+        .unwrap();
+    svc.publish_pane("thread:th-2", "done", 2, 1_210, Some("Audit B done"), None)
+        .unwrap();
+    svc.publish_pane("thread:parent-batch", "idle", 2, 1_300, None, None)
+        .unwrap();
+    assert!(
+        svc.port_mut().writes.iter().all(|w| {
+            !w.text.contains("from=\"thread:th-1\"") && !w.text.contains("from=\"thread:th-2\"")
+        }),
+        "batch --wait must suppress parent wakeup notices on all spawned children: {:?}",
+        svc.port_mut().writes
+    );
+
+    // Parallel fan-out via --count 2 / -n 2
+    let count_cmd = parse_args(&owned(&[
+        "kite",
+        "dispatch",
+        "run",
+        "--via",
+        "thread",
+        "--count",
+        "2",
+        "Run parallel check",
+    ]))
+    .expect("parse --count 2 run");
+    let count_receipt = execute(
+        &mut svc,
+        &count_cmd,
+        &ExecContext {
+            id: "count-run-1",
+            caller: Caller::Agent,
+            from: "thread:parent-batch",
+            now_ms: 1_400,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("execute --count 2 run");
+    assert_eq!(count_receipt.status, ReceiptStatus::Submitted);
+    assert_eq!(count_receipt.address, "thread:th-3");
+    assert_eq!(
+        count_receipt.text.as_deref(),
+        Some("thread:th-3,thread:th-4")
+    );
+    assert_eq!(svc.port_mut().thread_starts.len(), 4);
+    assert_eq!(svc.port_mut().thread_starts[2].task, "Run parallel check");
+    assert_eq!(svc.port_mut().thread_starts[3].task, "Run parallel check");
+
+    assert!(parse_args(&owned(&["kite", "dispatch", "run", "--via", "thread", "-n", "2", "check"])).is_ok());
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "run", "--via", "thread", "--count", "0", "check"])),
+        Err(DispatchError::BadArgs)
+    );
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "run", "--via", "thread", "--count", "9", "check"])),
+        Err(DispatchError::BadArgs)
+    );
+    assert_eq!(
+        parse_args(&owned(&["kite", "dispatch", "run", "--via", "thread", "--count", "abc", "check"])),
+        Err(DispatchError::BadArgs)
+    );
+}
+
+#[test]
+fn cli_send_thread_with_wait_transitions_to_working_and_suppresses_wakeup() {
+    let args = owned(&[
+        "kite",
+        "dispatch",
+        "send",
+        "thread:th-1",
+        "Follow-up task",
+        "--wait",
+        "--timeout-ms",
+        "45000",
+    ]);
+    assert_eq!(blocking_send_wait_ms(&args), Some(45_000));
+    assert_eq!(
+        blocking_send_wait_ms(&owned(&["kite", "dispatch", "send", "thread:th-1", "Follow-up task", "--wait"])),
+        Some(300_000)
+    );
+    assert_eq!(
+        blocking_send_wait_ms(&owned(&["kite", "dispatch", "send", "thread:th-1", "Follow-up task"])),
+        None
+    );
+
+    let cmd = parse_args(&args).expect("parse send --wait");
+    match &cmd {
+        Command::Send {
+            address,
+            body,
+            wait,
+            timeout_ms,
+            ..
+        } => {
+            assert_eq!(address, "thread:th-1");
+            assert_eq!(body.as_deref(), Some("Follow-up task"));
+            assert!(*wait);
+            assert_eq!(*timeout_ms, Some(45_000));
+        }
+        other => panic!("expected Command::Send, got {other:?}"),
+    }
+
+    let mut svc = Service::new(FakePort::default());
+    svc.attach(Family::Thread, "parent-send", None, None, false)
+        .unwrap();
+    svc.publish_pane("thread:parent-send", "working", 1, 1_000, None, None)
+        .unwrap();
+    svc.attach(Family::Thread, "th-1", None, Some("thread:parent-send"), false)
+        .unwrap();
+    svc.publish_pane("thread:th-1", "working", 1, 1_100, None, None)
+        .unwrap();
+    svc.publish_pane("thread:th-1", "done", 2, 1_200, Some("first turn done"), None)
+        .unwrap();
+    svc.suppress_parent_notice_for("thread:th-1");
+
+    let send_receipt = execute(
+        &mut svc,
+        &cmd,
+        &ExecContext {
+            id: "send-followup-1",
+            caller: Caller::Agent,
+            from: "thread:parent-send",
+            now_ms: 1_500,
+            config_dir: None,
+            workspace: None,
+            mounted: false,
+        },
+    )
+    .expect("execute send --wait");
+    assert_eq!(send_receipt.status, ReceiptStatus::Submitted);
+    assert!(send_receipt.submitted);
+    assert!(
+        svc.ls().iter().any(|row| row == "thread:th-1 working"),
+        "send to settled thread must transition endpoint back to working: {:?}",
+        svc.ls()
+    );
+
+    svc.publish_pane("thread:th-1", "done", 3, 1_600, Some("follow-up done"), None)
+        .unwrap();
+    svc.publish_pane("thread:parent-send", "idle", 2, 1_700, None, None)
+        .unwrap();
+    assert!(
+        svc.port_mut()
+            .writes
+            .iter()
+            .all(|w| !w.text.contains("from=\"thread:th-1\"")),
+        "send --wait must suppress duplicate parent wakeup notice when follow-up turn settles: {:?}",
+        svc.port_mut().writes
+    );
+}
+
+#[test]
+fn parse_agent_service_tool_commands_across_all_domains() {
+    assert!(is_agent_argv(&owned(&["kite", "agent", "thread", "list"])));
+    assert!(is_agent_argv(&owned(&["kite", "dispatch", "agent", "memory", "read"])));
+    assert!(!is_agent_argv(&owned(&["kite", "dispatch", "ls"])));
+
+    let t_list = parse_agent_args(&owned(&[
+        "kite",
+        "agent",
+        "thread",
+        "list",
+        "--workspace-id",
+        "ws-1",
+        "--cursor",
+        "10",
+        "--limit",
+        "25",
+    ]))
+    .unwrap();
+    assert_eq!(
+        t_list,
+        AgentCommand::ThreadList {
+            workspace_id: Some("ws-1".to_string()),
+            agent_id: None,
+            cursor: 10,
+            limit: 25,
+        }
+    );
+
+    let m_add = parse_agent_args(&owned(&[
+        "kite",
+        "dispatch",
+        "agent",
+        "memory",
+        "add",
+        "--target",
+        "user",
+        "--text",
+        "Prefers concise diffs",
+    ]))
+    .unwrap();
+    assert_eq!(
+        m_add,
+        AgentCommand::MemoryAdd {
+            text: "Prefers concise diffs".to_string(),
+            target: "user".to_string(),
+            agent_id: None,
+        }
+    );
+
+    let r_create = parse_agent_args(&owned(&[
+        "agent",
+        "routine",
+        "create",
+        "--name",
+        "Hourly",
+        "--prompt",
+        "Check CI",
+        "--every",
+        "3600",
+    ]))
+    .unwrap();
+    assert_eq!(
+        r_create,
+        AgentCommand::RoutineCreate {
+            agent_id: None,
+            name: "Hourly".to_string(),
+            prompt: "Check CI".to_string(),
+            cadence_seconds: 3600,
+            workspace_id: None,
+        }
+    );
+
+    let tm_send = parse_agent_args(&owned(&[
+        "kite",
+        "agent",
+        "teammate",
+        "send",
+        "--target",
+        "agent:1234",
+        "--message",
+        "Review PR",
+    ]))
+    .unwrap();
+    assert_eq!(
+        tm_send,
+        AgentCommand::TeammateSend {
+            target: "agent:1234".to_string(),
+            message: "Review PR".to_string(),
+        }
+    );
+}
+
+

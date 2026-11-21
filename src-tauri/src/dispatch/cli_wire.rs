@@ -8,6 +8,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+#[path = "hook.rs"]
+pub mod hook;
+#[path = "mcp.rs"]
+pub mod mcp;
+
 pub fn app_data_folder() -> &'static str {
     if cfg!(debug_assertions) {
         "Kite Code Dev"
@@ -254,6 +259,86 @@ pub fn blocking_run_wait_ms(args: &[String]) -> Option<u64> {
     Some(last_timeout_flag_ms(&tokens).unwrap_or(300_000))
 }
 
+pub fn blocking_send_wait_ms(args: &[String]) -> Option<u64> {
+    let slice = strip_cli_prefix(args);
+    if slice.first().map(String::as_str) != Some("send") {
+        return None;
+    }
+    let tokens: Vec<&str> = slice[1..].iter().map(String::as_str).collect();
+    if !has_flag(&tokens, "--wait") {
+        return None;
+    }
+    if !tokens.iter().any(|tok| tok.starts_with("thread:")) {
+        return None;
+    }
+    Some(last_timeout_flag_ms(&tokens).unwrap_or(300_000))
+}
+
+fn strip_send_wait_flags(args: &[String]) -> Vec<String> {
+    let slice = strip_cli_prefix(args);
+    if slice.first().map(String::as_str) != Some("send") {
+        return args.to_vec();
+    }
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    let mut past_double_dash = false;
+    while i < args.len() {
+        let tok = args[i].as_str();
+        if tok == "--" {
+            past_double_dash = true;
+            out.push(args[i].clone());
+            i += 1;
+            continue;
+        }
+        if !past_double_dash {
+            if tok == "--wait" || tok.starts_with("--wait=") {
+                i += 1;
+                continue;
+            }
+            if tok == "--timeout-ms" || tok == "--timeout" {
+                i += 2;
+                continue;
+            }
+            if tok.starts_with("--timeout-ms=") || tok.starts_with("--timeout=") {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    out
+}
+
+pub fn extract_spawned_thread_addresses(value: &Value) -> Vec<String> {
+    let receipt = value.get("receipt").unwrap_or(value);
+    let mut out: Vec<String> = Vec::new();
+    let mut push_from_raw = |raw: &str| {
+        for part in raw.split(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | '[' | ']' | '(' | ')' | ';')
+        }) {
+            let tok = part.trim();
+            if tok.starts_with("thread:") && tok.len() > "thread:".len() {
+                let s = tok.to_string();
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+    };
+    if let Some(text) = receipt.get("text").and_then(Value::as_str) {
+        if text.contains("thread:") {
+            push_from_raw(text);
+        }
+    }
+    if let Some(addr) = receipt.get("address").and_then(Value::as_str) {
+        if addr.contains("thread:") {
+            push_from_raw(addr);
+        }
+    }
+    out
+}
+
 pub fn should_prefer_gui_endpoint(args: &[String], kite_address_env: Option<&str>) -> bool {
     let slice = strip_cli_prefix(args);
     let Some(sub) = slice.first().map(String::as_str) else {
@@ -265,7 +350,7 @@ pub fn should_prefer_gui_endpoint(args: &[String], kite_address_env: Option<&str
         .is_some_and(|v| v.starts_with("thread:"));
 
     match sub {
-        "swarm" | "providers" | "models" => true,
+        "swarm" | "providers" | "models" | "agent" => true,
         "run" => {
             if let Some(via) = flag_value(&rest, "--via") {
                 return via.eq_ignore_ascii_case("thread");
@@ -304,7 +389,7 @@ pub fn loopback_cli_response_from_file(path: &Path, args: &[String]) -> Option<V
     } else {
         "human"
     };
-    let payload = json!({
+    let mut payload = json!({
         "token": token,
         "argv": args,
         "id": uuid::Uuid::new_v4().to_string(),
@@ -312,6 +397,46 @@ pub fn loopback_cli_response_from_file(path: &Path, args: &[String]) -> Option<V
         "from": std::env::var("KITE_ADDRESS").unwrap_or_default(),
         "workspace": std::env::current_dir().ok().map(|p| p.display().to_string()),
     });
+    if let Some(obj) = payload.as_object_mut() {
+        if let Ok(agent_id) = std::env::var("KITE_AGENT_ID") {
+            let trimmed = agent_id.trim();
+            if !trimmed.is_empty() {
+                obj.insert("agentId".to_string(), json!(trimmed));
+            }
+        }
+        if let Ok(raw) = std::env::var("KITE_ALLOW_SCHEDULING") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => {
+                    obj.insert("allowAgentScheduling".to_string(), json!(true));
+                }
+                "false" | "0" | "no" => {
+                    obj.insert("allowAgentScheduling".to_string(), json!(false));
+                }
+                _ => {}
+            }
+        }
+        if let Ok(raw) = std::env::var("KITE_ALLOW_MESSAGING") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => {
+                    obj.insert("allowAgentMessaging".to_string(), json!(true));
+                }
+                "false" | "0" | "no" => {
+                    obj.insert("allowAgentMessaging".to_string(), json!(false));
+                }
+                _ => {}
+            }
+        }
+        if let Ok(raw) = std::env::var("KITE_DISABLED_PLUGINS") {
+            let disabled: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !disabled.is_empty() {
+                obj.insert("disabledPluginIds".to_string(), json!(disabled));
+            }
+        }
+    }
     if stream
         .write_all(&serde_json::to_vec(&payload).unwrap_or_default())
         .is_err()
@@ -344,11 +469,11 @@ pub fn loopback_cli_response(args: &[String]) -> Option<Value> {
     None
 }
 
-fn emit_receipt_or_value(value: &Value) {
+fn format_receipt_or_value(value: &Value) -> String {
     if let Some(receipt) = value.get("receipt") {
-        emit_cli_line(&serde_json::to_string(receipt).unwrap_or_default());
+        serde_json::to_string(receipt).unwrap_or_default()
     } else {
-        emit_cli_line(&value.to_string());
+        value.to_string()
     }
 }
 
@@ -359,33 +484,27 @@ fn query_dispatch<'a>(
     loopback_cli_response(args).or_else(|| fallback.and_then(|f| f(args)))
 }
 
-fn run_blocking_subagent_dispatch<'a>(
-    args: &[String],
+pub fn next_wait_poll_delay(elapsed: Duration) -> Duration {
+    if elapsed < Duration::from_secs(2) {
+        Duration::from_millis(200)
+    } else if elapsed < Duration::from_secs(10) {
+        Duration::from_millis(500)
+    } else {
+        Duration::from_millis(1_000)
+    }
+}
+
+fn wait_and_read_single_child<'a>(
+    child_address: &str,
+    started: std::time::Instant,
     wait_timeout_ms: u64,
     fallback: Option<&'a dyn Fn(&[String]) -> Option<Value>>,
-) -> i32 {
-    let Some(value) = query_dispatch(args, fallback) else {
-        emit_cli_line(&offline_receipt_json("cli", "dispatch").to_string());
-        return 1;
-    };
-    let run_exit = value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
-    let child_address = value
-        .get("receipt")
-        .and_then(|r| r.get("address"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if run_exit != 0 || !child_address.starts_with("thread:") {
-        emit_receipt_or_value(&value);
-        return run_exit;
-    }
-
-    let started = std::time::Instant::now();
+) -> Result<(String, String), (i32, String)> {
     let wait_args = vec![
         "kite".to_string(),
         "dispatch".to_string(),
         "wait".to_string(),
-        child_address.clone(),
+        child_address.to_string(),
         "--until".to_string(),
         "done,error,gone,blocked".to_string(),
         "--timeout".to_string(),
@@ -394,21 +513,20 @@ fn run_blocking_subagent_dispatch<'a>(
     let settled_presence;
     loop {
         let Some(wait_val) = query_dispatch(&wait_args, fallback) else {
-            emit_cli_line(&offline_receipt_json("cli", "dispatch").to_string());
-            return 1;
+            return Err((1, offline_receipt_json("cli", "dispatch").to_string()));
         };
         if receipt_still_waiting(&wait_val) {
-            if started.elapsed() >= Duration::from_millis(wait_timeout_ms) {
-                emit_cli_line(&timeout_receipt(&wait_val).to_string());
-                return 1;
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_millis(wait_timeout_ms) {
+                return Err((1, timeout_receipt(&wait_val).to_string()));
             }
-            std::thread::sleep(Duration::from_millis(200));
+            let remaining = Duration::from_millis(wait_timeout_ms).saturating_sub(elapsed);
+            std::thread::sleep(next_wait_poll_delay(elapsed).min(remaining));
             continue;
         }
         let wait_exit = wait_val.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
         if wait_exit != 0 {
-            emit_receipt_or_value(&wait_val);
-            return wait_exit;
+            return Err((wait_exit, format_receipt_or_value(&wait_val)));
         }
         settled_presence = wait_val
             .get("receipt")
@@ -423,7 +541,7 @@ fn run_blocking_subagent_dispatch<'a>(
         "kite".to_string(),
         "dispatch".to_string(),
         "read".to_string(),
-        child_address.clone(),
+        child_address.to_string(),
         "--last".to_string(),
     ];
     let read_val = query_dispatch(&read_args, fallback);
@@ -432,66 +550,280 @@ fn run_blocking_subagent_dispatch<'a>(
         .and_then(|v| v.get("receipt"))
         .and_then(|r| r.get("text"))
         .and_then(Value::as_str)
-        .unwrap_or("");
-    if matches!(settled_presence.as_str(), "error" | "gone" | "blocked") {
-        let failure = json!({
-            "schemaVersion": 1,
-            "id": "run",
-            "op": "run",
-            "status": "failed",
-            "address": child_address,
-            "submitted": true,
-            "presenceAtSubmit": settled_presence,
-            "error": format!("subagent_{settled_presence}"),
-            "text": final_text,
-        });
-        emit_cli_line(&failure.to_string());
-        return 1;
+        .unwrap_or("")
+        .to_string();
+
+    Ok((settled_presence, final_text))
+}
+
+fn run_blocking_subagent_dispatch_captured<'a>(
+    args: &[String],
+    wait_timeout_ms: u64,
+    fallback: Option<&'a dyn Fn(&[String]) -> Option<Value>>,
+) -> (i32, String) {
+    let Some(mut value) = query_dispatch(args, fallback) else {
+        return (1, offline_receipt_json("cli", "dispatch").to_string());
+    };
+    if value
+        .pointer("/receipt/error")
+        .and_then(Value::as_str)
+        == Some("bad_args")
+        && strip_cli_prefix(args).first().map(String::as_str) == Some("send")
+    {
+        let stripped = strip_send_wait_flags(args);
+        if stripped != args {
+            if let Some(retry_val) = query_dispatch(&stripped, fallback) {
+                value = retry_val;
+            }
+        }
     }
-    let child_id = child_address.strip_prefix("thread:").unwrap_or(&child_address);
-    let formatted = format_subagent_wait_output(final_text, child_id);
-    emit_cli_line(&formatted);
-    0
+    let run_exit = value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
+    let addresses = extract_spawned_thread_addresses(&value);
+    if run_exit != 0 || addresses.is_empty() {
+        return (run_exit, format_receipt_or_value(&value));
+    }
+
+    let started = std::time::Instant::now();
+    if addresses.len() == 1 {
+        let child_address = &addresses[0];
+        let (settled_presence, final_text) =
+            match wait_and_read_single_child(child_address, started, wait_timeout_ms, fallback) {
+                Ok(pair) => pair,
+                Err(err_out) => return err_out,
+            };
+        if matches!(settled_presence.as_str(), "error" | "gone" | "blocked") {
+            let failure = json!({
+                "schemaVersion": 1,
+                "id": "run",
+                "op": "run",
+                "status": "failed",
+                "address": child_address,
+                "submitted": true,
+                "presenceAtSubmit": settled_presence,
+                "error": format!("subagent_{settled_presence}"),
+                "text": final_text,
+            });
+            return (1, failure.to_string());
+        }
+        let child_id = child_address
+            .strip_prefix("thread:")
+            .unwrap_or(child_address);
+        let formatted = format_subagent_wait_output(&final_text, child_id);
+        return (0, formatted);
+    }
+
+    let mut sections = Vec::with_capacity(addresses.len());
+    let mut any_failed = false;
+    for (idx, child_address) in addresses.iter().enumerate() {
+        match wait_and_read_single_child(child_address, started, wait_timeout_ms, fallback) {
+            Ok((settled_presence, final_text)) => {
+                if matches!(settled_presence.as_str(), "error" | "gone" | "blocked") {
+                    any_failed = true;
+                }
+                let child_id = child_address
+                    .strip_prefix("thread:")
+                    .unwrap_or(child_address);
+                let formatted = format_subagent_wait_output(&final_text, child_id);
+                sections.push(format!(
+                    "=== Subagent {} ({child_address}) ===\n{formatted}",
+                    idx + 1
+                ));
+            }
+            Err((_code, err_text)) => {
+                any_failed = true;
+                sections.push(format!(
+                    "=== Subagent {} ({child_address}) ===\n{err_text}",
+                    idx + 1
+                ));
+            }
+        }
+    }
+    (if any_failed { 1 } else { 0 }, sections.join("\n\n"))
+}
+
+pub fn execute_cli_captured<'a>(
+    args: &[String],
+    fallback: Option<&'a dyn Fn(&[String]) -> Option<Value>>,
+) -> (i32, String) {
+    if let Some(wait_timeout_ms) =
+        blocking_run_wait_ms(args).or_else(|| blocking_send_wait_ms(args))
+    {
+        return run_blocking_subagent_dispatch_captured(args, wait_timeout_ms, fallback);
+    }
+    let wait_for = blocking_wait_ms(args);
+    let started = std::time::Instant::now();
+    loop {
+        let Some(value) = query_dispatch(args, fallback) else {
+            return (1, offline_receipt_json("cli", "dispatch").to_string());
+        };
+        if let Some(skill) = value.get("skill").and_then(Value::as_str) {
+            return (0, skill.to_string());
+        }
+        if let Some(programs) = value.get("programs").and_then(Value::as_str) {
+            return (0, programs.to_string());
+        }
+        if let Some(text_out) = value.get("textOut").and_then(Value::as_str) {
+            let code = value.get("exit").and_then(Value::as_i64).unwrap_or(0) as i32;
+            return (code, text_out.to_string());
+        }
+        if receipt_still_waiting(&value) {
+            let elapsed = started.elapsed();
+            let timed_out = wait_for
+                .map(|timeout_ms| elapsed >= Duration::from_millis(timeout_ms))
+                .unwrap_or(true);
+            if timed_out {
+                return (1, timeout_receipt(&value).to_string());
+            }
+            let delay = match wait_for {
+                Some(timeout_ms) => {
+                    let remaining = Duration::from_millis(timeout_ms).saturating_sub(elapsed);
+                    next_wait_poll_delay(elapsed).min(remaining)
+                }
+                None => next_wait_poll_delay(elapsed),
+            };
+            std::thread::sleep(delay);
+            continue;
+        }
+        let code = value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
+        return (code, format_receipt_or_value(&value));
+    }
 }
 
 pub fn run_cli<'a>(
     args: &[String],
     fallback: Option<&'a dyn Fn(&[String]) -> Option<Value>>,
 ) -> i32 {
-    if let Some(wait_timeout_ms) = blocking_run_wait_ms(args) {
-        return run_blocking_subagent_dispatch(args, wait_timeout_ms, fallback);
+    let slice = strip_cli_prefix(args);
+    match slice.first().map(String::as_str) {
+        Some("mcp") => return mcp::run_mcp_cli(&slice[1..]),
+        Some("hook-subagent") => return hook::run_hook_cli(&slice[1..]),
+        _ => {}
     }
-    let wait_for = blocking_wait_ms(args);
-    let started = std::time::Instant::now();
-    loop {
-        let Some(value) = query_dispatch(args, fallback) else {
-            emit_cli_line(&offline_receipt_json("cli", "dispatch").to_string());
-            return 1;
-        };
-        if let Some(skill) = value.get("skill").and_then(Value::as_str) {
-            emit_cli_line(skill);
-            return 0;
-        }
-        if let Some(programs) = value.get("programs").and_then(Value::as_str) {
-            emit_cli_line(programs);
-            return 0;
-        }
-        if let Some(text_out) = value.get("textOut").and_then(Value::as_str) {
-            emit_cli_line(text_out);
-            return value.get("exit").and_then(Value::as_i64).unwrap_or(0) as i32;
-        }
-        if receipt_still_waiting(&value) {
-            let timed_out = wait_for
-                .map(|timeout_ms| started.elapsed() >= Duration::from_millis(timeout_ms))
-                .unwrap_or(true);
-            if timed_out {
-                emit_cli_line(&timeout_receipt(&value).to_string());
-                return 1;
+    let (code, output) = execute_cli_captured(args, fallback);
+    emit_cli_line(&output);
+    code
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn blocking_send_wait_ms_detects_thread_target_and_wait_flag() {
+        assert_eq!(
+            blocking_send_wait_ms(&owned(&[
+                "kite",
+                "dispatch",
+                "send",
+                "thread:child-1",
+                "Follow up prompt",
+                "--wait",
+                "--timeout-ms",
+                "45000"
+            ])),
+            Some(45_000)
+        );
+        assert_eq!(
+            blocking_send_wait_ms(&owned(&[
+                "kite",
+                "dispatch",
+                "send",
+                "thread:child-1",
+                "Follow up prompt"
+            ])),
+            None
+        );
+        assert_eq!(
+            blocking_send_wait_ms(&owned(&[
+                "kite",
+                "dispatch",
+                "send",
+                "session:term-1",
+                "Follow up prompt",
+                "--wait"
+            ])),
+            None
+        );
+    }
+
+    #[test]
+    fn multi_address_blocking_run_waits_and_formats_every_spawned_subagent() {
+        let args = owned(&[
+            "kite",
+            "dispatch",
+            "run",
+            "--via",
+            "thread",
+            "--task",
+            "Task A",
+            "--task",
+            "Task B",
+            "--wait",
+        ]);
+        let fallback = |argv: &[String]| -> Option<Value> {
+            let sub = strip_cli_prefix(argv);
+            match sub.first().map(String::as_str) {
+                Some("run") => Some(json!({
+                    "exit": 0,
+                    "receipt": {
+                        "op": "run",
+                        "status": "submitted",
+                        "address": "thread:c1",
+                        "text": "started thread:c1,thread:c2"
+                    }
+                })),
+                Some("wait") => {
+                    let target = sub.get(1).cloned().unwrap_or_default();
+                    Some(json!({
+                        "exit": 0,
+                        "receipt": {
+                            "op": "wait",
+                            "status": "settled",
+                            "address": target,
+                            "presenceAtSubmit": "done"
+                        }
+                    }))
+                }
+                Some("read") => {
+                    let target = sub.get(1).map(String::as_str).unwrap_or("");
+                    let reply = if target == "thread:c1" {
+                        "First subagent answer"
+                    } else {
+                        "Second subagent answer"
+                    };
+                    Some(json!({
+                        "exit": 0,
+                        "receipt": {
+                            "op": "read",
+                            "status": "settled",
+                            "address": target,
+                            "text": reply
+                        }
+                    }))
+                }
+                _ => None,
             }
-            std::thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-        emit_receipt_or_value(&value);
-        return value.get("exit").and_then(Value::as_i64).unwrap_or(1) as i32;
+        };
+
+        let (code, output) = execute_cli_captured(&args, Some(&fallback));
+        assert_eq!(code, 0);
+        assert_eq!(
+            output,
+            "=== Subagent 1 (thread:c1) ===\nFirst subagent answer\n\n[subagent_id: thread:c1]\n\n=== Subagent 2 (thread:c2) ===\nSecond subagent answer\n\n[subagent_id: thread:c2]"
+        );
+    }
+
+    #[test]
+    fn adaptive_wait_poll_delay_scales_with_elapsed_time() {
+        assert_eq!(next_wait_poll_delay(Duration::from_millis(0)), Duration::from_millis(200));
+        assert_eq!(next_wait_poll_delay(Duration::from_millis(1_999)), Duration::from_millis(200));
+        assert_eq!(next_wait_poll_delay(Duration::from_secs(2)), Duration::from_millis(500));
+        assert_eq!(next_wait_poll_delay(Duration::from_millis(9_999)), Duration::from_millis(500));
+        assert_eq!(next_wait_poll_delay(Duration::from_secs(10)), Duration::from_millis(1_000));
+        assert_eq!(next_wait_poll_delay(Duration::from_secs(60)), Duration::from_millis(1_000));
     }
 }

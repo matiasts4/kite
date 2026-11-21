@@ -42,7 +42,7 @@ fn deltas_flush_the_first_chunk_and_hold_the_next_until_the_window() {
     let first = coalescer.push_message("Hello", false, start);
     assert_eq!(first.as_deref(), Some("Hello"));
     assert!(coalescer.push_message(" there", false, start).is_none());
-    assert!(coalescer.poll(start + Duration::from_millis(49)).is_empty());
+    assert!(coalescer.poll(start + DELTA_WINDOW.saturating_sub(Duration::from_millis(1))).is_empty());
     let flushed = coalescer.poll(start + DELTA_WINDOW);
     assert_eq!(flushed, vec![" there".to_string()]);
     let closed = coalescer.push_reasoning("done", true, start);

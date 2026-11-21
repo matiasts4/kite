@@ -1,9 +1,12 @@
 use crate::persist::{agents, body, persist, routines};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 use uuid::Uuid;
 
 const SCHEMA_VERSION: i64 = 1;
@@ -21,6 +24,8 @@ const MS_PER_MINUTE: i64 = 60_000;
 const MS_PER_HOUR: i64 = 3_600_000;
 const MS_PER_DAY: i64 = 86_400_000;
 const INVALID_REQUEST: &str = "Routine request is invalid.";
+const DEFAULT_PERMISSION_MODE: &str = "readOnly";
+const ROUTINE_TICK_INTERVAL_SECS: u64 = 20;
 
 type RoutineResult<T> = Result<T, RoutineCommandError>;
 
@@ -66,6 +71,12 @@ struct RunRequest {
 
 // Remembers run request identifiers so a retried request replays instead of starting a second run.
 static RUN_REQUESTS: Mutex<Vec<RunRequest>> = Mutex::new(Vec::new());
+static IN_FLIGHT_ROUTINES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static SCHEDULER_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn in_flight_routines() -> &'static Mutex<HashSet<String>> {
+    IN_FLIGHT_ROUTINES.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -188,6 +199,16 @@ fn validate_workspace(value: Option<&Value>) -> RoutineResult<Value> {
     }
 }
 
+fn validate_permission_mode(value: Option<&Value>) -> RoutineResult<String> {
+    match value {
+        None | Some(Value::Null) => Ok(DEFAULT_PERMISSION_MODE.to_string()),
+        Some(Value::String(mode)) if matches!(mode.as_str(), "readOnly" | "auto" | "fullAccess") => {
+            Ok(mode.clone())
+        }
+        Some(_) => Err(invalid("Routine permission mode is invalid.")),
+    }
+}
+
 // Older records stored `author` as `{ "kind": "user" }`; the UI contract is "builder" | "agent".
 fn normalize_record(record: &Value) -> Value {
     let agent_authored = match record.get("author") {
@@ -195,12 +216,15 @@ fn normalize_record(record: &Value) -> Value {
         Some(Value::Object(object)) => object.get("kind").and_then(Value::as_str) == Some("agent"),
         _ => false,
     };
+    let permission_mode = validate_permission_mode(record.get("permissionMode"))
+        .unwrap_or_else(|_| DEFAULT_PERMISSION_MODE.to_string());
     let mut normalized = record.clone();
     if let Some(object) = normalized.as_object_mut() {
         object.insert(
             "author".to_string(),
             json!(if agent_authored { "agent" } else { "builder" }),
         );
+        object.insert("permissionMode".to_string(), json!(permission_mode));
     }
     normalized
 }
@@ -251,14 +275,16 @@ fn next_run_after(cadence: &Value, from_ms: i64) -> i64 {
     from_ms.saturating_add(MS_PER_DAY)
 }
 
-// Only engines that map onto a chat provider can run a routine. Others are reported as unavailable.
+// Map all 7 supported agent engines (and aliases) onto their chat provider.
 fn chat_provider_for_engine(engine: &str) -> Option<&'static str> {
-    match engine {
-        "claude-code" => Some("claude"),
+    match engine.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" => Some("claude"),
         "codex" => Some("codex"),
-        "cursor" => Some("cursor"),
+        "cursor" | "cursor-agent" => Some("cursor"),
         "grok" => Some("grok"),
-        "open-code" => Some("opencode"),
+        "opencode" | "open-code" => Some("opencode"),
+        "antigravity" | "agy" => Some("antigravity"),
+        "gemini" => Some("gemini"),
         _ => None,
     }
 }
@@ -400,16 +426,11 @@ fn release_run_request(request_id: &str) {
     requests.retain(|item| !(item.id == request_id && item.thread_id.is_none()));
 }
 
-fn start_routine_run(agent_id: &str, routine_id: &str, expected: &str) -> RoutineResult<(String, String)> {
-    let routine = {
-        let list = routines().lock().unwrap();
-        ensure_revision(&list, agent_id, expected)?;
-        let found = list
-            .iter()
-            .find(|record| is_routine(record, agent_id, routine_id))
-            .cloned();
-        found.ok_or_else(not_found)?
-    };
+fn execute_routine_record(
+    agent_id: &str,
+    routine_id: &str,
+    routine: &Value,
+) -> RoutineResult<(String, String)> {
     let prompt = routine
         .get("prompt")
         .and_then(Value::as_str)
@@ -428,6 +449,8 @@ fn start_routine_run(agent_id: &str, routine_id: &str, expected: &str) -> Routin
         .get("workspaceId")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let permission_mode = validate_permission_mode(routine.get("permissionMode"))
+        .unwrap_or_else(|_| DEFAULT_PERMISSION_MODE.to_string());
     let engine = {
         let roster = agents().lock().unwrap();
         let found = roster
@@ -454,7 +477,10 @@ fn start_routine_run(agent_id: &str, routine_id: &str, expected: &str) -> Routin
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    crate::chat::configure_thread(&thread_id, &json!({ "provider": provider, "mode": "readOnly" }));
+    crate::chat::configure_thread(
+        &thread_id,
+        &json!({ "provider": provider, "mode": permission_mode }),
+    );
     let started = crate::chat::start_turn(&thread_id, Some(agent_id), &prompt, Vec::new(), Some(routine_id));
     let run_id = started
         .get("runId")
@@ -488,6 +514,19 @@ fn start_routine_run(agent_id: &str, routine_id: &str, expected: &str) -> Routin
     Ok((thread_id, run_id))
 }
 
+fn start_routine_run(agent_id: &str, routine_id: &str, expected: &str) -> RoutineResult<(String, String)> {
+    let routine = {
+        let list = routines().lock().unwrap();
+        ensure_revision(&list, agent_id, expected)?;
+        let found = list
+            .iter()
+            .find(|record| is_routine(record, agent_id, routine_id))
+            .cloned();
+        found.ok_or_else(not_found)?
+    };
+    execute_routine_record(agent_id, routine_id, &routine)
+}
+
 #[tauri::command]
 pub fn list_routines(_request: Option<Value>) -> Value {
     routine_collection_snapshot()
@@ -518,6 +557,7 @@ pub fn create_routine(request: Option<Value>) -> RoutineResult<Value> {
     )?;
     let cadence = validate_cadence(draft.get("cadence"))?;
     let workspace = validate_workspace(draft.get("workspaceId"))?;
+    let permission_mode = validate_permission_mode(draft.get("permissionMode"))?;
     if !agent_exists(&agent_id) {
         return Err(agent_not_found());
     }
@@ -531,6 +571,7 @@ pub fn create_routine(request: Option<Value>) -> RoutineResult<Value> {
         "enabled": true,
         "author": "builder",
         "workspaceId": workspace,
+        "permissionMode": permission_mode,
         "createdAtUnixMs": now,
         "nextRunAtUnixMs": next_run_after(&cadence, now),
         "lastRunAtUnixMs": Value::Null,
@@ -574,6 +615,11 @@ pub fn update_routine(request: Option<Value>) -> RoutineResult<Value> {
     )?;
     let cadence = validate_cadence(update.get("cadence"))?;
     let workspace = validate_workspace(update.get("workspaceId"))?;
+    let next_permission_mode = if update.get("permissionMode").is_some() {
+        Some(validate_permission_mode(update.get("permissionMode"))?)
+    } else {
+        None
+    };
     {
         let mut list = routines().lock().unwrap();
         ensure_revision(&list, &agent_id, &expected)?;
@@ -588,6 +634,9 @@ pub fn update_routine(request: Option<Value>) -> RoutineResult<Value> {
         record["prompt"] = json!(prompt);
         record["cadence"] = cadence.clone();
         record["workspaceId"] = workspace;
+        if let Some(mode) = next_permission_mode {
+            record["permissionMode"] = json!(mode);
+        }
         if record.get("enabled").and_then(Value::as_bool) == Some(true) {
             record["nextRunAtUnixMs"] = json!(next_run_after(&cadence, now));
         }
@@ -682,6 +731,157 @@ pub fn set_routine_enabled(request: Option<Value>) -> RoutineResult<Value> {
     }
     persist();
     Ok(routine_collection_snapshot())
+}
+
+fn agent_allows_scheduling(agent_id: &str) -> bool {
+    let roster = agents().lock().unwrap();
+    let Some(agent) = roster.iter().find(|agent| agent.id == agent_id) else {
+        return false;
+    };
+    agent.allow_agent_scheduling != Some(false)
+}
+
+fn is_routine_currently_running(record: &Value) -> bool {
+    let Some(routine_id) = record.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    if in_flight_routines()
+        .lock()
+        .map(|set| set.contains(routine_id))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Some(thread_id) = record.get("lastRunThreadId").and_then(Value::as_str) {
+        if crate::chat::is_turn_running(thread_id) {
+            return true;
+        }
+    }
+    false
+}
+
+fn select_and_advance_due_routines<F, G>(
+    list: &mut [Value],
+    now: i64,
+    allows_scheduling: F,
+    is_running: G,
+) -> Vec<(String, String)>
+where
+    F: Fn(&str) -> bool,
+    G: Fn(&Value) -> bool,
+{
+    let mut due = Vec::new();
+    for record in list.iter_mut() {
+        if record.get("enabled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let Some(next_at) = record.get("nextRunAtUnixMs").and_then(Value::as_i64) else {
+            continue;
+        };
+        if next_at > now {
+            continue;
+        }
+        let Some(agent_id) = record.get("agentId").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        let Some(routine_id) = record.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        if !allows_scheduling(&agent_id) || is_running(record) {
+            continue;
+        }
+        // Missed-run guard: advance strictly into the future so overdue routines never fire catch-up bursts.
+        let mut next = next_run_after(&record["cadence"], now);
+        if next <= now {
+            next = now.saturating_add(MS_PER_MINUTE);
+        }
+        record["nextRunAtUnixMs"] = json!(next);
+        due.push((agent_id, routine_id));
+    }
+    due
+}
+
+pub fn tick_due_routines_at(now: i64) -> usize {
+    let due: Vec<(String, String, Value)> = {
+        let mut list = routines().lock().unwrap();
+        let selected = select_and_advance_due_routines(
+            &mut list,
+            now,
+            agent_allows_scheduling,
+            is_routine_currently_running,
+        );
+        if selected.is_empty() {
+            return 0;
+        }
+        let mut pairs = Vec::with_capacity(selected.len());
+        if let Ok(mut in_flight) = in_flight_routines().lock() {
+            for (agent_id, routine_id) in selected {
+                if !in_flight.insert(routine_id.clone()) {
+                    continue;
+                }
+                if let Some(record) = list
+                    .iter()
+                    .find(|record| is_routine(record, &agent_id, &routine_id))
+                    .cloned()
+                {
+                    pairs.push((agent_id, routine_id, record));
+                } else {
+                    in_flight.remove(&routine_id);
+                }
+            }
+        }
+        pairs
+    };
+
+    if due.is_empty() {
+        return 0;
+    }
+    persist();
+
+    let mut triggered = 0usize;
+    for (agent_id, routine_id, record) in due {
+        let outcome = execute_routine_record(&agent_id, &routine_id, &record);
+        if let Ok(mut in_flight) = in_flight_routines().lock() {
+            in_flight.remove(&routine_id);
+        }
+        match outcome {
+            Ok(_) => {
+                triggered += 1;
+            }
+            Err(err) => {
+                {
+                    let mut list = routines().lock().unwrap();
+                    if let Some(item) = list
+                        .iter_mut()
+                        .find(|item| is_routine(item, &agent_id, &routine_id))
+                    {
+                        item["lastError"] = json!(err.message);
+                    }
+                }
+                persist();
+            }
+        }
+    }
+    triggered
+}
+
+pub fn start_routine_scheduler() {
+    if SCHEDULER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            ROUTINE_TICK_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the immediate startup tick so initial state loading finishes before evaluating due routines.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now = now_ms();
+            let _ = tokio::task::spawn_blocking(move || tick_due_routines_at(now)).await;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -787,10 +987,88 @@ mod tests {
 
     #[test]
     fn only_chat_backed_engines_can_run_a_routine() {
+        assert_eq!(chat_provider_for_engine("claude"), Some("claude"));
         assert_eq!(chat_provider_for_engine("claude-code"), Some("claude"));
+        assert_eq!(chat_provider_for_engine("codex"), Some("codex"));
+        assert_eq!(chat_provider_for_engine("cursor"), Some("cursor"));
+        assert_eq!(chat_provider_for_engine("cursor-agent"), Some("cursor"));
+        assert_eq!(chat_provider_for_engine("grok"), Some("grok"));
+        assert_eq!(chat_provider_for_engine("opencode"), Some("opencode"));
         assert_eq!(chat_provider_for_engine("open-code"), Some("opencode"));
-        assert_eq!(chat_provider_for_engine("antigravity"), None);
+        assert_eq!(chat_provider_for_engine("antigravity"), Some("antigravity"));
+        assert_eq!(chat_provider_for_engine("agy"), Some("antigravity"));
+        assert_eq!(chat_provider_for_engine("gemini"), Some("gemini"));
         assert_eq!(chat_provider_for_engine("terminal"), None);
+        assert_eq!(chat_provider_for_engine("powershell"), None);
+    }
+
+    #[test]
+    fn permission_mode_validation_defaults_to_read_only_and_rejects_invalid() {
+        assert_eq!(validate_permission_mode(None).unwrap(), "readOnly");
+        assert_eq!(validate_permission_mode(Some(&Value::Null)).unwrap(), "readOnly");
+        assert_eq!(validate_permission_mode(Some(&json!("readOnly"))).unwrap(), "readOnly");
+        assert_eq!(validate_permission_mode(Some(&json!("auto"))).unwrap(), "auto");
+        assert_eq!(validate_permission_mode(Some(&json!("fullAccess"))).unwrap(), "fullAccess");
+        assert!(validate_permission_mode(Some(&json!("invalidMode"))).is_err());
+    }
+
+    #[test]
+    fn routine_scheduler_tick_respects_due_enabled_overlapping_and_scheduling_permission() {
+        let agent_ok = "11111111-1111-4111-8111-111111111111";
+        let agent_blocked = "22222222-2222-4222-8222-222222222222";
+        let now = 10_000_000i64;
+
+        let mut list = vec![
+            json!({
+                "id": "r-due",
+                "agentId": agent_ok,
+                "name": "Due",
+                "prompt": "Run check",
+                "cadence": { "kind": "interval", "seconds": 900 },
+                "enabled": true,
+                "nextRunAtUnixMs": now - 5_000_000,
+                "permissionMode": "auto"
+            }),
+            json!({
+                "id": "r-disabled",
+                "agentId": agent_ok,
+                "name": "Disabled",
+                "prompt": "Skip",
+                "cadence": { "kind": "interval", "seconds": 900 },
+                "enabled": false,
+                "nextRunAtUnixMs": now - 1000
+            }),
+            json!({
+                "id": "r-future",
+                "agentId": agent_ok,
+                "name": "Future",
+                "prompt": "Skip",
+                "cadence": { "kind": "interval", "seconds": 900 },
+                "enabled": true,
+                "nextRunAtUnixMs": now + 60_000
+            }),
+            json!({
+                "id": "r-disallowed",
+                "agentId": agent_blocked,
+                "name": "Disallowed",
+                "prompt": "Skip",
+                "cadence": { "kind": "interval", "seconds": 900 },
+                "enabled": true,
+                "nextRunAtUnixMs": now - 1000
+            }),
+        ];
+
+        let allowed_fn = |id: &str| id != agent_blocked;
+        let running_fn = |record: &Value| record.get("id").and_then(Value::as_str) == Some("r-running");
+        let due = select_and_advance_due_routines(&mut list, now, allowed_fn, running_fn);
+        assert_eq!(due, vec![(agent_ok.to_string(), "r-due".to_string())]);
+        let next_due = list[0]["nextRunAtUnixMs"].as_i64().unwrap();
+        assert!(next_due > now, "overdue routine must advance into the future");
+        assert_eq!(next_due, now + 900_000);
+
+        // Running again at the same `now` must not re-fire (no catch-up burst).
+        let due_again = select_and_advance_due_routines(&mut list, now, allowed_fn, running_fn);
+        assert!(due_again.is_empty());
     }
 
     // Exercises the commands against the Studio store. It only runs when APPDATA points at an isolated

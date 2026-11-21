@@ -1066,3 +1066,69 @@ fn compose_terminal_context_env_attributes_session_agent_provider_and_project() 
     assert_eq!(map.get("KITE_PROVIDER").map(String::as_str), Some("claude-code"));
     assert_eq!(map.get("KITE_PROJECT").map(String::as_str), Some("ws-kite"));
 }
+
+#[test]
+fn resolve_terminal_agent_prompts_handles_charter_by_engine() {
+    use crate::terminal::commands::resolve_terminal_agent_prompts;
+
+    let charter = "Role: Rust Architect\nCharter: Maintain terminal stability";
+    let user_prompt = Some("Inspect processes".to_string());
+
+    // claude-code accepts system prompt: combines charter with manual_text(), preserves user initial_prompt
+    let (claude_sys, claude_init) = resolve_terminal_agent_prompts(
+        "claude-code",
+        Some(charter),
+        user_prompt.clone(),
+        None,
+    );
+    let claude_sys = claude_sys.expect("claude-code should produce a system prompt");
+    let expected_manual = crate::dispatch::cli::manual_text();
+    assert!(claude_sys.contains(charter));
+    assert!(claude_sys.contains(&expected_manual));
+    assert_eq!(claude_init, user_prompt);
+
+    // grok accepts system prompt: prepends charter to existing system prompt, preserves initial_prompt
+    let (grok_sys, grok_init) = resolve_terminal_agent_prompts(
+        "grok",
+        Some(charter),
+        user_prompt.clone(),
+        Some("Custom system instructions".to_string()),
+    );
+    let grok_sys = grok_sys.expect("grok should produce a system prompt");
+    assert!(grok_sys.contains(charter));
+    assert!(grok_sys.contains("Custom system instructions"));
+    assert_eq!(grok_init, user_prompt);
+
+    // codex does NOT accept system prompt: injects charter into initial_prompt without clobbering user prompt
+    let (codex_sys, codex_init) = resolve_terminal_agent_prompts(
+        "codex",
+        Some(charter),
+        user_prompt.clone(),
+        None,
+    );
+    assert_eq!(codex_sys, None);
+    let codex_init = codex_init.expect("codex should produce an initial prompt");
+    assert!(codex_init.contains(charter));
+    assert!(codex_init.contains("Inspect processes"));
+
+    // antigravity does NOT accept system prompt: passes charter as initial_prompt when user prompt is None
+    let (anti_sys, anti_init) = resolve_terminal_agent_prompts(
+        "antigravity",
+        Some(charter),
+        None,
+        None,
+    );
+    assert_eq!(anti_sys, None);
+    assert_eq!(anti_init.as_deref(), Some(charter));
+
+    // When charter is None and engine accepts system prompt: defaults to manual_text()
+    let (default_sys, default_init) = resolve_terminal_agent_prompts(
+        "claude-code",
+        None,
+        user_prompt.clone(),
+        None,
+    );
+    let default_sys = default_sys.expect("claude-code should default to manual_text");
+    assert_eq!(default_sys, expected_manual);
+    assert_eq!(default_init, user_prompt);
+}

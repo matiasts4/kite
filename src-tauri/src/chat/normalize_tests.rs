@@ -525,3 +525,21 @@
             "{\"id\":\"perm-42\",\"jsonrpc\":\"2.0\",\"result\":{\"approved\":true,\"decision\":\"approve\",\"outcome\":{\"optionId\":\"allow_once\",\"outcome\":\"selected\"}}}\n"
         );
     }
+
+    #[test]
+    fn antigravity_subagent_step_normalizes_from_subagent_info() {
+        let frame = r#"{"event":"step_update","step_update":{"step_index":39,"step_type":"subagent","tool_name":"invoke_subagent","state":"ERROR","subagent_info":{"subagents":[{"type_name":"research","role":"Investigator","initial_prompt":"Check focus"}]}}}"#;
+        let events = normalize_frame("antigravity", frame);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            NormalizedEvent::Tool { tool } => {
+                assert_eq!(tool.tool_kind, "subagent");
+                assert_eq!(tool.status, "failed");
+                let meta = tool.subagent_meta.as_ref().expect("subagent meta");
+                assert_eq!(meta.role, "Investigator");
+                assert_eq!(meta.type_name.as_deref(), Some("research"));
+                assert_eq!(meta.prompt.as_deref(), Some("Check focus"));
+            }
+            other => panic!("expected NormalizedEvent::Tool, got {other:?}"),
+        }
+    }

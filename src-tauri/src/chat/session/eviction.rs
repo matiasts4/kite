@@ -31,6 +31,27 @@ impl SessionManager {
             .map(|session| session.record.clone())
     }
 
+    /// Returns the active conversation handle from either the session record or its
+    /// underlying transport (surviving mid-turn account-switch handle clears on future turns).
+    pub fn transport_resume_handle(&self, thread_id: &str) -> Option<String> {
+        self.sessions.get(thread_id).and_then(|session| {
+            session
+                .record
+                .resume_handle
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    session
+                        .transport
+                        .resume_handle()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        })
+    }
+
     pub fn events_since(&self, thread_id: &str, sequence: u64) -> Vec<SessionEvent> {
         self.sessions
             .get(thread_id)
@@ -83,15 +104,26 @@ impl SessionManager {
                 continue;
             }
 
-            let _ = session.transport.stop();
-            settle_approvals(session, "accountSwitch");
+            if !matches!(
+                session.record.state,
+                SessionState::Reaped
+                    | SessionState::Closed
+                    | SessionState::Failed
+                    | SessionState::Resumable
+            ) {
+                let _ = session.transport.stop();
+            }
             if session.record.state != SessionState::Closed {
                 session.record.state = SessionState::Reaped;
+                clear_heavy_session_payloads(session);
+                settle_approvals(session, "accountSwitch");
                 push_event(
                     session,
                     "evicted",
                     json!({ "driver": session.record.driver, "reason": "accountSwitch" }),
                 );
+            } else {
+                settle_approvals(session, "accountSwitch");
             }
             evicted.push(thread_id);
         }
@@ -109,9 +141,10 @@ impl SessionManager {
             }
         }
         session.transport.stop().map_err(SessionError::Transport)?;
-        settle_approvals(session, "reaped");
         session.record.state = SessionState::Reaped;
         let handle = session.record.resume_handle.clone();
+        clear_heavy_session_payloads(session);
+        settle_approvals(session, "reaped");
         push_event(session, "reaped", json!({ "resumeHandle": handle }));
         Ok(handle)
     }
@@ -189,6 +222,59 @@ impl SessionManager {
         }
         stopped
     }
+
+    pub(super) fn record_command(
+        &mut self,
+        command_id: &str,
+        prompt: &str,
+        receipt: SendReceipt,
+    ) {
+        if !self.commands.contains_key(command_id) {
+            while self.commands.len() >= DEFAULT_MAX_COMMAND_RECORDS {
+                let Some(oldest) = self.command_order.pop_front() else {
+                    break;
+                };
+                self.commands.remove(&oldest);
+            }
+            self.command_order.push_back(command_id.to_string());
+        }
+        self.commands.insert(
+            command_id.to_string(),
+            CommandRecord {
+                prompt: prompt.to_string(),
+                receipt,
+            },
+        );
+    }
+
+    pub(super) fn prune_terminal_sessions(&mut self, max_terminal: usize) -> usize {
+        let mut terminal: Vec<(String, i64)> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                matches!(
+                    session.record.state,
+                    SessionState::Closed
+                        | SessionState::Failed
+                        | SessionState::Interrupted
+                        | SessionState::Completed
+                )
+            })
+            .map(|(id, session)| (id.clone(), session.record.last_active_at_ms))
+            .collect();
+        if terminal.len() <= max_terminal {
+            return 0;
+        }
+        terminal.sort_by_key(|(_, ts)| *ts);
+        let to_remove = terminal.len() - max_terminal;
+        let mut removed = 0;
+        for (thread_id, _) in terminal.into_iter().take(to_remove) {
+            if self.sessions.remove(&thread_id).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
 }
 
 pub(super) fn spawn_once(session: &mut ManagedSession, resume_handle: Option<String>) -> Result<(), SessionError> {
@@ -224,7 +310,6 @@ pub(super) fn apply_exit(session: &mut ManagedSession, code: Option<i32>, error:
             session.record.resume_handle = Some(handle);
         }
     }
-    settle_approvals(session, "sessionExit");
     session.record.state = if error.is_some() {
         SessionState::Failed
     } else if session.record.mode != SessionMode::OneShot && session.record.resume_handle.is_some() {
@@ -232,6 +317,13 @@ pub(super) fn apply_exit(session: &mut ManagedSession, code: Option<i32>, error:
     } else {
         SessionState::Closed
     };
+    if matches!(
+        session.record.state,
+        SessionState::Closed | SessionState::Failed
+    ) {
+        clear_heavy_session_payloads(session);
+    }
+    settle_approvals(session, "sessionExit");
     push_event(
         session,
         "exited",
@@ -250,9 +342,17 @@ pub(super) fn settle_approvals(session: &mut ManagedSession, reason: &str) {
     }
 }
 
+pub(super) fn clear_heavy_session_payloads(session: &mut ManagedSession) {
+    session.events.clear();
+    session.events.shrink_to_fit();
+}
+
 pub(super) fn push_event(session: &mut ManagedSession, kind: &str, payload: Value) {
     session.record.next_sequence += 1;
-    session.events.push(SessionEvent {
+    while session.events.len() >= DEFAULT_MAX_SESSION_EVENTS {
+        session.events.pop_front();
+    }
+    session.events.push_back(SessionEvent {
         sequence: session.record.next_sequence,
         kind: kind.to_string(),
         payload,

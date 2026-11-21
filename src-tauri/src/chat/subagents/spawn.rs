@@ -47,7 +47,11 @@ pub(crate) fn remembered_provider_defaults(provider: &str) -> (Option<String>, O
     let mut best_model: Option<String> = None;
     let mut best_effort: Option<String> = None;
     for t in all.iter() {
-        if t.get("startedByAgent").and_then(Value::as_bool) == Some(true) {
+        if t.get("startedByAgent").and_then(Value::as_bool) == Some(true)
+            || t.get("profileId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+        {
             continue;
         }
         let Some(p) = t.get("provider").and_then(Value::as_str) else {
@@ -98,63 +102,88 @@ pub fn spawn_child_subagent_thread(
     params: ChildSubagentSpawnParams,
 ) -> Result<ChildSubagentSpawnResult, String> {
     let parent_meta = params.parent_thread_id.as_deref().and_then(|pid| {
-        let all = threads().lock().ok()?;
-        let parent = all
-            .iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))?;
-        let p_provider = parent
-            .get("provider")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let p_model = parent
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let p_ws_id = parent
-            .get("workspaceId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let p_cwd = parent
-            .get("worktreePath")
-            .or_else(|| parent.get("workingDirectory"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| p_ws_id.as_deref().and_then(workspace_path));
+        let (p_provider, p_model, p_ws_id, p_raw_cwd) = {
+            let all = threads().lock().ok()?;
+            let parent = all
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(pid))?;
+            (
+                parent.get("provider").and_then(Value::as_str).map(str::to_string),
+                parent.get("model").and_then(Value::as_str).map(str::to_string),
+                parent.get("workspaceId").and_then(Value::as_str).map(str::to_string),
+                parent
+                    .get("worktreePath")
+                    .or_else(|| parent.get("workingDirectory"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+        };
+        let p_cwd = p_raw_cwd.or_else(|| p_ws_id.as_deref().and_then(workspace_path));
         Some((p_provider, p_model, p_ws_id, p_cwd))
     });
 
     let (parent_provider, parent_model, parent_workspace_id, parent_cwd) =
         parent_meta.unwrap_or((None, None, None, None));
 
-    let provider = params
-        .provider
+    let (settings_prov, settings_model, settings_effort) =
+        crate::subagent_settings::get_subagent_settings().resolve_thread_selection_defaults(
+            params.provider.as_deref(),
+            params.model.as_deref(),
+            params.effort.as_deref(),
+        );
+
+    let provider = settings_prov
         .as_deref()
+        .or(params.provider.as_deref())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))
         .map(str::to_ascii_lowercase)
         .or_else(|| parent_provider.clone())
         .unwrap_or_else(|| "antigravity".to_string());
 
-    let same_provider_as_parent = parent_provider
-        .as_deref()
-        .is_some_and(|p| p.eq_ignore_ascii_case(&provider));
-    let (remembered_model, remembered_effort) = remembered_provider_defaults(&provider);
+    let (remembered_model, _remembered_effort) = remembered_provider_defaults(&provider);
 
     let child_id = uuid::Uuid::new_v4().to_string();
     let short_id: String = child_id.chars().filter(|c| *c != '-').take(8).collect();
 
-    let requested_model = params
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    let requested_model = settings_model
         .or_else(|| {
-            if params.provider.is_none() || same_provider_as_parent {
-                parent_model.clone().or(remembered_model.clone())
+            params
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            let available_ids = if cfg!(test) {
+                crate::chat::models::cached_provider_model_ids(&provider)
             } else {
-                remembered_model.clone()
-            }
+                let cached = crate::chat::models::cached_provider_model_ids(&provider);
+                if !cached.is_empty() {
+                    cached
+                } else {
+                    crate::chat::models::provider_models(&provider, false)
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }
+            };
+            crate::subagent_settings::pick_lightweight_model_for_provider(
+                &provider,
+                &available_ids,
+                parent_model.as_deref(),
+            )
+        })
+        .or_else(|| {
+            remembered_model
+                .clone()
+                .filter(|m| !crate::subagent_settings::is_heavy_or_deep_thinking_model(m))
         });
 
     let title = params
@@ -165,9 +194,14 @@ pub fn spawn_child_subagent_thread(
         .map(str::to_string)
         .unwrap_or_else(|| format!("Subagent ({provider})"));
 
+    let profile_id = params
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let mut child = blank_thread(
         &child_id,
-        None,
+        profile_id,
         &title,
         &provider,
         parent_workspace_id.as_deref(),
@@ -176,7 +210,13 @@ pub fn spawn_child_subagent_thread(
         .as_ref()
         .map(|model| json!(model))
         .unwrap_or(Value::Null);
-    child["mode"] = json!(default_mode(&provider));
+    let resolved_mode = params
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_mode(&provider));
+    child["mode"] = json!(resolved_mode);
     child["startedByAgent"] = json!(true);
     child["sideChat"] = json!(true);
     if let Some(ref pid) = params.parent_thread_id {
@@ -186,25 +226,22 @@ pub fn spawn_child_subagent_thread(
         child["subagentRole"] = json!(role);
     }
     let workspace_mode = match params.workspace_mode.trim().to_ascii_lowercase().as_str() {
-        "share" => "share".to_string(),
-        "branch" => "branch".to_string(),
+        "share" | "shared" | "worktree" => "share".to_string(),
+        "branch" | "branched" => "branch".to_string(),
         _ => "inherit".to_string(),
     };
     child["workspaceMode"] = json!(workspace_mode);
-    if let Some(eff) = params
-        .effort
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    let sanitized_effort = crate::subagent_settings::sanitize_subagent_effort(
+        &provider,
+        requested_model.as_deref(),
+        parent_model.as_deref(),
+        settings_effort.as_deref(),
+    );
+    if let Some(ref eff) = sanitized_effort {
         set_thread_effort_option(&mut child, eff);
-    } else if !same_provider_as_parent {
-        if let Some(eff) = remembered_effort {
-            set_thread_effort_option(&mut child, &eff);
-        } else {
-            child["effort"] = Value::Null;
-            child["providerOptions"] = json!([]);
-        }
+    } else {
+        child["effort"] = Value::Null;
+        child["providerOptions"] = json!([]);
     }
 
     let base_cwd = parent_cwd

@@ -171,6 +171,8 @@ fn bad_args_exit_2_and_bad_token_writes_nothing() {
             force: true,
             only_ready: false,
             allow_queue: true,
+            wait: false,
+            timeout_ms: None,
         },
         &ExecContext {
             id: "c1",
@@ -212,6 +214,8 @@ fn run_inherits_a_session_parent_and_ignores_the_word_human() {
             explicit_role: false,
             file: None,
             task: None,
+            tasks: Vec::new(),
+            count: None,
             wait: false,
             timeout_ms: None,
             hidden: false,
@@ -258,6 +262,8 @@ fn run_inherits_a_session_parent_and_ignores_the_word_human() {
             explicit_role: false,
             file: None,
             task: None,
+            tasks: Vec::new(),
+            count: None,
             wait: false,
             timeout_ms: None,
             hidden: false,
@@ -289,6 +295,11 @@ fn one_line_run_puts_the_task_on_the_start_prompt() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     ensure_sample_role(&dir).unwrap();
+    std::fs::write(
+        crate::dispatch::role::roles_dir(&dir).join("review.md"),
+        "command: codex\ndescription: Terminal review.\n\nReview the task. Report defects, risks, and a recommendation.\n",
+    )
+    .unwrap();
     let command = parse_args(&owned(&[
         "kite",
         "dispatch",

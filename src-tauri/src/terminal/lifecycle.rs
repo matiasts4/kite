@@ -16,7 +16,8 @@ use portable_pty::Child as PtyChild;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub const PTY_EXHAUSTION_DEBOUNCE_MS: i64 = 10_000;
 
@@ -564,6 +565,83 @@ pub fn maybe_bind_provider_session(session_id: &str, inst: &Arc<TerminalInstance
     });
 }
 
+struct PaintFlushTask {
+    due: Instant,
+    session_id: String,
+    inst: Arc<TerminalInstance>,
+}
+
+struct PaintFlushScheduler {
+    queue: Mutex<Vec<PaintFlushTask>>,
+    cvar: Condvar,
+}
+
+fn paint_flush_scheduler() -> &'static Arc<PaintFlushScheduler> {
+    static SCHEDULER: OnceLock<Arc<PaintFlushScheduler>> = OnceLock::new();
+    SCHEDULER.get_or_init(|| {
+        let sched = Arc::new(PaintFlushScheduler {
+            queue: Mutex::new(Vec::new()),
+            cvar: Condvar::new(),
+        });
+        let worker_sched = Arc::clone(&sched);
+        std::thread::Builder::new()
+            .name("kite-pty-paint-flush".to_string())
+            .spawn(move || {
+                let s = worker_sched;
+                let mut guard = s.queue.lock().unwrap();
+                loop {
+                    if guard.is_empty() {
+                        guard = s.cvar.wait(guard).unwrap();
+                        continue;
+                    }
+                    let now = Instant::now();
+                    let next_due = guard.iter().map(|t| t.due).min().unwrap();
+                    if next_due > now {
+                        let (next_guard, _) = s
+                            .cvar
+                            .wait_timeout(guard, next_due.saturating_duration_since(now))
+                            .unwrap();
+                        guard = next_guard;
+                        continue;
+                    }
+                    let mut ready = Vec::new();
+                    let mut remaining = Vec::with_capacity(guard.len());
+                    for task in guard.drain(..) {
+                        if task.due <= now {
+                            ready.push(task);
+                        } else {
+                            remaining.push(task);
+                        }
+                    }
+                    *guard = remaining;
+                    drop(guard);
+
+                    for task in ready {
+                        task.inst.paint_flush_armed.store(false, Ordering::Relaxed);
+                        if !task.inst.presentation_live.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        task.inst
+                            .last_paint_emit_ms
+                            .store(now_unix_ms() as u64, Ordering::Relaxed);
+                        let seq = task
+                            .inst
+                            .vt_engine
+                            .lock()
+                            .ok()
+                            .map(|vt| vt.seq())
+                            .unwrap_or(0);
+                        emit_terminal_activity(&task.session_id, seq, false, None);
+                    }
+
+                    guard = s.queue.lock().unwrap();
+                }
+            })
+            .expect("spawn kite-pty-paint-flush thread");
+        sched
+    })
+}
+
 pub fn schedule_paint_activity(session_id: &str, inst: &Arc<TerminalInstance>, seq: u64) {
     if !inst.presentation_live.load(Ordering::Relaxed) {
         return;
@@ -583,36 +661,89 @@ pub fn schedule_paint_activity(session_id: &str, inst: &Arc<TerminalInstance>, s
         return;
     }
     let wait = 16u64.saturating_sub(now.saturating_sub(last)).max(1);
-    let session_id = session_id.to_string();
-    let inst = Arc::clone(inst);
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(wait));
-        inst.paint_flush_armed.store(false, Ordering::Relaxed);
-        if !inst.presentation_live.load(Ordering::Relaxed) {
-            return;
-        }
-        inst.last_paint_emit_ms
-            .store(now_unix_ms() as u64, Ordering::Relaxed);
-        let seq = inst.vt_engine.lock().ok().map(|vt| vt.seq()).unwrap_or(0);
-        emit_terminal_activity(&session_id, seq, false, None);
-    });
+    let sched = paint_flush_scheduler();
+    if let Ok(mut queue) = sched.queue.lock() {
+        queue.push(PaintFlushTask {
+            due: Instant::now() + Duration::from_millis(wait),
+            session_id: session_id.to_string(),
+            inst: Arc::clone(inst),
+        });
+        sched.cvar.notify_one();
+    }
+}
+
+struct LifecycleMonitor {
+    entries: Mutex<Vec<(String, Arc<TerminalInstance>)>>,
+    cvar: Condvar,
+}
+
+fn lifecycle_monitor() -> &'static Arc<LifecycleMonitor> {
+    static MONITOR: OnceLock<Arc<LifecycleMonitor>> = OnceLock::new();
+    MONITOR.get_or_init(|| {
+        let mon = Arc::new(LifecycleMonitor {
+            entries: Mutex::new(Vec::new()),
+            cvar: Condvar::new(),
+        });
+        let worker_mon = Arc::clone(&mon);
+        std::thread::Builder::new()
+            .name("kite-pty-lifecycle".to_string())
+            .spawn(move || {
+                let m = worker_mon;
+                loop {
+                    let snapshot = {
+                        let mut guard = m.entries.lock().unwrap();
+                        while guard.is_empty() && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                            guard = m.cvar.wait(guard).unwrap();
+                        }
+                        if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        guard.retain(|(_, inst)| !inst.lifecycle_stop.load(Ordering::Relaxed));
+                        if guard.is_empty() {
+                            continue;
+                        }
+                        guard.clone()
+                    };
+
+                    let mut finished_ids = Vec::new();
+                    for (session_id, inst) in snapshot {
+                        if inst.lifecycle_stop.load(Ordering::Relaxed)
+                            || SHUTTING_DOWN.load(Ordering::Relaxed)
+                        {
+                            finished_ids.push(session_id);
+                            continue;
+                        }
+                        maybe_bind_provider_session(&session_id, &inst);
+                        if let Some(code) = try_child_exit(&inst) {
+                            notify_terminal_exit(&session_id, &inst, code);
+                            finished_ids.push(session_id);
+                        }
+                    }
+
+                    let mut guard = m.entries.lock().unwrap();
+                    if !finished_ids.is_empty() {
+                        guard.retain(|(sid, inst)| {
+                            !inst.lifecycle_stop.load(Ordering::Relaxed)
+                                && !finished_ids.iter().any(|done| done == sid)
+                        });
+                    }
+                    if !guard.is_empty() && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                        let _ = m.cvar.wait_timeout(guard, Duration::from_millis(400));
+                    }
+                }
+            })
+            .expect("spawn kite-pty-lifecycle thread");
+        mon
+    })
 }
 
 pub fn spawn_terminal_lifecycle(session_id: String, inst: Arc<TerminalInstance>) {
-    std::thread::spawn(move || {
-        while !inst.lifecycle_stop.load(Ordering::Relaxed) && !SHUTTING_DOWN.load(Ordering::Relaxed)
-        {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            if inst.lifecycle_stop.load(Ordering::Relaxed) {
-                break;
-            }
-            maybe_bind_provider_session(&session_id, &inst);
-            if let Some(code) = try_child_exit(&inst) {
-                notify_terminal_exit(&session_id, &inst, code);
-                break;
-            }
-        }
-    });
+    let mon = lifecycle_monitor();
+    if let Ok(mut entries) = mon.entries.lock() {
+        entries.retain(|(sid, _)| sid != &session_id);
+        entries.push((session_id, inst));
+        mon.cvar.notify_one();
+    }
 }
 
 pub fn spawn_pty_reader(

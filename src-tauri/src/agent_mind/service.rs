@@ -1,5 +1,7 @@
 use crate::agent_mind::memory::{load_agent_mind_at, write_agent_memory_at};
-use crate::agent_mind::skills::{load_agent_skill_at, remove_agent_skill_at, write_agent_skill_at};
+use crate::agent_mind::skills::{
+    load_agent_skill_at, remove_agent_skill_at, set_agent_skill_enabled_at, write_agent_skill_at,
+};
 use crate::agent_mind::starters::{install_agent_starter_at, starter_summaries};
 use crate::agent_mind::types::AgentMindError;
 use crate::agent_mind::utils::{
@@ -62,6 +64,17 @@ pub fn remove_agent_skill(request: Value) -> Result<Value, AgentMindError> {
         .unwrap_or("");
     require_known_agent(agent_id)?;
     remove_agent_skill_at(&agents_root(), agent_id, skill_id, expected)
+}
+
+#[tauri::command]
+pub fn set_agent_skill_enabled(request: Value) -> Result<Value, AgentMindError> {
+    let req = request_body(&request);
+    require_confirmation(req)?;
+    let agent_id = req.get("agentId").and_then(|value| value.as_str()).unwrap_or("");
+    let skill_id = req.get("skillId").and_then(|value| value.as_str()).unwrap_or("");
+    let enabled = req.get("enabled").and_then(|value| value.as_bool()).unwrap_or(true);
+    require_known_agent(agent_id)?;
+    set_agent_skill_enabled_at(&agents_root(), agent_id, skill_id, enabled)
 }
 
 #[tauri::command]

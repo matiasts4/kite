@@ -58,13 +58,15 @@ pub(super) fn prepare_swarm_member_thread(
     provider_override: Option<&str>,
     model_override: Option<&str>,
     effort_override: Option<&str>,
+    mode_override: Option<&str>,
+    agent_id: Option<&str>,
     workspace_mode: &str,
     role_label: Option<&str>,
     fork_source: Option<&str>,
     fork_source_thread_id: Option<&str>,
     fallback_cwd: Option<&str>,
 ) -> Result<PreparedSwarmWorker, DispatchError> {
-    let (coord_provider, coord_model, coord_ws_id, coord_cwd) = threads()
+    let (coord_provider, coord_model, coord_ws_id, coord_raw_cwd) = threads()
         .lock()
         .ok()
         .map(|all| {
@@ -79,18 +81,31 @@ pub(super) fn prepare_swarm_member_thread(
                     .get("worktreePath")
                     .or_else(|| c.get("workingDirectory"))
                     .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| cws.as_deref().and_then(workspace_path));
+                    .map(str::to_string);
                 (cp, cm, cws, ccwd)
             } else {
                 (None, None, None, None)
             }
         })
         .unwrap_or((None, None, None, None));
+    let coord_cwd = coord_raw_cwd.or_else(|| coord_ws_id.as_deref().and_then(workspace_path));
 
-    let raw_provider = provider_override
+    let explicit_model_override = model_override
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"));
+
+    let (settings_prov, settings_model, settings_effort) =
+        crate::subagent_settings::get_subagent_settings().resolve_thread_selection_defaults(
+            provider_override,
+            explicit_model_override,
+            effort_override,
+        );
+
+    let raw_provider = settings_prov
+        .as_deref()
+        .or(provider_override)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))
         .map(str::to_ascii_lowercase)
         .or_else(|| coord_provider.clone())
         .unwrap_or_else(|| "antigravity".to_string());
@@ -100,27 +115,44 @@ pub(super) fn prepare_swarm_member_thread(
     };
     let provider = canon_provider.to_string();
 
-    let same_provider_as_parent = coord_provider
-        .as_deref()
-        .is_some_and(|p| p.eq_ignore_ascii_case(&provider));
-    let (remembered_model, remembered_effort) = remembered_provider_defaults(&provider);
-    let requested_model = model_override
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            if provider_override.is_none() || same_provider_as_parent {
-                coord_model.clone().or(remembered_model.clone())
-            } else {
-                remembered_model.clone()
-            }
-        });
-    if model_override.is_some() {
-        if let Some(ref explicit_model) = requested_model {
-            crate::chat::models::validate_provider_model_selection(&provider, explicit_model)
-                .map_err(|_| DispatchError::BadArgs)?;
-        }
+    if let Some(explicit_model) = explicit_model_override {
+        crate::chat::models::validate_provider_model_selection(&provider, explicit_model)
+            .map_err(|_| DispatchError::BadArgs)?;
     }
+
+    let (remembered_model, _remembered_effort) = remembered_provider_defaults(&provider);
+    let requested_model = settings_model
+        .or_else(|| explicit_model_override.map(str::to_string))
+        .or_else(|| {
+            let available_ids = if cfg!(test) {
+                crate::chat::models::cached_provider_model_ids(&provider)
+            } else {
+                let cached = crate::chat::models::cached_provider_model_ids(&provider);
+                if !cached.is_empty() {
+                    cached
+                } else {
+                    crate::chat::models::provider_models(&provider, false)
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }
+            };
+            crate::subagent_settings::pick_lightweight_model_for_provider(
+                &provider,
+                &available_ids,
+                coord_model.as_deref(),
+            )
+        })
+        .or_else(|| {
+            remembered_model
+                .clone()
+                .filter(|m| !crate::subagent_settings::is_heavy_or_deep_thinking_model(m))
+        });
 
     let child_id = uuid::Uuid::new_v4().to_string();
     let short_id: String = child_id.chars().filter(|c| *c != '-').take(8).collect();
@@ -130,9 +162,12 @@ pub(super) fn prepare_swarm_member_thread(
         .map(str::to_string)
         .unwrap_or_else(|| format!("@{name} ({provider})"));
 
+    let profile_id = agent_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let mut child = blank_thread(
         &child_id,
-        None,
+        profile_id,
         &title,
         &provider,
         coord_ws_id.as_deref(),
@@ -141,7 +176,11 @@ pub(super) fn prepare_swarm_member_thread(
         .as_ref()
         .map(|m| json!(m))
         .unwrap_or(Value::Null);
-    child["mode"] = json!(default_mode(&provider));
+    let resolved_mode = mode_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_mode(&provider));
+    child["mode"] = json!(resolved_mode);
     child["startedByAgent"] = json!(true);
     child["sideChat"] = json!(true);
     child["parentThreadId"] = json!(coord_thread_id);
@@ -152,15 +191,17 @@ pub(super) fn prepare_swarm_member_thread(
     if let Some(r) = role_label {
         child["subagentRole"] = json!(r);
     }
-    if let Some(eff) = effort_override {
+    let sanitized_effort = crate::subagent_settings::sanitize_subagent_effort(
+        &provider,
+        requested_model.as_deref(),
+        coord_model.as_deref(),
+        settings_effort.as_deref(),
+    );
+    if let Some(ref eff) = sanitized_effort {
         set_thread_effort_option(&mut child, eff);
-    } else if !same_provider_as_parent {
-        if let Some(eff) = remembered_effort {
-            set_thread_effort_option(&mut child, &eff);
-        } else {
-            child["effort"] = Value::Null;
-            child["providerOptions"] = json!([]);
-        }
+    } else {
+        child["effort"] = Value::Null;
+        child["providerOptions"] = json!([]);
     }
 
     if let Some(src_tid) = fork_source_thread_id.or_else(|| {
@@ -386,6 +427,16 @@ pub fn on_worker_turn_settled_with_launcher(
 
     if let Some((cid, prompt)) = follow_up {
         if let Err(err) = invoke_launcher(launcher, &cid, &prompt) {
+            if let Ok(mut all) = threads().lock() {
+                if let Some(child) = all
+                    .iter_mut()
+                    .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+                {
+                    child["status"] = json!("error");
+                    crate::chat::threads::touch(child);
+                }
+            }
+            crate::chat::subagents::sync_child_thread_to_parent(&cid);
             let _guard = swarm_state_lock().lock().unwrap_or_else(|e| e.into_inner());
             let (mut state, path) = load_swarm_state(&coord_tid, None);
             if let Some(m) = state

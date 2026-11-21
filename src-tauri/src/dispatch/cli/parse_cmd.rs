@@ -42,11 +42,21 @@ pub(super) fn parse_send<'a>(
     let mut force = false;
     let mut only_ready = false;
     let mut allow_queue = true;
+    let mut wait = false;
+    let mut timeout_ms = None;
     while let Some(next) = items.next() {
         let (flag, inline_val) = parse_run::split_flag(next);
         match flag {
             "--file" => file = Some(need_flag(items, inline_val)?),
             "--force" if inline_val.is_none() => force = true,
+            "--wait" if inline_val.is_none() => wait = true,
+            "--timeout-ms" | "--timeout" => {
+                timeout_ms = Some(
+                    need_flag(items, inline_val)?
+                        .parse()
+                        .map_err(|_| DispatchError::BadArgs)?,
+                );
+            }
             "--if" => {
                 if need_flag(items, inline_val)? != "ready" {
                     return Err(DispatchError::BadArgs);
@@ -77,6 +87,8 @@ pub(super) fn parse_send<'a>(
         force,
         only_ready,
         allow_queue,
+        wait,
+        timeout_ms,
     })
 }
 
@@ -574,5 +586,468 @@ pub(super) fn need_flag<'a>(
         };
     }
     need(items)
+}
+
+fn agent_bad_args(msg: impl Into<String>) -> (DispatchError, String) {
+    (DispatchError::BadArgs, msg.into())
+}
+
+fn need_agent_flag<'a>(
+    items: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    flag_name: &str,
+    inline_val: Option<&str>,
+) -> Result<String, (DispatchError, String)> {
+    if let Some(val) = inline_val {
+        return if val.is_empty() {
+            Err(agent_bad_args(format!("Missing value for `{flag_name}`.")))
+        } else {
+            Ok(val.to_string())
+        };
+    }
+    match items.next() {
+        Some(value) if !value.starts_with('-') => Ok(value.to_string()),
+        _ => Err(agent_bad_args(format!("Missing value for `{flag_name}`."))),
+    }
+}
+
+/// Returns `true` when `args` (with optional `kite` / `dispatch` prefix) targets `agent`.
+pub fn is_agent_argv(args: &[String]) -> bool {
+    let mut slice = args;
+    if slice.first().map(String::as_str) == Some("kite") {
+        slice = &slice[1..];
+    }
+    if slice.first().map(String::as_str) == Some("dispatch") {
+        slice = &slice[1..];
+    }
+    slice.first().map(String::as_str) == Some("agent")
+}
+
+/// Parse `kite agent <domain> <action> ...` or `kite dispatch agent <domain> <action> ...`.
+pub fn parse_agent_args(args: &[String]) -> Result<AgentCommand, (DispatchError, String)> {
+    let mut items = args.iter().map(String::as_str).peekable();
+    if items.peek() == Some(&"kite") {
+        items.next();
+    }
+    if items.peek() == Some(&"dispatch") {
+        items.next();
+    }
+    if items.next() != Some("agent") {
+        return Err(agent_bad_args("Expected `agent` subcommand."));
+    }
+    let domain = items
+        .next()
+        .ok_or_else(|| agent_bad_args("Missing `agent` domain. Expected: thread, memory, routine, teammate."))?;
+    let action = items
+        .next()
+        .ok_or_else(|| agent_bad_args(format!("Missing action for `agent {domain}`.")))?;
+
+    match (domain, action) {
+        ("thread", "list") => {
+            let mut workspace_id = None;
+            let mut agent_id = None;
+            let mut cursor = 0usize;
+            let mut limit = 20usize;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--workspace-id" | "--workspace" => {
+                        workspace_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--cursor" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        cursor = raw.parse().map_err(|_| agent_bad_args("Invalid `--cursor` integer."))?;
+                    }
+                    "--limit" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        limit = raw.parse().map_err(|_| agent_bad_args("Invalid `--limit` integer."))?;
+                    }
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent thread list`."))),
+                }
+            }
+            Ok(AgentCommand::ThreadList {
+                workspace_id,
+                agent_id,
+                cursor,
+                limit,
+            })
+        }
+        ("thread", "search") => {
+            let mut query = None;
+            let mut workspace_id = None;
+            let mut agent_id = None;
+            let mut cursor = 0usize;
+            let mut limit = 20usize;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--query" | "-q" => {
+                        query = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--workspace-id" | "--workspace" => {
+                        workspace_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--cursor" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        cursor = raw.parse().map_err(|_| agent_bad_args("Invalid `--cursor` integer."))?;
+                    }
+                    "--limit" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        limit = raw.parse().map_err(|_| agent_bad_args("Invalid `--limit` integer."))?;
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent thread search`.")));
+                    }
+                    other if query.is_none() => query = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent thread search`.")));
+                    }
+                }
+            }
+            let query = query
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent thread search` requires a non-empty query."))?;
+            Ok(AgentCommand::ThreadSearch {
+                query,
+                workspace_id,
+                agent_id,
+                cursor,
+                limit,
+            })
+        }
+        ("thread", "read") => {
+            let mut thread_id = None;
+            let mut cursor = None;
+            let mut limit = 40usize;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--thread-id" | "--thread" | "--id" => {
+                        thread_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--cursor" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        cursor = Some(raw.parse().map_err(|_| agent_bad_args("Invalid `--cursor` integer."))?);
+                    }
+                    "--limit" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        limit = raw.parse().map_err(|_| agent_bad_args("Invalid `--limit` integer."))?;
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent thread read`.")));
+                    }
+                    other if thread_id.is_none() => thread_id = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent thread read`.")));
+                    }
+                }
+            }
+            let thread_id = thread_id
+                .map(|s| s.trim().strip_prefix("thread:").unwrap_or(s.trim()).to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent thread read` requires a thread id."))?;
+            Ok(AgentCommand::ThreadRead {
+                thread_id,
+                cursor,
+                limit,
+            })
+        }
+        ("memory", "read") => {
+            let mut target = "agent".to_string();
+            let mut agent_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--target" => target = need_agent_flag(&mut items, flag, inline_val)?,
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent memory read`."))),
+                }
+            }
+            Ok(AgentCommand::MemoryRead { target, agent_id })
+        }
+        ("memory", "add") => {
+            let mut text = None;
+            let mut target = "agent".to_string();
+            let mut agent_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--text" => text = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--target" => target = need_agent_flag(&mut items, flag, inline_val)?,
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent memory add`.")));
+                    }
+                    other if text.is_none() => text = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent memory add`.")));
+                    }
+                }
+            }
+            let text = text
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent memory add` requires non-empty text."))?;
+            Ok(AgentCommand::MemoryAdd {
+                text,
+                target,
+                agent_id,
+            })
+        }
+        ("memory", "search") => {
+            let mut query = None;
+            let mut target = "agent".to_string();
+            let mut agent_id = None;
+            let mut limit = 20usize;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--query" | "-q" => query = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--target" => target = need_agent_flag(&mut items, flag, inline_val)?,
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--limit" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        limit = raw.parse().map_err(|_| agent_bad_args("Invalid `--limit` integer."))?;
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent memory search`.")));
+                    }
+                    other if query.is_none() => query = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent memory search`.")));
+                    }
+                }
+            }
+            let query = query
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent memory search` requires a non-empty query."))?;
+            Ok(AgentCommand::MemorySearch {
+                query,
+                target,
+                agent_id,
+                limit,
+            })
+        }
+        ("routine", "list") => {
+            let mut agent_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent routine list`."))),
+                }
+            }
+            Ok(AgentCommand::RoutineList { agent_id })
+        }
+        ("routine", "create") => {
+            let mut agent_id = None;
+            let mut name = None;
+            let mut prompt = None;
+            let mut cadence_seconds = 3600u64;
+            let mut workspace_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--name" => name = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--prompt" => prompt = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--every" | "--cadence-seconds" | "--seconds" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        cadence_seconds = raw
+                            .parse()
+                            .map_err(|_| agent_bad_args("Invalid cadence seconds."))?;
+                    }
+                    "--workspace-id" | "--workspace" => {
+                        workspace_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent routine create`."))),
+                }
+            }
+            let name = name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent routine create` requires `--name`."))?;
+            let prompt = prompt
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent routine create` requires `--prompt`."))?;
+            Ok(AgentCommand::RoutineCreate {
+                agent_id,
+                name,
+                prompt,
+                cadence_seconds,
+                workspace_id,
+            })
+        }
+        ("routine", "toggle") => {
+            let mut agent_id = None;
+            let mut routine_id = None;
+            let mut enabled = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--routine-id" | "--id" => {
+                        routine_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--enabled" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        enabled = Some(match raw.trim().to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" => true,
+                            "false" | "0" | "no" => false,
+                            _ => return Err(agent_bad_args("Invalid `--enabled` boolean.")),
+                        });
+                    }
+                    "--enable" if inline_val.is_none() => enabled = Some(true),
+                    "--disable" if inline_val.is_none() => enabled = Some(false),
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent routine toggle`.")));
+                    }
+                    other if routine_id.is_none() => routine_id = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent routine toggle`.")));
+                    }
+                }
+            }
+            let routine_id = routine_id
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent routine toggle` requires a routine id."))?;
+            let enabled = enabled.ok_or_else(|| {
+                agent_bad_args("`agent routine toggle` requires `--enabled <true|false>`, `--enable`, or `--disable`.")
+            })?;
+            Ok(AgentCommand::RoutineToggle {
+                agent_id,
+                routine_id,
+                enabled,
+            })
+        }
+        ("routine", "run") => {
+            let mut agent_id = None;
+            let mut routine_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--agent-id" | "--agent" => {
+                        agent_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--routine-id" | "--id" => {
+                        routine_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent routine run`.")));
+                    }
+                    other if routine_id.is_none() => routine_id = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent routine run`.")));
+                    }
+                }
+            }
+            let routine_id = routine_id
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent routine run` requires a routine id."))?;
+            Ok(AgentCommand::RoutineRun {
+                agent_id,
+                routine_id,
+            })
+        }
+        ("teammate", "list") => {
+            if let Some(extra) = items.next() {
+                return Err(agent_bad_args(format!("Unexpected argument `{extra}` for `agent teammate list`.")));
+            }
+            Ok(AgentCommand::TeammateList)
+        }
+        ("teammate", "send") => {
+            let mut target = None;
+            let mut message = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--target" | "--to" => target = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--message" | "--body" => message = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent teammate send`.")));
+                    }
+                    other if target.is_none() => target = Some(other.to_string()),
+                    other if message.is_none() => message = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent teammate send`.")));
+                    }
+                }
+            }
+            let target = target
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent teammate send` requires a target."))?;
+            let message = message
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent teammate send` requires a message."))?;
+            Ok(AgentCommand::TeammateSend { target, message })
+        }
+        ("teammate", "delegate") => {
+            let mut target = None;
+            let mut task = None;
+            let mut wait = false;
+            let mut timeout_ms = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--target" | "--to" => target = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--task" | "--message" => task = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--wait" if inline_val.is_none() => wait = true,
+                    "--timeout-ms" | "--timeout" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        timeout_ms = Some(raw.parse().map_err(|_| agent_bad_args("Invalid `--timeout-ms`."))?);
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent teammate delegate`.")));
+                    }
+                    other if target.is_none() => target = Some(other.to_string()),
+                    other if task.is_none() => task = Some(other.to_string()),
+                    other => {
+                        return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent teammate delegate`.")));
+                    }
+                }
+            }
+            let target = target
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent teammate delegate` requires a target."))?;
+            let task = task
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent teammate delegate` requires a task."))?;
+            Ok(AgentCommand::TeammateDelegate {
+                target,
+                task,
+                wait,
+                timeout_ms,
+            })
+        }
+        _ => Err(agent_bad_args(format!(
+            "Unknown agent command `agent {domain} {action}`."
+        ))),
+    }
 }
 

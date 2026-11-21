@@ -344,12 +344,12 @@ fn normalize_antigravity_step(
                 duration_seconds: step.get("duration_seconds").and_then(Value::as_f64),
             }]
         }
-        "tool" => normalize_antigravity_tool(provider, step, step_index),
+        "tool" | "subagent" => normalize_antigravity_tool(provider, step, step_index),
         _ => notice(
             provider,
             "unknownStep",
             raw,
-            "expected step_type agent_response, thought, reasoning, or tool",
+            "expected step_type agent_response, thought, reasoning, tool, or subagent",
         ),
     }
 }
@@ -359,14 +359,19 @@ fn normalize_antigravity_tool(
     step: &Value,
     step_index: i64,
 ) -> Vec<NormalizedEvent> {
-    let tool_name = step.get("tool_name").and_then(Value::as_str).unwrap_or("tool");
+    let step_type = step.get("step_type").and_then(Value::as_str).unwrap_or("");
+    let tool_name = step
+        .get("tool_name")
+        .or_else(|| step.pointer("/tool_info/tool_name"))
+        .or_else(|| step.pointer("/tool_info/name"))
+        .and_then(Value::as_str)
+        .unwrap_or(if step_type.contains("subagent") {
+            "invoke_subagent"
+        } else {
+            "tool"
+        });
     let state = step.get("state").and_then(Value::as_str).unwrap_or("");
-    let parameters = step
-        .pointer("/tool_info/parameters")
-        .or_else(|| step.get("parameters"))
-        .or_else(|| step.get("input"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let parameters = crate::acp::extract_antigravity_step_params(step);
     let output = step
         .pointer("/tool_info/output")
         .or_else(|| step.get("output"))

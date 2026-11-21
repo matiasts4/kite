@@ -154,9 +154,14 @@ pub fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option
 
     let tool_kind = if is_swarm_tool_name(&clean_name) || matches!(cli_kind, Some(DispatchCliCommand::Swarm(_))) {
         "swarm"
-    } else if is_subagent_tool_name(&clean_name) || matches!(cli_kind, Some(DispatchCliCommand::Run(_))) {
+    } else if !is_non_delegating_subagent_tool(&clean_name)
+        && (is_subagent_tool_name(&clean_name) || matches!(cli_kind, Some(DispatchCliCommand::Run(_))))
+    {
         "subagent"
-    } else if server_name.is_some() || lower.contains("mcp") {
+    } else if server_name.is_some()
+        || lower.contains("mcp")
+        || clean_name.to_ascii_lowercase().starts_with("kite_subagent_")
+    {
         "mcpToolCall"
     } else if command.is_some() || lower.contains("bash") || lower.contains("command") || lower.contains("shell") || lower.contains("exec") {
         "commandExecution"
@@ -197,6 +202,8 @@ pub fn classify_tool_metadata(raw_name: &str, params: &Value) -> (String, Option
         action
     } else if let Some(ref srv) = server_name {
         format!("{} · {}", srv, clean_name)
+    } else if clean_name.to_ascii_lowercase().starts_with("kite_subagent_") {
+        format!("kite-dispatch · {}", clean_name)
     } else if let Some(ref cmd) = command {
         let short_cmd: String = cmd.chars().take(72).collect();
         format!("Run `{}`", short_cmd)

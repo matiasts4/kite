@@ -6,6 +6,17 @@ use serde_json::{json, Value};
 use super::types::*;
 
 /// Text carried by a thought frame. Empty markers and ordinary answer deltas return `None`.
+fn clean_content_delta_or_raw(raw: &str, trimmed_line: &str) -> AcpStreamEvent {
+    let clean = crate::chat::threads::sanitize_chat_text(raw);
+    if clean.is_empty() {
+        AcpStreamEvent::Raw {
+            line: trimmed_line.to_string(),
+        }
+    } else {
+        AcpStreamEvent::ContentDelta { text: clean }
+    }
+}
+
 pub fn extract_thought_text(value: &Value) -> Option<String> {
     if let Some(parts) = value.pointer("/message/content").and_then(Value::as_array) {
         for part in parts {
@@ -90,9 +101,10 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         .and_then(|v| v.as_str());
                     if let Some(d) = delta {
                         if !d.is_empty() {
-                            return Some(AcpStreamEvent::ContentDelta {
-                                text: d.to_string(),
-                            });
+                            let clean = crate::chat::threads::sanitize_chat_text(d);
+                            if !clean.is_empty() {
+                                return Some(AcpStreamEvent::ContentDelta { text: clean });
+                            }
                         }
                     }
                     let thought = su
@@ -123,8 +135,21 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         is_done: state.eq_ignore_ascii_case("DONE") || state.eq_ignore_ascii_case("COMPLETED"),
                         duration_seconds: duration,
                     });
-                } else if step_type == "tool" {
-                    let tool_name = su.get("tool_name").and_then(|v| v.as_str()).unwrap_or("tool");
+                } else if step_type == "tool"
+                    || step_type.contains("subagent")
+                    || su.pointer("/tool_info").is_some()
+                    || su.get("tool_name").is_some()
+                {
+                    let tool_name = su
+                        .get("tool_name")
+                        .or_else(|| su.pointer("/tool_info/tool_name"))
+                        .or_else(|| su.pointer("/tool_info/name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(if step_type.contains("subagent") {
+                            "invoke_subagent"
+                        } else {
+                            "tool"
+                        });
                     let tool_id = su
                         .get("tool_call_id")
                         .or_else(|| su.get("toolCallId"))
@@ -135,12 +160,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         .filter(|s| !s.trim().is_empty())
                         .map(String::from)
                         .unwrap_or_else(|| format!("t_{}_{}", run_id, step_index));
-                    let params = su
-                        .pointer("/tool_info/parameters")
-                        .or_else(|| su.get("parameters"))
-                        .or_else(|| su.get("input"))
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                    let params = extract_antigravity_step_params(su);
                     let output = su
                         .pointer("/tool_info/output")
                         .or_else(|| su.pointer("/tool_info/error"))
@@ -294,7 +314,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                             .get("text")
                             .or_else(|| update.pointer("/content/text"))
                             .and_then(|v| v.as_str())?;
-                        return Some(AcpStreamEvent::ContentDelta { text: text.to_string() });
+                        return Some(clean_content_delta_or_raw(text, trimmed));
                     }
                     "thought_delta" | "agent_thought_chunk" => {
                         let text = update
@@ -459,7 +479,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                     .or_else(|| val.pointer("/part/text"))
                     .or_else(|| val.get("text"))
                     .and_then(|v| v.as_str())?;
-                return Some(AcpStreamEvent::ContentDelta { text: text.to_string() });
+                return Some(clean_content_delta_or_raw(text, trimmed));
             }
             "thinking" | "reasoning" => {
                 let text = val
@@ -492,7 +512,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                             .and_then(|v| v.as_str());
                         if let Some(t) = text {
                             if !t.is_empty() {
-                                return Some(AcpStreamEvent::ContentDelta { text: t.to_string() });
+                                return Some(clean_content_delta_or_raw(t, trimmed));
                             }
                         }
                     } else if item_type == "reasoning" {
@@ -838,7 +858,7 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                             "text" => {
                                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                     if !text.is_empty() {
-                                        return Some(AcpStreamEvent::ContentDelta { text: text.to_string() });
+                                        return Some(clean_content_delta_or_raw(text, trimmed));
                                     }
                                 }
                             }

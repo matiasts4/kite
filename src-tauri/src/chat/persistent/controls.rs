@@ -58,7 +58,7 @@ pub const MAX_TAIL_CHARS: usize = 4_000;
 /// A session queue that never grows without bound. Provider output is
 /// operational, so an unread session drops the oldest frames instead of
 /// retaining an unbounded transcript in memory.
-pub const MAX_PENDING_EVENTS: usize = 512;
+pub const MAX_PENDING_EVENTS: usize = 8_192;
 
 /// The composer values a lasting session may pass to its driver. Each one
 /// reaches the command line only when the driver declaration accepts it.
@@ -184,9 +184,20 @@ pub(crate) fn frame_schema(value: &Value) -> String {
     keys.join(",")
 }
 
+fn is_terminal_transport_event(event: &TransportEvent) -> bool {
+    matches!(
+        event,
+        TransportEvent::TurnEnded | TransportEvent::TurnFailed(_) | TransportEvent::Exit { .. }
+    )
+}
+
 pub(crate) fn push_bounded(queue: &mut VecDeque<TransportEvent>, event: TransportEvent) {
     if queue.len() >= MAX_PENDING_EVENTS {
-        queue.pop_front();
+        if let Some(idx) = queue.iter().position(|ev| !is_terminal_transport_event(ev)) {
+            queue.remove(idx);
+        } else {
+            queue.pop_front();
+        }
     }
     queue.push_back(event);
 }

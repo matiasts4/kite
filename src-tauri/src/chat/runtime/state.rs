@@ -27,6 +27,7 @@ pub struct TurnRun {
     pub closing: bool,
     pub finished: bool,
     pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
     pub routine_id: Option<String>,
     /// Highest sequence a client has already been given. Older events can leave
     /// the buffer without hiding a row the transcript has not seen.
@@ -61,7 +62,19 @@ pub fn prune_stale_runs(live: &mut LiveTurns) {
     let stale_keys: Vec<String> = live
         .runs
         .iter()
-        .filter(|(_, run)| run.finished && (now.saturating_sub(run.started_at_ms) > 120_000))
+        .filter(|(_, run)| {
+            if !run.finished {
+                return false;
+            }
+            let elapsed_since_finish =
+                now.saturating_sub(run.finished_at_ms.unwrap_or(run.started_at_ms));
+            let has_undelivered = run.next_sequence > run.delivered_through;
+            if has_undelivered {
+                elapsed_since_finish > 600_000
+            } else {
+                elapsed_since_finish > 120_000
+            }
+        })
         .map(|(k, _)| k.clone())
         .collect();
 
@@ -166,14 +179,44 @@ pub fn session_manager() -> &'static Mutex<SessionManager> {
     CELL.get_or_init(|| Mutex::new(SessionManager::new()))
 }
 
-pub fn sync_thread_provider_session_id(thread_id: &str, handle: Option<&str>) {
+fn normalize_provider_key(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "agy" | "antigravity" => "antigravity".to_string(),
+        "open-code" | "opencode" => "opencode".to_string(),
+        "claude-code" | "claude" => "claude".to_string(),
+        other => other.to_string(),
+    }
+}
+
+pub fn sync_thread_provider_session_id_for_provider(
+    thread_id: &str,
+    expected_provider: Option<&str>,
+    handle: Option<&str>,
+) {
     let Some(handle) = handle.filter(|h| !h.trim().is_empty()) else {
         return;
     };
+    let expected = expected_provider
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(normalize_provider_key);
     let mut updated = false;
     {
         let mut items = threads().lock().unwrap();
-        if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
+        if let Some(thread) = items
+            .iter_mut()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+        {
+            if let Some(ref exp) = expected {
+                let current = thread
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(normalize_provider_key)
+                    .unwrap_or_default();
+                if !current.is_empty() && current != *exp {
+                    return;
+                }
+            }
             if thread.get("providerSessionId").and_then(|v| v.as_str()) != Some(handle) {
                 thread["providerSessionId"] = json!(handle);
                 touch(thread);
@@ -184,6 +227,14 @@ pub fn sync_thread_provider_session_id(thread_id: &str, handle: Option<&str>) {
     if updated {
         persist();
     }
+}
+
+pub fn sync_thread_provider_session_id(thread_id: &str, handle: Option<&str>) {
+    let active_driver = session_manager()
+        .lock()
+        .ok()
+        .and_then(|mgr| mgr.status(thread_id).map(|r| r.driver));
+    sync_thread_provider_session_id_for_provider(thread_id, active_driver.as_deref(), handle);
 }
 
 /// The lasting wire a send may open. The kind is evidence about this build's
@@ -316,17 +367,13 @@ pub fn emit_note_item(thread_id: &str, run_id: &str, message: &str) {
 /// Clears stored `providerSessionId` handles on threads matching `provider`
 /// (normalizing `"agy"` <-> `"antigravity"`) so subsequent turns never resume across accounts.
 pub(crate) fn clear_provider_thread_handles(items: &mut [Value], provider: &str) -> usize {
-    let norm = |s: &str| match s.trim().to_ascii_lowercase().as_str() {
-        "agy" | "antigravity" => "antigravity".to_string(),
-        other => other.to_string(),
-    };
-    let target = norm(provider);
+    let target = normalize_provider_key(provider);
     let mut cleared = 0usize;
     for thread in items.iter_mut() {
         let Some(tp) = thread.get("provider").and_then(|v| v.as_str()) else {
             continue;
         };
-        if norm(tp) != target {
+        if normalize_provider_key(tp) != target {
             continue;
         }
         if thread
@@ -358,4 +405,32 @@ pub(crate) fn evict_provider_runtime_state(provider: &str) -> Vec<String> {
     }
     crate::chat::models::invalidate_provider_model_cache(provider);
     evicted
+}
+
+/// Returns true when `thread_id` still owns an unfinished in-memory run or an
+/// active persistent session state in this process. Acquires locks sequentially
+/// so callers holding no lock can check liveness before inspecting `threads()`.
+pub fn is_thread_runtime_active(thread_id: &str) -> bool {
+    let has_live_run = live_turns().lock().is_ok_and(|live| {
+        live.by_thread
+            .get(thread_id)
+            .and_then(|run_id| live.runs.get(run_id))
+            .is_some_and(|run| !run.finished)
+    });
+    if has_live_run {
+        return true;
+    }
+    session_manager()
+        .lock()
+        .ok()
+        .and_then(|mgr| mgr.status(thread_id))
+        .is_some_and(|record| {
+            matches!(
+                record.state,
+                crate::chat::session::SessionState::Starting
+                    | crate::chat::session::SessionState::Running
+                    | crate::chat::session::SessionState::Resurrecting
+                    | crate::chat::session::SessionState::Waiting
+            )
+        })
 }

@@ -458,19 +458,24 @@ fn build_thread_provider_row(
     stack_active: bool,
     default_provider: Option<&str>,
 ) -> Value {
-    let binary_present = provider_binary_present(canon);
-    let signed_in = provider_signed_in(canon);
-    let state = classify_catalog_availability(binary_present, signed_in);
-    let catalog = if state == "ready" {
-        provider_models(canon, refresh)
+    let (binary_present, signed_in, state, models) = if cfg!(test) {
+        (false, None, "missing-binary", Vec::new())
     } else {
-        catalog_payload(canon, &[], false)
+        let binary_present = provider_binary_present(canon);
+        let signed_in = provider_signed_in(canon);
+        let state = classify_catalog_availability(binary_present, signed_in);
+        let catalog = if state == "ready" {
+            provider_models(canon, refresh)
+        } else {
+            catalog_payload(canon, &[], false)
+        };
+        let models: Vec<Value> = catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        (binary_present, signed_in, state, models)
     };
-    let models: Vec<Value> = catalog
-        .get("models")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let sample_ids: Vec<String> = models
         .iter()
         .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))

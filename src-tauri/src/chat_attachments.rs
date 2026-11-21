@@ -3,16 +3,19 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const ATTACHMENT_BYTE_LIMIT: usize = 10 * 1024 * 1024;
 const PREVIEW_IMAGE_BYTE_LIMIT: usize = 2 * 1024 * 1024;
+const STAGED_ATTACHMENT_TTL: Duration = Duration::from_secs(30 * 60);
 const ATTACHED_FILES_HEADER: &str = "[Attached files]";
 
 pub struct StagedAttachment {
     pub thread_id: String,
     pub directory: PathBuf,
     pub payload: Value,
+    pub staged_at: Instant,
 }
 
 fn staged_attachments() -> &'static Mutex<HashMap<String, StagedAttachment>> {
@@ -153,17 +156,46 @@ fn attachment_payload(
     payload
 }
 
+fn sweep_stale_staged_locked(map: &mut HashMap<String, StagedAttachment>, now: Instant) {
+    map.retain(|_, item| now.saturating_duration_since(item.staged_at) < STAGED_ATTACHMENT_TTL);
+}
+
 fn remember_attachment(thread_id: &str, resource_id: String, directory: PathBuf, payload: Value) -> Value {
     let stored = payload.clone();
-    staged_attachments().lock().unwrap().insert(
+    let now = Instant::now();
+    let mut map = staged_attachments().lock().unwrap();
+    sweep_stale_staged_locked(&mut map, now);
+    map.insert(
         resource_id,
         StagedAttachment {
             thread_id: thread_id.to_string(),
             directory,
             payload,
+            staged_at: now,
         },
     );
     stored
+}
+
+/// Evicts consumed entries from the in-memory `staged_attachments()` map once a
+/// turn is submitted, keeping the underlying files on disk for agent reads and
+/// on-demand thumbnail previews.
+pub fn consume_staged_attachments(attachments: &[Value]) {
+    if attachments.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    let mut map = staged_attachments().lock().unwrap();
+    for item in attachments {
+        if let Some(resource_id) = item.get("resourceId").and_then(|v| v.as_str()) {
+            map.remove(resource_id);
+        }
+    }
+    sweep_stale_staged_locked(&mut map, now);
+}
+
+pub fn staged_attachment_count() -> usize {
+    staged_attachments().lock().unwrap().len()
 }
 
 pub fn stage_blob_attachment(thread_id: &str, display_name: &str, data_base64: &str) -> Option<Value> {
@@ -194,11 +226,6 @@ pub fn stage_blob_attachment_with_mime(
         return None;
     }
     let dest_str = dest.to_string_lossy().to_string();
-    let preview_data_url = if mime.starts_with("image/") && bytes.len() <= PREVIEW_IMAGE_BYTE_LIMIT {
-        Some(format!("data:{mime};base64,{}", encode_base64(&bytes)))
-    } else {
-        None
-    };
     Some(remember_attachment(
         thread_id,
         resource_id.clone(),
@@ -210,7 +237,7 @@ pub fn stage_blob_attachment_with_mime(
             Some(bytes.len() as u64),
             Some(&mime),
             Some(&dest_str),
-            preview_data_url.as_deref(),
+            None,
         ),
     ))
 }
@@ -254,20 +281,11 @@ pub fn stage_dropped_path(thread_id: &str, path: &Path) -> Option<Value> {
         }
         let size = fs::metadata(&dest).ok().map(|meta| meta.len());
         let mime = infer_mime_type(&display_name, None);
-        let preview = if mime.starts_with("image/")
-            && size.is_some_and(|len| (len as usize) <= PREVIEW_IMAGE_BYTE_LIMIT)
-        {
-            fs::read(&dest)
-                .ok()
-                .map(|bytes| format!("data:{mime};base64,{}", encode_base64(&bytes)))
-        } else {
-            None
-        };
         (
             size,
             Some(mime),
             dest.to_string_lossy().to_string(),
-            preview,
+            None::<String>,
         )
     };
     Some(remember_attachment(
@@ -349,15 +367,6 @@ fn inspect_staged_resource_dir(resource_id: &str, dir: &Path) -> Option<Value> {
                 .unwrap_or_else(|| "attachment".to_string());
             let size = fs::metadata(&file_path).ok().map(|m| m.len());
             let mime = infer_mime_type(&name, None);
-            let preview = if mime.starts_with("image/")
-                && size.is_some_and(|len| (len as usize) <= PREVIEW_IMAGE_BYTE_LIMIT)
-            {
-                fs::read(&file_path)
-                    .ok()
-                    .map(|bytes| format!("data:{mime};base64,{}", encode_base64(&bytes)))
-            } else {
-                None
-            };
             let path_str = file_path.to_string_lossy().to_string();
             return Some(attachment_payload(
                 resource_id,
@@ -366,7 +375,7 @@ fn inspect_staged_resource_dir(resource_id: &str, dir: &Path) -> Option<Value> {
                 size,
                 Some(&mime),
                 Some(&path_str),
-                preview.as_deref(),
+                None,
             ));
         }
     }
@@ -392,6 +401,50 @@ fn resolve_staged_on_disk(thread_id: Option<&str>, resource_id: &str) -> Option<
             if let Some(found) = inspect_staged_resource_dir(resource_id, &candidate) {
                 return Some(found);
             }
+        }
+    }
+    None
+}
+
+fn read_image_file_data_url(file_path: &Path) -> Option<String> {
+    if !file_path.is_file() {
+        return None;
+    }
+    let meta = fs::metadata(file_path).ok()?;
+    if (meta.len() as usize) > PREVIEW_IMAGE_BYTE_LIMIT {
+        return None;
+    }
+    let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let mime = infer_mime_type(name, None);
+    if !mime.starts_with("image/") {
+        return None;
+    }
+    let bytes = fs::read(file_path).ok()?;
+    Some(format!("data:{mime};base64,{}", encode_base64(&bytes)))
+}
+
+/// Reads an image attachment preview on demand from disk under `chat-attachments/`
+/// so base64 payloads never have to be persisted inside `threads.data` JSON.
+pub fn read_attachment_preview(
+    thread_id: Option<&str>,
+    resource_id: &str,
+    path_hint: Option<&str>,
+) -> Option<String> {
+    if let Some(raw_path) = path_hint.map(str::trim).filter(|p| !p.is_empty()) {
+        if let (Ok(root_canon), Ok(target_canon)) = (
+            fs::canonicalize(attachment_root()),
+            fs::canonicalize(Path::new(raw_path)),
+        ) {
+            if target_canon.starts_with(&root_canon) {
+                if let Some(url) = read_image_file_data_url(&target_canon) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    if let Some(resolved) = resolve_staged_on_disk(thread_id, resource_id) {
+        if let Some(disk_path) = resolved.get("path").and_then(|v| v.as_str()) {
+            return read_image_file_data_url(Path::new(disk_path));
         }
     }
     None
@@ -454,7 +507,13 @@ pub fn parse_attachments(req: Option<&Value>) -> Vec<Value> {
                 let byte_size = item.get("byteSize").and_then(|v| v.as_u64());
                 let mime_type = item.get("mimeType").and_then(|v| v.as_str());
                 let path = item.get("path").and_then(|v| v.as_str());
-                let preview = item.get("previewDataUrl").and_then(|v| v.as_str());
+                // Only preserve legacy inline previewDataUrl when no external disk file backs it.
+                let has_disk_file = path.is_some_and(|p| Path::new(p).is_file());
+                let preview = if has_disk_file {
+                    None
+                } else {
+                    item.get("previewDataUrl").and_then(|v| v.as_str())
+                };
                 res.push(attachment_payload(
                     resource_id,
                     display_name,
@@ -597,10 +656,37 @@ mod tests {
         let path_str = staged["path"].as_str().expect("resolved disk path");
         assert!(Path::new(path_str).is_file(), "staged file exists on disk");
         assert!(
-            staged["previewDataUrl"]
-                .as_str()
-                .is_some_and(|u| u.starts_with("data:image/png;base64,"))
+            staged.get("previewDataUrl").is_none(),
+            "staged attachment JSON must not persist inline base64 previewDataUrl"
         );
+
+        let on_demand_preview = read_attachment_preview(Some(&thread_id), &resource_id, Some(path_str))
+            .expect("on-demand image preview from disk");
+        assert!(on_demand_preview.starts_with("data:image/png;base64,"));
+
+        // Consuming on send evicts the in-memory staged map entry while keeping disk file intact.
+        assert!(staged_attachment_count() >= 1);
+        consume_staged_attachments(std::slice::from_ref(&staged));
+        assert!(
+            !staged_attachments().lock().unwrap().contains_key(&resource_id),
+            "consumed attachment must be evicted from staged_attachments()"
+        );
+        assert!(Path::new(path_str).is_file(), "disk file remains for agent and previews");
+
+        // parse_attachments strips inline previewDataUrl when backed by a disk file.
+        let req = json!({
+            "threadId": thread_id,
+            "attachments": [{
+                "resourceId": resource_id,
+                "displayName": "clipboard-image.png",
+                "mimeType": "image/png",
+                "path": path_str,
+                "previewDataUrl": "data:image/png;base64,SHOULD_BE_STRIPPED"
+            }]
+        });
+        let parsed = parse_attachments(Some(&req));
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].get("previewDataUrl").is_none());
 
         let formatted = format_prompt_with_attachments("", std::slice::from_ref(&staged));
         assert!(formatted.contains("Please inspect the attached file(s) and image(s)."));

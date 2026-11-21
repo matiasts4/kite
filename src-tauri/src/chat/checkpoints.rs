@@ -403,7 +403,7 @@ fn process_diff_job(job: DiffJob) {
         crate::chat::runtime::live_cv().notify_all();
         crate::chat::subagents::sync_child_thread_to_parent(&job.thread_id);
         if !job.is_streaming {
-            crate::persist::persist();
+            crate::persist::persist_async();
         }
     }
 }
@@ -440,7 +440,7 @@ pub fn maybe_fill_turn_tool_diff(thread_id: &str, run_id: &str, item: &mut Value
         return;
     };
 
-    let (worktree, checkpoint_ref) = {
+    let (raw_worktree, workspace_id, checkpoint_ref) = {
         let items = crate::persist::threads().lock().unwrap();
         let Some(thread) = items
             .iter()
@@ -449,13 +449,34 @@ pub fn maybe_fill_turn_tool_diff(thread_id: &str, run_id: &str, item: &mut Value
             return;
         };
         (
-            workspace_dir(thread),
+            thread
+                .get("worktreePath")
+                .or_else(|| thread.get("workingDirectory"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            thread
+                .get("workspaceId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
             thread
                 .get("checkpointRef")
                 .and_then(Value::as_str)
                 .map(str::to_string),
         )
     };
+    let worktree = raw_worktree
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            workspace_id
+                .as_deref()
+                .and_then(crate::persist::workspace_path)
+                .map(PathBuf::from)
+                .filter(|p| p.is_dir())
+        });
 
     let Some((key, _, _)) = resolve_worktree_paths(worktree.as_deref(), &file_path) else {
         return;

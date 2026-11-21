@@ -172,6 +172,14 @@ pub fn extract_pane_id(req: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+pub fn extract_agent_id(req: &serde_json::Value) -> Option<String> {
+    req.get("agentId")
+        .and_then(|value| value.as_str())
+        .filter(|id| !id.is_empty())
+        .or_else(|| req.get("owner").and_then(owner_agent_id))
+        .map(str::to_string)
+}
+
 pub fn workspace_cwd(req: &serde_json::Value) -> String {
     if let Some(cwd) = req
         .get("cwd")
@@ -192,12 +200,8 @@ pub fn workspace_cwd(req: &serde_json::Value) -> String {
         return path;
     }
 
-    let agent_id = req
-        .get("agentId")
-        .and_then(|value| value.as_str())
-        .filter(|id| !id.is_empty())
-        .or_else(|| req.get("owner").and_then(owner_agent_id));
-    if let Some(aid) = agent_id {
+    let agent_id = extract_agent_id(req);
+    if let Some(ref aid) = agent_id {
         let home = crate::agent_mind::get_agent_home_dir(aid);
         let _ = std::fs::create_dir_all(&home);
         let _ = crate::agent_mind::sync_agent_instructions(

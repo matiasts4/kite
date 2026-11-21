@@ -102,6 +102,51 @@ pub fn start_terminal_sync(request: serde_json::Value) -> serde_json::Value {
     start_terminal_local_sync(request)
 }
 
+/// Resolves and combines the startup system prompt and initial prompt for an interactive terminal
+/// session, honoring the contract that only the agent's charter/brief is passed at startup
+/// (memory and skills stay out of the terminal session).
+pub fn resolve_terminal_agent_prompts(
+    engine: &str,
+    agent_charter: Option<&str>,
+    initial_prompt: Option<String>,
+    system_prompt: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let mut resolved_system = system_prompt;
+    let mut resolved_initial = initial_prompt;
+
+    if let Some(charter) = agent_charter.filter(|c| !c.trim().is_empty()) {
+        let charter = charter.trim();
+        if crate::dispatch::programs::accepts_system_prompt(engine) {
+            let manual = crate::dispatch::cli::manual_text();
+            resolved_system = match resolved_system {
+                Some(existing) if !existing.trim().is_empty() => {
+                    if existing.contains(charter) {
+                        Some(existing)
+                    } else {
+                        Some(format!("{charter}\n\n{existing}"))
+                    }
+                }
+                _ => Some(format!("{charter}\n\n{manual}")),
+            };
+        } else {
+            resolved_initial = match resolved_initial {
+                Some(existing) if !existing.trim().is_empty() => {
+                    if existing.contains(charter) {
+                        Some(existing)
+                    } else {
+                        Some(format!("{charter}\n\n{existing}"))
+                    }
+                }
+                _ => Some(charter.to_string()),
+            };
+        }
+    } else if resolved_system.is_none() && crate::dispatch::programs::accepts_system_prompt(engine) {
+        resolved_system = Some(crate::dispatch::cli::manual_text().to_string());
+    }
+
+    (resolved_system, resolved_initial)
+}
+
 pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Value {
     let req = request.get("request").unwrap_or(&request);
     let session_id = req
@@ -173,6 +218,21 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
         });
     }
 
+    let agent_id = crate::terminal::workspace::extract_agent_id(&req);
+    let agent_charter = agent_id.as_deref().and_then(|aid| {
+        let agent = crate::persist::find_agent_by_id(aid)?;
+        let charter = if !agent.brief.trim().is_empty() {
+            agent.brief.trim()
+        } else {
+            agent.purpose.trim()
+        };
+        if !charter.is_empty() {
+            Some(charter.to_string())
+        } else {
+            None
+        }
+    });
+
     let initial_prompt = req
         .get("initialPrompt")
         .or_else(|| req.get("prompt"))
@@ -182,14 +242,18 @@ pub fn start_terminal_local_sync(request: serde_json::Value) -> serde_json::Valu
         .get("autoApprove")
         .and_then(|v| v.as_bool())
         .unwrap_or_else(|| is_agent_cli_engine(engine));
-    let mut system_prompt = req
+    let system_prompt = req
         .get("systemPrompt")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .filter(|text| !text.is_empty());
-    if system_prompt.is_none() && crate::dispatch::programs::accepts_system_prompt(engine) {
-        system_prompt = Some(crate::dispatch::cli::manual_text().to_string());
-    }
+
+    let (system_prompt, initial_prompt) = resolve_terminal_agent_prompts(
+        engine,
+        agent_charter.as_deref(),
+        initial_prompt,
+        system_prompt,
+    );
 
     spawn_session_with_options(
         &session_id,
@@ -627,6 +691,15 @@ pub fn read_terminal_output_local_sync(request: serde_json::Value) -> serde_json
         "turnStartedAtUnixMs": 0,
         "waitingForInput": true
     })
+}
+
+#[tauri::command]
+pub async fn read_terminal_transcript(request: Option<serde_json::Value>) -> serde_json::Value {
+    let val = request.unwrap_or(serde_json::Value::Null);
+    let req = val.get("request").unwrap_or(&val);
+    let session_id = req.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let transcript = crate::terminal::scrollback::terminal_recent_text(session_id);
+    serde_json::json!({ "transcript": transcript })
 }
 
 pub fn write_terminal_sync(request: serde_json::Value) -> serde_json::Value {

@@ -90,6 +90,7 @@ fn thread_presence_reflects_live_turn_and_persisted_state() {
                 closing: false,
                 finished: false,
                 started_at_ms: now_ms(),
+                finished_at_ms: None,
                 routine_id: None,
                 delivered_through: 0,
                 file_baselines: std::collections::HashMap::new(),
@@ -216,6 +217,7 @@ fn live_port_stop_cancels_active_live_turn_and_settles_presence() {
                 closing: false,
                 finished: false,
                 started_at_ms: now_ms(),
+                finished_at_ms: None,
                 routine_id: None,
                 delivered_through: 0,
                 file_baselines: std::collections::HashMap::new(),
@@ -424,6 +426,7 @@ fn thread_presence_distinguishes_question_fallback_done_and_persistent_providers
                     closing: false,
                     finished: false,
                     started_at_ms: 1,
+                    finished_at_ms: None,
                     routine_id: None,
                     delivered_through: 0,
                     file_baselines: std::collections::HashMap::new(),
@@ -653,6 +656,8 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
         model: Some("grok-3-mini".to_string()),
         effort: Some("low".to_string()),
         role: Some("Grok Executor".to_string()),
+        agent_id: None,
+        mode: None,
         workspace_mode: "inherit".to_string(),
         fallback_cwd: Some(repo_dir.to_string_lossy().to_string()),
         task: "Inspect auth.rs".to_string(),
@@ -735,6 +740,8 @@ fn subagent_worktree_and_child_thread_linkage_sync_to_parent() {
         model: None,
         effort: None,
         role: Some("Codex Checker".to_string()),
+        agent_id: None,
+        mode: None,
         workspace_mode: "inherit".to_string(),
         fallback_cwd: Some(repo_dir.to_string_lossy().to_string()),
         task: "Verify edge case".to_string(),
@@ -1240,3 +1247,1245 @@ fn thread_tail_prefers_turn_failure_message_over_user_prompt() {
         "expected turnFailure message in read_final_response alongside partial assistant text, got: {final_resp}"
     );
 }
+
+#[test]
+fn send_to_settled_subagent_child_thread_steers_clean_body_and_suppresses_wait_wakeup() {
+    use crate::persist::threads;
+
+    let parent_id = format!("wire-steer-parent-{}", uuid::Uuid::new_v4().simple());
+    let child_id = format!("wire-steer-child-{}", uuid::Uuid::new_v4().simple());
+    let child_addr = format!("thread:{child_id}");
+    let parent_addr = format!("thread:{parent_id}");
+
+    {
+        let mut list = threads().lock().unwrap();
+        list.push(json!({
+            "id": parent_id,
+            "provider": "antigravity",
+            "status": "running",
+            "items": [{
+                "id": "sub_run_1",
+                "kind": "tool",
+                "toolKind": "subagent",
+                "status": "completed",
+                "streaming": false,
+                "subagentMeta": {
+                    "subagentId": "run_1",
+                    "childThreadId": child_id,
+                    "status": "completed",
+                    "latestActivity": "Initial task done."
+                }
+            }],
+            "subagentRuns": [{
+                "subagentId": "run_1",
+                "parentThreadId": parent_id,
+                "childThreadId": child_id,
+                "provider": "grok",
+                "status": "completed",
+                "stepCount": 1,
+                "items": [],
+                "completedAtUnixMs": 1_000
+            }]
+        }));
+        list.push(json!({
+            "id": child_id,
+            "parentThreadId": parent_id,
+            "startedByAgent": true,
+            "sideChat": true,
+            "provider": "grok",
+            "status": "idle",
+            "items": [
+                { "id": "u1", "kind": "user", "text": "Initial task" },
+                { "id": "a1", "kind": "assistant", "text": "Initial task done." }
+            ]
+        }));
+    }
+
+    {
+        let mut svc = super::protocol::service().lock().unwrap();
+        let _ = svc.attach(Family::Thread, &parent_id, None, None, false);
+        let _ = svc.attach(Family::Thread, &child_id, None, Some(&parent_addr), false);
+        super::protocol::publish_thread(&mut svc, &parent_id);
+        super::protocol::publish_thread(&mut svc, &child_id);
+        svc.suppress_parent_notice_for(&child_addr);
+    }
+
+    let envelope = execute_argv_envelope(&json!({
+        "id": "wire-send-followup-1",
+        "caller": "agent",
+        "from": parent_addr,
+        "argv": ["kite", "dispatch", "send", &child_addr, "Follow-up task", "--wait"]
+    }));
+    assert_eq!(envelope["exit"], 0, "envelope={envelope:?}");
+    assert_eq!(envelope["receipt"]["status"], "submitted");
+    assert_eq!(envelope["receipt"]["submitted"], true);
+
+    {
+        let list = threads().lock().unwrap();
+        let child = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(child_id.as_str()))
+            .expect("child thread exists");
+        let user_texts: Vec<&str> = child["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|it| it.get("kind").and_then(Value::as_str) == Some("user"))
+            .filter_map(|it| it.get("text").and_then(Value::as_str))
+            .collect();
+        assert!(
+            user_texts.contains(&"Follow-up task"),
+            "expected clean follow-up prompt without dispatch envelope header, got: {user_texts:?}"
+        );
+        assert!(
+            user_texts.iter().all(|t| !t.contains("[kite from=")),
+            "dispatch envelope header must be stripped on subagent follow-up: {user_texts:?}"
+        );
+
+        let parent = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+            .expect("parent thread exists");
+        assert_eq!(parent["subagentRuns"][0]["status"], "running");
+        assert_eq!(parent["items"][0]["status"], "running");
+        assert_eq!(parent["items"][0]["subagentMeta"]["status"], "running");
+    }
+
+    crate::chat::cancel_turn(&child_id);
+    {
+        let mut svc = super::protocol::service().lock().unwrap();
+        let _ = svc.kill("cleanup-wire-steer-child", &child_addr);
+        let _ = svc.kill("cleanup-wire-steer-parent", &parent_addr);
+    }
+    super::protocol::clear_thread_killed(&child_id);
+    super::protocol::clear_thread_killed(&parent_id);
+    crate::chat::threads::remove_thread(&child_id);
+    crate::chat::threads::remove_thread(&parent_id);
+}
+
+#[test]
+fn heavy_parent_delegates_two_parallel_lightweight_subagents_end_to_end() {
+    use crate::persist::threads;
+
+    let parent_id = format!("wire-e2e-2sub-parent-{}", uuid::Uuid::new_v4().simple());
+    let parent_addr = format!("thread:{parent_id}");
+
+    {
+        let mut parent = crate::chat::threads::blank_thread(
+            &parent_id,
+            None,
+            "Heavy Orchestrator",
+            "antigravity",
+            None,
+        );
+        parent["model"] = json!("gemini-4-argon");
+        parent["effort"] = json!("xhigh");
+        parent["status"] = json!("running");
+        threads().lock().unwrap().push(parent);
+    }
+
+    let envelope = execute_argv_envelope(&json!({
+        "id": "wire-e2e-2sub-1",
+        "caller": "agent",
+        "from": parent_addr,
+        "argv": [
+            "kite",
+            "dispatch",
+            "run",
+            "--via",
+            "thread",
+            "--role",
+            "Fast Executor",
+            "--task",
+            "Audit module A",
+            "--task",
+            "Audit module B",
+            "--wait"
+        ]
+    }));
+    assert_eq!(envelope["exit"], 0, "envelope={envelope:?}");
+    let spawned_addrs = crate::dispatch::cli_wire::extract_spawned_thread_addresses(&envelope);
+    assert_eq!(
+        spawned_addrs.len(),
+        2,
+        "expected 2 spawned child thread addresses, got: {spawned_addrs:?}"
+    );
+
+    let child_ids: Vec<String> = spawned_addrs
+        .iter()
+        .map(|a| a.strip_prefix("thread:").unwrap_or(a).to_string())
+        .collect();
+    assert_ne!(child_ids[0], child_ids[1]);
+
+    {
+        let list = threads().lock().unwrap();
+        let parent = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+            .expect("parent thread");
+        let runs = parent["subagentRuns"].as_array().expect("subagentRuns array");
+        assert_eq!(runs.len(), 2, "expected 2 SubagentRun entries on parent: {runs:?}");
+
+        for cid in &child_ids {
+            let child = list
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+                .expect("child thread exists");
+            assert_eq!(
+                child.get("model").and_then(Value::as_str),
+                Some("gemini-4-hydrogen"),
+                "child subagent must route to default gemini-4-hydrogen instead of cloning heavy gemini-4-argon: {child:?}"
+            );
+            assert!(
+                child.get("effort").is_none_or(Value::is_null),
+                "child subagent must not inherit parent xhigh effort: {child:?}"
+            );
+        }
+    }
+
+    for (idx, addr) in spawned_addrs.iter().enumerate() {
+        let cid = &child_ids[idx];
+        crate::chat::cancel_turn(cid);
+        if let Ok(mut svc) = super::protocol::service().lock() {
+            let _ = svc.kill(&format!("cleanup-e2e-2sub-{idx}"), addr);
+        }
+        super::protocol::clear_thread_killed(cid);
+        crate::chat::threads::remove_thread(cid);
+    }
+    if let Ok(mut svc) = super::protocol::service().lock() {
+        let _ = svc.kill("cleanup-e2e-2sub-parent", &parent_addr);
+    }
+    super::protocol::clear_thread_killed(&parent_id);
+    crate::chat::threads::remove_thread(&parent_id);
+}
+
+#[test]
+fn execute_command_skips_queued_wait_audit_rows_but_records_terminal_waits() {
+    use crate::dispatch::cli::Command;
+    use crate::dispatch::presence::PresenceState;
+    use crate::dispatch::types::ReceiptStatus;
+    use crate::persist::threads;
+
+    let tid = format!("wire-audit-wait-{}", uuid::Uuid::new_v4().simple());
+    let addr = format!("thread:{tid}");
+    {
+        let mut t = crate::chat::threads::blank_thread(&tid, None, "Audit Wait", "antigravity", None);
+        t["status"] = json!("running");
+        threads().lock().unwrap().push(t);
+    }
+    {
+        let mut svc = super::protocol::service().lock().unwrap();
+        svc.set_online(true);
+        let _ = svc.attach(Family::Thread, &tid, None, None, false);
+        let _ = svc.publish_pane(&addr, "working", 1, 1_000, None, None);
+    }
+
+    let queued_id = format!("audit-wait-queued-{}", uuid::Uuid::new_v4().simple());
+    let queued_receipt = super::server::execute_command(
+        &json!({ "caller": "agent", "from": "human" }),
+        &Command::Wait {
+            address: Some(addr.clone()),
+            until: vec![PresenceState::Done],
+            children: None,
+            timeout_ms: 30_000,
+        },
+        &queued_id,
+    );
+    assert_eq!(queued_receipt.op, "wait");
+    assert_eq!(queued_receipt.status, ReceiptStatus::Queued);
+
+    let failed_id = format!("audit-wait-failed-{}", uuid::Uuid::new_v4().simple());
+    let failed_receipt = super::server::execute_command(
+        &json!({ "caller": "agent", "from": "human" }),
+        &Command::Wait {
+            address: Some(addr.clone()),
+            until: vec![PresenceState::Done],
+            children: None,
+            timeout_ms: 0,
+        },
+        &failed_id,
+    );
+    assert_eq!(failed_receipt.op, "wait");
+    assert_eq!(failed_receipt.status, ReceiptStatus::Failed);
+
+    {
+        let mut list = threads().lock().unwrap();
+        if let Some(t) = list.iter_mut().find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str())) {
+            t["status"] = json!("idle");
+            t["items"] = json!([{ "id": "a1", "kind": "assistant", "text": "done" }]);
+        }
+    }
+    let settled_id = format!("audit-wait-settled-{}", uuid::Uuid::new_v4().simple());
+    let settled_receipt = super::server::execute_command(
+        &json!({ "caller": "agent", "from": "human" }),
+        &Command::Wait {
+            address: Some(addr.clone()),
+            until: vec![PresenceState::Done],
+            children: None,
+            timeout_ms: 30_000,
+        },
+        &settled_id,
+    );
+    assert_eq!(settled_receipt.op, "wait");
+    assert_eq!(settled_receipt.status, ReceiptStatus::Settled);
+
+    let conn = super::audit::audit_db().expect("audit_db");
+    let count_for = |id: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM dispatch_audit WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1)
+    };
+    assert_eq!(count_for(&queued_id), 0, "queued wait poll must not write dispatch_audit row");
+    assert_eq!(count_for(&failed_id), 1, "terminal timeout wait must be audited");
+    assert_eq!(count_for(&settled_id), 1, "settled wait must be audited");
+
+    let _ = conn.execute(
+        "DELETE FROM dispatch_audit WHERE id IN (?1, ?2, ?3)",
+        rusqlite::params![queued_id, failed_id, settled_id],
+    );
+    if let Ok(mut svc) = super::protocol::service().lock() {
+        let _ = svc.kill("cleanup-audit-wait", &addr);
+    }
+    super::protocol::clear_thread_killed(&tid);
+    crate::chat::threads::remove_thread(&tid);
+}
+
+#[test]
+fn read_final_response_returns_concise_bounded_live_summary_while_running_and_bounds_thread_tail() {
+    use crate::persist::threads;
+
+    let tid = format!("wire-live-summary-{}", uuid::Uuid::new_v4().simple());
+    let mut items = vec![
+        json!({ "id": "u1", "kind": "user", "text": "Audit repository" }),
+        json!({ "id": "r1", "kind": "reasoning", "text": "Inspecting auth and dispatch files" }),
+        json!({ "id": "a1", "kind": "assistant", "text": "Checking authentication handlers now." }),
+    ];
+    for idx in 1..=10 {
+        items.push(json!({
+            "id": format!("t{idx}"),
+            "kind": "tool",
+            "title": format!("Read file #{idx}"),
+            "status": if idx == 10 { "running" } else { "completed" },
+            "output": format!("TOOL-{idx}-BODY-{}", "x".repeat(4_000)),
+        }));
+    }
+    {
+        let mut t = crate::chat::threads::blank_thread(&tid, None, "Live Summary", "antigravity", None);
+        t["status"] = json!("running");
+        t["items"] = Value::Array(items);
+        threads().lock().unwrap().push(t);
+    }
+
+    let mut port = LivePort;
+    let live_resp = port
+        .read_final_response(Family::Thread, &tid)
+        .expect("read_final_response while running");
+    assert!(
+        live_resp.chars().count() <= 8_000,
+        "live summary exceeded 8000 chars: {}",
+        live_resp.chars().count()
+    );
+    assert!(live_resp.contains("Status: working"), "resp={live_resp}");
+    assert!(live_resp.contains("Inspecting auth and dispatch files"), "resp={live_resp}");
+    assert!(live_resp.contains("Checking authentication handlers now."), "resp={live_resp}");
+    assert!(live_resp.contains("Read file #10"), "latest tool missing: {live_resp}");
+    assert!(!live_resp.contains("Read file #1\n"), "old tools should be omitted: {live_resp}");
+    assert!(live_resp.contains("kite_subagent_wait"), "resp={live_resp}");
+
+    // Oversized settled/failed thread_tail must cap around 12,000 chars while preserving turnFailure.
+    {
+        let mut list = threads().lock().unwrap();
+        if let Some(t) = list.iter_mut().find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str())) {
+            t["status"] = json!("error");
+            t["turnFailure"] = json!({ "message": "Fatal upstream quota failure" });
+            t["items"] = json!([
+                { "id": "a_big", "kind": "assistant", "text": format!("HEAD-DROP-{}TAIL-KEEP", "z".repeat(20_000)) }
+            ]);
+        }
+    }
+    let tail = super::protocol::thread_tail(&tid);
+    assert!(
+        tail.chars().count() <= 12_000,
+        "thread_tail exceeded 12000 chars: {}",
+        tail.chars().count()
+    );
+    assert!(tail.contains("TAIL-KEEP"), "tail missing recent text");
+    assert!(tail.contains("Fatal upstream quota failure"), "tail dropped turnFailure");
+
+    crate::chat::threads::remove_thread(&tid);
+}
+
+#[test]
+fn agent_service_tools_enforce_thread_pagination_memory_budget_and_permissions() {
+    use crate::persist::{agents, threads, AgentProfile};
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let agent_id = uuid::Uuid::new_v4().to_string();
+    let ws_id = format!("ws-svc-{unique}");
+    let t1 = format!("t1-{unique}");
+    let t2 = format!("t2-{unique}");
+    let t3 = format!("t3-{unique}");
+
+    {
+        let mut list = threads().lock().unwrap();
+        for (tid, updated, msg) in [
+            (&t1, 1000_i64, "alpha needle first"),
+            (&t2, 2000_i64, "beta needle second"),
+            (&t3, 3000_i64, "gamma other"),
+        ] {
+            let thread = json!({
+                "id": tid,
+                "title": format!("Thread {tid}"),
+                "workspaceId": ws_id,
+                "profileId": agent_id,
+                "provider": "codex",
+                "status": "idle",
+                "createdAtUnixMs": 500,
+                "updatedAtUnixMs": updated,
+                "items": [
+                    { "id": "i1", "kind": "user", "text": msg },
+                    { "id": "i2", "kind": "assistant", "text": "item two" },
+                    { "id": "i3", "kind": "assistant", "text": "item three" }
+                ]
+            });
+            crate::chat::thread_index::index_thread(&thread);
+            list.push(thread);
+        }
+    }
+
+    {
+        let mut list = agents().lock().unwrap();
+        list.push(AgentProfile {
+            id: agent_id.clone(),
+            name: format!("SvcTester-{unique}"),
+            engine: "codex".to_string(),
+            purpose: "Test".to_string(),
+            brief: "Test".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(120),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(false),
+            allow_agent_messaging: Some(false),
+            default_mode: None,
+            default_plan: None,
+            default_model: None,
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: vec!["kite-dispatch".to_string()],
+        });
+    }
+
+    // 1. Thread list & search & read pagination
+    let list_page1 = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "thread", "list", "--workspace-id", &ws_id, "--cursor", "0", "--limit", "2"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(list_page1["exit"], 0);
+    assert_eq!(list_page1["result"]["threads"].as_array().unwrap().len(), 2);
+    assert_eq!(list_page1["result"]["nextCursor"], 2);
+    assert_eq!(list_page1["result"]["total"], 3);
+
+    let search_res = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "thread", "search", "--query", "needle", "--workspace-id", &ws_id],
+        "agentId": &agent_id
+    }));
+    assert_eq!(search_res["exit"], 0);
+    assert_eq!(search_res["result"]["total"], 2);
+
+    let read_res = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "thread", "read", "--thread-id", &t1, "--cursor", "0", "--limit", "2"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(read_res["exit"], 0);
+    assert_eq!(read_res["result"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(read_res["result"]["nextCursor"], 2);
+    assert_eq!(read_res["result"]["totalItems"], 3);
+
+    // 2. Memory add/read/search + budget enforcement
+    let mem_add = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "memory", "add", "--target", "agent", "--text", "Fact alpha"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(mem_add["exit"], 0);
+    let mem_read = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "memory", "read", "--target", "agent"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(mem_read["exit"], 0);
+    assert!(mem_read["result"]["text"].as_str().unwrap().contains("Fact alpha"));
+
+    let mem_search = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "memory", "search", "--target", "agent", "--query", "alpha"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(mem_search["exit"], 0);
+    assert_eq!(mem_search["result"]["totalMatches"], 1);
+
+    let huge = "x".repeat(200);
+    let mem_over = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "memory", "add", "--target", "agent", "--text", &huge],
+        "agentId": &agent_id
+    }));
+    assert_eq!(mem_over["exit"], 1);
+    assert!(mem_over["textOut"].as_str().unwrap().contains("memory_over_budget"));
+
+    // 3. allowAgentScheduling = false blocks kite agent routine
+    let routine_denied = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "routine", "list"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(routine_denied["exit"], 1);
+    assert!(routine_denied["textOut"].as_str().unwrap().contains("allowAgentScheduling"));
+
+    // 4. allowAgentMessaging = false blocks kite agent teammate
+    let teammate_denied = execute_argv_envelope(&json!({
+        "argv": ["kite", "agent", "teammate", "list"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(teammate_denied["exit"], 1);
+    assert!(teammate_denied["textOut"].as_str().unwrap().contains("allowAgentMessaging"));
+
+    // 5. disabled_plugin_ids = ["kite-dispatch"] blocks kite dispatch ls
+    let dispatch_denied = execute_argv_envelope(&json!({
+        "argv": ["kite", "dispatch", "ls"],
+        "agentId": &agent_id
+    }));
+    assert_eq!(dispatch_denied["exit"], 1);
+    assert!(dispatch_denied["textOut"].as_str().unwrap().contains("kite-dispatch"));
+
+    // Cleanup
+    for tid in [&t1, &t2, &t3] {
+        crate::chat::thread_index::remove_from_index(tid);
+        crate::chat::threads::remove_thread(tid);
+    }
+    let _ = std::fs::remove_dir_all(crate::agent_mind::get_agent_home_dir(&agent_id));
+    if let Ok(mut list) = agents().lock() {
+        list.retain(|a| a.id != agent_id);
+    }
+}
+
+#[test]
+fn profile_first_role_resolution_prefers_agent_profile_over_markdown_and_falls_back() {
+    use crate::dispatch::cli::{parse_args, Command, SwarmCommand};
+    use crate::persist::{agents, AgentProfile};
+    use crate::subagent_settings::{OverridePolicy, SubagentSettings};
+
+    let tmp_ws = std::env::temp_dir().join(format!(
+        "kite-wire-profile-first-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let agents_dir = tmp_ws.join(".kite").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("security-auditor.md"),
+        "---\ncommand: grok\nprovider: grok\nmodel: grok-4.7-build-fast\neffort: low\n---\nMarkdown fallback body.",
+    )
+    .unwrap();
+    std::fs::write(
+        agents_dir.join("md-only-role.md"),
+        "---\ncommand: codex\nprovider: codex\nmodel: gpt-5.3-codex\neffort: high\n---\nOnly markdown exists.",
+    )
+    .unwrap();
+
+    let profile_id = format!("agent-prof-{}", uuid::Uuid::new_v4().simple());
+    {
+        let mut list = agents().lock().unwrap();
+        list.push(AgentProfile {
+            id: profile_id.clone(),
+            name: "Security Auditor".to_string(),
+            engine: "claude-code".to_string(),
+            purpose: "Audit security".to_string(),
+            brief: "Audit auth and crypto carefully.".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_700_000_000_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(4000),
+            reflection_mode: Some("ask".to_string()),
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("readOnly".to_string()),
+            default_plan: Some(false),
+            default_model: Some("claude-sonnet-4-5".to_string()),
+            default_provider_options: vec![json!({ "id": "effort", "value": "high" })],
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+
+    let settings = SubagentSettings {
+        stack: Vec::new(),
+        default_delegation: None,
+        override_policy: OverridePolicy::Allow,
+    };
+    let req = json!({
+        "from": "thread:main-1",
+        "workspace": tmp_ws.to_string_lossy().to_string(),
+    });
+
+    // 1. By slug/name, AgentProfile wins over .md file and canonicalizes `claude-code` -> `claude`.
+    for role_arg in [
+        "security-auditor",
+        "Security Auditor",
+        profile_id.as_str(),
+        &format!("agent:{profile_id}"),
+    ] {
+        let parsed = parse_args(&[
+            "kite".into(),
+            "dispatch".into(),
+            "run".into(),
+            "--via".into(),
+            "thread".into(),
+            "--role".into(),
+            role_arg.to_string(),
+            "Check auth".into(),
+        ])
+        .unwrap();
+        let resolved = super::resolve_command_with_subagent_settings(&req, &parsed, &settings);
+        match resolved {
+            Command::Run {
+                provider,
+                model,
+                effort,
+                ..
+            } => {
+                assert_eq!(provider.as_deref(), Some("claude"), "role_arg={role_arg}");
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"), "role_arg={role_arg}");
+                assert_eq!(effort.as_deref(), Some("high"), "role_arg={role_arg}");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    // 2. Swarm add also resolves AgentProfile first.
+    let swarm_parsed = parse_args(&[
+        "kite".into(),
+        "dispatch".into(),
+        "swarm".into(),
+        "add".into(),
+        "--name".into(),
+        "auditor".into(),
+        "--role".into(),
+        format!("agent:{profile_id}"),
+        "--brief".into(),
+        "Audit repo".into(),
+    ])
+    .unwrap();
+    let swarm_resolved = super::resolve_command_with_subagent_settings(&req, &swarm_parsed, &settings);
+    match swarm_resolved {
+        Command::Swarm(SwarmCommand::Add {
+            provider,
+            model,
+            effort,
+            ..
+        }) => {
+            assert_eq!(provider.as_deref(), Some("claude"));
+            assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
+            assert_eq!(effort.as_deref(), Some("high"));
+        }
+        other => panic!("unexpected swarm command: {other:?}"),
+    }
+
+    // 3. Explicit CLI overrides still win over AgentProfile defaults.
+    let override_parsed = parse_args(&[
+        "kite".into(),
+        "dispatch".into(),
+        "run".into(),
+        "--via".into(),
+        "thread".into(),
+        "--role".into(),
+        profile_id.clone(),
+        "--provider".into(),
+        "gemini".into(),
+        "--model".into(),
+        "gemini-2.5-pro".into(),
+        "--effort".into(),
+        "low".into(),
+        "Check auth".into(),
+    ])
+    .unwrap();
+    let override_resolved =
+        super::resolve_command_with_subagent_settings(&req, &override_parsed, &settings);
+    match override_resolved {
+        Command::Run {
+            provider,
+            model,
+            effort,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("gemini"));
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+            assert_eq!(effort.as_deref(), Some("low"));
+        }
+        other => panic!("unexpected override command: {other:?}"),
+    }
+
+    // 4. When no AgentProfile matches, .md role fallback works identically.
+    let md_parsed = parse_args(&[
+        "kite".into(),
+        "dispatch".into(),
+        "run".into(),
+        "--via".into(),
+        "thread".into(),
+        "--role".into(),
+        "md-only-role".into(),
+        "Check fallback".into(),
+    ])
+    .unwrap();
+    let md_resolved = super::resolve_command_with_subagent_settings(&req, &md_parsed, &settings);
+    match md_resolved {
+        Command::Run {
+            provider,
+            model,
+            effort,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("codex"));
+            assert_eq!(model.as_deref(), Some("gpt-5.3-codex"));
+            assert_eq!(effort.as_deref(), Some("high"));
+        }
+        other => panic!("unexpected md command: {other:?}"),
+    }
+
+    agents().lock().unwrap().retain(|a| a.id != profile_id);
+    let _ = std::fs::remove_dir_all(&tmp_ws);
+}
+
+#[test]
+fn agent_profile_resolution_canonicalizes_all_seven_engines_and_fails_over_on_quota_exhaustion() {
+    use crate::dispatch::cli::{parse_args, Command, SwarmCommand};
+    use crate::persist::{agents, AgentProfile};
+    use crate::subagent_settings::{
+        DefaultDelegation, OverridePolicy, SubagentSettings, SubagentStackEntry,
+    };
+
+    let cases = [
+        ("claude-code", "claude"),
+        ("open-code", "opencode"),
+        ("cursor-agent", "cursor"),
+        ("agy", "antigravity"),
+        ("gemini", "gemini"),
+        ("codex", "codex"),
+        ("grok", "grok"),
+    ];
+    let mut created_ids = Vec::new();
+    for (idx, (raw_engine, _canon)) in cases.iter().enumerate() {
+        let id = format!("agent-eng-{idx}-{}", uuid::Uuid::new_v4().simple());
+        created_ids.push(id.clone());
+        agents().lock().unwrap().push(AgentProfile {
+            id,
+            name: format!("Specialist {idx}"),
+            engine: (*raw_engine).to_string(),
+            purpose: "Test".to_string(),
+            brief: "Test brief".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_700_000_000_000,
+            pinned: false,
+            order: idx as i32,
+            memory_budget: Some(4000),
+            reflection_mode: Some("ask".to_string()),
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("fullAccess".to_string()),
+            default_plan: Some(false),
+            default_model: None,
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+
+    let settings = SubagentSettings {
+        stack: Vec::new(),
+        default_delegation: None,
+        override_policy: OverridePolicy::Allow,
+    };
+    let req = json!({ "from": "thread:main-1" });
+    for (idx, (_raw, expected_canon)) in cases.iter().enumerate() {
+        let parsed = parse_args(&[
+            "kite".into(),
+            "dispatch".into(),
+            "run".into(),
+            "--via".into(),
+            "thread".into(),
+            "--role".into(),
+            format!("agent:{}", created_ids[idx]),
+            "Do work".into(),
+        ])
+        .unwrap();
+        let resolved = super::server::resolve_command_with_subagent_settings_using(
+            &req,
+            &parsed,
+            &settings,
+            |_| true,
+        );
+        match resolved {
+            Command::Run { provider, .. } => {
+                assert_eq!(provider.as_deref(), Some(*expected_canon));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // Quota exhaustion / unavailability failover:
+    // Specialist 0 (`claude-code` -> `claude`) is exhausted; stack has `gemini/gemini-2.5-pro` healthy.
+    let failover_settings = SubagentSettings {
+        stack: vec![
+            SubagentStackEntry {
+                provider: "claude".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                effort: Some("high".to_string()),
+                enabled: true,
+            },
+            SubagentStackEntry {
+                provider: "gemini".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+                effort: Some("medium".to_string()),
+                enabled: true,
+            },
+        ],
+        default_delegation: Some(DefaultDelegation {
+            provider: "claude".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            effort: Some("high".to_string()),
+        }),
+        override_policy: OverridePolicy::Strict,
+    };
+
+    let run_parsed = parse_args(&[
+        "kite".into(),
+        "dispatch".into(),
+        "run".into(),
+        "--via".into(),
+        "thread".into(),
+        "--role".into(),
+        format!("agent:{}", created_ids[0]),
+        "Check failover".into(),
+    ])
+    .unwrap();
+    let run_resolved = super::server::resolve_command_with_subagent_settings_using(
+        &req,
+        &run_parsed,
+        &failover_settings,
+        |p| p != "claude",
+    );
+    match run_resolved {
+        Command::Run {
+            provider,
+            model,
+            effort,
+            ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("gemini"));
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+            assert_eq!(effort.as_deref(), Some("medium"));
+        }
+        other => panic!("unexpected run failover: {other:?}"),
+    }
+
+    let swarm_parsed = parse_args(&[
+        "kite".into(),
+        "dispatch".into(),
+        "swarm".into(),
+        "add".into(),
+        "--name".into(),
+        "worker-1".into(),
+        "--role".into(),
+        format!("agent:{}", created_ids[0]),
+        "--brief".into(),
+        "Check swarm failover".into(),
+    ])
+    .unwrap();
+    let swarm_resolved = super::server::resolve_command_with_subagent_settings_using(
+        &req,
+        &swarm_parsed,
+        &failover_settings,
+        |p| p != "claude",
+    );
+    match swarm_resolved {
+        Command::Swarm(SwarmCommand::Add {
+            provider,
+            model,
+            effort,
+            ..
+        }) => {
+            assert_eq!(provider.as_deref(), Some("gemini"));
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+            assert_eq!(effort.as_deref(), Some("medium"));
+        }
+        other => panic!("unexpected swarm failover: {other:?}"),
+    }
+
+    agents()
+        .lock()
+        .unwrap()
+        .retain(|a| !created_ids.contains(&a.id));
+}
+
+#[test]
+fn wake_on_message_attaches_existing_persisted_cold_thread_and_routes_delivery() {
+    use crate::persist::{agents, threads, AgentProfile};
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let profile_id = format!("cold-persisted-{unique}");
+    let old_tid = format!("tid-old-{unique}");
+    let recent_tid = format!("tid-recent-{unique}");
+    let side_tid = format!("tid-side-{unique}");
+    let msg_id = format!("msg-cold-{unique}");
+
+    {
+        let mut list = agents().lock().unwrap();
+        list.push(AgentProfile {
+            id: profile_id.clone(),
+            name: "Cold Persisted".to_string(),
+            engine: "gemini".to_string(),
+            purpose: "Test".to_string(),
+            brief: "Test".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(4000),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("auto".to_string()),
+            default_plan: Some(false),
+            default_model: Some("gemini-2.5-pro".to_string()),
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+    {
+        let mut list = threads().lock().unwrap();
+        list.push(json!({
+            "id": old_tid,
+            "profileId": profile_id,
+            "provider": "gemini",
+            "status": "idle",
+            "items": [],
+            "updatedAtUnixMs": 1_000,
+            "createdAtUnixMs": 1_000,
+        }));
+        list.push(json!({
+            "id": recent_tid,
+            "profileId": profile_id,
+            "provider": "gemini",
+            "status": "idle",
+            "items": [],
+            "updatedAtUnixMs": 5_000,
+            "createdAtUnixMs": 4_000,
+        }));
+        list.push(json!({
+            "id": side_tid,
+            "profileId": profile_id,
+            "provider": "gemini",
+            "sideChat": true,
+            "status": "idle",
+            "items": [],
+            "updatedAtUnixMs": 9_000,
+            "createdAtUnixMs": 9_000,
+        }));
+    }
+
+    let res = super::server::send_agent(
+        &profile_id,
+        "Wake persisted thread",
+        "agent",
+        "Coordinator",
+        Some(msg_id.clone()),
+    );
+    assert_eq!(res["delivered"], true, "expected cold persisted thread to deliver: {res}");
+    assert_eq!(res["status"], "submitted");
+    assert_eq!(
+        res["receipt"]["address"].as_str(),
+        Some(format!("thread:{recent_tid}").as_str())
+    );
+
+    let inbox = super::server::inbox(&profile_id, None);
+    let messages = inbox["messages"].as_array().unwrap();
+    let found = messages
+        .iter()
+        .find(|m| m["id"].as_str() == Some(msg_id.as_str()))
+        .expect("message should appear in inbox");
+    assert_eq!(found["threadId"].as_str(), Some(recent_tid.as_str()));
+
+    if let Ok(mut live) = crate::chat::live_turns().lock() {
+        live.by_thread.remove(&recent_tid);
+    }
+    threads()
+        .lock()
+        .unwrap()
+        .retain(|t| {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            id != old_tid && id != recent_tid && id != side_tid
+        });
+    agents().lock().unwrap().retain(|a| a.id != profile_id);
+    if let Some(conn) = super::audit::audit_db() {
+        let _ = conn.execute("DELETE FROM dispatch_audit WHERE id = ?1", rusqlite::params![msg_id]);
+    }
+}
+
+#[test]
+fn wake_on_message_creates_canonical_thread_across_persistent_and_oneshot_engines() {
+    use crate::persist::{agents, threads, AgentProfile};
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let codex_id = format!("cold-codex-{unique}");
+    let claude_id = format!("cold-claude-{unique}");
+    let msg_codex = format!("msg-codex-{unique}");
+    let msg_claude = format!("msg-claude-{unique}");
+
+    {
+        let mut list = agents().lock().unwrap();
+        list.push(AgentProfile {
+            id: codex_id.clone(),
+            name: "Codex Teammate".to_string(),
+            engine: "codex".to_string(),
+            purpose: "Backend".to_string(),
+            brief: "Handle Rust".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(4000),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("auto".to_string()),
+            default_plan: Some(false),
+            default_model: Some("gpt-5.3-codex".to_string()),
+            default_provider_options: vec![json!({ "id": "effort", "value": "high" })],
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+        list.push(AgentProfile {
+            id: claude_id.clone(),
+            name: "Claude Teammate".to_string(),
+            engine: "claude-code".to_string(),
+            purpose: "Review".to_string(),
+            brief: "Review PRs".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 1,
+            memory_budget: Some(4000),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("readOnly".to_string()),
+            default_plan: Some(true),
+            default_model: Some("claude-sonnet-4-5".to_string()),
+            default_provider_options: vec![json!({ "id": "effort", "value": "medium" })],
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+
+    let res_codex = super::server::send_agent(
+        &codex_id,
+        "Run persistent wake",
+        "agent",
+        "Coordinator",
+        Some(msg_codex.clone()),
+    );
+    assert_eq!(res_codex["delivered"], true, "codex wake failed: {res_codex}");
+    assert_eq!(res_codex["status"], "submitted");
+    let codex_tid = res_codex["receipt"]["address"]
+        .as_str()
+        .and_then(|a| a.strip_prefix("thread:"))
+        .expect("codex receipt should target created thread")
+        .to_string();
+
+    let res_claude = super::server::send_agent(
+        &claude_id,
+        "Run one-shot wake",
+        "agent",
+        "Coordinator",
+        Some(msg_claude.clone()),
+    );
+    assert_eq!(res_claude["delivered"], true, "claude wake failed: {res_claude}");
+    assert_eq!(res_claude["status"], "submitted");
+    let claude_tid = res_claude["receipt"]["address"]
+        .as_str()
+        .and_then(|a| a.strip_prefix("thread:"))
+        .expect("claude receipt should target created thread")
+        .to_string();
+
+    {
+        let list = threads().lock().unwrap();
+        let t_codex = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(codex_tid.as_str()))
+            .expect("codex thread created");
+        assert_eq!(t_codex["profileId"], codex_id);
+        assert_eq!(t_codex["provider"], "codex");
+        assert_eq!(t_codex["model"], "gpt-5.3-codex");
+        assert_eq!(t_codex["mode"], "auto");
+        assert_eq!(t_codex["effort"], "high");
+
+        let t_claude = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(claude_tid.as_str()))
+            .expect("claude thread created");
+        assert_eq!(t_claude["profileId"], claude_id);
+        assert_eq!(t_claude["provider"], "claude");
+        assert_eq!(t_claude["model"], "claude-sonnet-4-5");
+        assert_eq!(t_claude["mode"], "readOnly");
+        assert_eq!(t_claude["plan"], true);
+        assert_eq!(t_claude["effort"], "medium");
+    }
+
+    let claude_inbox = super::server::inbox(&claude_id, None);
+    let claude_msg = claude_inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(msg_claude.as_str()))
+        .expect("claude message in inbox");
+    assert_eq!(claude_msg["threadId"].as_str(), Some(claude_tid.as_str()));
+
+    if let Ok(mut live) = crate::chat::live_turns().lock() {
+        live.by_thread.remove(&codex_tid);
+        live.by_thread.remove(&claude_tid);
+    }
+    threads()
+        .lock()
+        .unwrap()
+        .retain(|t| {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            id != codex_tid && id != claude_tid
+        });
+    agents()
+        .lock()
+        .unwrap()
+        .retain(|a| a.id != codex_id && a.id != claude_id);
+    if let Some(conn) = super::audit::audit_db() {
+        let _ = conn.execute(
+            "DELETE FROM dispatch_audit WHERE id IN (?1, ?2)",
+            rusqlite::params![msg_codex, msg_claude],
+        );
+    }
+}
+
+#[test]
+fn wake_on_message_respects_allow_agent_messaging_false() {
+    use crate::persist::{agents, threads, AgentProfile};
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let profile_id = format!("blocked-agent-{unique}");
+    let msg_id = format!("msg-blocked-{unique}");
+
+    {
+        let mut list = agents().lock().unwrap();
+        list.push(AgentProfile {
+            id: profile_id.clone(),
+            name: "Blocked Agent".to_string(),
+            engine: "codex".to_string(),
+            purpose: "Test".to_string(),
+            brief: "Test".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(4000),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(false),
+            default_mode: None,
+            default_plan: None,
+            default_model: None,
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+
+    let res = super::server::send_agent(
+        &profile_id,
+        "Should be blocked",
+        "agent",
+        "Coordinator",
+        Some(msg_id.clone()),
+    );
+    assert_eq!(res["delivered"], false);
+    assert_eq!(res["status"], "rejected");
+    assert_eq!(res["error"], "messaging_disabled");
+    let created_any = threads()
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.get("profileId").and_then(Value::as_str) == Some(profile_id.as_str()));
+    assert!(!created_any, "blocked agent must not spawn a thread");
+
+    agents().lock().unwrap().retain(|a| a.id != profile_id);
+    if let Some(conn) = super::audit::audit_db() {
+        let _ = conn.execute("DELETE FROM dispatch_audit WHERE id = ?1", rusqlite::params![msg_id]);
+    }
+}
+
+#[test]
+fn dispatch_audit_migration_preserves_existing_rows_and_surfaces_thread_id() {
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let profile_id = format!("audit-prof-{unique}");
+    let legacy_id = format!("legacy-{unique}");
+    let new_id = format!("new-{unique}");
+    let target_tid = format!("tid-audit-{unique}");
+
+    let conn = super::audit::audit_db().expect("audit_db");
+    let has_col = conn
+        .prepare("PRAGMA table_info(dispatch_audit)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .flatten()
+        .any(|c| c == "thread_id");
+    assert!(has_col, "dispatch_audit must have thread_id column");
+
+    conn.execute(
+        "INSERT OR REPLACE INTO dispatch_audit
+         (id, op, address, body, status, submitted, historical, sender_name, profile_id, error, created_ms, thread_id)
+         VALUES (?1, 'send', ?2, 'Legacy body', 'submitted', 1, 0, 'Agent', ?3, NULL, 1000, NULL)",
+        rusqlite::params![legacy_id, format!("agent:{profile_id}"), profile_id],
+    )
+    .unwrap();
+
+    let row = crate::dispatch::audit::AuditRow {
+        id: new_id.clone(),
+        op: "send".into(),
+        address: format!("thread:{target_tid}"),
+        body: "New body".into(),
+        status: "submitted".into(),
+        submitted: true,
+        historical: false,
+        sender_name: "Agent".into(),
+        profile_id: profile_id.clone(),
+        created_ms: 2000,
+    };
+    super::audit::insert_audit_with_thread(&row, Some(&target_tid))
+        .expect("insert_audit_with_thread");
+
+    let inbox = super::server::inbox(&profile_id, None);
+    let msgs = inbox["messages"].as_array().unwrap();
+    let legacy_msg = msgs.iter().find(|m| m["id"] == legacy_id).expect("legacy row preserved");
+    assert!(legacy_msg["threadId"].is_null());
+    let new_msg = msgs.iter().find(|m| m["id"] == new_id).expect("new row present");
+    assert_eq!(new_msg["threadId"].as_str(), Some(target_tid.as_str()));
+
+    let _ = conn.execute(
+        "DELETE FROM dispatch_audit WHERE id IN (?1, ?2)",
+        rusqlite::params![legacy_id, new_id],
+    );
+}
+
+
+
+
+

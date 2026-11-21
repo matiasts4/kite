@@ -5,7 +5,20 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+
+static PERSIST_CALLS: AtomicU64 = AtomicU64::new(0);
+static SQLITE_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
+static STORES_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+const WAL_CHECKPOINT_CADENCE: u64 = 32;
+const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+
+#[cfg(test)]
+pub fn persist_calls_count() -> u64 {
+    PERSIST_CALLS.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,20 +88,66 @@ pub fn app_data_folder() -> &'static str {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn is_isolated_test_appdata(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let norm = trimmed.to_ascii_lowercase().replace('\\', "/");
+    let norm_trimmed = norm.trim_end_matches('/');
+    let temp_norm = std::env::temp_dir()
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    let temp_trimmed = temp_norm.trim_end_matches('/');
+    (!temp_trimmed.is_empty() && norm_trimmed.starts_with(temp_trimmed))
+        || norm_trimmed.contains("f5-routines-test")
+        || norm_trimmed.contains("kite-test")
+        || norm_trimmed.contains("kite-cargo-test")
+        || !norm_trimmed.ends_with("/appdata/roaming")
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_test_roaming_app_dir(appdata: Option<&str>, fallback: &Path) -> PathBuf {
+    if let Some(raw) = appdata.filter(|raw| is_isolated_test_appdata(raw)) {
+        return PathBuf::from(raw).join(app_data_folder());
+    }
+    fallback.join(app_data_folder())
+}
+
 pub fn roaming_app_dir() -> PathBuf {
-    let base = std::env::var("APPDATA")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
-                .unwrap_or_else(|| std::env::temp_dir().join("kite-appdata"))
+    #[cfg(test)]
+    {
+        static TEST_APPDATA_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let fallback = TEST_APPDATA_ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "kite-cargo-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            let _ = fs::create_dir_all(&dir);
+            dir
         });
-    base.join(app_data_folder())
+        let appdata = std::env::var("APPDATA").ok();
+        return resolve_test_roaming_app_dir(appdata.as_deref(), fallback);
+    }
+    #[cfg(not(test))]
+    {
+        let base = std::env::var("APPDATA")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+                    .unwrap_or_else(|| std::env::temp_dir().join("kite-appdata"))
+            });
+        base.join(app_data_folder())
+    }
 }
 
 pub fn db_path() -> PathBuf {
@@ -267,13 +326,67 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 ";
 
+pub(crate) fn configure_sqlite_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA cache_size = -8000;
+         PRAGMA wal_autocheckpoint = 1000;",
+    )
+}
+
+fn wal_path_for_db(db_file: &Path) -> PathBuf {
+    PathBuf::from(format!("{}-wal", db_file.display()))
+}
+
+pub(crate) fn checkpoint_wal_on_conn(
+    conn: &Connection,
+    wal_path: Option<&Path>,
+    force_truncate: bool,
+) -> Result<(i64, i64, i64), rusqlite::Error> {
+    let should_truncate = force_truncate
+        || wal_path
+            .and_then(|p| fs::metadata(p).ok())
+            .is_some_and(|m| m.len() >= WAL_TRUNCATE_THRESHOLD_BYTES);
+    let sql = if should_truncate {
+        "PRAGMA wal_checkpoint(TRUNCATE)"
+    } else {
+        "PRAGMA wal_checkpoint(PASSIVE)"
+    };
+    conn.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+}
+
+fn maybe_checkpoint_wal(conn: &Connection) {
+    let flush_num = SQLITE_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let wal_path = wal_path_for_db(&db_path());
+    let wal_exceeded = fs::metadata(&wal_path)
+        .ok()
+        .is_some_and(|m| m.len() >= WAL_TRUNCATE_THRESHOLD_BYTES);
+    if flush_num % WAL_CHECKPOINT_CADENCE == 0 || wal_exceeded {
+        if let Err(error) = checkpoint_wal_on_conn(conn, Some(&wal_path), wal_exceeded) {
+            log_trace(&format!("WAL checkpoint failed: {error}"));
+        }
+    }
+}
+
+pub fn is_daemon_process() -> bool {
+    static IS_DAEMON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS_DAEMON.get_or_init(|| {
+        std::env::args()
+            .nth(1)
+            .is_some_and(|arg| arg == "daemon" || arg == "--daemon" || arg == "kite-core")
+    })
+}
+
 fn open_connection() -> Connection {
     let p = db_path();
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let conn = Connection::open(&p).expect("failed to open studio.sqlite");
-    conn.execute_batch(&format!("PRAGMA journal_mode = WAL;{SCHEMA_SQL}"))
+    configure_sqlite_pragmas(&conn).expect("failed to configure sqlite pragmas");
+    conn.execute_batch(SCHEMA_SQL)
         .expect("failed to initialize sqlite schema");
     for col in [
         "memory_budget INTEGER", "reflection_mode TEXT", "allow_agent_scheduling INTEGER",
@@ -346,6 +459,168 @@ fn load_legacy_state_json() -> Option<DiskState> {
     Some(state)
 }
 
+const AGENT_COLUMNS_SQL: &str = "id, name, engine, purpose, avatar, created_at_unix_ms, pinned, sort_order, memory_budget, reflection_mode, allow_agent_scheduling, allow_agent_messaging, default_mode, default_plan, default_model, brief, default_provider_options, place_display_names, disabled_plugin_ids";
+
+fn map_agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentProfile> {
+    let purpose: String = row.get(3)?;
+    let brief: String = row
+        .get::<_, Option<String>>(15)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| purpose.clone());
+    let default_plan_str: Option<String> = row.get(13).ok();
+    let default_plan = default_plan_str.map(|s| s == "true" || s == "1");
+    let default_provider_options: Vec<Value> = row
+        .get::<_, Option<String>>(16)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let place_display_names: Vec<String> = row
+        .get::<_, Option<String>>(17)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let disabled_plugin_ids: Vec<String> = row
+        .get::<_, Option<String>>(18)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let raw_name: String = row.get(1)?;
+    let engine: String = row.get(2)?;
+    let name = if raw_name.eq_ignore_ascii_case("antigravity") && engine == "antigravity" {
+        "Orion".to_string()
+    } else {
+        raw_name
+    };
+    Ok(AgentProfile {
+        id: row.get(0)?,
+        name,
+        engine,
+        purpose: if purpose.is_empty() { brief.clone() } else { purpose },
+        brief,
+        avatar: row.get(4)?,
+        created_at_unix_ms: row.get(5)?,
+        pinned: row.get::<_, i64>(6)? != 0,
+        order: row.get::<_, i64>(7)? as i32,
+        memory_budget: row.get(8).ok(),
+        reflection_mode: row.get(9).ok(),
+        allow_agent_scheduling: row.get::<_, Option<i64>>(10).ok().flatten().map(|v| v != 0),
+        allow_agent_messaging: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v != 0),
+        default_mode: row.get(12).ok(),
+        default_plan,
+        default_model: row.get(14).ok(),
+        default_provider_options,
+        place_display_names,
+        disabled_plugin_ids,
+    })
+}
+
+pub(crate) fn read_workspaces_from_conn(
+    conn: &Connection,
+) -> Result<(Vec<Workspace>, HashMap<String, String>), rusqlite::Error> {
+    let mut ws_stmt = conn.prepare(
+        "SELECT id, display_name, folder_path, created_at_unix_ms, last_opened_at_unix_ms, pinned
+         FROM workspaces ORDER BY sort_order ASC",
+    )?;
+    let ws_rows = ws_stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let display_name: String = row.get(1)?;
+        let folder_path: String = row.get(2)?;
+        let created_at_unix_ms: i64 = row.get(3)?;
+        let last_opened_at_unix_ms: i64 = row.get(4)?;
+        let pinned: bool = row.get::<_, i64>(5)? != 0;
+        let available = Path::new(&folder_path).is_dir();
+        Ok((
+            Workspace {
+                id: id.clone(),
+                display_name,
+                created_at_unix_ms,
+                last_opened_at_unix_ms,
+                pinned,
+                available,
+            },
+            id,
+            folder_path,
+        ))
+    })?;
+
+    let mut workspaces = Vec::new();
+    let mut paths = HashMap::new();
+    for row in ws_rows.flatten() {
+        workspaces.push(row.0);
+        paths.insert(row.1, row.2);
+    }
+    Ok((workspaces, paths))
+}
+
+pub(crate) fn read_workspace_path_from_conn(conn: &Connection, id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT folder_path FROM workspaces WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|p| !p.is_empty())
+}
+
+pub(crate) fn read_agents_from_conn(conn: &Connection) -> Result<Vec<AgentProfile>, rusqlite::Error> {
+    let sql = format!("SELECT {AGENT_COLUMNS_SQL} FROM agents ORDER BY sort_order ASC");
+    let mut ag_stmt = conn.prepare(&sql)?;
+    let ag_rows = ag_stmt.query_map([], map_agent_row)?;
+    Ok(ag_rows.flatten().collect())
+}
+
+pub(crate) fn read_agent_by_id_from_conn(conn: &Connection, id: &str) -> Option<AgentProfile> {
+    let sql = format!("SELECT {AGENT_COLUMNS_SQL} FROM agents WHERE id = ?1 LIMIT 1");
+    conn.query_row(&sql, params![id], map_agent_row).ok()
+}
+
+pub fn load_agents_direct() -> Vec<AgentProfile> {
+    let conn = db_connection().lock().unwrap();
+    read_agents_from_conn(&conn).unwrap_or_default()
+}
+
+pub fn load_agent_by_id_direct(id: &str) -> Option<AgentProfile> {
+    let conn = db_connection().lock().unwrap();
+    read_agent_by_id_from_conn(&conn, id)
+}
+
+pub fn load_workspaces_direct() -> Vec<Workspace> {
+    let conn = db_connection().lock().unwrap();
+    read_workspaces_from_conn(&conn)
+        .map(|(workspaces, _)| workspaces)
+        .unwrap_or_default()
+}
+
+pub fn load_workspace_path_direct(id: &str) -> Option<String> {
+    let conn = db_connection().lock().unwrap();
+    read_workspace_path_from_conn(&conn, id)
+}
+
+pub fn find_agent_by_id(id: &str) -> Option<AgentProfile> {
+    if is_daemon_process() {
+        return load_agent_by_id_direct(id);
+    }
+    agents().lock().ok()?.iter().find(|a| a.id == id).cloned()
+}
+
+pub fn list_agents_snapshot() -> Vec<AgentProfile> {
+    if is_daemon_process() {
+        return load_agents_direct();
+    }
+    agents().lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn list_workspaces_snapshot() -> Vec<Workspace> {
+    if is_daemon_process() {
+        return load_workspaces_direct();
+    }
+    workspaces().lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 fn load_or_migrate_sqlite() -> DiskState {
     let conn_guard = db_connection().lock().unwrap();
     let conn = &*conn_guard;
@@ -370,84 +645,17 @@ fn load_or_migrate_sqlite() -> DiskState {
     }
 
     // Load state from SQLite
-    let mut ws_stmt = conn.prepare("SELECT id, display_name, folder_path, created_at_unix_ms, last_opened_at_unix_ms, pinned FROM workspaces ORDER BY sort_order ASC").expect("failed to prepare workspaces query");
-    let ws_rows = ws_stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let display_name: String = row.get(1)?;
-        let folder_path: String = row.get(2)?;
-        let created_at_unix_ms: i64 = row.get(3)?;
-        let last_opened_at_unix_ms: i64 = row.get(4)?;
-        let pinned: bool = row.get::<_, i64>(5)? != 0;
-        let available = Path::new(&folder_path).is_dir();
-        Ok((Workspace {
-            id: id.clone(),
-            display_name,
-            created_at_unix_ms,
-            last_opened_at_unix_ms,
-            pinned,
-            available,
-        }, id, folder_path))
-    }).expect("failed to query workspaces");
-
-    let mut workspaces = Vec::new();
-    let mut paths = HashMap::new();
-    for row in ws_rows.flatten() {
-        workspaces.push(row.0);
-        paths.insert(row.1, row.2);
-    }
-
-    let mut ag_stmt = conn.prepare("SELECT id, name, engine, purpose, avatar, created_at_unix_ms, pinned, sort_order, memory_budget, reflection_mode, allow_agent_scheduling, allow_agent_messaging, default_mode, default_plan, default_model, brief, default_provider_options, place_display_names, disabled_plugin_ids FROM agents ORDER BY sort_order ASC").expect("failed to prepare agents query");
-    let ag_rows = ag_stmt.query_map([], |row| {
-        let purpose: String = row.get(3)?;
-        let brief: String = row.get::<_, Option<String>>(15).ok().flatten().unwrap_or_else(|| purpose.clone());
-        let default_plan_str: Option<String> = row.get(13).ok();
-        let default_plan = default_plan_str.map(|s| s == "true" || s == "1");
-        let default_provider_options: Vec<Value> = row.get::<_, Option<String>>(16).ok().flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let place_display_names: Vec<String> = row.get::<_, Option<String>>(17).ok().flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let disabled_plugin_ids: Vec<String> = row.get::<_, Option<String>>(18).ok().flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let raw_name: String = row.get(1)?;
-        let engine: String = row.get(2)?;
-        let name = if raw_name.eq_ignore_ascii_case("antigravity") && engine == "antigravity" {
-            "Orion".to_string()
-        } else {
-            raw_name
-        };
-        Ok(AgentProfile {
-            id: row.get(0)?,
-            name,
-            engine,
-            purpose: if purpose.is_empty() { brief.clone() } else { purpose },
-            brief,
-            avatar: row.get(4)?,
-            created_at_unix_ms: row.get(5)?,
-            pinned: row.get::<_, i64>(6)? != 0,
-            order: row.get::<_, i64>(7)? as i32,
-            memory_budget: row.get(8).ok(),
-            reflection_mode: row.get(9).ok(),
-            allow_agent_scheduling: row.get::<_, Option<i64>>(10).ok().flatten().map(|v| v != 0),
-            allow_agent_messaging: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v != 0),
-            default_mode: row.get(12).ok(),
-            default_plan,
-            default_model: row.get(14).ok(),
-            default_provider_options,
-            place_display_names,
-            disabled_plugin_ids,
-        })
-    }).expect("failed to query agents");
-    let agents: Vec<AgentProfile> = ag_rows.flatten().collect();
+    let (workspaces, paths) =
+        read_workspaces_from_conn(conn).expect("failed to query workspaces");
+    let agents = read_agents_from_conn(conn).expect("failed to query agents");
 
     let mut th_stmt = conn.prepare("SELECT data FROM threads ORDER BY updated_at_unix_ms ASC").expect("failed to prepare threads query");
     let th_rows = th_stmt.query_map([], |row| {
         let data: String = row.get(0)?;
         Ok(serde_json::from_str::<Value>(&data).unwrap_or(Value::Null))
     }).expect("failed to query threads");
-    let threads: Vec<Value> = th_rows.flatten().filter(|v| !v.is_null()).collect();
+    let mut threads: Vec<Value> = th_rows.flatten().filter(|v| !v.is_null()).collect();
+    let healed_thread_ids = heal_loaded_threads(&mut threads);
 
     let mut last_provider = "claude".to_string();
     let mut last_model: Option<String> = None;
@@ -512,9 +720,8 @@ fn load_or_migrate_sqlite() -> DiskState {
         routines,
         notifications,
     };
-    if seed_routines_now || seed_notifications_now {
-        drop(ws_stmt);
-        drop(ag_stmt);
+    seed_persisted_thread_revs(&state.threads, &healed_thread_ids);
+    if seed_routines_now || seed_notifications_now || !healed_thread_ids.is_empty() {
         drop(th_stmt);
         drop(app_stmt);
         drop(rt_stmt);
@@ -523,6 +730,67 @@ fn load_or_migrate_sqlite() -> DiskState {
         save_disk_to_sqlite(&state);
     }
     state
+}
+
+fn heal_loaded_threads(threads: &mut [Value]) -> std::collections::HashSet<String> {
+    let mut healed_ids = std::collections::HashSet::new();
+    for thread in threads.iter_mut() {
+        if crate::chat::runtime::post_reply::heal_persisted_connection_loss_after_reply(thread) {
+            if let Some(id) = json_row_id(thread) {
+                healed_ids.insert(id.to_string());
+            }
+        }
+    }
+    let pre_heal_statuses: std::collections::HashMap<String, String> = threads
+        .iter()
+        .filter_map(|t| {
+            let id = json_row_id(t)?;
+            let status = t.get("status").and_then(Value::as_str).unwrap_or("idle");
+            Some((id.to_string(), status.to_string()))
+        })
+        .collect();
+    let now = crate::chat::utils::now_ms();
+    for thread in threads.iter_mut() {
+        let mut healed_children = false;
+        if let Some(runs) = thread.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+            for run in runs.iter_mut() {
+                let cur = run.get("status").and_then(Value::as_str);
+                if matches!(cur, Some("completed" | "failed" | "killed")) {
+                    continue;
+                }
+                let Some(cid) = run
+                    .get("childThreadId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                let next_status = match pre_heal_statuses.get(cid).map(String::as_str) {
+                    Some("idle") => "completed",
+                    Some("error") => "failed",
+                    _ => "killed",
+                };
+                run["status"] = json!(next_status);
+                run["updatedAtUnixMs"] = json!(now);
+                if run.get("completedAtUnixMs").is_none_or(Value::is_null) {
+                    run["completedAtUnixMs"] = json!(now);
+                }
+                healed_children = true;
+            }
+        }
+        let healed_reconcile = crate::chat::subagents::needs_antigravity_transcript_reconcile(thread)
+            && crate::chat::subagents::reconcile_antigravity_subagents_in_thread(thread, None, false)
+                .changed;
+        let healed_running =
+            crate::chat::runtime::heal_orphaned_thread_with_options(thread, false, true);
+        if healed_children || healed_reconcile || healed_running {
+            if let Some(id) = json_row_id(thread) {
+                healed_ids.insert(id.to_string());
+            }
+        }
+    }
+    healed_ids
 }
 
 fn flag(value: bool) -> i64 {
@@ -539,7 +807,11 @@ fn delete_absent(tx: &Transaction<'_>, sql: &str, ids: &[String]) -> Result<(), 
     Ok(())
 }
 
-fn sync_workspaces(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlite::Error> {
+fn sync_workspaces_slice(
+    tx: &Transaction<'_>,
+    workspaces: &[Workspace],
+    paths: &HashMap<String, String>,
+) -> Result<(), rusqlite::Error> {
     let mut stmt = tx.prepare(
         "INSERT INTO workspaces (
              id, display_name, folder_path, created_at_unix_ms, last_opened_at_unix_ms,
@@ -561,9 +833,9 @@ fn sync_workspaces(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqli
             OR workspaces.available IS NOT excluded.available
             OR workspaces.sort_order IS NOT excluded.sort_order",
     )?;
-    let mut ids = Vec::with_capacity(state.workspaces.len());
-    for (index, workspace) in state.workspaces.iter().enumerate() {
-        let folder = state.paths.get(&workspace.id).cloned().unwrap_or_default();
+    let mut ids = Vec::with_capacity(workspaces.len());
+    for (index, workspace) in workspaces.iter().enumerate() {
+        let folder = paths.get(&workspace.id).cloned().unwrap_or_default();
         stmt.execute(params![
             workspace.id,
             workspace.display_name,
@@ -582,6 +854,10 @@ fn sync_workspaces(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqli
         "DELETE FROM workspaces WHERE id NOT IN (SELECT value FROM json_each(?1))",
         &ids,
     )
+}
+
+fn sync_workspaces(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlite::Error> {
+    sync_workspaces_slice(tx, &state.workspaces, &state.paths)
 }
 
 fn sync_agents(tx: &Transaction<'_>, agents: &[AgentProfile]) -> Result<(), rusqlite::Error> {
@@ -668,7 +944,78 @@ fn sync_agents(tx: &Transaction<'_>, agents: &[AgentProfile]) -> Result<(), rusq
     )
 }
 
-fn sync_threads(tx: &Transaction<'_>, threads: &[Value]) -> Result<(), rusqlite::Error> {
+type ThreadRevCache = HashMap<String, (String, i64)>;
+
+fn thread_sync_stamp(thread: &Value) -> Option<(String, i64)> {
+    let rev = thread
+        .get("revision")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let updated = thread.get("updatedAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
+    Some((rev.to_string(), updated))
+}
+
+fn persisted_thread_revs() -> &'static Mutex<ThreadRevCache> {
+    static CELL: std::sync::OnceLock<Mutex<ThreadRevCache>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn seed_persisted_thread_revs(threads: &[Value], skip_ids: &std::collections::HashSet<String>) {
+    if let Ok(mut cache) = persisted_thread_revs().lock() {
+        cache.clear();
+        for thread in threads {
+            if let (Some(id), Some(stamp)) = (json_row_id(thread), thread_sync_stamp(thread)) {
+                if !skip_ids.contains(id) {
+                    cache.insert(id.to_string(), stamp);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn collect_dirty_threads(
+    threads: &[Value],
+    known_revs: &ThreadRevCache,
+) -> (Vec<Value>, Vec<String>) {
+    let mut dirty = Vec::new();
+    let mut live_ids = Vec::with_capacity(threads.len());
+    for thread in threads {
+        let Some(id) = json_row_id(thread) else {
+            continue;
+        };
+        live_ids.push(id.to_string());
+        let is_clean = thread_sync_stamp(thread)
+            .as_ref()
+            .is_some_and(|stamp| known_revs.get(id) == Some(stamp));
+        if !is_clean {
+            dirty.push(thread.clone());
+        }
+    }
+    (dirty, live_ids)
+}
+
+pub(crate) struct DirtyDiskSnapshot {
+    pub workspaces: Vec<Workspace>,
+    pub paths: HashMap<String, String>,
+    pub agents: Vec<AgentProfile>,
+    pub dirty_threads: Vec<Value>,
+    pub live_thread_ids: Vec<String>,
+    pub last_provider: String,
+    pub last_model: Option<String>,
+    pub last_effort: Option<String>,
+    pub grid: Value,
+    pub revision: u64,
+    pub routines: Vec<Value>,
+    pub notifications: Vec<Value>,
+}
+
+fn upsert_threads_into_tx(
+    tx: &Transaction<'_>,
+    threads: &[Value],
+    mut rev_cache: Option<&mut ThreadRevCache>,
+    live_ids_out: Option<&mut Vec<String>>,
+) -> Result<usize, rusqlite::Error> {
     let mut stmt = tx.prepare(
         "INSERT INTO threads (id, data, created_at_unix_ms, updated_at_unix_ms)
          VALUES (?1, ?2, ?3, ?4)
@@ -680,23 +1027,76 @@ fn sync_threads(tx: &Transaction<'_>, threads: &[Value]) -> Result<(), rusqlite:
             OR threads.created_at_unix_ms IS NOT excluded.created_at_unix_ms
             OR threads.updated_at_unix_ms IS NOT excluded.updated_at_unix_ms",
     )?;
-    let mut ids = Vec::new();
+    let mut serialized_count = 0usize;
+    let mut collected_ids = live_ids_out;
     for thread in threads {
         let Some(id) = json_row_id(thread) else {
             continue;
         };
+        if let Some(ids) = collected_ids.as_deref_mut() {
+            ids.push(id.to_string());
+        }
+        let stamp = thread_sync_stamp(thread);
+        if let (Some(cache), Some(stamp_val)) = (rev_cache.as_deref(), stamp.as_ref()) {
+            if cache.get(id) == Some(stamp_val) {
+                continue;
+            }
+        }
         let created = thread.get("createdAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
         let updated = thread.get("updatedAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
         let data = serde_json::to_string(thread).unwrap_or_default();
         stmt.execute(params![id, data, created, updated])?;
-        ids.push(id.to_string());
+        serialized_count += 1;
+        if let Some(cache) = rev_cache.as_deref_mut() {
+            if let Some(stamp_val) = stamp {
+                cache.insert(id.to_string(), stamp_val);
+            } else {
+                cache.remove(id);
+            }
+        }
     }
-    drop(stmt);
+    Ok(serialized_count)
+}
+
+fn prune_absent_threads(
+    tx: &Transaction<'_>,
+    live_ids: &[String],
+    rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<(), rusqlite::Error> {
     delete_absent(
         tx,
         "DELETE FROM threads WHERE id NOT IN (SELECT value FROM json_each(?1))",
-        &ids,
-    )
+        live_ids,
+    )?;
+    if let Some(cache) = rev_cache {
+        let live_set: std::collections::HashSet<&str> = live_ids.iter().map(String::as_str).collect();
+        cache.retain(|k, _| live_set.contains(k.as_str()));
+    }
+    Ok(())
+}
+
+fn sync_threads(
+    tx: &Transaction<'_>,
+    threads: &[Value],
+    mut rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<usize, rusqlite::Error> {
+    let mut ids = Vec::with_capacity(threads.len());
+    let serialized_count =
+        upsert_threads_into_tx(tx, threads, rev_cache.as_deref_mut(), Some(&mut ids))?;
+    prune_absent_threads(tx, &ids, rev_cache)?;
+    Ok(serialized_count)
+}
+
+fn sync_dirty_threads(
+    tx: &Transaction<'_>,
+    dirty_threads: &[Value],
+    live_thread_ids: &[String],
+    mut rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<usize, rusqlite::Error> {
+    let serialized_count =
+        upsert_threads_into_tx(tx, dirty_threads, rev_cache.as_deref_mut(), None)?;
+    prune_absent_threads(tx, live_thread_ids, rev_cache)?;
+    Ok(serialized_count)
 }
 
 fn sync_routines(tx: &Transaction<'_>, routines: &[Value]) -> Result<(), rusqlite::Error> {
@@ -761,13 +1161,20 @@ fn sync_notifications(tx: &Transaction<'_>, notifications: &[Value]) -> Result<(
     )
 }
 
-fn sync_app_state(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlite::Error> {
-    let grid = serde_json::to_string(&state.grid).unwrap_or_default();
-    let revision = state.revision.to_string();
-    let last_model_val = state.last_model.as_deref().unwrap_or("");
-    let last_effort_val = state.last_effort.as_deref().unwrap_or("");
+fn sync_app_state_fields(
+    tx: &Transaction<'_>,
+    last_provider: &str,
+    last_model: Option<&str>,
+    last_effort: Option<&str>,
+    grid: &Value,
+    revision: u64,
+) -> Result<(), rusqlite::Error> {
+    let grid = serde_json::to_string(grid).unwrap_or_default();
+    let revision = revision.to_string();
+    let last_model_val = last_model.unwrap_or("");
+    let last_effort_val = last_effort.unwrap_or("");
     let rows = [
-        ("lastProvider", state.last_provider.as_str()),
+        ("lastProvider", last_provider),
         ("lastModel", last_model_val),
         ("lastEffort", last_effort_val),
         ("grid", grid.as_str()),
@@ -786,105 +1193,276 @@ fn sync_app_state(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlit
     Ok(())
 }
 
-fn apply_disk_state(tx: &Transaction<'_>, state: &DiskState) -> Result<(), rusqlite::Error> {
+fn apply_disk_state(
+    tx: &Transaction<'_>,
+    state: &DiskState,
+    rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<usize, rusqlite::Error> {
     sync_workspaces(tx, state)?;
     sync_agents(tx, &state.agents)?;
-    sync_threads(tx, &state.threads)?;
+    let serialized_threads = sync_threads(tx, &state.threads, rev_cache)?;
     sync_routines(tx, &state.routines)?;
     sync_notifications(tx, &state.notifications)?;
-    sync_app_state(tx, state)?;
-    Ok(())
+    sync_app_state_fields(
+        tx,
+        &state.last_provider,
+        state.last_model.as_deref(),
+        state.last_effort.as_deref(),
+        &state.grid,
+        state.revision,
+    )?;
+    Ok(serialized_threads)
 }
 
-fn write_disk_state(conn: &mut Connection, state: &DiskState) -> Result<(), rusqlite::Error> {
+fn apply_dirty_disk_snapshot(
+    tx: &Transaction<'_>,
+    snapshot: &DirtyDiskSnapshot,
+    rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<usize, rusqlite::Error> {
+    sync_workspaces_slice(tx, &snapshot.workspaces, &snapshot.paths)?;
+    sync_agents(tx, &snapshot.agents)?;
+    let serialized_threads = sync_dirty_threads(
+        tx,
+        &snapshot.dirty_threads,
+        &snapshot.live_thread_ids,
+        rev_cache,
+    )?;
+    sync_routines(tx, &snapshot.routines)?;
+    sync_notifications(tx, &snapshot.notifications)?;
+    sync_app_state_fields(
+        tx,
+        &snapshot.last_provider,
+        snapshot.last_model.as_deref(),
+        snapshot.last_effort.as_deref(),
+        &snapshot.grid,
+        snapshot.revision,
+    )?;
+    Ok(serialized_threads)
+}
+
+pub(crate) fn write_disk_state_with_cache(
+    conn: &mut Connection,
+    state: &DiskState,
+    rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<usize, rusqlite::Error> {
+    let mut staged_cache = rev_cache.as_deref().cloned();
     let tx = conn.transaction()?;
-    apply_disk_state(&tx, state)?;
+    let serialized_threads = apply_disk_state(&tx, state, staged_cache.as_mut())?;
     tx.commit()?;
-    Ok(())
+    if let (Some(cache), Some(staged)) = (rev_cache, staged_cache) {
+        *cache = staged;
+    }
+    Ok(serialized_threads)
+}
+
+pub(crate) fn write_dirty_disk_state_with_cache(
+    conn: &mut Connection,
+    snapshot: &DirtyDiskSnapshot,
+    rev_cache: Option<&mut ThreadRevCache>,
+) -> Result<usize, rusqlite::Error> {
+    let mut staged_cache = rev_cache.as_deref().cloned();
+    let tx = conn.transaction()?;
+    let serialized_threads = apply_dirty_disk_snapshot(&tx, snapshot, staged_cache.as_mut())?;
+    tx.commit()?;
+    if let (Some(cache), Some(staged)) = (rev_cache, staged_cache) {
+        *cache = staged;
+    }
+    Ok(serialized_threads)
+}
+
+#[allow(dead_code)]
+fn write_disk_state(conn: &mut Connection, state: &DiskState) -> Result<(), rusqlite::Error> {
+    write_disk_state_with_cache(conn, state, None).map(|_| ())
 }
 
 pub fn save_disk_to_sqlite(state: &DiskState) {
     let mut conn_guard = db_connection().lock().unwrap();
-    if let Err(error) = write_disk_state(&mut conn_guard, state) {
+    let mut rev_guard = persisted_thread_revs().lock().unwrap();
+    if let Err(error) = write_disk_state_with_cache(&mut conn_guard, state, Some(&mut rev_guard)) {
         log_trace(&format!("Failed to commit sqlite transaction: {error}"));
+    } else {
+        maybe_checkpoint_wal(&conn_guard);
     }
 }
 
-pub fn initial_state() -> &'static DiskState {
-    static STATE: std::sync::OnceLock<DiskState> = std::sync::OnceLock::new();
-    STATE.get_or_init(load_or_migrate_sqlite)
+fn save_dirty_disk_to_sqlite(snapshot: &DirtyDiskSnapshot) {
+    let mut conn_guard = db_connection().lock().unwrap();
+    let mut rev_guard = persisted_thread_revs().lock().unwrap();
+    if let Err(error) =
+        write_dirty_disk_state_with_cache(&mut conn_guard, snapshot, Some(&mut rev_guard))
+    {
+        log_trace(&format!("Failed to commit sqlite transaction: {error}"));
+    } else {
+        maybe_checkpoint_wal(&conn_guard);
+    }
+}
+
+struct PersistStores {
+    workspaces: Mutex<Vec<Workspace>>,
+    paths: Mutex<HashMap<String, String>>,
+    agents: Mutex<Vec<AgentProfile>>,
+    threads: Mutex<Vec<Value>>,
+    last_provider: Mutex<String>,
+    last_model: Mutex<Option<String>>,
+    last_effort: Mutex<Option<String>>,
+    grid: Mutex<Value>,
+    revision: Mutex<u64>,
+    routines: Mutex<Vec<Value>>,
+    notifications: Mutex<Vec<Value>>,
+}
+
+fn stores() -> &'static PersistStores {
+    static STORES: std::sync::OnceLock<PersistStores> = std::sync::OnceLock::new();
+    STORES.get_or_init(|| {
+        let state = load_or_migrate_sqlite();
+        STORES_INITIALIZED.store(true, Ordering::Relaxed);
+        PersistStores {
+            workspaces: Mutex::new(state.workspaces),
+            paths: Mutex::new(state.paths),
+            agents: Mutex::new(state.agents),
+            threads: Mutex::new(state.threads),
+            last_provider: Mutex::new(state.last_provider),
+            last_model: Mutex::new(state.last_model),
+            last_effort: Mutex::new(state.last_effort),
+            grid: Mutex::new(state.grid),
+            revision: Mutex::new(state.revision),
+            routines: Mutex::new(state.routines),
+            notifications: Mutex::new(state.notifications),
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn stores_initialized() -> bool {
+    STORES_INITIALIZED.load(Ordering::Relaxed)
+}
+
+pub fn initial_state() {
+    let _ = stores();
 }
 
 pub fn workspaces() -> &'static Mutex<Vec<Workspace>> {
-    static CELL: std::sync::OnceLock<Mutex<Vec<Workspace>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().workspaces.clone()))
+    &stores().workspaces
 }
 
 pub fn paths() -> &'static Mutex<HashMap<String, String>> {
-    static CELL: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().paths.clone()))
+    &stores().paths
 }
 
 pub fn agents() -> &'static Mutex<Vec<AgentProfile>> {
-    static CELL: std::sync::OnceLock<Mutex<Vec<AgentProfile>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().agents.clone()))
+    &stores().agents
 }
 
 pub fn threads() -> &'static Mutex<Vec<Value>> {
-    static CELL: std::sync::OnceLock<Mutex<Vec<Value>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().threads.clone()))
+    &stores().threads
 }
 
 pub fn last_provider() -> &'static Mutex<String> {
-    static CELL: std::sync::OnceLock<Mutex<String>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().last_provider.clone()))
+    &stores().last_provider
 }
 
 pub fn last_model() -> &'static Mutex<Option<String>> {
-    static CELL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().last_model.clone()))
+    &stores().last_model
 }
 
 pub fn last_effort() -> &'static Mutex<Option<String>> {
-    static CELL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().last_effort.clone()))
+    &stores().last_effort
 }
 
 pub fn grid_slot() -> &'static Mutex<Value> {
-    static CELL: std::sync::OnceLock<Mutex<Value>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().grid.clone()))
+    &stores().grid
 }
 
 pub fn revision_counter() -> &'static Mutex<u64> {
-    static CELL: std::sync::OnceLock<Mutex<u64>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().revision))
+    &stores().revision
 }
 
 pub fn routines() -> &'static Mutex<Vec<Value>> {
-    static CELL: std::sync::OnceLock<Mutex<Vec<Value>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().routines.clone()))
+    &stores().routines
 }
 
 pub fn notifications() -> &'static Mutex<Vec<Value>> {
-    static CELL: std::sync::OnceLock<Mutex<Vec<Value>>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(initial_state().notifications.clone()))
+    &stores().notifications
+}
+
+fn snapshot_dirty_disk_state() -> DirtyDiskSnapshot {
+    // CRITICAL: Lock, clone, and drop each mutex in its own separate statement.
+    // Never construct `DirtyDiskSnapshot { workspaces: workspaces().lock()..., threads: threads().lock()... }`
+    // inline, because Rust keeps all temporary MutexGuards alive until the terminating semicolon,
+    // which holds all mutexes simultaneously and creates AB-BA deadlocks with callers that hold
+    // `threads()` while querying `paths()`, `last_provider()`, `last_model()`, or `revision_counter()`.
+    let known_revs = persisted_thread_revs().lock().unwrap().clone();
+    let workspaces = workspaces().lock().unwrap().clone();
+    let paths = paths().lock().unwrap().clone();
+    let agents = agents().lock().unwrap().clone();
+    let (dirty_threads, live_thread_ids) = {
+        let threads_guard = threads().lock().unwrap();
+        collect_dirty_threads(&threads_guard, &known_revs)
+    };
+    let last_provider = last_provider().lock().unwrap().clone();
+    let last_model = last_model().lock().unwrap().clone();
+    let last_effort = last_effort().lock().unwrap().clone();
+    let grid = grid_slot().lock().unwrap().clone();
+    let revision = *revision_counter().lock().unwrap();
+    let routines = routines().lock().unwrap().clone();
+    let notifications = notifications().lock().unwrap().clone();
+    DirtyDiskSnapshot {
+        workspaces,
+        paths,
+        agents,
+        dirty_threads,
+        live_thread_ids,
+        last_provider,
+        last_model,
+        last_effort,
+        grid,
+        revision,
+        routines,
+        notifications,
+    }
 }
 
 pub fn persist() {
-    let state = DiskState {
-        workspaces: workspaces().lock().unwrap().clone(),
-        paths: paths().lock().unwrap().clone(),
-        agents: agents().lock().unwrap().clone(),
-        threads: threads().lock().unwrap().clone(),
-        last_provider: last_provider().lock().unwrap().clone(),
-        last_model: last_model().lock().unwrap().clone(),
-        last_effort: last_effort().lock().unwrap().clone(),
-        grid: grid_slot().lock().unwrap().clone(),
-        revision: *revision_counter().lock().unwrap(),
-        routines: routines().lock().unwrap().clone(),
-        notifications: notifications().lock().unwrap().clone(),
-    };
-    save_disk_to_sqlite(&state);
+    PERSIST_CALLS.fetch_add(1, Ordering::Relaxed);
+    let snapshot = snapshot_dirty_disk_state();
+    save_dirty_disk_to_sqlite(&snapshot);
+}
+
+/// Schedules a coalesced background SQLite flush for high-frequency mid-turn updates
+/// (such as streaming tool completions and background git diff line counts) so neither
+/// the transport pump thread nor the diff worker stalls on synchronous disk I/O.
+pub fn persist_async() {
+    static WORKER: std::sync::OnceLock<std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>> =
+        std::sync::OnceLock::new();
+    let pair = WORKER.get_or_init(|| {
+        let pair = std::sync::Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let worker_pair = std::sync::Arc::clone(&pair);
+        let _ = std::thread::Builder::new()
+            .name("kite-persist-worker".to_string())
+            .spawn(move || {
+                let (lock, cv) = &*worker_pair;
+                loop {
+                    let mut dirty = lock.lock().unwrap();
+                    while !*dirty {
+                        dirty = cv.wait(dirty).unwrap();
+                    }
+                    drop(dirty);
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    {
+                        let mut d = lock.lock().unwrap();
+                        *d = false;
+                    }
+                    persist();
+                }
+            });
+        pair
+    });
+    let (lock, cv) = &**pair;
+    let mut dirty = lock.lock().unwrap();
+    if !*dirty {
+        *dirty = true;
+        cv.notify_one();
+    }
 }
 
 pub fn next_revision() -> String {
@@ -894,6 +1472,9 @@ pub fn next_revision() -> String {
 }
 
 pub fn workspace_path(id: &str) -> Option<String> {
+    if is_daemon_process() {
+        return load_workspace_path_direct(id);
+    }
     paths().lock().unwrap().get(id).cloned().filter(|p| !p.is_empty())
 }
 

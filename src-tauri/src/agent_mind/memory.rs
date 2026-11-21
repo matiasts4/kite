@@ -1,22 +1,55 @@
-use crate::agent_mind::skills::{read_skill_source, read_skills};
+use crate::agent_mind::skills::{is_skill_enabled, read_skill_source, read_skills, read_skills_meta};
 use crate::agent_mind::types::{
-    AgentMindError, MEMORY_BYTE_LIMIT, MEMORY_CHAR_BUDGET, USER_CHAR_BUDGET,
+    AgentMindError, TextRecord, MEMORY_BYTE_LIMIT, MEMORY_CHAR_BUDGET, USER_CHAR_BUDGET,
 };
 use crate::agent_mind::utils::{
     agents_root, empty_revision, ensure_agent_id, get_agent_home_dir, has_disallowed_control,
     issue, prepare_file, read_regular, read_text_record, require_confirmation,
     require_known_agent, sha256_hex,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub(crate) fn clamp_memory_budget(configured: Option<i64>) -> usize {
+    match configured {
+        Some(v) if v > 0 => (v as usize).min(MEMORY_BYTE_LIMIT),
+        _ => MEMORY_CHAR_BUDGET,
+    }
+}
+
+pub(crate) fn resolve_agent_memory_budget(agent_id: &str) -> usize {
+    let configured = crate::persist::agents()
+        .lock()
+        .ok()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|a| a.id == agent_id)
+                .and_then(|a| a.memory_budget)
+        });
+    clamp_memory_budget(configured)
+}
+
+fn read_shared_user_record(root: &Path, agent_id: &str) -> TextRecord {
+    let shared = root.join("user.txt");
+    if shared.exists() {
+        return read_text_record(&shared, "userUnreadable");
+    }
+    let legacy = root.join(agent_id).join("user.txt");
+    if legacy.exists() {
+        return read_text_record(&legacy, "userUnreadable");
+    }
+    read_text_record(&shared, "userUnreadable")
+}
+
 pub fn load_agent_mind_at(root: &Path, agent_id: &str) -> Result<Value, AgentMindError> {
     ensure_agent_id(agent_id)?;
     let dir = root.join(agent_id);
     let memory = read_text_record(&dir.join("memory.txt"), "memoryUnreadable");
-    let user = read_text_record(&dir.join("user.txt"), "userUnreadable");
+    let user = read_shared_user_record(root, agent_id);
     let (skills, mut read_issues) = read_skills(&dir.join("skills"));
     if !dir.join("AGENTS.md").exists() {
         let _ = sync_agent_instructions(root, agent_id);
@@ -43,17 +76,14 @@ pub fn load_agent_mind_at(root: &Path, agent_id: &str) -> Result<Value, AgentMin
 }
 
 pub(crate) fn memory_path(root: &Path, agent_id: &str, target: &str) -> Result<PathBuf, AgentMindError> {
-    let file = match target {
-        "memory" => "memory.txt",
-        "user" => "user.txt",
-        _ => {
-            return Err(AgentMindError::new(
-                "agent_data_failed",
-                "That memory target is not available.",
-            ))
-        }
-    };
-    Ok(root.join(agent_id).join(file))
+    match target {
+        "memory" => Ok(root.join(agent_id).join("memory.txt")),
+        "user" => Ok(root.join("user.txt")),
+        _ => Err(AgentMindError::new(
+            "agent_data_failed",
+            "That memory target is not available.",
+        )),
+    }
 }
 
 pub(crate) fn revision_matches(path: &Path, expected: Option<&str>) -> Result<(), AgentMindError> {
@@ -89,6 +119,26 @@ pub(crate) fn write_agent_memory_at(
     edit_kind: &str,
     expected_revision: Option<&str>,
 ) -> Result<Value, AgentMindError> {
+    write_agent_memory_at_with_budget(
+        root,
+        agent_id,
+        target,
+        text,
+        edit_kind,
+        expected_revision,
+        None,
+    )
+}
+
+pub(crate) fn write_agent_memory_at_with_budget(
+    root: &Path,
+    agent_id: &str,
+    target: &str,
+    text: &str,
+    edit_kind: &str,
+    expected_revision: Option<&str>,
+    memory_budget: Option<usize>,
+) -> Result<Value, AgentMindError> {
     ensure_agent_id(agent_id)?;
     if edit_kind != "structured" && edit_kind != "rawBuilderEdit" {
         return Err(AgentMindError::new(
@@ -106,7 +156,9 @@ pub(crate) fn write_agent_memory_at(
         let budget = if target == "user" {
             USER_CHAR_BUDGET
         } else {
-            MEMORY_CHAR_BUDGET
+            memory_budget
+                .map(|b| b.clamp(1, MEMORY_BYTE_LIMIT))
+                .unwrap_or_else(|| resolve_agent_memory_budget(agent_id))
         };
         if text.chars().count() > budget {
             return Err(AgentMindError::new(
@@ -116,7 +168,17 @@ pub(crate) fn write_agent_memory_at(
         }
     }
     let path = memory_path(root, agent_id, target)?;
-    revision_matches(&path, expected_revision)?;
+    let revision_path = if target == "user" && !path.exists() {
+        let legacy = root.join(agent_id).join("user.txt");
+        if legacy.exists() {
+            legacy
+        } else {
+            path.clone()
+        }
+    } else {
+        path.clone()
+    };
+    revision_matches(&revision_path, expected_revision)?;
     prepare_file(root, &path)?;
     fs::write(&path, text).map_err(|_| {
         AgentMindError::new(
@@ -220,55 +282,63 @@ struct SkillRecord {
     body: Option<String>,
 }
 
-pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
+/// Compiles agent instructions preserving snapshot isolation: `role`, `memory`, and `user`
+/// are taken directly from the caller's arguments (e.g. from the frozen `RecipeSnapshot`),
+/// while `skills` are enriched with full names, descriptions, and markdown bodies from the
+/// specified `root` directory when available.
+pub fn compile_snapshot_instructions_at(
+    root: &Path,
+    agent_id: &str,
+    role: &str,
+    memory: &str,
+    user: &str,
+    skill_ids: &[String],
+) -> String {
     let dir = root.join(agent_id);
-    let _ = fs::create_dir_all(&dir);
-    let mem = read_text_record(&dir.join("memory.txt"), "memoryUnreadable").text;
-    let usr = read_text_record(&dir.join("user.txt"), "userUnreadable").text;
-    let (skills, _) = read_skills(&dir.join("skills"));
-
     let agent_opt = {
         let items = crate::persist::agents().lock().unwrap();
         items.iter().find(|a| a.id == agent_id).cloned()
     };
 
-    let skill_records: Vec<SkillRecord> = skills
+    let skills_meta = read_skills_meta(&dir);
+    let skill_records: Vec<SkillRecord> = skill_ids
         .iter()
-        .map(|skill| {
-            let id = skill
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("skill")
-                .to_string();
-            let name = skill
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(id.as_str())
-                .to_string();
-            let description = skill
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let body = read_skill_source(&dir.join("skills").join(format!("{id}.md")))
-                .ok()
-                .flatten()
-                .map(|src| {
-                    src.split("---")
-                        .nth(2)
-                        .map(str::trim)
-                        .unwrap_or(src.trim())
-                        .to_string()
-                })
-                .filter(|body| !body.is_empty());
+        .filter(|id| is_skill_enabled(&skills_meta, id))
+        .map(|id| {
+            let skill_file = dir.join("skills").join(format!("{id}.md"));
+            let (name, description, body) = if let Ok(Some(src)) = read_skill_source(&skill_file) {
+                let parts: Vec<&str> = src.split("---").collect();
+                let body = if parts.len() >= 3 {
+                    parts[2].trim().to_string()
+                } else {
+                    src.trim().to_string()
+                };
+                let body_opt = if !body.is_empty() { Some(body) } else { None };
+                let mut name = id.to_string();
+                let mut desc = String::new();
+                if parts.len() >= 3 {
+                    for line in parts[1].lines() {
+                        let line = line.trim();
+                        if let Some(rest) = line.strip_prefix("name:") {
+                            name = rest.trim().to_string();
+                        } else if let Some(rest) = line.strip_prefix("description:") {
+                            desc = rest.trim().to_string();
+                        }
+                    }
+                }
+                (name, desc, body_opt)
+            } else {
+                (id.to_string(), String::new(), None)
+            };
             SkillRecord {
-                id,
+                id: id.to_string(),
                 name,
                 description,
                 body,
             }
         })
         .collect();
+
     let instruction_skills: Vec<InstructionSkill<'_>> = skill_records
         .iter()
         .map(|skill| InstructionSkill {
@@ -279,17 +349,9 @@ pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
         })
         .collect();
 
-    let (title, engine, role) = match agent_opt.as_ref() {
-        Some(agent) => (
-            agent.name.as_str(),
-            Some(agent.engine.as_str()),
-            if !agent.brief.trim().is_empty() {
-                agent.brief.trim()
-            } else {
-                agent.purpose.trim()
-            },
-        ),
-        None => (WORKSPACE_RECIPE_TITLE, None, ""),
+    let (title, engine) = match agent_opt.as_ref() {
+        Some(agent) => (agent.name.as_str(), Some(agent.engine.as_str())),
+        None => (WORKSPACE_RECIPE_TITLE, None),
     };
 
     let mut doc = instruction_document(&InstructionSource {
@@ -297,28 +359,127 @@ pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
         title,
         engine,
         role,
-        memory: &mem,
-        user: &usr,
+        memory,
+        user,
         skills: &instruction_skills,
     });
 
-    let allow_msg = agent_opt.as_ref().and_then(|a| a.allow_agent_messaging).unwrap_or(true);
+    let allow_msg = agent_opt
+        .as_ref()
+        .and_then(|a| a.allow_agent_messaging)
+        .unwrap_or(true);
     if allow_msg {
         let all_agents = {
             let items = crate::persist::agents().lock().unwrap();
             items.clone()
         };
-        let teammates: Vec<_> = all_agents.iter().filter(|a| a.id != agent_id && a.allow_agent_messaging != Some(false)).collect();
+        let teammates: Vec<_> = all_agents
+            .iter()
+            .filter(|a| a.id != agent_id && a.allow_agent_messaging != Some(false))
+            .collect();
         if !teammates.is_empty() {
             doc.push_str("## Teammates\n\nYou can collaborate with other agents via Kite agent messaging:\n\n");
             for t in teammates {
-                let role = if !t.brief.is_empty() { &t.brief } else { &t.purpose };
-                let first_sentence = role.lines().next().unwrap_or("").chars().take(120).collect::<String>();
+                let r = if !t.brief.is_empty() {
+                    &t.brief
+                } else {
+                    &t.purpose
+                };
+                let first_sentence = r
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(120)
+                    .collect::<String>();
                 doc.push_str(&format!("- **{}** (`{}`): {}\n", t.name, t.id, first_sentence));
             }
             doc.push_str("\n");
         }
     }
+
+    if let Some(agent) = agent_opt.as_ref() {
+        let places = resolve_authorized_places(&agent.place_display_names);
+        if !places.is_empty() {
+            doc.push_str("## Places (Authorized Roots)\n\nYou have authorized access to these project roots:\n\n");
+            for line in places {
+                doc.push_str(&format!("- {line}\n"));
+            }
+            doc.push_str("\n");
+        }
+    }
+    doc
+}
+
+fn resolve_authorized_places(place_display_names: &[String]) -> Vec<String> {
+    if place_display_names.is_empty() {
+        return Vec::new();
+    }
+    let workspaces = crate::persist::workspaces()
+        .lock()
+        .map(|w| w.clone())
+        .unwrap_or_default();
+    let mut resolved = Vec::new();
+    for raw in place_display_names {
+        let place = raw.trim();
+        if place.is_empty() {
+            continue;
+        }
+        if let Some(ws) = workspaces
+            .iter()
+            .find(|w| w.display_name.eq_ignore_ascii_case(place) || w.id == place)
+        {
+            if let Some(path) = crate::persist::workspace_path(&ws.id) {
+                resolved.push(format!("**{}** (`{}`)", ws.display_name, path));
+            } else {
+                resolved.push(format!("**{}**", ws.display_name));
+            }
+        } else if Path::new(place).is_dir() {
+            resolved.push(format!("`{place}`"));
+        }
+    }
+    resolved
+}
+
+/// Builds the complete compiled agent instruction document reading current state on disk.
+pub fn build_compiled_agent_instructions(root: &Path, agent_id: &str) -> String {
+    let dir = root.join(agent_id);
+    let mem = read_text_record(&dir.join("memory.txt"), "memoryUnreadable").text;
+    let usr = read_shared_user_record(root, agent_id).text;
+    let (skills, _) = read_skills(&dir.join("skills"));
+    let skill_ids: Vec<String> = skills
+        .iter()
+        .filter(|s| s.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+        .filter_map(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+
+    let agent_opt = {
+        let items = crate::persist::agents().lock().unwrap();
+        items.iter().find(|a| a.id == agent_id).cloned()
+    };
+    let role = match agent_opt.as_ref() {
+        Some(agent) => {
+            if !agent.brief.trim().is_empty() {
+                agent.brief.trim()
+            } else {
+                agent.purpose.trim()
+            }
+        }
+        None => "",
+    };
+    compile_snapshot_instructions_at(root, agent_id, role, &mem, &usr, &skill_ids)
+}
+
+/// Convenience helper to compile agent instructions against the canonical agents root directory.
+pub fn compile_agent_instructions(agent_id: &str) -> String {
+    let root = agents_root();
+    build_compiled_agent_instructions(&root, agent_id)
+}
+
+pub fn sync_agent_instructions(root: &Path, agent_id: &str) -> io::Result<()> {
+    let dir = root.join(agent_id);
+    let _ = fs::create_dir_all(&dir);
+    let doc = build_compiled_agent_instructions(root, agent_id);
 
     let _ = fs::write(dir.join("AGENTS.md"), &doc);
     let _ = fs::write(dir.join("CLAUDE.md"), &doc);
@@ -337,7 +498,7 @@ pub(crate) struct AgentRecipeFiles {
 pub(crate) fn read_agent_recipe_at(root: &Path, agent_id: &str) -> AgentRecipeFiles {
     let dir = root.join(agent_id);
     let memory = read_text_record(&dir.join("memory.txt"), "memoryUnreadable").text;
-    let user = read_text_record(&dir.join("user.txt"), "userUnreadable").text;
+    let user = read_shared_user_record(root, agent_id).text;
     let (skills, _) = read_skills(&dir.join("skills"));
     let skills = skills
         .iter()
@@ -355,9 +516,25 @@ pub(crate) fn read_agent_recipe_at(root: &Path, agent_id: &str) -> AgentRecipeFi
     }
 }
 
-/// Writes a recipe into a workspace through the same document builder the
-/// agent home uses. `AGENTS.md` and `CLAUDE.md` belong to the recipe;
-/// `README.md` belongs to the workspace and is never touched here.
+/// Detects whether a path resides inside a Git repository.
+pub(crate) fn is_git_repository(dir: &Path) -> bool {
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        if path.join(".git").exists() {
+            return true;
+        }
+        current = path.parent();
+    }
+    false
+}
+
+/// Writes a recipe into a target directory non-destructively.
+///
+/// To protect developer codebases and agent homes:
+/// 1. Agent home directories are never overwritten with stripped `InstructionSkill` records;
+///    instead, complete instructions are safely synced.
+/// 2. Repository `AGENTS.md` and `CLAUDE.md` files are NEVER overwritten or created on disk.
+/// 3. In non-repository sandbox directories, writes standard instruction files.
 pub(crate) fn write_recipe_instructions(
     target: &Path,
     agent_id: &str,
@@ -366,6 +543,24 @@ pub(crate) fn write_recipe_instructions(
     user: &str,
     skills: &[String],
 ) -> io::Result<()> {
+    // 1. If target is an agent's dedicated home directory, sync complete instructions rather
+    // than overwriting with stripped InstructionSkill payloads.
+    let home = get_agent_home_dir(agent_id);
+    if target == home || (target.join("skills").is_dir() && target.join("memory.txt").is_file()) {
+        let root = home.parent().unwrap_or(Path::new("."));
+        return sync_agent_instructions(root, agent_id);
+    }
+
+    // 2. Never overwrite existing repository instruction files
+    if target.join("AGENTS.md").exists() || target.join("CLAUDE.md").exists() {
+        return Ok(());
+    }
+
+    // 3. Never write recipe instructions directly into a git repository
+    if is_git_repository(target) {
+        return Ok(());
+    }
+
     let instruction_skills: Vec<InstructionSkill<'_>> = skills
         .iter()
         .map(|id| InstructionSkill {
@@ -389,44 +584,136 @@ pub(crate) fn write_recipe_instructions(
     Ok(())
 }
 
-pub fn apply_post_turn_reflection(agent_id: &str, user_prompt: &str, _assistant_reply: &str) {
-    let agent_opt = {
-        let items = crate::persist::agents().lock().unwrap();
-        items.iter().find(|a| a.id == agent_id).cloned()
-    };
-    let Some(agent) = agent_opt else { return };
-    if agent.reflection_mode.as_deref() != Some("auto") {
-        return;
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionCandidate {
+    pub agent_id: String,
+    pub note: String,
+    pub summary: String,
+}
 
-    let lower = user_prompt.to_lowercase();
-    let has_intent = lower.contains("remember ")
-        || lower.contains("always ")
+fn contains_sensitive_token(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("sk-")
+        || lower.contains("ghp_")
+        || lower.contains("password=")
+        || lower.contains("token=")
+        || lower.contains("api_key=")
+}
+
+fn clean_single_line(raw: &str, max_chars: usize) -> String {
+    raw.replace('\r', " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+pub(crate) fn extract_reflection_candidate(
+    user_prompt: &str,
+    assistant_reply: &str,
+) -> Option<(String, String)> {
+    let prompt_clean = clean_single_line(user_prompt, 400);
+    if prompt_clean.is_empty() || contains_sensitive_token(&prompt_clean) {
+        return None;
+    }
+    let lower = prompt_clean.to_lowercase();
+
+    let (category, body) = if lower.contains("our convention")
+        || lower.contains("convention:")
+        || lower.contains("coding standard")
+        || lower.contains("style rule")
+    {
+        ("Convention", prompt_clean.clone())
+    } else if lower.contains("constraint:")
         || lower.contains("never ")
+        || lower.contains("do not ")
+        || lower.contains("don't ")
+        || lower.contains("nunca ")
+        || lower.contains("must not ")
+    {
+        ("Constraint", prompt_clean.clone())
+    } else if lower.contains("we decided")
+        || lower.contains("decision:")
+        || lower.contains("let's go with")
+        || lower.contains("use ") && lower.contains(" instead of ")
+    {
+        ("Decision", prompt_clean.clone())
+    } else if lower.contains("remember ")
+        || lower.contains("always ")
         || lower.contains("prefer ")
         || lower.contains("from now on")
         || lower.contains("recuerda ")
         || lower.contains("guarda en memoria")
-        || lower.contains("ten en cuenta");
+        || lower.contains("ten en cuenta")
+        || lower.contains("siempre ")
+        || lower.contains("prefiero ")
+    {
+        ("Preference", prompt_clean.clone())
+    } else {
+        // Check assistant reply for explicit structured Decision/Convention/Constraint lines
+        let mut found: Option<(&'static str, String)> = None;
+        for line in assistant_reply.lines() {
+            let trimmed = line.trim().trim_start_matches('-').trim();
+            if let Some(rest) = trimmed.strip_prefix("Decision:") {
+                let c = clean_single_line(rest, 240);
+                if !c.is_empty() && !contains_sensitive_token(&c) {
+                    found = Some(("Decision", c));
+                    break;
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("Convention:") {
+                let c = clean_single_line(rest, 240);
+                if !c.is_empty() && !contains_sensitive_token(&c) {
+                    found = Some(("Convention", c));
+                    break;
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("Constraint:") {
+                let c = clean_single_line(rest, 240);
+                if !c.is_empty() && !contains_sensitive_token(&c) {
+                    found = Some(("Constraint", c));
+                    break;
+                }
+            }
+        }
+        found?
+    };
 
-    if !has_intent {
-        return;
+    let summary = clean_single_line(&body, 140);
+    let note = format!("- {category}: {body}");
+    Some((note, summary))
+}
+
+pub fn apply_post_turn_reflection_at(
+    root: &Path,
+    agent_id: &str,
+    user_prompt: &str,
+    assistant_reply: &str,
+) -> Option<ReflectionCandidate> {
+    let agent_opt = {
+        let items = crate::persist::agents().lock().unwrap();
+        items.iter().find(|a| a.id == agent_id).cloned()
+    };
+    let agent = agent_opt?;
+    let mode = agent.reflection_mode.as_deref().unwrap_or("ask");
+    if mode != "auto" && mode != "ask" {
+        return None;
     }
 
-    let note = user_prompt.trim().replace('\r', "");
-    if note.is_empty() || note.len() > 600 {
-        return;
-    }
+    let (new_entry, summary) = extract_reflection_candidate(user_prompt, assistant_reply)?;
 
-    let root = agents_root();
     let dir = root.join(agent_id);
     let mem_file = dir.join("memory.txt");
     let existing = fs::read_to_string(&mem_file).unwrap_or_default();
-    let budget = agent.memory_budget.unwrap_or(2200) as usize;
+    let budget = clamp_memory_budget(agent.memory_budget);
 
-    let new_entry = format!("- Preference: {}\n", note.lines().next().unwrap_or(&note).trim());
-    if existing.contains(&new_entry.trim()) {
-        return;
+    let normalized_new = new_entry.trim().to_lowercase();
+    if existing.lines().any(|line| line.trim().to_lowercase() == normalized_new)
+        || existing.to_lowercase().contains(&normalized_new)
+    {
+        return None;
     }
 
     let mut combined = existing;
@@ -434,10 +721,31 @@ pub fn apply_post_turn_reflection(agent_id: &str, user_prompt: &str, _assistant_
         combined.push('\n');
     }
     combined.push_str(&new_entry);
+    combined.push('\n');
 
-    if combined.len() <= budget {
-        let _ = fs::write(&mem_file, &combined);
-        let _ = sync_agent_instructions(&root, agent_id);
+    if combined.chars().count() > budget || combined.len() > MEMORY_BYTE_LIMIT {
+        return None;
     }
+
+    if mode == "auto" {
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(&mem_file, &combined);
+        let _ = sync_agent_instructions(root, agent_id);
+        return None;
+    }
+
+    Some(ReflectionCandidate {
+        agent_id: agent_id.to_string(),
+        note: new_entry,
+        summary,
+    })
+}
+
+pub fn apply_post_turn_reflection(
+    agent_id: &str,
+    user_prompt: &str,
+    assistant_reply: &str,
+) -> Option<ReflectionCandidate> {
+    apply_post_turn_reflection_at(&agents_root(), agent_id, user_prompt, assistant_reply)
 }
 

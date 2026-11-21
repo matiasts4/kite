@@ -132,6 +132,8 @@ pub struct ChildSubagentSpawnParams {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub role: Option<String>,
+    pub agent_id: Option<String>,
+    pub mode: Option<String>,
     pub workspace_mode: String,
     pub fallback_cwd: Option<String>,
     pub task: String,

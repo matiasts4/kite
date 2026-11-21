@@ -25,7 +25,7 @@ pub(super) fn format_subagent_settings_section(
             .map(|e| format!(" (effort: {e})"))
             .unwrap_or_default();
         out.push(format!(
-            "- Default lightweight delegation: `{}/{}`{eff}",
+            "- Default subagent delegation: `{}/{}`{eff}",
             def.provider, def.model
         ));
     }
@@ -106,10 +106,10 @@ Commands:
   kite dispatch providers [--refresh]
   kite dispatch models [<provider>] [--refresh]
   kite dispatch run <program> \"<task>\"
-  kite dispatch run --via thread [--provider <provider>] [--model <model>] [--effort <level>] [--role \"<name_or_title>\"] [--workspace inherit|share|branch] [--override-stack] [--wait] [--timeout-ms <ms>] \"<task>\"
+  kite dispatch run --via thread [--provider <provider>] [--model <model>] [--effort <level>] [--role \"<name_or_title>\"] [--workspace inherit|share|branch] [--task \"<t1>\" --task \"<t2>\"] [--count <1..8>] [--override-stack] [--wait] [--timeout-ms <ms>] [\"<task>\"]
   kite dispatch run --via terminal --engine <engine> --name <alias> [--parent <address>] [--file <path>] [--pane] [--hidden]
   kite dispatch run --role <name> --name <alias> [--file <path>]
-  kite dispatch send <address> \"<text>\" [--file <path>] [--if ready] [--force]
+  kite dispatch send <address> \"<text>\" [--file <path>] [--if ready] [--force] [--wait] [--timeout-ms <ms>]
   kite dispatch wait [<address>] [--until idle,done,blocked] [--timeout-ms <ms>] [--children all|any]
   kite dispatch read <address> [--lines 80] [--last]
   kite dispatch report --to <address> --body \"<text>\"
@@ -118,6 +118,8 @@ Commands:
   kite dispatch keys <address> <key...>
   kite dispatch attach <address>
   kite dispatch swarm <title|add|post|read|wait|status|model|kill|channel> ...
+  kite dispatch mcp
+  kite dispatch hook-subagent [--agent <name>]
   kite dispatch skill
 
 Inside a Kite terminal the command is `kite` on PATH.
@@ -125,8 +127,8 @@ Inside a Kite terminal the command is `kite` on PATH.
 An agent does not get a pane unless --pane. A person gets a pane unless --hidden. --hidden wins.
 `ls` lines are `address`, then `alias:<name>` when set, then the engine when the run recorded one, then the state.
 When `--parent` is omitted and KITE_ADDRESS is `session:`, `thread:`, or `alias:`, that address is the parent. The words human and agent are not parents.
-`read` returns the screen text or child thread output (`--last` extracts the final assistant response). It does not type.
-`wait` blocks until the destination (or `--children all|any`) matches or the timeout elapses. The default timeout is 30000 ms. A timeout exits 1 with error timeout.
+`read` returns the screen text or child thread output (`--last` extracts the final assistant response, or a concise bounded live summary while running). It does not type.
+`wait` blocks until the destination (or `--children all|any`) matches or the timeout elapses. The default CLI `wait` timeout is 30000 ms (MCP waits default to 120000 ms, max 150000 ms). A CLI `wait` timeout exits 1 with error timeout.
 `interrupt` writes Ctrl+C and does not press Enter.
 `keys` writes the named keys and presses Enter only when the key is enter.
 `kill` ends that session and the children that do not outlive it.
@@ -135,21 +137,25 @@ When `--parent` is omitted and KITE_ADDRESS is `session:`, `thread:`, or `alias:
 
 Live Provider & Model Discovery (Run Before Picking a Custom Provider):
 - Thread providers (`--via thread --provider <name>`): `antigravity`, `grok`, `codex`, `claude`, `cursor`, `opencode`, `gemini` (aliases: `agy`, `claude-code`, `open-code`, `cursor-agent`). Use `programs` only for `--via terminal` CLI tools.
-- If `Default lightweight delegation` or `Curated enabled stack` is listed below in `Configured Subagents Stack & Roles`, OMIT `--provider` and `--model` (do NOT run `kite dispatch providers` to hunt for another provider) unless you are picking among multiple enabled stack entries or the user explicitly asked for a different provider/model.
+- If `Default subagent delegation` or `Curated enabled stack` is listed below in `Configured Subagents Stack & Roles`, OMIT `--provider` and `--model` (do NOT run `kite dispatch providers` to hunt for another provider) unless you are picking among multiple enabled stack entries or the user explicitly asked for a different provider/model.
 - When no default/stack is configured or you need live model IDs, inspect connected providers first (never invent or hardcode legacy model IDs):
   kite dispatch providers [--refresh]
   kite dispatch models <provider> [--refresh]
 - If a connected provider's CLI manages models dynamically (`claude`, `gemini`) or when using the configured default delegation, omit `--model`.
 - Use `--override-stack` only when the user explicitly requests a provider/model outside the curated `Settings -> Subagents` stack (`ask` override policy).{config_section}
 
-Cross-provider subagents (`--via thread`):
+Cross-provider subagents (`--via thread` & `kite_subagent_*` MCP tools):
+- First-class MCP tools (`kite dispatch mcp`): prefer `kite_subagent_run` (`task`, `tasks`, `n`, `role`, `provider`, `model`, `effort`, `workspace`, `wait`, `timeout_ms` [default 120000, max 150000], `override_stack`), `kite_subagent_send` (`target`, `message`, `wait`, `timeout_ms`), `kite_subagent_wait` (`targets`, `children`, `timeout_ms` — if a wait slice elapses while subagents are still active, call `kite_subagent_wait` again instead of polling `kite_subagent_read`), `kite_subagent_read` (`target`, `last`, `lines`; bounded to 8000 chars), and `kite_swarm` (`action`, `members`, etc.) when available.
 - Inside Thread Mode (`KITE_ADDRESS=thread:<id>`), `--via` defaults to `thread` (or pass `--via thread` explicitly). Keep the main orchestrator on a heavy reasoning model and delegate focused tasks to the user's configured default subagent or curated stack (`--provider`, `--model`, optional `--effort minimal|low|medium|high|xhigh|max|ultra`).
 - Always pass a crisp `--role \"<title>\"` (or a configured role slug from `Settings -> Subagents`) and quote prompts cleanly (never embed shell redirections like `2>&1` or pipes as unquoted prompt words).
 - Single blocking call using configured default (`--wait` prints the child's final reply and `[subagent_id: thread:<id>]`):
   kite dispatch run --via thread --role \"Fast Executor\" --workspace inherit --wait \"<task>\"
 - Single blocking call with explicit stack provider/model (when multiple stack entries exist or user requested a specific model):
   kite dispatch run --via thread --provider <provider> [--model <fast_model_id>] --role \"Fast Executor\" --workspace share --wait \"<task>\"
-- Parallel fan-out: launch multiple child threads without `--wait` (use `--workspace share` or `branch` for isolated git worktrees when editing files concurrently; `inherit` shares the workspace), then wait and inspect:
+- Batch parallel fan-out in one call (`--task` or `--count 1..8`) or multi-turn follow-up (`send --wait`):
+  kite dispatch run --via thread --role \"Fast Executor\" --workspace share --task \"<task 1>\" --task \"<task 2>\" --wait
+  kite dispatch send thread:<id> \"<task>\" --wait
+- Parallel fan-out without `--wait`: launch multiple child threads (use `--workspace share` or `branch` for isolated git worktrees when editing files concurrently; `inherit` shares the workspace), then wait and inspect:
   kite dispatch wait thread:<id>   # or: kite dispatch wait --children all
   kite dispatch read thread:<id> --last
 
@@ -166,6 +172,21 @@ Cross-provider swarm (`kite dispatch swarm`):
   kite dispatch swarm channel <create|subscribe|unsubscribe|archive|list> [--channel <name>] [--topic \"<text>\"] [--name <role>]
 - Reactive `@mention` wakeup: `waiting` workers sleep at zero token cost and wake only when a post mentions `@<role>`, `@<prefix>`, `@#<channel>`, or `@all` (e.g. `kite dispatch swarm post \"@verifier check #2\"`). Park without polling using `kite dispatch swarm wait --since <seq>`.
 - Quota failover: swap a stalled or rate-limited worker's provider/model while keeping its conversation history intact via `kite dispatch swarm model --name <role> --provider <provider> --model <new_model>`.
+
+Agent service tools (`kite agent` / `kite dispatch agent` or MCP `kite_thread`, `kite_memory`, `kite_routine`, `kite_teammate`):
+- `kite agent thread list [--workspace-id <id>] [--agent-id <id>] [--cursor <n>] [--limit <n>]`
+- `kite agent thread search --query \"<text>\" [--workspace-id <id>] [--agent-id <id>] [--cursor <n>] [--limit <n>]`
+- `kite agent thread read --thread-id <id> [--cursor <n>] [--limit <n>]`
+- `kite agent memory read [--target agent|user] [--agent-id <id>]`
+- `kite agent memory add --text \"<fact>\" [--target agent|user] [--agent-id <id>]`
+- `kite agent memory search --query \"<text>\" [--target agent|user] [--agent-id <id>] [--limit <n>]`
+- `kite agent routine list [--agent-id <id>]` (requires `allowAgentScheduling`)
+- `kite agent routine create --name \"<name>\" --prompt \"<prompt>\" [--every <seconds>] [--workspace-id <id>]` (requires `allowAgentScheduling`)
+- `kite agent routine toggle --routine-id <id> --enabled <true|false>` (requires `allowAgentScheduling`)
+- `kite agent routine run --routine-id <id>` (requires `allowAgentScheduling`)
+- `kite agent teammate list` (requires `allowAgentMessaging`)
+- `kite agent teammate send --target <agent_id|name> --message \"<text>\"` (requires `allowAgentMessaging`)
+- `kite agent teammate delegate --target <agent_id|name> --task \"<task>\" [--wait] [--timeout-ms <ms>]` (requires `allowAgentMessaging`)
 
 Envelope:
 [kite from=\"<alias-or-address>\"]
@@ -248,6 +269,38 @@ pub fn manual_text() -> String {
 
 pub fn skill_text() -> String {
     compose_skill()
+}
+
+pub fn compose_thread_rules_markdown_with(
+    settings: &crate::subagent_settings::SubagentSettings,
+    roles: &[crate::subagent_settings::SubagentRoleRecord],
+) -> String {
+    let config_section = format_subagent_settings_section(settings, roles);
+    format!(
+        "\
+<!-- kite-dispatch:start -->
+## Kite Subagents & Swarms (`kite-dispatch`)
+
+When `KITE_DISPATCH=1` (`KITE_ADDRESS=thread:<id>`), delegate subagents and swarms via Kite (`RightDock`):
+- MCP (`kite-dispatch`, preferred):
+  - `kite_subagent_run` (`task`, `tasks: [...]`, `n: 1..8`, `role`, `workspace: \"inherit\"|\"share\"|\"branch\"`, `wait: true`, optional `provider`, `model`, `effort`, `override_stack`)
+  - `kite_subagent_send` (`target: \"thread:<id>\"`, `message`, `wait: true`)
+  - `kite_subagent_wait` (`targets: [...]` or `children: \"all\"|\"any\"`)
+  - `kite_subagent_read` (`target: \"thread:<id>\"`, `last: true`)
+  - `kite_swarm` (`action: \"title\"|\"add\"|\"post\"|\"read\"|\"wait\"|\"status\"|\"model\"|\"kill\"|\"channel\"`, `members: [...]`)
+- CLI fallback:
+  - `kite dispatch run --via thread --role \"<Role>\" --workspace inherit --wait \"<task>\"` (or parallel `--task \"<t1>\" --task \"<t2>\"` / `--count <N>`)
+  - `kite dispatch send thread:<id> \"<task>\" --wait`
+  - `kite dispatch swarm <title|add|post|read|wait|status|model|kill|channel> ...`{config_section}
+<!-- kite-dispatch:end -->"
+    )
+}
+
+pub fn compose_thread_rules_markdown() -> String {
+    let active_ws = active_workspace_path();
+    let settings = crate::subagent_settings::get_subagent_settings();
+    let roles = crate::subagent_settings::list_roles(active_ws.as_deref());
+    compose_thread_rules_markdown_with(&settings, &roles)
 }
 
 /// Strips a leading YAML frontmatter block (`---\n...\n---\n`) when present so

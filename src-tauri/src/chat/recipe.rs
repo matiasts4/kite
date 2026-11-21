@@ -67,6 +67,11 @@ pub fn apply_recipe(cwd: &Path, snapshot: &RecipeSnapshot) -> io::Result<()> {
     )
 }
 
+/// Compiles the full agent instruction document for non-destructive injection.
+pub fn compile_instructions_for_snapshot(snapshot: &RecipeSnapshot) -> String {
+    snapshot.compile_instructions()
+}
+
 /// A content revision is stable for identical recipe fields. Each field is
 /// length-prefixed so content cannot shift across a boundary and collide.
 fn recipe_revision(agent_id: &str, role: &str, memory: &str, user: &str, skills: &[String]) -> String {
@@ -242,5 +247,61 @@ mod tests {
             snapshot_from_profiles(root.path(), &[profile("role")], "not-an-agent"),
             None
         );
+    }
+
+    #[test]
+    fn apply_recipe_never_overwrites_existing_instructions() {
+        let root = TempDir::new("apply-protect-existing");
+        write_agent_files(root.path(), "agent memory", "agent user", &["root-cause"]);
+        let recipe = snapshot(root.path(), "Agent role.");
+
+        let workspace = TempDir::new("existing-ws");
+        fs::write(workspace.path().join("AGENTS.md"), "# Custom Repo File").unwrap();
+        fs::write(workspace.path().join("CLAUDE.md"), "# Custom Claude File").unwrap();
+
+        apply_recipe(workspace.path(), &recipe).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("AGENTS.md")).unwrap(),
+            "# Custom Repo File"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("CLAUDE.md")).unwrap(),
+            "# Custom Claude File"
+        );
+    }
+
+    #[test]
+    fn apply_recipe_never_creates_files_in_git_repository() {
+        let root = TempDir::new("apply-protect-git");
+        write_agent_files(root.path(), "agent memory", "agent user", &["root-cause"]);
+        let recipe = snapshot(root.path(), "Agent role.");
+
+        let repo = TempDir::new("git-repo");
+        fs::create_dir_all(repo.path().join(".git")).unwrap();
+
+        apply_recipe(repo.path(), &recipe).unwrap();
+
+        assert!(!repo.path().join("AGENTS.md").exists());
+        assert!(!repo.path().join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn compile_instructions_for_snapshot_preserves_snapshot_values() {
+        let root = TempDir::new("compile-snapshot-test");
+        write_agent_files(root.path(), "old memory", "old user", &["root-cause"]);
+        let recipe = snapshot(root.path(), "Frozen Role.");
+
+        // Mutate files on disk
+        fs::write(root.path().join(AGENT_ID).join("memory.txt"), "new disk memory").unwrap();
+        fs::write(root.path().join(AGENT_ID).join("user.txt"), "new disk user").unwrap();
+
+        let compiled = recipe.compile_instructions_at(root.path());
+        assert!(compiled.contains("Frozen Role."));
+        assert!(compiled.contains("old memory"));
+        assert!(compiled.contains("old user"));
+        assert!(!compiled.contains("new disk memory"));
+        assert!(!compiled.contains("new disk user"));
+        assert!(compiled.contains("### root-cause (`root-cause`)"));
     }
 }

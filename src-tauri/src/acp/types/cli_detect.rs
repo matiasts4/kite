@@ -4,12 +4,12 @@ use serde_json::Value;
 
 use super::*;
 
-pub(super) struct ShellToken {
+pub struct ShellToken {
     text: String,
     quoted: bool,
 }
 
-pub(super) fn tokenize_shell_tokens(cmd: &str) -> Vec<ShellToken> {
+pub fn tokenize_shell_tokens(cmd: &str) -> Vec<ShellToken> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut current_quoted = false;
@@ -109,12 +109,12 @@ pub(super) fn sanitize_cli_args(tokens: &[ShellToken]) -> Vec<String> {
     cleaned
 }
 
-pub(super) enum DispatchCliCommand {
+pub enum DispatchCliCommand {
     Run(Vec<String>),
     Swarm(Vec<String>),
 }
 
-pub(super) fn match_dispatch_cli(tokens: &[ShellToken]) -> Option<DispatchCliCommand> {
+pub fn match_dispatch_cli(tokens: &[ShellToken]) -> Option<DispatchCliCommand> {
     for idx in 0..tokens.len() {
         let bin = Path::new(&tokens[idx].text)
             .file_stem()
@@ -186,7 +186,7 @@ pub(super) fn collect_cli_positionals(args: &[String]) -> Vec<String> {
     out
 }
 
-pub(super) fn strip_mcp_prefix(raw_name: &str, params: &Value) -> (Option<String>, String) {
+pub fn strip_mcp_prefix(raw_name: &str, params: &Value) -> (Option<String>, String) {
     let mut server_name = params
         .get("ServerName")
         .or_else(|| params.get("serverName"))
@@ -210,39 +210,108 @@ pub(super) fn strip_mcp_prefix(raw_name: &str, params: &Value) -> (Option<String
             clean_name = parts[1].to_string();
         }
     } else if let Some(rest) = raw_name.strip_prefix("mcp_") {
-        let parts: Vec<&str> = rest.splitn(2, '_').collect();
-        if parts.len() == 2 && server_name.is_none() {
-            server_name = Some(parts[0].to_string());
-            clean_name = parts[1].to_string();
+        if let Some(kite_tool) = rest
+            .strip_prefix("kite-dispatch_")
+            .or_else(|| rest.strip_prefix("kite_dispatch_"))
+        {
+            if server_name.is_none() {
+                server_name = Some("kite-dispatch".to_string());
+            }
+            clean_name = kite_tool.to_string();
+        } else {
+            let parts: Vec<&str> = rest.splitn(2, '_').collect();
+            if parts.len() == 2 && server_name.is_none() {
+                server_name = Some(parts[0].to_string());
+                clean_name = parts[1].to_string();
+            }
         }
     }
     (server_name, clean_name)
+}
+
+pub fn is_non_delegating_subagent_tool(clean_name: &str) -> bool {
+    matches!(
+        clean_name.trim().to_ascii_lowercase().as_str(),
+        "define_subagent"
+            | "manage_subagents"
+            | "send_message"
+            | "kite_subagent_send"
+            | "kite_subagent_wait"
+            | "kite_subagent_read"
+    )
 }
 
 pub fn is_subagent_tool_name(clean_name: &str) -> bool {
     matches!(
         clean_name.trim().to_ascii_lowercase().as_str(),
         "invoke_subagent"
-            | "define_subagent"
-            | "send_message"
-            | "manage_subagents"
             | "task"
             | "agent"
             | "dispatch_agent"
             | "subagent"
             | "delegate"
             | "spawn_agent"
+            | "kite_subagent_run"
     )
 }
 
 pub fn is_swarm_tool_name(clean_name: &str) -> bool {
     matches!(
         clean_name.trim().to_ascii_lowercase().as_str(),
-        "swarm" | "post_message" | "read_board" | "swarm_wait"
+        "swarm" | "post_message" | "read_board" | "swarm_wait" | "kite_swarm"
     )
 }
 
-pub(super) fn parse_output_json(output: Option<&str>) -> Option<Value> {
+fn extract_balanced_json_values(text: &str, open_ch: char, close_ch: char) -> Vec<Value> {
+    let mut out = Vec::new();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].1 != open_ch {
+            i += 1;
+            continue;
+        }
+        let start_byte = chars[i].0;
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut end_idx = None;
+        for (j, &(byte_pos, ch)) in chars.iter().enumerate().skip(i) {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+            } else if ch == open_ch {
+                depth += 1;
+            } else if ch == close_ch {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end_idx = Some((j, byte_pos + ch.len_utf8()));
+                    break;
+                }
+            }
+        }
+        if let Some((j, end_byte)) = end_idx {
+            if let Ok(val) = serde_json::from_str::<Value>(&text[start_byte..end_byte]) {
+                out.push(val);
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+pub fn parse_output_json(output: Option<&str>) -> Option<Value> {
     let text = output?.trim();
     if text.is_empty() {
         return None;
@@ -261,6 +330,68 @@ pub(super) fn parse_output_json(output: Option<&str>) -> Option<Value> {
                 if val.is_object() {
                     return Some(val);
                 }
+            }
+        }
+    }
+    let embedded: Vec<Value> = extract_balanced_json_values(text, '{', '}')
+        .into_iter()
+        .filter(|v| v.is_object())
+        .collect();
+    if let Some(preferred) = embedded.iter().rev().find(|v| {
+        [
+            "conversationId",
+            "conversation_id",
+            "logAbsoluteUri",
+            "log_absolute_uri",
+            "transcriptUri",
+            "transcript_uri",
+            "transcript",
+            "target",
+            "subagentId",
+            "childThreadId",
+            "swarmId",
+            "seq",
+        ]
+        .iter()
+        .any(|k| v.get(*k).is_some())
+    }) {
+        return Some(preferred.clone());
+    }
+    embedded.into_iter().last()
+}
+
+pub fn parse_output_json_array(output: Option<&str>) -> Option<Vec<Value>> {
+    let text = output?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.starts_with('[') && text.ends_with(']') {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(text) {
+            if arr.iter().any(|item| item.is_object()) {
+                return Some(arr);
+            }
+        }
+    }
+    if text.starts_with('{') && text.ends_with('}') {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) {
+            if let Some(Value::Array(arr)) = map.get("subagents") {
+                return Some(arr.clone());
+            }
+        }
+    }
+    let has_subagent_row = |arr: &[Value]| {
+        arr.iter().any(|item| {
+            item.as_object().is_some_and(|obj| {
+                ["conversationId", "conversation_id", "transcript", "logAbsoluteUri", "role"]
+                    .iter()
+                    .any(|k| obj.contains_key(*k))
+            })
+        })
+    };
+    for candidate in extract_balanced_json_values(text, '[', ']').into_iter().rev() {
+        if let Value::Array(arr) = candidate {
+            if has_subagent_row(&arr) {
+                return Some(arr);
             }
         }
     }
@@ -313,6 +444,20 @@ pub(super) fn display_provider_label(provider: &str) -> &str {
 
 pub(super) fn expand_swarm_members(base_name: Option<&str>, params: &Value) -> Vec<String> {
     let mut members = Vec::new();
+    if let Some(Value::Array(arr)) = lookup_value(params, &["members", "Members"]) {
+        for entry in arr {
+            if let Some(s) = entry.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                members.push(s.to_string());
+            } else if let Some(n) =
+                lookup_text(&entry, &["name", "Name", "memberName", "member_name"])
+            {
+                members.push(n);
+            }
+        }
+        if !members.is_empty() {
+            return members;
+        }
+    }
     let Some(base) = base_name.map(str::trim).filter(|s| !s.is_empty()) else {
         return members;
     };

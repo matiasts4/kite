@@ -59,6 +59,17 @@ pub(super) fn emit_subagent_steps_event(thread_id: &str, subagent_id: &str, run:
     }));
 }
 
+pub(super) fn emit_subagent_runs_removed(thread_id: &str, removed: Vec<(String, String)>) {
+    for (sid, ptc) in removed {
+        emit_subagent_event(json!({
+            "kind": "subagentRunRemoved",
+            "threadId": thread_id,
+            "subagentId": (!sid.is_empty()).then_some(sid),
+            "parentToolCallId": (!ptc.is_empty()).then_some(ptc),
+        }));
+    }
+}
+
 pub fn is_generic_tool_field(key: &str, val: &str) -> bool {
     let trimmed = val.trim();
     if trimmed.is_empty()
@@ -336,11 +347,26 @@ pub(super) fn summarize_run_progress(items: &[Value]) -> (usize, Option<String>)
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(|s| s.lines().next().unwrap_or(s).chars().take(120).collect())
+                .map(activity_line_for_text)
         } else {
             None
         }
     });
     (step_count, latest_activity)
+}
+
+/// First line of a message, or a readable stand-in when the message is a JSON payload.
+fn activity_line_for_text(text: &str) -> String {
+    if text.starts_with('{') || text.starts_with('[') {
+        let findings = serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|v| v.get("findings").and_then(Value::as_array).map(Vec::len));
+        return match findings {
+            Some(1) => "Reported 1 finding".to_string(),
+            Some(n) => format!("Reported {n} findings"),
+            None => "Returned a structured report".to_string(),
+        };
+    }
+    text.lines().next().unwrap_or(text).chars().take(120).collect()
 }
 

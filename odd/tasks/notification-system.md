@@ -45,8 +45,9 @@ Test runners: `npm test` (`vitest run`) for frontend; `cargo test` in `src-tauri
 ## Specs
 
 ### S1. Agent Turn Completion Dispatch
-In `src-tauri/src/chat/runtime.rs:finish_run()`:
-- When a turn finishes (and `routine_id.is_none()`):
+In `src-tauri/src/chat/runtime.rs:finish_run()` (`src-tauri/src/chat/runtime/settle.rs`):
+- When a top-level user conversation or Agent Chat turn finishes (and `routine_id.is_none()`):
+  - Skip internal subagent and swarm worker child threads (`startedByAgent: true`, `sideChat: true`, non-empty `parentThreadId` / `swarmParentThreadId` / `subagentRole` / `swarmMemberName`, or referenced as a `childThreadId` in a parent thread's `subagentRuns` / `swarmState.members`) so subagent completions stay silent and do not fire `playCompletionChime`.
   - Determine outcome: `completed` (if `ok && !stopped`), `cancelled` (if `stopped`), or `failed` (if `!ok`).
   - Generate a `NotificationRecord`:
     ```json

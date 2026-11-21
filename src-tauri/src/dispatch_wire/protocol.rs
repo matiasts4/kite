@@ -89,6 +89,11 @@ impl Port for LivePort {
     fn read_final_response(&mut self, family: Family, id: &str) -> Result<String, DispatchError> {
         match family {
             Family::Thread => {
+                let is_working = thread_presence(id).0 == PresenceState::Working
+                    || thread_status(id).as_deref() == Some("running");
+                if is_working {
+                    return Ok(live_thread_progress_summary(id));
+                }
                 let text = crate::chat::subagents::extract_final_assistant_text(id);
                 if text.is_empty() {
                     Ok(thread_tail(id))
@@ -207,13 +212,32 @@ impl Port for LivePort {
             .as_deref()
             .unwrap_or("inherit")
             .to_string();
+        let profile_role = request
+            .role
+            .as_deref()
+            .and_then(crate::dispatch::role::resolve_agent_profile_role);
+        let role_label = profile_role
+            .as_ref()
+            .map(|p| p.display_name.clone())
+            .or_else(|| request.role.clone());
         let spawned = crate::chat::subagents::spawn_child_subagent_thread(
             crate::chat::subagents::ChildSubagentSpawnParams {
                 parent_thread_id,
-                provider: request.provider.clone(),
-                model: request.model.clone(),
-                effort: request.effort.clone(),
-                role: request.role.clone(),
+                provider: request
+                    .provider
+                    .clone()
+                    .or_else(|| profile_role.as_ref().and_then(|p| p.provider.clone())),
+                model: request
+                    .model
+                    .clone()
+                    .or_else(|| profile_role.as_ref().and_then(|p| p.model.clone())),
+                effort: request
+                    .effort
+                    .clone()
+                    .or_else(|| profile_role.as_ref().and_then(|p| p.effort.clone())),
+                role: role_label.clone(),
+                agent_id: profile_role.as_ref().map(|p| p.agent_id.clone()),
+                mode: profile_role.as_ref().and_then(|p| p.mode.clone()),
                 workspace_mode,
                 fallback_cwd: request.cwd.clone(),
                 task: request.task.clone(),
@@ -237,18 +261,29 @@ impl Port for LivePort {
             _ => request.task.clone(),
         };
         if !turn_prompt.trim().is_empty() {
-            if let Err(err) = start_thread_turn(&spawned.child_thread_id, &turn_prompt) {
+            if let Err(err) = start_direct_thread_turn(&spawned.child_thread_id, &turn_prompt) {
                 if let Ok(mut all) = crate::persist::threads().lock() {
                     if let Some(child) = all.iter_mut().find(|t| {
                         t.get("id").and_then(Value::as_str)
                             == Some(spawned.child_thread_id.as_str())
                     }) {
                         child["status"] = json!("error");
+                        crate::chat::threads::touch(child);
                     }
                 }
                 crate::chat::subagents::sync_child_thread_to_parent(&spawned.child_thread_id);
                 return Err(err);
             }
+        } else {
+            if let Ok(mut all) = crate::persist::threads().lock() {
+                if let Some(child) = all.iter_mut().find(|t| {
+                    t.get("id").and_then(Value::as_str) == Some(spawned.child_thread_id.as_str())
+                }) {
+                    child["status"] = json!("idle");
+                    crate::chat::threads::touch(child);
+                }
+            }
+            crate::chat::subagents::sync_child_thread_to_parent(&spawned.child_thread_id);
         }
 
         let pane = if request.hidden {
@@ -300,7 +335,46 @@ impl Port for LivePort {
     }
 }
 
+fn extract_clean_dispatch_body(text: &str) -> &str {
+    if text.starts_with("[kite from=\"") {
+        if let Some((_, body)) = text.split_once("\nBODY:\n") {
+            return body;
+        }
+    }
+    text
+}
+
 fn start_thread_turn(id: &str, text: &str) -> Result<(), DispatchError> {
+    let parent_tid = crate::persist::threads().lock().ok().and_then(|list| {
+        let parent_id = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|t| t.get("parentThreadId").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)?;
+        let has_subagent_run = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+            .and_then(|parent| parent.get("subagentRuns").and_then(Value::as_array))
+            .is_some_and(|runs| {
+                runs.iter().any(|r| {
+                    r.get("childThreadId").and_then(Value::as_str) == Some(id)
+                        || r.get("subagentId").and_then(Value::as_str) == Some(id)
+                })
+            });
+        has_subagent_run.then_some(parent_id)
+    });
+    if let Some(parent_tid) = parent_tid {
+        let clean_body = extract_clean_dispatch_body(text);
+        return crate::chat::subagents::steer_subagent_thread(&parent_tid, id, clean_body)
+            .map(|_| ())
+            .map_err(|_| DispatchError::TransportUnsupported);
+    }
+    start_direct_thread_turn(id, text)
+}
+
+fn start_direct_thread_turn(id: &str, text: &str) -> Result<(), DispatchError> {
     clear_thread_killed(id);
     let profile_id = crate::persist::threads().lock().ok().and_then(|list| {
         list.iter()
@@ -397,7 +471,135 @@ fn thread_turn_failure_message(thread_id: &str) -> Option<String> {
         .and_then(turn_failure_message)
 }
 
+const MAX_LIVE_SUMMARY_CHARS: usize = 8_000;
+const MAX_THREAD_TAIL_CHARS: usize = 12_000;
+
+fn thread_status(thread_id: &str) -> Option<String> {
+    let Ok(items) = crate::persist::threads().lock() else {
+        return None;
+    };
+    items
+        .iter()
+        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+        .and_then(|thread| thread.get("status").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn live_thread_progress_summary(thread_id: &str) -> String {
+    use crate::dispatch::mcp::truncate_tail_chars;
+
+    let items_snapshot: Vec<Value> = {
+        let Ok(threads_guard) = crate::persist::threads().lock() else {
+            return "Status: working (subagent thread is currently running).".to_string();
+        };
+        threads_guard
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+            .and_then(|t| t.get("items").and_then(Value::as_array))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let latest_assistant = items_snapshot
+        .iter()
+        .rev()
+        .find(|it| {
+            it.get("kind").and_then(Value::as_str) == Some("assistant")
+                && it
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+        })
+        .and_then(|it| it.get("text").and_then(Value::as_str))
+        .map(|s| truncate_tail_chars(s.trim(), 1_500));
+
+    let latest_reasoning = items_snapshot
+        .iter()
+        .rev()
+        .find(|it| {
+            it.get("kind").and_then(Value::as_str) == Some("reasoning")
+                && it
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+        })
+        .and_then(|it| it.get("text").and_then(Value::as_str))
+        .map(|s| truncate_tail_chars(s.trim(), 800));
+
+    let tool_items: Vec<&Value> = items_snapshot
+        .iter()
+        .filter(|it| {
+            matches!(
+                it.get("kind").and_then(Value::as_str),
+                Some("tool" | "command")
+            )
+        })
+        .collect();
+    let total_tools = tool_items.len();
+    let recent_tools: Vec<String> = tool_items
+        .into_iter()
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|it| {
+            let title = it
+                .get("title")
+                .or_else(|| it.get("toolName"))
+                .or_else(|| it.get("command"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("tool");
+            let status = it
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("running");
+            let snippet = it
+                .get("output")
+                .or_else(|| it.get("text"))
+                .or_else(|| it.get("detail"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| truncate_tail_chars(s, 600));
+            match snippet {
+                Some(s) => format!("- [{status}] {title}: {s}"),
+                None => format!("- [{status}] {title}"),
+            }
+        })
+        .collect();
+
+    let mut sections = vec![
+        "Status: working (subagent thread is actively running; final response not completed yet)."
+            .to_string(),
+    ];
+    if let Some(reasoning) = latest_reasoning {
+        sections.push(format!("Latest reasoning:\n{reasoning}"));
+    }
+    if let Some(assistant) = latest_assistant {
+        sections.push(format!("Latest assistant excerpt:\n{assistant}"));
+    }
+    if !recent_tools.is_empty() {
+        sections.push(format!(
+            "Recent tool activity (last {} of {total_tools}):\n{}",
+            recent_tools.len(),
+            recent_tools.join("\n")
+        ));
+    }
+    sections.push(
+        "Call `kite_subagent_wait` to wait for completion rather than polling `kite_subagent_read`."
+            .to_string(),
+    );
+    truncate_tail_chars(&sections.join("\n\n"), MAX_LIVE_SUMMARY_CHARS)
+}
+
 pub fn thread_tail(thread_id: &str) -> String {
+    use crate::dispatch::mcp::truncate_tail_chars;
+
     let Ok(items) = crate::persist::threads().lock() else {
         return String::new();
     };
@@ -408,7 +610,7 @@ pub fn thread_tail(thread_id: &str) -> String {
         return String::new();
     };
     let failure_msg = turn_failure_message(thread);
-    let mut lines: Vec<String> = thread
+    let lines: Vec<String> = thread
         .get("items")
         .and_then(Value::as_array)
         .map(|list| {
@@ -430,12 +632,28 @@ pub fn thread_tail(thread_id: &str) -> String {
                 .collect()
         })
         .unwrap_or_default();
-    if let Some(msg) = failure_msg {
-        if !lines.iter().any(|l| l.contains(&msg)) {
-            lines.push(msg);
-        }
+    let body = lines.join("\n");
+    let Some(msg) = failure_msg else {
+        return truncate_tail_chars(&body, MAX_THREAD_TAIL_CHARS);
+    };
+    if body.is_empty() {
+        return truncate_tail_chars(&msg, MAX_THREAD_TAIL_CHARS);
     }
-    lines.join("\n")
+    let bounded = truncate_tail_chars(&body, MAX_THREAD_TAIL_CHARS);
+    if bounded.contains(&msg) {
+        return bounded;
+    }
+    let msg_chars = msg.chars().count();
+    if msg_chars >= MAX_THREAD_TAIL_CHARS {
+        return truncate_tail_chars(&msg, MAX_THREAD_TAIL_CHARS);
+    }
+    let body_budget = MAX_THREAD_TAIL_CHARS.saturating_sub(msg_chars + 1);
+    let trimmed_body = truncate_tail_chars(&body, body_budget);
+    if trimmed_body.is_empty() {
+        msg
+    } else {
+        format!("{trimmed_body}\n{msg}")
+    }
 }
 
 pub fn service() -> &'static Mutex<Service<LivePort>> {
@@ -486,7 +704,7 @@ pub fn prepare(svc: &mut Service<LivePort>, address: &str, observed: Option<&str
         let _ = svc.attach(Family::Thread, id, None, None, false);
         publish_thread(svc, id);
     } else if let Some(profile) = address.strip_prefix("agent:") {
-        if let Some(thread_id) = live_thread_for_profile(profile) {
+        if let Some(thread_id) = resolve_or_wake_thread_for_profile(profile) {
             let _ = svc.attach(Family::Thread, &thread_id, None, None, false);
             let _ = svc.bind_agent(profile, &thread_id);
             publish_thread(svc, &thread_id);
@@ -617,37 +835,131 @@ pub fn thread_presence(thread_id: &str) -> (PresenceState, Option<BlockKind>) {
     (PresenceState::Idle, None)
 }
 
+fn is_eligible_profile_thread(thread: &Value, profile: &str) -> bool {
+    if thread.get("profileId").and_then(Value::as_str) != Some(profile) {
+        return false;
+    }
+    if thread.get("archivedAtUnixMs").and_then(Value::as_i64).is_some() {
+        return false;
+    }
+    if thread.get("sideChat").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    let started_by_agent = thread.get("startedByAgent").and_then(Value::as_bool) == Some(true);
+    let has_parent = thread
+        .get("parentThreadId")
+        .and_then(Value::as_str)
+        .is_some_and(|p| !p.trim().is_empty());
+    !(started_by_agent && has_parent)
+}
+
 pub fn live_thread_for_profile(profile: &str) -> Option<String> {
-    let items = crate::persist::threads().lock().ok()?;
-    for thread in items.iter() {
-        if thread.get("profileId").and_then(Value::as_str) != Some(profile) {
-            continue;
-        }
-        if thread.get("archivedAtUnixMs").and_then(Value::as_i64).is_some() {
-            continue;
-        }
-        if thread.get("sideChat").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        let started_by_agent = thread.get("startedByAgent").and_then(Value::as_bool) == Some(true);
-        let has_parent = thread
-            .get("parentThreadId")
-            .and_then(Value::as_str)
-            .is_some_and(|p| !p.trim().is_empty());
-        if started_by_agent && has_parent {
-            continue;
-        }
-        let id = thread.get("id").and_then(Value::as_str)?;
-        let attached = crate::chat::session_manager()
-            .lock()
-            .ok()
-            .and_then(|manager| manager.status(id))
-            .is_some();
-        if attached {
-            return Some(id.to_string());
+    let candidate_ids: Vec<String> = {
+        let items = crate::persist::threads().lock().ok()?;
+        items
+            .iter()
+            .filter(|thread| is_eligible_profile_thread(thread, profile))
+            .filter_map(|thread| thread.get("id").and_then(Value::as_str).map(ToString::to_string))
+            .collect()
+    };
+
+    let manager = crate::chat::session_manager().lock().ok()?;
+    for id in candidate_ids {
+        if manager.status(&id).is_some() {
+            return Some(id);
         }
     }
     None
+}
+
+fn persisted_thread_for_profile(profile: &str) -> Option<String> {
+    let items = crate::persist::threads().lock().ok()?;
+    items
+        .iter()
+        .filter(|thread| is_eligible_profile_thread(thread, profile))
+        .filter_map(|thread| {
+            let id = thread.get("id").and_then(Value::as_str)?.to_string();
+            let updated = thread
+                .get("updatedAtUnixMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let created = thread
+                .get("createdAtUnixMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            Some(((updated, created), id))
+        })
+        .max_by_key(|(ts, _)| *ts)
+        .map(|(_, id)| id)
+}
+
+fn resolve_workspace_for_agent(agent: &crate::persist::AgentProfile) -> Option<String> {
+    if agent.place_display_names.is_empty() {
+        return None;
+    }
+    let workspaces = crate::persist::list_workspaces_snapshot();
+    for place in &agent.place_display_names {
+        let trimmed = place.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(ws) = workspaces.iter().find(|ws| {
+            ws.id == trimmed
+                || ws.display_name == trimmed
+                || ws.display_name.eq_ignore_ascii_case(trimmed)
+        }) {
+            return Some(ws.id.clone());
+        }
+    }
+    None
+}
+
+fn create_canonical_thread_for_profile(profile: &str) -> Option<String> {
+    let agent = crate::persist::find_agent_by_id(profile)?;
+    let provider =
+        crate::dispatch::cli::canonical_thread_provider(&agent.engine).unwrap_or("antigravity");
+    let workspace_id = resolve_workspace_for_agent(&agent);
+    let title = if agent.name.trim().is_empty() {
+        "New Agent Chat".to_string()
+    } else {
+        agent.name.clone()
+    };
+    let mut thread =
+        crate::chat::create_thread(Some(profile), &title, provider, workspace_id.as_deref());
+    if let Some(mode) = agent.default_mode {
+        thread["mode"] = json!(mode);
+    }
+    if let Some(plan) = agent.default_plan {
+        thread["plan"] = json!(plan);
+    }
+    if let Some(model) = agent.default_model {
+        thread["model"] = json!(model);
+    }
+    if !agent.default_provider_options.is_empty() {
+        thread["providerOptions"] = json!(agent.default_provider_options);
+        if let Some(effort) = agent
+            .default_provider_options
+            .iter()
+            .find(|o| o.get("id").and_then(Value::as_str) == Some("effort"))
+            .and_then(|o| o.get("value").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            thread["effort"] = json!(effort);
+        }
+    }
+    let thread_id = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)?;
+    crate::chat::replace_thread(&thread);
+    Some(thread_id)
+}
+
+pub fn resolve_or_wake_thread_for_profile(profile: &str) -> Option<String> {
+    live_thread_for_profile(profile)
+        .or_else(|| persisted_thread_for_profile(profile))
+        .or_else(|| create_canonical_thread_for_profile(profile))
 }
 
 pub fn caller_of(request: &Value) -> Caller {
@@ -666,14 +978,7 @@ pub fn messaging_flags() -> (bool, bool) {
 }
 
 pub fn profile_allows(profile: &str) -> bool {
-    crate::persist::agents()
-        .lock()
-        .ok()
-        .and_then(|agents| {
-            agents
-                .iter()
-                .find(|agent| agent.id == profile)
-                .map(|agent| agent.allow_agent_messaging.unwrap_or(true))
-        })
+    crate::persist::find_agent_by_id(profile)
+        .and_then(|agent| agent.allow_agent_messaging)
         .unwrap_or(true)
 }

@@ -90,6 +90,8 @@ pub enum Command {
         explicit_role: bool,
         file: Option<String>,
         task: Option<String>,
+        tasks: Vec<String>,
+        count: Option<usize>,
         wait: bool,
         timeout_ms: Option<u64>,
         hidden: bool,
@@ -118,6 +120,8 @@ pub enum Command {
         force: bool,
         only_ready: bool,
         allow_queue: bool,
+        wait: bool,
+        timeout_ms: Option<u64>,
     },
     Wait {
         address: Option<String>,
@@ -137,6 +141,73 @@ pub enum Command {
         file: Option<String>,
     },
     Swarm(SwarmCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentCommand {
+    ThreadList {
+        workspace_id: Option<String>,
+        agent_id: Option<String>,
+        cursor: usize,
+        limit: usize,
+    },
+    ThreadSearch {
+        query: String,
+        workspace_id: Option<String>,
+        agent_id: Option<String>,
+        cursor: usize,
+        limit: usize,
+    },
+    ThreadRead {
+        thread_id: String,
+        cursor: Option<usize>,
+        limit: usize,
+    },
+    MemoryRead {
+        target: String,
+        agent_id: Option<String>,
+    },
+    MemoryAdd {
+        text: String,
+        target: String,
+        agent_id: Option<String>,
+    },
+    MemorySearch {
+        query: String,
+        target: String,
+        agent_id: Option<String>,
+        limit: usize,
+    },
+    RoutineList {
+        agent_id: Option<String>,
+    },
+    RoutineCreate {
+        agent_id: Option<String>,
+        name: String,
+        prompt: String,
+        cadence_seconds: u64,
+        workspace_id: Option<String>,
+    },
+    RoutineToggle {
+        agent_id: Option<String>,
+        routine_id: String,
+        enabled: bool,
+    },
+    RoutineRun {
+        agent_id: Option<String>,
+        routine_id: String,
+    },
+    TeammateList,
+    TeammateSend {
+        target: String,
+        message: String,
+    },
+    TeammateDelegate {
+        target: String,
+        task: String,
+        wait: bool,
+        timeout_ms: Option<u64>,
+    },
 }
 
 

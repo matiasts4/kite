@@ -24,3 +24,19 @@ fn verifies_modular_decomposition_surface() {
     assert!(snap.full);
     assert!(engine.screen_text().contains("Modular VT Engine"));
 }
+
+#[test]
+fn scrollback_depth_is_bounded_to_default_vt_scrollback_lines() {
+    let mut engine = TerminalVtEngine::new(40, 10);
+    for i in 0..2600 {
+        engine.feed(format!("line-{i}\r\n").as_bytes());
+    }
+    let snap = match engine.get_snapshot_diff(0, false, None) {
+        TerminalSnapshotPollResponse::Snapshot { snapshot, .. } => snapshot,
+        _ => panic!("expected snapshot"),
+    };
+    assert_eq!(
+        snap.scrollback_depth as usize,
+        crate::vt_engine::screen::DEFAULT_VT_SCROLLBACK_LINES
+    );
+}

@@ -10,7 +10,7 @@ use crate::acp::{
 };
 use crate::chat::session::ApprovalDecision;
 
-pub const DELTA_WINDOW: Duration = Duration::from_millis(50);
+pub const DELTA_WINDOW: Duration = Duration::from_millis(24);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]

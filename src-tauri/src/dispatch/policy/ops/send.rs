@@ -165,8 +165,17 @@ impl<P: Port> Service<P> {
             }
         };
         if resolved {
-            if input.children.is_none() && !address.is_empty() {
-                self.suppress_parent_notice_for(&address);
+            match input.children {
+                None if !address.is_empty() => {
+                    self.suppress_parent_notice_for(&address);
+                }
+                Some(ChildrenMode::All) if !address.is_empty() => {
+                    self.suppress_parent_notices_for_children(&address, false);
+                }
+                Some(ChildrenMode::Any) if !address.is_empty() => {
+                    self.suppress_parent_notices_for_children(&address, true);
+                }
+                _ => {}
             }
             let settled_presence = if input.children.is_none() && !address.is_empty() {
                 self.resolve(&address)

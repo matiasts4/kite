@@ -1,10 +1,87 @@
-use crate::chat::threads::{chat_item, sanitize_chat_text, touch, upsert_item};
+use crate::chat::threads::{
+    chat_item, sanitize_chat_text_with_state, starts_with_system_message_envelope_header, touch,
+    upsert_item,
+};
 use crate::chat::utils::now_ms;
 use crate::persist::{notifications, persist, threads};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Mutex;
+
+fn streaming_sys_msg_runs() -> &'static Mutex<HashSet<String>> {
+    static RUNS: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    RUNS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn last_agent_step_by_run() -> &'static Mutex<HashMap<String, i64>> {
+    static MAP: std::sync::OnceLock<Mutex<HashMap<String, i64>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fallback_projected_steps_by_run() -> &'static Mutex<HashMap<String, HashSet<i64>>> {
+    static MAP: std::sync::OnceLock<Mutex<HashMap<String, HashSet<i64>>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_agent_step_index(run_id: &str, step_index: i64) {
+    let mut map = last_agent_step_by_run().lock().unwrap();
+    if map.len() > 256 {
+        map.clear();
+    }
+    map.insert(run_id.to_string(), step_index);
+}
+
+fn mark_fallback_projected_step(run_id: &str, step_index: i64) {
+    let mut map = fallback_projected_steps_by_run().lock().unwrap();
+    if map.len() > 256 {
+        map.clear();
+    }
+    map.entry(run_id.to_string()).or_default().insert(step_index);
+}
+
+fn is_fallback_projected_step(run_id: &str, step_index: i64) -> bool {
+    fallback_projected_steps_by_run()
+        .lock()
+        .unwrap()
+        .get(run_id)
+        .is_some_and(|steps| steps.contains(&step_index))
+}
+
+pub(super) fn clear_stream_run_state(run_id: &str) {
+    streaming_sys_msg_runs().lock().unwrap().remove(run_id);
+    last_agent_step_by_run().lock().unwrap().remove(run_id);
+    fallback_projected_steps_by_run().lock().unwrap().remove(run_id);
+}
+
+#[cfg(test)]
+pub(super) fn seed_stream_run_state_for_test(run_id: &str, step: i64) {
+    streaming_sys_msg_runs()
+        .lock()
+        .unwrap()
+        .insert(run_id.to_string());
+    last_agent_step_by_run()
+        .lock()
+        .unwrap()
+        .insert(run_id.to_string(), step);
+    fallback_projected_steps_by_run()
+        .lock()
+        .unwrap()
+        .entry(run_id.to_string())
+        .or_default()
+        .insert(step);
+}
+
+#[cfg(test)]
+pub(super) fn has_stream_run_state_for_test(run_id: &str) -> bool {
+    streaming_sys_msg_runs().lock().unwrap().contains(run_id)
+        || last_agent_step_by_run().lock().unwrap().contains_key(run_id)
+        || fallback_projected_steps_by_run()
+            .lock()
+            .unwrap()
+            .contains_key(run_id)
+}
 
 use super::pipeline::apply_known_turn_pipeline;
 use super::settle::finish_run;
@@ -123,6 +200,63 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
         return true;
     }
 
+    if val.get("event").and_then(Value::as_str) == Some("step_update") {
+        if let Some(su) = val.get("step_update") {
+            let step_type = su.get("step_type").and_then(Value::as_str).unwrap_or("");
+            if step_type == "agent_response" || step_type == "planner_response" {
+                let step_idx = su.get("step_index").and_then(Value::as_i64);
+                let state = su.get("state").and_then(Value::as_str).unwrap_or("");
+                let thought = su
+                    .get("thinking")
+                    .or_else(|| su.get("thought"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                // Transcript fallback already projected this step while stdout was stalled; skip delayed text deltas
+                // and do not fall through to parse_acp_stream_line (which would re-emit them as ContentDelta).
+                if let Some(curr) = step_idx {
+                    if is_fallback_projected_step(run_id, curr) {
+                        if !thought.is_empty() {
+                            emit_thought_delta(
+                                thread_id,
+                                run_id,
+                                curr,
+                                thought,
+                                state.eq_ignore_ascii_case("DONE")
+                                    || state.eq_ignore_ascii_case("COMPLETED"),
+                                su.get("duration_seconds").and_then(Value::as_f64),
+                            );
+                        }
+                        return true;
+                    }
+                }
+                let raw_delta = su
+                    .get("text_delta")
+                    .or_else(|| su.get("text"))
+                    .or_else(|| su.get("content"))
+                    .and_then(Value::as_str);
+                if let Some(raw) = raw_delta {
+                    if !raw.is_empty() {
+                        let step_changed = {
+                            let map = last_agent_step_by_run().lock().unwrap();
+                            matches!((map.get(run_id).copied(), step_idx), (Some(prev), Some(curr)) if curr != prev)
+                        };
+                        let emitted =
+                            emit_deltas_inner(thread_id, run_id, assistant_id, raw, step_changed);
+                        if emitted {
+                            if let Some(curr) = step_idx {
+                                record_agent_step_index(run_id, curr);
+                            }
+                            return true;
+                        }
+                        if thought.is_empty() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(acp_event) = crate::acp::parse_acp_stream_line(thread_id, run_id, trimmed) {
         match acp_event {
             crate::acp::AcpStreamEvent::Init { conversation_id, model } => {
@@ -153,22 +287,7 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                     .pointer("/step_update/step_index")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
-                let thought_id = format!("r_{}_{}", run_id, step_index);
-                let mut reasoning_item = chat_item(&thought_id, "reasoning", &text, !is_done);
-                if let Some(dur) = duration_seconds {
-                    reasoning_item["durationSeconds"] = json!(dur);
-                }
-                {
-                    let mut live = live_turns().lock().unwrap();
-                    if let Some(run) = live.runs.get_mut(run_id) {
-                        push_event(run, json!({ "kind": "upsert", "item": reasoning_item.clone() }));
-                    }
-                }
-                live_cv().notify_all();
-                let mut items = threads().lock().unwrap();
-                if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
-                    upsert_item(thread, &reasoning_item);
-                }
+                emit_thought_delta(thread_id, run_id, step_index, &text, is_done, duration_seconds);
                 return true;
             }
             crate::acp::AcpStreamEvent::ToolUpdate { tool } => {
@@ -311,15 +430,56 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                     }
                 }
                 persist();
+                crate::chat::subagents::reconcile_antigravity_subagents_for_thread(
+                    thread_id,
+                    Some(run_id),
+                );
 
                 let is_ok = !status.eq_ignore_ascii_case("ERROR") && !status.eq_ignore_ascii_case("FAILED");
-                finish_run(run_id, is_ok, false, "");
-
-                // Reap child process if still alive so pipe reader threads terminate promptly without hanging
-                if let Some(child_arc) = {
+                let child_arc = {
                     let live = live_turns().lock().unwrap();
                     live.runs.get(run_id).and_then(|r| r.child.clone())
-                } {
+                };
+                if is_ok {
+                    finish_run(run_id, true, false, "");
+                } else {
+                    let result_err = ["/result/error/message", "/result/error", "/error/message", "/error", "/result/message"]
+                        .iter()
+                        .filter_map(|ptr| val.pointer(ptr).and_then(Value::as_str))
+                        .map(str::trim)
+                        .find(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("the provider ended the turn with status {status}"));
+                    if child_arc.is_some() {
+                        // Let `stream_child` finish draining stderr and record the classified
+                        // `turnFailure` before calling `finish_run` once.
+                        record_result_failure(run_id, &result_err);
+                    } else {
+                        let provider = threads()
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                            .and_then(|t| t.get("provider").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .to_string();
+                        let projected = crate::chat::normalize::project_process_failure(
+                            Some(1),
+                            &result_err,
+                            &provider,
+                            &[],
+                        );
+                        if let Some(failure) = projected.failure {
+                            record_turn_failure(thread_id, &failure);
+                            finish_run(run_id, false, false, "");
+                        } else {
+                            finish_run(run_id, false, false, &result_err);
+                        }
+                    }
+                }
+
+                // Reap child process if still alive so pipe reader threads terminate promptly without hanging
+                if let Some(child_arc) = child_arc {
                     if let Ok(mut c) = child_arc.lock() {
                         let _ = c.kill();
                     }
@@ -402,6 +562,26 @@ pub fn take_run_stderr(run_id: &str) -> String {
         .unwrap_or_default()
 }
 
+fn result_failures() -> &'static Mutex<HashMap<String, String>> {
+    static MAP: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn record_result_failure(run_id: &str, message: &str) {
+    let trimmed = message.trim();
+    if run_id.is_empty() || trimmed.is_empty() {
+        return;
+    }
+    result_failures()
+        .lock()
+        .unwrap()
+        .insert(run_id.to_string(), trimmed.to_string());
+}
+
+pub fn take_result_failure(run_id: &str) -> Option<String> {
+    result_failures().lock().unwrap().remove(run_id)
+}
+
 pub fn record_turn_failure(thread_id: &str, failure: &crate::chat::normalize::TurnFailure) {
     let Ok(value) = serde_json::to_value(failure) else {
         return;
@@ -419,6 +599,13 @@ pub fn record_turn_failure(thread_id: &str, failure: &crate::chat::normalize::Tu
     persist();
 }
 
+fn should_discard_unhandled_json_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('{')
+        && trimmed.ends_with('}')
+        && matches!(serde_json::from_str::<Value>(trimmed), Ok(Value::Object(_)))
+}
+
 pub fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_id: &str) {
     let mut pending = Vec::new();
     let mut buf = [0u8; 4096];
@@ -432,14 +619,18 @@ pub fn read_pipe(mut pipe: impl Read, thread_id: &str, run_id: &str, assistant_i
         while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = pending.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line_bytes);
-            if !handle_stream_json_line(thread_id, run_id, assistant_id, &line) {
+            if !handle_stream_json_line(thread_id, run_id, assistant_id, &line)
+                && !should_discard_unhandled_json_line(&line)
+            {
                 emit_deltas(thread_id, run_id, assistant_id, &line);
             }
         }
     }
     if !pending.is_empty() {
         let text = String::from_utf8_lossy(&pending);
-        if !handle_stream_json_line(thread_id, run_id, assistant_id, &text) {
+        if !handle_stream_json_line(thread_id, run_id, assistant_id, &text)
+            && !should_discard_unhandled_json_line(&text)
+        {
             emit_deltas(thread_id, run_id, assistant_id, &text);
         }
     }
@@ -529,14 +720,126 @@ pub fn open_headless_permission(thread_id: &str, run_id: &str, permission: &str)
     crate::chat::subagents::sync_child_thread_to_parent(thread_id);
 }
 
+fn strip_dangling_user_role_line(text: &mut String) -> bool {
+    let trimmed_end = text.trim_end_matches([' ', '\t', '\r', '\n']);
+    let line_start = trimmed_end.rfind('\n').map_or(0, |p| p + 1);
+    if trimmed_end[line_start..].trim() != "user" {
+        return false;
+    }
+    let prefix = trimmed_end[..line_start].trim_end();
+    text.truncate(prefix.len());
+    true
+}
+
+fn emit_thought_delta(
+    thread_id: &str,
+    run_id: &str,
+    step_index: i64,
+    text: &str,
+    is_done: bool,
+    duration_seconds: Option<f64>,
+) {
+    let thought_id = format!("r_{}_{}", run_id, step_index);
+    let mut reasoning_item = chat_item(&thought_id, "reasoning", text, !is_done);
+    if let Some(dur) = duration_seconds {
+        reasoning_item["durationSeconds"] = json!(dur);
+    }
+    {
+        let mut live = live_turns().lock().unwrap();
+        if let Some(run) = live.runs.get_mut(run_id) {
+            push_event(run, json!({ "kind": "upsert", "item": reasoning_item.clone() }));
+        }
+    }
+    live_cv().notify_all();
+    let mut items = threads().lock().unwrap();
+    if let Some(thread) = items
+        .iter_mut()
+        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+    {
+        upsert_item(thread, &reasoning_item);
+    }
+}
+
 pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str) {
-    let clean = sanitize_chat_text(text);
+    let _ = emit_deltas_inner(thread_id, run_id, assistant_id, text, false);
+}
+
+/// Emits a transcript-recovered planner response step with a paragraph break when needed,
+/// recording `step_index` so delayed stdout frames for that step are suppressed without
+/// losing the paragraph separator before subsequent stdout steps.
+pub(crate) fn emit_fallback_step_deltas(
+    thread_id: &str,
+    run_id: &str,
+    assistant_id: &str,
+    step_index: i64,
+    text: &str,
+) -> bool {
+    let emitted = emit_deltas_inner(thread_id, run_id, assistant_id, text, true);
+    if emitted {
+        mark_fallback_projected_step(run_id, step_index);
+        record_agent_step_index(run_id, step_index);
+    }
+    emitted
+}
+
+fn emit_deltas_inner(
+    thread_id: &str,
+    run_id: &str,
+    assistant_id: &str,
+    text: &str,
+    force_paragraph_break: bool,
+) -> bool {
+    let was_in_sys = {
+        let runs = streaming_sys_msg_runs().lock().unwrap();
+        runs.contains(run_id)
+    };
+    let sanitized = sanitize_chat_text_with_state(text, was_in_sys);
+    let clean = sanitized.text;
+    let next_in_sys = sanitized.in_system_message;
+    let stripped_leading = sanitized.stripped_leading;
+    {
+        let mut runs = streaming_sys_msg_runs().lock().unwrap();
+        if next_in_sys {
+            if runs.len() > 256 {
+                runs.clear();
+            }
+            runs.insert(run_id.to_string());
+        } else {
+            runs.remove(run_id);
+        }
+    }
+
+    let leading_sys_header = !was_in_sys && starts_with_system_message_envelope_header(text);
     if clean.is_empty() {
-        return;
+        if leading_sys_header {
+            let fixed_item = {
+                let mut live = live_turns().lock().unwrap();
+                live.runs.get_mut(run_id).and_then(|run| {
+                    if !run.closing && !run.finished && strip_dangling_user_role_line(&mut run.assistant_text) {
+                        let item = chat_item(assistant_id, "assistant", &run.assistant_text, true);
+                        push_event(run, json!({ "kind": "upsert", "item": item.clone() }));
+                        Some(item)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(item) = fixed_item {
+                live_cv().notify_all();
+                let mut items = threads().lock().unwrap();
+                if let Some(thread) = items
+                    .iter_mut()
+                    .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+                {
+                    upsert_item(thread, &item);
+                }
+            }
+        }
+        return false;
     }
     if let Some(permission) = headless_permission_denial(&clean) {
         open_headless_permission(thread_id, run_id, &permission);
-        return;
+        return false;
     }
     let (has_tool_after_assistant, has_subagent_after_assistant) = {
         let items = threads().lock().unwrap();
@@ -568,45 +871,82 @@ pub fn emit_deltas(thread_id: &str, run_id: &str, assistant_id: &str, text: &str
             .unwrap_or((false, false))
     };
 
-    let mut first_post_tool_chunk = has_tool_after_assistant;
+    let mut apply_seam_check =
+        has_tool_after_assistant || force_paragraph_break || stripped_leading;
+    let mut emitted_any = false;
     for chunk in chars_chunks(&clean, 8000) {
-        let appended = {
+        let item = {
             let mut live = live_turns().lock().unwrap();
-            let Some(run) = live.runs.get_mut(run_id) else { return };
+            let Some(run) = live.runs.get_mut(run_id) else {
+                return emitted_any;
+            };
             if run.closing || run.finished {
-                return;
+                return emitted_any;
             }
-            if first_post_tool_chunk && !run.assistant_text.is_empty() {
-                first_post_tool_chunk = false;
+            let mut replaced_with_upsert = false;
+            if leading_sys_header && strip_dangling_user_role_line(&mut run.assistant_text) {
+                replaced_with_upsert = true;
+            }
+            let mut sep = "";
+            if apply_seam_check && !run.assistant_text.is_empty() {
+                apply_seam_check = false;
                 let lower = run.assistant_text.to_ascii_lowercase();
-                let is_waiting_narration = has_subagent_after_assistant
+                let is_waiting_narration = has_tool_after_assistant
+                    && has_subagent_after_assistant
                     && (lower.contains("esperando")
                         || lower.contains("waiting for")
                         || lower.contains("lancé el subagente")
                         || lower.contains("lance el subagente"));
                 if is_waiting_narration {
                     run.assistant_text.clear();
-                } else if !run.assistant_text.ends_with('\n') && !chunk.starts_with('\n') {
-                    run.assistant_text.push_str("\n\n");
+                    replaced_with_upsert = true;
+                } else if !chunk.starts_with('\n') && !run.assistant_text.ends_with("\n\n") {
+                    sep = if run.assistant_text.ends_with('\n') {
+                        "\n"
+                    } else {
+                        "\n\n"
+                    };
+                } else if chunk.starts_with('\n')
+                    && !chunk.starts_with("\n\n")
+                    && !run.assistant_text.ends_with('\n')
+                    && chunk.len() > 1
+                {
+                    sep = "\n";
                 }
+            } else {
+                apply_seam_check = false;
             }
             if run.assistant_text.chars().count() >= 200_000 {
-                return;
+                return emitted_any;
             }
             let room = 200_000 - run.assistant_text.chars().count();
-            let piece: String = chunk.chars().take(room).collect();
-            run.assistant_text.push_str(&piece);
-            push_event(run, json!({ "kind": "delta", "itemId": assistant_id, "text": piece }));
-            run.assistant_text.clone()
+            let sep_chars = sep.chars().count();
+            let piece: String = chunk.chars().take(room.saturating_sub(sep_chars)).collect();
+            let delta_piece = if sep_chars > 0 && room >= sep_chars {
+                format!("{sep}{piece}")
+            } else if sep_chars > 0 {
+                sep.chars().take(room).collect()
+            } else {
+                piece
+            };
+            run.assistant_text.push_str(&delta_piece);
+            let item = chat_item(assistant_id, "assistant", &run.assistant_text, true);
+            if replaced_with_upsert {
+                push_event(run, json!({ "kind": "upsert", "item": item.clone() }));
+            } else {
+                push_event(run, json!({ "kind": "delta", "itemId": assistant_id, "text": delta_piece }));
+            }
+            emitted_any = true;
+            item
         };
         live_cv().notify_all();
-        let item = chat_item(assistant_id, "assistant", &appended, true);
         let mut items = threads().lock().unwrap();
         if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
             upsert_item(thread, &item);
         }
     }
     crate::chat::subagents::sync_child_thread_to_parent(thread_id);
+    emitted_any
 }
 
 pub fn chars_chunks(text: &str, size: usize) -> Vec<String> {
@@ -625,21 +965,31 @@ pub fn chars_chunks(text: &str, size: usize) -> Vec<String> {
 }
 
 pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::AcpToolCall) {
+    let runtime_active = super::state::is_thread_runtime_active(thread_id);
     let mut item = crate::chat::subagents::acp_tool_to_chat_item(&tool);
     let streaming = tool.status == "running" || tool.status == "pending";
-    let existing = {
+    let (existing, thread_active) = {
         let items = threads().lock().unwrap();
-        items
+        let thread = items
             .iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id));
+        let active = thread.is_some_and(|t| {
+            matches!(
+                t.get("status").and_then(Value::as_str),
+                Some("running" | "waiting")
+            )
+        });
+        let found = thread
             .and_then(|t| t.get("items"))
             .and_then(Value::as_array)
             .and_then(|arr| {
                 arr.iter()
                     .find(|it| it.get("id").and_then(Value::as_str) == Some(tool.id.as_str()))
             })
-            .cloned()
+            .cloned();
+        (found, active)
     };
+    let parent_active = runtime_active || thread_active;
     if let Some(ex) = existing {
         for key in ["toolName", "toolKind", "title", "detail"] {
             let incoming_generic = item
@@ -663,8 +1013,13 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
                 }
             }
         }
+        if let Some(created_at) = ex
+            .get("createdAtUnixMs")
+            .filter(|v| v.as_i64().is_some_and(|n| n > 0))
+        {
+            item["createdAtUnixMs"] = created_at.clone();
+        }
         for key in [
-            "createdAtUnixMs",
             "serverName",
             "command",
             "filePath",
@@ -687,7 +1042,11 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
                 None => ex_sub,
             };
             if matches!(tool.status.as_str(), "completed" | "failed" | "cancelled") {
-                merged.status = tool.status.clone();
+                merged.status = if tool.status == "cancelled" {
+                    "killed".to_string()
+                } else {
+                    tool.status.clone()
+                };
             }
             item["toolKind"] = json!("subagent");
             if let Ok(v) = serde_json::to_value(merged) {
@@ -709,6 +1068,35 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
         }
     }
 
+    let item_tool_name = item
+        .get("toolName")
+        .and_then(Value::as_str)
+        .unwrap_or(&tool.name);
+    let item_failed = crate::acp::response_indicates_failure(
+        &tool.status,
+        None,
+        None,
+        item.get("text").and_then(Value::as_str),
+    );
+    if parent_active
+        && !item_failed
+        && tool.status == "completed"
+        && crate::chat::subagents::is_invoke_subagent_tool_name(item_tool_name)
+        && item.get("subagentMeta").is_some()
+        && !crate::chat::subagents::child_transcript_ended_with_final_response(
+            item.pointer("/subagentMeta/transcriptUri").and_then(Value::as_str),
+        )
+    {
+        item["status"] = json!("running");
+        item["streaming"] = json!(false);
+        if let Some(meta_obj) = item.get_mut("subagentMeta").and_then(Value::as_object_mut) {
+            meta_obj.insert("status".into(), json!("running"));
+        }
+    }
+
+    let retracted_unspawned_invoke =
+        crate::chat::subagents::downgrade_unspawned_failed_native_invoke_in_place(&mut item);
+
     {
         let mut live = live_turns().lock().unwrap();
         if let Some(run) = live.runs.get_mut(run_id) {
@@ -728,7 +1116,9 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
     }
     // Schedule diff calculation only after thread["items"] holds the item so kite-diff-worker can patch it reliably.
     crate::chat::checkpoints::schedule_turn_tool_diff(thread_id, run_id, &item, streaming);
-    if item.get("subagentMeta").is_some() {
+    if retracted_unspawned_invoke {
+        crate::chat::subagents::remove_unspawned_invoke_runs(thread_id, &tool.id);
+    } else if item.get("subagentMeta").is_some() {
         crate::chat::subagents::record_subagent_tool_call(thread_id, &item);
     }
     if item.get("swarmMeta").is_some() {
@@ -736,6 +1126,20 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
     }
     crate::chat::subagents::sync_child_thread_to_parent(thread_id);
     if !streaming {
-        persist();
+        let clean_name = crate::acp::strip_mcp_prefix(&tool.name, &Value::Null)
+            .1
+            .to_ascii_lowercase();
+        if clean_name == "manage_subagents"
+            || clean_name == "invoke_subagent"
+            || item.get("subagentMeta").is_some()
+        {
+            crate::chat::subagents::reconcile_antigravity_subagents_for_thread(
+                thread_id,
+                Some(run_id),
+            );
+        }
+    }
+    if !streaming {
+        crate::persist::persist_async();
     }
 }

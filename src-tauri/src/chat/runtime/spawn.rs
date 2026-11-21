@@ -120,18 +120,85 @@ pub fn build_thread_dispatch_env(
     workspace_id: Option<&str>,
     program_path: Option<&Path>,
 ) -> Vec<(String, String)> {
-    let skill = crate::dispatch::cli::install_dispatch_skill();
+    build_thread_dispatch_env_for_agent(thread_id, workspace_id, program_path, None)
+}
+
+/// Apply `AgentProfile` permission flags and disabled-plugin exclusions to a spawn env vector.
+pub fn apply_agent_permissions_to_env(
+    env: &mut Vec<(String, String)>,
+    agent: &crate::persist::AgentProfile,
+) {
+    let allow_scheduling = agent.allow_agent_scheduling.unwrap_or(true);
+    let allow_messaging = agent.allow_agent_messaging.unwrap_or(true);
+    let disabled = crate::plugins::normalize_disabled_plugins(&agent.disabled_plugin_ids);
+
+    upsert_env_var(env, "KITE_AGENT_ID", &agent.id);
+    upsert_env_var(
+        env,
+        "KITE_ALLOW_SCHEDULING",
+        if allow_scheduling { "true" } else { "false" },
+    );
+    upsert_env_var(
+        env,
+        "KITE_ALLOW_MESSAGING",
+        if allow_messaging { "true" } else { "false" },
+    );
+    upsert_env_var(env, "KITE_DISABLED_PLUGINS", &disabled.join(","));
+
+    if crate::plugins::is_plugin_disabled(&disabled, "kite-dispatch") {
+        env.retain(|(k, _)| k != "KITE_DISPATCH" && k != "KITE_SKILL_FILE");
+    }
+    if crate::plugins::is_plugin_disabled(&disabled, "kite-ctx") {
+        env.retain(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "KITE_SESSION_ID"
+                    | "KITE_PROJECT"
+                    | "KITE_PROVIDER"
+                    | "KITE_AGENT_NAME"
+                    | "KITE_MODEL"
+            )
+        });
+    }
+}
+
+/// Build the thread dispatch environment, honoring an optional `AgentProfile`'s
+/// permissions and `disabled_plugin_ids`.
+pub fn build_thread_dispatch_env_for_agent(
+    thread_id: &str,
+    workspace_id: Option<&str>,
+    program_path: Option<&Path>,
+    agent: Option<&crate::persist::AgentProfile>,
+) -> Vec<(String, String)> {
+    let dispatch_disabled = agent
+        .map(|a| crate::plugins::is_plugin_disabled(&a.disabled_plugin_ids, "kite-dispatch"))
+        .unwrap_or(false);
+    let ctx_disabled = agent
+        .map(|a| crate::plugins::is_plugin_disabled(&a.disabled_plugin_ids, "kite-ctx"))
+        .unwrap_or(false);
+
+    let skill = if dispatch_disabled {
+        PathBuf::new()
+    } else {
+        crate::dispatch::cli::ensure_dispatch_skill_once()
+    };
     let bin = crate::dispatch::cli::install_kite_shim();
-    crate::dispatch::cli::ensure_ctx_integrations_once();
+    if !ctx_disabled {
+        crate::dispatch::cli::ensure_ctx_integrations_once();
+    }
     let inherited = std::env::var("PATH").unwrap_or_default();
-    compose_thread_dispatch_env(
+    let mut env = compose_thread_dispatch_env(
         thread_id,
         workspace_id,
         &skill,
         &bin,
         program_path,
         &inherited,
-    )
+    );
+    if let Some(profile) = agent {
+        apply_agent_permissions_to_env(&mut env, profile);
+    }
+    env
 }
 
 pub fn launch_provider(
@@ -141,6 +208,10 @@ pub fn launch_provider(
     prompt: &str,
     binding: Option<&SendBinding>,
 ) {
+    if cfg!(test) {
+        let _ = (thread_id, run_id, thread, prompt, binding);
+        return;
+    }
     let provider = thread.get("provider").and_then(|v| v.as_str()).unwrap_or("antigravity").to_string();
     let mode = thread.get("mode").and_then(|v| v.as_str()).unwrap_or("fullAccess").to_string();
     let model = thread.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -226,9 +297,34 @@ pub fn launch_provider(
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 }
             });
+        let is_attached_workspace = workspace_id.is_some()
+            || custom_cwd.is_some()
+            || crate::agent_mind::memory::is_git_repository(&cwd);
         // Snapshot once. The same value is written before the process starts
         // and stored on the session, so a later agent edit cannot reach it.
         let recipe = profile_id.as_deref().and_then(snapshot_for_agent);
+        let compiled_instructions = recipe
+            .as_ref()
+            .map(|r| r.compile_instructions())
+            .or_else(|| {
+                profile_id
+                    .as_deref()
+                    .map(crate::agent_mind::memory::compile_agent_instructions)
+            });
+        if let Some(aid) = profile_id.as_deref() {
+            let root = crate::agent_mind::agents_root();
+            let skill_ids: Vec<String> = if let Some(ref r) = recipe {
+                r.skills.clone()
+            } else {
+                let (skills, _) = crate::agent_mind::skills::read_skills(&root.join(aid).join("skills"));
+                skills
+                    .iter()
+                    .filter(|s| s.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+                    .filter_map(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            };
+            crate::agent_mind::skills::record_skills_used_at(&root, aid, &skill_ids, None);
+        }
         let is_session_warm_or_has_handle = {
             let manager = session_manager().lock().unwrap();
             manager
@@ -244,7 +340,14 @@ pub fn launch_provider(
         } else {
             assemble_thread_context(&thread_clone, &prompt)
         };
-        match build_spawn(&provider, &mode, &values, effort.as_deref(), &effective_prompt) {
+        match build_spawn_with_instructions(
+            &provider,
+            &mode,
+            &values,
+            effort.as_deref(),
+            &effective_prompt,
+            compiled_instructions.as_deref(),
+        ) {
             Ok(plan) => {
                 chat_log(&format!(
                     "spawn: provider={}, endpoint={}, connection={}",
@@ -252,19 +355,31 @@ pub fn launch_provider(
                     plan.endpoint.verified_endpoint(),
                     plan.connection_id.as_deref().unwrap_or("none"),
                 ));
-                let mut dispatch_env = build_thread_dispatch_env(
+                let agent_profile = profile_id.as_deref().and_then(|aid| {
+                    crate::persist::agents()
+                        .lock()
+                        .ok()
+                        .and_then(|list| list.iter().find(|a| a.id == aid).cloned())
+                });
+                let ctx_disabled = agent_profile
+                    .as_ref()
+                    .is_some_and(|a| crate::plugins::is_plugin_disabled(&a.disabled_plugin_ids, "kite-ctx"));
+                let mut dispatch_env = build_thread_dispatch_env_for_agent(
                     &thread_id,
                     workspace_id.as_deref(),
                     Some(&plan.program),
+                    agent_profile.as_ref(),
                 );
-                append_context_engine_env(
-                    &mut dispatch_env,
-                    &thread_id,
-                    workspace_id.as_deref(),
-                    resolved_agent_name.as_deref(),
-                    Some(&provider),
-                    model.as_deref(),
-                );
+                if !ctx_disabled {
+                    append_context_engine_env(
+                        &mut dispatch_env,
+                        &thread_id,
+                        workspace_id.as_deref(),
+                        resolved_agent_name.as_deref(),
+                        Some(&provider),
+                        model.as_deref(),
+                    );
+                }
                 let persistent_enabled = persistent_sessions_enabled();
                 let mut fallback_notice_emitted = false;
                 if send_route(&provider, persistent_enabled) == SendRoute::Persistent {
@@ -295,6 +410,15 @@ pub fn launch_provider(
                         };
                         let cwd_for_prepare = cwd.clone();
                         let recipe_for_prepare = recipe.clone();
+                        let effective_managed_prompt = if first_session {
+                            if let Some(ref inst) = compiled_instructions {
+                                format_instruction_envelope(inst, &prompt)
+                            } else {
+                                prompt.clone()
+                            }
+                        } else {
+                            prompt.clone()
+                        };
                         let outcome = {
                             match select_persistent_transport(&provider, controls) {
                                 Ok(selected) => {
@@ -308,9 +432,9 @@ pub fn launch_provider(
                                         spec,
                                         selected.transport,
                                         &run_id,
-                                        &prompt,
+                                        &effective_managed_prompt,
                                         move || {
-                                            if !first_session {
+                                            if !first_session || is_attached_workspace {
                                                 return Ok(());
                                             }
                                             apply_agent_recipe(
@@ -387,16 +511,18 @@ pub fn launch_provider(
                         emit_notice_item(&thread_id, &run_id, &notice);
                     }
                 }
-                if let Err(reason) = apply_agent_recipe(&cwd, recipe.as_ref()) {
-                    emit_notice_item(
-                        &thread_id,
-                        &run_id,
-                        &format!(
-                            "The agent recipe could not be written before {provider} started: {reason} Your message is still in the thread."
-                        ),
-                    );
-                    finish_run(&run_id, false, false, &reason);
-                    return;
+                if !is_attached_workspace {
+                    if let Err(reason) = apply_agent_recipe(&cwd, recipe.as_ref()) {
+                        emit_notice_item(
+                            &thread_id,
+                            &run_id,
+                            &format!(
+                                "The agent recipe could not be written before {provider} started: {reason} Your message is still in the thread."
+                            ),
+                        );
+                        finish_run(&run_id, false, false, &reason);
+                        return;
+                    }
                 }
                 let args_refs: Vec<&str> = plan.args.iter().map(|s| s.as_str()).collect();
                 match crate::hidden_exec::spawn_streaming_with_owned_env(
@@ -629,6 +755,19 @@ pub struct SpawnPlan {
     pub connection_id: Option<String>,
 }
 
+/// Formats a structured context envelope for non-destructive agent instruction injection
+/// into providers that do not accept system prompt CLI flags.
+pub fn format_instruction_envelope(instructions: &str, prompt: &str) -> String {
+    let trimmed = instructions.trim();
+    if trimmed.is_empty() {
+        return prompt.to_string();
+    }
+    format!(
+        "--- Agent Instructions & Context ---\n{}\n--- End Agent Instructions ---\n\n{}",
+        trimmed, prompt
+    )
+}
+
 /// Builds the argument vector for one spawn endpoint. Program lookup is left to
 /// `build_spawn`, so argument rules are testable without an installed CLI.
 pub fn spawn_args(
@@ -638,6 +777,19 @@ pub fn spawn_args(
     effort: Option<&str>,
     prompt: &str,
 ) -> Result<SpawnArgs, String> {
+    spawn_args_with_instructions(provider, mode, values, effort, prompt, None)
+}
+
+/// Builds the argument vector for one spawn endpoint, optionally injecting compiled agent instructions
+/// non-destructively through provider-native CLI flags or structured envelope.
+pub fn spawn_args_with_instructions(
+    provider: &str,
+    mode: &str,
+    values: &SendValues<'_>,
+    effort: Option<&str>,
+    prompt: &str,
+    instructions: Option<&str>,
+) -> Result<SpawnArgs, String> {
     let resolved = resolve_send(provider, values)?;
     let prompt = clip_argv(prompt);
     let read_only = mode == "readOnly";
@@ -645,6 +797,15 @@ pub fn spawn_args(
         format!("Read-only mode: do not create, edit, or delete files.\n\n{prompt}")
     } else {
         prompt
+    };
+    let sent = if let Some(inst) = instructions.filter(|s| !s.trim().is_empty()) {
+        if !crate::dispatch::programs::accepts_system_prompt(provider) {
+            clip_argv(&format_instruction_envelope(inst, &sent))
+        } else {
+            sent
+        }
+    } else {
+        sent
     };
     let args = match provider {
         "antigravity" | "agy" => {
@@ -696,6 +857,11 @@ pub fn spawn_args(
                 args.push("--model".into());
                 args.push(model.into());
             }
+            if let Some(inst) = instructions.filter(|s| !s.trim().is_empty()) {
+                let sanitized = crate::terminal::launcher::sanitize_cli_system_prompt(inst);
+                args.push("--append-system-prompt".into());
+                args.push(clip_argv(&sanitized));
+            }
             args.push(sent);
             args
         }
@@ -742,6 +908,11 @@ pub fn spawn_args(
             if let Some(effort) = effort.map(str::trim).filter(|level| !level.is_empty()) {
                 args.push("--effort".into());
                 args.push(effort.into());
+            }
+            if let Some(inst) = instructions.filter(|s| !s.trim().is_empty()) {
+                let sanitized = crate::terminal::launcher::sanitize_cli_system_prompt(inst);
+                args.push("--system-prompt-override".into());
+                args.push(clip_argv(&sanitized));
             }
             args
         }
@@ -849,7 +1020,18 @@ pub fn build_spawn(
     effort: Option<&str>,
     prompt: &str,
 ) -> Result<SpawnPlan, String> {
-    let spawn = spawn_args(provider, mode, values, effort, prompt)?;
+    build_spawn_with_instructions(provider, mode, values, effort, prompt, None)
+}
+
+pub fn build_spawn_with_instructions(
+    provider: &str,
+    mode: &str,
+    values: &SendValues<'_>,
+    effort: Option<&str>,
+    prompt: &str,
+    instructions: Option<&str>,
+) -> Result<SpawnPlan, String> {
+    let spawn = spawn_args_with_instructions(provider, mode, values, effort, prompt, instructions)?;
     let program = resolve_spawn_program(provider)?;
     Ok(SpawnPlan {
         endpoint: spawn.endpoint,
@@ -857,4 +1039,70 @@ pub fn build_spawn(
         args: spawn.args,
         connection_id: values.connection_id.filter(|id| !id.is_empty()).map(str::to_string),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_profile(disabled: Vec<&str>) -> crate::persist::AgentProfile {
+        crate::persist::AgentProfile {
+            id: "agent-perm-test".to_string(),
+            name: "PermTester".to_string(),
+            engine: "codex".to_string(),
+            purpose: "Testing".to_string(),
+            brief: "Test".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(4_000),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(false),
+            allow_agent_messaging: Some(true),
+            default_mode: None,
+            default_plan: None,
+            default_model: None,
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: disabled.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn build_thread_dispatch_env_for_agent_injects_permissions_and_strips_disabled_plugins() {
+        let profile = test_profile(vec!["kite-dispatch", "kite-ctx"]);
+        let mut env = build_thread_dispatch_env_for_agent(
+            "th-perm-1",
+            Some("ws-1"),
+            None,
+            Some(&profile),
+        );
+        append_context_engine_env(&mut env, "th-perm-1", Some("ws-1"), Some("PermTester"), Some("codex"), None);
+        apply_agent_permissions_to_env(&mut env, &profile);
+
+        let get_env = |key: &str| -> Option<String> {
+            env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+        };
+        assert_eq!(get_env("KITE_AGENT_ID").as_deref(), Some("agent-perm-test"));
+        assert_eq!(get_env("KITE_ALLOW_SCHEDULING").as_deref(), Some("false"));
+        assert_eq!(get_env("KITE_ALLOW_MESSAGING").as_deref(), Some("true"));
+        assert_eq!(
+            get_env("KITE_DISABLED_PLUGINS").as_deref(),
+            Some("kite-dispatch,kite-ctx")
+        );
+        assert_eq!(get_env("KITE_DISPATCH"), None, "kite-dispatch must be omitted when disabled");
+        assert_eq!(get_env("KITE_SKILL_FILE"), None, "KITE_SKILL_FILE must be omitted when disabled");
+        assert_eq!(get_env("KITE_SESSION_ID"), None, "kite-ctx env must be omitted when disabled");
+        assert_eq!(get_env("KITE_PROJECT"), None, "kite-ctx env must be omitted when disabled");
+
+        let enabled_profile = test_profile(vec![]);
+        let env_ok = build_thread_dispatch_env_for_agent(
+            "th-perm-2",
+            Some("ws-1"),
+            None,
+            Some(&enabled_profile),
+        );
+        assert!(env_ok.iter().any(|(k, v)| k == "KITE_DISPATCH" && v == "1"));
+    }
 }

@@ -287,7 +287,8 @@ export async function run(ctx) {
     { timeout: 25_000 },
   );
 
-  const swarmInspectBtn = page.locator('button.chat-swarm-card').first();
+  const swarmInspectBtn = page.locator('button.chat-swarm-card').last();
+  await swarmInspectBtn.scrollIntoViewIfNeeded();
   await assertVisibleAndClickableRect(swarmInspectBtn, 'Swarm card Inspect Board button');
   await swarmInspectBtn.click();
 

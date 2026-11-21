@@ -11,6 +11,10 @@
   pointer-events: auto;
 }
 
+.app-intro[aria-busy="false"] {
+  pointer-events: none;
+}
+
 .app-intro__panel {
   display: flex;
   flex-direction: column;

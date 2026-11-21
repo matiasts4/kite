@@ -41,7 +41,7 @@ export async function waitForBootCoverCleared(page, timeoutMs = 15_000) {
           style.display !== 'none' &&
           style.visibility !== 'hidden' &&
           style.pointerEvents !== 'none' &&
-          parseFloat(style.opacity || '1') > 0.05
+          parseFloat(style.opacity || '1') > 0
         ) {
           return false;
         }

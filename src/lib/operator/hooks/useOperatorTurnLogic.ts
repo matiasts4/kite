@@ -149,9 +149,12 @@ export function buildPriorTurnMessages(
   for (const trace of chronological) {
     const turnInput = (trace.input || '').trim();
     if (!turnInput) continue;
+    // Skip discarded microphone / STT failure synthetic traces so they never pollute LLM history.
+    if (turnInput.startsWith('[captura de voz descartada')) continue;
 
     const reply = (trace.reply || '').trim();
     if (turnInput === currentInput && !reply) continue;
+    if (trace.overallSuccess === false && !reply) continue;
 
     messages.push({ role: 'user', content: trace.input });
     if (reply) {

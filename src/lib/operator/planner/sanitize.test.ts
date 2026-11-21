@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detectPromptEcho, sanitizeReply, isPredominantlyEnglish } from './sanitize';
+import { buildOperatorSystemPrompt } from './prompt';
 import { ActionSchema, PlanSchema } from '../contract';
 
 describe('Sanitize & Contract Tests', () => {
@@ -14,6 +15,22 @@ describe('Sanitize & Contract Tests', () => {
     it('returns false for normal conversational Spanish responses', () => {
       expect(detectPromptEcho('Abriendo 2 terminales con Grok para ejecutar los test.')).toBe(false);
       expect(detectPromptEcho('Todas las terminales han sido cerradas correctamente.')).toBe(false);
+    });
+
+    it('never rejects conversational Spanish greetings when checked against buildOperatorSystemPrompt()', () => {
+      const systemPrompt = buildOperatorSystemPrompt();
+      expect(
+        detectPromptEcho(
+          '¡Hola! Estoy listo para gestionar tus terminales y agentes. ¿Qué necesitas hacer?',
+          systemPrompt
+        )
+      ).toBe(false);
+      expect(
+        detectPromptEcho(
+          'REGLAS CRÍTICAS: Responde SIEMPRE con un ÚNICO objeto JSON válido.',
+          systemPrompt
+        )
+      ).toBe(true);
     });
   });
 

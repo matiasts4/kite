@@ -1,5 +1,9 @@
 import React from 'react';
 import { openDiffsInRightDock } from '../../../lib/diffPreviewNav';
+import {
+  buildTranscriptScrollKeys,
+  useTranscriptLiveEdge,
+} from '../../../motion/useTranscriptMotion';
 import type { ChatItem, SubagentRun } from '../../../types';
 import { ChangedFilesCard } from '../chat/ChangedFilesCard';
 import { ChatApprovalCard } from '../chat/ChatApprovalCard';
@@ -76,6 +80,32 @@ export const SubagentStepStream: React.FC<SubagentStepStreamProps> = ({
   const liveWorkIdx = activeRunRunning ? liveActivityRowIndex(groupedRows) : -1;
   const enterFor = (id: string) => !reduceMotion && !seenStepIdsRef.current.has(id);
   const changedFiles = React.useMemo(() => changedFilesForTurn(visibleSteps), [visibleSteps]);
+  const streamScrollKeys = React.useMemo(
+    () =>
+      buildTranscriptScrollKeys(
+        visibleSteps,
+        `${normalizedStatus}:${activeRunRunning ? 1 : 0}:${briefExpanded ? 1 : 0}:${changedFiles.length}:${childApproval?.id ?? ''}`,
+      ),
+    [
+      visibleSteps,
+      normalizedStatus,
+      activeRunRunning,
+      briefExpanded,
+      changedFiles.length,
+      childApproval?.id,
+    ],
+  );
+  const { handleScroll: handleStreamScroll, scrollToBottom } = useTranscriptLiveEdge(
+    streamRef,
+    `${parentThreadId}:${activeRun.subagentId}`,
+    atBottomRef,
+    {
+      contentKey: streamScrollKeys.contentKey,
+      edgeThresholdPx: 28,
+      overflowPauseMinPx: 32,
+      onPauseChange: onSetAutoScrollPaused,
+    },
+  );
   const activityItems = React.useMemo<ChatItem[]>(() => {
     if (visibleSteps.some((item) => item.kind === 'user')) {
       return visibleSteps;
@@ -117,12 +147,7 @@ export const SubagentStepStream: React.FC<SubagentStepStreamProps> = ({
         <div
           ref={streamRef}
           className="chat-transcript subagent-inspector__stream"
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
-            atBottomRef.current = nearBottom;
-            onSetAutoScrollPaused(!nearBottom);
-          }}
+          onScroll={handleStreamScroll}
         >
           <div
             className="chat-transcript__column subagent-inspector__transcript-column"
@@ -264,15 +289,9 @@ export const SubagentStepStream: React.FC<SubagentStepStreamProps> = ({
           <button
             type="button"
             className="subagent-inspector__jump-latest"
-            onClick={() => {
-              atBottomRef.current = true;
-              onSetAutoScrollPaused(false);
-              if (streamRef.current) {
-                streamRef.current.scrollTop = streamRef.current.scrollHeight;
-              }
-            }}
+            onClick={scrollToBottom}
           >
-            Jump to latest
+            ↓ Jump to latest
           </button>
         )}
       </div>

@@ -212,4 +212,24 @@ describe('ThreadTurnRail', () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]?.assistantPreview).toBe('Read 1 file');
   });
+
+  it('renders turn-rail hover preview card with an opaque solid surface and no glass-overlay translucency', async () => {
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const chatRailCss = fs.readFileSync('src/components/views/chat/styles/chat-rail.css', 'utf8');
+    const visualLangCss = fs.readFileSync('src/visual-language.css', 'utf8');
+
+    const cardBlock = chatRailCss.match(/\.chat-turn-rail__card\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(cardBlock).toContain('var(--menu-plate');
+    expect(cardBlock).not.toContain('var(--glass-overlay-bg');
+    expect(cardBlock).toContain('backdrop-filter: none;');
+
+    const glassCardBlock =
+      visualLangCss.match(
+        /html\[data-surface-glass='true'\] body\.kite-app \.chat-turn-rail__card\s*\{[^}]*\}/,
+      )?.[0] ?? '';
+    expect(glassCardBlock).not.toContain('var(--glass-overlay-bg');
+  });
 });

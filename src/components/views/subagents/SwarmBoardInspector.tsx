@@ -201,21 +201,28 @@ export const SwarmBoardInspector: React.FC<SwarmBoardInspectorProps> = ({
     <div className="swarm-board" data-testid="swarm-board-inspector">
       <div className="swarm-board__overview">
         <div className="swarm-board__title-row">
-          <span className="swarm-board__title">{swarmState.title || 'Swarm Board'}</span>
+          <div className="swarm-board__title-meta">
+            <span className="swarm-board__title">{swarmState.title || 'Swarm Board'}</span>
+            <span className="subagent-badge subagent-badge--hierarchy">
+              Coordinator: {parentModelLabel}
+            </span>
+          </div>
           <span className="subagent-badge">
             {members.length} {members.length === 1 ? 'worker' : 'workers'}
           </span>
         </div>
-        <div className="swarm-board__models-row">
-          <span className="subagent-badge subagent-badge--hierarchy">
-            Coordinator: {parentModelLabel}
-          </span>
-          {members.slice(0, 4).map((member) => (
-            <span key={member.name} className="subagent-badge">
-              @{member.name}: {formatInspectorModelName(member.model, member.provider)}
-            </span>
-          ))}
-        </div>
+        {members.length > 0 && (
+          <div className="swarm-board__models-row">
+            {members.slice(0, 3).map((member) => (
+              <span key={member.name} className="subagent-badge">
+                @{member.name}: {formatInspectorModelName(member.model, member.provider)}
+              </span>
+            ))}
+            {members.length > 3 && (
+              <span className="subagent-badge">+{members.length - 3} more</span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="swarm-board__subtabs" role="tablist" aria-label="Swarm views">

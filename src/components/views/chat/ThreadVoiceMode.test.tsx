@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ChatComposer } from './ChatComposer';
+import { ChatItemRow } from './ChatItemRow';
 import { liveVoiceStageItem, mergeTimeline, voiceTurnsToChatItems } from './voiceTranscript';
 import { ZedStripHost } from '../../ZedStrip';
 import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
@@ -25,17 +26,23 @@ vi.mock('../../../lib/ipc', async (importOriginal) => {
   };
 });
 
-vi.mock('../../../lib/operator/operatorConfig', () => ({
-  loadOperatorConfig: () => ({
-    activeProvider: 'grok',
-    ttsEngine: 'elevenlabs',
-    persona: {
-      name: 'Zed',
-      voice: 'Ara',
-      language: 'es',
-    },
-  }),
-}));
+vi.mock('../../../lib/operator/operatorConfig', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../lib/operator/operatorConfig')>();
+  return {
+    ...actual,
+    loadOperatorConfig: () => ({
+      ...actual.DEFAULT_OPERATOR_CONFIG,
+      activeProvider: 'grok',
+      ttsEngine: 'elevenlabs',
+      persona: {
+        ...actual.DEFAULT_ZED_PERSONA,
+        name: 'Zed',
+        voice: 'Ara',
+        language: 'es',
+      },
+    }),
+  };
+});
 
 describe('Thread Voice Mode — Integration & Surface Tests', () => {
   beforeEach(() => {
@@ -83,8 +90,10 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
     expect(voiceSessionStore.getSnapshot().phase).toBe('active');
     expect(voiceSessionStore.getSnapshot().boundThreadId).toBe('thread-test-vm');
 
-    // Locked assistant badge from VoiceModeFooterBar is displayed
-    expect(screen.getByTestId('voice-locked-assistant-badge')).toBeInTheDocument();
+    // Live voice status from VoiceModeFooterBar is displayed without Zed/model pills
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Escuchando en vivo');
+    expect(screen.queryByTestId('voice-locked-assistant-badge')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('voice-engine-badge')).not.toBeInTheDocument();
     // Normal model picker popover is hidden
     expect(screen.queryByTestId('model-picker-trigger')).not.toBeInTheDocument();
   });
@@ -157,6 +166,7 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
 
     expect(items.map((item) => item.kind)).toEqual(['user', 'tool', 'tool', 'tool', 'assistant']);
     expect(items[0].text).toBe('Abrime dos terminales con Grok');
+    expect(items[0].inputSource).toBe('voice');
     expect(items[1].title).toBe('Leyó el chat «Configuracion de auth»');
     expect(items[2]).toMatchObject({ title: '2 terminales con Grok abiertas', status: 'completed' });
     expect(items[3]).toMatchObject({ title: 'Hilo con Claude para auth', status: 'failed' });
@@ -237,5 +247,113 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
       voiceSessionStore.setActiveSurface('orb');
     });
     expect(zedCard).not.toHaveStyle({ display: 'none' });
+  });
+
+  it('renders a subtle voice badge only on spoken user messages (S4)', () => {
+    const items = voiceTurnsToChatItems([
+      {
+        turnId: 'vt-spoken',
+        userPrompt: 'Abrí una terminal',
+        source: 'voz',
+        createdAt: 1000,
+      },
+      {
+        turnId: 'vt-typed',
+        userPrompt: 'Listo por texto',
+        source: 'texto',
+        createdAt: 2000,
+      },
+    ]);
+
+    const { rerender } = render(<ChatItemRow item={items[0]} />);
+    expect(screen.getByLabelText('Mensaje por voz')).toHaveTextContent('Voz');
+
+    rerender(<ChatItemRow item={items[1]} />);
+    expect(screen.queryByLabelText('Mensaje por voz')).not.toBeInTheDocument();
+  });
+
+  it('builds thread-scoped conversation history without cross-thread leakage or discarded captures (S10)', () => {
+    voiceSessionStore.clearThreadVoiceTurns('thread-hist-a');
+    voiceSessionStore.clearThreadVoiceTurns('thread-hist-b');
+
+    voiceSessionStore.addThreadVoiceTurn('thread-hist-a', {
+      turnId: 'h-1',
+      userPrompt: 'Queremos armar notificaciones',
+      source: 'voz',
+      reply: 'Perfecto, ¿delegamos el ODD a un hilo con AntiGravity?',
+      createdAt: 1000,
+    });
+    voiceSessionStore.addThreadVoiceTurn('thread-hist-a', {
+      turnId: 'h-discard',
+      userPrompt: '[captura de voz descartada: silencio]',
+      source: 'voz',
+      createdAt: 1500,
+    });
+    voiceSessionStore.addThreadVoiceTurn('thread-hist-b', {
+      turnId: 'h-other',
+      userPrompt: 'Otro hilo distinto',
+      source: 'voz',
+      reply: 'Respuesta de otro hilo',
+      createdAt: 2000,
+    });
+
+    const historyA = voiceSessionStore.getConversationHistory('thread-hist-a');
+    expect(historyA).toEqual([
+      { role: 'user', content: 'Queremos armar notificaciones' },
+      { role: 'assistant', content: 'Perfecto, ¿delegamos el ODD a un hilo con AntiGravity?' },
+    ]);
+  });
+
+  it('projects delegated thread, subagent, and autonomous agent receipts with rich metadata (S4, S10)', () => {
+    const items = voiceTurnsToChatItems([
+      {
+        turnId: 'vt-del-1',
+        userPrompt: 'Delega el ODD a un subagente y al agente Security auditor',
+        source: 'voz',
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'spawn_subagent',
+            ok: true,
+            summaryEs: 'Subagente «ODD Planner» con Antigravity con enfoque ODD iniciado.',
+            durationMs: 120,
+            data: { role: 'ODD Planner', provider: 'antigravity', oddMode: true, threadId: 'sub-thread-101' },
+          },
+          {
+            actionIdx: 1,
+            type: 'launch_agent',
+            ok: true,
+            summaryEs: 'Delegué la tarea al agente Security auditor (claude) con enfoque ODD.',
+            durationMs: 95,
+            data: { agentName: 'Security auditor', provider: 'claude', oddMode: true, threadId: 'agent-thread-202' },
+          },
+        ],
+        reply: 'Listo, ambos están trabajando en segundo plano.',
+        createdAt: 3000,
+      },
+    ]);
+
+    const toolItems = items.filter((i) => i.kind === 'tool');
+    expect(toolItems).toHaveLength(2);
+    expect(toolItems[0].detail).toBe('Subagente · ODD Planner · antigravity · ODD · 120 ms');
+    expect(toolItems[0].delegatedThreadId).toBe('sub-thread-101');
+    expect(toolItems[1].detail).toBe('Agente · Security auditor · claude · ODD · 95 ms');
+    expect(toolItems[1].delegatedThreadId).toBe('agent-thread-202');
+
+    // Verify clicking a delegated receipt row opens the delegated thread via kite:select-thread
+    const selected: unknown[] = [];
+    const onSelect = (e: Event) => selected.push((e as CustomEvent).detail);
+    window.addEventListener('kite:select-thread', onSelect);
+
+    const { rerender } = render(<ChatItemRow item={toolItems[0]} />);
+    fireEvent.click(screen.getByRole('button', { name: /Abrir hilo/i }));
+    rerender(<ChatItemRow item={toolItems[1]} />);
+    fireEvent.click(screen.getByRole('button', { name: /Abrir agente/i }));
+
+    window.removeEventListener('kite:select-thread', onSelect);
+    expect(selected).toEqual([
+      { threadId: 'sub-thread-101', mode: 'chat' },
+      { threadId: 'agent-thread-202', mode: 'agents' },
+    ]);
   });
 });

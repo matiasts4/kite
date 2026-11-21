@@ -46,6 +46,8 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
   const [purpose, setPurpose] = useState('');
   const [engine, setEngine] = useState('antigravity');
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [defaultMode, setDefaultMode] = useState<string | null>(null);
+  const [effort, setEffort] = useState<string | null>(null);
   const [liveModels, setLiveModels] = useState<ModelOption[]>([]);
   const [modelsNote, setModelsNote] = useState<string | null>(null);
   const [catalogKind, setCatalogKind] = useState<CatalogEmptyKind>('loading');
@@ -157,6 +159,8 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
         purpose: purpose.trim(),
         avatar,
         defaultModel,
+        defaultMode,
+        effort,
         confirmedByBuilder: true,
       });
       onCreated(created);
@@ -262,6 +266,10 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
         name: stage.draft.name,
         brief: stage.draft.brief,
         engine,
+        avatar,
+        defaultModel,
+        defaultMode,
+        effort,
         confirmedByBuilder: true,
       });
       stageRef.current = null;
@@ -527,6 +535,58 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
                   onSelect={(id) => setDefaultModel(id === AUTOMATIC_MODEL_ID ? null : id)}
                 />
                 {modelsNote ? <p className="form-field__hint">{modelsNote}</p> : null}
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="agent-mode">Default mode</label>
+                <SelectMenu
+                  variant="field"
+                  label="Default mode"
+                  value={defaultMode || 'default'}
+                  triggerLabel={
+                    defaultMode === 'readOnly'
+                      ? 'Read only'
+                      : defaultMode === 'acceptEdits'
+                        ? 'Ask / Accept edits'
+                        : defaultMode === 'fullAccess'
+                          ? 'Full access'
+                          : 'Automatic'
+                  }
+                  disabled={creating}
+                  rows={[
+                    { id: 'default', title: 'Automatic', detail: 'Use workspace default permission mode.' },
+                    { id: 'readOnly', title: 'Read only', detail: 'Inspect and answer without editing files.' },
+                    { id: 'acceptEdits', title: 'Ask / Accept edits', detail: 'Apply edits with standard approvals.' },
+                    { id: 'fullAccess', title: 'Full access', detail: 'Run tools and commands autonomously.' },
+                  ]}
+                  onSelect={(id) => setDefaultMode(id === 'default' ? null : id)}
+                />
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="agent-effort">Reasoning effort</label>
+                <SelectMenu
+                  variant="field"
+                  label="Reasoning effort"
+                  value={effort || 'default'}
+                  triggerLabel={
+                    effort === 'low'
+                      ? 'Low'
+                      : effort === 'medium'
+                        ? 'Medium'
+                        : effort === 'high'
+                          ? 'High'
+                          : 'Automatic'
+                  }
+                  disabled={creating}
+                  rows={[
+                    { id: 'default', title: 'Automatic', detail: 'Let the provider choose.' },
+                    { id: 'low', title: 'Low', detail: 'Quick responses with focused reasoning.' },
+                    { id: 'medium', title: 'Medium', detail: 'Balanced reasoning for everyday tasks.' },
+                    { id: 'high', title: 'High', detail: 'Deep reasoning and thorough analysis.' },
+                  ]}
+                  onSelect={(id) => setEffort(id === 'default' ? null : id)}
+                />
               </div>
 
               <div className="form-field">

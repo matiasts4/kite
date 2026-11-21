@@ -54,7 +54,9 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     expect(screen.getByText(/grok-3-mini/i)).toBeInTheDocument();
     expect(screen.getByText(/branch/i)).toBeInTheDocument();
     expect(container.querySelector('[data-testid="subagent-role-icon"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="agent-orbit-spinner"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="agent-status-indicator"][data-status="running"]')
+    ).not.toBeNull();
     expect(container.querySelector('.live-tool-shine')?.textContent).toContain(
       'Reading src-tauri/src/chat/threads.rs',
     );
@@ -418,5 +420,28 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('uses higher-density translucent card tokens for subagent cards in both main chat and RightDock sidebar', async () => {
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const chatSubagentsCss = fs.readFileSync('src/components/views/chat/styles/chat-subagents.css', 'utf8');
+    const inspectorCss = fs.readFileSync('src/components/views/subagents/inspector.css', 'utf8');
+    const visualLangCss = fs.readFileSync('src/visual-language.css', 'utf8');
+
+    const chatCardBlock = chatSubagentsCss.match(/\.chat-subagent-card\s*\{[^}]*\}/)?.[0] ?? '';
+    const chatCardHoverBlock =
+      chatSubagentsCss.match(/\.chat-subagent-card:hover:not\(\.chat-subagent-card--static\)\s*\{[^}]*\}/)?.[0] ?? '';
+    const sidebarCardBlock = inspectorCss.match(/\.subagent-run-card\s*\{[^}]*\}/)?.[0] ?? '';
+    const sidebarCardHoverBlock = inspectorCss.match(/\.subagent-run-card:hover\s*\{[^}]*\}/)?.[0] ?? '';
+
+    expect(chatCardBlock).toContain('var(--glass-subagent-card-bg');
+    expect(chatCardHoverBlock).toContain('var(--glass-subagent-card-hover-bg');
+    expect(sidebarCardBlock).toContain('var(--glass-subagent-card-bg');
+    expect(sidebarCardHoverBlock).toContain('var(--glass-subagent-card-hover-bg');
+    expect(visualLangCss).toContain('--glass-subagent-card-bg:');
+    expect(visualLangCss).toContain('--glass-subagent-card-hover-bg:');
   });
 });

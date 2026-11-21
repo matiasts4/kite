@@ -38,8 +38,6 @@ export interface KiteDiffViewProps {
   expandUnchanged?: boolean;
 }
 
-ensureReadableLightDiffTheme();
-
 /**
  * Shared Kite diff surface powered by `@pierre/diffs`: renders a single
  * line-number gutter in unified mode, WASM syntax highlighting, intra-line
@@ -63,6 +61,8 @@ export const KiteDiffView: React.FC<KiteDiffViewProps> = ({
   emptyMessage = 'No text diff available for this file.',
   expandUnchanged = false,
 }) => {
+  ensureReadableLightDiffTheme();
+
   const themeState = useKiteThemeVisualState();
   const diffThemes = useMemo(
     () => resolveKiteDiffThemes(themeState.darkThemeId, themeState.lightThemeId),

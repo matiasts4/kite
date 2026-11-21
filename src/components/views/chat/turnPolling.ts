@@ -1,7 +1,7 @@
 import type React from 'react';
 import type { ChatItem } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
-import { ExtendedChatThread } from './types';
+import { ExtendedChatThread, ReflectionCandidate } from './types';
 import { isInternalDispatchItem } from './chatItemHelpers';
 import { withTimeout } from './chatSessionUtils';
 import { playApprovalChime } from '../../../lib/notifications/audioCues';
@@ -96,7 +96,7 @@ export async function pollTurnUpdates({
       error?: string;
       events: Array<{
         sequence: number;
-        kind: 'status' | 'upsert' | 'delta' | 'remove' | 'finished' | 'approvalOpened' | 'approvalResolved';
+        kind: 'status' | 'upsert' | 'delta' | 'remove' | 'finished' | 'approvalOpened' | 'approvalResolved' | 'reflectionCandidate';
         status?: 'idle' | 'running' | 'waiting' | 'error';
         item?: ChatItem;
         itemId?: string;
@@ -105,6 +105,7 @@ export async function pollTurnUpdates({
         stoppedByBuilder?: boolean;
         approval?: any;
         requestId?: string;
+        candidate?: ReflectionCandidate;
       }>;
     }>(
       agentId ? 'read_agent_chat_turn_updates' : 'read_chat_turn_updates',
@@ -156,12 +157,16 @@ export async function pollTurnUpdates({
           let items = [...target.items];
           let status = target.status;
           let pendingApproval = target.pendingApproval;
+          let reflectionCandidate = target.reflectionCandidate;
           let stoppedByBuilder = Boolean(target.stoppedByBuilder);
 
           for (const ev of events) {
             if (ev.kind === 'status' && ev.status) {
               status = ev.status;
-              if (ev.status === 'running') stoppedByBuilder = false;
+              if (ev.status === 'running') {
+                stoppedByBuilder = false;
+                reflectionCandidate = null;
+              }
               if (ev.status === 'idle' || ev.status === 'error') {
                 items = settleInFlightItems(
                   items,
@@ -240,6 +245,8 @@ export async function pollTurnUpdates({
               playApprovalChime();
             } else if (ev.kind === 'approvalResolved') {
               pendingApproval = null;
+            } else if (ev.kind === 'reflectionCandidate' && ev.candidate) {
+              reflectionCandidate = ev.candidate;
             } else if (ev.kind === 'finished') {
               status = ev.ok === false ? 'error' : 'idle';
               stoppedByBuilder = Boolean(ev.stoppedByBuilder);
@@ -269,6 +276,7 @@ export async function pollTurnUpdates({
               items,
               status,
               pendingApproval,
+              reflectionCandidate,
               stoppedByBuilder,
             },
           };
@@ -307,7 +315,7 @@ export async function pollTurnUpdates({
               consecutiveErrors: 0,
             });
           }
-        }, hasMore ? 0 : 400);
+        }, hasMore ? 0 : 16);
       }
     } else if (res?.finished) {
       console.log(`[ChatSession] Run ${runId} finished without events. Removing poller.`);
@@ -360,7 +368,7 @@ export async function pollTurnUpdates({
             consecutiveErrors: 0,
           });
         }
-      }, 500);
+      }, 50);
     }
   } catch (err) {
     if (!isMountedRef.current || !activePollRunsRef.current.has(runId)) return;

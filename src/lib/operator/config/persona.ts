@@ -3,9 +3,113 @@ import type {
   ZedMemoryNote,
   ZedTone,
   ZedBrevity,
+  ZedFigureId,
+  ZedFigureDescriptor,
   OperatorProviderConfig,
 } from './types';
 import { legacyOperatorMemoryNotesStorageKey } from '../../kiteLegacyIds';
+
+export const ZED_FIGURE_OPTIONS: readonly ZedFigureDescriptor[] = [
+  {
+    id: 'plasma-orb',
+    label: 'Orbe Plasma',
+    blurb: 'Esfera volumétrica clásica con vidrio refractivo y plasma fluido',
+    shaderMode: 0,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'ferrofluid',
+    label: 'Ferrofluido Sólido',
+    blurb: 'Esfera líquida continua y sólida que se moldea hacia el cursor y la voz',
+    shaderMode: 1,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'frosted-sphere',
+    label: 'Vidrio Satinado',
+    blurb: 'Cristal esmerilado minimalista con foco de luz interna difusa',
+    shaderMode: 2,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'eclipse-halo',
+    label: 'Eclipse',
+    blurb: 'Núcleo oscuro sólido con corona luminosa que orienta su brillo al cursor',
+    shaderMode: 3,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'silk-wave',
+    label: 'Seda Líquida',
+    blurb: 'Esfera translúcida con velos de luz fluidos que ondulan al hablar',
+    shaderMode: 4,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'crystal-prism',
+    label: 'Gema Esculpida',
+    blurb: 'Poliedro de cristal 3D suavemente biselado con refracción óptica',
+    shaderMode: 5,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'orbital-gyro',
+    label: 'Esfera Orbital',
+    blurb: 'Núcleo sólido de vidrio rodeado por dos anillos 3D inclinables',
+    shaderMode: 6,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+  {
+    id: 'chromatic-pearl',
+    label: 'Perla Iridiscente',
+    blurb: 'Superficie nacarada sólida con iridiscencia física y reflejos de estudio',
+    shaderMode: 7,
+    resourceTier: 'optimized',
+    resourceLabel: 'Interactivo · Ligero',
+  },
+] as const;
+
+export type ResolvedZedFigureId = ZedFigureId;
+
+const VALID_ZED_FIGURES = new Set<ZedFigureId>(ZED_FIGURE_OPTIONS.map((item) => item.id));
+
+const LEGACY_ZED_FIGURE_MIGRATION: Record<string, ZedFigureId> = {
+  'theme-sync': 'plasma-orb',
+  'aurora-ring': 'orbital-gyro',
+  'acoustic-pulse': 'silk-wave',
+  'kite-crest': 'crystal-prism',
+  'isometric-construct': 'crystal-prism',
+  'kinetic-ring': 'orbital-gyro',
+  'orbital-constellation': 'orbital-gyro',
+  'pixel-companion': 'ferrofluid',
+  'editorial-botanical': 'frosted-sphere',
+};
+
+export function sanitizeZedFigure(figure?: string | null): ZedFigureId {
+  if (figure && VALID_ZED_FIGURES.has(figure as ZedFigureId)) {
+    return figure as ZedFigureId;
+  }
+  if (figure && figure in LEGACY_ZED_FIGURE_MIGRATION) {
+    return LEGACY_ZED_FIGURE_MIGRATION[figure];
+  }
+  return 'plasma-orb';
+}
+
+export function resolveZedFigure(figure?: ZedFigureId | null): ResolvedZedFigureId {
+  return sanitizeZedFigure(figure);
+}
+
+export function getZedFigureShaderMode(figure?: ZedFigureId | null): number {
+  const safe = sanitizeZedFigure(figure);
+  return ZED_FIGURE_OPTIONS.find((item) => item.id === safe)?.shaderMode ?? 0;
+}
 
 export const DEFAULT_ZED_PERSONA: ZedPersonaConfig = {
   name: 'Zed',
@@ -17,6 +121,7 @@ export const DEFAULT_ZED_PERSONA: ZedPersonaConfig = {
   standingInstructions: '',
   rememberBetweenCalls: true,
   afterCallMode: 'summary+decisions',
+  figure: 'plasma-orb',
 };
 
 const MEMORY_NOTES_STORAGE_KEY = 'kite.zed.memoryNotes.v1';

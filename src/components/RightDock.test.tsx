@@ -150,7 +150,7 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     expect(sibling.hasAttribute('inert')).toBe(false);
   });
 
-  it('opens and renders DiffsView when triggered via Ctrl+Alt+D shortcut', () => {
+  it('opens and renders DiffsView when triggered via Ctrl+Alt+D shortcut', async () => {
     render(
       <RightDock
         visible={true}
@@ -162,7 +162,7 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     // Trigger shortcut Ctrl+Alt+D
     fireEvent.keyDown(window, { key: 'd', ctrlKey: true, altKey: true });
 
-    expect(screen.getByTestId('mock-diffs-view')).toBeInTheDocument();
+    expect(await screen.findByTestId('mock-diffs-view')).toBeInTheDocument();
   });
 
   it('opens New tab menu, renders authentic ui-menu rows and handles selection and Escape', () => {
@@ -266,7 +266,9 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     const subagentsTab = container.querySelector('.side-panel-tab[data-kind="subagents"]');
     expect(subagentsTab).not.toBeNull();
     expect(subagentsTab?.querySelector('.side-panel-tab__count')?.textContent).toBe('3');
-    expect(subagentsTab?.querySelector('[data-testid="agent-orbit-spinner"]')).not.toBeNull();
+    expect(
+      subagentsTab?.querySelector('[data-testid="agent-status-indicator"][data-status="running"]')
+    ).not.toBeNull();
   });
 
   it('updates subagents badge dynamically on kite:subagent-activity-count and lists Subagents in New tab menu', () => {

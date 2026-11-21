@@ -49,6 +49,9 @@ describe('CustomizationsTab UI overhaul', () => {
       expect(screen.getByText(pack.name)).toBeInTheDocument();
     }
 
+    expect(document.querySelectorAll('[data-testid^="stage-backdrop"]')).toHaveLength(0);
+    expect(document.querySelectorAll('.theme-preview__backdrop').length).toBeGreaterThan(0);
+
     const auroraCard = screen.getByRole('button', { name: /Aurora Studio/i });
     await user.click(auroraCard);
     expect(onSelectTheme).toHaveBeenCalledWith('aurora-studio', 'dark');
@@ -89,6 +92,8 @@ describe('CustomizationsTab UI overhaul', () => {
       'Aurora Boreal',
       'Crepúsculo Alpino',
       'Horizonte Solar',
+      'Horizonte de Eventos',
+      'Claro de Luna',
       'Imagen personalizada',
     ]);
     await user.click(
@@ -281,5 +286,66 @@ describe('CustomizationsTab UI overhaul', () => {
     );
     expect(screen.getByRole('status')).toHaveClass('customizations-status--ok');
     expect(screen.getByRole('status')).toHaveTextContent(/Tema Warm Atelier importado/i);
+  });
+
+  it('renders the compact agent activity indicator gallery with color controls, live preview, and persistence', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <CustomizationsTab
+        mode="dark"
+        appearanceMode="dark"
+        palette="kite-dark"
+        customizations={DEFAULT_THEME_CUSTOMIZATIONS}
+        onToggleMode={vi.fn()}
+        onSelectTheme={vi.fn()}
+        onUpdateCustomizations={vi.fn()}
+        onResetThemeOverrides={vi.fn()}
+        onResetAllCustomizations={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/Indicador de actividad de agentes/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Órbita clásica/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Destello vivo/i })).not.toBeInTheDocument();
+
+    const matrixTile = screen.getByRole('button', { name: /Matriz neural/i });
+    const kiteTile = screen.getByRole('button', { name: /Cometa Kite/i });
+    const grid3x3Tile = screen.getByRole('button', { name: /Grilla 3×3/i });
+
+    expect(matrixTile).toHaveAttribute('aria-pressed', 'true');
+    expect(kiteTile).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(kiteTile);
+    expect(kiteTile).toHaveAttribute('aria-pressed', 'true');
+    expect(matrixTile).toHaveAttribute('aria-pressed', 'false');
+    expect(localStorage.getItem('kite.agentActivityIndicator')).toBe('kite-diamond');
+
+    const preview = screen.getByTestId('agent-indicator-live-preview');
+    const previewIndicators = preview.querySelectorAll('[data-testid="agent-status-indicator"]');
+    expect(previewIndicators.length).toBeGreaterThanOrEqual(3);
+    previewIndicators.forEach((node) => {
+      expect(node).toHaveAttribute('data-variant', 'kite-diamond');
+    });
+
+    await user.click(grid3x3Tile);
+    expect(grid3x3Tile).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('kite.agentActivityIndicator')).toBe('matrix-3x3');
+
+    const accentColorBtn = screen.getByRole('button', { name: /Acento del tema/i });
+    await user.click(accentColorBtn);
+    expect(accentColorBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('kite.agentActivityIndicatorColor')).toBe('accent');
+    preview.querySelectorAll('[data-testid="agent-status-indicator"]').forEach((node) => {
+      expect(node).toHaveAttribute('data-variant', 'matrix-3x3');
+      expect(node).toHaveAttribute('data-color-mode', 'accent');
+    });
+
+    const customColorInput = screen.getByLabelText(/Color personalizado del indicador/i);
+    fireEvent.change(customColorInput, { target: { value: '#22d3ee' } });
+    expect(localStorage.getItem('kite.agentActivityIndicatorColor')).toBe('#22d3ee');
+    preview.querySelectorAll('[data-testid="agent-status-indicator"]').forEach((node) => {
+      expect(node).toHaveAttribute('data-color-mode', '#22d3ee');
+    });
   });
 });

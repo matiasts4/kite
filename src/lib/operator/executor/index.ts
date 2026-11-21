@@ -17,6 +17,7 @@ import { executeHandoffToAgentAction } from './actions/handoffToAgent';
 import { executeManagePaneLayoutAction } from './actions/managePaneLayout';
 import { executeSwitchWorkspaceAction } from './actions/switchWorkspace';
 import { executeLaunchThreadAction } from './actions/launchThread';
+import { executeLaunchAgentAction } from './actions/launchAgent';
 
 export function composeReplyFromReceipts(
   plan: OperatorPlan,
@@ -35,15 +36,17 @@ export function composeReplyFromReceipts(
   const failed = receipts.filter((r) => !r.ok);
   const succeeded = receipts.filter((r) => r.ok);
 
+  const spokenText = (r: ActionReceipt) => (r.spokenSummaryEs || r.summaryEs).trim();
+
   if (failed.length === 0) {
-    return succeeded.map((r) => r.summaryEs).join(' ');
+    return succeeded.map(spokenText).join(' ');
   }
 
   if (succeeded.length === 0) {
-    return failed.map((r) => r.summaryEs).join(' ');
+    return failed.map(spokenText).join(' ');
   }
 
-  return `${succeeded.map((r) => r.summaryEs).join(' ')} Sin embargo, ${failed.map((r) => r.summaryEs).join(' ')}`;
+  return `${succeeded.map(spokenText).join(' ')} Sin embargo, ${failed.map(spokenText).join(' ')}`;
 }
 
 export async function executePlan(
@@ -95,7 +98,7 @@ export async function executePlan(
           break;
 
         case 'spawn_subagent':
-          receipt = await executeSpawnSubagentAction(action, idx);
+          receipt = await executeSpawnSubagentAction(action, idx, context);
           break;
 
         case 'stop_speaking':
@@ -116,6 +119,10 @@ export async function executePlan(
 
         case 'launch_thread':
           receipt = await executeLaunchThreadAction(action, idx, context);
+          break;
+
+        case 'launch_agent':
+          receipt = await executeLaunchAgentAction(action, idx, context);
           break;
 
         default:

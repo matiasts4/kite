@@ -34,8 +34,41 @@ export function parseSpokenSummary(raw: string): string {
   return collapseSpeech(trimmed.replace(/^```(?:json)?/i, '').replace(/```$/i, ''));
 }
 
-function collapseSpeech(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().slice(0, 700);
+const MAX_SPOKEN_SUMMARY_CHARS = 700;
+
+function collapseSpeech(text: string, maxChars = MAX_SPOKEN_SUMMARY_CHARS): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) return normalized;
+
+  const sentenceEndPattern = /[.!?…]+(?=\s|$)/g;
+  let lastBoundaryEnd = -1;
+  let firstBoundaryEnd = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = sentenceEndPattern.exec(normalized)) !== null) {
+    const endIdx = match.index + match[0].length;
+    if (firstBoundaryEnd === -1) {
+      firstBoundaryEnd = endIdx;
+    }
+    if (endIdx <= maxChars) {
+      lastBoundaryEnd = endIdx;
+    } else {
+      break;
+    }
+  }
+
+  if (lastBoundaryEnd > 0) {
+    return normalized.slice(0, lastBoundaryEnd).trim();
+  }
+
+  if (firstBoundaryEnd > 0 && firstBoundaryEnd <= Math.round(maxChars * 1.5)) {
+    return normalized.slice(0, firstBoundaryEnd).trim();
+  }
+
+  const window = normalized.slice(0, maxChars);
+  const lastSpace = window.lastIndexOf(' ');
+  const cut = lastSpace > Math.floor(maxChars * 0.5) ? window.slice(0, lastSpace) : window;
+  return `${cut.replace(/[,;:\-–—\s]+$/, '')}.`;
 }
 
 export function prepareTerminalExcerpt(buffer: string): string {
@@ -75,7 +108,7 @@ function summarizeTerminalsLocally(terminals: TerminalSummaryInput[]): string {
     }
     return `${term.label}: ${stateEs}. ${body}`;
   });
-  return parts.join(' ').slice(0, 700);
+  return collapseSpeech(parts.join(' '));
 }
 
 export async function summarizeTerminalsWithProvider(

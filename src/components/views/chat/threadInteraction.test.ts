@@ -11,10 +11,12 @@ import type { ChatItem } from '../../../types';
 import {
   applyShelfUndo,
   canSendDraft,
+  childDisplayLabel,
   dragBadge,
   fileRestoreAllowed,
   composerGoalStop,
   goalAfterStop,
+  groupActiveChildrenByParent,
   handoffChannel,
   handoffMessages,
   isFailedThread,
@@ -731,5 +733,36 @@ describe('file restore on the thread row', () => {
     );
 
     expect(screen.getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
+  });
+
+  it('merges native activeSubagents with child threads without duplicates and distinguishes generic Subagent labels', () => {
+    const map = groupActiveChildrenByParent([
+      {
+        id: 'parent-1',
+        provider: 'antigravity',
+        status: 'running',
+        activeSubagents: [
+          { subagentId: 'sub-backed', role: 'Scout', status: 'running', childThreadId: 'child-1' },
+          { subagentId: 'sub-native', role: 'Subagent', status: 'running', prompt: 'Audit router bindings' },
+          { subagentId: 'sub-done', role: 'Done', status: 'completed' },
+        ],
+      },
+      {
+        id: 'child-1',
+        title: 'Child Scout',
+        subagentRole: 'Scout',
+        parentThreadId: 'parent-1',
+        startedByAgent: true,
+        sideChat: true,
+        status: 'waiting',
+        pendingApproval: { requestId: 'apr-1' },
+      },
+    ]);
+
+    const children = map.get('parent-1') ?? [];
+    expect(children).toHaveLength(2);
+    expect(children[0]).toMatchObject({ id: 'child-1', subagentId: 'sub-backed' });
+    expect(children[1]).toMatchObject({ id: 'sub-native', subagentId: 'sub-native' });
+    expect(childDisplayLabel(children[1])).toBe('Audit router bindings');
   });
 });

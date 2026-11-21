@@ -1,5 +1,6 @@
 import { queueVisibleRows } from './composerPrimaryAction';
 import { CloseIcon, FileCodeIcon, PencilIcon } from './ChatIcons';
+import { AttachmentPreviewThumb } from './attachmentPreview';
 import { formatBytes, type ChatAttachment } from './types';
 
 export interface QueuedRunRow {
@@ -74,15 +75,12 @@ export function QueuedRunsControl({
                     const size = att.byteSize || (att as { sizeBytes?: number }).sizeBytes || 0;
                     return (
                       <span key={att.resourceId} className="queued-runs__attachment">
-                        {att.previewDataUrl ? (
-                          <img
-                            src={att.previewDataUrl}
-                            alt={name}
-                            className="queued-runs__thumb"
-                          />
-                        ) : (
-                          <FileCodeIcon size={11} />
-                        )}
+                        <AttachmentPreviewThumb
+                          attachment={att}
+                          alt={name}
+                          className="queued-runs__thumb"
+                          fallback={<FileCodeIcon size={11} />}
+                        />
                         <span className="queued-runs__attachment-name">{name}</span>
                         {size > 0 ? <small>{formatBytes(size)}</small> : null}
                       </span>

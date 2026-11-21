@@ -1,3 +1,4 @@
+import type { AgentProfile } from '../../../../types';
 import type { ChatMode, ChatProvider } from '../types';
 import {
   getSavedSelectedModel,
@@ -17,6 +18,7 @@ export interface ChatDraftConfig {
   model: string | null;
   effort: string | null;
   agent?: string | null;
+  plan?: boolean;
 }
 
 export interface ChatConfigPatch {
@@ -25,6 +27,7 @@ export interface ChatConfigPatch {
   model?: string | null;
   effort?: string | null;
   agent?: string | null;
+  plan?: boolean;
 }
 
 /** Arguments that create a thread from the draft instead of the agent engine. */
@@ -35,7 +38,18 @@ export type DraftThreadRequest = {
   model: string | null;
   effort: string | null;
   agent?: string | null;
+  plan?: boolean;
+  workspaceId?: string | null;
 };
+
+export interface CreateDraftConfigOptions {
+  defaultMode?: ChatMode | string | null;
+  defaultPlan?: boolean | string | null;
+  defaultEffort?: string | null;
+  defaultProviderOptions?: Array<{ provider?: string; effort?: string | null; [key: string]: unknown }> | null;
+  defaultModel?: string | null;
+  agentProfile?: Partial<AgentProfile> | null;
+}
 
 /**
  * A draft opens on the agent's provider with edits auto-accepted and the
@@ -44,22 +58,54 @@ export type DraftThreadRequest = {
 export function createDraftConfig(
   defaultProvider: ChatProvider,
   defaultModel: string | null = null,
-  defaultAgent: string | null = null
+  defaultAgent: string | null = null,
+  options?: CreateDraftConfigOptions | Partial<AgentProfile> | null
 ): ChatDraftConfig {
   const savedProvider = getSavedSelectedProvider();
   const provider = (savedProvider && ['claude', 'codex', 'cursor', 'grok', 'opencode', 'antigravity', 'gemini'].includes(savedProvider)
     ? (savedProvider as ChatProvider)
     : defaultProvider);
-  const savedModel = defaultModel !== null ? defaultModel : getSavedSelectedModel(provider);
+
+  const candidateModel =
+    defaultModel !== null
+      ? defaultModel
+      : (options?.defaultModel ?? (options as any)?.agentProfile?.defaultModel ?? null);
+  const savedModel = candidateModel !== null ? candidateModel : getSavedSelectedModel(provider);
   const savedAgent = defaultAgent !== null ? defaultAgent : getSavedSelectedAgent(provider);
-  const savedEffort = getSavedSelectedEffort(provider, savedModel);
+
+  const rawMode = options?.defaultMode ?? (options as any)?.agentProfile?.defaultMode;
+  const rawPlan = options?.defaultPlan ?? (options as any)?.agentProfile?.defaultPlan;
+
+  let mode: ChatMode = 'acceptEdits';
+  if (rawMode === 'fullAccess' || rawMode === 'readOnly' || rawMode === 'acceptEdits') {
+    mode = rawMode;
+  } else if (rawPlan === true || rawPlan === 'true') {
+    mode = 'readOnly';
+  }
+
+  let plan: boolean | undefined = undefined;
+  if (rawPlan !== undefined && rawPlan !== null) {
+    plan = rawPlan === true || rawPlan === 'true';
+  } else if (rawMode === 'readOnly') {
+    plan = true;
+  }
+
+  const explicitEffort =
+    options?.defaultEffort ??
+    (options as any)?.agentProfile?.defaultEffort ??
+    options?.defaultProviderOptions?.find((o: any) => o?.effort)?.effort ??
+    (options as any)?.agentProfile?.defaultProviderOptions?.find((o: any) => o?.effort)?.effort ??
+    null;
+
+  const savedEffort = explicitEffort !== null ? explicitEffort : getSavedSelectedEffort(provider, savedModel);
 
   return {
     provider,
-    mode: 'acceptEdits',
+    mode,
     model: savedModel,
     effort: savedEffort,
     ...(savedAgent !== null && savedAgent !== undefined ? { agent: savedAgent } : {}),
+    ...(plan !== undefined ? { plan } : {}),
   };
 }
 
@@ -99,9 +145,21 @@ export function applyDraftPatch(
     agent = current.agent;
   }
 
+  let mode = patch.mode ?? current.mode;
+  let plan: boolean | undefined = current.plan;
+  if (patch.plan !== undefined) {
+    plan = patch.plan;
+  } else if (current.plan !== undefined) {
+    if (patch.mode === 'readOnly') {
+      plan = true;
+    } else if (patch.mode === 'acceptEdits' || patch.mode === 'fullAccess') {
+      plan = false;
+    }
+  }
+
   return {
     provider,
-    mode: patch.mode ?? current.mode,
+    mode,
     model,
     effort: (() => {
       if (patch.effort !== undefined) {
@@ -115,6 +173,7 @@ export function applyDraftPatch(
       return current.effort;
     })(),
     ...(agent !== null && agent !== undefined ? { agent } : {}),
+    ...(plan !== undefined ? { plan } : {}),
   };
 }
 
@@ -130,5 +189,6 @@ export function draftThreadRequest(
     model: draft.model,
     effort: draft.effort,
     ...(draft.agent ? { agent: draft.agent } : {}),
+    ...(draft.plan !== undefined ? { plan: draft.plan } : {}),
   };
 }

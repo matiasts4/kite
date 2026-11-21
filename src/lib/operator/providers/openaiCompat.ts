@@ -2,7 +2,7 @@
 // Handles OpenCode Multi-Model Gateway, Vercel AI, and custom OpenAI-compatible endpoints
 // with streaming SSE deltas, native tool-call parsing, cancellation, timeouts, and safe non-streaming fallback.
 
-import { operatorHttpFetch } from '../operatorConfig';
+import { operatorHttpFetch, operatorHttpStreamFetch } from '../operatorConfig';
 import { OPERATOR_NATIVE_TOOLS } from '../contract';
 import type {
   PlannerProvider,
@@ -46,7 +46,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.temperature = options.temperature ?? 0.0;
-    this.maxTokens = options.maxTokens ?? 500;
+    this.maxTokens = options.maxTokens ?? 1400;
     this.credentialProvider = options.credentialProvider;
     this.sessionId = options.sessionId;
   }
@@ -162,7 +162,7 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
           }),
           signal,
         })
-      : operatorHttpFetch(endpoint, {
+      : operatorHttpStreamFetch(endpoint, {
           method: 'POST',
           headers: this.requestHeaders(),
           body: JSON.stringify({

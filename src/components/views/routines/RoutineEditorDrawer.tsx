@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import type { AgentProfile } from '../../../types';
-import type { RoutineItem, RoutineCadence, RoutineTriggerType } from './types';
+import type { RoutineItem, RoutineCadence, RoutineTriggerType, RoutinePermissionMode } from './types';
 import {
   Clock,
   X,
@@ -21,6 +21,7 @@ export interface RoutineEditorDrawerProps {
     agentId: string;
     cadence: RoutineCadence;
     triggerType: RoutineTriggerType;
+    permissionMode: RoutinePermissionMode;
   }) => Promise<boolean>;
   editingRoutine: RoutineItem | null;
   agents: AgentProfile[];
@@ -50,6 +51,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
   const [prompt, setPrompt] = useState('');
   const [agentId, setAgentId] = useState('');
   const [triggerType, setTriggerType] = useState<RoutineTriggerType>('schedule');
+  const [permissionMode, setPermissionMode] = useState<RoutinePermissionMode>('readOnly');
   const [presetId, setPresetId] = useState('every-hour');
   const [customCadenceKind, setCustomCadenceKind] = useState<'preset' | 'custom-interval' | 'custom-clock'>('preset');
   const [customIntervalMinutes, setCustomIntervalMinutes] = useState(60);
@@ -65,6 +67,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
       setPrompt(editingRoutine.prompt || '');
       setAgentId(editingRoutine.agentId || agents[0]?.id || '');
       setTriggerType(editingRoutine.triggerType || 'schedule');
+      setPermissionMode(editingRoutine.permissionMode || 'readOnly');
 
       // Detect cadence matching
       const found = CANONICAL_CADENCE_PRESETS.find((p) => {
@@ -99,6 +102,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
       setPrompt('');
       setAgentId(agents[0]?.id || '');
       setTriggerType('schedule');
+      setPermissionMode('readOnly');
       setPresetId('every-hour');
       setCustomCadenceKind('preset');
       setCustomIntervalMinutes(60);
@@ -168,6 +172,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
         agentId: agentId || selectedAgent?.id,
         cadence: resolvedCadence,
         triggerType,
+        permissionMode,
       });
       if (ok) {
         onClose();
@@ -416,6 +421,54 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
               <span style={{ fontSize: '11px', color: 'var(--text-secondary, #9da2b4)', marginTop: '4px', display: 'block' }}>
                 Runs will be triggered in readOnly mode to safely audit and report findings without unwanted side effects.
               </span>
+            </div>
+
+            {/* Permission Mode */}
+            <div className="routine-form__field">
+              <span className="routine-form__label">Permission Mode</span>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gap: '6px',
+                  marginTop: '4px',
+                }}
+              >
+                {(
+                  [
+                    { id: 'readOnly', label: 'Read-only' },
+                    { id: 'auto', label: 'Auto' },
+                    { id: 'fullAccess', label: 'Full access' },
+                  ] as const
+                ).map((m) => {
+                  const active = permissionMode === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setPermissionMode(m.id)}
+                      style={{
+                        height: 'var(--vl-control-md, 32px)',
+                        padding: '0 10px',
+                        borderRadius: 'var(--control-radius, 8px)',
+                        border: active
+                          ? '1px solid var(--accent, #5c8fff)'
+                          : '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+                        backgroundColor: active
+                          ? 'rgba(92, 143, 255, 0.16)'
+                          : 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)))',
+                        color: active ? 'var(--text-primary, #fff)' : 'var(--text-secondary, #9da2b4)',
+                        fontSize: '12px',
+                        fontWeight: active ? 600 : 400,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Trigger Type Tabs */}

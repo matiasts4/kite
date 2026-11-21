@@ -1,5 +1,5 @@
 import React from 'react';
-import type { Workspace, AgentProfile } from '../../types';
+import type { ActiveSubagentSummary, Workspace, AgentProfile } from '../../types';
 
 export type WorkMode = 'agent' | 'code' | 'chat';
 
@@ -25,6 +25,7 @@ export interface ChatThreadSummary {
   workspaceMode?: 'inherit' | 'share' | 'branch' | string | null;
   swarmId?: string | null;
   swarmMemberName?: string | null;
+  activeSubagents?: ActiveSubagentSummary[];
   pendingApproval?: {
     requestId?: string;
     toolName?: string;

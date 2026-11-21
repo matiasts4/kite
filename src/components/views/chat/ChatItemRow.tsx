@@ -1,17 +1,21 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
+import { useReduceMotion } from '../../../motion/standard/context';
+import { prefersReducedMotion } from '../../../motion/contract';
 import { tweens } from '../../../motion/standard/tokens';
 import {
   AlertCircleIcon,
   FileCodeIcon,
   CheckIcon,
   CopyIcon,
+  MicIcon,
   PencilIcon,
 } from './ChatIcons';
 import type { ChatItem, SubagentRun, SwarmState } from '../../../types';
 import { dedupeSubagentRuns, SubagentActivityCard } from './SubagentActivityCard';
 import { SwarmActivityCard } from './SwarmActivityCard';
 import { ActivityGlyph } from './activityGlyph';
+import { AttachmentPreviewThumb } from './attachmentPreview';
 import { formatBytes } from './types';
 import { MarkdownMessage } from './MarkdownMessage';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
@@ -36,6 +40,7 @@ import {
 } from './chatItemHelpers';
 import { ChatWorkEntry, ChatWorkGroup } from './ChatWorkLog';
 import { AssistantCitationChip } from './ChatCitationChip';
+import { useSmoothStreamingText } from './useSmoothStreamingText';
 
 export {
   groupTranscriptRows,
@@ -97,11 +102,39 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   const [expandedReasoning, setExpandedReasoning] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
   const [rewindOpen, setRewindOpen] = useState(false);
+  const [rewindPlacement, setRewindPlacement] = useState<'bottom' | 'top'>('bottom');
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreUnavailable, setRestoreUnavailable] = useState(false);
   const [copiedAssistant, setCopiedAssistant] = useState(false);
   const [citation, setCitation] = useState<string | null>(null);
+  const actionsRef = useRef<HTMLDivElement | null>(null);
   const assistantRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!rewindOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (actionsRef.current && event.target instanceof Node && !actionsRef.current.contains(event.target)) {
+        setRewindOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setRewindOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [rewindOpen]);
+  const reduceMotion = useReduceMotion() || prefersReducedMotion();
+  const cleanAssistantText = item.kind === 'assistant' ? visibleAssistantText(item.text) : '';
+  const displayedAssistantText = useSmoothStreamingText(
+    cleanAssistantText,
+    item.kind === 'assistant' && Boolean(item.streaming) && !reduceMotion,
+  );
 
   // User row: no "You" or timestamp header
   if (item.kind === 'user') {
@@ -116,7 +149,11 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
         animate={{ opacity: 1, y: 0 }}
         transition={tweens.reveal}
       >
-        <div className="chat-turn__actions">
+        <div
+          ref={actionsRef}
+          className="chat-turn__actions"
+          data-open={rewindOpen ? 'true' : undefined}
+        >
           <button
             type="button"
             className="chat-turn__action-btn"
@@ -135,25 +172,48 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
               type="button"
               className="chat-turn__action-btn"
               title="Edit from here"
-              onClick={() => setRewindOpen((open) => !open)}
+              aria-expanded={rewindOpen}
+              onClick={(event) => {
+                const trigger = event.currentTarget;
+                setRewindOpen((open) => {
+                  const next = !open;
+                  if (next) {
+                    const rect = trigger.getBoundingClientRect();
+                    const scroller = trigger.closest('.chat-transcript');
+                    const bottomLimit = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
+                    setRewindPlacement(rect.bottom + 116 > bottomLimit ? 'top' : 'bottom');
+                  }
+                  return next;
+                });
+              }}
             >
               <PencilIcon size={12} />
               <span>Edit from here</span>
             </button>
           )}
           {rewindOpen && onEditUserMessage ? (
-            <div className="chat-rewind" role="dialog" aria-label="Edit from here">
+            <div
+              className="chat-rewind"
+              role="dialog"
+              aria-label="Edit from here"
+              data-placement={rewindPlacement}
+            >
               <button
                 type="button"
                 onClick={() => {
                   onEditUserMessage(item.text);
                   if (!onRewindTranscript) return;
-                  void Promise.resolve(onRewindTranscript(item.id)).catch((error: unknown) => {
-                    setRestoreError(restoreErrorText(error));
-                  });
+                  void Promise.resolve(onRewindTranscript(item.id))
+                    .then(() => {
+                      setRewindOpen(false);
+                    })
+                    .catch((error: unknown) => {
+                      setRestoreError(restoreErrorText(error));
+                    });
                 }}
               >
-                Rewind and keep file changes
+                <PencilIcon size={12} />
+                <span>Rewind and keep file changes</span>
               </button>
               <button
                 type="button"
@@ -170,6 +230,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
                   void Promise.resolve(onRestoreFiles(item.id))
                     .then(() => {
                       setRestoreError(null);
+                      setRewindOpen(false);
                       onEditUserMessage(item.text);
                     })
                     .catch((error: unknown) => {
@@ -179,7 +240,8 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
                     });
                 }}
               >
-                Restore files too
+                <FileCodeIcon size={12} />
+                <span>Restore files too</span>
               </button>
               {restoreError ? <p role="alert">{restoreError}</p> : null}
             </div>
@@ -191,20 +253,29 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
           <ul className="chat-attachments">
             {(item.attachments as any[]).map((att, i) => (
               <li key={i} className="chat-attachment">
-                {att.previewDataUrl ? (
-                  <img
-                    src={att.previewDataUrl}
-                    alt={att.displayName || 'Attachment'}
-                    className="chat-attachment__thumb"
-                  />
-                ) : (
-                  <FileCodeIcon size={12} className="chat-attachment__icon" />
-                )}
+                <AttachmentPreviewThumb
+                  attachment={att}
+                  threadId={threadId}
+                  alt={att.displayName || 'Attachment'}
+                  className="chat-attachment__thumb"
+                  fallback={<FileCodeIcon size={12} className="chat-attachment__icon" />}
+                />
                 <span>{att.displayName || 'Attachment'}</span>
                 {att.byteSize && <small>{formatBytes(att.byteSize)}</small>}
               </li>
             ))}
           </ul>
+        )}
+
+        {item.inputSource === 'voice' && (
+          <span
+            className="chat-user-row__voice-badge"
+            title="Enviado por voz"
+            aria-label="Mensaje por voz"
+          >
+            <MicIcon size={11} />
+            <span>Voz</span>
+          </span>
         )}
 
         <p
@@ -246,8 +317,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
 
   // Assistant row: no assistant label or timestamp header
   if (item.kind === 'assistant') {
-    const cleanText = visibleAssistantText(item.text);
-    if (cleanText.trim().length === 0) return null;
+    if (cleanAssistantText.trim().length === 0) return null;
 
     return (
       <motion.div
@@ -272,7 +342,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
         }}
       >
         <div id={item.id} data-message-id={item.id}>
-        {!item.streaming && cleanText.trim().length > 0 && (
+        {!item.streaming && cleanAssistantText.trim().length > 0 && (
           <div className="chat-turn__actions">
             {citation && (
               <button
@@ -295,7 +365,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
               className="chat-turn__action-btn"
               title={copiedAssistant ? 'Copied!' : 'Copy response'}
               onClick={() => {
-                navigator.clipboard?.writeText(cleanText);
+                navigator.clipboard?.writeText(cleanAssistantText);
                 setCopiedAssistant(true);
                 setTimeout(() => setCopiedAssistant(false), 1500);
               }}
@@ -305,7 +375,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
             </button>
           </div>
         )}
-        <MarkdownMessage text={cleanText} workspaceId={(item as any).workspaceId || null} />
+        <MarkdownMessage text={displayedAssistantText} workspaceId={(item as any).workspaceId || null} />
         </div>
       </motion.div>
     );
@@ -431,6 +501,91 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   return null;
 };
 
-export const ChatItemRow = React.memo(ChatItemRowInner);
+function areChatItemsVisuallyEqual(prev: ChatItem, next: ChatItem): boolean {
+  if (prev === next) return true;
+  if (
+    prev.id !== next.id ||
+    prev.kind !== next.kind ||
+    prev.text !== next.text ||
+    prev.title !== next.title ||
+    prev.detail !== next.detail ||
+    prev.status !== next.status ||
+    Boolean(prev.streaming) !== Boolean(next.streaming) ||
+    prev.exitCode !== next.exitCode ||
+    prev.durationSeconds !== next.durationSeconds ||
+    prev.addedLines !== next.addedLines ||
+    prev.removedLines !== next.removedLines ||
+    prev.filePath !== next.filePath ||
+    prev.command !== next.command ||
+    prev.toolName !== next.toolName ||
+    prev.toolKind !== next.toolKind ||
+    prev.serverName !== next.serverName ||
+    prev.createdAtUnixMs !== next.createdAtUnixMs ||
+    Boolean(prev.internalDispatch) !== Boolean(next.internalDispatch) ||
+    prev.delegatedThreadId !== next.delegatedThreadId ||
+    prev.delegatedMode !== next.delegatedMode ||
+    (prev as { workspaceId?: string | null }).workspaceId !==
+      (next as { workspaceId?: string | null }).workspaceId ||
+    prev.handoffOffer !== next.handoffOffer
+  ) {
+    return false;
+  }
+  const prevAtts = prev.attachments ?? [];
+  const nextAtts = next.attachments ?? [];
+  if (prevAtts.length !== nextAtts.length) return false;
+  for (let i = 0; i < prevAtts.length; i += 1) {
+    if (prevAtts[i] !== nextAtts[i]) return false;
+  }
+  if (prev.subagentMeta !== next.subagentMeta) {
+    if (!prev.subagentMeta || !next.subagentMeta) return false;
+    if (
+      prev.subagentMeta.subagentId !== next.subagentMeta.subagentId ||
+      prev.subagentMeta.typeName !== next.subagentMeta.typeName ||
+      prev.subagentMeta.provider !== next.subagentMeta.provider ||
+      prev.subagentMeta.workspaceMode !== next.subagentMeta.workspaceMode ||
+      prev.subagentMeta.prompt !== next.subagentMeta.prompt ||
+      prev.subagentMeta.status !== next.subagentMeta.status ||
+      prev.subagentMeta.stepCount !== next.subagentMeta.stepCount ||
+      prev.subagentMeta.latestActivity !== next.subagentMeta.latestActivity ||
+      prev.subagentMeta.childThreadId !== next.subagentMeta.childThreadId ||
+      prev.subagentMeta.transcriptUri !== next.subagentMeta.transcriptUri ||
+      prev.subagentMeta.role !== next.subagentMeta.role ||
+      prev.subagentMeta.model !== next.subagentMeta.model
+    ) {
+      return false;
+    }
+  }
+  if (prev.swarmMeta !== next.swarmMeta) return false;
+  return true;
+}
+
+function areChatItemRowPropsEqual(prev: ChatItemRowProps, next: ChatItemRowProps): boolean {
+  if (
+    prev.threadId !== next.threadId ||
+    prev.workspaceId !== next.workspaceId ||
+    prev.enter !== next.enter
+  ) {
+    return false;
+  }
+  if (
+    next.item.kind === 'user' &&
+    (prev.fileRestoreEnabled !== next.fileRestoreEnabled ||
+      prev.restoreCommandAvailable !== next.restoreCommandAvailable ||
+      prev.onEditUserMessage !== next.onEditUserMessage ||
+      prev.onRewindTranscript !== next.onRewindTranscript ||
+      prev.onRestoreFiles !== next.onRestoreFiles)
+  ) {
+    return false;
+  }
+  if (!areChatItemsVisuallyEqual(prev.item, next.item)) return false;
+  const isTool = next.item.kind === 'tool' || next.item.kind === 'command';
+  const usesSubagents = isTool && (next.item.toolKind === 'subagent' || Boolean(next.item.subagentMeta));
+  const usesSwarm = isTool && (next.item.toolKind === 'swarm' || Boolean(next.item.swarmMeta));
+  if (usesSubagents && prev.subagentRuns !== next.subagentRuns) return false;
+  if (usesSwarm && prev.swarmState !== next.swarmState) return false;
+  return true;
+}
+
+export const ChatItemRow = React.memo(ChatItemRowInner, areChatItemRowPropsEqual);
 ChatItemRow.displayName = 'ChatItemRow';
 

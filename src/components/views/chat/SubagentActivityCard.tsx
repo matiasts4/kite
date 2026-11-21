@@ -257,7 +257,7 @@ export const SubagentGroupRow: React.FC<{
   workspaceId?: string | null;
   subagentRuns?: SubagentRun[] | null;
   enterFor?: (id: string) => boolean;
-}> = ({ items, threadId, workspaceId = null, subagentRuns = null, enterFor }) => {
+}> = React.memo(({ items, threadId, workspaceId = null, subagentRuns = null, enterFor }) => {
   const dedupedRuns = dedupeSubagentRuns(subagentRuns);
   const dedupedItems = dedupeSubagentItems(items);
   const resolvedRuns = dedupedItems.map((it) => matchSubagentRun(it, dedupedRuns));
@@ -357,4 +357,4 @@ export const SubagentGroupRow: React.FC<{
       )}
     </div>
   );
-};
+});

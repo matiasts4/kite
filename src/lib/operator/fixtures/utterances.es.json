@@ -353,5 +353,20 @@
     "id": "inject-esa-terminal-grok",
     "input": "en esa terminal abre grok",
     "expected": { "type": "inject_prompt", "target": "active" }
+  },
+  {
+    "id": "seth-stt-phonetic-thread-claude",
+    "input": "Oye Seth, abre un threat con Clot para revisar auth",
+    "expected": { "type": "launch_thread", "provider": "claude" }
+  },
+  {
+    "id": "seth-stt-mixed-polarity-thread",
+    "input": "No cierres las terminales, abre un hilo con Claude para revisar permisos",
+    "expected": { "type": "launch_thread", "provider": "claude" }
+  },
+  {
+    "id": "seth-stt-phonetic-subagent-odd",
+    "input": "Lanza su agente con anti gráviti para armar el o de de de voz",
+    "expected": { "type": "spawn_subagent", "provider": "antigravity", "via": "thread", "oddMode": true }
   }
 ]

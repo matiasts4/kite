@@ -123,6 +123,12 @@ export const ChatWorkEntry: React.FC<{
   const statLabel = outputStatLabel(item.text);
   const bodyText = toolExpandedBody(item);
   const openPath = traceFilePath(item);
+  const delegatedThreadId = item.delegatedThreadId || null;
+  const delegatedLabel = delegatedThreadId
+    ? item.delegatedMode === 'agents'
+      ? 'Abrir agente'
+      : 'Abrir hilo'
+    : null;
   const sidebarFile = opensInFilesSidebar(item);
   const hasText = !sidebarFile && bodyText.length > 0;
   const meta = parseToolDisplayMeta(item);
@@ -164,9 +170,20 @@ export const ChatWorkEntry: React.FC<{
         type="button"
         aria-expanded={hasText ? expanded : undefined}
         aria-controls={hasText ? id : undefined}
-        disabled={!hasText && !openPath}
-        title={openPath ? openPath : undefined}
+        disabled={!hasText && !openPath && !delegatedThreadId}
+        title={openPath ? openPath : delegatedLabel ?? undefined}
         onClick={(e) => {
+          if (e.button === 0 && delegatedThreadId) {
+            e.preventDefault();
+            try {
+              window.dispatchEvent(
+                new CustomEvent('kite:select-thread', {
+                  detail: { threadId: delegatedThreadId, mode: item.delegatedMode || 'chat' },
+                })
+              );
+            } catch {}
+            return;
+          }
           if (e.button !== 0 || !openPath) {
             if (!hasText) return;
             setExpanded((v) => !v);
@@ -206,6 +223,7 @@ export const ChatWorkEntry: React.FC<{
         </strong>
         {lineRangeLabel ? <span className="chat-work-entry__range">{lineRangeLabel}</span> : null}
         {statLabel ? <span className="chat-work-entry__meta">{statLabel}</span> : null}
+        {delegatedLabel ? <span className="chat-work-entry__meta">{delegatedLabel}</span> : null}
 
         {failedMark ? (
           <span className="chat-work-entry__status chat-work-entry__status--failed">
@@ -250,7 +268,7 @@ export const ChatWorkGroup: React.FC<{
   interrupted?: boolean;
   durationSeconds?: number | null;
   defaultExpanded?: boolean;
-}> = ({
+}> = React.memo(({
   items,
   running,
   enterFor,
@@ -331,4 +349,4 @@ export const ChatWorkGroup: React.FC<{
       )}
     </div>
   );
-};
+});

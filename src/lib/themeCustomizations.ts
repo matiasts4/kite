@@ -9,6 +9,8 @@ export type BackdropPresetId =
   | 'aurora-mesh'
   | 'alpine-dusk'
   | 'solar-horizon'
+  | 'event-horizon'
+  | 'lunar-eclipse'
   | 'custom-image';
 
 export type ConcreteBackdropPresetId = Exclude<BackdropPresetId, 'theme-default'>;
@@ -20,6 +22,7 @@ export type HeroFigureId =
   | 'editorial-botanical'
   | 'orbital-constellation'
   | 'kite-crest'
+  | 'kinetic-ring'
   | 'none';
 
 export type ConcreteHeroFigureId = Exclude<HeroFigureId, 'theme-default'>;
@@ -617,6 +620,18 @@ export const BACKDROP_PRESETS: readonly BackdropPresetDescriptor[] = [
     previewGradient: 'radial-gradient(circle at 50% 80%, #ea580c 0%, #7c2d12 45%, #1c1917 100%)',
   },
   {
+    id: 'event-horizon',
+    label: 'Horizonte de Eventos',
+    blurb: 'Agujero negro supermasivo con disco de acreción luminoso sobre crestas basálticas estrelladas',
+    previewGradient: 'radial-gradient(circle at 50% 44%, #f59e0b 0%, #6366f1 32%, #090d16 78%)',
+  },
+  {
+    id: 'lunar-eclipse',
+    label: 'Claro de Luna',
+    blurb: 'Luna plateada entre bruma nocturna sobre océano tranquilo y cielo estrellado',
+    previewGradient: 'radial-gradient(circle at 32% 28%, #bae6fd 0%, #334155 44%, #090d16 100%)',
+  },
+  {
     id: 'custom-image',
     label: 'Imagen personalizada',
     blurb: 'Tu propia URL de fondo o una imagen local subida',
@@ -653,7 +668,12 @@ export const HERO_FIGURE_OPTIONS: readonly HeroFigureDescriptor[] = [
   {
     id: 'kite-crest',
     label: 'Emblema Kite',
-    blurb: 'Insignia de cometa origami con sutil resplandor ambiental',
+    blurb: 'Insignia de cometa origami facetada con núcleo luminoso',
+  },
+  {
+    id: 'kinetic-ring',
+    label: 'Anillo Cinético',
+    blurb: 'Arcos concéntricos de precisión con pulso acústico liviano',
   },
   {
     id: 'none',
@@ -722,6 +742,8 @@ export const BACKDROP_WALLPAPER_URLS: Partial<Record<ConcreteBackdropPresetId, s
   'aurora-mesh': '/wallpapers/aurora-mesh.jpg',
   'alpine-dusk': '/wallpapers/alpine-dusk.jpg',
   'solar-horizon': '/wallpapers/solar-horizon.jpg',
+  'event-horizon': '/wallpapers/event-horizon.jpg',
+  'lunar-eclipse': '/wallpapers/lunar-eclipse.jpg',
 };
 
 export const DEFAULT_THEME_CUSTOMIZATIONS: KiteThemeCustomizations = {

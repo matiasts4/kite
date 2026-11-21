@@ -74,6 +74,8 @@ describe('themeCustomizations engine', () => {
       'aurora-mesh',
       'alpine-dusk',
       'solar-horizon',
+      'event-horizon',
+      'lunar-eclipse',
       'custom-image',
     ]);
     expect(BACKDROP_PRESETS.map((p) => p.label)).toEqual([
@@ -82,12 +84,16 @@ describe('themeCustomizations engine', () => {
       'Aurora Boreal',
       'Crepúsculo Alpino',
       'Horizonte Solar',
+      'Horizonte de Eventos',
+      'Claro de Luna',
       'Imagen personalizada',
     ]);
     expect(Object.keys(BACKDROP_WALLPAPER_URLS)).toEqual([
       'aurora-mesh',
       'alpine-dusk',
       'solar-horizon',
+      'event-horizon',
+      'lunar-eclipse',
     ]);
     expect(HERO_FIGURE_OPTIONS.map((f) => f.label)).toEqual([
       'Predeterminado del tema',
@@ -96,6 +102,7 @@ describe('themeCustomizations engine', () => {
       'Botánica Editorial',
       'Constelación Orbital',
       'Emblema Kite',
+      'Anillo Cinético',
       'Minimalista (Sin figura)',
     ]);
   });

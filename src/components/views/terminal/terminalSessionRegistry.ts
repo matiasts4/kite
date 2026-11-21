@@ -1,4 +1,4 @@
-import { Terminal } from '@xterm/xterm';
+import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCommand, isTauriEnvironment } from '../../../lib/ipc';

@@ -20,6 +20,16 @@ function Main({ className = '', ...props }: ComponentProps<'div'>) {
   );
 }
 
+function TopStrip({ className = '', ...props }: ComponentProps<'section'>) {
+  return (
+    <section
+      data-slot="composer-top-strip"
+      className={`kite-composer-top-strip ${className}`.trim()}
+      {...props}
+    />
+  );
+}
+
 function ContextStrip({ className = '', ...props }: ComponentProps<'div'>) {
   return (
     <div
@@ -33,5 +43,6 @@ function ContextStrip({ className = '', ...props }: ComponentProps<'div'>) {
 export const ComposerSurface = {
   Shell,
   Main,
+  TopStrip,
   ContextStrip,
 };

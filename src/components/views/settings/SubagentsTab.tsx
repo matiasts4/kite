@@ -572,12 +572,12 @@ export const SubagentsTab: React.FC = () => {
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <h3 className="settings-row__title">Modelo ligero predeterminado</h3>
+              <h3 className="settings-row__title">Modelo predeterminado de subagentes</h3>
               <p>Se usa cuando un agente delega sin especificar `--provider` ni `--model`.</p>
             </div>
             <div className="settings-row__control settings-row__control--menu">
               <SelectMenu
-                label="Modelo ligero predeterminado"
+                label="Modelo predeterminado de subagentes"
                 variant="field"
                 className="settings-select"
                 searchable

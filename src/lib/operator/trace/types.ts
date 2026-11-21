@@ -2,7 +2,13 @@
 // Defines structured JSONL events for turn execution, planning, action verification, and TTS.
 
 export type TraceEventKind =
+  | 'vad.speech_start'
+  | 'vad.eos'
+  | 'stt.start'
+  | 'stt.end'
   | 'turn.start'
+  | 'intent.route'
+  | 'llm.first_token'
   | 'plan.created'
   | 'action.start'
   | 'ui.request'
@@ -10,6 +16,8 @@ export type TraceEventKind =
   | 'action.verify'
   | 'action.end'
   | 'reply.composed'
+  | 'tts.first_sentence'
+  | 'tts.first_audio'
   | 'tts.speak'
   | 'turn.end';
 
@@ -18,6 +26,59 @@ export interface BaseTraceEvent {
   turnId: string;
   seq: number;
   ev: TraceEventKind;
+}
+
+export interface VadSpeechStartTraceEvent extends BaseTraceEvent {
+  ev: 'vad.speech_start';
+  noiseFloorRms?: number;
+  bargeIn?: boolean;
+}
+
+export interface VadEosTraceEvent extends BaseTraceEvent {
+  ev: 'vad.eos';
+  silenceWindowMs?: number;
+  speechDurationMs?: number;
+}
+
+export interface SttStartTraceEvent extends BaseTraceEvent {
+  ev: 'stt.start';
+  backend?: string;
+  audioDurationMs?: number;
+}
+
+export interface SttEndTraceEvent extends BaseTraceEvent {
+  ev: 'stt.end';
+  backend?: string;
+  durationMs?: number;
+  chars?: number;
+  fallback?: boolean;
+}
+
+export interface IntentRouteTraceEvent extends BaseTraceEvent {
+  ev: 'intent.route';
+  route: 'heuristic' | 'llm' | 'clarification' | 'negation';
+  reason?: string;
+  rawInput?: string;
+  normalizedInput?: string;
+}
+
+export interface LlmFirstTokenTraceEvent extends BaseTraceEvent {
+  ev: 'llm.first_token';
+  provider?: string;
+  model?: string;
+  firstTokenMs?: number;
+}
+
+export interface TtsFirstSentenceTraceEvent extends BaseTraceEvent {
+  ev: 'tts.first_sentence';
+  chars?: number;
+  streamed?: boolean;
+}
+
+export interface TtsFirstAudioTraceEvent extends BaseTraceEvent {
+  ev: 'tts.first_audio';
+  engine?: 'elevenlabs' | 'browser' | string;
+  ttfaMs?: number;
 }
 
 export interface TurnStartTraceEvent extends BaseTraceEvent {
@@ -113,7 +174,13 @@ export interface TurnEndTraceEvent extends BaseTraceEvent {
 }
 
 export type TraceEvent =
+  | VadSpeechStartTraceEvent
+  | VadEosTraceEvent
+  | SttStartTraceEvent
+  | SttEndTraceEvent
   | TurnStartTraceEvent
+  | IntentRouteTraceEvent
+  | LlmFirstTokenTraceEvent
   | PlanCreatedTraceEvent
   | ActionStartTraceEvent
   | UiRequestTraceEvent
@@ -121,8 +188,24 @@ export type TraceEvent =
   | ActionVerifyTraceEvent
   | ActionEndTraceEvent
   | ReplyComposedTraceEvent
+  | TtsFirstSentenceTraceEvent
+  | TtsFirstAudioTraceEvent
   | TtsSpeakTraceEvent
   | TurnEndTraceEvent;
+
+export interface LatencyPercentileBucket {
+  count: number;
+  p50: number;
+  p95: number;
+  avg: number;
+}
+
+export interface VoiceLatencySummary {
+  sttMs: LatencyPercentileBucket;
+  turnToFirstTokenMs: LatencyPercentileBucket;
+  turnToFirstAudioMs: LatencyPercentileBucket;
+  eosToFirstAudioMs: LatencyPercentileBucket;
+}
 
 export type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
 export type TraceEventInput = DistributiveOmit<TraceEvent, 'ts' | 'seq'> & {

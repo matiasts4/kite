@@ -1,4 +1,5 @@
 export type RoutineTriggerType = 'schedule' | 'webhook' | 'event' | 'manual';
+export type RoutinePermissionMode = 'readOnly' | 'auto' | 'fullAccess';
 
 export type RoutineCadence =
   | { kind: 'interval'; seconds: number }
@@ -18,6 +19,7 @@ export interface RoutineItem {
   lastRunAtUnixMs: number | null;
   lastRunThreadId: string | null;
   lastError: string | null;
+  permissionMode?: RoutinePermissionMode;
   triggerType?: RoutineTriggerType;
 }
 
@@ -52,4 +54,5 @@ export interface RoutineDraft {
   triggerType: RoutineTriggerType;
   cadence: RoutineCadence;
   workspaceId: string | null;
+  permissionMode?: RoutinePermissionMode;
 }

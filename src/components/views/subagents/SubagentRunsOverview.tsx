@@ -4,6 +4,7 @@ import { SubagentRunCard } from './SubagentRunCard';
 import {
   isRunActive,
   isRunBlocked,
+  isZeroStepFailedRun,
   sortRunsForOverview,
 } from './subagentInspectorHelpers';
 
@@ -22,6 +23,7 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
   onStopRun,
 }) => {
   const [filter, setFilter] = useState<'all' | 'live'>('all');
+  const [showFailedGroup, setShowFailedGroup] = useState(false);
 
   const { sorted, activeCount, waitingCount } = useMemo(() => {
     const ordered = sortRunsForOverview(runs);
@@ -46,6 +48,21 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
         : sorted,
     [effectiveFilter, sorted],
   );
+
+  const { primaryRuns, foldedFailedRuns } = useMemo(() => {
+    if (effectiveFilter === 'live') {
+      return { primaryRuns: displayedRuns, foldedFailedRuns: [] as SubagentRun[] };
+    }
+    const emptyFailures = displayedRuns.filter((run) => isZeroStepFailedRun(run));
+    if (emptyFailures.length < 3) {
+      return { primaryRuns: displayedRuns, foldedFailedRuns: [] as SubagentRun[] };
+    }
+    const emptySet = new Set(emptyFailures.map((run) => run.subagentId));
+    return {
+      primaryRuns: displayedRuns.filter((run) => !emptySet.has(run.subagentId)),
+      foldedFailedRuns: emptyFailures,
+    };
+  }, [displayedRuns, effectiveFilter]);
 
   return (
     <div className="subagent-overview" data-testid="subagent-runs-overview">
@@ -91,7 +108,7 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
       </div>
 
       <div className="subagent-overview__list">
-        {displayedRuns.map((run) => (
+        {primaryRuns.map((run) => (
           <SubagentRunCard
             key={run.subagentId}
             run={run}
@@ -100,6 +117,39 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
             onStop={() => onStopRun(run.subagentId)}
           />
         ))}
+
+        {foldedFailedRuns.length > 0 && (
+          <div className="subagent-overview__failed-group">
+            <button
+              type="button"
+              className="subagent-overview__failed-toggle"
+              data-testid="subagent-failed-group-toggle"
+              aria-expanded={showFailedGroup}
+              onClick={() => setShowFailedGroup((v) => !v)}
+            >
+              <span className="subagent-dot subagent-dot--failed" aria-hidden="true" />
+              <span>
+                {foldedFailedRuns.length} empty failed {foldedFailedRuns.length === 1 ? 'attempt' : 'attempts'}
+              </span>
+              <span className="subagent-overview__failed-hint">
+                {showFailedGroup ? 'Hide' : 'Show'}
+              </span>
+            </button>
+            {showFailedGroup && (
+              <div className="subagent-overview__list">
+                {foldedFailedRuns.map((run) => (
+                  <SubagentRunCard
+                    key={run.subagentId}
+                    run={run}
+                    stopping={stoppingRunId === run.subagentId}
+                    onInspect={() => onInspectRun(run.subagentId)}
+                    onStop={() => onStopRun(run.subagentId)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

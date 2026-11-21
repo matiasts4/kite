@@ -1,6 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { motion, MotionGlobalConfig } from 'motion/react';
-import { springs } from '../../motion/standard/tokens';
 import type { Workspace } from '../../types';
 import type { ChatThreadSummary, MenuItem, ContextMenuState } from './types';
 import { formatThreadTrailing } from './types';
@@ -18,6 +16,7 @@ import {
   RefreshIcon,
 } from './sidebarIcons';
 import { BrandLogo } from '../ui/BrandLogo';
+import { AgentStatusIndicator } from '../ui/AgentStatusIndicator';
 import { ActiveChildRows } from './ActiveChildRows';
 import {
   groupActiveChildrenByParent,
@@ -502,54 +501,61 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           onContextMenu={(e) => handleOpenThreadMenu(thread, e)}
           title={folderName ? `${thread.title} · ${folderName}` : thread.title}
         >
-          <i
-            aria-hidden="true"
-            className={getStatusDotClass(effectiveStatus, thread.sessionState, thread.isWarm)}
-          />
+          {effectiveStatus === 'running' ? (
+            <AgentStatusIndicator status="running" size={12} />
+          ) : (
+            <i
+              aria-hidden="true"
+              className={getStatusDotClass(effectiveStatus, thread.sessionState, thread.isWarm)}
+            />
+          )}
           <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
           <span className="chat-thread-row__title">{thread.title}</span>
           {thread.unread && <i aria-hidden="true" className="chat-thread-row__unread" />}
-          <span
-            aria-hidden="true"
-            className={`chat-thread-row__trailing${trailingMod}${
-              effectiveStatus === 'running' ? ' chat-working-live' : ''
-            }`}
-          >
-            {trailingText}
-          </span>
+          {(rollup.rollupBadge || effectiveStatus !== 'running') && (
+            <span
+              aria-hidden="true"
+              className={`chat-thread-row__trailing${trailingMod}${
+                effectiveStatus === 'running' ? ' chat-working-live' : ''
+              }`}
+            >
+              {trailingText}
+            </span>
+          )}
         </button>
 
-        <span className="chat-thread-row__actions">
-          {activeChildren.length > 0 && (
-            <button
-              type="button"
-              className="chat-thread-row__children-toggle"
-              aria-expanded={childrenExpanded}
-              aria-label={
-                childrenExpanded
-                  ? `Collapse subagents for ${thread.title}`
-                  : `Expand subagents for ${thread.title}`
-              }
-              title={childrenExpanded ? 'Hide active subagents' : 'Show active subagents'}
-              onClick={(event) => {
-                event.stopPropagation();
-                setCollapsedChildGroups((prev) => {
-                  const next = new Set(prev);
-                  if (next.has(thread.id)) next.delete(thread.id);
-                  else next.add(thread.id);
-                  return next;
-                });
+        {activeChildren.length > 0 && (
+          <button
+            type="button"
+            className="chat-thread-row__children-toggle"
+            aria-expanded={childrenExpanded}
+            aria-label={
+              childrenExpanded
+                ? `Collapse subagents for ${thread.title}`
+                : `Expand subagents for ${thread.title}`
+            }
+            title={childrenExpanded ? 'Hide active subagents' : 'Show active subagents'}
+            onClick={(event) => {
+              event.stopPropagation();
+              setCollapsedChildGroups((prev) => {
+                const next = new Set(prev);
+                if (next.has(thread.id)) next.delete(thread.id);
+                else next.add(thread.id);
+                return next;
+              });
+            }}
+          >
+            <ChevronRightIcon
+              size={11}
+              style={{
+                transform: childrenExpanded ? 'rotate(90deg)' : 'none',
+                transition: 'transform 120ms ease',
               }}
-            >
-              <ChevronRightIcon
-                size={11}
-                style={{
-                  transform: childrenExpanded ? 'rotate(90deg)' : 'none',
-                  transition: 'transform 120ms ease',
-                }}
-              />
-            </button>
-          )}
+            />
+          </button>
+        )}
+
+        <span className="chat-thread-row__actions">
           {onRegenerateTitle && isSelected ? (
             <button
               type="button"
@@ -604,29 +610,13 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       />
     ) : null;
 
-    if (MotionGlobalConfig.skipAnimations) {
-      return (
-        <div key={thread.id} className="chat-thread-item">
-          <div className={rowClassName} data-thread-id={thread.id}>
-            {row}
-          </div>
-          {nestedChildrenList}
-        </div>
-      );
-    }
-
     return (
-      <motion.div
-        layout
-        transition={springs.reflow}
-        key={thread.id}
-        className="chat-thread-item"
-      >
+      <div key={thread.id} className="chat-thread-item">
         <div className={rowClassName} data-thread-id={thread.id}>
           {row}
         </div>
         {nestedChildrenList}
-      </motion.div>
+      </div>
     );
   };
 

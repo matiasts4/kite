@@ -167,6 +167,8 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ code, className 
           borderBottom: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
           fontSize: '11px',
           color: 'var(--text-secondary, #8b949e)',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

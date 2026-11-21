@@ -62,4 +62,42 @@ describe('terminal summary via planner provider', () => {
     expect(spoken).toMatch(/En Orion:/);
     expect(spoken).toMatch(/isBrowserTestLane|Propuse/);
   });
+
+  it('sizes long spoken summaries at clean sentence boundaries instead of chopping mid-word (S9)', () => {
+    const s1 = 'El agente analizó los tres módulos principales de autenticación y verificó la sesión.';
+    const s2 = 'Luego actualizó las pruebas unitarias para cubrir el flujo de renovación de tokens.';
+    const s3 = 'También revisó la configuración de entorno y validó los permisos de escritura.';
+    const s4 = 'Finalmente dejó la compilación en verde sin advertencias ni errores pendientes.';
+    const s5 = 'Esta quinta oración supera ampliamente el límite de setecientos caracteres para verificar el corte exacto en frontera de oración y nunca a mitad de palabra.';
+    const longSpoken = [s1, s2, s3, s4, s5, s1, s2, s3].join(' ');
+
+    const parsed = parseSpokenSummary(JSON.stringify({ spoken: longSpoken }));
+    expect(parsed.length).toBeLessThanOrEqual(700);
+    expect(parsed).toMatch(/[.!?…]$/);
+    expect(parsed).not.toMatch(/\s\w+$/);
+  });
+
+  it('sizes local terminal summaries at clean sentence boundaries without mid-word truncation (S9)', async () => {
+    const provider: PlannerProvider = {
+      id: 'local',
+      plan: async () => ({ rawText: '{}', latencyMs: 1, model: 'local' }),
+    };
+
+    const repeatedSentence =
+      'Se completó la verificación de rutas y contratos en el módulo principal sin errores. ';
+    const longBuffer = repeatedSentence.repeat(15);
+
+    const spoken = await summarizeTerminalsWithProvider(provider, [
+      {
+        label: 'Orion',
+        engine: 'claude',
+        state: 'waitingForYou',
+        buffer: longBuffer,
+      },
+    ]);
+
+    expect(spoken.length).toBeLessThanOrEqual(700);
+    expect(spoken).toMatch(/[.!?…]$/);
+    expect(spoken).toContain('En Orion:');
+  });
 });

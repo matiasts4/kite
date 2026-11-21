@@ -456,3 +456,176 @@ describe('AgentChatSurface thread transitions', () => {
     voiceSessionStore.stopSession();
   });
 });
+
+describe('AgentChatSurface teammate inbox deep-links', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('navigates to threadId via onSelect or kite:select-thread while keeping legacy null threadId safe', async () => {
+    const ipc = await import('../../../lib/ipc');
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'agent_message_inbox') {
+        return {
+          schemaVersion: 1,
+          profileId: 'agent-1',
+          messages: [
+            {
+              id: 'm-remote',
+              senderName: 'Reviewer',
+              body: 'Finished audit on remote thread.',
+              delivered: true,
+              threadId: 'thread-remote-42',
+              direction: 'incoming',
+            },
+            {
+              id: 'm-local',
+              senderName: 'Planner',
+              body: 'Updated local tab.',
+              delivered: true,
+              threadId: 'agent-t1',
+              direction: 'outgoing',
+            },
+            {
+              id: 'm-legacy',
+              senderName: 'Legacy Bot',
+              body: 'Historical audit message without thread.',
+              delivered: true,
+              threadId: null,
+            },
+          ],
+          nextCursor: null,
+        };
+      }
+      if (cmd === 'agent_messaging_preference') {
+        return { schemaVersion: 1, enabled: true, readOnly: false, revision: '1' };
+      }
+      return null;
+    });
+
+    const t1 = createAgentThread('agent-t1', 'First Tab');
+    const onSelect = vi.fn();
+    const selectThreadListener = vi.fn();
+    window.addEventListener('kite:select-thread', selectThreadListener);
+
+    render(
+      createElement(
+        MotionProvider,
+        null,
+        createElement(AgentChatSurface, {
+          agentId: 'agent-1',
+          agentName: 'Builder',
+          engineLabel: 'Claude',
+          workspaceId: 'ws-1',
+          workspaceName: 'Workspace',
+          workspaces: [{ id: 'ws-1', name: 'Workspace' }],
+          activeThread: t1,
+          tabs: [{ id: t1.id, title: t1.title }],
+          selectedId: t1.id,
+          isDraft: false,
+          running: false,
+          prompt: '',
+          attachments: [],
+          totalTokens: 0,
+          dynamicModels: [],
+          onNew: vi.fn(),
+          onSelect,
+          onRename: vi.fn(),
+          onArchive: vi.fn(),
+          onChangePrompt: vi.fn(),
+          onSend: vi.fn(),
+          onStop: vi.fn(),
+          onPickAttachments: vi.fn(),
+          onStageFiles: vi.fn(),
+          onStagePaths: vi.fn(),
+          onRemoveAttachment: vi.fn(),
+          onUpdateConfig: vi.fn(),
+        })
+      )
+    );
+
+    const summary = screen.getByText('Teammate inbox');
+    fireEvent.click(summary);
+
+    await waitFor(() => {
+      expect(screen.getByText('Finished audit on remote thread.')).toBeInTheDocument();
+      expect(screen.getByText('Historical audit message without thread.')).toBeInTheDocument();
+    });
+
+    const remoteBtn = screen.getByRole('button', { name: /Open thread for message from Reviewer/i });
+    fireEvent.click(remoteBtn);
+    expect(selectThreadListener).toHaveBeenCalledTimes(1);
+    const dispatchedEvent = selectThreadListener.mock.calls[0][0] as CustomEvent;
+    expect(dispatchedEvent.detail).toEqual({ threadId: 'thread-remote-42', mode: 'chat' });
+
+    const localBtn = screen.getByRole('button', { name: /Open thread for message from Planner/i });
+    fireEvent.click(localBtn);
+    expect(onSelect).toHaveBeenCalledWith('agent-t1');
+
+    expect(screen.queryByRole('button', { name: /Legacy Bot/i })).not.toBeInTheDocument();
+
+    window.removeEventListener('kite:select-thread', selectThreadListener);
+  });
+
+  it('renders voice turns in AgentChatSurface and exits draft hero (T20)', async () => {
+    const { voiceSessionStore } = await import('../../../lib/operator/voice/voiceSessionStore');
+    voiceSessionStore.stopSession();
+    voiceSessionStore.clearThreadVoiceTurns('agent-voice-t1');
+
+    const t1 = createAgentThread('agent-voice-t1', 'Sesión de voz');
+    voiceSessionStore.startSession('agent-voice-t1', 'thread');
+    voiceSessionStore.addThreadVoiceTurn('agent-voice-t1', {
+      turnId: 'vt-agent-1',
+      userPrompt: 'Revisemos los próximos pasos del ODD',
+      source: 'voz',
+      reply: 'Propongo empezar definiendo el ODD de orquestación.',
+      createdAt: Date.now(),
+    });
+
+    try {
+      render(
+        createElement(
+          MotionProvider,
+          null,
+          createElement(AgentChatSurface, {
+            agentId: 'agent-1',
+            agentName: 'Builder',
+            engineLabel: 'Claude',
+            workspaceId: 'ws-1',
+            workspaceName: 'Workspace',
+            workspaces: [{ id: 'ws-1', name: 'Workspace' }],
+            activeThread: t1,
+            tabs: [{ id: t1.id, title: t1.title }],
+            selectedId: t1.id,
+            isDraft: true,
+            running: false,
+            prompt: '',
+            attachments: [],
+            totalTokens: 0,
+            dynamicModels: [],
+            onNew: vi.fn(),
+            onSelect: vi.fn(),
+            onRename: vi.fn(),
+            onArchive: vi.fn(),
+            onChangePrompt: vi.fn(),
+            onSend: vi.fn(),
+            onStop: vi.fn(),
+            onPickAttachments: vi.fn(),
+            onStageFiles: vi.fn(),
+            onStagePaths: vi.fn(),
+            onRemoveAttachment: vi.fn(),
+            onUpdateConfig: vi.fn(),
+          })
+        )
+      );
+
+      expect(screen.getByText('Revisemos los próximos pasos del ODD')).toBeInTheDocument();
+      expect(screen.getByText('Propongo empezar definiendo el ODD de orquestación.')).toBeInTheDocument();
+      expect(screen.queryByText('What should we build?')).not.toBeInTheDocument();
+    } finally {
+      voiceSessionStore.stopSession();
+      voiceSessionStore.clearThreadVoiceTurns('agent-voice-t1');
+    }
+  });
+});

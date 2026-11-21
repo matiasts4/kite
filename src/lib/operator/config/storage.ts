@@ -3,7 +3,7 @@ import {
   OPENCODE_GO_CHAT_BASE_URL,
   normalizeOpenCodeBaseUrl,
 } from './modelCatalogs';
-import { DEFAULT_ZED_PERSONA } from './persona';
+import { DEFAULT_ZED_PERSONA, sanitizeZedFigure } from './persona';
 import { invokeCommand } from '../../ipc';
 
 export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
@@ -20,7 +20,7 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   cloudflareGatewaySlug: '',
   cloudflareBaseUrl: 'https://api.cloudflare.com/client/v4/accounts',
   cloudflareModel: '@cf/meta/llama-3.1-8b-instruct-fp8',
-  antigravityModel: 'gemini-3.8-flash',
+  antigravityModel: 'gemini-3.8-flash-low',
   antigravityCommand: 'agy',
   grokApiKey: '',
   grokBaseUrl: 'https://api.x.ai/v1',
@@ -44,7 +44,7 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
 export const OPERATOR_CONFIG_STORAGE_KEY = 'kite.operator.providerConfig.v2';
 const CONFIG_STORAGE_KEY = OPERATOR_CONFIG_STORAGE_KEY;
 const LEGACY_CONFIG_STORAGE_KEY = 'kite.operator.providerConfig.v1';
-const SEED_VERSION_KEY = 'kite_operator_seed_v4';
+const SEED_VERSION_KEY = 'kite_operator_seed_v5';
 
 /** Prefer HTTP API when an xAI API key is configured. */
 export function shouldUseGrokHttpApi(config: OperatorProviderConfig): boolean {
@@ -106,11 +106,20 @@ export function loadOperatorConfig(): OperatorProviderConfig {
         : legacyGrokTrans || DEFAULT_OPERATOR_CONFIG.grokTranscriptionApiKey;
 
     const activeProvider = parsed.activeProvider || DEFAULT_OPERATOR_CONFIG.activeProvider;
+    let antigravityModel =
+      parsed.antigravityModel || DEFAULT_OPERATOR_CONFIG.antigravityModel;
+    if (
+      antigravityModel === 'gemini-3.8-flash' &&
+      localStorage.getItem(SEED_VERSION_KEY) !== '1'
+    ) {
+      antigravityModel = 'gemini-3.8-flash-low';
+    }
 
     return {
       ...DEFAULT_OPERATOR_CONFIG,
       ...parsed,
       activeProvider,
+      antigravityModel,
       opencodeApiKey: apiKey,
       opencodeBaseUrl: baseUrl,
       opencodeModel: model,
@@ -128,6 +137,7 @@ export function loadOperatorConfig(): OperatorProviderConfig {
       persona: {
         ...DEFAULT_ZED_PERSONA,
         ...(parsed.persona ?? {}),
+        figure: sanitizeZedFigure(parsed.persona?.figure),
       },
     };
   } catch {
@@ -181,6 +191,7 @@ export function applyOperatorConfigPatch(
     persona: {
       ...base.persona,
       ...(patch.persona ?? {}),
+      figure: sanitizeZedFigure(patch.persona?.figure ?? base.persona?.figure),
     },
   };
 }
@@ -424,6 +435,12 @@ export async function syncNativeCredentialsWithVault(): Promise<OperatorProvider
     }
 
     if (Object.keys(hydratedPatch).length > 0) {
+      if (
+        hydratedPatch.antigravityModel === 'gemini-3.8-flash' &&
+        localStorage.getItem(SEED_VERSION_KEY) !== '1'
+      ) {
+        hydratedPatch.antigravityModel = 'gemini-3.8-flash-low';
+      }
       const latest = loadOperatorConfig();
       const merged: OperatorProviderConfig = {
         ...latest,

@@ -1,5 +1,6 @@
 import React from 'react';
 import { CloseIcon, FileCodeIcon } from '../ChatIcons';
+import { AttachmentPreviewThumb } from '../attachmentPreview';
 import { formatBytes, type ChatAttachment } from '../types';
 
 export interface ComposerAttachmentsProps {
@@ -17,15 +18,12 @@ export const ComposerAttachments: React.FC<ComposerAttachmentsProps> = ({
     <div className="kite-composer-attachments">
       {attachments.map((att) => (
         <div key={att.resourceId} className="kite-composer-attachment-chip">
-          {att.previewDataUrl ? (
-            <img
-              src={att.previewDataUrl}
-              alt={att.displayName}
-              className="kite-composer-attachment-thumb"
-            />
-          ) : (
-            <FileCodeIcon size={13} className="text-muted-foreground shrink-0" />
-          )}
+          <AttachmentPreviewThumb
+            attachment={att}
+            alt={att.displayName}
+            className="kite-composer-attachment-thumb"
+            fallback={<FileCodeIcon size={13} className="text-muted-foreground shrink-0" />}
+          />
           <span title={att.displayName}>{att.displayName}</span>
           {att.byteSize && (
             <span className="text-2xs opacity-60 shrink-0">

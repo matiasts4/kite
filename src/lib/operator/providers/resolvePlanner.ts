@@ -46,9 +46,17 @@ export const VERIFIED_PROVIDER_MODELS: Record<string, { fast: string; diagnosis:
     verified: ['grok-4.7', 'grok-beta', 'grok-2'],
   },
   antigravity: {
-    fast: 'gemini-3.8-flash',
+    fast: 'gemini-3.8-flash-low',
     diagnosis: 'gemini-3.8-pro',
-    verified: ['gemini-3.8-flash', 'gemini-3.8-pro', 'claude-3-7-sonnet'],
+    verified: [
+      'gemini-3.8-flash-low',
+      'gemini-3.8-flash-medium',
+      'gemini-3.8-flash-high',
+      'gemini-4-neon-low',
+      'gemini-3.8-flash',
+      'gemini-3.8-pro',
+      'claude-3-7-sonnet',
+    ],
   },
   local: {
     fast: 'deterministic-heuristic',

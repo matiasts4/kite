@@ -7,6 +7,7 @@ import { LiveElapsedClock } from '../chat/LiveElapsedClock';
 import { formatInspectorModelName } from './swarmBoardHelpers';
 import {
   cleanRunPreviewText,
+  formatSubagentDisplayTitle,
   isRunActive,
   isRunBlocked,
   settledPrefixLabel,
@@ -34,7 +35,7 @@ export const SubagentRunCard: React.FC<SubagentRunCardProps> = ({
   const visualStatus = blocked ? 'waiting' : run.status;
   const modelLabel = formatInspectorModelName(run.model, run.provider);
   const preview = cleanRunPreviewText(run);
-  const roleLabel = run.role || run.typeName || run.subagentId || 'Subagent';
+  const roleLabel = formatSubagentDisplayTitle(run);
   const showWorkspacePill = Boolean(run.workspaceMode && run.workspaceMode !== 'inherit');
   const stepCount = run.stepCount ?? run.items?.length ?? 0;
 

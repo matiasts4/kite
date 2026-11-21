@@ -66,6 +66,7 @@ import { ComposerPrimaryActionButton } from './composer/ComposerPrimaryActionBut
 import { resolvePrimaryAction, useDefaultFollowUp } from './composerPrimaryAction';
 import { ComposerConfigControls } from './composer/ComposerConfigControls';
 import { usePromptHistory } from './composer/usePromptHistory';
+import { ChangedFilesCard, type ChangedFile } from './ChangedFilesCard';
 
 export {
   extractUserPromptHistory,
@@ -152,6 +153,13 @@ export interface ChatComposerProps {
   onStartVoiceMode?: () => void;
   /** True once the conversation has started so the pre-chat folder/branch strip collapses away. */
   conversationStarted?: boolean;
+  /** Changed workspace files for the current turn, docked flush atop the composer. */
+  changedFiles?: ChangedFile[];
+  changedFilesWorkspaceName?: string | null;
+  onOpenTurnDiff?: () => void;
+  onOpenChangedFile?: (path: string) => void;
+  /** Called synchronously inside useLayoutEffect whenever composer textarea height changes. */
+  onHeightChange?: () => void;
 }
 
 export const ChatComposer: React.FC<ChatComposerProps> = ({
@@ -212,6 +220,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onSendVoiceTurn,
   onStartVoiceMode,
   conversationStarted,
+  changedFiles = [],
+  changedFilesWorkspaceName,
+  onOpenTurnDiff,
+  onOpenChangedFile,
+  onHeightChange,
 }) => {
   const reduceMotion = useReduceMotion() || prefersReducedMotion();
   const defaultFollowUp = useDefaultFollowUp();
@@ -234,6 +247,13 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const caretRef = useRef({ start: 0, end: 0 });
+  const promptRef = useRef(prompt);
+  promptRef.current = prompt;
+  const onChangePromptRef = useRef(onChangePrompt);
+  onChangePromptRef.current = onChangePrompt;
+  const onHeightChangeRef = useRef(onHeightChange);
+  onHeightChangeRef.current = onHeightChange;
+  const prevTextareaHeightRef = useRef<number | null>(null);
   const [pendingCaret, setPendingCaret] = useState<number | null>(null);
   const [draftCaret, setDraftCaret] = useState(0);
   const [stashes, setStashes] = useState<StashEntry[]>(initialStashes ?? []);
@@ -245,6 +265,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   useEffect(() => {
     setNewSessionArmed(false);
     setCompactNotice(null);
+    prevTextareaHeightRef.current = null;
   }, [threadId]);
 
   const footerRef = useRef<HTMLDivElement>(null);
@@ -296,14 +317,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     const onCite = (event: Event) => {
       const detail = (event as CustomEvent<CitationInput>).detail;
       if (typeof detail !== 'string' && (detail === null || typeof detail !== 'object')) return;
+      const currentPrompt = promptRef.current;
       const area = textareaRef.current;
-      const usingField = Boolean(area) && !draftHasCitation(prompt);
-      const start = usingField ? (area?.selectionStart ?? prompt.length) : caretRef.current.start;
+      const usingField = Boolean(area) && !draftHasCitation(currentPrompt);
+      const start = usingField ? (area?.selectionStart ?? currentPrompt.length) : caretRef.current.start;
       const end = usingField ? (area?.selectionEnd ?? start) : caretRef.current.end;
-      const next = insertQuoteAtCaret(prompt, start, end, detail);
+      const next = insertQuoteAtCaret(currentPrompt, start, end, detail);
       caretRef.current = { start: next.caret, end: next.caret };
       setPendingCaret(next.caret);
-      onChangePrompt(next.text);
+      onChangePromptRef.current(next.text);
       window.requestAnimationFrame(() => {
         const field = textareaRef.current;
         if (!field || draftHasCitation(next.text)) return;
@@ -313,25 +335,26 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     };
     window.addEventListener('kite:cite', onCite);
     return () => window.removeEventListener('kite:cite', onCite);
-  }, [onChangePrompt, prompt]);
+  }, []);
 
   useEffect(() => {
     const onExcerpt = (event: Event) => {
       const mention = mentionFromTerminalExcerpt((event as CustomEvent).detail);
       if (!mention) return;
+      const currentPrompt = promptRef.current;
       const area = textareaRef.current;
-      const plain = Boolean(area) && !draftHasCitation(prompt) && !draftHasMention(prompt);
+      const plain = Boolean(area) && !draftHasCitation(currentPrompt) && !draftHasMention(currentPrompt);
       const start = plain ? (area?.selectionStart ?? caretRef.current.start) : caretRef.current.start;
       const end = plain ? (area?.selectionEnd ?? start) : caretRef.current.end;
-      const next = insertMentionAtCaret(prompt, start, end, mention);
+      const next = insertMentionAtCaret(currentPrompt, start, end, mention);
       caretRef.current = { start: next.caret, end: next.caret };
       setDraftCaret(next.caret);
       setPendingCaret(next.caret);
-      onChangePrompt(next.text);
+      onChangePromptRef.current(next.text);
     };
     window.addEventListener('kite:terminal-excerpt', onExcerpt);
     return () => window.removeEventListener('kite:terminal-excerpt', onExcerpt);
-  }, [onChangePrompt, prompt]);
+  }, []);
 
   useLayoutEffect(() => {
     if (draftHasCitation(prompt) || draftHasMention(prompt) || pendingCaret === null) return;
@@ -343,13 +366,51 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     setPendingCaret(null);
   }, [pendingCaret, prompt]);
 
-  // Dynamic textarea height
+  // Dynamic textarea height: lock the host container during measurement so collapsing to 'auto'
+  // never expands the sibling flex transcript or clamps its scrollTop, and sync live-edge on real height changes.
   useLayoutEffect(() => {
     const el = textareaRef.current;
-    if (el) {
-      el.style.height = '52px';
-      el.style.height = `${Math.min(240, Math.max(52, el.scrollHeight))}px`;
+    if (!el) return;
+    const prevScrollTop = el.scrollTop;
+    const computed = typeof window !== 'undefined' ? window.getComputedStyle(el) : null;
+    const minH = Math.max(52, Number.parseFloat(computed?.minHeight ?? '') || 52);
+    const parsedMaxH = Number.parseFloat(computed?.maxHeight ?? '');
+    const maxH = Number.isFinite(parsedMaxH) && parsedMaxH > minH ? parsedMaxH : 220;
+
+    const host = el.parentElement;
+    const hostComputedHeight =
+      host && typeof window !== 'undefined'
+        ? Number.parseFloat(window.getComputedStyle(host).height)
+        : Number.NaN;
+    const lockedHostHeight =
+      Number.isFinite(hostComputedHeight) && hostComputedHeight > 0
+        ? hostComputedHeight
+        : (host?.offsetHeight ?? 0);
+    const prevHostMinHeight = host ? host.style.minHeight : '';
+
+    let measuredHeight = minH;
+    let nextHeight = minH;
+    if (host && lockedHostHeight > 0) {
+      host.style.minHeight = `${lockedHostHeight}px`;
     }
+    try {
+      el.style.height = 'auto';
+      measuredHeight = el.scrollHeight;
+      nextHeight = Math.min(maxH, Math.max(minH, measuredHeight));
+      el.style.height = `${nextHeight}px`;
+      if (prevScrollTop > 0 && measuredHeight > nextHeight) {
+        el.scrollTop = prevScrollTop;
+      }
+    } finally {
+      if (host && lockedHostHeight > 0) {
+        host.style.minHeight = prevHostMinHeight;
+      }
+    }
+
+    if (prevTextareaHeightRef.current !== null && prevTextareaHeightRef.current !== nextHeight) {
+      onHeightChangeRef.current?.();
+    }
+    prevTextareaHeightRef.current = nextHeight;
   }, [prompt, composerValue]);
 
   const insertAtCursor = (insertion: string, isMention: boolean = false) => {
@@ -692,6 +753,47 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           </button>
         </div>
       ) : null}
+
+      {/* Tier 0: Recessed Upper Changed-Files Strip (flush atop main composer) */}
+      <AnimatePresence initial={false}>
+        {changedFiles.length > 0 && (
+          <motion.div
+            key="composer-changed-files-strip"
+            className="kite-composer-top-strip-wrap"
+            initial={reduceMotion ? false : { opacity: 0, height: 0, y: 6 }}
+            animate={{
+              opacity: 1,
+              height: 'auto',
+              y: 0,
+              transition: reduceMotion ? tweens.instant : tweens.disclosure,
+            }}
+            exit={
+              reduceMotion
+                ? { opacity: 0, height: 0, transition: tweens.instant }
+                : {
+                    opacity: 0,
+                    height: 0,
+                    y: 8,
+                    transition: {
+                      height: { duration: 0.24, ease: eases.out },
+                      y: { duration: 0.2, ease: eases.out },
+                      opacity: { duration: 0.14, ease: eases.leave },
+                    },
+                  }
+            }
+            style={{ overflow: 'hidden' }}
+          >
+            <ChangedFilesCard
+              key={threadId}
+              variant="composer-top"
+              files={changedFiles}
+              workspaceName={changedFilesWorkspaceName ?? threadWorkspaceName}
+              onOpenTurnDiff={onOpenTurnDiff}
+              onOpenFile={onOpenChangedFile}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Tier 1: Main Floating Glass Card */}
       <ComposerSurface.Main

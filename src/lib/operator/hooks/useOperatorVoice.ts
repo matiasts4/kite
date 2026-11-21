@@ -8,12 +8,18 @@ import {
   getCurrentAudioLevel,
   isVoiceRecognitionSupported,
   getVoiceEngineStatus,
+  isFatalSttError,
   type VoiceEngineStatus,
 } from '../voice/zedVoice';
 
 export interface UseOperatorVoiceOptions {
   onFinalTranscript?: (transcript: string) => void;
   language?: string;
+}
+
+export interface StartListeningCallOptions {
+  continuous?: boolean;
+  fromBargeIn?: boolean;
 }
 
 export interface UseOperatorVoiceResult {
@@ -23,9 +29,10 @@ export interface UseOperatorVoiceResult {
   interimTranscript: string;
   audioLevel: number;
   error: string | null;
+  isFatalError: boolean;
   engineStatus: VoiceEngineStatus;
-  startListening: () => Promise<void>;
-  stopListening: () => void;
+  startListening: (callOpts?: StartListeningCallOptions) => Promise<void>;
+  stopListening: (opts?: { release?: boolean }) => void;
   toggleListening: () => Promise<void>;
   clearTranscript: () => void;
   clearError: () => void;
@@ -41,6 +48,7 @@ export function useOperatorVoice({
   const [interimTranscript, setInterimTranscript] = useState('');
   const [audioLevel, setAudioLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [isFatalError, setIsFatalError] = useState(false);
 
   const levelRafRef = useRef<number | null>(null);
   const isListeningRef = useRef(false);
@@ -57,20 +65,25 @@ export function useOperatorVoice({
       errorTimerRef.current = null;
     }
     setError(null);
+    setIsFatalError(false);
   }, []);
 
-  const setErrorWithAutoClear = useCallback((msg: string | null) => {
+  const setErrorWithAutoClear = useCallback((msg: string | null, rawErr?: unknown) => {
     if (errorTimerRef.current) {
       window.clearTimeout(errorTimerRef.current);
       errorTimerRef.current = null;
     }
+    const fatal = Boolean(msg && (isFatalSttError(rawErr) || isFatalSttError(msg)));
     setError(msg);
+    setIsFatalError(fatal);
     if (msg) {
       toast.error('Asistente Zed', msg);
-      errorTimerRef.current = window.setTimeout(() => {
-        setError(null);
-        errorTimerRef.current = null;
-      }, 4000);
+      if (!fatal) {
+        errorTimerRef.current = window.setTimeout(() => {
+          setError(null);
+          errorTimerRef.current = null;
+        }, 4000);
+      }
     }
   }, []);
 
@@ -82,7 +95,7 @@ export function useOperatorVoice({
     levelRafRef.current = requestAnimationFrame(monitorAudio);
   }, []);
 
-  const stopListening = useCallback(() => {
+  const stopListening = useCallback((opts?: { release?: boolean }) => {
     setIsListening(false);
     isListeningRef.current = false;
     if (levelRafRef.current) {
@@ -90,10 +103,14 @@ export function useOperatorVoice({
       levelRafRef.current = null;
     }
     setAudioLevel(0);
-    stopOperatorListening();
+    if (opts?.release) {
+      void releaseOperatorCapture();
+    } else {
+      void stopOperatorListening();
+    }
   }, []);
 
-  const startListening = useCallback(async () => {
+  const startListening = useCallback(async (callOpts?: StartListeningCallOptions) => {
     // Unconditionally stop any ongoing TTS speech immediately (barge-in / user interruption)
     ttsNarrator.stop();
 
@@ -116,7 +133,10 @@ export function useOperatorVoice({
     try {
       const finalResult = await startOperatorListening({
         language,
+        continuous: callOpts?.continuous,
+        fromBargeIn: callOpts?.fromBargeIn,
         onInterim: (partial) => {
+          if (epoch !== listenEpochRef.current) return;
           setInterimTranscript(partial);
         },
         onTranscribing: () => {
@@ -131,6 +151,7 @@ export function useOperatorVoice({
           setAudioLevel(0);
         },
         onError: (err) => {
+          if (epoch !== listenEpochRef.current) return;
           setErrorWithAutoClear(err);
         },
       });
@@ -168,7 +189,7 @@ export function useOperatorVoice({
     } catch (err: any) {
       if (epoch !== listenEpochRef.current) return;
       console.warn('[useOperatorVoice] Error capturando voz:', err);
-      setErrorWithAutoClear(err?.message || 'Error al capturar voz');
+      setErrorWithAutoClear(err?.message || 'Error al capturar voz', err);
       setIsListening(false);
       isListeningRef.current = false;
       setIsTranscribing(false);
@@ -212,6 +233,7 @@ export function useOperatorVoice({
     interimTranscript,
     audioLevel,
     error,
+    isFatalError,
     engineStatus,
     startListening,
     stopListening,

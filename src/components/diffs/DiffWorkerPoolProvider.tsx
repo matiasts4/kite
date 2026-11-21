@@ -1,5 +1,10 @@
-import { useEffect, useMemo, type ReactNode } from 'react';
-import { WorkerPoolContextProvider, useWorkerPool } from '@pierre/diffs/react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { WorkerPoolContext, useWorkerPool } from '@pierre/diffs/react';
+import {
+  getOrCreateWorkerPoolSingleton,
+  terminateWorkerPoolSingleton,
+  type WorkerPoolManager,
+} from '@pierre/diffs/worker';
 import DiffWorker from '@pierre/diffs/worker/worker.js?worker';
 import {
   ensureReadableLightDiffTheme,
@@ -7,13 +12,19 @@ import {
 } from '../../lib/diffs/readableSyntaxTheme';
 import { PREFERRED_DIFF_HIGHLIGHTER } from '../../lib/diffs/syntaxHighlighting';
 
+export const DIFF_WORKER_IDLE_DISPOSE_MS = 60_000;
+
+let activeConsumers = 0;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+let sharedPool: WorkerPoolManager | null = null;
+
 function canUseWorkers(): boolean {
   return typeof window !== 'undefined' && typeof Worker !== 'undefined';
 }
 
 function createDiffWorkerPoolSize(): number {
   if (typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number') {
-    return Math.max(1, Math.min(4, Math.floor(navigator.hardwareConcurrency / 2) || 2));
+    return Math.max(1, Math.min(2, Math.floor(navigator.hardwareConcurrency / 2) || 2));
   }
   return 2;
 }
@@ -24,34 +35,81 @@ const POOL_RENDER_OPTIONS = {
   lineDiffType: 'word-alt' as const,
 };
 
+function clearIdleDisposeTimer(): void {
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+function acquireSharedWorkerPool(): WorkerPoolManager | undefined {
+  if (!canUseWorkers()) return undefined;
+  clearIdleDisposeTimer();
+  ensureReadableLightDiffTheme();
+  if (!sharedPool) {
+    sharedPool = getOrCreateWorkerPoolSingleton({
+      poolOptions: {
+        workerFactory: () => new DiffWorker(),
+        poolSize: createDiffWorkerPoolSize(),
+        mainThreadMaxCharacters: 12_000,
+      },
+      highlighterOptions: POOL_RENDER_OPTIONS,
+    });
+  }
+  return sharedPool;
+}
+
+function releaseSharedWorkerPool(): void {
+  activeConsumers = Math.max(0, activeConsumers - 1);
+  if (activeConsumers === 0 && sharedPool) {
+    clearIdleDisposeTimer();
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (activeConsumers === 0 && sharedPool) {
+        sharedPool = null;
+        terminateWorkerPoolSingleton();
+      }
+    }, DIFF_WORKER_IDLE_DISPOSE_MS);
+  }
+}
+
+export function __resetDiffWorkerPoolForTests(): void {
+  clearIdleDisposeTimer();
+  activeConsumers = 0;
+  if (sharedPool) {
+    sharedPool = null;
+    terminateWorkerPoolSingleton();
+  }
+}
+
 /**
- * Provides a shared `@pierre/diffs` syntax-highlighting WorkerPool when running
- * in browser/Tauri environments, and renders children directly in headless/test
- * environments without Web Worker support.
+ * Provides a shared, ref-counted `@pierre/diffs` syntax-highlighting WorkerPool
+ * capped at 1–2 workers when running in browser/Tauri environments, and disposes
+ * idle workers after 60s of inactivity once all consumers unmount.
  */
 export function DiffWorkerPoolProvider({ children }: { children: ReactNode }) {
-  useEffect(() => {
-    ensureReadableLightDiffTheme();
-  }, []);
-
   const existingPool = useWorkerPool();
-  const poolOptions = useMemo(() => {
-    if (!canUseWorkers() || existingPool) return null;
-    ensureReadableLightDiffTheme();
-    return {
-      workerFactory: () => new DiffWorker(),
-      poolSize: createDiffWorkerPoolSize(),
-      mainThreadMaxCharacters: 12_000,
-    };
-  }, [existingPool]);
+  const [poolManager] = useState<WorkerPoolManager | undefined>(() => {
+    if (existingPool) return undefined;
+    return acquireSharedWorkerPool();
+  });
 
-  if (existingPool || !poolOptions) {
+  useEffect(() => {
+    if (existingPool || !poolManager) return;
+    activeConsumers += 1;
+    clearIdleDisposeTimer();
+    return () => {
+      releaseSharedWorkerPool();
+    };
+  }, [existingPool, poolManager]);
+
+  if (existingPool || !poolManager) {
     return <>{children}</>;
   }
 
   return (
-    <WorkerPoolContextProvider poolOptions={poolOptions} highlighterOptions={POOL_RENDER_OPTIONS}>
+    <WorkerPoolContext.Provider value={poolManager}>
       {children}
-    </WorkerPoolContextProvider>
+    </WorkerPoolContext.Provider>
   );
 }

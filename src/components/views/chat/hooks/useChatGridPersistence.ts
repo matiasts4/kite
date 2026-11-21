@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { MutableRefObject, Dispatch, SetStateAction } from 'react';
 import { invokeCommand } from '../../../../lib/ipc';
 import type { ExtendedChatThread, ChatAttachment } from '../types';
@@ -7,6 +7,105 @@ import { draftThreadRequest, type ChatDraftConfig } from './useChatDraftConfig';
 export const CHAT_GRID_STORAGE_KEY = 'kite.chat.grid.v1';
 export const CHAT_SUMMARIES_STORAGE_KEY = 'kite.chat.summaries.v1';
 export const CHAT_THREAD_STORAGE_PREFIX = 'kite.chat.thread.';
+export const MAX_CACHED_THREADS_IN_MEMORY = 8;
+export const THREAD_LOCAL_PERSIST_DEBOUNCE_MS = 350;
+
+function stripAttachmentPreview(att: ChatAttachment): ChatAttachment {
+  if (!att || !att.previewDataUrl) return att;
+  // Keep legacy inline previews only when there is no external file/resource backing them.
+  if (!att.path && !att.resourceId) return att;
+  const { previewDataUrl: _stripped, ...rest } = att;
+  return rest;
+}
+
+export function stripExternalizedAttachmentPreviews(
+  thread: ExtendedChatThread
+): ExtendedChatThread {
+  let itemsChanged = false;
+  const nextItems = Array.isArray(thread.items)
+    ? thread.items.map((item) => {
+        const atts = (item as { attachments?: ChatAttachment[] }).attachments;
+        if (!Array.isArray(atts) || atts.length === 0) return item;
+        let attChanged = false;
+        const cleaned = atts.map((att) => {
+          const next = stripAttachmentPreview(att);
+          if (next !== att) attChanged = true;
+          return next;
+        });
+        if (!attChanged) return item;
+        itemsChanged = true;
+        return { ...item, attachments: cleaned };
+      })
+    : thread.items;
+
+  let queuedChanged = false;
+  const nextQueued = Array.isArray(thread.queuedRuns)
+    ? thread.queuedRuns.map((run) => {
+        if (!Array.isArray(run.attachments) || run.attachments.length === 0) return run;
+        let attChanged = false;
+        const cleaned = run.attachments.map((att) => {
+          const next = stripAttachmentPreview(att);
+          if (next !== att) attChanged = true;
+          return next;
+        });
+        if (!attChanged) return run;
+        queuedChanged = true;
+        return { ...run, attachments: cleaned };
+      })
+    : thread.queuedRuns;
+
+  if (!itemsChanged && !queuedChanged) return thread;
+  return {
+    ...thread,
+    ...(itemsChanged ? { items: nextItems } : {}),
+    ...(queuedChanged ? { queuedRuns: nextQueued } : {}),
+  };
+}
+
+/**
+ * Strips heavy transcript `items[]` and inline attachment data URLs before storing
+ * a thread in `knownThreadsList` or `localStorage['kite.chat.summaries.v1']`.
+ */
+export function toThreadSummary(thread: ExtendedChatThread): ExtendedChatThread {
+  const { items: _droppedItems, queuedRuns: _droppedQueue, ...rest } = thread;
+  return rest as ExtendedChatThread;
+}
+
+/**
+ * Keeps `threadsMap` bounded to `maxEntries` full threads in renderer memory,
+ * preserving protected (open in grid / focused / active) and currently running
+ * threads while evicting the oldest closed threads first.
+ */
+export function pruneThreadsMapLru(
+  map: Record<string, ExtendedChatThread>,
+  protectedIds: Iterable<string>,
+  maxEntries: number = MAX_CACHED_THREADS_IN_MEMORY
+): Record<string, ExtendedChatThread> {
+  const keys = Object.keys(map);
+  if (keys.length <= maxEntries) return map;
+
+  const keep = new Set<string>();
+  for (const id of protectedIds) {
+    if (id && map[id]) keep.add(id);
+  }
+  for (const [id, thread] of Object.entries(map)) {
+    if (thread?.status === 'running') keep.add(id);
+  }
+
+  // Evict oldest non-protected entries first (Map/Object insertion order tracks recency).
+  const evictable = keys.filter((id) => !keep.has(id));
+  const excess = keys.length - maxEntries;
+  if (excess <= 0 || evictable.length === 0) return map;
+
+  const toDrop = new Set(evictable.slice(0, excess));
+  const next: Record<string, ExtendedChatThread> = {};
+  for (const key of keys) {
+    if (!toDrop.has(key)) {
+      next[key] = map[key];
+    }
+  }
+  return next;
+}
 
 export interface SavedGridState {
   threadIds: string[];
@@ -185,7 +284,12 @@ const syncCachedSummariesForScope = (
     const otherScopes = agentId
       ? existing.filter((t) => t.profileId !== agentId)
       : existing.filter((t) => Boolean(t.profileId));
-    localStorage.setItem(CHAT_SUMMARIES_STORAGE_KEY, JSON.stringify([...summaries, ...otherScopes]));
+    const compactSummaries = summaries.map(toThreadSummary);
+    const compactOthers = otherScopes.map(toThreadSummary);
+    localStorage.setItem(
+      CHAT_SUMMARIES_STORAGE_KEY,
+      JSON.stringify([...compactSummaries, ...compactOthers])
+    );
   } catch {}
 };
 
@@ -409,15 +513,60 @@ export function useChatGridPersistence({
     void persistGrid(remaining, nextFocused);
   };
 
+  const lastPersistedThreadsRef = useRef<Record<string, ExtendedChatThread>>({});
+  const dirtyThreadIdsRef = useRef<Set<string>>(new Set());
+  const latestThreadsMapRef = useRef<Record<string, ExtendedChatThread>>(threadsMap);
+  latestThreadsMapRef.current = threadsMap;
+
   useEffect(() => {
+    const prev = lastPersistedThreadsRef.current;
     for (const [id, thread] of Object.entries(threadsMap)) {
-      if (id && thread) {
-        try {
-          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(thread));
-        } catch {}
+      if (id && thread && prev[id] !== thread) {
+        dirtyThreadIdsRef.current.add(id);
       }
     }
+    if (dirtyThreadIdsRef.current.size === 0) return;
+
+    const flushDirty = () => {
+      const pending = Array.from(dirtyThreadIdsRef.current);
+      if (pending.length === 0) return;
+      dirtyThreadIdsRef.current.clear();
+      const current = latestThreadsMapRef.current;
+      const nextPersisted = { ...lastPersistedThreadsRef.current };
+      for (const id of pending) {
+        const thread = current[id];
+        if (!thread) continue;
+        try {
+          const sanitized = stripExternalizedAttachmentPreviews(thread);
+          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(sanitized));
+          nextPersisted[id] = thread;
+        } catch {}
+      }
+      lastPersistedThreadsRef.current = nextPersisted;
+    };
+
+    const timer = window.setTimeout(flushDirty, THREAD_LOCAL_PERSIST_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [threadsMap]);
+
+  useEffect(() => {
+    return () => {
+      const pending = Array.from(dirtyThreadIdsRef.current);
+      if (pending.length === 0) return;
+      dirtyThreadIdsRef.current.clear();
+      const current = latestThreadsMapRef.current;
+      for (const id of pending) {
+        const thread = current[id];
+        if (!thread) continue;
+        try {
+          const sanitized = stripExternalizedAttachmentPreviews(thread);
+          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(sanitized));
+        } catch {}
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (knownThreadsList.length > 0) {

@@ -1,4 +1,5 @@
 import type {
+  ActiveSubagentSummary,
   ChatThread,
   SubagentMeta,
   SwarmMeta,
@@ -11,6 +12,7 @@ import type {
 import type { ProposedPlan } from './ChatPlanPanel';
 
 export type {
+  ActiveSubagentSummary,
   SubagentMeta,
   SwarmMeta,
   SubagentRun,
@@ -83,9 +85,16 @@ export const DEFAULT_EFFORT_CHOICES: EffortChoice[] = [
   { id: 'high', label: 'High', detail: 'Deep reasoning and thorough analysis' },
 ];
 
+export interface ReflectionCandidate {
+  agentId: string;
+  note: string;
+  summary: string;
+}
+
 export interface ExtendedChatThread extends ChatThread {
   hasContent?: boolean;
   pendingApproval?: ApprovalRequest | null;
+  reflectionCandidate?: ReflectionCandidate | null;
   effort?: string | null;
   agent?: string | null;
   workMode?: string | null;

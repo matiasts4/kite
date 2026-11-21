@@ -10,8 +10,8 @@
 .swarm-board__overview {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--separator);
   flex: none;
 }
@@ -21,6 +21,15 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.swarm-board__title-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   flex-wrap: wrap;
 }
 
@@ -34,14 +43,14 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .swarm-board__subtabs {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px 12px 6px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--separator);
   flex: none;
   flex-wrap: wrap;
@@ -51,15 +60,16 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 12px;
+  gap: 4px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--separator);
   flex: none;
+  overflow-x: visible;
 }
 
 .swarm-channel-pill {
-  height: var(--control-row, 28px);
-  padding: 0 10px;
+  height: var(--vl-control-sm, 26px);
+  padding: 0 8px;
   border: 1px solid var(--block-stroke);
   border-radius: var(--radius-chip, 6px);
   background: var(--block-fill);
@@ -79,10 +89,13 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 10px 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .swarm-post-card,
@@ -146,6 +159,8 @@
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .swarm-mention-pill,

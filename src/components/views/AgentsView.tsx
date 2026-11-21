@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import './agents/agent-surface.css';
 import { invokeCommand } from '../../lib/ipc';
-import type { AgentProfile } from '../../types';
+import { subscribeLiveChatRuns } from '../../lib/liveChatRunsStore';
+import type { AgentProfile, Workspace } from '../../types';
 import { AgentAvatar } from '../AgentAvatar';
 import { ThemeHeroFigure } from '../theme/ThemeHeroFigure';
 import { ChatView } from './ChatView';
@@ -68,12 +69,20 @@ export function isLlmEngine(engine?: string | null): boolean {
 export interface AgentChatSurfaceProps {
   agent: AgentProfile;
   agents: AgentProfile[];
+  workspaceId?: string | null;
+  workspaces?: Workspace[];
 }
 
-export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({ agent, agents }) => {
+export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
+  agent,
+  agents,
+  workspaceId,
+  workspaces,
+}) => {
   return (
     <ChatView
-      workspaceId={null}
+      workspaceId={workspaceId ?? null}
+      workspaces={workspaces}
       agentId={agent.id}
       agentName={agent.name}
       agentEngine={agent.engine}
@@ -86,6 +95,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({ agent, agent
 export interface AgentsViewProps {
   agents?: AgentProfile[];
   workspaceId?: string | null;
+  workspaces?: Workspace[];
   selectedAgentId: string | null;
   onSelectAgent: (id: string) => void;
   agentEditorOpen?: boolean;
@@ -103,6 +113,7 @@ export interface AgentsViewProps {
 export const AgentsView: React.FC<AgentsViewProps> = ({
   agents: agentsProp,
   workspaceId,
+  workspaces,
   selectedAgentId,
   onSelectAgent,
   agentEditorOpen,
@@ -168,6 +179,9 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     defaultMode?: string | null;
     defaultPlan?: boolean;
     defaultModel?: string | null;
+    defaultProviderOptions?: unknown[];
+    placeDisplayNames?: string[];
+    disabledPluginIds?: string[];
     avatar?: any;
   }>({
     name: '',
@@ -180,6 +194,9 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     defaultMode: null,
     defaultPlan: false,
     defaultModel: null,
+    defaultProviderOptions: [],
+    placeDisplayNames: [],
+    disabledPluginIds: [],
     avatar: null,
   });
   const [settingsDirty, setSettingsDirty] = useState<boolean>(false);
@@ -262,6 +279,9 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           defaultMode: fullProf.defaultMode || null,
           defaultPlan: Boolean(fullProf.defaultPlan),
           defaultModel: fullProf.defaultModel || null,
+          defaultProviderOptions: fullProf.defaultProviderOptions ?? [],
+          placeDisplayNames: fullProf.placeDisplayNames ?? [],
+          disabledPluginIds: fullProf.disabledPluginIds ?? [],
           avatar: fullProf.avatar || null,
         });
         setSettingsDirty(false);
@@ -284,33 +304,23 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   // Poll live running tasks for active agent
   useEffect(() => {
     let isMounted = true;
-    let inFlight = false;
-    const pollLiveRuns = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const runs = await invokeCommand<Array<{ agentId?: string; status?: string }>>('list_live_chat_runs');
-        if (isMounted && Array.isArray(runs) && selectedAgentId) {
-          const count = runs.filter(
-            (r) => r.agentId === selectedAgentId && (r.status === 'running' || r.status === 'waiting')
-          ).length;
-          setLiveRunningCount(count);
-        }
-      } catch {
-        // Silent background fallback
-      } finally {
-        inFlight = false;
-      }
+    const applyRuns = (
+      runs: Array<{ agentId?: string; profileId?: string | null; status?: string; needsYou?: boolean }>
+    ) => {
+      if (!isMounted || !selectedAgentId) return;
+      const count = runs.filter(
+        (r) =>
+          (r.profileId ?? r.agentId) === selectedAgentId &&
+          (!r.status || r.status === 'running' || r.status === 'waiting' || r.needsYou)
+      ).length;
+      setLiveRunningCount((prev) => (prev === count ? prev : count));
     };
 
-    void pollLiveRuns();
-    const timer = setInterval(() => {
-      void pollLiveRuns();
-    }, 4000);
+    const unsubscribe = subscribeLiveChatRuns(applyRuns, { immediate: true });
 
     return () => {
       isMounted = false;
-      clearInterval(timer);
+      unsubscribe();
     };
   }, [selectedAgentId]);
 
@@ -583,6 +593,9 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
         defaultMode: settingsDraft.defaultMode,
         defaultPlan: settingsDraft.defaultPlan ? 'true' : 'false',
         defaultModel: settingsDraft.defaultModel,
+        defaultProviderOptions: settingsDraft.defaultProviderOptions ?? [],
+        placeDisplayNames: settingsDraft.placeDisplayNames ?? [],
+        disabledPluginIds: settingsDraft.disabledPluginIds ?? [],
       });
       if (onAgentUpdated && updatedProfile) {
         onAgentUpdated(updatedProfile);
@@ -613,6 +626,9 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
       defaultMode: profile.defaultMode || null,
       defaultPlan: Boolean(profile.defaultPlan),
       defaultModel: profile.defaultModel || null,
+      defaultProviderOptions: profile.defaultProviderOptions ?? [],
+      placeDisplayNames: profile.placeDisplayNames ?? [],
+      disabledPluginIds: profile.disabledPluginIds ?? [],
       avatar: profile.avatar || null,
     });
     setSettingsDirty(false);
@@ -836,7 +852,12 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
 
       {/* Content Surfaces */}
       {viewMode === 'chats' && isLlm && surfacePreference === 'chat' && (
-        <AgentChatSurface agent={selectedAgent} agents={agents} />
+        <AgentChatSurface
+          agent={selectedAgent}
+          agents={agents}
+          workspaceId={workspaceId}
+          workspaces={workspaces}
+        />
       )}
 
       {viewMode === 'chats' && (!isLlm || surfacePreference === 'terminal') && (
@@ -877,6 +898,7 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           skillSaving={skillSaving}
           starters={starters}
           onInstallStarter={handleInstallStarter}
+          onMindUpdated={setMind}
           onSelectSkill={handleSelectSkill}
           onSaveSkill={handleSaveSkill}
           onDeleteSkill={handleDeleteSkill}
@@ -905,6 +927,7 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           setSettingsDraft={setSettingsDraft}
           settingsDirty={settingsDirty}
           setSettingsDirty={setSettingsDirty}
+          workspaces={workspaces}
           error={error}
           successMessage={successNotice}
           onSaveSettings={handleSaveSettings}

@@ -82,13 +82,14 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
     expect(screen.getByTestId('stage-backdrop-watermark')).toBeTruthy();
   });
 
-  it('renders all ThemeHeroFigure styles and returns null when figure style resolves to none', () => {
+  it('renders all ThemeHeroFigure styles, supports fallbackFigure and voiceState, and returns null when figure style resolves to none', () => {
     const styles = [
       'pixel-companion',
       'isometric-construct',
       'editorial-botanical',
       'orbital-constellation',
       'kite-crest',
+      'kinetic-ring',
     ] as const;
 
     const { rerender, container } = render(
@@ -96,10 +97,14 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
     );
 
     for (const style of styles) {
-      rerender(<ThemeHeroFigure figure={style} variant="hero" />);
+      rerender(<ThemeHeroFigure figure={style} variant="hero" voiceState="listening" voiceLevel={0.4} />);
       const fig = screen.getByTestId(`theme-hero-figure-${style}`);
       expect(fig).toBeTruthy();
+      expect(fig).toHaveAttribute('data-voice-state', 'listening');
     }
+
+    rerender(<ThemeHeroFigure figure="none" fallbackFigure="kinetic-ring" variant="hero" />);
+    expect(screen.getByTestId('theme-hero-figure-kinetic-ring')).toBeTruthy();
 
     rerender(<ThemeHeroFigure figure="none" variant="hero" />);
     expect(container.querySelector('[data-testid^="theme-hero-figure-"]')).toBeNull();
@@ -130,6 +135,8 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
       'aurora-mesh',
       'alpine-dusk',
       'solar-horizon',
+      'event-horizon',
+      'lunar-eclipse',
       'custom-image',
     ];
 
@@ -145,11 +152,13 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
         },
       });
       const { unmount, container } = render(<StageBackdrop customizations={state} />);
-      const backdrop = screen.getByTestId('stage-backdrop');
-      expect(backdrop.getAttribute('data-backdrop-preset')).toBe(preset);
       if (preset === 'none') {
+        expect(container.firstChild).toBeNull();
+        expect(screen.queryByTestId('stage-backdrop')).toBeNull();
         expect(container.querySelector('.stage-backdrop__scrim')).toBeNull();
       } else {
+        const backdrop = screen.getByTestId('stage-backdrop');
+        expect(backdrop.getAttribute('data-backdrop-preset')).toBe(preset);
         expect(screen.getByTestId(`stage-backdrop-scene-${preset}`)).toBeTruthy();
         if (preset !== 'custom-image') {
           const wall = screen.getByTestId(`stage-backdrop-wallpaper-${preset}`);
@@ -159,7 +168,7 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
         const scrim = container.querySelector('.stage-backdrop__scrim') as HTMLElement | null;
         expect(scrim).toBeTruthy();
         expect(scrim?.style.opacity).toBe('0.45');
-        expect(scrim?.style.backdropFilter).toBe('blur(10px)');
+        expect(scrim?.style.backdropFilter).toBe('');
       }
       unmount();
     }
@@ -268,5 +277,26 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
     expect(agentResumeTsx).toContain('--glass-modal-bg');
     expect(resumeHostTsx).toContain('--glass-modal-bg');
     expect(routinesTsx).toContain('--glass-modal-bg');
+  });
+
+  it('avoids GPU layer explosion in theme-visuals.css, visual-language.css, and index.css', async () => {
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+
+    const themeVisualsCss = fs.readFileSync('src/components/theme/theme-visuals.css', 'utf8');
+    const visualLanguageCss = fs.readFileSync('src/visual-language.css', 'utf8');
+    const indexCss = fs.readFileSync('src/index.css', 'utf8');
+
+    expect(themeVisualsCss).not.toContain('feTurbulence');
+    expect(themeVisualsCss).not.toContain('transform: translateZ(0)');
+
+    expect(visualLanguageCss).not.toContain('backdrop-filter: var(--glass-blur)');
+    expect(visualLanguageCss).toContain('backdrop-filter: var(--glass-overlay-blur)');
+    expect(visualLanguageCss).toMatch(/\.chat-transcript\s*\{\s*contain:\s*layout style;\s*\}/);
+
+    expect(indexCss).toMatch(/\.mode-layer\s*\{[^}]*display:\s*none;/);
+    expect(indexCss).toMatch(/\.mode-layer--visible\s*\{[^}]*display:\s*flex;/);
   });
 });

@@ -2,13 +2,21 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ZedOrb, type ZedOrbState } from './ZedOrb';
 import { type OperatorBrainResponse } from '../lib/operator/operatorBrain';
 import { ttsNarrator } from '../lib/operator/ttsNarrator';
-import { loadOperatorConfig } from '../lib/operator/operatorConfig';
+import { loadOperatorConfig, sanitizeZedFigure, type ZedFigureId } from '../lib/operator/operatorConfig';
 import { useOperatorTurn } from '../lib/operator/hooks/useOperatorTurn';
 import { resolveZedOrbState } from '../lib/operator/hooks/useOperatorTurnLogic';
 import { isBrowserTestLane } from '../lib/browserTestLane';
 import { useOperatorVoice } from '../lib/operator/hooks/useOperatorVoice';
-import { releaseOperatorCapture } from '../lib/operator/voice/zedVoice';
+import {
+  releaseOperatorCapture,
+  armBargeInMonitor,
+  disarmBargeInMonitor,
+} from '../lib/operator/voice/zedVoice';
+import { voiceTurnArbitrator } from '../lib/operator/voice/turnArbitrator';
+import { SpeechSentenceQueue } from '../lib/operator/voice/speechProsody';
 import { voiceSessionStore, useVoiceSession } from '../lib/operator/voice/voiceSessionStore';
+import { startProactiveAgentWatcher } from '../lib/operator/proactiveWatcher';
+import { startSubagentReturnWatcher } from '../lib/operator/subagentReturnWatcher';
 import { getTurnTrace, type TraceEvent } from '../lib/operator/trace/trace';
 import { isTerminalTarget } from '../lib/shortcuts/useGlobalShortcuts';
 import './zedFloat.css';
@@ -84,7 +92,12 @@ function loadSavedPoint(): FloatPoint {
     const raw = localStorage.getItem(FLOAT_POS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<FloatPoint>;
-      if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') {
+      if (
+        typeof parsed?.x === 'number' &&
+        Number.isFinite(parsed.x) &&
+        typeof parsed?.y === 'number' &&
+        Number.isFinite(parsed.y)
+      ) {
         const winW = typeof window !== 'undefined' ? window.innerWidth : 1200;
         const winH = typeof window !== 'undefined' ? window.innerHeight : 800;
         return clampPoint(parsed.x * winW, parsed.y * winH);
@@ -122,6 +135,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   onExecuteCommand,
 }) => {
   const rootRef = useRef<HTMLElement | null>(null);
+  const orbContainerRef = useRef<HTMLDivElement | null>(null);
 
   const [point, setPoint] = useState<FloatPoint>(loadSavedPoint);
   const pointRef = useRef<FloatPoint>(point);
@@ -134,6 +148,24 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   const [manualInputValue, setManualInputValue] = useState('');
   const [speakingTts, setSpeakingTts] = useState(false);
   const [orbAck, setOrbAck] = useState(false);
+  const [orbPulseKey, setOrbPulseKey] = useState(0);
+  const [configuredFigure, setConfiguredFigure] = useState<ZedFigureId>(() =>
+    sanitizeZedFigure(loadOperatorConfig().persona?.figure)
+  );
+
+  useEffect(() => {
+    const syncFigure = (event?: Event) => {
+      const detail = (event as CustomEvent<{ persona?: { figure?: string } }> | undefined)?.detail;
+      const next = detail?.persona?.figure ?? loadOperatorConfig().persona?.figure;
+      setConfiguredFigure(sanitizeZedFigure(next));
+    };
+    window.addEventListener('kite:operator-config-updated', syncFigure);
+    window.addEventListener('kite:operator-config-changed', syncFigure);
+    return () => {
+      window.removeEventListener('kite:operator-config-updated', syncFigure);
+      window.removeEventListener('kite:operator-config-changed', syncFigure);
+    };
+  }, []);
 
   useEffect(() => {
     let timer = 0;
@@ -163,6 +195,11 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   const [isVoiceSessionActive, setIsVoiceSessionActive] = useState(false);
   const isVoiceSessionActiveRef = useRef(false);
   const lastSpokenTurnKeyRef = useRef<string | null>(null);
+  const activeSpokenTurnRef = useRef<{ threadId: string | null; turnId?: string } | null>(null);
+  const activeSpeechQueueRef = useRef<SpeechSentenceQueue | null>(null);
+  const consecutiveEmptyCapturesRef = useRef(0);
+  const prevListeningRef = useRef(false);
+  const prevMutedOrPausedRef = useRef(false);
 
   useEffect(() => {
     isVoiceSessionActiveRef.current = isVoiceSessionActive;
@@ -177,7 +214,13 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
   }, [isVoiceSessionActive]);
 
   const recordThreadVoiceTurn = useCallback(
-    (targetThreadId: string | null | undefined, userPrompt: string, source: 'voz' | 'texto', res: any) => {
+    (
+      targetThreadId: string | null | undefined,
+      userPrompt: string,
+      source: 'voz' | 'texto',
+      res: any,
+      createdAt?: number
+    ) => {
       if (!targetThreadId || !res) return;
       const trace = getTurnTrace(res.turnId);
       const planEv = trace?.events?.find((e: TraceEvent) => e.ev === 'plan.created') as any;
@@ -201,7 +244,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         receipts: res.receipts,
         consultChatsInfo,
         reply: res.reply,
-        createdAt: Date.now(),
+        createdAt: createdAt ?? Date.now(),
       });
     },
     []
@@ -214,6 +257,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     language: configuredLang,
     onFinalTranscript: async (text) => {
       if (!text || text.trim().length === 0) return;
+      consecutiveEmptyCapturesRef.current = 0;
       if (onExecuteCommand) {
         const res = await onExecuteCommand(text);
         if (res) {
@@ -224,14 +268,108 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
           });
         }
       } else {
+        const vsBefore = voiceSessionStore.getSnapshot();
+        const targetThreadId = vsBefore.boundThreadId;
+        const effectiveMode =
+          vsBefore.activeSurface === 'thread' || Boolean(targetThreadId) ? 'thread' : 'code';
+        const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const startedAt = Date.now();
+
+        // T20: Immediately project the user's spoken prompt into the thread timeline and clear
+        // the composer textarea so long LLM turns never look frozen or unsent.
+        if (targetThreadId) {
+          voiceSessionStore.addThreadVoiceTurn(targetThreadId, {
+            turnId,
+            userPrompt: text,
+            source: 'voz',
+            createdAt: startedAt,
+          });
+          voiceRef.current.clearTranscript();
+          voiceSessionStore.setVoiceRuntimeState({ interimTranscript: '' });
+        }
+
         try {
-          const res = await turn.runTurn(text, { source: 'voz', workspaceId });
-          const vs = voiceSessionStore.getSnapshot();
-          recordThreadVoiceTurn(vs.boundThreadId, text, 'voz', res);
+          const opConfig = loadOperatorConfig();
+          const speakerMutedNow = call.speakerMuted || vsBefore.speakerMuted;
+          let streamedQueue: SpeechSentenceQueue | null = null;
+          let streamedAnySentence = false;
+
+          if (!speakerMutedNow) {
+            streamedQueue = new SpeechSentenceQueue({
+              onFirstSentence: () => {
+                streamedAnySentence = true;
+                activeSpokenTurnRef.current = { threadId: targetThreadId, turnId };
+                setSpeakingTts(true);
+                voiceTurnArbitrator.transition('speaking');
+              },
+              speakSentence: async (sentence, idx) => {
+                await ttsNarrator.speak(sentence, {
+                  voiceName: opConfig.persona?.voice || 'Ara',
+                  rate: opConfig.ttsRate || 1.0,
+                  lang: opConfig.persona?.language === 'en' ? 'en-US' : 'es-ES',
+                  turnId: idx === 0 ? turnId : undefined,
+                  turnStartedAt: idx === 0 ? startedAt : undefined,
+                });
+              },
+              onComplete: () => {
+                if (activeSpeechQueueRef.current === streamedQueue) {
+                  activeSpeechQueueRef.current = null;
+                }
+                if (streamedAnySentence) {
+                  setSpeakingTts(false);
+                  voiceTurnArbitrator.transition('listening');
+                  if (canRearmVoiceSessionMicRef.current()) {
+                    void voiceRef.current.startListening({ continuous: isVoiceSessionActiveRef.current });
+                  }
+                }
+              },
+            });
+            activeSpeechQueueRef.current = streamedQueue;
+          }
+
+          voiceTurnArbitrator.transition('thinking');
+          const res = await turn.runTurn(text, {
+            turnId,
+            source: 'voz',
+            workspaceId,
+            mode: effectiveMode,
+            onStreamSentence: streamedQueue
+              ? (sentence) => {
+                  streamedQueue?.enqueue(sentence);
+                }
+              : undefined,
+          });
+          if (streamedQueue) {
+            if (streamedAnySentence) {
+              lastSpokenTurnKeyRef.current = `turn-${res.turnId || res.reply}`;
+              void streamedQueue.close();
+            } else {
+              streamedQueue.abort();
+              if (activeSpeechQueueRef.current === streamedQueue) {
+                activeSpeechQueueRef.current = null;
+              }
+            }
+          }
+          const resolvedThreadId = targetThreadId || voiceSessionStore.getSnapshot().boundThreadId;
+          recordThreadVoiceTurn(resolvedThreadId, text, 'voz', res, startedAt);
         } catch (err) {
+          activeSpeechQueueRef.current?.abort();
+          activeSpeechQueueRef.current = null;
+          voiceTurnArbitrator.transition('idle');
           const message =
             err instanceof Error ? err.message : 'No se pudo ejecutar la orden.';
           setManualCommandResult({ reply: message, ok: false });
+          const resolvedThreadId = targetThreadId || voiceSessionStore.getSnapshot().boundThreadId;
+          if (resolvedThreadId) {
+            voiceSessionStore.addThreadVoiceTurn(resolvedThreadId, {
+              turnId,
+              userPrompt: text,
+              source: 'voz',
+              overallSuccess: false,
+              reply: message,
+              createdAt: startedAt,
+            });
+          }
         }
       }
     },
@@ -247,11 +385,39 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       if (voiceRef.current.isListening) {
         voiceRef.current.stopListening();
       }
-      const res = await turn.runTurn(text, {
-        source: 'texto',
-        workspaceId: wsId ?? workspaceId,
-      });
-      recordThreadVoiceTurn(threadId, text, 'texto', res);
+      const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const startedAt = Date.now();
+      if (threadId) {
+        voiceSessionStore.addThreadVoiceTurn(threadId, {
+          turnId,
+          userPrompt: text,
+          source: 'texto',
+          createdAt: startedAt,
+        });
+      }
+      try {
+        const res = await turn.runTurn(text, {
+          turnId,
+          source: 'texto',
+          workspaceId: wsId ?? workspaceId,
+          mode: 'thread',
+        });
+        recordThreadVoiceTurn(threadId, text, 'texto', res, startedAt);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'No se pudo ejecutar la orden.';
+        if (threadId) {
+          voiceSessionStore.addThreadVoiceTurn(threadId, {
+            turnId,
+            userPrompt: text,
+            source: 'texto',
+            overallSuccess: false,
+            reply: message,
+            createdAt: startedAt,
+          });
+        }
+        throw err;
+      }
     });
     return () => {
       voiceSessionStore.registerTextTurnExecutor(null);
@@ -262,37 +428,60 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     const syncFromStore = () => {
       const vs = voiceSessionStore.getSnapshot();
       const shouldBeActive = vs.phase === 'active' || vs.phase === 'starting';
+      const nowMutedOrPaused = vs.isPausedForDictation || vs.micMuted;
+      const wasMutedOrPaused = prevMutedOrPausedRef.current;
+      prevMutedOrPausedRef.current = nowMutedOrPaused;
 
       if (shouldBeActive && !isVoiceSessionActiveRef.current) {
+        consecutiveEmptyCapturesRef.current = 0;
         setIsVoiceSessionActive(true);
         isVoiceSessionActiveRef.current = true;
         if (typeof window !== 'undefined') {
           (window as any).__kiteVoiceSessionActive = true;
         }
         turn.resetStage();
-        if (!voiceRef.current.isListening && !vs.isPausedForDictation && !vs.micMuted) {
-          void voiceRef.current.startListening();
+        if (!voiceRef.current.isListening && !voiceRef.current.isFatalError && !nowMutedOrPaused) {
+          void voiceRef.current.startListening({ continuous: true });
         }
       } else if (!shouldBeActive && isVoiceSessionActiveRef.current) {
+        consecutiveEmptyCapturesRef.current = 0;
         setIsVoiceSessionActive(false);
         isVoiceSessionActiveRef.current = false;
         if (typeof window !== 'undefined') {
           (window as any).__kiteVoiceSessionActive = false;
         }
-        voiceRef.current.stopListening();
+        disarmBargeInMonitor();
+        activeSpeechQueueRef.current?.abort();
+        activeSpeechQueueRef.current = null;
+        voiceRef.current.stopListening({ release: true });
         ttsNarrator.stop();
         setSpeakingTts(false);
+        voiceTurnArbitrator.transition('idle');
       } else if (shouldBeActive) {
-        if (vs.isPausedForDictation || vs.micMuted) {
+        if (nowMutedOrPaused) {
+          disarmBargeInMonitor();
           if (voiceRef.current.isListening) {
-            voiceRef.current.stopListening();
+            voiceRef.current.stopListening({ release: true });
+          } else {
+            void releaseOperatorCapture();
           }
-        } else if (!voiceRef.current.isListening && !voiceRef.current.isTranscribing && !turn.busy && !speakingTts) {
-          void voiceRef.current.startListening();
+        } else if (
+          wasMutedOrPaused &&
+          !voiceRef.current.isListening &&
+          !voiceRef.current.isTranscribing &&
+          !voiceRef.current.isFatalError &&
+          !turn.busy &&
+          !speakingTts
+        ) {
+          consecutiveEmptyCapturesRef.current = 0;
+          void voiceRef.current.startListening({ continuous: true });
         }
         if (vs.speakerMuted && speakingTts) {
+          activeSpeechQueueRef.current?.abort();
+          activeSpeechQueueRef.current = null;
           ttsNarrator.stop();
           setSpeakingTts(false);
+          voiceTurnArbitrator.transition('listening');
         }
       }
     };
@@ -301,14 +490,37 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     return voiceSessionStore.subscribe(syncFromStore);
   }, [speakingTts, turn]);
 
-  // Continuous listening loop: re-arm microphone automatically after silent capture windows
+  // Track consecutive empty silence captures so continuous mode backs off calmly instead of spinning
+  useEffect(() => {
+    const wasListening = prevListeningRef.current;
+    prevListeningRef.current = voice.isListening;
+    if (
+      wasListening &&
+      !voice.isListening &&
+      !voice.isTranscribing &&
+      !turn.busy &&
+      !voice.transcript.trim() &&
+      !voice.error
+    ) {
+      consecutiveEmptyCapturesRef.current += 1;
+    }
+  }, [voice.isListening, voice.isTranscribing, voice.transcript, voice.error, turn.busy]);
+
+  // Continuous listening loop: re-arm microphone with calm backoff on silence and stop on fatal STT errors
   useEffect(() => {
     if (!isVoiceSessionActive) return;
-    if (voice.isListening || voice.isTranscribing || turn.busy || speakingTts || voice.error) return;
+    if (voice.isListening || voice.isTranscribing || turn.busy || speakingTts || voice.error || voice.isFatalError) {
+      return;
+    }
     const vs = voiceSessionStore.getSnapshot();
     if (vs.micMuted || vs.isPausedForDictation || (vs.phase !== 'active' && vs.phase !== 'starting')) {
       return;
     }
+
+    const delayMs =
+      consecutiveEmptyCapturesRef.current > 0
+        ? Math.min(3200, 1200 + (consecutiveEmptyCapturesRef.current - 1) * 400)
+        : 350;
 
     const timer = window.setTimeout(() => {
       const latest = voiceSessionStore.getSnapshot();
@@ -318,14 +530,23 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         !latest.micMuted &&
         !latest.isPausedForDictation &&
         !voiceRef.current.isListening &&
-        !voiceRef.current.isTranscribing
+        !voiceRef.current.isTranscribing &&
+        !voiceRef.current.isFatalError
       ) {
-        void voiceRef.current.startListening();
+        void voiceRef.current.startListening({ continuous: true });
       }
-    }, 280);
+    }, delayMs);
 
     return () => window.clearTimeout(timer);
-  }, [isVoiceSessionActive, voice.isListening, voice.isTranscribing, voice.error, turn.busy, speakingTts]);
+  }, [
+    isVoiceSessionActive,
+    voice.isListening,
+    voice.isTranscribing,
+    voice.error,
+    voice.isFatalError,
+    turn.busy,
+    speakingTts,
+  ]);
 
   useEffect(() => {
     voiceSessionStore.setVoiceRuntimeState({
@@ -344,6 +565,118 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     voiceSessionStore.setActiveTurnStage(turn.stage, turn.stageLabel);
   }, [turn.stage, turn.stageLabel]);
 
+  const canRearmVoiceSessionMic = useCallback(() => {
+    if (!isVoiceSessionActiveRef.current) return false;
+    const latest = voiceSessionStore.getSnapshot();
+    return (
+      latest.phase === 'active' &&
+      !latest.micMuted &&
+      !latest.isPausedForDictation &&
+      !voiceRef.current.isListening &&
+      !voiceRef.current.isTranscribing &&
+      !voiceRef.current.isFatalError
+    );
+  }, []);
+
+  const canRearmVoiceSessionMicRef = useRef(canRearmVoiceSessionMic);
+  canRearmVoiceSessionMicRef.current = canRearmVoiceSessionMic;
+
+  const callSpeakerMutedRef = useRef(Boolean(call.speakerMuted));
+  callSpeakerMutedRef.current = Boolean(call.speakerMuted);
+
+  // S2: Proactive speech callback shared by subagent return watcher & terminal watcher.
+  // Coordinates speakingTts, VoiceTurnArbitrator, acoustic barge-in, and mic re-arming with zero self-echo.
+  const speakProactiveInSession = useCallback((text: string) => {
+    const vs = voiceSessionStore.getSnapshot();
+    if (callSpeakerMutedRef.current || vs.speakerMuted) return;
+    if (voiceRef.current.isListening) {
+      voiceRef.current.stopListening();
+    }
+    activeSpokenTurnRef.current = { threadId: vs.boundThreadId };
+    setSpeakingTts(true);
+    voiceTurnArbitrator.transition('speaking');
+    const opConfig = loadOperatorConfig();
+    ttsNarrator.speak(text, {
+      voiceName: opConfig.persona?.voice || 'Ara',
+      rate: opConfig.ttsRate || 1.0,
+      lang: opConfig.persona?.language === 'en' ? 'en-US' : 'es-ES',
+      onEnd: () => {
+        setSpeakingTts(false);
+        voiceTurnArbitrator.transition(isVoiceSessionActiveRef.current ? 'listening' : 'idle');
+        if (canRearmVoiceSessionMicRef.current()) {
+          void voiceRef.current.startListening({ continuous: true });
+        }
+      },
+      onError: () => {
+        setSpeakingTts(false);
+        voiceTurnArbitrator.transition(isVoiceSessionActiveRef.current ? 'listening' : 'idle');
+        if (canRearmVoiceSessionMicRef.current()) {
+          void voiceRef.current.startListening({ continuous: true });
+        }
+      },
+    });
+  }, []);
+
+  // S2: Mount closed-loop subagent return watcher and terminal proactive watcher while ZedStrip is active.
+  useEffect(() => {
+    const isVoiceOpen = () => {
+      const vs = voiceSessionStore.getSnapshot();
+      return isVoiceSessionActiveRef.current || vs.phase === 'active' || vs.phase === 'starting';
+    };
+    const stopSubagentWatcher = startSubagentReturnWatcher({
+      speak: speakProactiveInSession,
+      isVoiceSessionOpen: isVoiceOpen,
+    });
+    const stopTerminalWatcher = startProactiveAgentWatcher({
+      isVoiceSessionOpen: isVoiceOpen,
+      sessionSpeak: speakProactiveInSession,
+      speak: speakProactiveInSession,
+    });
+    return () => {
+      stopSubagentWatcher();
+      stopTerminalWatcher();
+    };
+  }, [speakProactiveInSession]);
+
+  // S1: Acoustic full-duplex barge-in while SETH is speaking in an active voice session.
+  useEffect(() => {
+    if (!speakingTts || !isVoiceSessionActive) {
+      disarmBargeInMonitor();
+      return;
+    }
+    const vs = voiceSessionStore.getSnapshot();
+    if (vs.micMuted || vs.isPausedForDictation || vs.phase !== 'active') {
+      disarmBargeInMonitor();
+      return;
+    }
+
+    armBargeInMonitor(() => {
+      activeSpeechQueueRef.current?.abort();
+      activeSpeechQueueRef.current = null;
+      ttsNarrator.stop();
+      setSpeakingTts(false);
+
+      const spokenTurn = activeSpokenTurnRef.current;
+      if (spokenTurn?.threadId) {
+        voiceSessionStore.markTurnInterrupted(spokenTurn.threadId, spokenTurn.turnId);
+      }
+
+      const latest = voiceSessionStore.getSnapshot();
+      if (
+        isVoiceSessionActiveRef.current &&
+        latest.phase === 'active' &&
+        !latest.micMuted &&
+        !latest.isPausedForDictation
+      ) {
+        void voiceRef.current.startListening({ continuous: true, fromBargeIn: true });
+      }
+    });
+
+    return () => {
+      disarmBargeInMonitor();
+    };
+  }, [speakingTts, isVoiceSessionActive]);
+
   // When turn finishes with reply, auto-speak if TTS is enabled and not muted
   useEffect(() => {
     const reply = manualCommandResult?.reply || turn.lastTurn?.reply;
@@ -359,31 +692,40 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         return;
       }
       lastSpokenTurnKeyRef.current = turnKey;
+      activeSpokenTurnRef.current = {
+        threadId: vs.boundThreadId,
+        turnId: turn.lastTurn?.turnId,
+      };
       setSpeakingTts(true);
+      voiceTurnArbitrator.transition('speaking');
       const opConfig = loadOperatorConfig();
       ttsNarrator.speak(reply, {
         voiceName: opConfig.persona?.voice || 'Ara',
         rate: opConfig.ttsRate || 1.0,
         lang: opConfig.persona?.language === 'en' ? 'en-US' : 'es-ES',
+        turnId: turn.lastTurn?.turnId,
         onEnd: () => {
           setSpeakingTts(false);
-          // S5: A voice session survives a reply. Re-arm the microphone for the next turn.
-          if (isVoiceSessionActiveRef.current) {
-            void voiceRef.current.startListening();
+          voiceTurnArbitrator.transition(isVoiceSessionActiveRef.current ? 'listening' : 'idle');
+          // S5/S8: Only re-arm the microphone when the session is active, unmuted, and not paused for dictation.
+          if (canRearmVoiceSessionMic()) {
+            void voiceRef.current.startListening({ continuous: true });
           }
         },
         onError: () => {
           setSpeakingTts(false);
-          if (isVoiceSessionActiveRef.current) {
-            void voiceRef.current.startListening();
+          voiceTurnArbitrator.transition(isVoiceSessionActiveRef.current ? 'listening' : 'idle');
+          if (canRearmVoiceSessionMic()) {
+            void voiceRef.current.startListening({ continuous: true });
           }
         },
       });
-    } else if (turn.stage === 'done' && isVoiceSessionActiveRef.current && !voiceRef.current.isListening) {
+    } else if (turn.stage === 'done' && canRearmVoiceSessionMic()) {
+      voiceTurnArbitrator.transition('listening');
       // Re-arm microphone if TTS was muted or had no reply
-      void voiceRef.current.startListening();
+      void voiceRef.current.startListening({ continuous: true });
     }
-  }, [turn.stage, turn.lastTurn, manualCommandResult, call.speakerMuted]);
+  }, [turn.stage, turn.lastTurn, manualCommandResult, call.speakerMuted, canRearmVoiceSessionMic]);
 
   // Toggle continuous voice session (S5)
   const handleToggleVoiceSession = useCallback(async () => {
@@ -394,9 +736,13 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       if (typeof window !== 'undefined') {
         (window as any).__kiteVoiceSessionActive = false;
       }
-      voice.stopListening();
+      disarmBargeInMonitor();
+      activeSpeechQueueRef.current?.abort();
+      activeSpeechQueueRef.current = null;
+      voice.stopListening({ release: true });
       ttsNarrator.stop();
       setSpeakingTts(false);
+      voiceTurnArbitrator.transition('idle');
       return;
     }
 
@@ -417,7 +763,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     }
 
     try {
-      await voice.startListening();
+      await voice.startListening({ continuous: true });
     } catch {
       voiceSessionStore.stopSession();
       setIsVoiceSessionActive(false);
@@ -444,6 +790,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       voice.stopListening();
       return;
     }
+    setOrbPulseKey((k) => k + 1);
     turn.resetStage();
     await voice.startListening();
   }, [voice, call.muted, onToggleMute, turn]);
@@ -560,12 +907,14 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       // Prevent repeated firing when holding down key
       if (e.repeat) return;
 
-      // Escape: Close/Hide assistant, unless the terminal owns the key (copy mode, etc.).
+      // Escape: Close/Hide floating assistant orb only when the orb itself is visible
+      // (never kill an active Thread Voice Mode session when pressing Escape in Thread UI).
       if (e.key === 'Escape') {
-        if (isTerminalTarget(e.target)) {
+        if (hideFloatingOrb || isTerminalTarget(e.target)) {
           return;
         }
         e.preventDefault();
+        voiceSessionStore.stopSession();
         ttsNarrator.stop();
         voice.stopListening();
         void releaseOperatorCapture();
@@ -598,7 +947,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       window.removeEventListener('kite:toggle-voice', handleVoiceEvent);
       window.removeEventListener('kite:toggle-voice-session', handleVoiceSessionEvent);
     };
-  }, [handleToggleVoice, handleToggleVoiceSession, onEndCall, voice]);
+  }, [handleToggleVoice, handleToggleVoiceSession, hideFloatingOrb, onEndCall, voice]);
 
   // Keep orb within bounds on window resize
   useEffect(() => {
@@ -638,7 +987,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
     if (voice.isListening) {
       return voice.interimTranscript
         ? `«${voice.interimTranscript}»`
-        : '🎙️ Escuchando tu voz… (habla y espera o haz clic para enviar)';
+        : 'Escuchando… (habla o haz clic para enviar)';
     }
     if (voice.isTranscribing) {
       return 'Transcribiendo tu voz en la nube…';
@@ -678,7 +1027,12 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         });
       }
     } else {
-      const res = await turn.runTurn(text, { source: 'texto', workspaceId });
+      const vsBefore = voiceSessionStore.getSnapshot();
+      const res = await turn.runTurn(text, {
+        source: 'texto',
+        workspaceId,
+        mode: vsBefore.activeSurface === 'thread' ? 'thread' : 'code',
+      });
       const vs = voiceSessionStore.getSnapshot();
       recordThreadVoiceTurn(vs.boundThreadId, text, 'texto', res);
     }
@@ -698,14 +1052,19 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
       onMouseLeave={() => setHovering(false)}
     >
       {/* 1. Pure 72px Spherical Orb Container (Mathematically Centered) */}
-      <div className="zed-float__orb-container">
+      <div ref={orbContainerRef} className="zed-float__orb-container">
         <div className={`zed-float__orb${orbAck ? ' motion-orb-ack' : ''}`}>
-          <ZedOrb
-            state={effectiveOrbState}
-            size={72}
-            getLevel={effectiveAudioLevel}
-            interactive={false}
-          />
+          {!hideFloatingOrb && (
+            <ZedOrb
+              figure={configuredFigure}
+              state={effectiveOrbState}
+              size={72}
+              getLevel={effectiveAudioLevel}
+              pointerTargetRef={orbContainerRef}
+              pulseKey={orbPulseKey}
+              interactive={false}
+            />
+          )}
         </div>
 
         {/* Circular Drag Handle & Push-to-Talk / Click-to-Speak Trigger */}
@@ -822,6 +1181,7 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
           type="button"
           className="zed-float__control zed-float__control--end"
           onClick={() => {
+            voiceSessionStore.stopSession();
             ttsNarrator.stop();
             voice.stopListening();
             void releaseOperatorCapture();
@@ -837,13 +1197,34 @@ export const ZedStrip: React.FC<ZedStripProps> = ({
         </button>
       </div>
 
-      {/* 3. Accessible Status Note (Screen readers & tests — NO visual bottom bar/pill below buttons) */}
+      {/* 3. Active Floating Status Note Pill (Omitted when idle; dismissible when completed) */}
       {(displayedNote || (browserTestUi && turn.stageLabel)) && (
         <div
-          className={browserTestUi ? 'zed-float__browser-status' : 'sr-only'}
+          className={
+            browserTestUi
+              ? 'zed-float__browser-status'
+              : `zed-float__note${
+                  voice.error || call.lastError || turn.stage === 'error'
+                    ? ' zed-float__note--error'
+                    : voice.isListening || voice.isTranscribing
+                    ? ' zed-float__note--listening'
+                    : ''
+                }`
+          }
           data-testid="zed-status"
           role="status"
           aria-live="polite"
+          title={
+            !voice.isListening && !voice.isTranscribing && !turn.busy
+              ? 'Clic para ocultar mensaje'
+              : undefined
+          }
+          onClick={() => {
+            if (voice.isListening || voice.isTranscribing || turn.busy) return;
+            if (voice.error) voice.clearError();
+            setManualCommandResult(null);
+            turn.resetStage();
+          }}
         >
           <span className="zed-float__note-text">
             {displayedNote || turn.stageLabel}
@@ -922,7 +1303,7 @@ export const ZedStripHost: React.FC<ZedStripHostProps> = ({ call, ...rest }) => 
     status: 'listening',
     toolCalls: [],
   };
-  const hideFloatingOrb = voiceSession.activeSurface === 'thread';
+  const hideFloatingOrb = isVoiceSessionRunning && voiceSession.activeSurface === 'thread';
 
   return <ZedStrip call={effectiveCall} hideFloatingOrb={hideFloatingOrb} {...rest} />;
 };

@@ -45,6 +45,8 @@ import {
   extractTerminalIndices,
   normalizeInputForIntent,
 } from './heuristicPatterns';
+import { normalizeSpanishVoiceStt } from './voiceNormalizer';
+import { analyzeClausePolarity } from './clausePolarity';
 
 export {
   detectEngineFromText,
@@ -59,14 +61,16 @@ export {
 };
 
 export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
-  const text = normalizeInputForIntent(rawText);
-  const lower = text.toLowerCase();
+  const sttNormalized = normalizeSpanishVoiceStt(rawText).normalized;
+  const polarity = analyzeClausePolarity(sttNormalized);
 
-  // S4: a negated imperative ("no cierres las terminales", "no abras dos terminales")
-  // must never be executed as its affirmative counterpart.
-  if (isNegatedTerminalImperative(text)) {
+  // S4/S7: Full negation refuses; mixed polarity ("no cierres X, abre Y") parses only affirmative clauses!
+  if (polarity.isEntireUtteranceNegated) {
     return { kind: 'UNKNOWN' };
   }
+
+  const text = normalizeInputForIntent(polarity.hasMixedPolarity ? polarity.affirmativeText : sttNormalized);
+  const lower = text.toLowerCase();
 
   // 1. Immediate silence / stop speaking
   if (
@@ -84,21 +88,23 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
     return { kind: 'STOP_SPEAKING' };
   }
 
-  // 2. Spawn subagent
-  const subagentMatch = lower.match(
-    /(?:lanza|lanzar|crea|crear|inicia|iniciar|spawn)\s+(?:un\s+)?subagente?\s+(grok|claude|codex|antigravity|opencode|agy)?(?:\s+(?:para|de)\s+(.+))?/i
+  // 2. Spawn subagent (supports "lanza un subagente / spawn subagent [con/de <provider>] [para <task>]")
+  const subagentMatch = text.match(
+    /(?:lanza|lanzar|lanzame|crea|crear|inicia|iniciar|abre|abrir|spawn)\s+(?:un\s+)?subagente?s?(?:\s+(?:con|de|usando)?\s*(grok|claude|codex|antigravity|opencode|agy))?(?:\s+(?:para|de|sobre)\s+(.+))?/i
   );
   if (subagentMatch) {
+    const rawProvider = subagentMatch[1]?.toLowerCase();
+    const mappedProvider = rawProvider === 'agy' ? 'antigravity' : rawProvider;
     return {
       kind: 'SPAWN_SUBAGENT',
-      cli: subagentMatch[1] || 'grok',
+      cli: mappedProvider,
       prompt: subagentMatch[2]?.trim() || '',
     };
   }
 
-  // 3. Summarize and speak (handles named agents e.g. "¿Qué está haciendo Nova?", "¿Cómo va Orion?", specific terminals, or general summary)
+  // 3. Summarize and speak (handles named agents/subagents/threads e.g. "¿Qué está haciendo Nova?", "¿Cómo va el subagente?", "¿Qué encontró el explorador?")
   const agentQueryMatch = text.match(
-    /(?:qu[eé]\s+(?:est[aá]\s+haciendo|hace)|c[oó]mo\s+va|estado\s+de)\s+(?:el\s+agente\s+|la\s+terminal\s+)?([a-záéíóúñ0-9_-]+)/i
+    /(?:qu[eé]\s+(?:est[aá]\s+haciendo|hace)|c[oó]mo\s+va|estado\s+(?:de(?:l)?))\s+(?:(?:el\s+)?agente\s+|(?:la\s+)?terminal\s+(?:de\s+)?|(?:el\s+)?hilo\s+(?:de\s+)?|(?:el\s+)?subagente\s+(?:de\s+)?)?(?:(?:el|la)\s+)?([a-záéíóúñ0-9_-]+)/i
   );
   if (agentQueryMatch) {
     const rawTarget = agentQueryMatch[1].trim();
@@ -111,7 +117,7 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
   }
 
   const agentSaidMatch = text.match(
-    /(?:qu[eé]\s+di(?:jo|ce)|resume\s+(?:qu[eé]|lo que)\s+dijo|resum(?:e|ir|o|a|en)\s+(?:qu[eé]|lo que)\s+dijo)\s+(?:el\s+agente\s+|la\s+terminal\s+(?:de\s+)?)?([a-záéíóúñ0-9_-]+)/i
+    /(?:qu[eé]\s+(?:di(?:jo|ce)|encontr[oó]|report[oó]|devolvi[oó])|resume\s+(?:qu[eé]|lo que)\s+(?:dijo|encontr[oó])|resum(?:e|ir|o|a|en)\s+(?:qu[eé]|lo que)\s+(?:dijo|encontr[oó]))\s+(?:(?:el\s+)?agente\s+|(?:la\s+)?terminal\s+(?:de\s+)?|(?:el\s+)?hilo\s+(?:de\s+)?|(?:el\s+)?subagente\s+(?:de\s+)?)?(?:(?:el|la)\s+)?([a-záéíóúñ0-9_-]+)/i
   );
   if (agentSaidMatch) {
     const rawTarget = agentSaidMatch[1].trim();
@@ -130,15 +136,21 @@ export function parseOperatorIntent(rawText: string): LegacyOperatorIntent {
     }
   }
 
+  const mentionsNonTerminalSubject =
+    /\b(?:chat|chats|hilo|hilos|thread|threads|odd|odds|subagente|subagentes|plan|conversaci[oó]n|memoria)\b/i.test(
+      lower
+    ) && !/\b(?:terminal|terminales|consola|panel|pane)\b/i.test(lower);
+
   if (
-    /resum(?:e|ir|en|o|a|i)\b/i.test(lower) ||
-    lower.includes('resumen') ||
-    lower.includes('summary') ||
-    /\bnarr(?:a|ame|ar)\b/i.test(lower) ||
-    /l[eé]eme/i.test(lower) ||
-    lower.includes('read aloud') ||
-    /cu[eé]ntame/i.test(lower) ||
-    /qu[eé] est[aá]n haciendo/i.test(lower)
+    !mentionsNonTerminalSubject &&
+    (/resum(?:e|ir|en|o|a|i)\b/i.test(lower) ||
+      lower.includes('resumen') ||
+      lower.includes('summary') ||
+      /\bnarr(?:a|ame|ar)\b/i.test(lower) ||
+      /l[eé]eme/i.test(lower) ||
+      lower.includes('read aloud') ||
+      /cu[eé]ntame/i.test(lower) ||
+      /qu[eé] est[aá]n haciendo/i.test(lower))
   ) {
     const termMatch = lower.match(/terminal\s*(\d+|uno|dos|tres|one|two|three)/i);
     const terminalIndex = termMatch ? parseNumberWord(termMatch[1]) : undefined;
@@ -552,16 +564,21 @@ export {
  * Plans a turn deterministically using the heuristic engine.
  */
 export function planTurnHeuristic(input: string): OperatorPlan {
-  const text = normalizeInputForIntent(input);
+  const sttNormalized = normalizeSpanishVoiceStt(input).normalized;
+  const polarity = analyzeClausePolarity(sttNormalized);
 
-  // S4: a negated imperative must never open or close anything.
-  if (isNegatedTerminalImperative(text)) {
+  // S4/S7: Full negation refuses; mixed polarity executes only the affirmative clause.
+  if (polarity.isEntireUtteranceNegated) {
     return {
       strategy: 'heuristic',
       actions: [],
       reply: 'Entendido. No abriré ni cerraré ninguna terminal.',
     };
   }
+
+  const text = normalizeInputForIntent(
+    polarity.hasMixedPolarity ? polarity.affirmativeText : sttNormalized
+  );
 
   // S4/Compound: support compound multi-intent commands like "Abre terminal de antigravity y cierra la vacía"
   const compoundMatch = text.match(
@@ -752,18 +769,28 @@ export function planTurnHeuristic(input: string): OperatorPlan {
       };
     }
 
-    case 'SPAWN_SUBAGENT':
+    case 'SPAWN_SUBAGENT': {
+      const provider = intent.cli?.toLowerCase() as Engine | undefined;
+      const explicitOdd = /\b(?:odd|especificaci[oó]n|plan\s+de\s+implementaci[oó]n)\b/i.test(text);
+      const isExplore =
+        !explicitOdd &&
+        /\b(?:explora(?:r)?|revisa(?:r)?|investiga(?:r)?|analiza(?:r)?|audita(?:r)?|chequea(?:r)?|verifica(?:r)?)\b/i.test(
+          text
+        );
       return {
         strategy: 'heuristic',
         actions: [
           {
             type: 'spawn_subagent',
-            cli: (intent.cli?.toLowerCase() || 'grok') as Engine,
+            ...(provider ? { cli: provider, provider } : {}),
+            via: 'thread',
+            ...(explicitOdd ? { mode: 'odd' as const, oddMode: true } : isExplore ? { mode: 'explore' as const } : {}),
             task: intent.prompt || 'tarea delegada',
           },
         ],
-        reply: `Iniciando subagente ${intent.cli || 'grok'}.`,
+        reply: provider ? `Iniciando subagente con ${provider}.` : 'Iniciando subagente.',
       };
+    }
 
     case 'UNKNOWN':
     default:

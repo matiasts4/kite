@@ -1,24 +1,27 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import { AgentStatusIndicator, OrbitDotsSpinner } from './AgentStatusIndicator';
+import { act, render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  AGENT_ACTIVITY_INDICATOR_OPTIONS,
+  AgentStatusIndicator,
+} from './AgentStatusIndicator';
+import {
+  readAgentActivityIndicatorColor,
+  readAgentActivityIndicatorStyle,
+  writeAgentActivityIndicatorColor,
+  writeAgentActivityIndicatorStyle,
+} from '../../lib/kitePrefs';
 import { resolveAgentRoleKind, SubagentRoleIcon } from './SubagentRoleIcon';
 
-describe('OrbitDotsSpinner & AgentStatusIndicator', () => {
-  it('renders 4 circular dots arranged on an orbital ring', () => {
-    const { container } = render(<OrbitDotsSpinner size={14} />);
-    const spinner = screen.getByTestId('agent-orbit-spinner');
-    expect(spinner).toHaveClass('agent-orbit-spinner');
-    const dots = container.querySelectorAll('circle');
-    expect(dots).toHaveLength(4);
-    dots.forEach((dot) => {
-      expect(Number(dot.getAttribute('r'))).toBeGreaterThan(0);
-    });
+describe('AgentStatusIndicator', () => {
+  beforeEach(() => {
+    localStorage.clear();
   });
 
   it('switches cleanly between running, backgroundWorking, waiting, completed, failed, and killed states', () => {
     const { rerender, container } = render(<AgentStatusIndicator status="running" size={14} />);
     expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-status', 'running');
-    expect(screen.getByTestId('agent-orbit-spinner')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-variant', 'matrix-grid');
+    expect(screen.getByTestId('agent-activity-matrix-grid')).toBeInTheDocument();
 
     rerender(<AgentStatusIndicator status="backgroundWorking" size={14} />);
     expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-status', 'backgroundWorking');
@@ -57,5 +60,52 @@ describe('OrbitDotsSpinner & AgentStatusIndicator', () => {
 
     rerender(<SubagentRoleIcon role="Auditor" size={14} />);
     expect(screen.getByTestId('subagent-role-icon')).toHaveAttribute('data-role-kind', 'review');
+  });
+
+  it('supports all 8 curated running variants, theme-accent/custom colors, and reactive updates', () => {
+    expect(readAgentActivityIndicatorStyle()).toBe('matrix-grid');
+    expect(readAgentActivityIndicatorColor()).toBe('status');
+    expect(AGENT_ACTIVITY_INDICATOR_OPTIONS.map((o) => o.id)).toEqual([
+      'matrix-grid',
+      'signal-bars',
+      'pulse-aura',
+      'kite-diamond',
+      'matrix-3x3',
+      'wave-dots',
+      'radar-sweep',
+      'chevron-flow',
+    ]);
+
+    const { rerender } = render(<AgentStatusIndicator status="running" size={14} />);
+    for (const option of AGENT_ACTIVITY_INDICATOR_OPTIONS) {
+      rerender(<AgentStatusIndicator status="running" size={14} variant={option.id} />);
+      expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-variant', option.id);
+      expect(screen.getByTestId(`agent-activity-${option.id}`)).toBeInTheDocument();
+    }
+
+    rerender(<AgentStatusIndicator status="running" size={14} />);
+    act(() => {
+      writeAgentActivityIndicatorStyle('matrix-3x3');
+      writeAgentActivityIndicatorColor('accent');
+    });
+    expect(readAgentActivityIndicatorStyle()).toBe('matrix-3x3');
+    expect(readAgentActivityIndicatorColor()).toBe('accent');
+    expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-variant', 'matrix-3x3');
+    expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-color-mode', 'accent');
+    expect(screen.getByTestId('agent-status-indicator')).toHaveStyle({
+      color: 'var(--accent, #5c8fff)',
+    });
+
+    act(() => {
+      writeAgentActivityIndicatorColor('#ff66aa');
+    });
+    expect(readAgentActivityIndicatorColor()).toBe('#ff66aa');
+    expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-color-mode', '#ff66aa');
+    expect(screen.getByTestId('agent-status-indicator')).toHaveStyle({ color: '#ff66aa' });
+
+    localStorage.setItem('kite.agentActivityIndicator', 'orbit');
+    expect(readAgentActivityIndicatorStyle()).toBe('matrix-grid');
+    localStorage.setItem('kite.agentActivityIndicatorColor', 'not-a-color');
+    expect(readAgentActivityIndicatorColor()).toBe('status');
   });
 });

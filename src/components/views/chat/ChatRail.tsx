@@ -24,6 +24,7 @@ import {
 } from './ChatIcons';
 import { ArchivedChatsModal } from '../modals/ArchivedChatsModal';
 import { BrandLogo } from '../../ui/BrandLogo';
+import { AgentStatusIndicator } from '../../ui/AgentStatusIndicator';
 import { ActiveChildRows } from '../../sidebar/ActiveChildRows';
 
 export interface ChatRailProps {
@@ -261,23 +262,25 @@ export const ChatRail: React.FC<ChatRailProps> = ({
       );
     }
 
+    const effectiveStatus = rollup.effectiveStatus ?? thread.status;
+
     const dotClass =
-      thread.status === 'running'
+      effectiveStatus === 'running'
         ? 'chat-thread-row__dot chat-thread-row__dot--running'
-        : thread.status === 'waiting'
+        : effectiveStatus === 'waiting'
         ? 'chat-thread-row__dot chat-thread-row__dot--waiting'
-        : isFailedThread(thread)
+        : isFailedThread({ status: effectiveStatus })
         ? 'chat-thread-row__dot chat-thread-row__dot--failed'
         : (thread.isWarm || thread.sessionState === 'warm')
         ? 'chat-thread-row__dot chat-thread-row__dot--warm'
         : 'chat-thread-row__dot chat-thread-row__dot--settled';
 
     const trailingClass =
-      thread.status === 'running'
+      effectiveStatus === 'running'
         ? 'chat-thread-row__trailing chat-thread-row__trailing--running'
-        : thread.status === 'waiting'
+        : effectiveStatus === 'waiting'
         ? 'chat-thread-row__trailing chat-thread-row__trailing--waiting'
-        : isFailedThread(thread)
+        : isFailedThread({ status: effectiveStatus })
         ? 'chat-thread-row__trailing chat-thread-row__trailing--failed'
         : 'chat-thread-row__trailing';
 
@@ -292,53 +295,61 @@ export const ChatRail: React.FC<ChatRailProps> = ({
           <button
             type="button"
             aria-current={isSelected ? 'page' : undefined}
+            aria-label={`${thread.title || 'Untitled'}, ${trailingLabel}`}
             className="chat-thread-row__select"
             onClick={() => onSelectThread(thread.id)}
             onDoubleClick={(e) => startRename(thread, e)}
             title={`${thread.title} (${thread.provider})`}
           >
-            <i aria-hidden="true" className={dotClass} />
+            {effectiveStatus === 'running' ? (
+              <AgentStatusIndicator status="running" size={12} />
+            ) : (
+              <i aria-hidden="true" className={dotClass} />
+            )}
             <BrandLogo engine={thread.provider || 'antigravity'} size={14} className="chat-thread-row__logo" />
             <span className="chat-thread-row__title">{thread.title || 'Untitled'}</span>
-            <span
-              aria-hidden="true"
-              className={`${trailingClass}${thread.status === 'running' ? ' chat-working-live' : ''}`}
-            >
-              {trailingLabel}
-            </span>
+            {(rollup.rollupBadge || effectiveStatus !== 'running') && (
+              <span
+                aria-hidden="true"
+                className={`${trailingClass}${effectiveStatus === 'running' ? ' chat-working-live' : ''}`}
+              >
+                {trailingLabel}
+              </span>
+            )}
           </button>
 
-          <span className="chat-thread-row__actions">
-            {activeChildren.length > 0 && (
-              <button
-                type="button"
-                className="chat-thread-row__children-toggle"
-                aria-expanded={childrenExpanded}
-                aria-label={
-                  childrenExpanded
-                    ? `Collapse subagents for ${thread.title}`
-                    : `Expand subagents for ${thread.title}`
-                }
-                title={childrenExpanded ? 'Hide active subagents' : 'Show active subagents'}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setCollapsedChildGroups((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(thread.id)) next.delete(thread.id);
-                    else next.add(thread.id);
-                    return next;
-                  });
+          {activeChildren.length > 0 && (
+            <button
+              type="button"
+              className="chat-thread-row__children-toggle"
+              aria-expanded={childrenExpanded}
+              aria-label={
+                childrenExpanded
+                  ? `Collapse subagents for ${thread.title}`
+                  : `Expand subagents for ${thread.title}`
+              }
+              title={childrenExpanded ? 'Hide active subagents' : 'Show active subagents'}
+              onClick={(event) => {
+                event.stopPropagation();
+                setCollapsedChildGroups((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(thread.id)) next.delete(thread.id);
+                  else next.add(thread.id);
+                  return next;
+                });
+              }}
+            >
+              <ChevronRightIcon
+                size={10}
+                style={{
+                  transform: childrenExpanded ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 120ms ease',
                 }}
-              >
-                <ChevronRightIcon
-                  size={10}
-                  style={{
-                    transform: childrenExpanded ? 'rotate(90deg)' : 'none',
-                    transition: 'transform 120ms ease',
-                  }}
-                />
-              </button>
-            )}
+              />
+            </button>
+          )}
+
+          <span className="chat-thread-row__actions">
             {onRegenerateTitle && isSelected ? (
               <button
                 type="button"

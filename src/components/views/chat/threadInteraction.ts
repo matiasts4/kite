@@ -328,6 +328,19 @@ export function compactSendText(provider: string): '/compact' | null {
   return null;
 }
 
+export interface ActiveSubagentSummaryLike {
+  subagentId?: string | null;
+  role?: string | null;
+  typeName?: string | null;
+  provider?: string | null;
+  status?: string | null;
+  childThreadId?: string | null;
+  swarmId?: string | null;
+  swarmMemberName?: string | null;
+  prompt?: string | null;
+  updatedAtUnixMs?: number | null;
+}
+
 export interface RosterChildCandidate {
   id: string;
   title?: string;
@@ -337,11 +350,54 @@ export interface RosterChildCandidate {
   parentThreadId?: string | null;
   startedByAgent?: boolean;
   sideChat?: boolean;
+  subagentId?: string | null;
+  childThreadId?: string | null;
   subagentRole?: string | null;
+  typeName?: string | null;
+  prompt?: string | null;
   swarmId?: string | null;
   swarmMemberName?: string | null;
   pendingApproval?: unknown | null;
   pendingUserInput?: unknown | null;
+  activeSubagents?: ActiveSubagentSummaryLike[] | null;
+  subagentRuns?: ActiveSubagentSummaryLike[] | null;
+}
+
+const ACTIVE_SUBAGENT_STATUS_SET = new Set([
+  'running',
+  'queued',
+  'pending',
+  'inprogress',
+  'in_progress',
+  'started',
+  'waiting',
+  'needsinput',
+  'pendingapproval',
+  'pending_approval',
+  'blocked',
+]);
+
+export function childDisplayLabel(child: RosterChildCandidate): string {
+  const candidates = [child.subagentRole, child.swarmMemberName, child.title];
+  for (const raw of candidates) {
+    const trimmed = (raw ?? '').trim();
+    if (trimmed && trimmed.toLowerCase() !== 'subagent') {
+      return trimmed;
+    }
+  }
+  const typeName = (child.typeName ?? '').trim();
+  if (
+    typeName &&
+    typeName.toLowerCase() !== (child.provider ?? '').trim().toLowerCase() &&
+    typeName.toLowerCase() !== 'subagent'
+  ) {
+    return typeName.charAt(0).toUpperCase() + typeName.slice(1);
+  }
+  const prompt = (child.prompt ?? '').replace(/\s+/g, ' ').trim();
+  if (prompt) {
+    return prompt.length > 32 ? `${prompt.slice(0, 31).trimEnd()}…` : prompt;
+  }
+  return 'Subagent';
 }
 
 export type ChildAttentionKind = 'approval' | 'input' | 'running' | 'blocked';
@@ -356,7 +412,13 @@ export function isActiveOrAttentionChild(thread: RosterChildCandidate): boolean 
 export function classifyChildAttention(thread: RosterChildCandidate): ChildAttentionKind {
   if (thread.pendingApproval) return 'approval';
   if (thread.pendingUserInput) return 'input';
-  if (thread.status === 'running') return 'running';
+  const s = (thread.status ?? '').trim().toLowerCase();
+  if (s === 'pendingapproval' || s === 'pending_approval') return 'approval';
+  if (s === 'needsinput' || s === 'needs_input') return 'input';
+  if (s === 'waiting' || s === 'blocked') return 'blocked';
+  if (s === 'running' || s === 'queued' || s === 'pending' || s === 'inprogress' || s === 'in_progress' || s === 'started') {
+    return 'running';
+  }
   return 'blocked';
 }
 
@@ -379,27 +441,78 @@ function childAttentionPriority(kind: ChildAttentionKind): number {
       return 0;
     case 'input':
       return 1;
-    case 'running':
-      return 2;
     case 'blocked':
+      return 2;
+    case 'running':
       return 3;
   }
 }
 
 export function groupActiveChildrenByParent<T extends RosterChildCandidate>(
   threads: T[],
-): Map<string, T[]> {
-  const byParent = new Map<string, T[]>();
-  const seen = new Set<string>();
+): Map<string, RosterChildCandidate[]> {
+  const byParent = new Map<string, RosterChildCandidate[]>();
+  const seenChildThreadIds = new Set<string>();
+  const seenSubagentKeys = new Set<string>();
+
   for (const thread of threads) {
     if (!isActiveOrAttentionChild(thread)) continue;
     const parentId = thread.parentThreadId!;
-    if (seen.has(thread.id)) continue;
-    seen.add(thread.id);
+    if (seenChildThreadIds.has(thread.id)) continue;
+    seenChildThreadIds.add(thread.id);
+    if (thread.subagentId) {
+      seenSubagentKeys.add(`${parentId}:${thread.subagentId}`);
+    }
     const list = byParent.get(parentId) ?? [];
-    list.push(thread);
+    list.push({ ...thread, childThreadId: thread.childThreadId ?? thread.id });
     byParent.set(parentId, list);
   }
+
+  for (const parent of threads) {
+    if (parent.parentThreadId && (parent.startedByAgent || parent.sideChat)) continue;
+    const embedded = [
+      ...(parent.activeSubagents ?? []),
+      ...(parent.subagentRuns ?? []),
+    ];
+    if (embedded.length === 0) continue;
+    for (const run of embedded) {
+      const status = (run.status ?? '').trim().toLowerCase();
+      if (!ACTIVE_SUBAGENT_STATUS_SET.has(status)) continue;
+      const ctid = (run.childThreadId ?? '').trim();
+      const sid = (run.subagentId ?? '').trim();
+      if (ctid && seenChildThreadIds.has(ctid)) {
+        const list = byParent.get(parent.id);
+        const existing = list?.find((item) => item.id === ctid || item.childThreadId === ctid);
+        if (existing && !existing.subagentId && sid) {
+          existing.subagentId = sid;
+        }
+        continue;
+      }
+      if (sid && seenSubagentKeys.has(`${parent.id}:${sid}`)) continue;
+      const syntheticId = ctid || sid;
+      if (!syntheticId) continue;
+      if (ctid) seenChildThreadIds.add(ctid);
+      if (sid) seenSubagentKeys.add(`${parent.id}:${sid}`);
+      const list = byParent.get(parent.id) ?? [];
+      list.push({
+        id: syntheticId,
+        subagentId: sid || null,
+        childThreadId: ctid || null,
+        parentThreadId: parent.id,
+        startedByAgent: true,
+        subagentRole: run.role ?? null,
+        typeName: run.typeName ?? null,
+        provider: run.provider ?? parent.provider,
+        status: run.status ?? 'running',
+        swarmId: run.swarmId ?? null,
+        swarmMemberName: run.swarmMemberName ?? null,
+        prompt: run.prompt ?? null,
+        updatedAtUnixMs: run.updatedAtUnixMs ?? undefined,
+      });
+      byParent.set(parent.id, list);
+    }
+  }
+
   for (const list of byParent.values()) {
     list.sort((a, b) => {
       const pDiff =

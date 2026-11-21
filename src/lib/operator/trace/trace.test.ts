@@ -411,4 +411,44 @@ describe('Operator Trace System', () => {
     expect(stored[0].receipts).toEqual([]);
     expect(localStorage.getItem('kite.operator.traces.v1')).toBeNull();
   });
+
+  it('records end-to-end voice latency spans and computes p50/p95 breakdown', async () => {
+    const traceMod = await import('./trace');
+    const turnId = 't-voice-lat-1';
+    const base = 1_700_000_000_000;
+
+    emitTrace({ turnId, ev: 'vad.speech_start', ts: base, noiseFloorRms: 0.008 });
+    emitTrace({ turnId, ev: 'vad.eos', ts: base + 1200, silenceWindowMs: 750 });
+    emitTrace({ turnId, ev: 'stt.start', ts: base + 1210, backend: 'grok' });
+    emitTrace({ turnId, ev: 'stt.end', ts: base + 1610, backend: 'grok', durationMs: 400, chars: 18 });
+    emitTrace({ turnId, ev: 'turn.start', ts: base + 1620, input: 'qué está haciendo Nova', source: 'voz' });
+    emitTrace({ turnId, ev: 'intent.route', ts: base + 1625, route: 'llm', reason: 'contextual_query' });
+    emitTrace({ turnId, ev: 'llm.first_token', ts: base + 2020, provider: 'opencode', firstTokenMs: 395 });
+    emitTrace({ turnId, ev: 'tts.first_sentence', ts: base + 2150, chars: 42 });
+    emitTrace({ turnId, ev: 'tts.first_audio', ts: base + 2450, engine: 'elevenlabs', ttfaMs: 830 });
+    emitTrace({ turnId, ev: 'turn.end', ts: base + 2500, overallSuccess: true, durationMs: 880 });
+
+    const trace = getTurnTrace(turnId)!;
+    const jsonl = trace.events.map((e) => JSON.stringify(e)).join('\n');
+    const rebuilt = parseTracesFromJsonl(jsonl);
+    expect(rebuilt).toHaveLength(1);
+    expect(rebuilt[0].events.map((e) => e.ev)).toEqual([
+      'vad.speech_start',
+      'vad.eos',
+      'stt.start',
+      'stt.end',
+      'turn.start',
+      'intent.route',
+      'llm.first_token',
+      'tts.first_sentence',
+      'tts.first_audio',
+      'turn.end',
+    ]);
+
+    const summary = (traceMod as any).computeVoiceLatencySummary(rebuilt);
+    expect(summary.sttMs.p50).toBe(400);
+    expect(summary.eosToFirstAudioMs.p50).toBe(1250);
+    expect(summary.turnToFirstTokenMs.p50).toBe(400);
+    expect(summary.turnToFirstAudioMs.p50).toBe(830);
+  });
 });

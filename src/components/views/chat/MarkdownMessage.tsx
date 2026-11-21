@@ -1,10 +1,14 @@
-import React, { useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import React, { useContext, useState } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CheckIcon, CopyIcon } from './ChatIcons';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
 import { MermaidDiagram } from '../../ui/MermaidDiagram';
 import { toast } from '../../../lib/toast';
+
+const MarkdownWorkspaceContext = React.createContext<string | null>(null);
+const REMARK_PLUGINS = [remarkGfm];
+const identityUrlTransform = (url: string) => url;
 
 function isFilePathCandidate(text: string): boolean {
   let trimmed = text.trim();
@@ -58,6 +62,41 @@ function withPaths(children: React.ReactNode, workspaceId?: string | null): Reac
   );
 }
 
+const TABLE_BR_REGEX = /(<br\s*\/?>)/gi;
+
+/** Converts literal `<br>` tags inside GFM table cells into `<br />` elements while preserving code spans and file-path links. */
+function withTableCellFormatting(children: React.ReactNode, workspaceId?: string | null): React.ReactNode {
+  return React.Children.map(children, (child, i) => {
+    if (typeof child === 'string') {
+      if (!/<br\s*\/?>/i.test(child)) {
+        return renderPlainTextWithPaths(child, i, workspaceId);
+      }
+      return child.split(TABLE_BR_REGEX).map((part, pIdx) => {
+        if (!part) return null;
+        if (/^<br\s*\/?>$/i.test(part)) {
+          return <br key={`${i}-br-${pIdx}`} />;
+        }
+        return renderPlainTextWithPaths(part, `${i}-t-${pIdx}`, workspaceId);
+      });
+    }
+    if (
+      React.isValidElement<{ children?: React.ReactNode }>(child) &&
+      typeof child.type === 'string' &&
+      child.type !== 'code' &&
+      child.type !== 'pre' &&
+      child.type !== 'a' &&
+      child.props.children !== undefined
+    ) {
+      return React.cloneElement(
+        child,
+        undefined,
+        withTableCellFormatting(child.props.children, workspaceId),
+      );
+    }
+    return child;
+  });
+}
+
 const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => {
   const [copied, setCopied] = useState(false);
   return (
@@ -93,92 +132,140 @@ function isFileHref(href: string): boolean {
   );
 }
 
-export const MarkdownMessage: React.FC<{ text: string; workspaceId?: string | null }> = ({
-  text,
-  workspaceId,
-}) => {
-  return (
-    <div className="md-body">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        urlTransform={(url) => url}
-        components={{
-          p: ({ children }) => <p>{withPaths(children, workspaceId)}</p>,
-          li: ({ children }) => <li>{withPaths(children, workspaceId)}</li>,
-          td: ({ children }) => <td>{withPaths(children, workspaceId)}</td>,
-          th: ({ children }) => <th>{withPaths(children, workspaceId)}</th>,
-          blockquote: ({ children }) => <blockquote>{children}</blockquote>,
-          table: ({ children }) => (
-            <div className="md-table-wrap">
-              <table>{children}</table>
-            </div>
-          ),
-          a: ({ href = '', children }) => {
-            const isFile = isFileHref(href);
-            return (
-              <a
-                href={href}
-                title={isFile ? 'Click para previsualizar archivo' : undefined}
-                target={isFile ? undefined : '_blank'}
-                rel="noreferrer noopener"
-                onClick={(e) => {
-                  if (isFile) {
-                    e.preventDefault();
-                    openFileInRightDock({
-                      candidate: href,
-                      workspaceId: workspaceId || null,
-                      collapseTree: true,
-                    });
-                  }
-                }}
-              >
-                {children}
-              </a>
-            );
-          },
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className, children }) => {
-            const raw = Array.isArray(children)
-              ? children.map((part) => String(part ?? '')).join('')
-              : String(children ?? '');
-            const match = /language-([\w-]+)/.exec(className || '');
-            const lang = (match?.[1] ?? '').toLowerCase();
-            const isBlock = Boolean(match) || raw.includes('\n');
-            if (isBlock) {
-              if (lang === 'mermaid') {
-                return <MermaidDiagram code={raw.replace(/\n$/, '')} />;
-              }
-              return <CodeBlock lang={match?.[1] ?? ''} code={raw.replace(/\n$/, '')} />;
-            }
-            const isPath = isFilePathCandidate(raw);
-            return (
-              <code
-                className={`md-inline-code${isPath ? ' md-inline-code--path' : ''}`}
-                title={isPath ? 'Ctrl + Click para previsualizar archivo' : undefined}
-                onClick={
-                  isPath
-                    ? (e) => {
-                        if ((e.ctrlKey || e.metaKey) && e.button === 0) {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          openFileInRightDock({
-                            candidate: raw,
-                            workspaceId: workspaceId || null,
-                            collapseTree: true,
-                          });
-                        }
-                      }
-                    : undefined
-                }
-              >
-                {raw}
-              </code>
-            );
-          },
-        }}
-      >
-        {text}
-      </ReactMarkdown>
+// Keep ReactMarkdown component identities stable across renders so updating text or
+// toggling citation state never unmounts/remounts paragraph DOM nodes during selection.
+const MarkdownP: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+  const workspaceId = useContext(MarkdownWorkspaceContext);
+  return <p>{withPaths(children, workspaceId)}</p>;
+};
+
+const MarkdownLi: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+  const workspaceId = useContext(MarkdownWorkspaceContext);
+  return <li>{withPaths(children, workspaceId)}</li>;
+};
+
+const MarkdownTd: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+  const workspaceId = useContext(MarkdownWorkspaceContext);
+  return <td>{withTableCellFormatting(children, workspaceId)}</td>;
+};
+
+const MarkdownTh: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+  const workspaceId = useContext(MarkdownWorkspaceContext);
+  return <th>{withTableCellFormatting(children, workspaceId)}</th>;
+};
+
+const MarkdownBlockquote: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
+  <blockquote>{children}</blockquote>
+);
+
+const MarkdownTable: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
+  <div className="md-table-anchor">
+    <div className="md-table-wrap">
+      <table>{children}</table>
     </div>
+  </div>
+);
+
+const MarkdownA: React.FC<{ href?: string; children?: React.ReactNode }> = ({
+  href = '',
+  children,
+}) => {
+  const workspaceId = useContext(MarkdownWorkspaceContext);
+  const isFile = isFileHref(href);
+  return (
+    <a
+      href={href}
+      title={isFile ? 'Click para previsualizar archivo' : undefined}
+      target={isFile ? undefined : '_blank'}
+      rel="noreferrer noopener"
+      onClick={(e) => {
+        if (isFile) {
+          e.preventDefault();
+          openFileInRightDock({
+            candidate: href,
+            workspaceId: workspaceId || null,
+            collapseTree: true,
+          });
+        }
+      }}
+    >
+      {children}
+    </a>
   );
 };
+
+const MarkdownPre: React.FC<{ children?: React.ReactNode }> = ({ children }) => <>{children}</>;
+
+const MarkdownCode: React.FC<{ className?: string; children?: React.ReactNode }> = ({
+  className,
+  children,
+}) => {
+  const workspaceId = useContext(MarkdownWorkspaceContext);
+  const raw = Array.isArray(children)
+    ? children.map((part) => String(part ?? '')).join('')
+    : String(children ?? '');
+  const match = /language-([\w-]+)/.exec(className || '');
+  const lang = (match?.[1] ?? '').toLowerCase();
+  const isBlock = Boolean(match) || raw.includes('\n');
+  if (isBlock) {
+    if (lang === 'mermaid') {
+      return <MermaidDiagram code={raw.replace(/\n$/, '')} />;
+    }
+    return <CodeBlock lang={match?.[1] ?? ''} code={raw.replace(/\n$/, '')} />;
+  }
+  const isPath = isFilePathCandidate(raw);
+  return (
+    <code
+      className={`md-inline-code${isPath ? ' md-inline-code--path' : ''}`}
+      title={isPath ? 'Ctrl + Click para previsualizar archivo' : undefined}
+      onClick={
+        isPath
+          ? (e) => {
+              if ((e.ctrlKey || e.metaKey) && e.button === 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                openFileInRightDock({
+                  candidate: raw,
+                  workspaceId: workspaceId || null,
+                  collapseTree: true,
+                });
+              }
+            }
+          : undefined
+      }
+    >
+      {raw}
+    </code>
+  );
+};
+
+const MARKDOWN_COMPONENTS: Components = {
+  p: MarkdownP,
+  li: MarkdownLi,
+  td: MarkdownTd,
+  th: MarkdownTh,
+  blockquote: MarkdownBlockquote,
+  table: MarkdownTable,
+  a: MarkdownA,
+  pre: MarkdownPre,
+  code: MarkdownCode,
+};
+
+export const MarkdownMessage: React.FC<{ text: string; workspaceId?: string | null }> = React.memo(
+  ({ text, workspaceId = null }) => {
+    return (
+      <MarkdownWorkspaceContext.Provider value={workspaceId ?? null}>
+        <div className="md-body">
+          <ReactMarkdown
+            remarkPlugins={REMARK_PLUGINS}
+            urlTransform={identityUrlTransform}
+            components={MARKDOWN_COMPONENTS}
+          >
+            {text}
+          </ReactMarkdown>
+        </div>
+      </MarkdownWorkspaceContext.Provider>
+    );
+  },
+);
+MarkdownMessage.displayName = 'MarkdownMessage';

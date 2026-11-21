@@ -146,4 +146,98 @@ describe('AgentSkillsTab - Single Starter Control & Empty State Parity', () => {
     expect(screen.getByText('Code Reviewer')).toBeInTheDocument();
     expect(screen.getByText('Test Generator')).toBeInTheDocument();
   });
+
+  it('supports + New Skill authoring and per-skill enable/disable toggle with usage stats', async () => {
+    const user = userEvent.setup();
+    const ipcCoreModule = await import('../../../lib/ipc/core');
+    const invokeSpy = vi.spyOn(ipcCoreModule, 'invokeCommand').mockResolvedValue({
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '',
+      user: '',
+      skills: [],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: null,
+      userRevision: null,
+      readIssues: [],
+    });
+    const onMindUpdated = vi.fn();
+
+    const mindWithSkill: AgentMindSnapshot = {
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '',
+      user: '',
+      skills: [
+        {
+          id: 'release-check',
+          name: 'Release Check',
+          description: 'Verify changelog before tagging',
+          uses: 4,
+          updatedAtUnixMs: Date.now() - 120000,
+          revision: 'rev-1',
+          lastUsed: String(Date.now() - 60000),
+          lastOutcome: 'completed',
+        },
+      ],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: null,
+      userRevision: null,
+      readIssues: [],
+    };
+
+    render(
+      <AgentSkillsTab
+        agentName="Claude"
+        mind={mindWithSkill}
+        selectedSkillId={null}
+        skillDocument={null}
+        skillLoading={false}
+        skillSaving={false}
+        onSelectSkill={vi.fn()}
+        onSaveSkill={vi.fn()}
+        onDeleteSkill={vi.fn()}
+        onClearSelectedSkill={vi.fn()}
+        starters={mockStarters}
+        onInstallStarter={vi.fn()}
+        onMindUpdated={onMindUpdated}
+      />
+    );
+
+    expect(screen.getByText(/Fired 4×/i)).toBeInTheDocument();
+    expect(screen.getByText(/Last used/i)).toBeInTheDocument();
+
+    const toggle = screen.getByRole('switch', { name: /Enable Release Check/i });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    await user.click(toggle);
+
+    expect(invokeSpy).toHaveBeenCalledWith(
+      'set_agent_skill_enabled',
+      expect.objectContaining({
+        agentId: 'agent-1',
+        skillId: 'release-check',
+        enabled: false,
+        confirmedByBuilder: true,
+      })
+    );
+    expect(onMindUpdated).toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /\+ New Skill/i }));
+    await user.type(screen.getByLabelText(/Skill name/i), 'Audit Diff');
+    await user.type(screen.getByLabelText(/When it fires/i), 'Before committing');
+    await user.type(screen.getByLabelText(/Instructions/i), 'Run git diff --stat.');
+    await user.click(screen.getByRole('button', { name: /Create skill/i }));
+
+    expect(invokeSpy).toHaveBeenCalledWith(
+      'write_agent_skill',
+      expect.objectContaining({
+        agentId: 'agent-1',
+        skillId: 'audit-diff',
+        confirmedByBuilder: true,
+      })
+    );
+    invokeSpy.mockRestore();
+  });
 });

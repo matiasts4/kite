@@ -284,4 +284,46 @@ describe('shouldDispatchThreadsChanged and useSubagentEvents sync', () => {
       window.removeEventListener('kite:threads-changed', onThreadsChanged);
     }
   });
+
+  it('removes a retracted unspawned subagent placeholder run on subagentRunRemoved', () => {
+    const base = makeThread();
+    const withRuns: ExtendedChatThread = {
+      ...base,
+      subagentRuns: [
+        {
+          subagentId: 't_run1_40',
+          parentThreadId: 'thread-1',
+          parentToolCallId: 't_run1_40',
+          role: 'Subagent',
+          status: 'running',
+          stepCount: 0,
+          items: [],
+          startedAtUnixMs: 1,
+          updatedAtUnixMs: 1,
+        },
+        {
+          subagentId: 'child-1',
+          parentThreadId: 'thread-1',
+          parentToolCallId: 't_run1_45',
+          childThreadId: 'child-1',
+          role: 'Chat Keystroke Jump Investigator',
+          status: 'running',
+          stepCount: 2,
+          items: [],
+          startedAtUnixMs: 2,
+          updatedAtUnixMs: 2,
+        },
+      ],
+    };
+
+    const removalPayload: ChatSubagentEventPayload = {
+      kind: 'subagentRunRemoved',
+      threadId: 'thread-1',
+      subagentId: 't_run1_40',
+      parentToolCallId: 't_run1_40',
+    };
+    expect(shouldDispatchThreadsChanged(removalPayload)).toBe(true);
+    const updated = applySubagentEvent(withRuns, removalPayload);
+    expect(updated.subagentRuns?.map((r) => r.subagentId)).toEqual(['child-1']);
+  });
 });

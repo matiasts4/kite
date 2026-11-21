@@ -13,8 +13,44 @@ export interface UseNotificationsResult {
   refresh: () => Promise<void>;
 }
 
+export function areNotificationsSnapshotsEqual(
+  a: NotificationsSnapshot | null,
+  b: NotificationsSnapshot | null
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.unreadCount !== b.unreadCount ||
+    a.openInputRequestCount !== b.openInputRequestCount ||
+    a.preferences?.finishSoundEnabled !== b.preferences?.finishSoundEnabled ||
+    a.preferences?.inputRequestsEnabled !== b.preferences?.inputRequestsEnabled
+  ) {
+    return false;
+  }
+  const aRecs = a.records ?? [];
+  const bRecs = b.records ?? [];
+  if (aRecs.length !== bRecs.length) return false;
+  for (let i = 0; i < aRecs.length; i += 1) {
+    const ar = aRecs[i];
+    const br = bRecs[i];
+    if (
+      ar.id !== br.id ||
+      ar.isRead !== br.isRead ||
+      ar.isWaitingForInput !== br.isWaitingForInput ||
+      ar.title !== br.title ||
+      ar.body !== br.body ||
+      ar.createdAtUnixMs !== br.createdAtUnixMs ||
+      ar.kind?.kind !== br.kind?.kind
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function useNotifications(): UseNotificationsResult {
   const [snapshot, setSnapshot] = useState<NotificationsSnapshot | null>(null);
+  const latestSnapshotRef = useRef<NotificationsSnapshot | null>(null);
   const knownRecordIdsRef = useRef<Set<string>>(new Set());
   const initialLoadDoneRef = useRef(false);
 
@@ -51,6 +87,10 @@ export function useNotifications(): UseNotificationsResult {
     }
 
     initialLoadDoneRef.current = true;
+    if (areNotificationsSnapshotsEqual(latestSnapshotRef.current, snap)) {
+      return;
+    }
+    latestSnapshotRef.current = snap;
     setSnapshot(snap);
   }, []);
 

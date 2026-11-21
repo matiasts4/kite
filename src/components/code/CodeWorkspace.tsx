@@ -24,6 +24,7 @@ import type {
 } from './types';
 import '../views/workspaces.css';
 import { startAgentInboxPolling } from '../../lib/agentInboxLoop';
+import { getActiveAgentTerminals } from '../../lib/terminalRegistry';
 import { AGENT_CODENAMES, getNextAgentName, cleanAgentTitle } from '../../lib/agentNames';
 import { collectActiveAgentNames } from './workspaceUtils';
 import { useWorkspaceLayoutState } from './useWorkspaceLayoutState';
@@ -264,7 +265,14 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   }, [selectedWorkspace?.id]);
 
   useEffect(() => {
-    return startAgentInboxPolling(() => workspaceCwdRef.current);
+    return startAgentInboxPolling(() => workspaceCwdRef.current, {
+      isActive: () => {
+        const el = containerRef.current;
+        if (!el) return true;
+        return el.closest('.mode-layer--hidden') === null;
+      },
+      hasActiveAgents: () => getActiveAgentTerminals().length > 0,
+    });
   }, [selectedWorkspace?.id]);
 
   const hasActiveWorkspace = Boolean(selectedWorkspace && workspaces.length > 0);

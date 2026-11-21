@@ -730,3 +730,264 @@ describe('T3 / S3 — launch_thread', () => {
     expect(terminals).toHaveLength(1);
   });
 });
+
+describe('T17 / S9-S10 — Spoken summary separation & real Thread/Subagent/Agent ODD delegation', () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    vi.mocked(invokeCommand).mockResolvedValue({} as any);
+    vi.clearAllMocks();
+    const { voiceSessionStore } = await import('../voice/voiceSessionStore');
+    voiceSessionStore.stopSession();
+    (window as any).__kiteCodeWorkspaceMounted = true;
+  });
+
+  it('S9: keeps spoken reply concise for open_terminals when prompt exceeds 80 chars instead of reciting the full prompt', async () => {
+    const terminals: Array<{ sessionId: string; engine: string }> = [];
+    vi.spyOn(terminalRegistry, 'getActiveAgentTerminals').mockImplementation(() => terminals as any);
+
+    const handleUiRequest = (event: Event) => {
+      const detail = (event as CustomEvent<UiBusRequestPayload>).detail;
+      if (detail.kind === 'navigate') {
+        sendUiAck({ reqId: detail.reqId, ok: true });
+      } else if (detail.kind === 'spawn-terminal') {
+        const sid = (detail.payload as any).sessionId || 'term-long-1';
+        terminals.push({ sessionId: sid, engine: 'antigravity' });
+        sendUiAck({ reqId: detail.reqId, ok: true, sessionId: sid });
+      }
+    };
+    window.addEventListener('kite:op-request', handleUiRequest);
+
+    const longPrompt =
+      'Implementa las funcionalidades de orquestación del proyecto. Revisa primero el código existente relacionado con orquestación multiagente, identifica lo que falta por completar y propón un plan completo.';
+
+    const res = await executePlan({
+      strategy: 'llm',
+      actions: [{ type: 'open_terminals', count: 1, engine: 'antigravity', prompts: [longPrompt] }],
+    });
+    window.removeEventListener('kite:op-request', handleUiRequest);
+
+    expect(res.overallSuccess).toBe(true);
+    expect(res.receipts[0].summaryEs).toContain(longPrompt);
+    expect(res.receipts[0].spokenSummaryEs).toBeDefined();
+    expect(res.reply).not.toContain('Revisa primero el código existente');
+    expect(res.reply).toContain('Abrí 1 terminal con antigravity');
+  });
+
+  it('S10: launch_thread with title & oddMode during active Thread Voice Mode renames thread, frames ODD brief, and stays in the voice call', async () => {
+    const { voiceSessionStore } = await import('../voice/voiceSessionStore');
+    voiceSessionStore.startSession('voice-thread-1', 'thread');
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'create_general_chat') return { id: 'delegated-thread-99' };
+      if (cmd === 'rename_chat_thread') return {};
+      if (cmd === 'dispatch_send') return { status: 'submitted' };
+      return {};
+    });
+
+    const selectedThreads: unknown[] = [];
+    const onSelect = (e: Event) => selectedThreads.push((e as CustomEvent).detail);
+    window.addEventListener('kite:select-thread', onSelect);
+
+    const res = await executePlan(
+      {
+        strategy: 'llm',
+        actions: [
+          {
+            type: 'launch_thread',
+            provider: 'antigravity',
+            title: 'ODD de Notificaciones',
+            body: 'Investiga y diseña el sistema de notificaciones.',
+            oddMode: true,
+          },
+        ],
+      },
+      { workspaceId: 'ws-1', mode: 'thread', boundThreadId: 'voice-thread-1', voiceSessionActive: true }
+    );
+
+    window.removeEventListener('kite:select-thread', onSelect);
+    voiceSessionStore.stopSession();
+
+    expect(res.overallSuccess).toBe(true);
+    expect(invokeCommand).toHaveBeenCalledWith('rename_chat_thread', {
+      supportedSchemaVersion: 1,
+      threadId: 'delegated-thread-99',
+      title: 'ODD de Notificaciones',
+    });
+    expect(invokeCommand).toHaveBeenCalledWith(
+      'dispatch_send',
+      expect.objectContaining({
+        address: 'thread:delegated-thread-99',
+        body: expect.stringMatching(/odd\/tasks\/<slug>\.md/i),
+        caller: 'agent',
+      })
+    );
+    // Must not steal UI focus away from active Thread Voice Mode call unless focusThread: true
+    expect(selectedThreads).toHaveLength(0);
+    expect(res.reply).not.toContain('delegated-thread-99');
+    expect(res.reply).toMatch(/en segundo plano/i);
+  });
+
+  it('S10: launch_thread treats queued and settled dispatch_send statuses as success', async () => {
+    vi.mocked(invokeCommand).mockResolvedValue({ status: 'queued' } as any);
+
+    const res = await executePlan({
+      strategy: 'llm',
+      actions: [{ type: 'launch_thread', threadId: 'busy-thread-1', body: 'agrega pruebas de regresión' }],
+    });
+
+    expect(res.overallSuccess).toBe(true);
+    expect(res.receipts[0].ok).toBe(true);
+  });
+
+  it('S10: spawn_subagent dispatches a real Thread subagent via dispatch_run bound to active voice thread with ODD framing', async () => {
+    const { voiceSessionStore } = await import('../voice/voiceSessionStore');
+    voiceSessionStore.startSession('voice-parent-42', 'thread');
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'dispatch_run') {
+        return { status: 'submitted', address: 'thread:sub-child-7' };
+      }
+      return {};
+    });
+
+    const spawnTermSpy = vi.spyOn(appOperatorController, 'spawnTerminals');
+
+    const res = await executePlan(
+      {
+        strategy: 'llm',
+        actions: [
+          {
+            type: 'spawn_subagent',
+            provider: 'antigravity',
+            role: 'ODD Planner',
+            workspace: 'inherit',
+            oddMode: true,
+            task: 'Explorar permisos y armar plan de pruebas',
+          },
+        ],
+      },
+      { workspaceId: 'ws-1', mode: 'thread', boundThreadId: 'voice-parent-42', voiceSessionActive: true }
+    );
+    voiceSessionStore.stopSession();
+
+    expect(res.overallSuccess).toBe(true);
+    expect(spawnTermSpy).not.toHaveBeenCalled();
+    expect(invokeCommand).toHaveBeenCalledWith(
+      'dispatch_run',
+      expect.objectContaining({
+        via: 'thread',
+        provider: 'antigravity',
+        role: 'ODD Planner',
+        workspaceMode: 'inherit',
+        from: 'thread:voice-parent-42',
+        parent: 'thread:voice-parent-42',
+        wait: false,
+        caller: 'agent',
+        task: expect.stringMatching(/odd\/tasks\/<slug>\.md/i),
+      })
+    );
+    expect(res.receipts[0].data).toEqual(
+      expect.objectContaining({
+        via: 'thread',
+        role: 'ODD Planner',
+        threadId: 'sub-child-7',
+        parentThreadId: 'voice-parent-42',
+        oddMode: true,
+      })
+    );
+    expect(res.reply).toMatch(/subagente ODD Planner/i);
+  });
+
+  it('S10: spawn_subagent reports honest failure on dispatch_run rejection without opening a terminal', async () => {
+    vi.mocked(invokeCommand).mockResolvedValue({
+      status: 'rejected',
+      error: 'subagent_limit_reached',
+    } as any);
+    const spawnTermSpy = vi.spyOn(appOperatorController, 'spawnTerminals');
+
+    const res = await executePlan({
+      strategy: 'llm',
+      actions: [{ type: 'spawn_subagent', task: 'revisar módulo auth' }],
+    });
+
+    expect(res.overallSuccess).toBe(false);
+    expect(spawnTermSpy).not.toHaveBeenCalled();
+    expect(res.reply).toMatch(/subagent_limit_reached/i);
+  });
+
+  it('S10: launch_agent matches an Autonomous Agent profile, creates its chat, and starts an ODD-focused turn', async () => {
+    const { voiceSessionStore } = await import('../voice/voiceSessionStore');
+    voiceSessionStore.startSession('voice-thread-2', 'thread');
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_agent_profiles') {
+        return [
+          { id: 'agent-sec-1', name: 'Security auditor', engine: 'claude', pinned: false },
+        ];
+      }
+      if (cmd === 'create_agent_chat') return { id: 'agent-thread-55' };
+      if (cmd === 'start_agent_chat_turn') return { runId: 'run-1' };
+      return {};
+    });
+
+    const res = await executePlan(
+      {
+        strategy: 'llm',
+        actions: [
+          {
+            type: 'launch_agent',
+            agentQuery: 'security',
+            body: 'Audita los endpoints de autenticación.',
+            oddMode: true,
+          },
+        ],
+      },
+      { workspaceId: 'ws-1', mode: 'thread', boundThreadId: 'voice-thread-2', voiceSessionActive: true }
+    );
+    voiceSessionStore.stopSession();
+
+    expect(res.overallSuccess).toBe(true);
+    expect(invokeCommand).toHaveBeenCalledWith('create_agent_chat', {
+      agentId: 'agent-sec-1',
+      workspaceId: 'ws-1',
+      provider: 'claude',
+    });
+    expect(invokeCommand).toHaveBeenCalledWith(
+      'start_agent_chat_turn',
+      expect.objectContaining({
+        agentId: 'agent-sec-1',
+        threadId: 'agent-thread-55',
+        provider: 'claude',
+        prompt: expect.stringMatching(/odd\/tasks\/<slug>\.md/i),
+      })
+    );
+    expect(res.reply).toMatch(/Security auditor/i);
+  });
+
+  it('S10: runOperatorTurn in thread voice mode does not hijack ODD/chat questions into terminal narrate_summary', async () => {
+    const { runOperatorTurn } = await import('../index');
+    const planSpy = vi.fn().mockResolvedValue({
+      rawText: JSON.stringify({
+        reply: 'Podemos armar primero el ODD de notificaciones y luego delegar la implementación a un subagente.',
+        actions: [],
+        answer: 'Podemos armar primero el ODD de notificaciones y luego delegar la implementación a un subagente.',
+      }),
+      latencyMs: 50,
+      model: 'test-model',
+    });
+
+    const result = await runOperatorTurn('cuéntame cómo armamos el ODD de notificaciones', {
+      mode: 'thread',
+      source: 'voz',
+      context: { mode: 'thread', voiceSessionActive: true, activeTerminals: [] },
+      provider: {
+        id: 'test-llm',
+        plan: planSpy,
+      } as any,
+    });
+
+    expect(planSpy).toHaveBeenCalledTimes(1);
+    expect(result.plan.actions).toEqual([]);
+    expect(result.reply).toContain('ODD de notificaciones');
+  });
+});

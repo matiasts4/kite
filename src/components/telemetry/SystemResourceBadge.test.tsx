@@ -117,7 +117,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     await user.click(badgeBtn);
 
     expect(
-      screen.getByRole('dialog', { name: /monitor de recursos del sistema y de la aplicación/i })
+      await screen.findByRole('dialog', { name: /monitor de recursos del sistema y de la aplicación/i })
     ).toBeInTheDocument();
 
     // Verifies process tree breakdown & system cards are shown
@@ -159,7 +159,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     await user.click(badgeBtn);
 
     // Switch to RAM tab
-    await user.click(screen.getByRole('tab', { name: 'RAM' }));
+    await user.click(await screen.findByRole('tab', { name: 'RAM' }));
 
     // Verifies explanatory note is displayed
     expect(screen.getByText(/¿Por qué varía el consumo\?/i)).toBeInTheDocument();
@@ -294,7 +294,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     });
 
     await user.click(screen.getByTestId('system-resource-badge'));
-    await user.click(screen.getByRole('tab', { name: 'RAM' }));
+    await user.click(await screen.findByRole('tab', { name: 'RAM' }));
 
     // Verifies workspace grouping is shown by default when workspaces exist
     expect(screen.getByText('kite-core')).toBeInTheDocument();
@@ -321,7 +321,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
 
     await user.click(screen.getByTestId('system-resource-badge'));
 
-    const dialog = screen.getByRole('dialog', {
+    const dialog = await screen.findByRole('dialog', {
       name: /monitor de recursos del sistema y de la aplicación/i,
     });
     expect(dialog.style.backdropFilter).toBe('none');
@@ -337,5 +337,21 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
       (el) => (el as HTMLElement).style?.overflowY === 'auto'
     );
     expect(nestedAutoScrollers).toHaveLength(0);
+
+    // Must use an opaque solid plate instead of translucent --glass-modal-bg / --glass-overlay-bg
+    expect(dialog.style.background).toContain('var(--menu-plate');
+    expect(dialog.style.background).not.toContain('var(--glass-modal-bg');
+    expect(dialog.style.background).not.toContain('var(--glass-overlay-bg');
+
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const visualLangCss = fs.readFileSync('src/visual-language.css', 'utf8');
+    const popoverRule =
+      visualLangCss.match(/body\.kite-app \.system-resource-popover\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(popoverRule).toContain('var(--menu-plate');
+    expect(popoverRule).not.toContain('var(--glass-modal-bg');
+    expect(popoverRule).not.toContain('var(--glass-overlay-bg');
   });
 });

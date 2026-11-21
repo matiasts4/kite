@@ -56,20 +56,8 @@ export default defineConfig(({ mode }) => ({
             return 'vendor-runtime';
           }
           if (!id.includes('node_modules')) return;
-          if (id.includes('@pierre') || id.includes('shiki')) {
-            return 'vendor-diffs';
-          }
           if (id.includes('@xterm')) {
             return 'vendor-xterm';
-          }
-          if (
-            id.includes('mermaid') ||
-            id.includes('cytoscape') ||
-            id.includes('elkjs') ||
-            id.includes('katex') ||
-            id.includes('dagre')
-          ) {
-            return 'vendor-mermaid';
           }
           if (/[\\/]node_modules[\\/]motion[\\/]/.test(id) || /[\\/]node_modules[\\/]framer-motion[\\/]/.test(id)) {
             return 'vendor-motion';

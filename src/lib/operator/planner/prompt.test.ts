@@ -145,4 +145,21 @@ describe('buildOperatorSystemPrompt local notes', () => {
     expect(promptWithRead).toContain('CONTENIDO DE LA CONVERSACIÓN CONSULTADA (Plan de Auth - antigravity):');
     expect(promptWithRead).toContain('Usuario: ¿Cómo va el backend?');
   });
+
+  it('includes measured conversational summary rules, ODD-first delegation, and active voice context (S9, S10)', () => {
+    const prompt = buildOperatorSystemPrompt({
+      workspaceName: 'kite',
+      mode: 'thread',
+      voiceSessionActive: true,
+      boundThreadId: 'thread-voice-1',
+    });
+
+    expect(prompt).toContain('RESUMEN HABLADO MEDIDO');
+    expect(prompt).toContain('ORQUESTACIÓN Y TENDENCIA ODD-FIRST');
+    expect(prompt).toContain('"oddMode": true');
+    expect(prompt).toContain('launch_agent');
+    expect(prompt).toContain('spawn_subagent');
+    expect(prompt).toContain('Modo actual: thread');
+    expect(prompt).toContain('Sesión de voz activa: sí (Hilo de voz: thread-voice-1)');
+  });
 });

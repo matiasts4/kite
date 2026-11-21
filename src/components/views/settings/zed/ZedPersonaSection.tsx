@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ZedPersonaConfig,
   OperatorConfig,
   ELEVENLABS_TTS_MODELS,
   ELEVENLABS_CURATED_VOICES,
+  ZED_FIGURE_OPTIONS,
+  sanitizeZedFigure,
 } from '../../../../lib/operator/operatorConfig';
+import { getOrbModeThumbnails } from '../../../orbRenderer';
 import { SegmentedIndicator } from '../../../ui/SegmentedIndicator';
 import { SelectMenu, type SelectMenuRow } from '../../../ui/SelectMenu';
 import { toast } from '../../../../lib/toast';
@@ -61,6 +64,14 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
 }) => {
   const [showElevenKey, setShowElevenKey] = useState(false);
   const [savedElevenKey, setSavedElevenKey] = useState(false);
+  const figureThumbnails = useMemo(
+    () =>
+      getOrbModeThumbnails(
+        ZED_FIGURE_OPTIONS.map((opt) => opt.shaderMode),
+        'listening'
+      ),
+    []
+  );
   const isEleven = config.ttsEngine === 'elevenlabs';
   const isCuratedVoice = ELEVENLABS_CURATED_VOICES.some((v) => v.id === config.elevenlabsVoiceId);
   const [customVoiceActive, setCustomVoiceActive] = useState(!isCuratedVoice && Boolean(config.elevenlabsVoiceId));
@@ -109,6 +120,54 @@ export const ZedPersonaSection: React.FC<ZedPersonaSectionProps> = ({
               style={{ width: 140 }}
               aria-label="Nombre del asistente"
             />
+          </div>
+        </div>
+
+        {/* Figura visual del asistente */}
+        <div className="ui-card__row settings-row settings-row--stacked">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Figura del Asistente</h3>
+            <p>
+              Elige la figura interactiva para el asistente flotante y el Voice Mode. Todas responden al cursor, al clic y a la voz con shader optimizado de bajo consumo.
+            </p>
+          </div>
+          <div className="customizations-figure-grid zed-figure-grid" role="group" aria-label="Figura del Asistente">
+            {ZED_FIGURE_OPTIONS.map((option) => {
+              const selectedFigure = sanitizeZedFigure(persona.figure);
+              const active = selectedFigure === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  aria-pressed={active}
+                  data-testid={`zed-figure-option-${option.id}`}
+                  className="customizations-figure-tile zed-figure-tile"
+                  onClick={() => onPersonaChange('figure', option.id)}
+                >
+                  <span aria-hidden="true" className="customizations-figure-tile__art">
+                    {figureThumbnails[option.shaderMode] ? (
+                      <img
+                        src={figureThumbnails[option.shaderMode]}
+                        alt=""
+                        width={52}
+                        height={52}
+                        className="zed-figure-preview-img"
+                        draggable={false}
+                      />
+                    ) : (
+                      <span className={`zed-figure-preview zed-figure-preview--${option.id}`} />
+                    )}
+                  </span>
+                  <span className="customizations-figure-tile__label">{option.label}</span>
+                  <span className="customizations-figure-tile__blurb">{option.blurb}</span>
+                  <span
+                    className={`zed-figure-tile__tier zed-figure-tile__tier--${option.resourceTier}`}
+                  >
+                    {option.resourceLabel}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 

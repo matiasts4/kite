@@ -537,4 +537,33 @@ describe('Run Ledger — T9 Integration Scenarios', () => {
     expect(run?.provider).toBeUndefined();
     expect(run?.toolCalls[0].name).toBe('stop_speaking');
   });
+
+  it('preserves numeric tokenCounts and firstTokenMs while still redacting auth tokens', () => {
+    const runId = ledger.startRun('hola');
+    ledger.recordProviderResponse(runId, {
+      latencyMs: 650,
+      tokenCounts: { prompt: 320, completion: 48, cache: 200 },
+      rawText: 'ok',
+    });
+
+    const run = ledger.getRun(runId)!;
+    const providerEv = run.events.find((e) => e.type === 'provider_response');
+    expect(providerEv?.payload.tokenCounts).toEqual({ prompt: 320, completion: 48, cache: 200 });
+
+    const secretObj = ledger.exportHistory('json');
+    expect(secretObj).toContain('"prompt": 320');
+
+    // Actual credential keys named token/apiToken/authToken must still be redacted
+    const runId2 = ledger.startRun('test');
+    ledger.recordToolEmission(runId2, {
+      name: 'custom',
+      arguments: { apiToken: 'secret-123', token: 'secret-456', tokenCounts: { prompt: 10 }, firstTokenMs: 250 },
+    });
+    const toolEv = ledger.getRun(runId2)?.events.find((e) => e.type === 'tool_emission');
+    const args = toolEv?.payload.arguments as Record<string, unknown>;
+    expect(args.apiToken).toBe('[REDACTED_SECRET]');
+    expect(args.token).toBe('[REDACTED_SECRET]');
+    expect(args.tokenCounts).toEqual({ prompt: 10 });
+    expect(args.firstTokenMs).toBe(250);
+  });
 });

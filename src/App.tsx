@@ -7,8 +7,11 @@ import { openSettingsTab } from './lib/settingsNav';
 
 const RightDock = lazy(() => import('./components/RightDock').then((m) => ({ default: m.RightDock })));
 const SettingsView = lazy(() => import('./components/views/SettingsView').then((m) => ({ default: m.SettingsView })));
+const ZedStripHost = lazy(() => import('./components/ZedStrip').then((m) => ({ default: m.ZedStripHost })));
 import { isValidWorkMode, readKitePref, readSavedWorkMode, writeSavedWorkMode } from './lib/kitePrefs';
-import { ZedStripHost, type ZedCallState } from './components/ZedStrip';
+import type { ZedCallState } from './components/ZedStrip';
+import { useVoiceSession } from './lib/operator/voice/voiceSessionStore';
+import { loadInitialTabs } from './components/dock/dockConfig';
 import { releaseOperatorCapture } from './lib/operator/voice/zedVoice';
 import { useNotifications } from './lib/notifications/useNotifications';
 import { Toaster } from './lib/toast';
@@ -98,6 +101,15 @@ export const App: React.FC = () => {
       setHasOpenedRightDock(true);
     }
   }, [rightDockVisible]);
+
+  const voiceSession = useVoiceSession();
+  const isVoiceSessionRunning =
+    voiceSession.phase === 'active' || voiceSession.phase === 'starting';
+  const keepRightDockMountedForBrowser =
+    !rightDockVisible &&
+    hasOpenedRightDock &&
+    loadInitialTabs().tabs.some((t) => t.kind === 'browser');
+  const shouldMountRightDock = rightDockVisible || keepRightDockMountedForBrowser;
 
   useEffect(() => {
     try {
@@ -697,7 +709,7 @@ export const App: React.FC = () => {
           </ErrorBoundary>
 
           {/* Authentic Right Tools & Browser Dock */}
-          {hasOpenedRightDock && (
+          {shouldMountRightDock && (
             <ErrorBoundary name="RightDock">
               <Suspense fallback={null}>
                 <RightDock
@@ -809,24 +821,28 @@ export const App: React.FC = () => {
         />
 
         {/* Floating Zed Voice & Operations Orb */}
-        <ZedStripHost
-          workspaceId={selectedWorkspaceId}
-          call={{
-            ...zedCallState,
-            isActive: operatorOpen,
-          }}
-          onToggleMute={() =>
-            setZedCallState((s) => ({ ...s, muted: !s.muted }))
-          }
-          onToggleSpeaker={() =>
-            setZedCallState((s) => ({ ...s, speakerMuted: !s.speakerMuted }))
-          }
-          onEndCall={() => setOperatorOpen(false)}
-          onOpenSettingsZed={() => {
-            setSettingsOpen(true);
-            openSettingsTab('zed');
-          }}
-        />
+        {(operatorOpen || isVoiceSessionRunning) && (
+          <Suspense fallback={null}>
+            <ZedStripHost
+              workspaceId={selectedWorkspaceId}
+              call={{
+                ...zedCallState,
+                isActive: operatorOpen,
+              }}
+              onToggleMute={() =>
+                setZedCallState((s) => ({ ...s, muted: !s.muted }))
+              }
+              onToggleSpeaker={() =>
+                setZedCallState((s) => ({ ...s, speakerMuted: !s.speakerMuted }))
+              }
+              onEndCall={() => setOperatorOpen(false)}
+              onOpenSettingsZed={() => {
+                setSettingsOpen(true);
+                openSettingsTab('zed');
+              }}
+            />
+          </Suspense>
+        )}
 
         <AppIntro open={!introDismissed} />
 

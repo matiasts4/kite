@@ -95,6 +95,28 @@ export interface WorkspaceGitService {
   pushWorkspaceChanges(workspaceId: string): Promise<WorkspaceChanges>;
 }
 
+export const MAX_FILE_DIFF_CACHE_ENTRIES = 40;
+export const MAX_DIFF_CONTENTS_CACHE_ENTRIES = 24;
+
+function touchLru<K, V>(map: Map<K, V>, key: K): V | undefined {
+  const value = map.get(key);
+  if (value !== undefined) {
+    map.delete(key);
+    map.set(key, value);
+  }
+  return value;
+}
+
+function setLru<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > maxEntries) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
 export function createWorkspaceGitService(): WorkspaceGitService {
   const fileDiffCache = new Map<string, Promise<DiffData>>();
   const diffFileContentsCache = new Map<string, Promise<WorkspaceDiffFileContents>>();
@@ -135,7 +157,7 @@ export function createWorkspaceGitService(): WorkspaceGitService {
 
     async readWorkspaceFileDiff(workspaceId: string, path: string, untracked: boolean): Promise<DiffData> {
       const cacheKey = `${workspaceId}:${path}:${untracked}`;
-      const existing = fileDiffCache.get(cacheKey);
+      const existing = touchLru(fileDiffCache, cacheKey);
       if (existing) return existing;
 
       const promise = invokeCommand<DiffData>('read_workspace_file_diff', {
@@ -147,7 +169,7 @@ export function createWorkspaceGitService(): WorkspaceGitService {
         throw err;
       });
 
-      fileDiffCache.set(cacheKey, promise);
+      setLru(fileDiffCache, cacheKey, promise, MAX_FILE_DIFF_CACHE_ENTRIES);
       return promise;
     },
 
@@ -159,7 +181,7 @@ export function createWorkspaceGitService(): WorkspaceGitService {
       const normalizedOld = oldPath || null;
       const normalizedNew = newPath || null;
       const cacheKey = JSON.stringify([workspaceId, normalizedOld, normalizedNew]);
-      const existing = diffFileContentsCache.get(cacheKey);
+      const existing = touchLru(diffFileContentsCache, cacheKey);
       if (existing) return existing;
 
       const promise = ipcReadWorkspaceDiffFileContents(
@@ -171,7 +193,7 @@ export function createWorkspaceGitService(): WorkspaceGitService {
         throw err;
       });
 
-      diffFileContentsCache.set(cacheKey, promise);
+      setLru(diffFileContentsCache, cacheKey, promise, MAX_DIFF_CONTENTS_CACHE_ENTRIES);
       return promise;
     },
 

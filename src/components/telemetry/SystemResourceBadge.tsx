@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import {
   type SystemMetricsSnapshot,
   type SystemMetricsHistoryPoint,
@@ -8,8 +8,11 @@ import {
   readSystemMetricsPreferences,
   SYSTEM_METRICS_PREFS_EVENT,
 } from '../../lib/systemMetrics';
-import { SystemResourcePopover } from './SystemResourcePopover';
 import { usePresence } from '../../motion/usePresence';
+
+const SystemResourcePopover = lazy(() =>
+  import('./SystemResourcePopover').then((m) => ({ default: m.SystemResourcePopover }))
+);
 
 export interface SystemResourceBadgeProps {
   className?: string;
@@ -282,16 +285,18 @@ export const SystemResourceBadge: React.FC<SystemResourceBadgeProps> = ({ classN
       </button>
 
       {popoverPresence.mounted && snapshot && (
-        <SystemResourcePopover
-          snapshot={snapshot}
-          history={history}
-          prefs={prefs}
-          isRefreshing={isRefreshing}
-          onRefresh={() => pollMetrics(true)}
-          onClose={() => setIsOpen(false)}
-          anchorRect={anchorRect}
-          phase={popoverPresence.phase}
-        />
+        <Suspense fallback={null}>
+          <SystemResourcePopover
+            snapshot={snapshot}
+            history={history}
+            prefs={prefs}
+            isRefreshing={isRefreshing}
+            onRefresh={() => pollMetrics(true)}
+            onClose={() => setIsOpen(false)}
+            anchorRect={anchorRect}
+            phase={popoverPresence.phase}
+          />
+        </Suspense>
       )}
     </div>
   );

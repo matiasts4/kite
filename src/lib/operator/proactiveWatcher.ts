@@ -10,6 +10,7 @@ import {
 } from '../terminalRegistry';
 import type { ActiveAgentTerminal } from '../terminalRegistry';
 import { ttsNarrator } from './ttsNarrator';
+import { voiceTurnArbitrator } from './voice/turnArbitrator';
 
 /** Minimum silence window per session so rapid output fluctuations never spam speech. */
 export const PROACTIVE_COOLDOWN_MS = 8000;
@@ -290,17 +291,23 @@ function voiceSessionIsOpen(settings: WatcherSettings): boolean {
 
 function speakSafely(settings: WatcherSettings, text: string): void {
   // An open session is the mouth. A closed or absent session uses the existing sink.
-  // Never call a session opener from here.
+  // Never call a session opener from here, and arbitrate against active turns so audio never overlaps.
   const sink =
     voiceSessionIsOpen(settings) && settings.sessionSpeak ? settings.sessionSpeak : settings.speak;
-  try {
-    const result: unknown = sink(text);
-    if (result instanceof Promise) {
-      void result.catch(() => {});
-    }
-  } catch {
-    // A failing speaker must never stop the watcher.
-  }
+  voiceTurnArbitrator.requestProactiveSpeech(
+    text,
+    (queuedText) => {
+      try {
+        const result: unknown = sink(queuedText);
+        if (result instanceof Promise) {
+          void result.catch(() => {});
+        }
+      } catch {
+        // A failing speaker must never stop the watcher.
+      }
+    },
+    settings.now()
+  );
 }
 
 function handleTerminalUpdate(rawDetail: unknown, settings: WatcherSettings): void {

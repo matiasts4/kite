@@ -27,6 +27,7 @@ import {
   type QueuedTurn,
   type TurnStage,
 } from './useOperatorTurnLogic';
+import { voiceSessionStore } from '../voice/voiceSessionStore';
 
 export type { TurnStage };
 
@@ -146,7 +147,21 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
       setStageLabel(getStageLabelEs('planning'));
 
       try {
-        const historyOptions = withPriorTurnHistory(input, opts, getTurnTraces());
+        const vs = voiceSessionStore.getSnapshot();
+        const isThreadVoiceSession =
+          (vs.phase === 'active' || vs.phase === 'starting') && Boolean(vs.boundThreadId);
+        const voiceThreadHistory =
+          !opts?.history && isThreadVoiceSession
+            ? voiceSessionStore.getConversationHistory(vs.boundThreadId)
+            : undefined;
+        const historyOptions =
+          opts?.history
+            ? { history: opts.history }
+            : isThreadVoiceSession
+              ? voiceThreadHistory && voiceThreadHistory.length > 0
+                ? { history: voiceThreadHistory }
+                : {}
+              : withPriorTurnHistory(input, opts, getTurnTraces());
         const result = await withTurnTimeout(
           runOperatorTurn(input, {
             workspaceId: defaultWorkspaceIdRef.current,

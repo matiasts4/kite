@@ -120,4 +120,38 @@ describe('ZedTab Component Refactoring', () => {
     const stored = JSON.parse(localStorage.getItem(OPERATOR_CONFIG_STORAGE_KEY) ?? '{}');
     expect(stored.cloudflareApiToken).toBe('cf-secret-token');
   });
+
+  it('lets the user select among the 8 studio interactive orb-style figures in Persona without mounting WebGL canvases in the grid', () => {
+    const { container } = render(<ZedTab />);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Persona$/ }));
+
+    const figureGroup = screen.getByRole('group', { name: 'Figura del Asistente' });
+    expect(figureGroup).toBeInTheDocument();
+    // Grid uses cached static snapshots or CSS previews (zero live WebGL canvases mounted in the picker grid)
+    expect(figureGroup.querySelectorAll('canvas')).toHaveLength(0);
+
+    const plasmaBtn = screen.getByTestId('zed-figure-option-plasma-orb');
+    expect(plasmaBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('zed-figure-option-frosted-sphere')).toBeInTheDocument();
+    expect(screen.getByTestId('zed-figure-option-eclipse-halo')).toBeInTheDocument();
+    expect(screen.getByTestId('zed-figure-option-silk-wave')).toBeInTheDocument();
+    expect(screen.getByTestId('zed-figure-option-crystal-prism')).toBeInTheDocument();
+    expect(screen.getByTestId('zed-figure-option-orbital-gyro')).toBeInTheDocument();
+    expect(screen.getByTestId('zed-figure-option-chromatic-pearl')).toBeInTheDocument();
+
+    const eclipseBtn = screen.getByTestId('zed-figure-option-eclipse-halo');
+    expect(eclipseBtn).toHaveTextContent('Interactivo · Ligero');
+    fireEvent.click(eclipseBtn);
+
+    expect(eclipseBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('zed-orb')).toHaveAttribute('data-figure', 'eclipse-halo');
+
+    const stored = JSON.parse(localStorage.getItem(OPERATOR_CONFIG_STORAGE_KEY) ?? '{}');
+    expect(stored.persona?.figure).toBe('eclipse-halo');
+
+    // Verify zero Unicode emojis inside the Persona settings view
+    const emojiPattern = /\p{Extended_Pictographic}/u;
+    expect(emojiPattern.test(container.textContent || '')).toBe(false);
+  });
 });

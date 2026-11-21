@@ -21,15 +21,18 @@ describe('UnifiedDiffView', () => {
     const figure = screen.getByRole('figure', { name: /Diff, 1 additions, 1 deletions/i });
     expect(figure).toBeInTheDocument();
 
-    await waitFor(() => {
-      const shadowRoot = container.querySelector('diffs-container')?.shadowRoot;
-      expect(shadowRoot).toBeTruthy();
-      expect(shadowRoot?.querySelector('[data-diff-type="single"]')).toBeTruthy();
-      expect(shadowRoot?.querySelectorAll('[data-gutter]').length).toBe(1);
-      const code = shadowRoot?.querySelector('[data-code]');
-      expect(code?.textContent).toContain('return `hello ${name}`;');
-      expect(code?.textContent).not.toContain('diff --git');
-    });
+    await waitFor(
+      () => {
+        const shadowRoot = container.querySelector('diffs-container')?.shadowRoot;
+        expect(shadowRoot).toBeTruthy();
+        expect(shadowRoot?.querySelector('[data-diff-type="single"]')).toBeTruthy();
+        expect(shadowRoot?.querySelectorAll('[data-gutter]').length).toBe(1);
+        const code = shadowRoot?.querySelector('[data-code]');
+        expect(code?.textContent).toContain('return `hello ${name}`;');
+        expect(code?.textContent).not.toContain('diff --git');
+      },
+      { timeout: 5000 }
+    );
   });
 
   it('supports pre-parsed DiffData objects with explicit filePath syntax highlighting', async () => {

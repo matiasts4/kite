@@ -6,6 +6,8 @@
 //     and natural neural voice prioritization.
 import { sanitizeReply } from './planner/sanitize';
 import { loadOperatorConfig, syncNativeCredentialsWithVault } from './operatorConfig';
+import { normalizeForVoiceSpeech } from './voice/speechProsody';
+import { emitTrace } from './trace/trace';
 
 export interface TTSOptions {
   lang?: string; // Default: 'es-ES' or 'en-US'
@@ -19,7 +21,12 @@ export interface TTSOptions {
   elevenlabsVoiceId?: string;
   elevenlabsStability?: number;
   elevenlabsSimilarity?: number;
+  /** Optional turnId for emitting `tts.first_audio` latency traces. */
+  turnId?: string;
+  /** Optional turn start timestamp used to calculate TTFA (`ttfaMs`). */
+  turnStartedAt?: number;
   onStart?: () => void;
+  onFirstAudio?: () => void;
   onEnd?: () => void;
   onError?: (err: any) => void;
 }
@@ -65,47 +72,11 @@ export const PERSONA_VOICE_PROFILES: Record<string, PersonaVoiceProfile> = {
 };
 
 /**
- * Strips code blocks, markdown symbols, URLs, and noisy syntax so text reads naturally.
+ * Strips code blocks, markdown symbols, UUIDs, file paths, URLs, CLI flags,
+ * template clichés, and noisy syntax so text reads naturally aloud.
  */
 export function cleanTextForSpeech(text: string): string {
-  if (!text) return '';
-
-  let cleaned = text;
-
-  // Replace code blocks with descriptive pause
-  cleaned = cleaned.replace(/```[\s\S]*?```/g, ' bloque de código omitido ');
-
-  // Strip inline backticks
-  cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
-
-  // Markdown links [title](url) -> title
-  cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-
-  // Markdown headers, bold, italics
-  cleaned = cleaned.replace(/^#+\s+/gm, '');
-  cleaned = cleaned.replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, '$1');
-
-  // Strip bullet markers and numbered list markers
-  cleaned = cleaned.replace(/^[-*+]\s+/gm, '');
-  cleaned = cleaned.replace(/^\d+\.\s+/gm, '');
-
-  // Strip common noisy symbols, emojis and quotation guillemets
-  cleaned = cleaned.replace(/[📋🚀⚠️✅❌🔥✨🔍🛠️📦💻💬🤖⚡🔴🟢🔵«»]/g, '');
-
-  // Replace tech symbols with natural speech pauses
-  cleaned = cleaned.replace(/&&|\|\|/g, ' y ');
-  cleaned = cleaned.replace(/!=|!==/g, ' distinto de ');
-  cleaned = cleaned.replace(/==|===/g, ' igual a ');
-  cleaned = cleaned.replace(/->|=>/g, ' hacia ');
-
-  // Soften colons and slashes for natural breathing cadence
-  cleaned = cleaned.replace(/:\s+/g, ', ');
-  cleaned = cleaned.replace(/\s*—\s*/g, ', ');
-
-  // Collapse whitespace
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-
-  return cleaned;
+  return normalizeForVoiceSpeech(text);
 }
 
 /**
@@ -354,7 +325,9 @@ class TTSNarrator {
 
     if (engine === 'elevenlabs' && apiKey.length > 0) {
       try {
-        await this.speakElevenLabs(textToSpeak, options, config, myGen);
+        // Suppress caller onError during ElevenLabs attempt so playback/stream failures
+        // fall back cleanly to speakBrowser without prematurely re-arming the mic or calling stop().
+        await this.speakElevenLabs(textToSpeak, { ...options, onError: undefined }, config, myGen);
         return;
       } catch (err: any) {
         // If interrupted, stopped by user, or superseded, NEVER fall back to local voice!
@@ -362,7 +335,6 @@ class TTSNarrator {
           this.generation !== myGen ||
           err?.name === 'AbortError' ||
           err?.code === 20 ||
-          err?.type === 'error' ||
           (typeof err?.message === 'string' &&
             (err.message.includes('interrupted') ||
               err.message.includes('abort') ||
@@ -405,7 +377,7 @@ class TTSNarrator {
 
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
       voiceId
-    )}/stream?output_format=mp3_44100_128`;
+    )}/stream?output_format=mp3_44100_128&optimize_streaming_latency=3`;
 
     const res = await fetch(url, {
       method: 'POST',
@@ -475,6 +447,17 @@ class TTSNarrator {
             return;
           }
           this.speaking = true;
+          options.onFirstAudio?.();
+          if (options.turnId) {
+            try {
+              emitTrace({
+                turnId: options.turnId,
+                ev: 'tts.first_audio',
+                engine: 'elevenlabs',
+                ttfaMs: options.turnStartedAt ? Math.max(0, Date.now() - options.turnStartedAt) : undefined,
+              });
+            } catch {}
+          }
           options.onStart?.();
         };
 
@@ -486,7 +469,10 @@ class TTSNarrator {
 
         audio.onerror = (e) => {
           cleanup();
-          options.onError?.(e);
+          if (this.generation !== myGen || controller.signal.aborted) {
+            resolve();
+            return;
+          }
           reject(e);
         };
 
@@ -500,9 +486,11 @@ class TTSNarrator {
           let sourceBuffer: SourceBuffer;
           try {
             sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
-          } catch {
+          } catch (sbErr) {
             cleanup();
-            resolve();
+            reject(
+              sbErr instanceof Error ? sbErr : new Error('MediaSource addSourceBuffer failed')
+            );
             return;
           }
 
@@ -527,7 +515,12 @@ class TTSNarrator {
             isAppending = false;
             if (!startedPlayback && audio.paused) {
               startedPlayback = true;
-              void audio.play().catch(() => {});
+              void audio.play().catch((playErr) => {
+                if (this.generation === myGen && !controller.signal.aborted) {
+                  cleanup();
+                  reject(playErr);
+                }
+              });
             }
             if (queue.length > 0) {
               pump();
@@ -540,7 +533,7 @@ class TTSNarrator {
 
           try {
             while (true) {
-              if (this.generation !== myGen || controller.signal.aborted) {
+              if (finished || this.generation !== myGen || controller.signal.aborted) {
                 try {
                   void reader.cancel();
                 } catch {}
@@ -566,7 +559,6 @@ class TTSNarrator {
           } catch (readErr) {
             if (this.generation === myGen && !controller.signal.aborted) {
               cleanup();
-              options.onError?.(readErr);
               reject(readErr);
             }
           }
@@ -640,7 +632,6 @@ class TTSNarrator {
           resolve();
           return;
         }
-        options.onError?.(e);
         reject(e);
       };
 
@@ -749,6 +740,7 @@ class TTSNarrator {
         utterance.volume = options.volume ?? 1.0;
 
         let chunkFinished = false;
+        let started = false;
         const finishChunk = () => {
           if (chunkFinished) return;
           chunkFinished = true;
@@ -758,18 +750,37 @@ class TTSNarrator {
           }
         };
 
-        const chunkMaxMs = Math.max(8000, Math.ceil((chunkText.length / 4) * 1000) + 6000);
+        // Dead-utterance stall guard: only advance if the utterance never started
+        // and the browser synthesis engine is completely idle.
         this.safetyTimer = setTimeout(() => {
-          if (!chunkFinished) {
+          if (chunkFinished || started) return;
+          const synth = typeof window !== 'undefined' ? window.speechSynthesis : undefined;
+          if (synth && !synth.speaking && !synth.pending) {
             finishChunk();
             speakNextChunk();
           }
-        }, chunkMaxMs);
+        }, 5000);
 
         utterance.onstart = () => {
+          started = true;
+          if (this.safetyTimer) {
+            clearTimeout(this.safetyTimer);
+            this.safetyTimer = null;
+          }
           this.speaking = true;
           if (!hasStarted) {
             hasStarted = true;
+            options.onFirstAudio?.();
+            if (options.turnId) {
+              try {
+                emitTrace({
+                  turnId: options.turnId,
+                  ev: 'tts.first_audio',
+                  engine: 'browser',
+                  ttfaMs: options.turnStartedAt ? Math.max(0, Date.now() - options.turnStartedAt) : undefined,
+                });
+              } catch {}
+            }
             options.onStart?.();
           }
         };

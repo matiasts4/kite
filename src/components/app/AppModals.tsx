@@ -1,15 +1,26 @@
-import React from 'react';
-import { CommandPaletteModal } from '../modals/CommandPaletteModal';
-import { UsageDashboardModal } from '../views/modals/UsageDashboardModal';
-import { WhatsNewModal } from '../views/modals/WhatsNewModal';
-import { ArchivedChatsModal } from '../views/modals/ArchivedChatsModal';
-import { SshWorkspaceModal } from '../views/modals/SshWorkspaceModal';
+import React, { Suspense, lazy } from 'react';
 import { ResumeHost } from '../modals/ResumeHost';
 import { PromptProjectileOverlay } from '../code/PromptProjectileOverlay';
 import { openSettingsTab } from '../../lib/settingsNav';
 import type { SupportedPlatform } from '../../lib/shortcuts/types';
 import type { WorkMode } from '../Sidebar';
 import type { Workspace, AgentProfile } from '../../types';
+
+const CommandPaletteModal = lazy(() =>
+  import('../modals/CommandPaletteModal').then((m) => ({ default: m.CommandPaletteModal }))
+);
+const UsageDashboardModal = lazy(() =>
+  import('../views/modals/UsageDashboardModal').then((m) => ({ default: m.UsageDashboardModal }))
+);
+const WhatsNewModal = lazy(() =>
+  import('../views/modals/WhatsNewModal').then((m) => ({ default: m.WhatsNewModal }))
+);
+const ArchivedChatsModal = lazy(() =>
+  import('../views/modals/ArchivedChatsModal').then((m) => ({ default: m.ArchivedChatsModal }))
+);
+const SshWorkspaceModal = lazy(() =>
+  import('../views/modals/SshWorkspaceModal').then((m) => ({ default: m.SshWorkspaceModal }))
+);
 
 export interface AppModalsProps {
   isCommandPaletteOpen: boolean;
@@ -74,89 +85,109 @@ export const AppModals: React.FC<AppModalsProps> = ({
 }) => {
   return (
     <>
-      <CommandPaletteModal
-        isOpen={isCommandPaletteOpen}
-        onClose={onCloseCommandPalette}
-        agents={agents}
-        onLaunchAgent={(engineId, displayName) => {
-          if (workMode !== 'code') {
-            setWorkMode('code');
-            setSettingsOpen(false);
-          }
-          window.dispatchEvent(
-            new CustomEvent('kite:shortcut-pane-action', {
-              detail: { action: 'launch-agent', engineId, engineName: displayName },
-            })
-          );
-        }}
-        onSelectAgent={(agentId) => {
-          setSelectedAgentId(agentId);
-          setWorkMode('agent');
-          setSettingsOpen(false);
-        }}
-        onSelectMode={(mode) => {
-          setWorkMode(mode);
-          setSettingsOpen(false);
-          setRoutinesOpen(false);
-        }}
-        onToggleSidebar={() => setSidebarVisible((v) => !v)}
-        onToggleDock={() => setRightDockVisible((v) => !v)}
-        onToggleOperator={() => setOperatorOpen((prev) => !prev)}
-        onToggleVoice={() => {
-          if (!operatorOpen) setOperatorOpen(true);
-          window.dispatchEvent(new CustomEvent('kite:toggle-voice'));
-        }}
-        onOpenSettings={(tab) => {
-          setSettingsOpen(true);
-          if (tab) openSettingsTab(tab);
-        }}
-        onNewTerminal={() => {
-          if (workMode !== 'code') setWorkMode('code');
-          window.dispatchEvent(
-            new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
-          );
-        }}
-        onSplitPane={(axis) => {
-          if (workMode !== 'code') setWorkMode('code');
-          window.dispatchEvent(
-            new CustomEvent('kite:shortcut-pane-action', {
-              detail: { action: 'split-pane', axis },
-            })
-          );
-        }}
-        onClosePane={() => {
-          window.dispatchEvent(
-            new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'close-pane' } })
-          );
-        }}
-        onSaveFile={() => {
-          window.dispatchEvent(new CustomEvent('kite:save-file'));
-        }}
-        platform={platform}
-      />
+      {isCommandPaletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPaletteModal
+            isOpen={isCommandPaletteOpen}
+            onClose={onCloseCommandPalette}
+            agents={agents}
+            onLaunchAgent={(engineId, displayName) => {
+              if (workMode !== 'code') {
+                setWorkMode('code');
+                setSettingsOpen(false);
+              }
+              window.dispatchEvent(
+                new CustomEvent('kite:shortcut-pane-action', {
+                  detail: { action: 'launch-agent', engineId, engineName: displayName },
+                })
+              );
+            }}
+            onSelectAgent={(agentId) => {
+              setSelectedAgentId(agentId);
+              setWorkMode('agent');
+              setSettingsOpen(false);
+            }}
+            onSelectMode={(mode) => {
+              setWorkMode(mode);
+              setSettingsOpen(false);
+              setRoutinesOpen(false);
+            }}
+            onToggleSidebar={() => setSidebarVisible((v) => !v)}
+            onToggleDock={() => setRightDockVisible((v) => !v)}
+            onToggleOperator={() => setOperatorOpen((prev) => !prev)}
+            onToggleVoice={() => {
+              if (!operatorOpen) setOperatorOpen(true);
+              window.dispatchEvent(new CustomEvent('kite:toggle-voice'));
+            }}
+            onOpenSettings={(tab) => {
+              setSettingsOpen(true);
+              if (tab) openSettingsTab(tab);
+            }}
+            onNewTerminal={() => {
+              if (workMode !== 'code') setWorkMode('code');
+              window.dispatchEvent(
+                new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
+              );
+            }}
+            onSplitPane={(axis) => {
+              if (workMode !== 'code') setWorkMode('code');
+              window.dispatchEvent(
+                new CustomEvent('kite:shortcut-pane-action', {
+                  detail: { action: 'split-pane', axis },
+                })
+              );
+            }}
+            onClosePane={() => {
+              window.dispatchEvent(
+                new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'close-pane' } })
+              );
+            }}
+            onSaveFile={() => {
+              window.dispatchEvent(new CustomEvent('kite:save-file'));
+            }}
+            platform={platform}
+          />
+        </Suspense>
+      )}
 
-      <UsageDashboardModal
-        isOpen={isUsageModalOpen}
-        onClose={onCloseUsageModal}
-      />
+      {isUsageModalOpen && (
+        <Suspense fallback={null}>
+          <UsageDashboardModal
+            isOpen={isUsageModalOpen}
+            onClose={onCloseUsageModal}
+          />
+        </Suspense>
+      )}
 
-      <WhatsNewModal
-        isOpen={isWhatsNewOpen}
-        onClose={onCloseWhatsNew}
-      />
+      {isWhatsNewOpen && (
+        <Suspense fallback={null}>
+          <WhatsNewModal
+            isOpen={isWhatsNewOpen}
+            onClose={onCloseWhatsNew}
+          />
+        </Suspense>
+      )}
 
-      <ArchivedChatsModal
-        isOpen={isArchivedChatsOpen}
-        onClose={onCloseArchivedChats}
-        profileId={workMode === 'agent' ? selectedAgentId : null}
-        onRestored={onRestoredArchivedChat}
-      />
+      {isArchivedChatsOpen && (
+        <Suspense fallback={null}>
+          <ArchivedChatsModal
+            isOpen={isArchivedChatsOpen}
+            onClose={onCloseArchivedChats}
+            profileId={workMode === 'agent' ? selectedAgentId : null}
+            onRestored={onRestoredArchivedChat}
+          />
+        </Suspense>
+      )}
 
-      <SshWorkspaceModal
-        isOpen={isSshModalOpen}
-        onClose={onCloseSshModal}
-        onConnect={onConnectSsh}
-      />
+      {isSshModalOpen && (
+        <Suspense fallback={null}>
+          <SshWorkspaceModal
+            isOpen={isSshModalOpen}
+            onClose={onCloseSshModal}
+            onConnect={onConnectSsh}
+          />
+        </Suspense>
+      )}
 
       {/* Visual Spark Projectile Overlay for Dispatched Prompts */}
       <PromptProjectileOverlay />

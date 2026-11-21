@@ -146,14 +146,6 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
 
   const activeRunRunning = activeRun ? isRunActive(activeRun.status) : false;
 
-  const stepCount = visibleSteps.length;
-  useEffect(() => {
-    if (mode !== 'subagent' || !activeRun || !atBottomRef.current) return;
-    const el = streamRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [mode, activeRun?.subagentId, stepCount]);
-
   useEffect(() => {
     for (const item of visibleSteps) {
       seenStepIdsRef.current.add(item.id);

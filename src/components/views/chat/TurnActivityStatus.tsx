@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import {
   approvalWaitLabel,
   interruptedTurnLine,
@@ -31,7 +31,7 @@ export function WorkingStatus({ line, stage = null }: { line: string; stage?: st
   );
 }
 
-export function TurnActivityStatus({
+export const TurnActivityStatus = memo(function TurnActivityStatus({
   running,
   pendingApproval,
   items,
@@ -83,4 +83,4 @@ export function TurnActivityStatus({
       </p>
     </div>
   );
-}
+});

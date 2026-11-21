@@ -37,7 +37,7 @@ vi.mock('../modals/ResumeHost', () => ({
 }));
 
 describe('AppModals Component', () => {
-  it('renders overlay hosts and conditionally mounts modals based on isOpen flags', () => {
+  it('renders overlay hosts and conditionally mounts modals based on isOpen flags', async () => {
     const { rerender } = render(
       <AppModals
         isCommandPaletteOpen={false}
@@ -108,10 +108,10 @@ describe('AppModals Component', () => {
       />
     );
 
-    expect(screen.getByTestId('command-palette-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('usage-dashboard-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('whats-new-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('archived-chats-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('ssh-workspace-modal')).toBeInTheDocument();
+    expect(await screen.findByTestId('command-palette-modal')).toBeInTheDocument();
+    expect(await screen.findByTestId('usage-dashboard-modal')).toBeInTheDocument();
+    expect(await screen.findByTestId('whats-new-modal')).toBeInTheDocument();
+    expect(await screen.findByTestId('archived-chats-modal')).toBeInTheDocument();
+    expect(await screen.findByTestId('ssh-workspace-modal')).toBeInTheDocument();
   });
 });

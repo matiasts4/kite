@@ -45,11 +45,16 @@ describe('composer menu motion', () => {
     }
   });
 
-  it('keeps the context strip flush below the composer without undefined theme tokens', async () => {
+  it('keeps the top and bottom strips flush against the composer without undefined theme tokens', async () => {
     const composerCss = await readRepoFile('src/components/views/chat/composer/composer.css');
     const stripBlock = composerCss.match(/\.kite-composer-context-strip\s*\{[^}]*\}/)?.[0] ?? '';
     expect(stripBlock).toContain('margin-top: 0;');
     expect(stripBlock).not.toMatch(/margin-top:\s*-/);
+
+    const topStripBlock = composerCss.match(/\.kite-composer-top-strip\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(topStripBlock).toContain('margin-bottom: 0;');
+    expect(topStripBlock).not.toMatch(/margin-bottom:\s*-/);
+    expect(topStripBlock).toContain('border-bottom: none;');
 
     const undefinedTokenPattern = /var\(--(?:border|secondary-label|muted-foreground|primary|destructive|canvas|surface|surface-raised)\b/;
     expect(composerCss).not.toMatch(undefinedTokenPattern);
@@ -63,13 +68,26 @@ describe('composer menu motion', () => {
     const modeLayerBlock = indexCss.match(/\.mode-layer\s*\{[^}]*\}/)?.[0] ?? '';
     const visibleModeLayerBlock = indexCss.match(/\.mode-layer--visible\s*\{[^}]*\}/)?.[0] ?? '';
 
-    expect(modeLayerBlock).toContain('visibility: hidden;');
-    expect(modeLayerBlock).toContain('opacity: 0;');
-    expect(visibleModeLayerBlock).toContain('visibility: visible;');
-    expect(visibleModeLayerBlock).toContain('opacity: 1;');
+    expect(modeLayerBlock).toContain('display: none;');
+    expect(visibleModeLayerBlock).toContain('display: flex;');
     expect(indexCss).toContain('.mode-layer:not(.mode-layer--visible) .workspace-tab-layer--active');
     expect(indexCss).toMatch(/\.mode-layer\[aria-hidden=['"]true['"]\] \.workspace-tab-layer--active/);
     expect(indexCss).toContain('.mode-layer:not(.mode-layer--visible) .main-pane__layer--visible');
     expect(indexCss).toContain('.workspace-shell:has(> .app-browser-sidebar--fullscreen)');
+  });
+
+  it('uses higher-density translucent composer tokens across the main composer and top/bottom strips', async () => {
+    const composerCss = await readRepoFile('src/components/views/chat/composer/composer.css');
+    const visualLangCss = await readRepoFile('src/visual-language.css');
+
+    const mainBlock = composerCss.match(/\.kite-composer-main\s*\{[^}]*\}/)?.[0] ?? '';
+    const bottomStripBlock = composerCss.match(/\.kite-composer-context-strip\s*\{[^}]*\}/)?.[0] ?? '';
+    const topStripBlock = composerCss.match(/\.kite-composer-top-strip\s*\{[^}]*\}/)?.[0] ?? '';
+
+    expect(mainBlock).toContain('var(--glass-composer-bg');
+    expect(bottomStripBlock).toContain('var(--glass-composer-strip-bg');
+    expect(topStripBlock).toContain('var(--glass-composer-strip-bg');
+    expect(visualLangCss).toContain('--glass-composer-bg:');
+    expect(visualLangCss).toContain('--glass-composer-strip-bg:');
   });
 });

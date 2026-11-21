@@ -13,11 +13,22 @@ export interface AgentProfile {
   id: string;
   name: string;
   engine: string;
-  purpose: string;
+  purpose?: string;
+  brief?: string;
   avatar: string | null;
   createdAtUnixMs: number;
   pinned: boolean;
   order: number;
+  defaultMode?: string | null;
+  defaultPlan?: boolean | string | null;
+  defaultModel?: string | null;
+  defaultEffort?: string | null;
+  defaultProviderOptions?: Array<{ provider?: string; effort?: string | null; [key: string]: unknown }>;
+  placeDisplayNames?: string[];
+  memoryBudget?: number | null;
+  reflectionMode?: string | null;
+  allowAgentScheduling?: boolean | null;
+  allowAgentMessaging?: boolean | null;
   disabledPluginIds?: string[];
 }
 
@@ -135,6 +146,19 @@ export interface SwarmMeta {
   mentions?: string[];
 }
 
+export interface ActiveSubagentSummary {
+  subagentId?: string | null;
+  role?: string | null;
+  typeName?: string | null;
+  provider?: string | null;
+  status: string;
+  childThreadId?: string | null;
+  swarmId?: string | null;
+  swarmMemberName?: string | null;
+  prompt?: string | null;
+  updatedAtUnixMs?: number | null;
+}
+
 export interface SubagentRun {
   subagentId: string;
   parentThreadId: string;
@@ -225,6 +249,7 @@ export interface ChatThread {
   swarmId?: string | null;
   swarmMemberName?: string | null;
   subagentRuns?: SubagentRun[];
+  activeSubagents?: ActiveSubagentSummary[];
   swarmState?: SwarmState | null;
   quotaHandoffOffer?: QuotaHandoffOffer | null;
   sessionState?: string;
@@ -258,6 +283,9 @@ export interface ChatItem {
   swarmMeta?: SwarmMeta | null;
   parentToolUseId?: string | null;
   internalDispatch?: boolean;
+  inputSource?: 'voice' | 'text';
+  delegatedThreadId?: string | null;
+  delegatedMode?: 'chat' | 'agents';
 }
 
 export interface NotificationRecord {

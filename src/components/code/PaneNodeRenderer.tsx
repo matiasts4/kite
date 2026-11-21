@@ -1,7 +1,9 @@
 import React from 'react';
 import type { Workspace, AgentProfile } from '../../types';
 import { TerminalView } from '../views/TerminalView';
-import { ChatView } from '../views/ChatView';
+const ChatView = React.lazy(() =>
+  import('../views/ChatView').then((m) => ({ default: m.ChatView }))
+);
 import { CodePaneHeader } from './CodePaneHeader';
 import { getAllLeaves } from './treeUtils';
 import type {
@@ -222,11 +224,13 @@ export const PaneNodeRenderer: React.FC<PaneNodeRendererProps> = ({
               />
             )
           ) : (
-            <ChatView
-              workspaceId={selectedWorkspace.id}
-              threadId={occupant.threadId}
-              embedded={true}
-            />
+            <React.Suspense fallback={null}>
+              <ChatView
+                workspaceId={selectedWorkspace.id}
+                threadId={occupant.threadId}
+                embedded={true}
+              />
+            </React.Suspense>
           )}
         </div>
       </section>

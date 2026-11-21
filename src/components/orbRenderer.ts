@@ -1,6 +1,14 @@
 /**
- * WebGL2 Volumetric Plasma & Glass Refraction OrbRenderer
- * High-performance WebGL2 shader implementation for Kite Code Zed Assistant Orb.
+ * WebGL2 Studio-Grade Interactive Multi-Mode Living Orb Renderer
+ * Single low-overhead WebGL2 pipeline supporting 8 sculptural interactive 3D forms:
+ *   0 = plasma-orb      (Volumetric liquid plasma & glass refraction)
+ *   1 = ferrofluid      (100% solid sculpted magnetic liquid sphere — zero holes)
+ *   2 = frosted-sphere  (Minimalist frosted satin glass with internal diffused light)
+ *   3 = eclipse-halo    (Solid obsidian ceramic core with directional luminous corona)
+ *   4 = silk-wave       (Crystal glass sphere enclosing fluid silk light ribbons)
+ *   5 = crystal-prism   (Smoothly beveled 3D rounded gem with analytical SDF normals)
+ *   6 = orbital-gyro    (Solid inner glass sphere with true 3D Z-occluded thin rings)
+ *   7 = chromatic-pearl (Solid glossy pearl with physical thin-film iridescence)
  */
 
 const VERTEX_SHADER_SOURCE = `#version 300 es
@@ -23,7 +31,11 @@ uniform float u_level;
 uniform float u_reactivity;
 uniform float u_thinking;
 uniform float u_idle;
+uniform float u_hover;
+uniform float u_ripple;
+uniform float u_mode;
 uniform vec2  u_tilt;
+uniform vec2  u_ripple_origin;
 uniform vec3  u_primary;
 uniform vec3  u_secondary;
 uniform vec3  u_accent;
@@ -78,24 +90,679 @@ float snoise(vec3 v) {
   return 105.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
 }
 
-float fbm(vec3 p) {
-  float v = 0.0;
-  float a = 0.5;
-  for (int i = 0; i < 3; i++) {
-    v += a * snoise(p);
-    p = p * 2.03 + vec3(17.1, 31.7, 11.3);
-    a *= 0.5;
-  }
+float fbm2(vec3 p) {
+  float v = 0.62 * snoise(p);
+  v += 0.38 * snoise(p * 2.06 + vec3(13.4, 27.2, 9.1));
   return v;
+}
+
+vec3 fastWarp(vec3 p, float t) {
+  return vec3(
+    sin(p.y * 2.2 + t * 0.72),
+    cos(p.z * 2.1 - t * 0.58),
+    sin(p.x * 2.3 + t * 0.64)
+  ) * 0.42;
 }
 
 mat3 rotY(float a) {
   float c = cos(a), s = sin(a);
   return mat3(c,0.0,s, 0.0,1.0,0.0, -s,0.0,c);
 }
+
 mat3 rotX(float a) {
   float c = cos(a), s = sin(a);
   return mat3(1.0,0.0,0.0, 0.0,c,-s, 0.0,s,c);
+}
+
+mat3 rotZ(float a) {
+  float c = cos(a), s = sin(a);
+  return mat3(c,-s,0.0, s,c,0.0, 0.0,0.0,1.0);
+}
+
+float safeAtan(float y, float x) {
+  return (abs(x) + abs(y) < 1e-5) ? 0.0 : atan(y, x);
+}
+
+// Cohesive photographic studio environment reflection (softbox key + rim fill + subtle floor)
+vec3 studioEnv(vec3 R, vec3 primary, vec3 secondary, vec3 accent, vec2 tilt) {
+  float up = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+  vec3 baseGrad = mix(secondary * 0.42, primary * 0.58 + vec3(0.08), smoothstep(0.15, 0.85, up));
+
+  vec3 keyDir = normalize(vec3(-0.36 + tilt.x * 0.35, 0.72 - tilt.y * 0.25, 0.62));
+  float keyBox = smoothstep(0.68, 0.96, dot(R, keyDir));
+  float keyHalo = pow(max(dot(R, keyDir), 0.0), 10.0);
+
+  vec3 fillDir = normalize(vec3(0.68, -0.28, 0.52));
+  float fillStrip = smoothstep(0.62, 0.94, dot(R, fillDir));
+
+  vec3 rimDir = normalize(vec3(0.18, -0.78, 0.48));
+  float rimBounce = pow(max(dot(R, rimDir), 0.0), 5.0);
+
+  vec3 col = baseGrad;
+  col += vec3(1.0, 0.99, 0.97) * keyBox * 0.92;
+  col += mix(vec3(1.0), accent, 0.45) * keyHalo * 0.42;
+  col += accent * fillStrip * 0.48;
+  col += primary * rimBounce * 0.38;
+  return col;
+}
+
+// Interactive tactile ripple ring emanating smoothly from click/tap origin
+float computeRipple(vec2 p, vec2 origin, float phase) {
+  if (phase <= 0.001 || phase >= 0.999) return 0.0;
+  float d = length(p - origin * 0.52);
+  float targetR = phase * 1.16;
+  float fade = (1.0 - phase) * (1.0 - phase);
+  float rd = (d - targetR) * 16.0;
+  return exp(-rd * rd) * fade;
+}
+
+// ── Mode 0: Orbe Plasma (Classic Glass-Refracted Volumetric Plasma) ─────────
+vec4 renderPlasmaOrb(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.06 + hover * 0.025);
+  float r = length(c);
+  float angle = safeAtan(c.y, c.x);
+
+  float baseRadius = 0.72 + lvl * 0.022 * react + hover * 0.018 + rippleRing * 0.02;
+  float dispA = sin(angle * 3.0 + t * 0.9) * 0.004 + cos(angle * 2.0 - t * 0.65) * 0.003;
+  float radius = baseRadius + dispA * (react + hover * 0.35);
+  float edgeDist = r - radius;
+  float sphereMask = 1.0 - smoothstep(-px * 1.5, px * 1.5, edgeDist);
+
+  vec2 sn = c / max(radius, 0.0001);
+  float z = sqrt(max(0.0, 1.0 - dot(sn, sn)));
+  vec3 N = normalize(vec3(sn.x, sn.y, z + 0.0001));
+  vec3 T = refract(vec3(0.0, 0.0, -1.0), N, 1.0 / 1.28);
+
+  float spinSpeed = mix(0.12, 0.34, max(think * 0.75, max(lvl * 0.45, hover * 0.32)));
+  mat3 spin = rotY(t * spinSpeed + u_tilt.x * 0.55) * rotX(sin(t * 0.16) * 0.18 - u_tilt.y * 0.55);
+
+  vec3 accum = vec3(0.0);
+  float densityAccum = 0.0;
+  const int STEPS = 3;
+  for (int i = 0; i < STEPS; i++) {
+    float fi = float(i) / float(STEPS - 1);
+    float depth = mix(0.22, 0.88, fi);
+    vec3 samplePos = vec3(sn * (1.0 - depth * 0.34), z * depth) + T * depth * 0.34;
+    samplePos = spin * samplePos;
+
+    vec3 warp = fastWarp(samplePos * 1.35, t * (0.55 + think * 0.6));
+    float f = fbm2(samplePos * 1.85 + warp * (0.52 + lvl * 0.42 + hover * 0.18));
+
+    float ribbon = smoothstep(-0.18, 0.58, f);
+    float coreWeight = exp(-dot(samplePos, samplePos) * 1.28);
+
+    vec3 layerCol = mix(u_secondary, u_primary, smoothstep(-0.22, 0.48, f));
+    layerCol = mix(layerCol, u_accent, pow(clamp(f + 0.38, 0.0, 1.0), 2.8) * (0.48 + lvl * 0.45 + hover * 0.2));
+
+    float pulse = 0.94 + 0.16 * sin(t * 0.95 + fi * 2.1) * (lvl + hover * 0.25);
+    float w = ribbon * (0.38 + 0.62 * coreWeight) * pulse;
+    accum += layerCol * w;
+    densityAccum += w;
+  }
+
+  vec3 plasma = accum / max(densityAccum, 0.001);
+  plasma *= (0.80 + 0.50 * (densityAccum / float(STEPS)));
+
+  float coreDist = length(sn - u_tilt * 0.18 - vec2(-0.05, 0.08));
+  float core = exp(-coreDist * coreDist * (3.1 - lvl * 0.85 - hover * 0.35));
+  vec3 coreCol = mix(u_primary, u_accent, 0.56 + 0.24 * sin(t * 0.72));
+  plasma += coreCol * core * (0.68 + lvl * 0.52 + hover * 0.28);
+
+  vec3 interior = mix(u_secondary * 0.22, plasma, clamp(densityAccum * 0.65, 0.0, 1.0));
+  interior += plasma * 0.40;
+
+  float fresnel = pow(1.0 - z, 2.5);
+  float iridShift = sin(angle * 1.8 + t * 0.35 + r * 3.0) * 0.5 + 0.5;
+  vec3 rimCol = mix(u_primary, u_accent, iridShift);
+  interior = mix(interior, rimCol * (1.38 + hover * 0.32), fresnel * (0.62 + hover * 0.2));
+  interior += u_accent * rippleRing * 0.82;
+
+  interior *= mix(0.64, 1.06, smoothstep(0.0, 0.55, z));
+
+  vec3 L1 = normalize(vec3(-0.46 + u_tilt.x * 0.28, 0.58 - u_tilt.y * 0.28, 0.68));
+  vec3 H1 = normalize(L1 + vec3(0.0, 0.0, 1.0));
+  float spec1 = pow(max(dot(N, H1), 0.0), 46.0);
+  float spec1Soft = pow(max(dot(N, H1), 0.0), 10.0);
+  vec3 L2 = normalize(vec3(0.55, -0.52, 0.65));
+  vec3 H2 = normalize(L2 + vec3(0.0, 0.0, 1.0));
+  float spec2 = pow(max(dot(N, H2), 0.0), 22.0);
+
+  interior += vec3(1.0, 0.98, 0.95) * spec1 * (0.85 + hover * 0.2);
+  interior += u_accent * spec1Soft * 0.24;
+  interior += u_primary * spec2 * 0.35;
+
+  float haloDist = max(edgeDist, 0.0);
+  float halo1 = exp(-haloDist * 13.5) * (0.32 + lvl * 0.26 + hover * 0.2 + think * 0.1);
+  float halo2 = exp(-haloDist * 4.8)  * (0.11 + lvl * 0.16 + hover * 0.09);
+  vec3 halo = mix(u_primary, u_accent, 0.45 + 0.3 * sin(angle * 2.0 + t * 0.4)) * (halo1 + halo2);
+  halo += u_accent * rippleRing * 0.52;
+
+  vec3 col = interior * sphereMask + halo * (1.0 - sphereMask * 0.62);
+  float alpha = clamp(sphereMask + (halo1 * 0.85 + halo2 * 0.62 + rippleRing * 0.48) * (1.0 - sphereMask), 0.0, 1.0);
+  return vec4(col, alpha);
+}
+
+// ── Mode 1: Ferrofluido Sólido (100% Solid Sculpted Liquid Metal Sphere) ────
+float sdSolidFerro(vec3 q, float t, float lvl, float react, float think, float hover, vec2 tilt) {
+  float r = length(q);
+  vec3 nq = q / max(r, 0.0001);
+  float speed = t * (1.05 + think * 1.15);
+
+  // Smooth continuous 3D spherical-harmonic organic liquid waves (zero holes or discontinuities)
+  float harmonic =
+    sin(nq.x * 3.4 + speed) * cos(nq.y * 3.2 - speed * 0.85) * 0.52 +
+    sin(nq.z * 3.8 + speed * 0.72) * cos(nq.x * 2.6 + nq.y * 2.4) * 0.48;
+  float micro = sin(nq.x * 5.8 - speed * 1.2) * sin(nq.y * 5.4 + speed * 0.9) * 0.25;
+
+  // Magnetic attraction smoothly stretches the liquid toward cursor direction
+  vec3 pullDir = normalize(vec3(tilt.x, tilt.y, 0.45));
+  float magPull = max(0.0, dot(nq, pullDir)) * length(tilt) * (0.065 + hover * 0.045);
+
+  float amp = 0.032 + lvl * 0.062 * react + hover * 0.024;
+  float targetR = 0.72 + magPull + (harmonic + micro * (0.4 + lvl)) * amp;
+  return (r - targetR) * 0.78;
+}
+
+vec3 calcFerroNormal(vec3 q, float t, float lvl, float react, float think, float hover, vec2 tilt) {
+  const vec2 e = vec2(0.006, -0.006);
+  return normalize(
+    e.xyy * sdSolidFerro(q + e.xyy, t, lvl, react, think, hover, tilt) +
+    e.yyx * sdSolidFerro(q + e.yyx, t, lvl, react, think, hover, tilt) +
+    e.yxy * sdSolidFerro(q + e.yxy, t, lvl, react, think, hover, tilt) +
+    e.xxx * sdSolidFerro(q + e.xxx, t, lvl, react, think, hover, tilt)
+  );
+}
+
+vec4 renderFerrofluid(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.045 + hover * 0.02);
+  vec3 ro = vec3(c, 2.0);
+  vec3 rd = normalize(vec3(c * 0.14, -1.0));
+
+  float dist = 0.0;
+  float minD = 10.0;
+  bool hit = false;
+  vec3 hitPos = vec3(0.0);
+
+  for (int i = 0; i < 20; i++) {
+    vec3 q = ro + rd * dist;
+    float d = sdSolidFerro(q, t, lvl, react, think, hover, u_tilt);
+    minD = min(minD, d);
+    if (d < 0.0025) {
+      hit = true;
+      hitPos = q;
+      break;
+    }
+    dist += d;
+    if (dist > 3.2) break;
+  }
+
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+
+  if (hit) {
+    vec3 N = calcFerroNormal(hitPos, t, lvl, react, think, hover, u_tilt);
+    vec3 V = -rd;
+    vec3 R = reflect(-V, N);
+    float ndotv = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndotv, 2.8);
+
+    // 100% solid, continuous sculptural tinted-liquid albedo (ZERO holes or blotches)
+    vec3 L1 = normalize(vec3(-0.42 + u_tilt.x * 0.45, 0.64 - u_tilt.y * 0.38, 0.72));
+    vec3 L2 = normalize(vec3(0.62, -0.42, 0.56));
+    float wrapDiff = clamp((dot(N, L1) + 0.42) / 1.42, 0.0, 1.0);
+    float fillDiff = clamp(dot(N, L2), 0.0, 1.0);
+
+    vec3 solidBody = mix(u_secondary * 0.78, u_primary * 0.96, wrapDiff);
+    solidBody += u_accent * fillDiff * 0.22;
+
+    // Studio liquid-metal reflection blended smoothly over the solid body
+    vec3 env = studioEnv(R, u_primary, u_secondary, u_accent, u_tilt);
+    vec3 H1 = normalize(L1 + V);
+    float specCrisp = pow(max(dot(N, H1), 0.0), 64.0);
+    float specBroad = pow(max(dot(N, H1), 0.0), 14.0);
+
+    col = mix(solidBody, env * 1.12, 0.42 + fresnel * 0.45);
+    col += mix(u_primary, u_accent, 0.65) * fresnel * (0.58 + hover * 0.34 + lvl * 0.22);
+    col += vec3(1.0, 0.99, 0.97) * specCrisp * (0.95 + hover * 0.2);
+    col += u_accent * specBroad * 0.26;
+    col += u_accent * rippleRing * 0.72;
+    alpha = 1.0;
+  }
+
+  // Smooth anti-aliased edge + restrained studio halo
+  float haloDist = max(minD, 0.0);
+  float halo1 = exp(-haloDist * 14.5) * (0.28 + lvl * 0.24 + hover * 0.2);
+  float halo2 = exp(-haloDist * 5.2)  * (0.10 + lvl * 0.14);
+  vec3 haloCol = mix(u_primary, u_accent, 0.48) * (halo1 + halo2) + u_accent * rippleRing * 0.45;
+
+  if (!hit) {
+    col = haloCol;
+    alpha = clamp(halo1 * 0.85 + halo2 * 0.58 + rippleRing * 0.45, 0.0, 1.0);
+  }
+  float edgeAA = smoothstep(px * 2.0, -px * 1.2, minD);
+  alpha = max(alpha, edgeAA);
+  return vec4(col, alpha);
+}
+
+// ── Mode 2: Vidrio Satinado (Minimalist Frosted Glass with Internal Glow) ───
+vec4 renderFrostedSphere(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.045 + hover * 0.02);
+  float r = length(c);
+  float radius = 0.73 + lvl * 0.02 * react + hover * 0.015 + rippleRing * 0.015;
+  float edgeDist = r - radius;
+  float mask = 1.0 - smoothstep(-px * 1.5, px * 1.5, edgeDist);
+
+  vec2 sn = c / max(radius, 0.0001);
+  float z = sqrt(max(0.0, 1.0 - dot(sn, sn)));
+  vec3 N = normalize(vec3(sn.x, sn.y, z + 0.0001));
+  vec3 V = vec3(0.0, 0.0, 1.0);
+
+  // Frosted satin polycarbonate shell (soft gradient from cool pearl top to deep satin base)
+  vec3 L1 = normalize(vec3(-0.35 + u_tilt.x * 0.25, 0.68 - u_tilt.y * 0.25, 0.68));
+  float satinDiff = clamp((dot(N, L1) + 0.55) / 1.55, 0.0, 1.0);
+  vec3 shellBase = mix(u_secondary * 0.52 + vec3(0.06, 0.07, 0.10), mix(u_primary, vec3(0.92, 0.94, 0.98), 0.34), satinDiff * 0.72);
+
+  // Diffused internal light floating smoothly behind frosted glass, following cursor
+  vec2 innerTarget = u_tilt * 0.26 + vec2(sin(t * 0.55), cos(t * 0.48)) * (0.05 + think * 0.08);
+  float dCore = length(sn - innerTarget);
+  float subGlowWide = exp(-dCore * dCore * (2.3 - lvl * 0.55 - hover * 0.25));
+  float subGlowCore = exp(-dCore * dCore * (5.6 - lvl * 1.0));
+
+  vec3 innerLight = u_primary * subGlowWide * (0.56 + lvl * 0.38 + hover * 0.18);
+  innerLight += mix(u_accent, vec3(1.0), 0.22) * subGlowCore * (0.46 + lvl * 0.4 + hover * 0.2);
+
+  // Broad velvety frosted highlight (low specular exponent = realistic matte satin finish)
+  vec3 H1 = normalize(L1 + V);
+  float frostedSheen = pow(max(dot(N, H1), 0.0), 7.5);
+  float crispEdgeRim = pow(1.0 - z, 3.2);
+
+  vec3 interior = shellBase * 0.76 + innerLight;
+  interior += vec3(1.0, 0.99, 0.98) * frostedSheen * (0.24 + hover * 0.1);
+  interior += mix(vec3(1.0), u_accent, 0.56) * crispEdgeRim * (0.76 + hover * 0.28 + lvl * 0.18);
+  interior += u_accent * rippleRing * 0.68;
+
+  // Delicate ambient glow outside the frosted glass
+  float haloDist = max(edgeDist, 0.0);
+  float halo1 = exp(-haloDist * 13.0) * (0.26 + lvl * 0.24 + hover * 0.18);
+  float halo2 = exp(-haloDist * 4.6)  * (0.09 + lvl * 0.14);
+  vec3 halo = mix(u_primary, u_accent, 0.5) * (halo1 + halo2) + u_accent * rippleRing * 0.45;
+
+  vec3 col = interior * mask + halo * (1.0 - mask * 0.7);
+  float alpha = clamp(mask + (halo1 * 0.8 + halo2 * 0.55 + rippleRing * 0.42) * (1.0 - mask), 0.0, 1.0);
+  return vec4(col, alpha);
+}
+
+// ── Mode 3: Eclipse (Solid Ceramic Obsidian Core + Directional Solar Corona) ──
+vec4 renderEclipseHalo(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.04 + hover * 0.02);
+  float r = length(c);
+  float angle = safeAtan(c.y, c.x);
+
+  float coreR = 0.61 + lvl * 0.012 * react;
+  float edgeDist = r - coreR;
+  float coreMask = 1.0 - smoothstep(-px * 1.5, px * 1.5, edgeDist);
+
+  // Crescent focus angle smoothly follows cursor (or orbits gently when idle)
+  float tiltLen = length(u_tilt);
+  vec2 dir = c / max(r, 0.0001);
+  vec2 orbitDir = vec2(cos(t * (0.38 + think * 1.0)), sin(t * (0.38 + think * 1.0)));
+  vec2 cursorDir = tiltLen > 0.04 ? normalize(u_tilt) : orbitDir;
+  vec2 crownDir = normalize(mix(orbitDir, cursorDir, clamp(tiltLen * 1.4 + hover * 0.65, 0.0, 1.0)));
+
+  float align = clamp(dot(dir, crownDir) * 0.5 + 0.5, 0.0, 1.0);
+  float crescent = 0.32 + 0.68 * pow(align, 2.2);
+  float diamondGlint = pow(max(0.0, dot(dir, crownDir)), 14.0);
+
+  // Sleek polished dark ceramic core (subtle reflection so it feels 3D and substantial; zero center pinch)
+  vec2 sn = c / max(coreR, 0.0001);
+  float z = sqrt(max(0.0, 1.0 - dot(sn, sn)));
+  vec3 N = normalize(vec3(sn.x, sn.y, z + 0.0001));
+  vec3 R = reflect(vec3(0.0, 0.0, -1.0), N);
+  float limbMask = smoothstep(0.55, 0.99, length(sn));
+  float rim = pow(1.0 - z, 4.2) * limbMask;
+
+  vec3 ceramicCore = mix(vec3(0.025, 0.03, 0.048), u_secondary * 0.2, 0.38) * (0.75 + 0.35 * z);
+  ceramicCore += studioEnv(R, u_primary, u_secondary, u_accent, u_tilt) * (0.11 + hover * 0.06) * smoothstep(0.0, 0.6, z);
+  // Crisp corona light wrap strictly along the outer limb (eliminates center cone artifact)
+  ceramicCore += mix(u_primary, u_accent, align) * rim * (0.68 + crescent * 0.95 + lvl * 0.45);
+  ceramicCore += u_accent * rippleRing * 0.45;
+
+  // Razor-crisp corona right outside the limb + soft atmospheric bloom
+  float outD = max(edgeDist, 0.0);
+  float coronaTight = exp(-outD * (22.0 - lvl * 5.0 - hover * 3.0));
+  float coronaMid   = exp(-outD * (8.5 - lvl * 2.0));
+  float coronaSoft  = exp(-outD * 3.8);
+  float shimmer = 0.92 + 0.08 * sin(angle * 6.0 - t * 1.6);
+
+  vec3 coronaCol = mix(u_primary, u_accent, coronaTight * 0.65 + diamondGlint * 0.55) * shimmer;
+  vec3 halo = coronaCol * (
+    coronaTight * (1.28 + lvl * 0.55 + hover * 0.35) * crescent +
+    coronaMid   * (0.46 + lvl * 0.38 + hover * 0.22) * crescent +
+    coronaSoft  * (0.16 + lvl * 0.18)
+  );
+  halo += vec3(1.0, 0.98, 0.95) * coronaTight * diamondGlint * (0.85 + lvl * 0.6 + hover * 0.4);
+  halo += u_accent * rippleRing * 0.68;
+
+  vec3 col = ceramicCore * coreMask + halo * (1.0 - coreMask);
+  float haloAlpha = clamp((coronaTight * 1.15 + coronaMid * 0.65 + coronaSoft * 0.4) * crescent + rippleRing * 0.5, 0.0, 1.0);
+  float alpha = clamp(coreMask + haloAlpha * (1.0 - coreMask), 0.0, 1.0);
+  return vec4(col, alpha);
+}
+
+// ── Mode 4: Seda Líquida (Glass Globe with Smooth Layered Silk Light Waves) ──
+vec4 renderSilkWave(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.05 + hover * 0.02);
+  float r = length(c);
+  float radius = 0.73 + lvl * 0.018 * react + hover * 0.016 + rippleRing * 0.016;
+  float edgeDist = r - radius;
+  float mask = 1.0 - smoothstep(-px * 1.5, px * 1.5, edgeDist);
+
+  vec2 sn = c / max(radius, 0.0001);
+  float z = sqrt(max(0.0, 1.0 - dot(sn, sn)));
+  vec3 N = normalize(vec3(sn.x, sn.y, z + 0.0001));
+
+  // Tilt the internal silk ribbons gently in 2D/3D with the cursor
+  float tiltRot = u_tilt.x * 0.32;
+  float cr = cos(tiltRot), sr = sin(tiltRot);
+  vec2 wp = vec2(sn.x * cr - sn.y * sr, sn.x * sr + sn.y * cr);
+  wp.y -= u_tilt.y * 0.14;
+
+  // Deep translucent glass interior
+  vec3 interior = mix(u_secondary * 0.24, vec3(0.04, 0.05, 0.09), 0.58) * (0.75 + 0.4 * z);
+
+  // 3 Silky translucent ribbon layers harmonizing smoothly with voice level
+  float speed = t * (0.95 + think * 1.35 + lvl * 0.45);
+  float amp = 0.12 + lvl * 0.22 * react + hover * 0.05 + rippleRing * 0.08;
+  float envelope = clamp(1.0 - wp.x * wp.x * 0.85, 0.0, 1.0);
+  float sphereFade = smoothstep(0.02, 0.48, z);
+
+  vec3 ribbons = vec3(0.0);
+  for (int i = 0; i < 3; i++) {
+    float fi = float(i);
+    float freq = 2.4 + fi * 1.15;
+    float phase = speed * (0.85 + fi * 0.28) + fi * 2.05;
+    float waveY = sin(wp.x * freq + phase) * amp * envelope + (fi - 1.0) * 0.09;
+    float dWave = abs(wp.y - waveY);
+    float ribbonBand = exp(-dWave * (10.5 - fi * 1.2)) * sphereFade;
+    float ribbonCrest = exp(-dWave * 28.0) * sphereFade * z;
+
+    vec3 bandCol = i == 0
+      ? mix(u_secondary, u_primary, 0.75)
+      : (i == 1 ? mix(u_primary, u_accent, 0.45) : u_accent);
+    ribbons += bandCol * ribbonBand * (0.58 + lvl * 0.42 + hover * 0.18);
+    ribbons += mix(bandCol, vec3(1.0), 0.45) * ribbonCrest * (0.48 + lvl * 0.35);
+  }
+
+  interior += ribbons;
+
+  // Clean optical glass sphere coating & studio speculars
+  vec3 R = reflect(vec3(0.0, 0.0, -1.0), N);
+  float fresnel = pow(1.0 - z, 2.8);
+  vec3 L1 = normalize(vec3(-0.45 + u_tilt.x * 0.3, 0.62 - u_tilt.y * 0.3, 0.7));
+  vec3 H1 = normalize(L1 + vec3(0.0, 0.0, 1.0));
+  float spec = pow(max(dot(N, H1), 0.0), 54.0);
+
+  interior += studioEnv(R, u_primary, u_secondary, u_accent, u_tilt) * (0.18 + fresnel * 0.58 + hover * 0.14);
+  interior += vec3(1.0, 0.99, 0.97) * spec * (0.82 + hover * 0.2);
+  interior += u_accent * rippleRing * 0.72;
+
+  float haloDist = max(edgeDist, 0.0);
+  float halo1 = exp(-haloDist * 14.0) * (0.28 + lvl * 0.24 + hover * 0.18);
+  float halo2 = exp(-haloDist * 4.8)  * (0.10 + lvl * 0.14);
+  vec3 halo = mix(u_primary, u_accent, 0.52) * (halo1 + halo2) + u_accent * rippleRing * 0.48;
+
+  vec3 col = interior * mask + halo * (1.0 - mask * 0.65);
+  float alpha = clamp(mask + (halo1 * 0.8 + halo2 * 0.55 + rippleRing * 0.45) * (1.0 - mask), 0.0, 1.0);
+  return vec4(col, alpha);
+}
+
+// ── Mode 5: Gema Esculpida (Smoothly Beveled 3D Rounded Gem with True Normals)
+float sdRoundedGem(vec3 q, float s, float bevel) {
+  vec3 a = abs(q);
+  float m = a.x + a.y + a.z - s;
+  // Exact bounded octahedron SDF minus smooth bevel radius -> sleek sculptural facets
+  return m * 0.57735027 - bevel;
+}
+
+vec3 calcGemNormal(vec3 q, float s, float bevel) {
+  const vec2 e = vec2(0.005, -0.005);
+  return normalize(
+    e.xyy * sdRoundedGem(q + e.xyy, s, bevel) +
+    e.yyx * sdRoundedGem(q + e.yyx, s, bevel) +
+    e.yxy * sdRoundedGem(q + e.yxy, s, bevel) +
+    e.xxx * sdRoundedGem(q + e.xxx, s, bevel)
+  );
+}
+
+vec4 renderCrystalPrism(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.045 + hover * 0.02);
+  float spinSpeed = mix(0.28, 0.85, max(think * 0.8, hover * 0.35));
+  mat3 rot = rotY(t * spinSpeed + u_tilt.x * 0.95) * rotX(0.32 - u_tilt.y * 0.82 + sin(t * 0.28) * 0.1);
+
+  float gemSize = 0.76 + lvl * 0.028 * react + hover * 0.022 + rippleRing * 0.018;
+  float bevel = 0.075;
+  vec3 ro = vec3(c, 2.0);
+  vec3 rd = normalize(vec3(c * 0.16, -1.0));
+
+  float dist = 0.0;
+  float minD = 10.0;
+  bool hit = false;
+  vec3 hitLocal = vec3(0.0);
+
+  for (int i = 0; i < 20; i++) {
+    vec3 q = rot * (ro + rd * dist);
+    float d = sdRoundedGem(q, gemSize, bevel);
+    minD = min(minD, d);
+    if (d < 0.0025) {
+      hit = true;
+      hitLocal = q;
+      break;
+    }
+    dist += d;
+    if (dist > 3.2) break;
+  }
+
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+
+  if (hit) {
+    vec3 localN = calcGemNormal(hitLocal, gemSize, bevel);
+    vec3 N = normalize(transpose(rot) * localN);
+    vec3 V = -rd;
+    vec3 R = reflect(-V, N);
+    float ndotv = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndotv, 2.4);
+
+    // Subtle smooth bevel edge catchlight without jagged sign() artifacts
+    float edgeSoft = 1.0 - smoothstep(0.02, 0.22, min(abs(hitLocal.x), min(abs(hitLocal.y), abs(hitLocal.z))));
+
+    // Rich optical facet shading: distinct dark-to-bright planes + smooth bevel catchlights
+    vec3 L1 = normalize(vec3(-0.48 + u_tilt.x * 0.45, 0.65 - u_tilt.y * 0.4, 0.68));
+    vec3 H1 = normalize(L1 + V);
+    float facetLight = clamp(dot(N, L1), 0.0, 1.0);
+    float spec = pow(max(dot(N, H1), 0.0), 64.0);
+
+    vec3 prismShift = 0.5 + 0.5 * cos(6.28318 * (fresnel * 0.85 + vec3(0.0, 0.28, 0.58)));
+    vec3 glassBody = mix(u_secondary * 0.36, u_primary * 0.92, 0.18 + 0.82 * facetLight);
+    glassBody = mix(glassBody, mix(u_accent, prismShift, 0.32), fresnel * 0.48);
+
+    // Calm glowing inner heart suspended inside the crystal
+    float heart = exp(-length(c) * (4.4 - lvl * 1.15 - hover * 0.45));
+    vec3 heartCol = mix(u_primary, u_accent, 0.62) * heart * (0.62 + lvl * 0.55 + hover * 0.24);
+
+    vec3 env = studioEnv(R, u_primary, u_secondary, u_accent, u_tilt);
+
+    col = mix(glassBody, env * 1.08, 0.28 + fresnel * 0.46) + heartCol;
+    col += mix(vec3(1.0), u_accent, 0.55) * edgeSoft * (0.24 + hover * 0.2 + lvl * 0.16);
+    col += vec3(1.0, 0.99, 0.97) * spec * (0.95 + hover * 0.22);
+    col += u_accent * rippleRing * 0.85;
+    alpha = 0.99;
+  }
+
+  float haloDist = max(minD, 0.0);
+  float aura = exp(-haloDist * 13.5) * (0.34 + lvl * 0.26 + hover * 0.2 + think * 0.1);
+  float outerGlow = exp(-haloDist * 4.8) * (0.11 + lvl * 0.15);
+  vec3 haloCol = mix(u_primary, u_accent, 0.52) * (aura + outerGlow) + u_accent * rippleRing * 0.52;
+
+  if (!hit) {
+    col = haloCol;
+    alpha = clamp(aura * 0.85 + outerGlow * 0.6 + rippleRing * 0.48, 0.0, 1.0);
+  }
+  float edgeAA = smoothstep(px * 2.0, -px * 1.2, minD);
+  alpha = max(alpha, edgeAA * 0.98);
+  return vec4(col, alpha);
+}
+
+// ── Mode 6: Esfera Orbital (Solid Inner Sphere + True 3D Z-Occluded Rings) ──
+float sdTorusThin(vec3 q, float majorR, float minorR) {
+  vec2 d = vec2(length(q.xz) - majorR, q.y);
+  return length(d) - minorR;
+}
+
+vec4 renderOrbitalGyro(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.04 + hover * 0.02);
+  vec3 ro = vec3(c, 2.2);
+  vec3 rd = normalize(vec3(c * 0.14, -1.0));
+
+  float coreR = 0.46 + lvl * 0.022 * react + hover * 0.016;
+  float speed = t * (0.55 + think * 1.1 + hover * 0.25);
+
+  mat3 ringRotA = rotX(1.12 - u_tilt.y * 0.55) * rotZ(0.42 + u_tilt.x * 0.45) * rotY(speed * 0.65);
+  mat3 ringRotB = rotX(1.18 + u_tilt.y * 0.45) * rotZ(-0.58 + u_tilt.x * 0.4) * rotY(-speed * 0.52 + 1.4);
+
+  float majorA = 0.74 + lvl * 0.018 * react + rippleRing * 0.02;
+  float majorB = 0.83 + lvl * 0.024 * react + rippleRing * 0.025;
+  float minorR = 0.028 + hover * 0.004;
+
+  float dist = 0.0;
+  float minCoreD = 10.0;
+  float minRingD = 10.0;
+  int hitKind = 0; // 1 = core sphere, 2 = ring A, 3 = ring B
+  vec3 hitPos = vec3(0.0);
+
+  for (int i = 0; i < 22; i++) {
+    vec3 q = ro + rd * dist;
+    float dCore = length(q) - coreR;
+    float dRingA = sdTorusThin(ringRotA * q, majorA, minorR);
+    float dRingB = sdTorusThin(ringRotB * q, majorB, minorR * 0.85);
+    minCoreD = min(minCoreD, dCore);
+    minRingD = min(minRingD, min(dRingA, dRingB));
+
+    float d = min(dCore, min(dRingA, dRingB));
+    if (d < 0.0025) {
+      hitPos = q;
+      if (dCore <= dRingA && dCore <= dRingB) {
+        hitKind = 1;
+      } else if (dRingA <= dRingB) {
+        hitKind = 2;
+      } else {
+        hitKind = 3;
+      }
+      break;
+    }
+    dist += d;
+    if (dist > 3.5) break;
+  }
+
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+
+  if (hitKind == 1) {
+    vec3 N = normalize(hitPos);
+    vec3 V = -rd;
+    vec3 R = reflect(-V, N);
+    float ndotv = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndotv, 2.6);
+
+    vec3 L1 = normalize(vec3(-0.42 + u_tilt.x * 0.35, 0.64 - u_tilt.y * 0.35, 0.7));
+    vec3 H1 = normalize(L1 + V);
+    float diff = clamp((dot(N, L1) + 0.38) / 1.38, 0.0, 1.0);
+    float spec = pow(max(dot(N, H1), 0.0), 58.0);
+
+    vec3 coreSolid = mix(u_secondary * 0.65, u_primary * 0.95, diff);
+    col = mix(coreSolid, studioEnv(R, u_primary, u_secondary, u_accent, u_tilt) * 1.05, 0.36 + fresnel * 0.45);
+    col += mix(u_primary, u_accent, 0.6) * fresnel * (0.55 + hover * 0.35 + lvl * 0.25);
+    col += vec3(1.0, 0.99, 0.97) * spec * 0.9;
+    col += u_accent * rippleRing * 0.72;
+    alpha = 1.0;
+  } else if (hitKind == 2 || hitKind == 3) {
+    vec3 localQ = (hitKind == 2 ? ringRotA : ringRotB) * hitPos;
+    float rAngle = safeAtan(localQ.z, localQ.x);
+    float pulseWave = 0.55 + 0.45 * sin(rAngle * 2.0 - speed * 2.4 + (hitKind == 3 ? 1.8 : 0.0));
+    float depthShade = clamp(0.62 + hitPos.z * 0.48, 0.35, 1.15);
+
+    vec3 ringCol = mix(u_primary, u_accent, pulseWave * 0.75 + (hitKind == 3 ? 0.2 : 0.0));
+    col = ringCol * (1.05 + lvl * 0.45 + hover * 0.28) * depthShade;
+    col += vec3(1.0, 0.99, 0.97) * pow(pulseWave, 4.0) * 0.42 * depthShade;
+    col += u_accent * rippleRing * 0.8;
+    alpha = 0.98;
+  }
+
+  float ringGlow = exp(-max(minRingD, 0.0) * 20.0) * (0.45 + lvl * 0.32 + hover * 0.24);
+  float coreGlow = exp(-max(minCoreD, 0.0) * 11.0) * (0.32 + lvl * 0.24 + hover * 0.16);
+  vec3 glowCol = mix(u_primary, u_accent, 0.55) * (ringGlow + coreGlow) + u_accent * rippleRing * 0.48;
+
+  if (hitKind == 0) {
+    col = glowCol;
+    alpha = clamp(ringGlow * 0.9 + coreGlow * 0.75 + rippleRing * 0.45, 0.0, 1.0);
+  } else {
+    col += glowCol * 0.18;
+  }
+
+  float minAll = min(minCoreD, minRingD);
+  float edgeAA = smoothstep(px * 2.0, -px * 1.2, minAll);
+  alpha = max(alpha, edgeAA * 0.96);
+  return vec4(col, alpha);
+}
+
+// ── Mode 7: Perla Iridiscente (Solid Glossy Thin-Film Interference Pearl) ───
+vec4 renderChromaticPearl(vec2 p, float t, float lvl, float react, float think, float hover, float rippleRing, float px) {
+  vec2 c = p - u_tilt * (0.05 + hover * 0.022);
+  float r = length(c);
+  float radius = 0.73 + lvl * 0.02 * react + hover * 0.016 + rippleRing * 0.016;
+  float edgeDist = r - radius;
+  float mask = 1.0 - smoothstep(-px * 1.5, px * 1.5, edgeDist);
+
+  vec2 sn = c / max(radius, 0.0001);
+  float z = sqrt(max(0.0, 1.0 - dot(sn, sn)));
+  vec3 N = normalize(vec3(sn.x, sn.y, z + 0.0001));
+  vec3 V = vec3(0.0, 0.0, 1.0);
+  vec3 R = reflect(-V, N);
+  float fresnel = pow(1.0 - z, 2.5);
+
+  // Physical thin-film iridescent interference driven by viewing angle + cursor tilt + subtle liquid breath
+  float filmShift =
+    (1.0 - z) * 1.45 +
+    dot(sn, u_tilt) * 0.42 +
+    sin(sn.x * 2.4 + sn.y * 1.8 + t * (0.45 + think * 0.7)) * (0.08 + lvl * 0.14) +
+    rippleRing * 0.55;
+  vec3 thinFilm = 0.56 + 0.44 * cos(6.28318 * (filmShift * 0.65 + vec3(0.0, 0.28, 0.58)));
+
+  // Solid creamy-satin pearl body harmonized with active state palette
+  vec3 L1 = normalize(vec3(-0.42 + u_tilt.x * 0.38, 0.66 - u_tilt.y * 0.34, 0.72));
+  vec3 H1 = normalize(L1 + V);
+  float diff = clamp((dot(N, L1) + 0.48) / 1.48, 0.0, 1.0);
+  float specSharp = pow(max(dot(N, H1), 0.0), 68.0);
+  float specSoft = pow(max(dot(N, H1), 0.0), 12.0);
+
+  vec3 pearlAlbedo = mix(u_secondary * 0.45 + vec3(0.18, 0.19, 0.24), mix(vec3(0.95, 0.96, 0.99), u_accent, 0.35), diff);
+  vec3 iridTint = mix(u_primary, thinFilm, 0.62);
+  vec3 interior = mix(pearlAlbedo, iridTint, 0.36 + fresnel * 0.48 + hover * 0.12);
+
+  vec3 env = studioEnv(R, u_primary, u_secondary, u_accent, u_tilt);
+  interior = mix(interior, env * 1.08, 0.22 + fresnel * 0.35);
+  interior += vec3(1.0, 0.99, 0.98) * specSharp * (0.95 + hover * 0.18);
+  interior += mix(u_accent, thinFilm, 0.5) * specSoft * 0.28;
+  interior += mix(u_accent, vec3(1.0), 0.35) * rippleRing * 0.72;
+
+  float haloDist = max(edgeDist, 0.0);
+  float halo1 = exp(-haloDist * 14.0) * (0.26 + lvl * 0.24 + hover * 0.18);
+  float halo2 = exp(-haloDist * 4.8)  * (0.09 + lvl * 0.14);
+  vec3 halo = mix(u_primary, u_accent, 0.58) * (halo1 + halo2) + u_accent * rippleRing * 0.46;
+
+  vec3 col = interior * mask + halo * (1.0 - mask * 0.68);
+  float alpha = clamp(mask + (halo1 * 0.8 + halo2 * 0.55 + rippleRing * 0.44) * (1.0 - mask), 0.0, 1.0);
+  return vec4(col, alpha);
 }
 
 void main() {
@@ -105,121 +772,36 @@ void main() {
   float lvl = clamp(u_level, 0.0, 1.0);
   float react = clamp(u_reactivity, 0.0, 1.0);
   float think = clamp(u_thinking, 0.0, 1.0);
-
-  vec2 c = p - u_tilt * 0.06;
-  float r = length(c);
-
-  float baseRadius = 0.72 + lvl * 0.015 * react;
-  float angle = atan(c.y, c.x);
-  // Gentle, calm organic drift rather than high-frequency jitter
-  float dispA = snoise(vec3(cos(angle) * 1.4, sin(angle) * 1.4, t * 0.22)) * 0.005;
-  float radius = baseRadius + dispA * react;
-
-  float edgeDist = r - radius;
+  float hover = clamp(u_hover, 0.0, 1.0);
   float px = 2.0 / max(u_resolution.x, 1.0);
+  float rippleRing = computeRipple(p, u_ripple_origin, u_ripple);
 
-  float sphereMask = 1.0 - smoothstep(-px * 1.5, px * 1.5, edgeDist);
-
-  vec2 sn = c / max(radius, 0.0001);
-  float zSq = max(0.0, 1.0 - dot(sn, sn));
-  float z = sqrt(zSq);
-  vec3 N = normalize(vec3(sn.x, sn.y, z + 0.0001));
-
-  vec3 R = reflect(vec3(0.0, 0.0, -1.0), N);
-  float ior = 1.28;
-  vec3 T = refract(vec3(0.0, 0.0, -1.0), N, 1.0 / ior);
-
-  // Smooth, relaxed rotation speed
-  float spinSpeed = mix(0.10, 0.26, max(think * 0.7, lvl * 0.35));
-  mat3 spin = rotY(t * spinSpeed + u_tilt.x * 0.35) * rotX(sin(t * 0.14) * 0.18 - u_tilt.y * 0.35);
-
-  vec3 accum = vec3(0.0);
-  float densityAccum = 0.0;
-  const int STEPS = 5;
-  for (int i = 0; i < STEPS; i++) {
-    float fi = float(i) / float(STEPS - 1);
-    float depth = mix(0.18, 0.92, fi);
-    vec3 samplePos = vec3(sn * (1.0 - depth * 0.35), z * depth);
-    samplePos += T * depth * 0.35;
-    samplePos = spin * samplePos;
-
-    vec3 warp = vec3(
-      snoise(samplePos * 1.5 + vec3(0.0, 0.0, t * 0.18)),
-      snoise(samplePos * 1.5 + vec3(5.2, 1.3, t * 0.18)),
-      snoise(samplePos * 1.5 + vec3(2.8, 7.1, t * 0.18))
-    );
-    float f = fbm(samplePos * 1.9 + warp * (0.45 + lvl * 0.35));
-
-    float ribbon = smoothstep(-0.15, 0.55, f);
-    float coreWeight = exp(-dot(samplePos, samplePos) * 1.35);
-
-    vec3 layerCol = mix(u_secondary, u_primary, smoothstep(-0.2, 0.5, f));
-    layerCol = mix(layerCol, u_accent, pow( clamp(f + 0.35, 0.0, 1.0), 3.0 ) * (0.45 + lvl * 0.45));
-
-    // Calm harmonic breathing
-    float pulse = 0.92 + 0.16 * sin(t * 0.85 + fi * 1.8) * lvl;
-    float w = ribbon * (0.35 + 0.65 * coreWeight) * pulse;
-    accum += layerCol * w;
-    densityAccum += w;
+  vec4 res;
+  if (u_mode < 0.5) {
+    res = renderPlasmaOrb(p, t, lvl, react, think, hover, rippleRing, px);
+  } else if (u_mode < 1.5) {
+    res = renderFerrofluid(p, t, lvl, react, think, hover, rippleRing, px);
+  } else if (u_mode < 2.5) {
+    res = renderFrostedSphere(p, t, lvl, react, think, hover, rippleRing, px);
+  } else if (u_mode < 3.5) {
+    res = renderEclipseHalo(p, t, lvl, react, think, hover, rippleRing, px);
+  } else if (u_mode < 4.5) {
+    res = renderSilkWave(p, t, lvl, react, think, hover, rippleRing, px);
+  } else if (u_mode < 5.5) {
+    res = renderCrystalPrism(p, t, lvl, react, think, hover, rippleRing, px);
+  } else if (u_mode < 6.5) {
+    res = renderOrbitalGyro(p, t, lvl, react, think, hover, rippleRing, px);
+  } else {
+    res = renderChromaticPearl(p, t, lvl, react, think, hover, rippleRing, px);
   }
-  vec3 plasma = accum / max(densityAccum, 0.001);
-  plasma *= (0.75 + 0.55 * (densityAccum / float(STEPS)));
 
-  float coreDist = length(sn - vec2(-0.08, 0.1) + u_tilt * 0.08);
-  float core = exp(-coreDist * coreDist * (3.2 - lvl * 0.8));
-  vec3 coreCol = mix(u_primary, u_accent, 0.55 + 0.25 * sin(t * 0.65));
-  plasma += coreCol * core * (0.65 + lvl * 0.5);
+  float idleDim = mix(1.0, 0.9, u_idle * (1.0 - hover * 0.65));
+  vec3 col = res.rgb * idleDim;
+  float alpha = clamp(res.a, 0.0, 1.0);
 
-  vec3 deepBase = u_secondary * 0.22;
-  vec3 interior = mix(deepBase, plasma, clamp(densityAccum * 0.55, 0.0, 1.0));
-  interior += plasma * 0.42;
-
-  float fresnel = pow(1.0 - z, 2.6);
-  float iridShift = sin(angle * 1.5 + t * 0.25 + r * 3.0) * 0.5 + 0.5;
-  vec3 rimCol = mix(u_primary, u_accent, iridShift);
-  interior = mix(interior, rimCol * 1.35, fresnel * 0.62);
-
-  float innerShadow = smoothstep(0.0, 0.55, z);
-  interior *= mix(0.62, 1.05, innerShadow);
-
-  vec3 L1 = normalize(vec3(-0.48, 0.58, 0.66));
-  vec3 H1 = normalize(L1 + vec3(0.0, 0.0, 1.0));
-  float spec1 = pow(max(dot(N, H1), 0.0), 48.0);
-  float spec1Soft = pow(max(dot(N, H1), 0.0), 10.0);
-
-  vec3 L2 = normalize(vec3(0.55, -0.52, 0.65));
-  vec3 H2 = normalize(L2 + vec3(0.0, 0.0, 1.0));
-  float spec2 = pow(max(dot(N, H2), 0.0), 22.0);
-
-  interior += vec3(1.0, 0.98, 0.95) * spec1 * 0.85;
-  interior += u_accent * spec1Soft * 0.22;
-  interior += u_primary * spec2 * 0.35;
-
-  float sheen = smoothstep(0.15, 0.85, sn.y * 0.7 - sn.x * 0.3 + 0.35) * (1.0 - smoothstep(0.0, 0.65, abs(sn.x)));
-  interior += vec3(1.0) * sheen * 0.10 * z;
-
-  float haloDist = max(edgeDist, 0.0);
-  float halo1 = exp(-haloDist * 14.0) * (0.32 + lvl * 0.25 + think * 0.1);
-  float halo2 = exp(-haloDist * 4.8)  * (0.12 + lvl * 0.18);
-  float haloWave = 0.5 + 0.5 * snoise(vec3(cos(angle) * 1.5, sin(angle) * 1.5, t * 0.35));
-  vec3 haloCol = mix(u_primary, u_accent, haloWave * 0.5);
-  vec3 halo = haloCol * (halo1 + halo2);
-
-  // Calm ethereal aura wave instead of rapid concentric rings
-  float ringRadius = radius + 0.05 + fract(t * 0.12) * 0.16;
-  float ringFade = (1.0 - fract(t * 0.12));
-  float ring = exp(-pow((r - ringRadius) * 26.0, 2.0)) * ringFade * lvl * 0.22;
-  halo += u_accent * ring;
-
-  float idleDim = mix(1.0, 0.88, u_idle);
-  interior *= idleDim;
-  halo *= mix(1.0, 0.55, u_idle);
-
-  vec3 col = interior * sphereMask + halo * (1.0 - sphereMask * 0.65);
-  float alpha = clamp(sphereMask + (halo1 * 0.85 + halo2 * 0.65 + ring) * (1.0 - sphereMask), 0.0, 1.0);
-
-  col = col / (1.0 + col * 0.28);
-  col = pow(max(col, vec3(0.0)), vec3(1.0 / 1.08));
+  // Filmic tone-mapping & crisp gamma polish
+  col = col / (1.0 + col * 0.25);
+  col = pow(max(col, vec3(0.0)), vec3(1.0 / 1.06));
 
   fragColor = vec4(col * alpha, alpha);
 }
@@ -238,7 +820,7 @@ export const ORB_PALETTES: Record<string, OrbPalette> = {
     accent: [1, 0.88, 0.58],
   },
   listening: {
-    primary: [0.12, 0.85, 1.0], // Vibrant glowing electric cyan when recording!
+    primary: [0.12, 0.85, 1.0], // Vibrant glowing electric cyan when recording
     secondary: [0.05, 0.35, 0.78],
     accent: [0.65, 0.98, 1.0],
   },
@@ -300,9 +882,16 @@ export interface OrbRenderParams {
   reactivity: number;
   thinking: number;
   idle: number;
+  hover?: number;
+  ripple?: number;
+  rippleOriginX?: number;
+  rippleOriginY?: number;
+  mode?: number;
   tiltX: number;
   tiltY: number;
   paletteKey: string;
+  /** Snap palette immediately without lerp (used for 1-frame offscreen thumbnails). */
+  snapPalette?: boolean;
 }
 
 export class OrbRenderer {
@@ -319,6 +908,7 @@ export class OrbRenderer {
   private dpr = 1;
   private lost = false;
   private canvas: HTMLCanvasElement;
+  private preserveDrawingBuffer: boolean;
 
   private readonly onContextLost = (e: Event) => {
     e.preventDefault();
@@ -330,8 +920,9 @@ export class OrbRenderer {
     this.initPipeline();
   };
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, options?: { preserveDrawingBuffer?: boolean }) {
     this.canvas = canvas;
+    this.preserveDrawingBuffer = Boolean(options?.preserveDrawingBuffer);
     canvas.addEventListener('webglcontextlost', this.onContextLost, false);
     canvas.addEventListener('webglcontextrestored', this.onContextRestored, false);
     this.initPipeline();
@@ -347,7 +938,7 @@ export class OrbRenderer {
       premultipliedAlpha: true,
       antialias: true,
       powerPreference: 'low-power',
-      preserveDrawingBuffer: false,
+      preserveDrawingBuffer: this.preserveDrawingBuffer,
     });
     if (!gl) {
       this.gl = null;
@@ -392,7 +983,11 @@ export class OrbRenderer {
         'u_reactivity',
         'u_thinking',
         'u_idle',
+        'u_hover',
+        'u_ripple',
+        'u_mode',
         'u_tilt',
+        'u_ripple_origin',
         'u_primary',
         'u_secondary',
         'u_accent',
@@ -433,9 +1028,15 @@ export class OrbRenderer {
     if (!gl || !program || this.lost) return;
 
     const palette = ORB_PALETTES[params.paletteKey] ?? ORB_PALETTES.connected;
-    this.currentPrimary = lerp3(this.currentPrimary, palette.primary, 0.08);
-    this.currentSecondary = lerp3(this.currentSecondary, palette.secondary, 0.08);
-    this.currentAccent = lerp3(this.currentAccent, palette.accent, 0.08);
+    if (params.snapPalette) {
+      this.currentPrimary = [...palette.primary];
+      this.currentSecondary = [...palette.secondary];
+      this.currentAccent = [...palette.accent];
+    } else {
+      this.currentPrimary = lerp3(this.currentPrimary, palette.primary, 0.1);
+      this.currentSecondary = lerp3(this.currentSecondary, palette.secondary, 0.1);
+      this.currentAccent = lerp3(this.currentAccent, palette.accent, 0.1);
+    }
 
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -447,7 +1048,11 @@ export class OrbRenderer {
     gl.uniform1f(u.u_reactivity, params.reactivity);
     gl.uniform1f(u.u_thinking, params.thinking);
     gl.uniform1f(u.u_idle, params.idle);
+    gl.uniform1f(u.u_hover, params.hover ?? 0);
+    gl.uniform1f(u.u_ripple, params.ripple ?? 0);
+    gl.uniform1f(u.u_mode, params.mode ?? 0);
     gl.uniform2f(u.u_tilt, params.tiltX, params.tiltY);
+    gl.uniform2f(u.u_ripple_origin, params.rippleOriginX ?? 0, params.rippleOriginY ?? 0);
     gl.uniform3fv(u.u_primary, this.currentPrimary);
     gl.uniform3fv(u.u_secondary, this.currentSecondary);
     gl.uniform3fv(u.u_accent, this.currentAccent);
@@ -472,4 +1077,64 @@ export class OrbRenderer {
     this.vao = null;
     this.gl = null;
   }
+}
+
+/**
+ * Generates crisp static PNG thumbnails of every shader mode using ONE temporary offscreen
+ * WebGL2 context that is disposed immediately — zero live WebGL contexts in Settings grids!
+ */
+let cachedThumbnails: Record<number, string> | null = null;
+
+export function getOrbModeThumbnails(
+  modes: readonly number[],
+  paletteKey: string = 'listening'
+): Record<number, string> {
+  if (cachedThumbnails && modes.every((m) => Boolean(cachedThumbnails?.[m]))) {
+    return cachedThumbnails;
+  }
+  if (typeof document === 'undefined') return {};
+
+  const out: Record<number, string> = {};
+  const canvas = document.createElement('canvas');
+  const renderer = new OrbRenderer(canvas, { preserveDrawingBuffer: true });
+  if (!renderer.isReady()) {
+    renderer.dispose();
+    return out;
+  }
+
+  try {
+    renderer.resize(84, 84, 1.5);
+    for (const mode of modes) {
+      renderer.render({
+        time: 2.35,
+        level: 0.24,
+        reactivity: 0.85,
+        thinking: 0.0,
+        idle: 0.0,
+        hover: 0.28,
+        ripple: 0.0,
+        mode,
+        tiltX: 0.26,
+        tiltY: -0.22,
+        paletteKey,
+        snapPalette: true,
+      });
+      const url = canvas.toDataURL('image/png');
+      if (url && url.startsWith('data:image/png')) {
+        out[mode] = url;
+      }
+    }
+    if (Object.keys(out).length > 0) {
+      cachedThumbnails = { ...(cachedThumbnails ?? {}), ...out };
+    }
+  } catch {
+    // Graceful fallback to CSS previews in non-WebGL environments
+  } finally {
+    renderer.dispose();
+  }
+  return cachedThumbnails ?? out;
+}
+
+export function clearOrbThumbnailCacheForTest(): void {
+  cachedThumbnails = null;
 }

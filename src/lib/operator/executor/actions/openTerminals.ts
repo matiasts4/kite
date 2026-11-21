@@ -134,11 +134,18 @@ export async function executeOpenTerminalsAction(
     };
   }
 
+  const summaryEs = `Abrí ${count} ${count === 1 ? 'terminal' : 'terminales'} con ${engine}${namesDesc}${promptSuffix}.`;
+  const spokenSummaryEs =
+    prompts.length > 0 && prompts[0].length > 80
+      ? `Abrí ${count} ${count === 1 ? 'terminal' : 'terminales'} con ${engine}${namesDesc} y ya le envié las instrucciones.`
+      : summaryEs;
+
   return {
     actionIdx,
     type: 'open_terminals',
     ok: true,
-    summaryEs: `Abrí ${count} ${count === 1 ? 'terminal' : 'terminales'} con ${engine}${namesDesc}${promptSuffix}.`,
+    summaryEs,
+    spokenSummaryEs,
     data: { sessionIds: spawnedSessionIds, agentNames: assignedNames },
     verification,
   };

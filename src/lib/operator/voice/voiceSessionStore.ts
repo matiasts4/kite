@@ -3,8 +3,13 @@
 
 import { useSyncExternalStore } from 'react';
 import type { ActionReceipt } from '../contract';
+import type { ProviderMessage } from '../providers/types';
 import { loadOperatorConfig } from '../operatorConfig';
 import { resolveVerifiedModel } from '../providers/resolvePlanner';
+import {
+  clearSessionWorkingContext,
+  recordTurnIntoWorkingContext,
+} from '../context/workingContext';
 
 export type VoiceSessionPhase = 'inactive' | 'starting' | 'active' | 'stopping';
 export type VoiceSurface = 'orb' | 'thread';
@@ -66,6 +71,16 @@ export function getConfiguredAssistantDisplay(): ConfiguredAssistantDisplay {
   };
 }
 
+export interface PendingDisambiguationState {
+  question: string;
+  missingSlot: 'target' | 'task' | 'surface' | 'provider' | 'workspace';
+  originalInput: string;
+  candidates?: string[];
+  draftAction?: Record<string, unknown>;
+  createdAt: number;
+  remainingTurns: number;
+}
+
 export interface VoiceTurnRecord {
   turnId: string;
   userPrompt: string;
@@ -83,6 +98,9 @@ export interface VoiceTurnRecord {
     cli?: string;
   };
   reply?: string;
+  interrupted?: boolean;
+  /** True when this turn was generated proactively (e.g. a child subagent return callback) without a user prompt. */
+  isProactiveReport?: boolean;
   createdAt: number;
 }
 
@@ -126,7 +144,9 @@ class VoiceSessionStore {
   };
 
   private turnsByThread: Record<string, VoiceTurnRecord[]> = {};
+  private pendingDisambiguationByScope: Record<string, PendingDisambiguationState> = {};
   private textTurnExecutor: VoiceTextTurnExecutor | null = null;
+  private onSessionEndedListeners = new Set<(info: { threadId: string | null; turns: VoiceTurnRecord[] }) => void>();
 
   private listeners = new Set<() => void>();
 
@@ -201,6 +221,9 @@ class VoiceSessionStore {
       return;
     }
 
+    const closingThreadId = this.state.boundThreadId;
+    const closingTurns = closingThreadId ? this.getThreadVoiceTurns(closingThreadId) : [];
+
     this.state = {
       ...this.state,
       phase: 'stopping',
@@ -210,6 +233,8 @@ class VoiceSessionStore {
     this.state = {
       ...this.state,
       phase: 'inactive',
+      boundThreadId: null,
+      activeSurface: 'orb',
       isPausedForDictation: false,
       liveAudioLevel: 0,
       activeTurnStage: undefined,
@@ -220,6 +245,19 @@ class VoiceSessionStore {
       interimTranscript: '',
     };
     this.notify();
+
+    for (const cb of this.onSessionEndedListeners) {
+      try {
+        cb({ threadId: closingThreadId, turns: closingTurns });
+      } catch {}
+    }
+  }
+
+  onSessionEnded(
+    listener: (info: { threadId: string | null; turns: VoiceTurnRecord[] }) => void
+  ): () => void {
+    this.onSessionEndedListeners.add(listener);
+    return () => this.onSessionEndedListeners.delete(listener);
   }
 
   toggleSession(threadId?: string | null, surface: VoiceSurface = 'orb') {
@@ -346,6 +384,9 @@ class VoiceSessionStore {
         localStorage.setItem(`kite.voiceTurns.${threadId}`, JSON.stringify(updated));
       }
     } catch {}
+    if (record.reply && record.reply.trim()) {
+      recordTurnIntoWorkingContext(threadId, record, updated);
+    }
     this.state = {
       ...this.state,
       turnsVersion: (this.state.turnsVersion || 0) + 1,
@@ -353,9 +394,112 @@ class VoiceSessionStore {
     this.notify();
   }
 
+  markTurnInterrupted(threadId: string | null | undefined, turnId?: string) {
+    const targetId = threadId ?? this.state.boundThreadId;
+    if (!targetId) return;
+    const existing = this.getThreadVoiceTurns(targetId);
+    if (existing.length === 0) return;
+
+    const targetTurnId = turnId || existing[existing.length - 1]?.turnId;
+    if (!targetTurnId) return;
+
+    let changed = false;
+    const updated = existing.map((t) => {
+      if (t.turnId === targetTurnId && !t.interrupted) {
+        changed = true;
+        return { ...t, interrupted: true };
+      }
+      return t;
+    });
+    if (!changed) return;
+
+    this.turnsByThread[targetId] = updated;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(`kite.voiceTurns.${targetId}`, JSON.stringify(updated));
+      }
+    } catch {}
+    this.state = {
+      ...this.state,
+      turnsVersion: (this.state.turnsVersion || 0) + 1,
+    };
+    this.notify();
+  }
+
+  setPendingDisambiguation(
+    scopeKey: string | null | undefined,
+    pending: PendingDisambiguationState | null
+  ) {
+    const key = scopeKey || this.state.boundThreadId || '__default__';
+    if (!pending) {
+      delete this.pendingDisambiguationByScope[key];
+      return;
+    }
+    this.pendingDisambiguationByScope[key] = pending;
+  }
+
+  getPendingDisambiguation(
+    scopeKey?: string | null,
+    nowMs: number = Date.now()
+  ): PendingDisambiguationState | null {
+    const key = scopeKey || this.state.boundThreadId || '__default__';
+    const item = this.pendingDisambiguationByScope[key];
+    if (!item) return null;
+    if (nowMs - item.createdAt > 90_000 || item.remainingTurns <= 0) {
+      delete this.pendingDisambiguationByScope[key];
+      return null;
+    }
+    return item;
+  }
+
+  clearPendingDisambiguation(scopeKey?: string | null) {
+    const key = scopeKey || this.state.boundThreadId || '__default__';
+    delete this.pendingDisambiguationByScope[key];
+  }
+
+  getConversationHistory(threadId?: string | null, maxTurns: number = 8): ProviderMessage[] {
+    const targetId = threadId ?? this.state.boundThreadId;
+    if (!targetId) return [];
+    const turns = this.getThreadVoiceTurns(targetId);
+    if (turns.length === 0) return [];
+
+    const recent = [...turns]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .filter((t) => {
+        const prompt = (t.userPrompt || '').trim();
+        if (prompt.startsWith('[captura de voz descartada')) return false;
+        if (!prompt && !t.isProactiveReport) return false;
+        return true;
+      })
+      .slice(-Math.max(1, maxTurns));
+
+    const messages: ProviderMessage[] = [];
+    for (const turn of recent) {
+      const reply = (turn.reply || '').trim();
+      // Skip in-flight optimistic user bubbles (no reply yet) so the current turn is never duplicated in history.
+      if (!reply) continue;
+      if (turn.isProactiveReport && !(turn.userPrompt || '').trim()) {
+        // Merge proactive assistant reports onto the preceding assistant message to preserve
+        // strict user/assistant alternation across all LLM providers (and avoid orphan leading assistant turns).
+        const prev = messages[messages.length - 1];
+        if (prev && prev.role === 'assistant') {
+          prev.content = `${prev.content}\n\n[Reporte automático]: ${reply}`;
+        }
+        continue;
+      }
+      messages.push({ role: 'user', content: turn.userPrompt });
+      messages.push({
+        role: 'assistant',
+        content: turn.interrupted ? `${reply} [respuesta interrumpida por el usuario]` : reply,
+      });
+    }
+    return messages;
+  }
+
   clearThreadVoiceTurns(threadId: string) {
     if (!threadId) return;
     delete this.turnsByThread[threadId];
+    clearSessionWorkingContext(threadId);
     try {
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem(`kite.voiceTurns.${threadId}`);

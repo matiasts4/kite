@@ -38,6 +38,47 @@ interface ResolvedFileLink {
   column?: number | null;
 }
 
+export const MAX_OPEN_FILE_TABS = 12;
+export const MAX_FOLDER_CHILDREN_CACHE = 120;
+export const MAX_PATH_TO_ENTRY_CACHE = 2000;
+
+export function pruneMapLru<K, V>(map: Map<K, V>, maxEntries: number, protectedKeys?: ReadonlySet<K>): Map<K, V> {
+  if (map.size <= maxEntries) return map;
+  const next = new Map(map);
+  for (const key of next.keys()) {
+    if (next.size <= maxEntries) break;
+    if (protectedKeys?.has(key)) continue;
+    next.delete(key);
+  }
+  // If still above limit because everything was protected, fall back to evicting oldest entries.
+  while (next.size > maxEntries) {
+    const oldest = next.keys().next().value;
+    if (oldest === undefined) break;
+    next.delete(oldest);
+  }
+  return next;
+}
+
+export function appendOpenFileTabLru(
+  tabs: OpenFileTab[],
+  newTab: OpenFileTab,
+  maxTabs: number = MAX_OPEN_FILE_TABS
+): OpenFileTab[] {
+  const deduped = tabs.filter((t) => t.entryId !== newTab.entryId);
+  const combined = [...deduped, newTab];
+  if (combined.length <= maxTabs) return combined;
+  const next = [...combined];
+  while (next.length > maxTabs) {
+    // Prefer evicting the oldest clean (unmodified) non-newest tab so unsaved edits are preserved.
+    const cleanIdx = next.findIndex(
+      (t, idx) => idx < next.length - 1 && t.draftText === t.initialText
+    );
+    if (cleanIdx === -1) break;
+    next.splice(cleanIdx, 1);
+  }
+  return next;
+}
+
 export interface FilesViewProps {
   workspaceId: string | null;
   workspaceName?: string;
@@ -326,16 +367,22 @@ export const FilesView: React.FC<FilesViewProps> = ({
             entryId: folderEntryId,
           });
 
-          setFolderChildren((prev) => new Map(prev).set(folderEntryId, dir.entries));
+          setFolderChildren((prev) => {
+            const next = new Map(prev);
+            next.delete(folderEntryId);
+            next.set(folderEntryId, dir.entries);
+            return pruneMapLru(next, MAX_FOLDER_CHILDREN_CACHE, expandedFolders);
+          });
           setPathToEntryId((prevPath) => {
             const next = new Map(prevPath);
             for (const item of dir.entries) {
               const fullItemPath = folderRelativePath
                 ? `${folderRelativePath}/${item.displayName}`
                 : item.displayName;
+              next.delete(fullItemPath);
               next.set(fullItemPath, item.entryId);
             }
-            return next;
+            return pruneMapLru(next, MAX_PATH_TO_ENTRY_CACHE);
           });
         } catch (err: unknown) {
           const errObj = err as { message?: string };
@@ -420,7 +467,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
               previewData: { mime: preview.mime, base64: preview.base64 },
             };
 
-            setOpenFiles((prev) => [...prev, newTab]);
+            setOpenFiles((prev) => appendOpenFileTabLru(prev, newTab));
             setActiveFileId(link.entryId);
             setLoadingContent(false);
             return;
@@ -445,7 +492,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
             isUnsupportedBinary: true,
           };
 
-          setOpenFiles((prev) => [...prev, newTab]);
+          setOpenFiles((prev) => appendOpenFileTabLru(prev, newTab));
           setActiveFileId(link.entryId);
           setLoadingContent(false);
           return;
@@ -471,7 +518,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
             previewData: null,
           };
 
-          setOpenFiles((prev) => [...prev, newTab]);
+          setOpenFiles((prev) => appendOpenFileTabLru(prev, newTab));
           setActiveFileId(link.entryId);
         } catch {
           try {
@@ -492,7 +539,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
               previewData: { mime: preview.mime, base64: preview.base64 },
             };
 
-            setOpenFiles((prev) => [...prev, newTab]);
+            setOpenFiles((prev) => appendOpenFileTabLru(prev, newTab));
             setActiveFileId(link.entryId);
           } catch {
             // If neither text nor preview worked, open as unsupported binary card with quick actions
@@ -507,7 +554,7 @@ export const FilesView: React.FC<FilesViewProps> = ({
               isUnsupportedBinary: true,
             };
 
-            setOpenFiles((prev) => [...prev, newTab]);
+            setOpenFiles((prev) => appendOpenFileTabLru(prev, newTab));
             setActiveFileId(link.entryId);
           }
         }

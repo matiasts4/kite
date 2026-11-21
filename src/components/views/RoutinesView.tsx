@@ -5,6 +5,7 @@ import type {
   RoutineCollection,
   RoutineCadence,
   RoutineTriggerType,
+  RoutinePermissionMode,
 } from './routines/types';
 import {
   Clock,
@@ -295,6 +296,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
     agentId: string;
     cadence: RoutineCadence;
     triggerType: RoutineTriggerType;
+    permissionMode?: RoutinePermissionMode;
   }): Promise<boolean> => {
     if (readOnly) return false;
     setBusy(true);
@@ -325,6 +327,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             prompt: draft.prompt,
             cadence: draft.cadence,
             workspaceId: editingRoutine.workspaceId ?? workspaceId ?? null,
+            permissionMode: draft.permissionMode ?? editingRoutine.permissionMode ?? 'readOnly',
           },
         });
         setCollection(updatedSnapshot);
@@ -341,6 +344,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             prompt: draft.prompt,
             cadence: draft.cadence,
             workspaceId: workspaceId ?? null,
+            permissionMode: draft.permissionMode ?? 'readOnly',
           },
         });
         setCollection(updatedSnapshot);

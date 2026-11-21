@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useMemo, useRef } from 'react';
+import { useTranscriptLiveEdge } from '../../../motion/useTranscriptMotion';
 import type { SwarmBoardPost, SwarmMember } from '../../../types';
 import { formatPostTime, TOKEN_SPLIT_RE } from './swarmBoardHelpers';
 
@@ -27,6 +28,18 @@ export const SwarmBoardFeed: React.FC<SwarmBoardFeedProps> = ({
   onInsertTarget,
   onScrollToPost,
 }) => {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const atBottomRef = useRef(true);
+  const feedContentKey = useMemo(() => {
+    const last = filteredPosts[filteredPosts.length - 1];
+    return `${selectedChannel}:${filteredPosts.length}:${last?.seq ?? 0}:${last?.text.length ?? 0}`;
+  }, [selectedChannel, filteredPosts]);
+  const { handleScroll } = useTranscriptLiveEdge(scrollRef, selectedChannel, atBottomRef, {
+    contentKey: feedContentKey,
+    columnSelector: ':self',
+    edgeThresholdPx: 28,
+  });
+
   const renderPostBody = (post: SwarmBoardPost) => {
     const parts = post.text.split(TOKEN_SPLIT_RE);
     return parts.map((part, idx) => {
@@ -91,7 +104,7 @@ export const SwarmBoardFeed: React.FC<SwarmBoardFeedProps> = ({
         ))}
       </div>
 
-      <div className="swarm-board__scroll">
+      <div className="swarm-board__scroll" ref={scrollRef} onScroll={handleScroll}>
         {filteredPosts.length === 0 ? (
           <div className="subagent-inspector__empty">
             <strong>No board posts yet</strong>

@@ -38,9 +38,13 @@ export const ZedHeroCard: React.FC<ZedHeroCardProps> = ({
         <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
           <div style={{ flexShrink: 0 }}>
             <ZedOrb
-              size={64}
-              state={testingProvider ? 'thinking' : 'listening'}
-              level={testingProvider ? 0.55 : 0.18}
+              figure={persona.figure}
+              size={68}
+              state={testingProvider ? 'thinking' : 'connected'}
+              level={testingProvider ? 0.55 : 0.14}
+              interactive={true}
+              title="Mueve el cursor o haz clic para probar la interacción"
+              ariaLabel="Vista previa interactiva de la figura del asistente"
             />
           </div>
           <div>
@@ -84,8 +88,8 @@ export const ZedHeroCard: React.FC<ZedHeroCardProps> = ({
                 lineHeight: 1.45,
               }}
             >
-              Orbe esférico superior para ejecutar acciones rápidas (abrir/cerrar terminales,
-              inyectar planes a subagentes, navegar vistas y leer resúmenes por voz).
+              Asistente flotante personalizable para ejecutar acciones rápidas (abrir o cerrar
+              terminales, coordinar subagentes, navegar vistas y leer resúmenes por voz).
             </p>
           </div>
         </div>

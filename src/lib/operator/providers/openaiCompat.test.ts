@@ -259,4 +259,26 @@ describe('OpenAiCompatPlannerProvider — Streaming, Native Tool Calls & Resilie
       provider.plan([{ role: 'user', content: 'sleep' }], { timeoutSecs: 0.05 })
     ).rejects.toThrow(/timed out/i);
   });
+
+  it('defaults max_tokens to 1400 so structured planner JSON does not truncate mid-object (S9)', async () => {
+    let capturedBody: Record<string, any> | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      capturedBody = JSON.parse(String(init?.body || '{}'));
+      return Promise.resolve(
+        new Response(JSON.stringify({ choices: [{ message: { content: '{"reply":"OK","actions":[]}' } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
+    const provider = new OpenAiCompatPlannerProvider({
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'test-key',
+      model: 'deepseek-v4.1-flash',
+    });
+
+    await provider.plan([{ role: 'user', content: 'hola' }], { stream: false });
+    expect(capturedBody?.max_tokens).toBe(1400);
+  });
 });

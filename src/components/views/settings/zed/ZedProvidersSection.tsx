@@ -501,7 +501,7 @@ export const ZedProvidersSection: React.FC<ZedProvidersSectionProps> = ({
                     className="zed-settings__input"
                     value={config.antigravityModel}
                     onChange={(e) => onFieldChange('antigravityModel', e.target.value)}
-                    placeholder="gemini-3.8-flash"
+                    placeholder="gemini-3.8-flash-low"
                     style={{ flex: 1 }}
                   />
                   <button

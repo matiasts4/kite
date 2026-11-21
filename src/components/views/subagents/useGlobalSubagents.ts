@@ -41,6 +41,23 @@ function patchGlobalEntries(
   if (!payload.threadId) return { next: snapshot, matched: false };
 
   let matched = false;
+
+  if (payload.kind === 'subagentRunRemoved') {
+    const targetSid = payload.subagentId?.trim() || null;
+    const targetCallId = payload.parentToolCallId?.trim() || null;
+    if (!targetSid && !targetCallId) return { next: snapshot, matched: false };
+    const filtered = snapshot.runs.filter((entry) => {
+      if (entry.threadId !== payload.threadId) return true;
+      const matches =
+        (targetSid && entry.run.subagentId === targetSid) ||
+        (targetCallId && entry.run.parentToolCallId === targetCallId);
+      if (matches) matched = true;
+      return !matches;
+    });
+    if (!matched) return { next: snapshot, matched: false };
+    return { next: recomputeSnapshotStats(filtered), matched: true };
+  }
+
   const updated = snapshot.runs.map((entry) => {
     if (entry.threadId !== payload.threadId) return entry;
 

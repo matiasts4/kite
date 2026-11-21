@@ -213,7 +213,11 @@ describe('ChatComposer - Behavioral Tests', () => {
     expect(dictationBtn.className).toContain('size-8');
     expect(dictationBtn.className).toContain('rounded-control');
     expect(dictationBtn.className).toContain('chat-dictate-control');
-    expect(dictationBtn.querySelector('svg')).toHaveAttribute('width', '14');
+    const micSvg = dictationBtn.querySelector('svg');
+    expect(micSvg).toHaveAttribute('width', '14');
+    expect(micSvg).toHaveAttribute('height', '14');
+    // Optical full-height 24x24 Lucide bounds (y=2..22) so MicIcon matches PaperclipIcon & Voice Mode
+    expect(micSvg?.querySelector('rect[y="2"][height="13"]')).not.toBeNull();
     await user.click(dictationBtn);
   });
 
@@ -1191,5 +1195,41 @@ describe('ChatComposer - Behavioral Tests', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(onChangePrompt).not.toHaveBeenCalledWith('');
+  });
+
+  it('connects changedFiles directly atop ComposerSurface.Main and expands cleanly', async () => {
+    const onOpenTurnDiff = vi.fn();
+    const onOpenChangedFile = vi.fn();
+    const { container } = render(
+      <ChatComposer
+        {...defaultProps}
+        changedFiles={[
+          { path: 'src/App.tsx', additions: 9, deletions: 2 },
+          { path: 'src/index.css', additions: 3, deletions: 1 },
+        ]}
+        changedFilesWorkspaceName="kite"
+        onOpenTurnDiff={onOpenTurnDiff}
+        onOpenChangedFile={onOpenChangedFile}
+      />,
+    );
+
+    const shell = container.querySelector('[data-slot="composer-shell"]') ?? container.querySelector('.kite-composer-shell');
+    const topStrip = container.querySelector('[data-slot="composer-top-strip"]');
+    const mainCard = container.querySelector('[data-slot="composer-main"]');
+    expect(shell).not.toBeNull();
+    expect(topStrip).not.toBeNull();
+    expect(mainCard).not.toBeNull();
+    expect(shell!.contains(topStrip!)).toBe(true);
+    expect(topStrip!.compareDocumentPosition(mainCard!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    expect(screen.getByText('2 changed files')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand changed files' }));
+    expect(screen.getByText('src/App.tsx')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /src\/App\.tsx/i }));
+    expect(onOpenChangedFile).toHaveBeenCalledWith('src/App.tsx');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open diff' }));
+    expect(onOpenTurnDiff).toHaveBeenCalledTimes(1);
   });
 });

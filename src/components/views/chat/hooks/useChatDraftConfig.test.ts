@@ -160,4 +160,79 @@ describe('draftThreadRequest', () => {
       effort: null,
     });
   });
+
+  describe('launch inheritance (S1)', () => {
+    it('inherits defaultMode, defaultPlan, defaultModel, and effort from agent options', () => {
+      resetRememberedSelections();
+      const draft = createDraftConfig('antigravity', null, null, {
+        defaultMode: 'fullAccess',
+        defaultPlan: true,
+        defaultModel: 'gemini-2.5-pro',
+        defaultEffort: 'high',
+      });
+
+      expect(draft).toEqual({
+        provider: 'antigravity',
+        mode: 'fullAccess',
+        model: 'gemini-2.5-pro',
+        effort: 'high',
+        plan: true,
+      });
+
+      expect(draftThreadRequest(draft, 'agent-specialist')).toEqual({
+        agentId: 'agent-specialist',
+        provider: 'antigravity',
+        mode: 'fullAccess',
+        model: 'gemini-2.5-pro',
+        effort: 'high',
+        plan: true,
+      });
+    });
+
+    it('inherits effort from defaultProviderOptions when defaultEffort is not set', () => {
+      resetRememberedSelections();
+      const draft = createDraftConfig('codex', null, null, {
+        defaultProviderOptions: [{ provider: 'openai', effort: 'medium' }],
+      });
+
+      expect(draft.effort).toBe('medium');
+    });
+
+    it('sets mode to readOnly when defaultPlan is true and no explicit defaultMode is provided', () => {
+      resetRememberedSelections();
+      const draft = createDraftConfig('claude', null, null, {
+        defaultPlan: true,
+      });
+
+      expect(draft.mode).toBe('readOnly');
+      expect(draft.plan).toBe(true);
+    });
+
+    it('inherits defaults when passed a partial AgentProfile directly as options', () => {
+      resetRememberedSelections();
+      const profile = {
+        id: 'agent-42',
+        name: 'Tester',
+        engine: 'codex',
+        purpose: 'Testing',
+        avatar: null,
+        createdAtUnixMs: 1234567,
+        pinned: false,
+        order: 1,
+        defaultMode: 'fullAccess',
+        defaultPlan: false,
+        defaultModel: 'o3-mini',
+        defaultProviderOptions: [{ provider: 'openai', effort: 'low' }],
+      };
+
+      const draft = createDraftConfig('codex', null, null, profile);
+      expect(draft).toEqual({
+        provider: 'codex',
+        mode: 'fullAccess',
+        model: 'o3-mini',
+        effort: 'low',
+        plan: false,
+      });
+    });
+  });
 });

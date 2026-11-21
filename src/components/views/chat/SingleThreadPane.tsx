@@ -34,13 +34,18 @@ import { SideChatPane } from './SideChatPane';
 import { TurnActivityStatus } from './TurnActivityStatus';
 import { ChatComposer } from './ChatComposer';
 import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
+import { ZedOrb, type ZedOrbState } from '../../ZedOrb';
+import {
+  loadOperatorConfig,
+  sanitizeZedFigure,
+  type ZedFigureId,
+} from '../../../lib/operator/operatorConfig';
 import { SessionLifecycleBar } from './SessionLifecycleBar';
 import { declarationFromCatalog } from './driverDeclaration';
 import { getSavedSelectedModel, getSavedSelectedAgent } from './modelPersistence';
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
 import { useThreadFailureBanner } from './ThreadErrorBanner';
-import { ChangedFilesCard } from './ChangedFilesCard';
 import { HtmlRenderFrame } from './HtmlRenderFrame';
 import { ComposerPendingUserInputPanel } from './ComposerPendingUserInputPanel';
 import { ChatApprovalCard } from './ChatApprovalCard';
@@ -48,10 +53,18 @@ import { ThreadUsageCard } from './ThreadUsageCard';
 import { bringBackAllowed, childApprovals, childStopIds, directMessageNotice } from './childApprovals';
 import { compactSendText, fileRestoreAllowed } from './threadInteraction';
 import { QuotaHandoffBanner } from '../../chat/QuotaHandoffBanner';
-import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
+import { AgentReflectionCard } from './AgentReflectionCard';
+import {
+  buildTranscriptScrollKeys,
+  useTranscriptLiveEdge,
+  useTranscriptMotion,
+} from '../../../motion/useTranscriptMotion';
 import { ThreadTurnRail } from './ThreadTurnRail';
-import { composeRewoundPrompt, changedFilesForTurn } from './pane/threadTurnHelpers';
-import { openDiffsInRightDock } from '../../../lib/diffPreviewNav';
+import {
+  buildComposerChangedFilesProps,
+  composeRewoundPrompt,
+  changedFilesForTurn,
+} from './pane/threadTurnHelpers';
 import { useThreadBranches } from './pane/useThreadBranches';
 import { SingleThreadHeader } from './pane/SingleThreadHeader';
 
@@ -120,6 +133,179 @@ export interface SingleThreadPaneProps {
   ) => void;
   embedded?: boolean;
 }
+
+const VOICE_STAGE_QUICK_PROMPTS = [
+  '¿Qué agentes están activos?',
+  'Abre dos terminales',
+  'Resume la terminal activa',
+] as const;
+
+interface SingleThreadTranscriptProps {
+  threadId: string;
+  activeWsId: string | null;
+  timelineItems: ExtendedChatThread['items'];
+  displayedRows: ReturnType<typeof groupTranscriptRows>;
+  totalRows: number;
+  liveWorkIdx: number;
+  running: boolean;
+  pendingApproval: ExtendedChatThread['pendingApproval'];
+  quotaHandoffOffer: ExtendedChatThread['quotaHandoffOffer'];
+  reflectionCandidate: ExtendedChatThread['reflectionCandidate'];
+  dismissedReflectionNote: string | null;
+  stoppedByBuilder: boolean;
+  durationSeconds?: number | null;
+  subagentRuns: ExtendedChatThread['subagentRuns'];
+  swarmState: ExtendedChatThread['swarmState'];
+  isFileRestoreAllowed: boolean;
+  transcriptRef: React.RefObject<HTMLDivElement>;
+  onScroll: React.UIEventHandler<HTMLDivElement>;
+  onEnsureAllVisible: () => void;
+  onShowEarlier: () => void;
+  enterFor: (id: string) => boolean;
+  onRewindTranscript: (messageId: string) => Promise<void>;
+  onRestoreFiles: (messageId: string) => Promise<void>;
+  onEditUserMessage: (text: string) => void;
+  onDismissReflection: (note: string | null) => void;
+}
+
+/** Memoized transcript and turn-rail subtree so composer typing never re-renders message rows. */
+const SingleThreadTranscript = React.memo(function SingleThreadTranscript({
+  threadId,
+  activeWsId,
+  timelineItems,
+  displayedRows,
+  totalRows,
+  liveWorkIdx,
+  running,
+  pendingApproval,
+  quotaHandoffOffer,
+  reflectionCandidate,
+  dismissedReflectionNote,
+  stoppedByBuilder,
+  durationSeconds,
+  subagentRuns,
+  swarmState,
+  isFileRestoreAllowed,
+  transcriptRef,
+  onScroll,
+  onEnsureAllVisible,
+  onShowEarlier,
+  enterFor,
+  onRewindTranscript,
+  onRestoreFiles,
+  onEditUserMessage,
+  onDismissReflection,
+}: SingleThreadTranscriptProps) {
+  return (
+    <>
+      <ThreadTurnRail
+        items={timelineItems}
+        running={running}
+        transcriptRef={transcriptRef}
+        onEnsureAllVisible={onEnsureAllVisible}
+      />
+      <div
+        className="chat-transcript"
+        ref={transcriptRef}
+        onScroll={onScroll}
+      >
+        <div className="chat-transcript__column">
+          {displayedRows.length < totalRows && (
+            <div
+              className="chat-transcript__earlier"
+              style={{
+                display: 'flex',
+                justifyContent: 'center',
+                padding: '12px 0',
+              }}
+            >
+              <button
+                type="button"
+                className="secondary-button chat-transcript__earlier-btn"
+                onClick={onShowEarlier}
+                style={{
+                  fontSize: '12px',
+                  padding: '6px 14px',
+                  borderRadius: 'var(--control-radius, 8px)',
+                }}
+              >
+                Show earlier messages ({displayedRows.length} of {totalRows} shown)
+              </button>
+            </div>
+          )}
+
+          {displayedRows.map((row, rowIdx) => {
+            const rowKey =
+              row.kind === 'work' || row.kind === 'subagentGroup'
+                ? row.id
+                : row.item.id;
+            return (
+              <React.Fragment key={rowKey}>
+                {row.kind === 'item' && row.item.kind === 'assistant' && /<html[\s\S]*<\/html>/i.test(row.item.text) ? (
+                  <HtmlRenderFrame html={row.item.text.match(/<html[\s\S]*<\/html>/i)?.[0] ?? row.item.text} />
+                ) : null}
+                {row.kind === 'work' ? (
+                  <ChatWorkGroup
+                    items={row.items}
+                    running={running && rowIdx === liveWorkIdx}
+                    enterFor={enterFor}
+                    interrupted={stoppedByBuilder && rowIdx === displayedRows.length - 1}
+                  />
+                ) : row.kind === 'subagentGroup' ? (
+                  <SubagentGroupRow
+                    items={row.items}
+                    threadId={threadId}
+                    workspaceId={activeWsId}
+                    subagentRuns={subagentRuns ?? null}
+                    enterFor={enterFor}
+                  />
+                ) : (
+                  <ChatItemRow
+                    item={row.item}
+                    threadId={threadId}
+                    workspaceId={activeWsId}
+                    subagentRuns={subagentRuns ?? null}
+                    swarmState={swarmState ?? null}
+                    enter={enterFor(row.item.id)}
+                    fileRestoreEnabled={isFileRestoreAllowed}
+                    onRewindTranscript={onRewindTranscript}
+                    onRestoreFiles={onRestoreFiles}
+                    onEditUserMessage={onEditUserMessage}
+                  />
+                )}
+              </React.Fragment>
+            );
+          })}
+
+          <TurnActivityStatus
+            running={running}
+            pendingApproval={pendingApproval}
+            items={timelineItems}
+            swarmState={swarmState ?? null}
+            interrupted={stoppedByBuilder && !running}
+            durationSeconds={durationSeconds}
+          />
+
+          {/* Quota Handoff Banner */}
+          {quotaHandoffOffer && (
+            <QuotaHandoffBanner
+              offer={quotaHandoffOffer}
+              threadId={threadId}
+            />
+          )}
+
+          {/* Memory Reflection Confirmation Card */}
+          {reflectionCandidate && dismissedReflectionNote !== reflectionCandidate.note && (
+            <AgentReflectionCard
+              candidate={reflectionCandidate}
+              onDismiss={() => onDismissReflection(reflectionCandidate?.note ?? null)}
+            />
+          )}
+        </div>
+      </div>
+    </>
+  );
+});
 
 export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   thread,
@@ -207,6 +393,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const reduceMotion = contextReduceMotion || prefersReducedMotion();
   const [hiddenFromId, setHiddenFromId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(200);
+  const [dismissedReflectionNote, setDismissedReflectionNote] = useState<string | null>(null);
 
   const atLiveEdgeRef = useRef(true);
   const promptRef = useRef(prompt);
@@ -238,16 +425,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     }
     await rewindFromMessage(messageId);
   }, [thread.id, rewindFromMessage]);
+  const onChangePromptRef = useRef(onChangePrompt);
+  onChangePromptRef.current = onChangePrompt;
+
   const handleEditUserMessage = useCallback((text: string) => {
-    onChangePrompt(composeRewoundPrompt(promptRef.current, text));
+    onChangePromptRef.current(composeRewoundPrompt(promptRef.current, text));
     const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
     el?.focus();
-  }, [onChangePrompt]);
-  const handleTranscriptScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
-    atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
   }, []);
-  useTranscriptLiveEdge(transcriptRef, thread.id, atLiveEdgeRef);
 
   const providerMeta = (PROVIDER_CATALOG as Record<string, any>)[thread.provider] || PROVIDER_CATALOG.claude;
   const currentModelOption = dynamicModels.find((m) => m.id === thread.model);
@@ -255,13 +440,26 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
   const totalTokens = (thread.usage?.inputTokens || 0) + (thread.usage?.outputTokens || 0);
   const directNotice = directMessageNotice(thread);
-  const renderUsageCard = () => (
-    <ThreadUsageCard
-      reported={thread.usageReported}
-      inputTokens={thread.usage?.inputTokens}
-      outputTokens={thread.usage?.outputTokens}
-      contextWindowTokens={thread.contextWindowTokens}
-    />
+  const onUpdateConfigRef = useRef(onUpdateConfig);
+  onUpdateConfigRef.current = onUpdateConfig;
+  const handleSelectHeaderWorkspace = useCallback((wsId: string | null) => {
+    onUpdateConfigRef.current({ workspaceId: wsId });
+  }, []);
+  const usageCardNode = React.useMemo(
+    () => (
+      <ThreadUsageCard
+        reported={thread.usageReported}
+        inputTokens={thread.usage?.inputTokens}
+        outputTokens={thread.usage?.outputTokens}
+        contextWindowTokens={thread.contextWindowTokens}
+      />
+    ),
+    [
+      thread.usageReported,
+      thread.usage?.inputTokens,
+      thread.usage?.outputTokens,
+      thread.contextWindowTokens,
+    ]
   );
   const stopRunning = () => {
     try {
@@ -288,7 +486,10 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
   useEffect(() => {
     const vs = voiceSessionStore.getSnapshot();
-    if (vs.phase === 'active' || vs.phase === 'starting') {
+    if (
+      (vs.phase === 'active' || vs.phase === 'starting') &&
+      (!vs.boundThreadId || vs.boundThreadId === thread.id)
+    ) {
       voiceSessionStore.setActiveSurface('thread');
     }
     return () => {
@@ -300,7 +501,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
         voiceSessionStore.setActiveSurface('orb');
       }
     };
-  }, [thread.id]);
+  }, [thread.id, voice.phase, voice.boundThreadId]);
 
   useEffect(() => {
     setVoiceTurns(voice.getThreadVoiceTurns(thread.id));
@@ -308,8 +509,10 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
   useEffect(() => {
     return subscribeTrace((event) => {
-      const isBound = voice.boundThreadId === thread.id || voice.activeSurface === 'thread';
-      if (!isBound && voice.boundThreadId !== null) return;
+      const isBound = voice.boundThreadId
+        ? voice.boundThreadId === thread.id
+        : voice.activeSurface === 'thread';
+      if (!isBound) return;
 
       if (event.ev === 'turn.start') {
         setLiveVoiceTurn({
@@ -373,9 +576,11 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
       }
       const res = await runOperatorTurn(clean, {
         workspaceId: thread.workspaceId ?? undefined,
+        mode: 'thread',
         source: 'texto',
         ttsEnabled: !voice.speakerMuted,
         muted: voice.speakerMuted,
+        history: voiceSessionStore.getConversationHistory(thread.id),
       });
       if (res) {
         voice.addThreadVoiceTurn(thread.id, {
@@ -401,6 +606,56 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const isVoiceActiveHere =
     (voice.phase === 'active' || voice.phase === 'starting') &&
     (voice.boundThreadId === thread.id || (voice.activeSurface === 'thread' && !voice.boundThreadId));
+
+  const [voiceFigure, setVoiceFigure] = useState<ZedFigureId>(() =>
+    sanitizeZedFigure(loadOperatorConfig().persona?.figure)
+  );
+
+  useEffect(() => {
+    const syncFigure = (event?: Event) => {
+      const detail = (event as CustomEvent<{ persona?: { figure?: string } }> | undefined)?.detail;
+      const next = detail?.persona?.figure ?? loadOperatorConfig().persona?.figure;
+      setVoiceFigure(sanitizeZedFigure(next));
+    };
+    window.addEventListener('kite:operator-config-updated', syncFigure);
+    window.addEventListener('kite:operator-config-changed', syncFigure);
+    return () => {
+      window.removeEventListener('kite:operator-config-updated', syncFigure);
+      window.removeEventListener('kite:operator-config-changed', syncFigure);
+    };
+  }, []);
+
+  const voiceHeroState: 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'muted' = voice.micMuted
+    ? 'muted'
+    : voice.isSpeaking || voice.activeTurnStage === 'speaking'
+    ? 'speaking'
+    : voice.activeTurnStage === 'planning' ||
+      voice.activeTurnStage === 'executing' ||
+      voice.activeTurnStage === 'verifying'
+    ? 'thinking'
+    : voice.isTranscribing
+    ? 'transcribing'
+    : 'listening';
+
+  const voiceOrbState: ZedOrbState =
+    voiceHeroState === 'muted'
+      ? 'muted'
+      : voiceHeroState === 'speaking'
+      ? 'speaking'
+      : voiceHeroState === 'thinking' || voiceHeroState === 'transcribing'
+      ? 'thinking'
+      : 'listening';
+
+  const voiceEyebrowLabel =
+    voiceHeroState === 'muted'
+      ? 'MICRÓFONO EN PAUSA'
+      : voiceHeroState === 'speaking'
+      ? 'RESPONDIENDO EN VOZ ALTA'
+      : voiceHeroState === 'thinking'
+      ? 'COORDINANDO EN KITE'
+      : voiceHeroState === 'transcribing'
+      ? 'TRANSCRIBIENDO VOZ'
+      : 'SESIÓN DE VOZ · EN VIVO';
 
   // Voice turns are projected as regular chat items so they render with the exact same rows,
   // widths and spacing as any other conversation.
@@ -587,9 +842,59 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     () => (running ? liveActivityRowIndex(displayedRows) : -1),
     [running, displayedRows]
   );
+  const transcriptScrollKeys = React.useMemo(
+    () =>
+      buildTranscriptScrollKeys(
+        timelineItems,
+        `${displayedRows.length}:${running ? 1 : 0}:${Boolean(thread.pendingApproval)}:${Boolean(thread.quotaHandoffOffer)}:${liveVoiceTurn?.stage ?? ''}:${liveVoiceTurn?.detail ?? ''}`,
+      ),
+    [
+      timelineItems,
+      displayedRows.length,
+      running,
+      thread.pendingApproval,
+      thread.quotaHandoffOffer,
+      liveVoiceTurn?.stage,
+      liveVoiceTurn?.detail,
+    ],
+  );
+  const { handleScroll: handleTranscriptScroll, syncLiveEdge } = useTranscriptLiveEdge(
+    transcriptRef,
+    thread.id,
+    atLiveEdgeRef,
+    {
+      contentKey: transcriptScrollKeys.contentKey,
+      followTrigger: `${transcriptScrollKeys.followTrigger}:${voiceTurns.length}:${liveVoiceTurn?.turnId ?? ''}`,
+    },
+  );
   const handleEnsureAllVisible = useCallback(() => {
     setVisibleLimit(totalRows + 200);
   }, [totalRows]);
+  const handleShowEarlier = useCallback(() => {
+    if (!transcriptRef.current) {
+      setVisibleLimit((prev) => prev + 200);
+      return;
+    }
+    const prevScrollHeight = transcriptRef.current.scrollHeight;
+    setVisibleLimit((prev) => prev + 200);
+    requestAnimationFrame(() => {
+      if (transcriptRef.current) {
+        const diff = transcriptRef.current.scrollHeight - prevScrollHeight;
+        transcriptRef.current.scrollTop += diff;
+      }
+    });
+  }, []);
+  const handleDismissReflection = useCallback((note: string | null) => {
+    setDismissedReflectionNote(note);
+  }, []);
+  const composerChangedFilesProps = React.useMemo(
+    () => buildComposerChangedFilesProps(transcriptItems, activeWsId, effectiveWorkspaceName),
+    [transcriptItems, activeWsId, effectiveWorkspaceName]
+  );
+  const workspaceOptions = React.useMemo(
+    () => workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' })),
+    [workspaces]
+  );
   const isFileRestoreAllowed = fileRestoreAllowed(
     Boolean(thread.providerCanRewind),
     Boolean(thread.isolatedCheckout),
@@ -612,14 +917,14 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
       }
     >
       {/* Thread Header — Thread mode only. Agent chats use the tab rail; embedded code panes use CodePaneHeader. */}
-      {(agentName || embedded) ? <div className="chat-thread-header-area">{renderUsageCard()}</div> : null}
+      {(agentName || embedded) ? <div className="chat-thread-header-area">{usageCardNode}</div> : null}
       {!agentName && !embedded && (
         <SingleThreadHeader
           thread={thread}
           effectiveWorkspaceName={effectiveWorkspaceName}
           workspaces={workspaces}
           currentWorkspaceId={activeWsId}
-          onSelectWorkspace={(wsId) => onUpdateConfig({ workspaceId: wsId })}
+          onSelectWorkspace={handleSelectHeaderWorkspace}
           branchState={branchState}
           editingTitleId={editingTitleId}
           titleInput={titleInput}
@@ -629,7 +934,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
           onCancelRename={onCancelRename}
           providerMeta={providerMeta}
           currentModelName={currentModelName}
-          usageCard={renderUsageCard()}
+          usageCard={usageCardNode}
           running={running}
           onNewThread={onNewThread}
           isMulti={isMulti}
@@ -644,118 +949,33 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
             {/* Layout body: renders null when isDraft to prevent empty transcript pushing hero up */}
             <div className="chat-thread-layout__body">
               {isDraft ? null : (
-                <>
-                  <ThreadTurnRail
-                    items={timelineItems}
-                    running={running}
-                    transcriptRef={transcriptRef}
-                    onEnsureAllVisible={handleEnsureAllVisible}
-                  />
-                  <div
-                    className="chat-transcript"
-                    ref={transcriptRef}
-                    onScroll={handleTranscriptScroll}
-                  >
-                    <div className="chat-transcript__column">
-                      {displayedRows.length < transcriptRows.length && (
-                        <div
-                          className="chat-transcript__earlier"
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'center',
-                            padding: '12px 0',
-                          }}
-                        >
-                          <button
-                            type="button"
-                            className="secondary-button chat-transcript__earlier-btn"
-                            onClick={() => {
-                              if (!transcriptRef.current) {
-                                setVisibleLimit((prev) => prev + 200);
-                                return;
-                              }
-                              const prevScrollHeight = transcriptRef.current.scrollHeight;
-                              setVisibleLimit((prev) => prev + 200);
-                              requestAnimationFrame(() => {
-                                if (transcriptRef.current) {
-                                  const diff = transcriptRef.current.scrollHeight - prevScrollHeight;
-                                  transcriptRef.current.scrollTop += diff;
-                                }
-                              });
-                            }}
-                            style={{
-                              fontSize: '12px',
-                              padding: '6px 14px',
-                              borderRadius: 'var(--control-radius, 8px)',
-                            }}
-                          >
-                            Show earlier messages ({displayedRows.length} of {transcriptRows.length} shown)
-                          </button>
-                        </div>
-                      )}
-
-                      {displayedRows.map((row, rowIdx) => {
-                        const rowKey =
-                          row.kind === 'work' || row.kind === 'subagentGroup'
-                            ? row.id
-                            : row.item.id;
-                        return (
-                          <React.Fragment key={rowKey}>
-                            {row.kind === 'item' && row.item.kind === 'assistant' && /<html[\s\S]*<\/html>/i.test(row.item.text) ? (
-                              <HtmlRenderFrame html={row.item.text.match(/<html[\s\S]*<\/html>/i)?.[0] ?? row.item.text} />
-                            ) : null}
-                            {row.kind === 'work' ? (
-                              <ChatWorkGroup
-                                items={row.items}
-                                running={running && rowIdx === liveWorkIdx}
-                                enterFor={enterFor}
-                                interrupted={Boolean(thread.stoppedByBuilder) && rowIdx === displayedRows.length - 1}
-                              />
-                            ) : row.kind === 'subagentGroup' ? (
-                              <SubagentGroupRow
-                                items={row.items}
-                                threadId={thread.id}
-                                workspaceId={activeWsId ?? null}
-                                subagentRuns={thread.subagentRuns ?? null}
-                                enterFor={enterFor}
-                              />
-                            ) : (
-                              <ChatItemRow
-                                item={row.item}
-                                threadId={thread.id}
-                                workspaceId={activeWsId ?? null}
-                                subagentRuns={thread.subagentRuns ?? null}
-                                swarmState={thread.swarmState ?? null}
-                                enter={enterFor(row.item.id)}
-                                fileRestoreEnabled={isFileRestoreAllowed}
-                                onRewindTranscript={rewindFromMessage}
-                                onRestoreFiles={handleRestoreFiles}
-                                onEditUserMessage={handleEditUserMessage}
-                              />
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-
-                      <TurnActivityStatus
-                        running={running}
-                        pendingApproval={thread.pendingApproval}
-                        items={transcriptItems}
-                        swarmState={thread.swarmState ?? null}
-                        interrupted={Boolean(thread.stoppedByBuilder) && !running}
-                        durationSeconds={thread.usage?.durationSeconds}
-                      />
-
-                      {/* Quota Handoff Banner */}
-                      {thread.quotaHandoffOffer && (
-                        <QuotaHandoffBanner
-                          offer={thread.quotaHandoffOffer}
-                          threadId={thread.id}
-                        />
-                      )}
-                    </div>
-                  </div>
-                </>
+                <SingleThreadTranscript
+                  threadId={thread.id}
+                  activeWsId={activeWsId ?? null}
+                  timelineItems={timelineItems}
+                  displayedRows={displayedRows}
+                  totalRows={totalRows}
+                  liveWorkIdx={liveWorkIdx}
+                  running={running}
+                  pendingApproval={thread.pendingApproval}
+                  quotaHandoffOffer={thread.quotaHandoffOffer}
+                  reflectionCandidate={thread.reflectionCandidate}
+                  dismissedReflectionNote={dismissedReflectionNote}
+                  stoppedByBuilder={Boolean(thread.stoppedByBuilder)}
+                  durationSeconds={thread.usage?.durationSeconds}
+                  subagentRuns={thread.subagentRuns}
+                  swarmState={thread.swarmState ?? null}
+                  isFileRestoreAllowed={isFileRestoreAllowed}
+                  transcriptRef={transcriptRef}
+                  onScroll={handleTranscriptScroll}
+                  onEnsureAllVisible={handleEnsureAllVisible}
+                  onShowEarlier={handleShowEarlier}
+                  enterFor={enterFor}
+                  onRewindTranscript={rewindFromMessage}
+                  onRestoreFiles={handleRestoreFiles}
+                  onEditUserMessage={handleEditUserMessage}
+                  onDismissReflection={handleDismissReflection}
+                />
               )}
             </div>
 
@@ -767,13 +987,62 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 transition={reduceMotion ? tweens.instant : tweens.fade}
                 className={agentName ? 'chat-draft-hero agent-chat-hero scroll-quiet' : 'chat-draft-hero scroll-quiet'}
               >
-                <ThemeHeroFigure variant="hero" />
+                {isVoiceActiveHere ? (
+                  <div
+                    className="chat-voice-stage"
+                    data-testid="thread-voice-hero"
+                    data-state={voiceHeroState}
+                    style={{ '--voice-level': String(voice.liveAudioLevel || 0) } as React.CSSProperties}
+                  >
+                    <div className="chat-voice-stage__frame">
+                      <span className="chat-voice-stage__reticle" aria-hidden="true" />
+                      <ZedOrb
+                        figure={voiceFigure}
+                        state={voiceOrbState}
+                        size={112}
+                        level={voice.liveAudioLevel}
+                        interactive={true}
+                        onClick={() => voice.toggleMicMuted()}
+                        title={
+                          voice.micMuted
+                            ? 'Haz clic para reactivar el micrófono'
+                            : 'Haz clic para pausar el micrófono'
+                        }
+                        ariaLabel={
+                          voice.micMuted
+                            ? 'Reactivar micrófono de la sesión de voz'
+                            : 'Pausar micrófono de la sesión de voz'
+                        }
+                      />
+                    </div>
+                    <span
+                      className="chat-voice-stage__eyebrow"
+                      data-testid="thread-voice-eyebrow"
+                    >
+                      <span className="chat-voice-stage__dot" aria-hidden="true" />
+                      <span>{voiceEyebrowLabel}</span>
+                    </span>
+                  </div>
+                ) : (
+                  <ThemeHeroFigure variant="hero" />
+                )}
                 <h1>
                   {isVoiceActiveHere ? (
-                    voice.micMuted ? (
-                      'Microphone muted'
+                    voiceHeroState === 'muted' ? (
+                      'Micrófono en pausa'
+                    ) : voiceHeroState === 'speaking' ? (
+                      'Respondiendo en voz alta'
+                    ) : voiceHeroState === 'thinking' ? (
+                      'Ejecutando en el espacio de trabajo'
+                    ) : voiceHeroState === 'transcribing' ? (
+                      'Transcribiendo tu orden…'
+                    ) : effectiveWorkspaceName ? (
+                      <>
+                        Listo para coordinar en{' '}
+                        <strong className="chat-draft-hero__folder">{effectiveWorkspaceName}</strong>
+                      </>
                     ) : (
-                      'Listening...'
+                      'Listo para coordinar'
                     )
                   ) : agentName ? (
                     'What should we build?'
@@ -788,14 +1057,33 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 </h1>
                 <p>
                   {isVoiceActiveHere
-                    ? 'Speak or type. Zed replies with voice and logs each action in this conversation.'
+                    ? 'Habla con naturalidad o escribe abajo. Cada orden, terminal y resultado queda trazado en este hilo.'
                     : agentName
                     ? null
                     : effectiveWorkspaceName
                     ? 'Pick a model. Then say the work.'
                     : 'Pick a model. Then ask.'}
                 </p>
-                {!agentName && !effectiveWorkspaceName && (
+                {isVoiceActiveHere && (
+                  <div
+                    className="chat-voice-stage__prompts"
+                    data-testid="thread-voice-quick-prompts"
+                    aria-label="Acciones rápidas de voz"
+                  >
+                    {VOICE_STAGE_QUICK_PROMPTS.map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        className="chat-voice-prompt-chip"
+                        disabled={voiceHeroState === 'thinking'}
+                        onClick={() => void handleSendVoiceTurn(suggestion)}
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!isVoiceActiveHere && !agentName && !effectiveWorkspaceName && (
                   <button
                     type="button"
                     className="secondary-button action-button--row chat-draft-hero__action"
@@ -892,27 +1180,6 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 }}
               />
             ) : null}
-            <ChangedFilesCard
-              files={changedFilesForTurn(transcriptItems)}
-              workspaceName={effectiveWorkspaceName}
-              onOpenTurnDiff={() => {
-                const turnFiles = changedFilesForTurn(transcriptItems);
-                openDiffsInRightDock({
-                  workspaceId: activeWsId,
-                  workspaceName: effectiveWorkspaceName,
-                  focusPaths: turnFiles.map((f) => f.path),
-                });
-              }}
-              onOpenFile={(path) => {
-                openDiffsInRightDock({
-                  workspaceId: activeWsId,
-                  workspaceName: effectiveWorkspaceName,
-                  focusPaths: [path],
-                  selectedPath: path,
-                });
-              }}
-            />
-
             {failureBanner}
 
             <QueuedRunsControl
@@ -930,6 +1197,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               threadId={thread.id}
               threadItems={transcriptItems}
               conversationStarted={!isDraft || queuedRuns.length > 0}
+              {...composerChangedFilesProps}
               agentName={agentName}
               engineLabel={engineLabel}
               threadMode={thread.mode}
@@ -953,8 +1221,8 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               branches={branchState.branches}
               threadWorkspaceId={activeWsId ?? null}
               threadWorkspaceName={effectiveWorkspaceName || 'Local'}
-              workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
-              onSelectWorkspace={(wsId) => onUpdateConfig({ workspaceId: wsId })}
+              workspaces={workspaceOptions}
+              onSelectWorkspace={handleSelectHeaderWorkspace}
               onSwitchBranch={branchState.handleSwitchBranch}
               onCreateBranch={branchState.handleCreateBranch}
               running={running}
@@ -966,6 +1234,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               isRefreshingModels={isRefreshingModels}
               onRefreshModels={onRefreshModels}
               onChangePrompt={onChangePrompt}
+              onHeightChange={syncLiveEdge}
               onSend={directNotice ? () => undefined : () => onSend()}
               onFreshContext={() => {
                 void invokeCommand('update_chat_configuration', {

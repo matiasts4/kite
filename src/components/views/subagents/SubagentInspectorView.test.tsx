@@ -1,6 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SubagentInspectorView } from './SubagentInspectorView';
+import { getActiveSubagentInspection } from '../../../lib/subagentNav';
+
+async function readInspectorCss(): Promise<string> {
+  const fsSpecifier = ['node', 'fs'].join(':');
+  const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+    readFileSync: (filePath: string, encoding: 'utf8') => string;
+  };
+  return fs.readFileSync('src/components/views/subagents/inspector.css', 'utf8');
+}
 import type { ExtendedChatThread } from '../chat/types';
 import type { ChatItem } from '../../../types';
 
@@ -231,8 +240,11 @@ describe('SubagentInspectorView', () => {
     expect(screen.getByText(/Found/i)).toBeInTheDocument();
     expect(screen.getByText('SubagentRun')).toBeInTheDocument();
 
-    // Subagent switcher switches to second subagent
-    fireEvent.click(screen.getByRole('button', { name: /Verifier/i }));
+    // Option A subagent switcher dropdown switches to second subagent
+    fireEvent.click(screen.getByTestId('subagent-switcher-trigger'));
+    const popover = await screen.findByTestId('subagent-switcher-popover');
+    expect(popover).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: /Verifier/i }));
     await waitFor(() => {
       expect(screen.getByText('All checks passed.')).toBeInTheDocument();
     });
@@ -677,7 +689,7 @@ describe('SubagentInspectorView', () => {
     );
     await waitFor(() => {
       expect(screen.getByTestId('subagent-transcript-column')).toBeInTheDocument();
-      expect(document.querySelector('.subagent-inspector__role')).toHaveTextContent(
+      expect(screen.getByTestId('subagent-switcher-trigger')).toHaveTextContent(
         'Codebase Researcher',
       );
       expect(screen.queryByText('All checks passed.')).not.toBeInTheDocument();
@@ -864,15 +876,253 @@ describe('SubagentInspectorView', () => {
     expect(roleIcons).toHaveLength(2);
     expect(roleIcons[0]).toHaveAttribute('data-role-kind', 'explore');
     expect(roleIcons[1]).toHaveAttribute('data-role-kind', 'review');
-    expect(overview.querySelector('[data-testid="agent-orbit-spinner"]')).toBeInTheDocument();
+    expect(
+      overview.querySelector('[data-testid="agent-status-indicator"][data-status="running"]')
+    ).toBeInTheDocument();
     expect(overview.textContent).not.toMatch(/Working/i);
 
     fireEvent.click(screen.getByRole('button', { name: /Inspect Codebase Researcher/i }));
     await waitFor(() => {
       const headerIcons = document.querySelectorAll('.subagent-inspector__header [data-testid="subagent-role-icon"]');
-      expect(headerIcons.length).toBeGreaterThanOrEqual(2);
-      expect(document.querySelector('.subagent-inspector__header [data-testid="agent-orbit-spinner"]')).toBeInTheDocument();
+      expect(headerIcons.length).toBeGreaterThanOrEqual(1);
+      expect(
+        document.querySelector(
+          '.subagent-inspector__header [data-testid="agent-status-indicator"][data-status="running"]'
+        )
+      ).toBeInTheDocument();
       expect(document.querySelector('.subagent-inspector__header')?.textContent).not.toMatch(/Working/i);
+    });
+
+    fireEvent.click(screen.getByTestId('subagent-switcher-trigger'));
+    const switcherPopover = await screen.findByTestId('subagent-switcher-popover');
+    expect(switcherPopover.querySelectorAll('[data-testid="subagent-role-icon"]')).toHaveLength(2);
+  });
+
+  it('uses Option A switcher with search for 8 runs, distinguishes generic Subagent labels, and folds 3+ empty failed runs in overview', async () => {
+    const manyRunsThread = makeThread({
+      id: 'thread-many-1',
+      swarmState: null,
+      subagentRuns: [
+        {
+          subagentId: 'run-be',
+          parentThreadId: 'thread-many-1',
+          parentToolCallId: 'c-be',
+          role: 'Backend Engineer',
+          provider: 'antigravity',
+          model: 'gemini-3.8-flash',
+          workspaceMode: 'share',
+          status: 'running',
+          prompt: 'Refactor backend handlers',
+          stepCount: 2,
+          startedAtUnixMs: Date.now() - 10_000,
+          updatedAtUnixMs: Date.now(),
+          items: [
+            makeItem({ id: 'be-1', kind: 'assistant', text: 'Working on backend.' }),
+          ],
+        },
+        {
+          subagentId: 'run-fe',
+          parentThreadId: 'thread-many-1',
+          parentToolCallId: 'c-fe',
+          role: 'Frontend Engineer',
+          provider: 'antigravity',
+          model: 'gemini-3.8-flash',
+          workspaceMode: 'share',
+          status: 'completed',
+          prompt: 'Update UI views',
+          stepCount: 1,
+          startedAtUnixMs: Date.now() - 20_000,
+          updatedAtUnixMs: Date.now() - 5_000,
+          items: [
+            makeItem({ id: 'fe-1', kind: 'assistant', text: 'UI updated.' }),
+          ],
+        },
+        ...[1, 2, 3, 4, 5, 6].map((n) => ({
+          subagentId: `run-fail-${n}`,
+          parentThreadId: 'thread-many-1',
+          parentToolCallId: `c-fail-${n}`,
+          role: 'Subagent',
+          provider: 'antigravity',
+          model: 'gemini-4-hydrogen',
+          workspaceMode: 'inherit',
+          status: 'failed',
+          prompt: `Check module task #${n} in workspace`,
+          latestActivity: `Timed out launching worker ${n}`,
+          stepCount: 0,
+          startedAtUnixMs: Date.now() - 30_000 - n * 1000,
+          updatedAtUnixMs: Date.now() - 25_000 - n * 1000,
+          items: [],
+        })),
+      ],
+    });
+    loadChatThreadMock.mockResolvedValueOnce(manyRunsThread);
+
+    const { container } = render(
+      <SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-many-1" />,
+    );
+
+    const overview = await screen.findByTestId('subagent-runs-overview');
+    // Only the 2 meaningful runs appear directly; the 6 zero-step failed runs fold into a toggle.
+    expect(overview.querySelectorAll('[data-testid="subagent-run-card"]')).toHaveLength(2);
+    const failedToggle = screen.getByTestId('subagent-failed-group-toggle');
+    expect(failedToggle).toHaveTextContent('6 empty failed attempts');
+
+    fireEvent.click(failedToggle);
+    expect(overview.querySelectorAll('[data-testid="subagent-run-card"]')).toHaveLength(8);
+    expect(overview).toHaveTextContent('Check module task #1 in workspace');
+
+    // Drill into Backend Engineer: header must never render .subagent-inspector__selector-strip
+    fireEvent.click(screen.getByRole('button', { name: /Inspect Backend Engineer/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId('subagent-switcher-trigger')).toHaveTextContent('Backend Engineer');
+      expect(screen.getByTestId('subagent-switcher-trigger')).toHaveTextContent('1/8');
+    });
+    expect(container.querySelector('.subagent-inspector__selector-strip')).toBeNull();
+    expect(container.querySelector('.subagent-inspector__scope-row')).toBeNull();
+
+    // Open Option A popover, filter with search, and switch to Frontend Engineer
+    fireEvent.click(screen.getByTestId('subagent-switcher-trigger'));
+    const searchInput = await screen.findByLabelText('Filter subagents');
+    fireEvent.change(searchInput, { target: { value: 'Frontend' } });
+    fireEvent.click(screen.getByRole('option', { name: /Frontend Engineer/i }));
+    await waitFor(() => {
+      expect(screen.getByText('UI updated.')).toBeInTheDocument();
+    });
+  });
+
+  it('shows Jump to latest only when scrolled away on an overflowing stream and clears inspection on unmount', async () => {
+    const thread = makeThread({ swarmState: null });
+    loadChatThreadMock.mockResolvedValueOnce(thread);
+
+    const { container, unmount } = render(
+      <SubagentInspectorView
+        workspaceId="ws-1"
+        selectedThreadId="thread-main-1"
+        requestedTarget={{
+          threadId: 'thread-main-1',
+          subagentId: 'sub-1',
+          mode: 'subagent',
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('subagent-transcript-column')).toBeInTheDocument();
+      expect(getActiveSubagentInspection()).toMatchObject({
+        threadId: 'thread-main-1',
+        subagentId: 'sub-1',
+      });
+    });
+
+    const stream = container.querySelector('.subagent-inspector__stream') as HTMLDivElement;
+    Object.defineProperty(stream, 'scrollHeight', { value: 600, configurable: true });
+    Object.defineProperty(stream, 'clientHeight', { value: 250, configurable: true });
+    Object.defineProperty(stream, 'scrollTop', { value: 50, writable: true, configurable: true });
+    fireEvent.scroll(stream);
+
+    const jumpBtn = await screen.findByRole('button', { name: /Jump to latest/i });
+    fireEvent.click(jumpBtn);
+    expect(screen.queryByRole('button', { name: /Jump to latest/i })).toBeNull();
+    expect(stream.scrollTop).toBe(600);
+
+    unmount();
+    expect(getActiveSubagentInspection()).toBeNull();
+  });
+
+  it('renders subagent-switcher popover with an opaque surface background and no backdrop transparency', async () => {
+    const inspectorCss = await readInspectorCss();
+    const popoverBlock =
+      inspectorCss.match(/\.subagent-switcher__popover\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(popoverBlock).toContain('var(--menu-plate');
+    expect(popoverBlock).not.toContain('var(--glass-overlay-bg');
+    expect(popoverBlock).toContain('backdrop-filter: none;');
+  });
+
+  it('auto-scrolls when an existing streaming subagent step grows without changing stepCount', async () => {
+    const initialThread = makeThread({
+      swarmState: null,
+      subagentRuns: [
+        {
+          subagentId: 'sub-stream-1',
+          parentThreadId: 'thread-main-1',
+          parentToolCallId: 'call-1',
+          role: 'Streaming Analyst',
+          typeName: 'research',
+          provider: 'gemini',
+          model: 'gemini-2.5-flash',
+          workspaceMode: 'inherit',
+          status: 'running',
+          prompt: 'Analyze the module',
+          startedAtUnixMs: Date.now() - 5000,
+          updatedAtUnixMs: Date.now() - 1000,
+          stepCount: 1,
+          items: [
+            makeItem({
+              id: 'sub-msg-1',
+              kind: 'assistant',
+              text: 'Initial chunk.',
+              streaming: true,
+            }),
+          ],
+        },
+      ],
+    });
+    loadChatThreadMock.mockResolvedValueOnce(initialThread);
+
+    const { container } = render(
+      <SubagentInspectorView
+        workspaceId="ws-1"
+        selectedThreadId="thread-main-1"
+        requestedTarget={{
+          threadId: 'thread-main-1',
+          subagentId: 'sub-stream-1',
+          mode: 'subagent',
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Initial chunk.')).toBeInTheDocument();
+    });
+
+    const stream = container.querySelector('.subagent-inspector__stream') as HTMLDivElement;
+    let scrollHeight = 500;
+    const clientHeight = 250;
+    let scrollTop = 250;
+    Object.defineProperty(stream, 'scrollHeight', { get: () => scrollHeight, configurable: true });
+    Object.defineProperty(stream, 'clientHeight', { get: () => clientHeight, configurable: true });
+    Object.defineProperty(stream, 'scrollTop', {
+      get: () => scrollTop,
+      set: (val: number) => {
+        scrollTop = val;
+      },
+      configurable: true,
+    });
+
+    // Simulate the single existing assistant step streaming more lines (stepCount stays 1)
+    scrollHeight = 860;
+    loadChatThreadMock.mockResolvedValueOnce({
+      ...initialThread,
+      subagentRuns: [
+        {
+          ...initialThread.subagentRuns![0],
+          updatedAtUnixMs: Date.now(),
+          items: [
+            makeItem({
+              id: 'sub-msg-1',
+              kind: 'assistant',
+              text: 'Initial chunk.\n\nAppended streaming paragraph with findings.',
+              streaming: true,
+            }),
+          ],
+        },
+      ],
+    });
+    window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Appended streaming paragraph/)).toBeInTheDocument();
+      expect(scrollTop).toBe(860);
     });
   });
 });

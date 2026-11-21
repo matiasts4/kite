@@ -33,10 +33,13 @@ export function voiceTurnsToChatItems(turns: VoiceTurnRecord[]): ChatItem[] {
   for (const turn of turns) {
     const at = turn.createdAt;
 
-    items.push({
-      ...baseItem(`${turn.turnId}:user`, 'user', at),
-      text: turn.userPrompt,
-    });
+    if (!turn.isProactiveReport && (turn.userPrompt || '').trim().length > 0) {
+      items.push({
+        ...baseItem(`${turn.turnId}:user`, 'user', at),
+        text: turn.userPrompt,
+        inputSource: turn.source === 'voz' ? 'voice' : 'text',
+      });
+    }
 
     const consult = turn.consultChatsInfo;
     if (consult && consult.kind !== 'none') {
@@ -56,13 +59,51 @@ export function voiceTurnsToChatItems(turns: VoiceTurnRecord[]): ChatItem[] {
     }
 
     (turn.receipts ?? []).forEach((receipt, index) => {
+      const data = (receipt.data && typeof receipt.data === 'object'
+        ? (receipt.data as Record<string, unknown>)
+        : null);
+      const detailParts: string[] = [];
+      if (receipt.type === 'launch_thread') {
+        detailParts.push('Hilo');
+        if (typeof data?.provider === 'string') detailParts.push(data.provider);
+        if (data?.oddMode) detailParts.push('ODD');
+      } else if (receipt.type === 'spawn_subagent') {
+        detailParts.push('Subagente');
+        if (typeof data?.role === 'string') detailParts.push(data.role);
+        if (typeof data?.provider === 'string') detailParts.push(data.provider);
+        if (data?.oddMode) detailParts.push('ODD');
+      } else if (receipt.type === 'launch_agent') {
+        detailParts.push('Agente');
+        if (typeof data?.agentName === 'string') detailParts.push(data.agentName);
+        if (typeof data?.provider === 'string') detailParts.push(data.provider);
+        if (data?.oddMode) detailParts.push('ODD');
+      } else {
+        detailParts.push(receipt.type);
+      }
+      if (receipt.durationMs) detailParts.push(`${receipt.durationMs} ms`);
+
+      const delegatedThreadId =
+        (receipt.type === 'launch_thread' ||
+          receipt.type === 'spawn_subagent' ||
+          receipt.type === 'launch_agent') &&
+        typeof data?.threadId === 'string' &&
+        data.threadId.trim()
+          ? data.threadId.trim()
+          : null;
+      const delegatedMode: 'chat' | 'agents' | undefined = delegatedThreadId
+        ? receipt.type === 'launch_agent'
+          ? 'agents'
+          : 'chat'
+        : undefined;
+
       items.push({
         ...baseItem(`${turn.turnId}:action:${index}`, 'tool', at),
         title: receipt.summaryEs || receipt.type,
-        detail: receipt.durationMs ? `${receipt.type} · ${receipt.durationMs} ms` : receipt.type,
+        detail: detailParts.join(' · '),
         status: receipt.ok ? 'completed' : 'failed',
         toolName: receipt.type,
         toolKind: 'dynamicToolCall',
+        ...(delegatedThreadId ? { delegatedThreadId, delegatedMode } : {}),
       });
     });
 

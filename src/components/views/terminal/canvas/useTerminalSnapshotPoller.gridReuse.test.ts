@@ -36,6 +36,8 @@ vi.mock('../../../../lib/ipc', () => ({
 import { invokeCommand } from '../../../../lib/ipc';
 import { encodeBinarySnapshot } from './binarySnapshotDecoder';
 import {
+  MAX_ROW_CACHE_ENTRIES,
+  updateTerminalRowCache,
   useTerminalSnapshotPoller,
   type UseTerminalSnapshotPollerOptions,
 } from './useTerminalSnapshotPoller';
@@ -227,5 +229,41 @@ describe('useTerminalSnapshotPoller packed grid reuse', () => {
     } finally {
       markTerminalExited(sessionId);
     }
+  });
+
+  it('bounds rowCacheRef to MAX_ROW_CACHE_ENTRIES and avoids cloning unchanged rows', async () => {
+    const rowCacheRef = ref<Map<number, CellSnapshot[]>>(new Map());
+    mockBinaryPolls([
+      encodeBinarySnapshot(frame(1, true, [{ idx: 0, text: 'HELLO' }, { idx: 1, text: 'WORLD' }])),
+      encodeBinarySnapshot(frame(2, false, [{ idx: 0, text: 'CHANGED' }])),
+    ]);
+    const { options } = makeOptions({ rowCacheRef });
+    const { result } = renderHook(() => useTerminalSnapshotPoller(options));
+
+    await waitFor(() => expect(rowCacheRef.current.get(0)?.[0]?.ch).toBe('H'));
+    const unchangedRow1Ref = rowCacheRef.current.get(1);
+    expect(unchangedRow1Ref?.slice(0, 5).map((c) => c.ch).join('')).toBe('WORLD');
+
+    act(() => result.current.immediatePoll());
+    await waitFor(() => expect(rowCacheRef.current.get(0)?.[0]?.ch).toBe('C'));
+
+    // Unchanged row 1 must keep the exact same cached reference without re-cloning cells.
+    expect(rowCacheRef.current.get(1)).toBe(unchangedRow1Ref);
+    expect(rowCacheRef.current.get(0)?.slice(0, 7).map((c) => c.ch).join('')).toBe('CHANGED');
+
+    // Fill cache well past MAX_ROW_CACHE_ENTRIES and verify strict LRU bound.
+    const cache = new Map<number, CellSnapshot[]>();
+    const row = Array.from({ length: 4 }, (_, i) => cell({ ch: String(i) }));
+    for (let offset = 0; offset < MAX_ROW_CACHE_ENTRIES + 120; offset += 1) {
+      updateTerminalRowCache(cache, [row], offset, {
+        full: false,
+        scrollbackChanged: true,
+        packed: false,
+      });
+    }
+    expect(cache.size).toBe(MAX_ROW_CACHE_ENTRIES);
+    // Non-packed immutable rows are stored directly without per-cell cloning.
+    const latestRelRow = -(MAX_ROW_CACHE_ENTRIES + 119);
+    expect(cache.get(latestRelRow)).toBe(row);
   });
 });

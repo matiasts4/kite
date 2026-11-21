@@ -192,6 +192,12 @@ export function useSubagentInspectorThread({
   const groupedRows = useMemo(() => groupTranscriptRows(visibleSteps), [visibleSteps]);
 
   useEffect(() => {
+    return () => {
+      setActiveSubagentInspection(null);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!activeThreadId) {
       setActiveSubagentInspection(null);
       return;

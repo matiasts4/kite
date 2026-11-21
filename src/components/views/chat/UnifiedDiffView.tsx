@@ -1,6 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { Suspense, useMemo } from 'react';
 import type { FileDiffContentsLoader } from '@pierre/diffs';
-import { KiteDiffView } from '../../diffs/KiteDiffView';
+
+const LazyKiteDiffView = React.lazy(() =>
+  import('../../diffs/KiteDiffView').then((m) => ({ default: m.KiteDiffView }))
+);
 import {
   getDiffDataLineStat,
   parseDiffDataToFileMetadata,
@@ -123,20 +126,22 @@ export const UnifiedDiffView: React.FC<UnifiedDiffViewProps> = ({
       {rawTextFallback !== null ? (
         <pre className="diff-view__fallback">{rawTextFallback}</pre>
       ) : (
-        <KiteDiffView
-          diff={diff}
-          fileDiff={fileDiff}
-          filePath={filePath}
-          oldPath={oldPath}
-          status={status}
-          layout="unified"
-          wordWrap={wordWrap}
-          ignoreWhitespace={ignoreWhitespace}
-          hideFileHeader={true}
-          lineDiffType="word-alt"
-          loadDiffFiles={loadDiffFiles}
-          emptyMessage="No changes in this diff."
-        />
+        <Suspense fallback={<div className="kite-diff-surface kite-diff-surface--loading" />}>
+          <LazyKiteDiffView
+            diff={diff}
+            fileDiff={fileDiff}
+            filePath={filePath}
+            oldPath={oldPath}
+            status={status}
+            layout="unified"
+            wordWrap={wordWrap}
+            ignoreWhitespace={ignoreWhitespace}
+            hideFileHeader={true}
+            lineDiffType="word-alt"
+            loadDiffFiles={loadDiffFiles}
+            emptyMessage="No changes in this diff."
+          />
+        </Suspense>
       )}
     </figure>
   );

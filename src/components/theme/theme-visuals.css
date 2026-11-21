@@ -7,12 +7,20 @@
   overflow: hidden;
   z-index: 0;
   user-select: none;
-  contain: strict;
-  transform: translateZ(0);
+  contain: layout style paint;
 }
 
 .stage-backdrop--miniature {
   border-radius: inherit;
+}
+
+.theme-preview__backdrop {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.72;
 }
 
 .stage-backdrop__canvas,
@@ -42,14 +50,16 @@
 
 .stage-backdrop__scrim {
   background: var(--background, #090a0c);
-  transition: opacity 160ms ease, backdrop-filter 160ms ease;
+  transition: opacity 160ms ease;
 }
 
 .stage-backdrop__grain {
-  opacity: 0.045;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size: 160px 160px;
+  opacity: 0.035;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.45) 0.5px, transparent 0.5px),
+    radial-gradient(rgba(0, 0, 0, 0.45) 0.5px, transparent 0.5px);
+  background-size: 6px 6px;
+  background-position: 0 0, 3px 3px;
 }
 
 .stage-backdrop__watermark {
@@ -60,7 +70,7 @@
   pointer-events: none;
 }
 
-/* Hero Figure & Mascot Component */
+/* Hero Figure & Mascot Component (GPU-friendly pure SVG + radial gradient, zero animated blur) */
 .theme-hero-figure {
   position: relative;
   display: inline-flex;
@@ -68,12 +78,18 @@
   justify-content: center;
   pointer-events: none;
   user-select: none;
+  --voice-level: 0;
 }
 
 .theme-hero-figure--hero {
   width: 112px;
   height: 92px;
   margin-bottom: 8px;
+}
+
+.theme-hero-figure--assistant {
+  width: 58px;
+  height: 58px;
 }
 
 .theme-hero-figure--card {
@@ -91,17 +107,29 @@
   height: 110px;
 }
 
+/* Pure radial-gradient halo — visually rich without expensive filter: blur() repaints */
 .theme-hero-figure__halo {
   position: absolute;
-  width: 72%;
-  height: 72%;
-  border-radius: var(--pill-radius);
+  inset: -6%;
+  border-radius: var(--pill-radius, 9999px);
   background: radial-gradient(
     circle,
     color-mix(in srgb, var(--accent, #5c8fff) 24%, transparent) 0%,
+    color-mix(in srgb, var(--accent, #5c8fff) 8%, transparent) 44%,
     transparent 72%
   );
-  filter: blur(12px);
+  transform: scale(calc(0.94 + var(--voice-level, 0) * 0.24));
+  transition: transform 0.14s ease-out, opacity 0.18s ease;
+}
+
+.theme-hero-figure[data-voice-state='muted'] .theme-hero-figure__halo,
+.theme-hero-figure[data-voice-state='error'] .theme-hero-figure__halo {
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--status-failed, #ef4444) 22%, transparent) 0%,
+    transparent 68%
+  );
+  transform: scale(0.9);
 }
 
 .theme-hero-figure__svg {
@@ -109,7 +137,63 @@
   width: 100%;
   height: 100%;
   overflow: visible;
-  animation: kite-hero-float 6s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .theme-hero-figure__svg {
+  animation: kite-hero-float 6.5s ease-in-out infinite;
+}
+
+/* Active voice animations run ONLY during live voice states (0 work when idle) */
+.theme-hero-figure__orbit,
+.theme-hero-figure__orbit-reverse,
+.theme-hero-figure__pulse-core,
+.theme-hero-figure__bar {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.theme-hero-figure[data-voice-state='listening'] .theme-hero-figure__orbit {
+  animation: kite-figure-spin 18s linear infinite;
+}
+
+.theme-hero-figure[data-voice-state='thinking'] .theme-hero-figure__orbit,
+.theme-hero-figure[data-voice-state='transcribing'] .theme-hero-figure__orbit {
+  animation: kite-figure-spin 4.5s linear infinite;
+}
+
+.theme-hero-figure[data-voice-state='speaking'] .theme-hero-figure__orbit {
+  animation: kite-figure-spin 8s linear infinite;
+}
+
+.theme-hero-figure[data-voice-state='thinking'] .theme-hero-figure__orbit-reverse,
+.theme-hero-figure[data-voice-state='speaking'] .theme-hero-figure__orbit-reverse {
+  animation: kite-figure-spin-reverse 7s linear infinite;
+}
+
+.theme-hero-figure[data-voice-state='listening'] .theme-hero-figure__pulse-core,
+.theme-hero-figure[data-voice-state='speaking'] .theme-hero-figure__pulse-core,
+.theme-hero-figure[data-voice-state='thinking'] .theme-hero-figure__pulse-core {
+  animation: kite-figure-pulse 1.5s ease-in-out infinite;
+}
+
+.theme-hero-figure[data-voice-state='listening'] .theme-hero-figure__bar,
+.theme-hero-figure[data-voice-state='speaking'] .theme-hero-figure__bar,
+.theme-hero-figure[data-voice-state='thinking'] .theme-hero-figure__bar,
+.theme-hero-figure[data-voice-state='transcribing'] .theme-hero-figure__bar {
+  animation: kite-figure-bar 0.9s ease-in-out infinite;
+}
+
+.theme-hero-figure__bar:nth-child(2) {
+  animation-delay: 0.12s;
+}
+.theme-hero-figure__bar:nth-child(3) {
+  animation-delay: 0.24s;
+}
+.theme-hero-figure__bar:nth-child(4) {
+  animation-delay: 0.36s;
+}
+.theme-hero-figure__bar:nth-child(5) {
+  animation-delay: 0.48s;
 }
 
 @keyframes kite-hero-float {
@@ -122,16 +206,66 @@
   }
 }
 
+@keyframes kite-figure-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes kite-figure-spin-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes kite-figure-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes kite-figure-bar {
+  0%,
+  100% {
+    transform: scaleY(0.55);
+  }
+  50% {
+    transform: scaleY(1.05);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .stage-backdrop__scrim,
-  .theme-hero-figure__svg {
+  .theme-hero-figure__svg,
+  .theme-hero-figure__halo,
+  .theme-hero-figure__orbit,
+  .theme-hero-figure__orbit-reverse,
+  .theme-hero-figure__pulse-core,
+  .theme-hero-figure__bar {
     animation: none !important;
     transition: none !important;
   }
 }
 
 html[data-motion='reduce'] .stage-backdrop__scrim,
-html[data-motion='reduce'] .theme-hero-figure__svg {
+html[data-motion='reduce'] .theme-hero-figure__svg,
+html[data-motion='reduce'] .theme-hero-figure__halo,
+html[data-motion='reduce'] .theme-hero-figure__orbit,
+html[data-motion='reduce'] .theme-hero-figure__orbit-reverse,
+html[data-motion='reduce'] .theme-hero-figure__pulse-core,
+html[data-motion='reduce'] .theme-hero-figure__bar {
   animation: none !important;
   transition: none !important;
 }

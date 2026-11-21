@@ -1,5 +1,129 @@
-import React from 'react';
+import React, { useSyncExternalStore } from 'react';
+import {
+  AGENT_ACTIVITY_INDICATOR_COLOR_EVENT,
+  AGENT_ACTIVITY_INDICATOR_EVENT,
+  DEFAULT_AGENT_ACTIVITY_INDICATOR_COLOR,
+  DEFAULT_AGENT_ACTIVITY_INDICATOR_STYLE,
+  kitePrefKey,
+  readAgentActivityIndicatorColor,
+  readAgentActivityIndicatorStyle,
+  resolveAgentActivityIndicatorColorValue,
+  type AgentActivityIndicatorColor,
+  type AgentActivityIndicatorColorPreset,
+  type AgentActivityIndicatorStyle,
+} from '../../lib/kitePrefs';
 import './agent-indicators.css';
+
+export interface AgentActivityIndicatorOption {
+  id: AgentActivityIndicatorStyle;
+  label: string;
+  blurb: string;
+}
+
+export const AGENT_ACTIVITY_INDICATOR_OPTIONS: readonly AgentActivityIndicatorOption[] = [
+  {
+    id: 'matrix-grid',
+    label: 'Matriz neural',
+    blurb: 'Grilla 2×2 que late en secuencia diagonal.',
+  },
+  {
+    id: 'signal-bars',
+    label: 'Barras activas',
+    blurb: 'Tres barras verticales en fase orgánica.',
+  },
+  {
+    id: 'pulse-aura',
+    label: 'Pulso sereno',
+    blurb: 'Núcleo limpio con halo suave que respira.',
+  },
+  {
+    id: 'kite-diamond',
+    label: 'Cometa Kite',
+    blurb: 'Rombo geométrico con núcleo vivo.',
+  },
+  {
+    id: 'matrix-3x3',
+    label: 'Grilla 3×3',
+    blurb: 'Matriz de nueve píxeles con onda diagonal.',
+  },
+  {
+    id: 'wave-dots',
+    label: 'Pulso en línea',
+    blurb: 'Tres nodos horizontales con cadencia luminosa.',
+  },
+  {
+    id: 'radar-sweep',
+    label: 'Anillo fluido',
+    blurb: 'Arco fino de precisión sobre pista circular.',
+  },
+  {
+    id: 'chevron-flow',
+    label: 'Flujo activo',
+    blurb: 'Doble chevrón direccional en avance rítmico.',
+  },
+];
+
+export interface AgentActivityColorPresetOption {
+  id: AgentActivityIndicatorColorPreset;
+  label: string;
+  swatch: string;
+}
+
+export const AGENT_ACTIVITY_INDICATOR_COLOR_OPTIONS: readonly AgentActivityColorPresetOption[] = [
+  { id: 'status', label: 'Estado', swatch: 'var(--status-running, #4ade80)' },
+  { id: 'accent', label: 'Acento del tema', swatch: 'var(--accent, #5c8fff)' },
+  { id: 'cyan', label: 'Cian', swatch: '#38bdf8' },
+  { id: 'violet', label: 'Violeta', swatch: '#a78bfa' },
+  { id: 'amber', label: 'Ámbar', swatch: '#fbbf24' },
+  { id: 'rose', label: 'Rosa', swatch: '#fb7185' },
+  { id: 'neutral', label: 'Neutro', swatch: 'var(--text-secondary, #a3a3a3)' },
+];
+
+function subscribeAgentActivityIndicator(onStoreChange: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const prefKey = kitePrefKey('agentActivityIndicator');
+  const handleCustom = () => onStoreChange();
+  const handleStorage = (e: StorageEvent) => {
+    if (!e.key || e.key === prefKey) onStoreChange();
+  };
+  window.addEventListener(AGENT_ACTIVITY_INDICATOR_EVENT, handleCustom);
+  window.addEventListener('storage', handleStorage);
+  return () => {
+    window.removeEventListener(AGENT_ACTIVITY_INDICATOR_EVENT, handleCustom);
+    window.removeEventListener('storage', handleStorage);
+  };
+}
+
+export function useAgentActivityIndicatorStyle(): AgentActivityIndicatorStyle {
+  return useSyncExternalStore(
+    subscribeAgentActivityIndicator,
+    readAgentActivityIndicatorStyle,
+    () => DEFAULT_AGENT_ACTIVITY_INDICATOR_STYLE
+  );
+}
+
+function subscribeAgentActivityIndicatorColor(onStoreChange: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const prefKey = kitePrefKey('agentActivityIndicatorColor');
+  const handleCustom = () => onStoreChange();
+  const handleStorage = (e: StorageEvent) => {
+    if (!e.key || e.key === prefKey) onStoreChange();
+  };
+  window.addEventListener(AGENT_ACTIVITY_INDICATOR_COLOR_EVENT, handleCustom);
+  window.addEventListener('storage', handleStorage);
+  return () => {
+    window.removeEventListener(AGENT_ACTIVITY_INDICATOR_COLOR_EVENT, handleCustom);
+    window.removeEventListener('storage', handleStorage);
+  };
+}
+
+export function useAgentActivityIndicatorColor(): AgentActivityIndicatorColor {
+  return useSyncExternalStore(
+    subscribeAgentActivityIndicatorColor,
+    readAgentActivityIndicatorColor,
+    () => DEFAULT_AGENT_ACTIVITY_INDICATOR_COLOR
+  );
+}
 
 export type AgentActivityVisualState =
   | 'running'
@@ -94,32 +218,284 @@ export function classifyAttentionTool(toolName?: string | null): AttentionToolKi
   return 'shield';
 }
 
-export interface OrbitDotsSpinnerProps {
-  size?: number;
-  className?: string;
-}
+const MATRIX_3X3_CELLS: ReadonlyArray<{ x: number; y: number; wave: number }> = [
+  { x: 2.2, y: 2.2, wave: 1 },
+  { x: 6.8, y: 2.2, wave: 2 },
+  { x: 11.4, y: 2.2, wave: 3 },
+  { x: 2.2, y: 6.8, wave: 2 },
+  { x: 6.8, y: 6.8, wave: 3 },
+  { x: 11.4, y: 6.8, wave: 4 },
+  { x: 2.2, y: 11.4, wave: 3 },
+  { x: 6.8, y: 11.4, wave: 4 },
+  { x: 11.4, y: 11.4, wave: 5 },
+];
 
-/** Four circular dots arranged around a ring that orbit smoothly during active execution. */
-export const OrbitDotsSpinner: React.FC<OrbitDotsSpinnerProps> = ({
-  size = 14,
-  className = '',
-}) => (
-  <svg
-    aria-hidden="true"
-    focusable="false"
-    data-testid="agent-orbit-spinner"
-    className={`agent-orbit-spinner${className ? ` ${className}` : ''}`}
-    width={size}
-    height={size}
-    viewBox="0 0 16 16"
-    fill="currentColor"
-  >
-    <circle className="agent-orbit-spinner__dot agent-orbit-spinner__dot--1" cx="8" cy="3" r="1.75" />
-    <circle className="agent-orbit-spinner__dot agent-orbit-spinner__dot--2" cx="13" cy="8" r="1.55" />
-    <circle className="agent-orbit-spinner__dot agent-orbit-spinner__dot--3" cx="8" cy="13" r="1.35" />
-    <circle className="agent-orbit-spinner__dot agent-orbit-spinner__dot--4" cx="3" cy="8" r="1.15" />
-  </svg>
-);
+const RunningActivityGlyph: React.FC<{ variant: AgentActivityIndicatorStyle; size: number }> = ({
+  variant,
+  size,
+}) => {
+  switch (variant) {
+    case 'pulse-aura':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-pulse-aura"
+          className="agent-activity-glyph agent-activity-pulse-aura"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="none"
+        >
+          <circle
+            className="agent-activity-pulse-aura__ring"
+            cx="8"
+            cy="8"
+            r="5.25"
+            stroke="currentColor"
+            strokeWidth="1.4"
+          />
+          <circle
+            className="agent-activity-pulse-aura__core"
+            cx="8"
+            cy="8"
+            r="2.65"
+            fill="currentColor"
+          />
+        </svg>
+      );
+    case 'signal-bars':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-signal-bars"
+          className="agent-activity-glyph agent-activity-signal-bars"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="currentColor"
+        >
+          <rect
+            className="agent-activity-signal-bars__bar agent-activity-signal-bars__bar--1"
+            x="2.2"
+            y="3"
+            width="2.4"
+            height="10"
+            rx="1.2"
+          />
+          <rect
+            className="agent-activity-signal-bars__bar agent-activity-signal-bars__bar--2"
+            x="6.8"
+            y="3"
+            width="2.4"
+            height="10"
+            rx="1.2"
+          />
+          <rect
+            className="agent-activity-signal-bars__bar agent-activity-signal-bars__bar--3"
+            x="11.4"
+            y="3"
+            width="2.4"
+            height="10"
+            rx="1.2"
+          />
+        </svg>
+      );
+    case 'kite-diamond':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-kite-diamond"
+          className="agent-activity-glyph agent-activity-kite-diamond"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="none"
+        >
+          <path
+            className="agent-activity-kite-diamond__frame"
+            d="M8 1.75L14.25 8L8 14.25L1.75 8Z"
+            stroke="currentColor"
+            strokeWidth="1.45"
+            strokeLinejoin="round"
+          />
+          <path
+            className="agent-activity-kite-diamond__core"
+            d="M8 5.2L10.8 8L8 10.8L5.2 8Z"
+            fill="currentColor"
+          />
+        </svg>
+      );
+    case 'matrix-3x3':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-matrix-3x3"
+          className="agent-activity-glyph agent-activity-matrix-3x3"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="currentColor"
+        >
+          {MATRIX_3X3_CELLS.map((cell, index) => (
+            <rect
+              key={index}
+              className={`agent-activity-matrix-3x3__cell agent-activity-matrix-3x3__cell--w${cell.wave}`}
+              x={cell.x}
+              y={cell.y}
+              width="2.4"
+              height="2.4"
+              rx="0.65"
+            />
+          ))}
+        </svg>
+      );
+    case 'wave-dots':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-wave-dots"
+          className="agent-activity-glyph agent-activity-wave-dots"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="currentColor"
+        >
+          <circle
+            className="agent-activity-wave-dots__dot agent-activity-wave-dots__dot--1"
+            cx="3.2"
+            cy="8"
+            r="1.7"
+          />
+          <circle
+            className="agent-activity-wave-dots__dot agent-activity-wave-dots__dot--2"
+            cx="8"
+            cy="8"
+            r="1.7"
+          />
+          <circle
+            className="agent-activity-wave-dots__dot agent-activity-wave-dots__dot--3"
+            cx="12.8"
+            cy="8"
+            r="1.7"
+          />
+        </svg>
+      );
+    case 'radar-sweep':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-radar-sweep"
+          className="agent-activity-glyph agent-activity-radar-sweep"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="none"
+        >
+          <circle
+            className="agent-activity-radar-sweep__track"
+            cx="8"
+            cy="8"
+            r="5.5"
+            stroke="currentColor"
+            strokeWidth="1.6"
+          />
+          <circle
+            className="agent-activity-radar-sweep__arc"
+            cx="8"
+            cy="8"
+            r="5.5"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeDasharray="11 24"
+          />
+        </svg>
+      );
+    case 'chevron-flow':
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-chevron-flow"
+          className="agent-activity-glyph agent-activity-chevron-flow"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="none"
+        >
+          <path
+            className="agent-activity-chevron-flow__arm agent-activity-chevron-flow__arm--1"
+            d="M3.5 4.25L7.25 8L3.5 11.75"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            className="agent-activity-chevron-flow__arm agent-activity-chevron-flow__arm--2"
+            d="M8.75 4.25L12.5 8L8.75 11.75"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case 'matrix-grid':
+    default:
+      return (
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          data-testid="agent-activity-matrix-grid"
+          className="agent-activity-glyph agent-activity-matrix-grid"
+          width={size}
+          height={size}
+          viewBox="0 0 16 16"
+          fill="currentColor"
+        >
+          <rect
+            className="agent-activity-matrix-grid__cell agent-activity-matrix-grid__cell--1"
+            x="2.5"
+            y="2.5"
+            width="4.5"
+            height="4.5"
+            rx="1.2"
+          />
+          <rect
+            className="agent-activity-matrix-grid__cell agent-activity-matrix-grid__cell--2"
+            x="9"
+            y="2.5"
+            width="4.5"
+            height="4.5"
+            rx="1.2"
+          />
+          <rect
+            className="agent-activity-matrix-grid__cell agent-activity-matrix-grid__cell--3"
+            x="9"
+            y="9"
+            width="4.5"
+            height="4.5"
+            rx="1.2"
+          />
+          <rect
+            className="agent-activity-matrix-grid__cell agent-activity-matrix-grid__cell--4"
+            x="2.5"
+            y="9"
+            width="4.5"
+            height="4.5"
+            rx="1.2"
+          />
+        </svg>
+      );
+  }
+};
 
 const AttentionGlyph: React.FC<{ kind: AttentionToolKind; size: number }> = ({ kind, size }) => {
   const glyphSize = Math.max(10, Math.round(size * 0.92));
@@ -193,6 +569,8 @@ export interface AgentStatusIndicatorProps {
   idleFallback?: React.ReactNode;
   className?: string;
   showPing?: boolean;
+  variant?: AgentActivityIndicatorStyle;
+  color?: AgentActivityIndicatorColor;
 }
 
 /** Reactive agent/thread/subagent state indicator shared across sidebars and subagent cards. */
@@ -203,7 +581,14 @@ export const AgentStatusIndicator: React.FC<AgentStatusIndicatorProps> = ({
   idleFallback = null,
   className = '',
   showPing = true,
+  variant,
+  color,
 }) => {
+  const preferredVariant = useAgentActivityIndicatorStyle();
+  const preferredColor = useAgentActivityIndicatorColor();
+  const activeVariant = variant ?? preferredVariant;
+  const activeColor = color ?? preferredColor;
+  const resolvedRunningColor = resolveAgentActivityIndicatorColorValue(activeColor);
   const visualState = resolveActivityVisualState(status);
   const attentionKind = visualState === 'waiting' ? classifyAttentionTool(toolName) : undefined;
   const classes = [
@@ -220,9 +605,12 @@ export const AgentStatusIndicator: React.FC<AgentStatusIndicatorProps> = ({
         aria-hidden="true"
         data-testid="agent-status-indicator"
         data-status="running"
+        data-variant={activeVariant}
+        data-color-mode={activeColor}
         className={classes}
+        style={resolvedRunningColor ? { color: resolvedRunningColor } : undefined}
       >
-        <OrbitDotsSpinner size={size} />
+        <RunningActivityGlyph variant={activeVariant} size={size} />
       </span>
     );
   }

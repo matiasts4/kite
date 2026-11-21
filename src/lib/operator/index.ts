@@ -7,8 +7,15 @@ import {
   type ActionReceipt,
 } from './contract';
 import { emitTrace } from './trace/trace';
-import { planTurnHeuristic, isNegatedTerminalImperative } from './planner/heuristic';
+import { planTurnHeuristic } from './planner/heuristic';
 import { planTurnLLM } from './planner/llm';
+import { normalizeSpanishVoiceStt } from './planner/voiceNormalizer';
+import { analyzeClausePolarity } from './planner/clausePolarity';
+import {
+  buildPendingDisambiguationState,
+  detectPreExecutionDisambiguation,
+  isDisambiguationCancellation,
+} from './planner/disambiguation';
 import { executePlan, composeReplyFromReceipts } from './executor';
 import { ttsNarrator } from './ttsNarrator';
 import { loadOperatorConfig } from './operatorConfig';
@@ -17,6 +24,17 @@ import { getActiveAgentTerminals } from '../terminalRegistry';
 import type { PlannerProvider, ProviderMessage } from './providers/types';
 import { resolvePlannerProvider } from './providers/resolvePlanner';
 import { zedAssistantFailureMessage } from './assistantFailureNotice';
+import { voiceSessionStore } from './voice/voiceSessionStore';
+import {
+  buildEnrichedTurnContext,
+  filterTerminalsForWorkspace,
+  resolveAuthoritativeWorkspace,
+} from './context/workspaceSnapshot';
+import {
+  ensureEpisodicSessionHook,
+  loadWorkspaceEpisodicMemory,
+  recordDelegationsFromReceipts,
+} from './context/episodicMemory';
 
 export { resolvePlannerProvider } from './providers/resolvePlanner';
 
@@ -45,6 +63,8 @@ export interface RunOperatorTurnOptions {
   context?: TurnContext;
   /** Prior user and assistant messages from the operator run, oldest first. */
   history?: ProviderMessage[];
+  /** Optional streaming callback invoked as each complete conversational sentence arrives from LLM. */
+  onStreamSentence?: (sentence: string) => void;
 }
 
 export interface OperatorTurnResult {
@@ -61,37 +81,10 @@ export interface OperatorTurnResult {
 }
 
 export function captureCurrentTurnContext(mode?: string, workspaceId?: string | null): TurnContext {
-  const legacyPrefix = ['bm', 'one'].join('');
-  let resolvedWsId = workspaceId || undefined;
-  if (!resolvedWsId && typeof window !== 'undefined') {
-    try {
-      resolvedWsId =
-        localStorage.getItem('kite.selectedWorkspaceId') ||
-        localStorage.getItem(`${legacyPrefix}.selectedWorkspaceId`) ||
-        undefined;
-    } catch {}
-  }
-
-  let workspaceName: string | undefined;
-  let workspacePath: string | undefined;
-
-  if (typeof window !== 'undefined') {
-    try {
-      const raw =
-        localStorage.getItem('kite.cached_workspaces') ||
-        localStorage.getItem(`${legacyPrefix}.cached_workspaces`);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          const ws = parsed.find((w: any) => w.id === resolvedWsId);
-          if (ws) {
-            workspaceName = ws.displayName || ws.name;
-            workspacePath = ws.path || ws.rootPath;
-          }
-        }
-      }
-    } catch {}
-  }
+  const resolved = resolveAuthoritativeWorkspace(workspaceId);
+  const resolvedWsId = resolved.workspaceId;
+  let workspaceName = resolved.workspaceName;
+  const workspacePath = resolved.workspacePath;
 
   let allTerminals: any[] = [];
   try {
@@ -100,25 +93,35 @@ export function captureCurrentTurnContext(mode?: string, workspaceId?: string | 
     allTerminals = [];
   }
 
-  // Filter terminals strictly to the active workspace to prevent cross-project confusion
-  const filteredTerminals = resolvedWsId
-    ? allTerminals.filter((t) => !t.workspaceId || t.workspaceId === resolvedWsId)
-    : allTerminals;
+  // S5: Strictly isolate terminals to the active workspace to prevent cross-project confusion.
+  const filteredTerminals = filterTerminalsForWorkspace(allTerminals, resolvedWsId);
 
   if (!workspaceName && filteredTerminals.length > 0) {
     workspaceName = filteredTerminals[0].workspaceName;
   }
 
+  const voiceSnapshot = voiceSessionStore.getSnapshot();
+  const isVoiceSessionActive =
+    voiceSnapshot.phase === 'active' || voiceSnapshot.phase === 'starting';
+  const resolvedMode =
+    mode ||
+    (isVoiceSessionActive && voiceSnapshot.activeSurface === 'thread' ? 'thread' : 'code');
+
   return {
-    mode: mode || 'code',
+    mode: resolvedMode,
     workspaceId: resolvedWsId,
     workspaceName,
     workspacePath,
+    gitBranch: resolved.gitBranch,
+    boundThreadId: isVoiceSessionActive ? (voiceSnapshot.boundThreadId ?? undefined) : undefined,
+    voiceSessionActive: isVoiceSessionActive,
     activeTerminals: filteredTerminals.map((t, idx) => ({
       sessionId: t.sessionId,
       engine: t.engine,
       title: t.title,
       who: t.who,
+      state: t.state,
+      latestLine: t.latestLine ? String(t.latestLine).slice(0, 120) : undefined,
       idx: idx + 1,
       workspaceId: t.workspaceId ?? undefined,
     })),
@@ -129,9 +132,17 @@ export async function runOperatorTurn(
   input: string,
   options: RunOperatorTurnOptions = {}
 ): Promise<OperatorTurnResult> {
+  ensureEpisodicSessionHook();
   const startTime = Date.now();
   const turnId = options.turnId || `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const context = options.context || captureCurrentTurnContext(options.mode, options.workspaceId);
+  const context =
+    options.context ||
+    (await buildEnrichedTurnContext(options.mode, options.workspaceId).catch(() =>
+      captureCurrentTurnContext(options.mode, options.workspaceId)
+    ));
+  if (context.workspaceId) {
+    await loadWorkspaceEpisodicMemory(context.workspaceId).catch(() => {});
+  }
 
   emitTrace({
     turnId,
@@ -146,26 +157,84 @@ export async function runOperatorTurn(
   const provider = options.provider || resolvePlannerProvider(config);
 
   try {
-    // 1. Plan turn with Fast-Path Heuristic (< 2ms)
-    // If the heuristic detects deterministic action intent, execute immediately without 3-4s cloud delay
+    // 0. Normalize Spanish STT phonetics & analyze clause-level polarity (preserving raw input in trace).
+    const sttNorm = normalizeSpanishVoiceStt(input);
+    const normalizedInput = sttNorm.normalized || input;
+    const polarity = analyzeClausePolarity(normalizedInput);
+    const disambiguationScope = context.boundThreadId || context.workspaceId || '__default__';
+    const activePending = voiceSessionStore.getPendingDisambiguation(disambiguationScope);
+
+    // 1. Handle cancellation of a pending disambiguation cleanly
+    if (activePending && isDisambiguationCancellation(normalizedInput)) {
+      voiceSessionStore.clearPendingDisambiguation(disambiguationScope);
+      const cancelPlan: OperatorPlan = {
+        strategy: 'heuristic',
+        actions: [],
+        reply: 'Entendido, dejo esa acción cancelada.',
+        answer: 'Entendido, dejo esa acción cancelada.',
+      };
+      emitTrace({
+        turnId,
+        ev: 'intent.route',
+        route: 'clarification',
+        reason: 'disambiguation_cancelled',
+        rawInput: input,
+        normalizedInput,
+      });
+      emitTrace({
+        turnId,
+        ev: 'plan.created',
+        strategy: 'heuristic',
+        actions: [],
+        reply: cancelPlan.reply,
+      });
+      const durationMs = Date.now() - startTime;
+      const cancelResult: OperatorTurnResult = {
+        turnId,
+        plan: cancelPlan,
+        receipts: [],
+        reply: cancelPlan.reply!,
+        overallSuccess: true,
+        durationMs,
+        strategy: 'heuristic',
+        providerId: provider.id,
+      };
+      emitTrace({
+        turnId,
+        ev: 'turn.end',
+        overallSuccess: true,
+        durationMs,
+        reply: cancelPlan.reply,
+        turnResult: cancelResult,
+      });
+      return cancelResult;
+    }
+
+    // 2. Plan turn with Confidence-Gated Hybrid Router (Fast-Path Heuristic vs LLM Planner)
     let plan: OperatorPlan;
-    let fastPlan = planTurnHeuristic(input);
-    // S4: a negated imperative ("no cierres las terminales") is already answered by the
-    // heuristic refusal plan and must never be escalated to the LLM.
-    const negatedTerminalImperative = isNegatedTerminalImperative(input);
+    let fastPlan = planTurnHeuristic(normalizedInput);
+    const negatedEntireUtterance = polarity.isEntireUtteranceNegated;
     const hasDeterministicActions =
       fastPlan.strategy === 'heuristic' &&
       fastPlan.actions.length > 0;
 
-    // Avoid LLM mis-plans (p. ej. abrir Grok) cuando claramente pidieron narrar/resumir.
+    // Avoid LLM mis-plans (p. ej. abrir Grok) cuando claramente pidieron narrar/resumir una terminal abierta.
+    // Only intercept when terminals actually exist and the user is NOT asking about threads/chats/ODDs/subagents/plans.
+    const hasOpenTerminals = (context.activeTerminals?.length ?? 0) > 0;
+    const mentionsNonTerminalDomain =
+      /\b(?:chat|chats|hilo|hilos|thread|threads|odd|odds|subagente|subagentes|plan|proyecto|conversaci[oó]n|memoria|ayer|anoche)\b/i.test(
+        normalizedInput
+      );
     if (
-      !negatedTerminalImperative &&
+      hasOpenTerminals &&
+      !mentionsNonTerminalDomain &&
+      !negatedEntireUtterance &&
       !hasDeterministicActions &&
       /resum(?:e|ir|en|o|a|i)\b|resumen\b|\bnarr(?:a|ame|ar)\b|com[eé]ntame|cu[eé]ntame|qu[eé]\s+hay|qu[eé]\s+hab[ií]a/i.test(
-        input
+        normalizedInput
       ) &&
       !/(?:abre|abrir|lanza|crea|inicia|pon|spawn)\s+(?:\d+|un|una|uno|dos|tres|\w+\s+)?(?:terminal|terminales|agente|agentes)\b/i.test(
-        input.toLowerCase()
+        normalizedInput.toLowerCase()
       )
     ) {
       fastPlan = {
@@ -175,12 +244,51 @@ export async function runOperatorTurn(
       };
     }
 
+    // In Thread Voice Mode (or with zero open terminals), never let a generic
+    // targetless `narrate_summary` heuristic hijack conversational questions before the LLM sees them.
+    const isGenericNarrateWithoutTerminals =
+      !hasOpenTerminals &&
+      fastPlan.actions.length === 1 &&
+      fastPlan.actions[0].type === 'narrate_summary' &&
+      !fastPlan.actions[0].target;
+
+    // S7: In Thread/Voice Mode, saying "abre/lanza un agente..." WITHOUT explicitly requesting a terminal/console/powershell
+    // must be routed to the LLM (with workspace roster) so it chooses between Autonomous Agent, Subagent, or Thread
+    // rather than hijacking into a Code PTY terminal!
+    const isAgentHijackedToTerminalInThreadMode =
+      (context.mode === 'thread' || Boolean(context.voiceSessionActive)) &&
+      fastPlan.actions.length === 1 &&
+      fastPlan.actions[0].type === 'open_terminals' &&
+      !/\b(?:terminal|terminales|consola|consolas|powershell|pane|panes)\b/i.test(normalizedInput);
+
+    // S8: If a pending disambiguation is open, route the user's answer to the LLM so it resolves the missing slot.
+    const mustDeferToLlm =
+      Boolean(activePending) ||
+      isGenericNarrateWithoutTerminals ||
+      isAgentHijackedToTerminalInThreadMode;
+
     const useFastPlan =
-      (fastPlan.strategy === 'heuristic' && fastPlan.actions.length > 0) ||
-      negatedTerminalImperative;
+      (!mustDeferToLlm &&
+        fastPlan.strategy === 'heuristic' &&
+        fastPlan.actions.length > 0) ||
+      negatedEntireUtterance;
+
+    const effectiveHistory =
+      options.history ??
+      (context.boundThreadId
+        ? voiceSessionStore.getConversationHistory(context.boundThreadId)
+        : undefined);
 
     if (provider.id === 'local' || useFastPlan) {
       plan = fastPlan;
+      emitTrace({
+        turnId,
+        ev: 'intent.route',
+        route: negatedEntireUtterance ? 'negation' : 'heuristic',
+        reason: provider.id === 'local' ? 'local_provider' : 'deterministic_fast_path',
+        rawInput: input,
+        normalizedInput,
+      });
       emitTrace({
         turnId,
         ev: 'plan.created',
@@ -188,7 +296,54 @@ export async function runOperatorTurn(
         actions: plan.actions,
       });
     } else {
-      plan = await planTurnLLM(input, provider, context, turnId, options.history);
+      emitTrace({
+        turnId,
+        ev: 'intent.route',
+        route: activePending ? 'clarification' : 'llm',
+        reason: activePending
+          ? 'resolving_pending_disambiguation'
+          : isAgentHijackedToTerminalInThreadMode
+            ? 'surface_selection_llm'
+            : 'planner_required',
+        rawInput: input,
+        normalizedInput,
+      });
+      plan = await planTurnLLM(normalizedInput, provider, context, turnId, effectiveHistory, {
+        onStreamSentence: options.onStreamSentence,
+        pendingDisambiguation: activePending,
+      });
+    }
+
+    // S8: Active Disambiguation Guard (max 1 concrete question before delegating or executing ambiguous actions)
+    const clarification = detectPreExecutionDisambiguation(
+      normalizedInput,
+      plan,
+      context,
+      activePending
+    );
+    if (clarification) {
+      voiceSessionStore.setPendingDisambiguation(
+        disambiguationScope,
+        buildPendingDisambiguationState(normalizedInput, clarification)
+      );
+      plan = {
+        ...plan,
+        actions: [],
+        reply: clarification.question,
+        answer: clarification.question,
+        clarification,
+      };
+      emitTrace({
+        turnId,
+        ev: 'intent.route',
+        route: 'clarification',
+        reason: `missing_${clarification.missingSlot}`,
+        rawInput: input,
+        normalizedInput,
+      });
+    } else if (activePending) {
+      // Pending disambiguation was consumed on this follow-up turn; never linger or loop.
+      voiceSessionStore.clearPendingDisambiguation(disambiguationScope);
     }
 
     // 2. Execute actions and collect verified receipts
@@ -196,6 +351,11 @@ export async function runOperatorTurn(
     const receipts = execution.receipts;
     const reply = execution.reply || composeReplyFromReceipts(plan, receipts);
     const overallSuccess = execution.overallSuccess;
+
+    // S6: Persist verified delegations into workspace-scoped episodic ledger
+    if (receipts.length > 0) {
+      void recordDelegationsFromReceipts(context.workspaceId, receipts).catch(() => {});
+    }
 
     // 3. Speak reply via TTS if requested and not muted
     if (options.ttsEnabled && !options.muted && reply) {

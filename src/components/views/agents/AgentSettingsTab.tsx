@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { invokeCommand } from '../../../lib/ipc';
-import type { AgentProfile } from '../../../types';
+import type { AgentProfile, Workspace } from '../../../types';
 import type { AvatarChoice } from '../../AgentAvatar';
 import { AgentAvatarCustomizer } from './AgentAvatarCustomizer';
 import {
@@ -9,7 +9,7 @@ import {
   getEngineDisplayName,
   getEngineVendor,
 } from './engineMetadata';
-import { CheckIcon, ClockIcon, TrashIcon } from './agentIcons';
+import { CheckIcon, ClockIcon, CloseIcon, TrashIcon } from './agentIcons';
 import { AgentMcpSection } from './sections/AgentMcpSection';
 import { AgentModelDefaultsSection } from './sections/AgentModelDefaultsSection';
 
@@ -63,6 +63,7 @@ export interface AgentSettingsTabProps {
   successMessage?: string | null;
   onDeleteAgent?: () => Promise<void> | void;
   onOpenRoutines?: () => void;
+  workspaces?: Workspace[] | Array<{ id: string; displayName?: string; name?: string }>;
 }
 
 export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
@@ -78,6 +79,7 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
   successMessage = null,
   onDeleteAgent,
   onOpenRoutines,
+  workspaces,
 }) => {
   const [saving, setSaving] = useState<boolean>(false);
   const [deleting, setDeleting] = useState<boolean>(false);
@@ -170,29 +172,26 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
     if (!settingsDirty || saving || readOnly) return;
     setSaving(true);
     try {
-      await onSaveSettings();
-      if (resolvedAgentId) {
-        try {
-          await invokeCommand('update_agent_profile', {
-            agentId: resolvedAgentId,
-            name: settingsDraft.name,
-            brief: settingsDraft.purpose,
-            engine: settingsDraft.engine,
-            avatar: customAvatar ? JSON.stringify(customAvatar) : (typeof settingsDraft.avatar === 'string' ? settingsDraft.avatar : null),
-            memoryBudget: settingsDraft.memoryBudget,
-            reflectionMode: settingsDraft.reflectionMode,
-            allowAgentScheduling: settingsDraft.allowAgentScheduling,
-            allowAgentMessaging: settingsDraft.allowAgentMessaging,
-            defaultMode: settingsDraft.defaultMode,
-            defaultPlan: settingsDraft.defaultPlan ? 'true' : 'false',
-            defaultModel: settingsDraft.defaultModel,
-            defaultProviderOptions: settingsDraft.defaultProviderOptions ?? [],
-            placeDisplayNames: settingsDraft.placeDisplayNames ?? [],
-            disabledPluginIds: settingsDraft.disabledPluginIds ?? [],
-          });
-        } catch {
-          // ignore
-        }
+      if (onSaveSettings) {
+        await onSaveSettings();
+      } else if (resolvedAgentId) {
+        await invokeCommand('update_agent_profile', {
+          agentId: resolvedAgentId,
+          name: settingsDraft.name,
+          brief: settingsDraft.purpose,
+          engine: settingsDraft.engine,
+          avatar: customAvatar ? JSON.stringify(customAvatar) : (typeof settingsDraft.avatar === 'string' ? settingsDraft.avatar : null),
+          memoryBudget: settingsDraft.memoryBudget,
+          reflectionMode: settingsDraft.reflectionMode,
+          allowAgentScheduling: settingsDraft.allowAgentScheduling,
+          allowAgentMessaging: settingsDraft.allowAgentMessaging,
+          defaultMode: settingsDraft.defaultMode,
+          defaultPlan: settingsDraft.defaultPlan ? 'true' : 'false',
+          defaultModel: settingsDraft.defaultModel,
+          defaultProviderOptions: settingsDraft.defaultProviderOptions ?? [],
+          placeDisplayNames: settingsDraft.placeDisplayNames ?? [],
+          disabledPluginIds: settingsDraft.disabledPluginIds ?? [],
+        });
       }
       setInitialEngine(settingsDraft.engine);
       setSettingsDirty(false);
@@ -243,6 +242,33 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
         disabledPluginIds: next,
       };
     });
+    setSettingsDirty(true);
+  };
+
+  const [newPlaceInput, setNewPlaceInput] = useState('');
+
+  const handleAddPlace = (nameToAdd?: string) => {
+    const raw = nameToAdd !== undefined ? nameToAdd : newPlaceInput;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const current = settingsDraft.placeDisplayNames ?? [];
+    if (!current.includes(trimmed)) {
+      setSettingsDraft((prev: any) => ({
+        ...prev,
+        placeDisplayNames: [...(prev.placeDisplayNames ?? []), trimmed],
+      }));
+      setSettingsDirty(true);
+    }
+    if (nameToAdd === undefined) {
+      setNewPlaceInput('');
+    }
+  };
+
+  const handleRemovePlace = (placeToRemove: string) => {
+    setSettingsDraft((prev: any) => ({
+      ...prev,
+      placeDisplayNames: (prev.placeDisplayNames ?? []).filter((p: string) => p !== placeToRemove),
+    }));
     setSettingsDirty(true);
   };
 
@@ -546,11 +572,76 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
             <h2 className="agent-setting-label">Places</h2>
             <ul aria-label="Approved place names" className="ui-card agent-settings__places">
               {places.length === 0 ? (
-                <li>Home only</li>
+                <li className="agent-settings__place-empty">Home only</li>
               ) : (
-                places.map((p) => <li key={p}>{p}</li>)
+                places.map((p) => (
+                  <li key={p} className="agent-settings__place-chip">
+                    <span className="agent-settings__place-name">{p}</span>
+                    <button
+                      type="button"
+                      className="agent-settings__place-remove"
+                      onClick={() => handleRemovePlace(p)}
+                      disabled={readOnly || saving}
+                      title={`Remove ${p}`}
+                      aria-label={`Remove ${p}`}
+                    >
+                      <CloseIcon size={11} />
+                    </button>
+                  </li>
+                ))
               )}
             </ul>
+            <div className="agent-settings__places-add">
+              <input
+                type="text"
+                className="ui-field rounded-control text-row flex-1"
+                style={{ height: 'var(--vl-control-md, 32px)' }}
+                placeholder="Add folder or place name…"
+                aria-label="Add folder or place name"
+                value={newPlaceInput}
+                onChange={(e) => setNewPlaceInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddPlace();
+                  }
+                }}
+                disabled={readOnly || saving}
+              />
+              {workspaces && workspaces.length > 0 && (
+                <select
+                  className="ui-field rounded-control text-caption"
+                  style={{ height: 'var(--vl-control-md, 32px)', maxWidth: '160px' }}
+                  aria-label="Add from workspace"
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      handleAddPlace(e.target.value);
+                    }
+                  }}
+                  disabled={readOnly || saving}
+                >
+                  <option value="" disabled>Add from workspace…</option>
+                  {workspaces.map((w: any) => {
+                    const wsName = w.displayName || w.name || 'Workspace';
+                    return (
+                      <option key={w.id} value={wsName}>
+                        {wsName}
+                      </option>
+                    );
+                  })}
+                </select>
+              )}
+              <button
+                type="button"
+                className="secondary-button rounded-control px-3"
+                style={{ height: 'var(--vl-control-md, 32px)' }}
+                onClick={() => handleAddPlace()}
+                disabled={readOnly || saving || !newPlaceInput.trim()}
+              >
+                Add
+              </button>
+            </div>
             <p className="agent-setting-hint">
               Folders beyond its home that new chats may write in. It always runs from its home and can read anywhere.
             </p>

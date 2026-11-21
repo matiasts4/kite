@@ -5,7 +5,9 @@ import { SubagentRoleIcon } from '../../ui/SubagentRoleIcon';
 import { LiveElapsedClock } from '../chat/LiveElapsedClock';
 import type { ExtendedChatThread } from '../chat/types';
 import { formatInspectorModelName } from './swarmBoardHelpers';
+import { SubagentRunSwitcher } from './SubagentRunSwitcher';
 import {
+  formatSubagentDisplayTitle,
   isRunActive,
   isRunBlocked,
   settledPrefixLabel,
@@ -74,81 +76,98 @@ export const SubagentInspectorHeader: React.FC<SubagentInspectorHeaderProps> = (
     !showingOverview &&
     !fromSwarmRoster;
 
-  const showTopNav =
-    fromGlobalView ||
-    fromSwarmRoster ||
-    showBackToOverview ||
-    Boolean(thread) ||
-    Boolean(mode === 'subagent' && activeRun?.childThreadId);
+  const isDrilledIn = fromGlobalView || fromSwarmRoster || showBackToOverview;
+  const showOpenThreadBtn = Boolean(mode === 'subagent' && activeRun?.childThreadId && !showingOverview);
+  const showSwarmSwitch = scope === 'thread' && hasSwarm;
+
+  const activeTitle = activeRun ? formatSubagentDisplayTitle(activeRun) : 'Subagent';
+  const resolvedSubagentModel = activeRun
+    ? !activeRun.model || activeRun.model.trim().toLowerCase() === 'inherit'
+      ? parentModelLabel
+      : formatInspectorModelName(activeRun.model, activeRun.provider)
+    : parentModelLabel;
 
   return (
     <div className="subagent-inspector__header">
-      <div className="subagent-inspector__scope-row">
-        <div
-          className="subagent-inspector__segmented"
-          role="tablist"
-          aria-label="Subagents scope"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={scope === 'thread'}
-            className={`subagent-inspector__segment-btn${scope === 'thread' ? ' subagent-inspector__segment-btn--active' : ''}`}
-            onClick={() => onSelectScope('thread')}
-          >
-            <span>This Thread</span>
-            {threadRunsCount > 0 && (
-              <span className="subagent-inspector__scope-count">{threadRunsCount}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={scope === 'all'}
-            className={`subagent-inspector__segment-btn${scope === 'all' ? ' subagent-inspector__segment-btn--active' : ''}`}
-            onClick={() => onSelectScope('all')}
-          >
-            {globalActiveCount > 0 && (
-              <AgentStatusIndicator status="running" size={11} />
-            )}
-            <span>All Threads</span>
-            {globalTotalCount > 0 && (
-              <span className="subagent-inspector__scope-count">{globalTotalCount}</span>
-            )}
-          </button>
-        </div>
-
-        {scope === 'thread' && hasSwarm && (
+      {!isDrilledIn ? (
+        <div className="subagent-inspector__scope-row">
           <div
             className="subagent-inspector__segmented"
             role="tablist"
-            aria-label="Inspector mode"
+            aria-label="Subagents scope"
           >
-            {hasRuns && (
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === 'subagent'}
-                className={`subagent-inspector__segment-btn${mode === 'subagent' ? ' subagent-inspector__segment-btn--active' : ''}`}
-                onClick={() => onSelectMode('subagent')}
-              >
-                Subagents
-              </button>
-            )}
             <button
               type="button"
               role="tab"
-              aria-selected={mode === 'swarm'}
-              className={`subagent-inspector__segment-btn${mode === 'swarm' ? ' subagent-inspector__segment-btn--active' : ''}`}
-              onClick={() => onSelectMode('swarm')}
+              aria-selected={scope === 'thread'}
+              className={`subagent-inspector__segment-btn${scope === 'thread' ? ' subagent-inspector__segment-btn--active' : ''}`}
+              onClick={() => onSelectScope('thread')}
             >
-              Swarm Board
+              <span>This Thread</span>
+              {threadRunsCount > 0 && (
+                <span className="subagent-inspector__scope-count">{threadRunsCount}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={scope === 'all'}
+              className={`subagent-inspector__segment-btn${scope === 'all' ? ' subagent-inspector__segment-btn--active' : ''}`}
+              onClick={() => onSelectScope('all')}
+            >
+              {globalActiveCount > 0 && (
+                <AgentStatusIndicator status="running" size={11} />
+              )}
+              <span>All Threads</span>
+              {globalTotalCount > 0 && (
+                <span className="subagent-inspector__scope-count">{globalTotalCount}</span>
+              )}
             </button>
           </div>
-        )}
-      </div>
 
-      {showTopNav && (
+          <div className="subagent-inspector__top-actions">
+            {showSwarmSwitch && (
+              <div
+                className="subagent-inspector__segmented"
+                role="tablist"
+                aria-label="Inspector mode"
+              >
+                {hasRuns && (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === 'subagent'}
+                    className={`subagent-inspector__segment-btn${mode === 'subagent' ? ' subagent-inspector__segment-btn--active' : ''}`}
+                    onClick={() => onSelectMode('subagent')}
+                  >
+                    Subagents
+                  </button>
+                )}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === 'swarm'}
+                  className={`subagent-inspector__segment-btn${mode === 'swarm' ? ' subagent-inspector__segment-btn--active' : ''}`}
+                  onClick={() => onSelectMode('swarm')}
+                >
+                  Swarm Board
+                </button>
+              </div>
+            )}
+            {showOpenThreadBtn && (
+              <button
+                type="button"
+                className="subagent-inspector__popout-btn"
+                onClick={onPopOutChildThread}
+                aria-label="Open subagent thread in main pane"
+                title="Open subagent conversation in main pane"
+              >
+                Open thread
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
         <div className="subagent-inspector__top-row">
           <div className="subagent-inspector__nav-group">
             {fromGlobalView && (
@@ -183,15 +202,28 @@ export const SubagentInspectorHeader: React.FC<SubagentInspectorHeaderProps> = (
                 type="button"
                 className="subagent-inspector__parent-link"
                 onClick={onJumpToParent}
+                aria-label={`Main Thread: ${thread.title || 'Untitled Thread'}`}
                 title={`Focus main thread: ${thread.title || thread.id}`}
               >
-                <span>← Main Thread: {thread.title || 'Untitled Thread'}</span>
+                <span className="subagent-inspector__parent-link-text">
+                  {thread.title || 'Untitled Thread'}
+                </span>
               </button>
             )}
           </div>
 
           <div className="subagent-inspector__top-actions">
-            {mode === 'subagent' && activeRun?.childThreadId && !showingOverview && (
+            {showSwarmSwitch && mode === 'subagent' && (
+              <button
+                type="button"
+                className="subagent-inspector__popout-btn"
+                onClick={() => onSelectMode('swarm')}
+                title="Switch to Swarm Board"
+              >
+                Swarm
+              </button>
+            )}
+            {showOpenThreadBtn && (
               <button
                 type="button"
                 className="subagent-inspector__popout-btn"
@@ -209,19 +241,32 @@ export const SubagentInspectorHeader: React.FC<SubagentInspectorHeaderProps> = (
       {mode === 'subagent' && activeRun && !showingOverview && (
         <div className="subagent-inspector__identity-row">
           <div className="subagent-inspector__meta-title-row">
-            <div className="subagent-inspector__role">
-              <SubagentRoleIcon
-                typeName={activeRun.typeName}
-                role={activeRun.role}
-                status={activeRun.status}
-                size={15}
-              />
-              <span>{activeRun.role || 'Subagent'}</span>
-              {activeRun.typeName &&
-                activeRun.typeName.toLowerCase() !== (activeRun.provider ?? '').toLowerCase() && (
-                  <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
-                )}
+            <div className="subagent-inspector__identity-main">
+              {runs.length > 1 ? (
+                <SubagentRunSwitcher
+                  key={thread?.id ?? activeRun.parentThreadId}
+                  runs={runs}
+                  activeRun={activeRun}
+                  onSelectRun={onSelectRun}
+                />
+              ) : (
+                <div className="subagent-inspector__role">
+                  <SubagentRoleIcon
+                    typeName={activeRun.typeName}
+                    role={activeRun.role}
+                    status={activeRun.status}
+                    size={15}
+                  />
+                  <span className="subagent-inspector__role-title">{activeTitle}</span>
+                  {activeRun.typeName &&
+                    activeRun.typeName.toLowerCase() !== (activeRun.provider ?? '').toLowerCase() &&
+                    activeRun.typeName.toLowerCase() !== activeTitle.toLowerCase() && (
+                      <span className="subagent-inspector__type-label">{activeRun.typeName}</span>
+                    )}
+                </div>
+              )}
             </div>
+
             <div className="subagent-inspector__status-actions">
               {isRunBlocked(activeRun.status) ? (
                 <span className="subagent-run-card__live">
@@ -270,54 +315,24 @@ export const SubagentInspectorHeader: React.FC<SubagentInspectorHeaderProps> = (
             </div>
           </div>
 
-          <div className="subagent-inspector__meta-subtitle">
+          <div
+            className="subagent-inspector__meta-subtitle"
+            title={`Main: ${parentModelLabel} ➔ Subagent: ${resolvedSubagentModel}${activeRun.workspaceMode ? ` · ${activeRun.workspaceMode}` : ''}`}
+          >
             <span
               data-testid="subagent-model-hierarchy"
               aria-label="Main to Subagent model hierarchy"
+              className="subagent-inspector__hierarchy-text"
             >
-              Main: {parentModelLabel} ➔ Subagent:{' '}
-              {!activeRun.model || activeRun.model.trim().toLowerCase() === 'inherit'
-                ? parentModelLabel
-                : formatInspectorModelName(activeRun.model, activeRun.provider)}
+              Main: {parentModelLabel} ➔ Subagent: {resolvedSubagentModel}
             </span>
             {activeRun.workspaceMode && (
               <>
                 <span aria-hidden="true">·</span>
-                <span>{activeRun.workspaceMode}</span>
+                <span className="subagent-inspector__workspace-text">{activeRun.workspaceMode}</span>
               </>
             )}
           </div>
-        </div>
-      )}
-
-      {mode === 'subagent' && runs.length > 1 && activeRun && !showingOverview && (
-        <div
-          className="subagent-inspector__selector-strip"
-          role="navigation"
-          aria-label="Subagent selector"
-        >
-          {runs.map((run) => {
-            const selected = activeRun.subagentId === run.subagentId;
-            const shortModel = formatInspectorModelName(run.model, run.provider);
-            return (
-              <button
-                key={run.subagentId}
-                type="button"
-                className={`subagent-inspector__selector-pill${selected ? ' subagent-inspector__selector-pill--active' : ''}`}
-                onClick={() => onSelectRun(run.subagentId)}
-              >
-                <SubagentRoleIcon
-                  typeName={run.typeName}
-                  role={run.role}
-                  status={run.status}
-                  size={12}
-                />
-                <span>{run.role || run.typeName || run.subagentId}</span>
-                <AgentStatusIndicator status={run.status} size={11} idleFallback={null} />
-                <span className="subagent-badge">{shortModel}</span>
-              </button>
-            );
-          })}
         </div>
       )}
     </div>

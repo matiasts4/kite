@@ -184,7 +184,7 @@ describe('SubagentsTab', () => {
     });
 
     // When curated stack is non-empty, default delegation options exclude out-of-stack sample models.
-    const defaultSelectBtn = screen.getByRole('combobox', { name: 'Modelo ligero predeterminado' });
+    const defaultSelectBtn = screen.getByRole('combobox', { name: 'Modelo predeterminado de subagentes' });
     await user.click(defaultSelectBtn);
     expect(screen.queryByText(/gemini-3-flash/)).not.toBeInTheDocument();
     await user.click(defaultSelectBtn);
@@ -252,7 +252,7 @@ describe('SubagentsTab', () => {
     render(<SubagentsTab />);
 
     const defaultSelectBtn = await screen.findByRole('combobox', {
-      name: 'Modelo ligero predeterminado',
+      name: 'Modelo predeterminado de subagentes',
     });
     await user.click(defaultSelectBtn);
     await user.click(screen.getByText(/gemini-3-flash/));

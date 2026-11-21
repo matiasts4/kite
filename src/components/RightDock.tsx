@@ -8,8 +8,12 @@ import {
   peekPendingDiffPreview,
 } from '../lib/diffPreviewNav';
 import { openFileInRightDock, peekPendingFilePreview } from '../lib/filePreviewNav';
-import { FilesView } from './views/FilesView';
-import { DiffsView } from './views/diffs/DiffsView';
+const FilesView = React.lazy(() =>
+  import('./views/FilesView').then((m) => ({ default: m.FilesView }))
+);
+const DiffsView = React.lazy(() =>
+  import('./views/diffs/DiffsView').then((m) => ({ default: m.DiffsView }))
+);
 import { TicketsView } from './views/TicketsView';
 import { PromptsView } from './views/PromptsView';
 import { SidePanelAppsView } from './views/SidePanelAppsView';
@@ -178,17 +182,19 @@ export const RightDock: React.FC<RightDockProps> = ({
   });
 
   useEffect(() => {
+    if (!visible) return;
     const update = () => {
-      const active = getActiveAgentTerminals();
-      setActiveAgentsCount(active.length);
+      const nextCount = getActiveAgentTerminals().length;
+      setActiveAgentsCount((prev) => (prev === nextCount ? prev : nextCount));
     };
+    update();
     window.addEventListener('kite:terminal-agent-update', update);
     const interval = window.setInterval(update, 2000);
     return () => {
       window.removeEventListener('kite:terminal-agent-update', update);
       window.clearInterval(interval);
     };
-  }, []);
+  }, [visible]);
 
   // Listen for open-right-dock-file to switch to the files tab
   useEffect(() => {
@@ -838,31 +844,35 @@ export const RightDock: React.FC<RightDockProps> = ({
                     <BrowserView workspaceId={effectiveWorkspaceId} isOccluded={isOccluded || dragging} />
                   )}
                   {activeTab.kind === 'files' && (
-                    <FilesView
-                      workspaceId={effectiveWorkspaceId}
-                      workspaces={workspaces}
-                      onSelectWorkspace={onSelectWorkspace}
-                    />
+                    <React.Suspense fallback={null}>
+                      <FilesView
+                        workspaceId={effectiveWorkspaceId}
+                        workspaces={workspaces}
+                        onSelectWorkspace={onSelectWorkspace}
+                      />
+                    </React.Suspense>
                   )}
                   {activeTab.kind === 'diffs' && (
-                    <DiffsView
-                      workspaceId={effectiveWorkspaceId}
-                      workspaces={workspaces}
-                      onSelectWorkspace={onSelectWorkspace}
-                      onOpenFileInEditor={(filePath) => {
-                        setTabs((prev) => {
-                          if (!prev.some((t) => t.id === 'files')) {
-                            return [...prev, { id: 'files', kind: 'files' }];
-                          }
-                          return prev;
-                        });
-                        setActiveTabId('files');
-                        openFileInRightDock({
-                          candidate: filePath,
-                          workspaceId: effectiveWorkspaceId,
-                        });
-                      }}
-                    />
+                    <React.Suspense fallback={null}>
+                      <DiffsView
+                        workspaceId={effectiveWorkspaceId}
+                        workspaces={workspaces}
+                        onSelectWorkspace={onSelectWorkspace}
+                        onOpenFileInEditor={(filePath) => {
+                          setTabs((prev) => {
+                            if (!prev.some((t) => t.id === 'files')) {
+                              return [...prev, { id: 'files', kind: 'files' }];
+                            }
+                            return prev;
+                          });
+                          setActiveTabId('files');
+                          openFileInRightDock({
+                            candidate: filePath,
+                            workspaceId: effectiveWorkspaceId,
+                          });
+                        }}
+                      />
+                    </React.Suspense>
                   )}
                   {activeTab.kind === 'tasks' && (
                     <div className="app-browser-sidebar__tasks">

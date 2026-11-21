@@ -34,8 +34,10 @@ import {
   loadChatSummariesWithFallback,
   loadSavedGrid,
   loadThreadWithFallback,
+  pruneThreadsMapLru,
   readCachedThread,
   sortAgentSummariesByTabOrder,
+  toThreadSummary,
 } from './hooks/useChatGridPersistence';
 import { useChatTurnActions } from './hooks/useChatTurnActions';
 import { useSubagentEvents } from './hooks/useSubagentEvents';
@@ -85,6 +87,8 @@ function areThreadSnapshotsEquivalent(
     incoming.swarmState ||
     current.quotaHandoffOffer ||
     incoming.quotaHandoffOffer ||
+    current.reflectionCandidate ||
+    incoming.reflectionCandidate ||
     (current.queuedRuns?.length ?? 0) > 0 ||
     (incoming.queuedRuns?.length ?? 0) > 0 ||
     (current.subagentRuns?.length ?? 0) > 0 ||
@@ -140,6 +144,7 @@ function mergeThreadConfigUpdate(
     subagentRuns: existing.subagentRuns,
     swarmState: existing.swarmState,
     quotaHandoffOffer: existing.quotaHandoffOffer,
+    reflectionCandidate: existing.reflectionCandidate,
     usage: existing.usage,
     ...(existingExtra.liveActivity !== undefined
       ? { liveActivity: existingExtra.liveActivity }
@@ -209,7 +214,12 @@ export function useChatSession({
   // draft inherits the agent profile's default model so the first thread does
   // not silently reset a configured model to Automatic.
   const [draftConfig, setDraftConfig] = useState<ChatDraftConfig>(() =>
-    createDraftConfig(defaultProvider, currentAgent?.defaultModel || null)
+    createDraftConfig(
+      defaultProvider,
+      currentAgent?.defaultModel || null,
+      null,
+      currentAgent
+    )
   );
 
   // UI state
@@ -340,14 +350,24 @@ export function useChatSession({
       if (areThreadSnapshotsEquivalent(existing, merged)) {
         return prev;
       }
-      return { ...prev, [threadId]: merged };
+      const { [threadId]: _reordered, ...rest } = prev;
+      const updated = { ...rest, [threadId]: merged };
+      const protectedIds = [
+        ...gridThreadIdsRef.current,
+        ...(focusedThreadIdRef.current ? [focusedThreadIdRef.current] : []),
+        threadId,
+      ];
+      return pruneThreadsMapLru(updated, protectedIds);
     });
+    const summaryThread = toThreadSummary(boundThread);
     setKnownThreadsList((prev) => {
       const existing = prev.find((t) => t.id === threadId);
-      if (existing && areThreadSnapshotsEquivalent(existing, boundThread)) {
+      if (existing && areThreadSnapshotsEquivalent(existing, summaryThread)) {
         return prev;
       }
-      return existing ? prev.map((t) => (t.id === threadId ? boundThread : t)) : [boundThread, ...prev];
+      return existing
+        ? prev.map((t) => (t.id === threadId ? summaryThread : t))
+        : [summaryThread, ...prev];
     });
     if (updateLayout) {
       const currentGrid = gridThreadIdsRef.current;
@@ -453,14 +473,24 @@ export function useChatSession({
           if (areThreadSnapshotsEquivalent(existing, bound)) {
             return prev;
           }
-          return { ...prev, [threadId]: bound };
+          const { [threadId]: _reordered, ...rest } = prev;
+          const updated = { ...rest, [threadId]: bound };
+          const protectedIds = [
+            ...gridThreadIdsRef.current,
+            ...(focusedThreadIdRef.current ? [focusedThreadIdRef.current] : []),
+            threadId,
+          ];
+          return pruneThreadsMapLru(updated, protectedIds);
         });
+        const summaryBound = toThreadSummary(bound);
         setKnownThreadsList((prev) => {
           const existing = prev.find((t) => t.id === threadId);
-          if (existing && areThreadSnapshotsEquivalent(existing, bound)) {
+          if (existing && areThreadSnapshotsEquivalent(existing, summaryBound)) {
             return prev;
           }
-          return existing ? prev.map((t) => (t.id === threadId ? bound : t)) : [bound, ...prev];
+          return existing
+            ? prev.map((t) => (t.id === threadId ? summaryBound : t))
+            : [summaryBound, ...prev];
         });
         if (bound.status !== 'running') {
           setIsRunning((prev) => (prev[threadId] ? { ...prev, [threadId]: false } : prev));
@@ -923,6 +953,7 @@ export function useChatSession({
           let changed = false;
           const next = { ...prev };
           for (const [id, loadedThread] of Object.entries(loadedMap)) {
+            if ((configUpdateSeqRef.current[id] ?? 0) > 0) continue;
             if (!areThreadSnapshotsEquivalent(prev[id], loadedThread)) {
               next[id] = loadedThread;
               changed = true;
@@ -979,10 +1010,13 @@ export function useChatSession({
       focusedThreadIdRef.current && threadsMapRef.current[focusedThreadIdRef.current]
         ? (threadsMapRef.current[focusedThreadIdRef.current].workspaceId ?? null)
         : null;
-    const homeWorkspaceId = activeFocusedWsId ?? (embedded ? workspaceId : null);
+    const homeWorkspaceId = activeFocusedWsId ?? (embedded || agentId ? workspaceId : null);
     try {
       const thread = agentId
-        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
+        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
+            ...request,
+            ...(homeWorkspaceId ? { workspaceId: homeWorkspaceId } : {}),
+          })
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
             ...request,
             workspaceId: homeWorkspaceId,
@@ -1029,7 +1063,9 @@ export function useChatSession({
     const requestSeq = ++switchRequestSeqRef.current;
     const activeFocusedId = focusedThreadIdRef.current ?? focusedThreadId;
     const activeFocusedThread = activeFocusedId ? threadsMapRef.current[activeFocusedId] ?? threadsMap[activeFocusedId] : null;
-    const fallbackWorkspaceId = agentId
+    const fallbackWorkspaceId = (workspaceId ?? null) !== null
+      ? workspaceId
+      : agentId
       ? null
       : embedded
       ? workspaceId
@@ -1042,7 +1078,16 @@ export function useChatSession({
         : targetWorkspaceId === null
         ? null
         : fallbackWorkspaceId;
-    const latest = createDraftConfig(draftConfig.provider, null, draftConfig.agent ?? null);
+    const latest = createDraftConfig(
+      draftConfig.provider,
+      currentAgent?.defaultModel || draftConfig.model || null,
+      draftConfig.agent ?? null,
+      currentAgent ?? {
+        defaultMode: draftConfig.mode,
+        defaultPlan: draftConfig.plan,
+        defaultEffort: draftConfig.effort,
+      }
+    );
 
     // Reuse the open draft ONLY if the currently focused thread in this pane is already
     // a blank conversation (zero messages, zero voice turns) in the requested scope.
@@ -1069,6 +1114,7 @@ export function useChatSession({
         model: latest.model,
         effort: latest.effort,
         mode: latest.mode,
+        ...(latest.plan !== undefined ? { plan: latest.plan } : {}),
         ...(latest.agent ? { agent: latest.agent } : {}),
       });
       if (!isMountedRef.current || switchRequestSeqRef.current !== requestSeq) return currentThread.id;
@@ -1077,7 +1123,7 @@ export function useChatSession({
       window.dispatchEvent(
         new CustomEvent('kite:select-thread', { detail: { threadId: currentThread.id, mode: 'chat' } })
       );
-      if (scopeWorkspaceId && embedded) {
+      if (scopeWorkspaceId && (embedded || agentId)) {
         window.dispatchEvent(
           new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
         );
@@ -1088,7 +1134,10 @@ export function useChatSession({
     try {
       const request = draftThreadRequest(latest, agentId);
       const thread = agentId
-        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', request)
+        ? await invokeCommand<ExtendedChatThread>('create_agent_chat', {
+            ...request,
+            ...(scopeWorkspaceId ? { workspaceId: scopeWorkspaceId } : {}),
+          })
         : await invokeCommand<ExtendedChatThread>('create_general_chat', {
             ...request,
             workspaceId: scopeWorkspaceId ?? null,
@@ -1111,7 +1160,7 @@ export function useChatSession({
       window.dispatchEvent(
         new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
       );
-      if (scopeWorkspaceId && embedded) {
+      if (scopeWorkspaceId && (embedded || agentId)) {
         window.dispatchEvent(
           new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
         );

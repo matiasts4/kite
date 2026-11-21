@@ -10,7 +10,19 @@ import {
 } from './icons';
 import { ThemeItem, DARK_THEMES, LIGHT_THEMES } from './types';
 import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
-import { StageBackdrop } from '../../theme/StageBackdrop';
+import {
+  AGENT_ACTIVITY_INDICATOR_COLOR_OPTIONS,
+  AGENT_ACTIVITY_INDICATOR_OPTIONS,
+  AgentStatusIndicator,
+  useAgentActivityIndicatorColor,
+  useAgentActivityIndicatorStyle,
+} from '../../ui/AgentStatusIndicator';
+import { SubagentRoleIcon } from '../../ui/SubagentRoleIcon';
+import {
+  writeAgentActivityIndicatorColor,
+  writeAgentActivityIndicatorStyle,
+  type AgentActivityIndicatorColor,
+} from '../../../lib/kitePrefs';
 import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
 import {
   BACKDROP_PRESETS,
@@ -170,6 +182,14 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
   } | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const indicatorStyle = useAgentActivityIndicatorStyle();
+  const indicatorColor = useAgentActivityIndicatorColor();
+  const isCustomIndicatorHex = /^#[0-9a-fA-F]{6}$/.test(indicatorColor);
+  const customIndicatorColorValue = isCustomIndicatorHex
+    ? indicatorColor
+    : indicatorColor === 'accent'
+      ? (customizations.overrides.accent ?? activePack.tokens.accent)
+      : '#4ade80';
 
   useEffect(() => {
     setCustomUrlDraft(customizations.backdrop.customImageUrl);
@@ -277,12 +297,7 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
   const renderThemeCard = (theme: ThemeItem) => {
     const isThemeActive = palette === theme.id;
     const pack = getThemePackById(theme.id);
-    const previewState: KiteThemeCustomizations = {
-      ...customizations,
-      appearanceMode: theme.mode,
-      darkThemeId: theme.mode === 'dark' ? theme.id : customizations.darkThemeId,
-      lightThemeId: theme.mode === 'light' ? theme.id : customizations.lightThemeId,
-    };
+    const backdropPreset = BACKDROP_PRESETS.find((p) => p.id === pack.defaultBackdrop);
 
     const previewStyle = {
       '--background': pack.tokens.background,
@@ -311,11 +326,16 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
           data-theme={theme.mode}
           style={previewStyle}
         >
-          <StageBackdrop
-            customizations={previewState}
-            overridePreset={pack.defaultBackdrop}
-            variant="miniature"
-          />
+          {pack.defaultBackdrop !== 'none' && (
+            <span
+              aria-hidden="true"
+              className="theme-preview__backdrop"
+              data-backdrop-preset={pack.defaultBackdrop}
+              style={{
+                background: backdropPreset?.previewGradient ?? pack.tokens.background,
+              }}
+            />
+          )}
           <span className="theme-preview__rail">
             <span className="theme-preview__row theme-preview__row--selected">
               <span className="theme-preview__dot" data-status="running" />
@@ -436,6 +456,129 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
                   <span>Sistema</span>
                 </button>
               </fieldset>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 1b. Agent Activity Indicator Gallery, Color & Compact Live Preview */}
+      <section aria-labelledby="agent-activity-indicator-heading" className="settings-group">
+        <h2 className="settings-group__title" id="agent-activity-indicator-heading">
+          Indicador de actividad de agentes
+        </h2>
+        <div className="ui-card">
+          <div className="ui-card__row settings-row settings-row--stacked customizations-indicator-card__row">
+            <div className="customizations-indicator-grid" role="group" aria-label="Estilo del indicador">
+              {AGENT_ACTIVITY_INDICATOR_OPTIONS.map((option) => {
+                const active = indicatorStyle === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    aria-pressed={active}
+                    className="customizations-indicator-tile"
+                    onClick={() => writeAgentActivityIndicatorStyle(option.id)}
+                    title={option.blurb}
+                    type="button"
+                  >
+                    <AgentStatusIndicator status="running" size={14} variant={option.id} />
+                    <span className="customizations-indicator-tile__label">{option.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row customizations-indicator-card__row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Color del indicador</h3>
+              <p>Sincronízalo con el acento del tema o elige un color fijo.</p>
+            </div>
+            <div className="customizations-indicator-colors" role="group" aria-label="Color del indicador">
+              {AGENT_ACTIVITY_INDICATOR_COLOR_OPTIONS.slice(0, 2).map((opt) => {
+                const active = indicatorColor === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    aria-pressed={active}
+                    className="customizations-indicator-color-pill"
+                    onClick={() => writeAgentActivityIndicatorColor(opt.id)}
+                    type="button"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="customizations-indicator-color-dot"
+                      style={{ background: opt.swatch }}
+                    />
+                    <span>{opt.label}</span>
+                  </button>
+                );
+              })}
+
+              <span className="customizations-indicator-color-swatches">
+                {AGENT_ACTIVITY_INDICATOR_COLOR_OPTIONS.slice(2).map((opt) => {
+                  const active = indicatorColor === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      aria-label={opt.label}
+                      aria-pressed={active}
+                      className="customizations-indicator-swatch"
+                      onClick={() => writeAgentActivityIndicatorColor(opt.id)}
+                      title={opt.label}
+                      type="button"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="customizations-indicator-swatch__fill"
+                        style={{ background: opt.swatch }}
+                      />
+                    </button>
+                  );
+                })}
+                <label
+                  className={`customizations-indicator-custom${
+                    isCustomIndicatorHex ? ' customizations-indicator-custom--active' : ''
+                  }`}
+                  title="Color personalizado"
+                >
+                  <input
+                    aria-label="Color personalizado del indicador"
+                    className="customizations-indicator-custom__input"
+                    onChange={(e) => {
+                      const next = e.target.value as AgentActivityIndicatorColor;
+                      writeAgentActivityIndicatorColor(next);
+                    }}
+                    type="color"
+                    value={/^#[0-9a-fA-F]{6}$/.test(customIndicatorColorValue) ? customIndicatorColorValue : '#4ade80'}
+                  />
+                </label>
+              </span>
+            </div>
+          </div>
+
+          <div className="ui-card__row customizations-indicator-preview-row">
+            <span className="customizations-indicator-preview-row__label">Vista previa</span>
+            <div
+              className="customizations-indicator-preview"
+              data-testid="agent-indicator-live-preview"
+            >
+              <span className="customizations-indicator-preview__chip">
+                <span>Subagents</span>
+                <AgentStatusIndicator status="running" size={11} />
+                <span className="customizations-indicator-preview__count">2</span>
+              </span>
+
+              <span className="customizations-indicator-preview__chip">
+                <SubagentRoleIcon typeName="research" role="Explorer" size={13} />
+                <span>Explorer</span>
+                <AgentStatusIndicator status="running" size={14} />
+                <span className="customizations-indicator-preview__time">0:14</span>
+              </span>
+
+              <span className="customizations-indicator-preview__chip">
+                <span>Auth middleware</span>
+                <AgentStatusIndicator status="running" size={14} />
+              </span>
             </div>
           </div>
         </div>

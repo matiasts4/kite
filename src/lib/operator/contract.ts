@@ -45,9 +45,18 @@ export const NarrateSummaryActionSchema = z.object({
   target: z.union([z.string(), z.number()]).optional(),
 });
 
+export const SubagentDelegationModeSchema = z.enum(['explore', 'odd', 'execute']);
+export type SubagentDelegationMode = z.infer<typeof SubagentDelegationModeSchema>;
+
 export const SpawnSubagentActionSchema = z.object({
   type: z.literal('spawn_subagent'),
-  cli: EngineSchema.default('grok'),
+  cli: EngineSchema.optional(),
+  provider: EngineSchema.optional(),
+  role: z.string().optional(),
+  workspace: z.enum(['inherit', 'share', 'branch']).optional(),
+  via: z.enum(['thread', 'terminal']).optional(),
+  mode: SubagentDelegationModeSchema.optional(),
+  oddMode: z.boolean().optional(),
   task: z.string().min(1),
 });
 
@@ -86,7 +95,19 @@ export const LaunchThreadActionSchema = z.object({
   type: z.literal('launch_thread'),
   threadId: z.string().optional(),
   provider: EngineSchema.optional(),
+  title: z.string().optional(),
   body: z.string().optional(),
+  oddMode: z.boolean().optional(),
+  focusThread: z.boolean().optional(),
+});
+
+export const LaunchAgentActionSchema = z.object({
+  type: z.literal('launch_agent'),
+  agentQuery: z.string().optional(),
+  provider: EngineSchema.optional(),
+  body: z.string().min(1),
+  oddMode: z.boolean().optional(),
+  focusAgent: z.boolean().optional(),
 });
 
 export const ActionSchema = z.discriminatedUnion('type', [
@@ -101,10 +122,13 @@ export const ActionSchema = z.discriminatedUnion('type', [
   ManagePaneLayoutActionSchema,
   SwitchWorkspaceActionSchema,
   LaunchThreadActionSchema,
+  LaunchAgentActionSchema,
 ]);
 
 export type OperatorContractAction = z.infer<typeof ActionSchema>;
 export type LaunchThreadAction = z.infer<typeof LaunchThreadActionSchema>;
+export type LaunchAgentAction = z.infer<typeof LaunchAgentActionSchema>;
+export type SpawnSubagentAction = z.infer<typeof SpawnSubagentActionSchema>;
 export type HandoffToAgentAction = z.infer<typeof HandoffToAgentActionSchema>;
 export type ManagePaneLayoutAction = z.infer<typeof ManagePaneLayoutActionSchema>;
 export type SwitchWorkspaceAction = z.infer<typeof SwitchWorkspaceActionSchema>;
@@ -114,15 +138,54 @@ export type WorkspaceViewMode = NonNullable<SwitchWorkspaceAction['viewMode']>;
 export const PlanStrategySchema = z.enum(['llm', 'heuristic', 'heuristic-fallback']);
 export type PlanStrategy = z.infer<typeof PlanStrategySchema>;
 
+export const ClarificationSchema = z.object({
+  question: z.string().min(1),
+  missingSlot: z.enum(['target', 'task', 'surface', 'provider', 'workspace']),
+  candidates: z.array(z.string()).max(4).optional(),
+  draftAction: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type OperatorClarification = z.infer<typeof ClarificationSchema>;
+
 export const PlanSchema = z.object({
   strategy: PlanStrategySchema,
   fallbackReason: z.string().optional(),
   actions: z.array(ActionSchema),
   answer: z.string().optional(),
   reply: z.string().optional(),
+  clarification: ClarificationSchema.optional(),
 });
 
 export type OperatorPlan = z.infer<typeof PlanSchema>;
+
+export interface WorkspaceThreadSnapshot {
+  id: string;
+  title: string;
+  provider: string;
+  status: string;
+  updatedAtUnixMs: number;
+}
+
+export interface WorkspaceSubagentSnapshot {
+  id: string;
+  role: string;
+  provider: string;
+  status: string;
+  parentThreadId?: string;
+  title?: string;
+  latestActivity?: string;
+  findingsSummary?: string;
+  updatedAtUnixMs: number;
+}
+
+export interface WorkspaceAutonomousAgentSnapshot {
+  id: string;
+  name: string;
+  engine: string;
+  status: string;
+  activeThreadId?: string;
+  updatedAtUnixMs?: number;
+}
 
 export interface ActionVerification {
   expected: Record<string, unknown>;
@@ -136,6 +199,8 @@ export interface ActionReceipt {
   type: OperatorContractAction['type'] | string;
   ok: boolean;
   summaryEs: string;
+  /** Optional concise conversational narration preferred for voice playback over verbose receipts. */
+  spokenSummaryEs?: string;
   data?: unknown;
   verification?: ActionVerification;
   error?: string;
@@ -146,7 +211,10 @@ export interface TurnContext {
   workspaceId?: string;
   workspaceName?: string;
   workspacePath?: string;
+  gitBranch?: string;
   mode?: string;
+  boundThreadId?: string;
+  voiceSessionActive?: boolean;
   activeTerminals?: Array<{
     sessionId: string;
     who?: string;
@@ -157,6 +225,9 @@ export interface TurnContext {
     idx?: number;
     workspaceId?: string;
   }>;
+  activeThreads?: WorkspaceThreadSnapshot[];
+  activeSubagents?: WorkspaceSubagentSnapshot[];
+  autonomousAgents?: WorkspaceAutonomousAgentSnapshot[];
 }
 
 export const OPERATOR_NATIVE_TOOLS = [
@@ -237,11 +308,17 @@ export const OPERATOR_NATIVE_TOOLS = [
     type: 'function',
     function: {
       name: 'spawn_subagent',
-      description: 'Spawn a dedicated subagent with a specific CLI and task.',
+      description: 'Spawn a dedicated child subagent anchored to the active voice thread via dispatch (default) or terminal with mode (explore read-only vs odd vs execute), optional role, and workspace mode.',
       parameters: {
         type: 'object',
         properties: {
-          cli: { type: 'string', enum: ['grok', 'claude', 'codex', 'antigravity', 'opencode'], default: 'grok' },
+          cli: { type: 'string', enum: ['grok', 'claude', 'codex', 'antigravity', 'opencode'] },
+          provider: { type: 'string', enum: ['grok', 'claude', 'codex', 'antigravity', 'opencode'] },
+          role: { type: 'string' },
+          workspace: { type: 'string', enum: ['inherit', 'share', 'branch'] },
+          via: { type: 'string', enum: ['thread', 'terminal'], default: 'thread' },
+          mode: { type: 'string', enum: ['explore', 'odd', 'execute'], default: 'explore' },
+          oddMode: { type: 'boolean' },
           task: { type: 'string' },
         },
         required: ['task'],
@@ -313,6 +390,42 @@ export const OPERATOR_NATIVE_TOOLS = [
           viewMode: { type: 'string', enum: ['agents', 'code', 'threads'] },
         },
         required: ['workspaceQuery'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_thread',
+      description: 'Create or message a conversation thread with an optional provider, title, and ODD-first brief.',
+      parameters: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          provider: { type: 'string', enum: ['grok', 'claude', 'codex', 'antigravity', 'opencode'] },
+          title: { type: 'string' },
+          body: { type: 'string' },
+          oddMode: { type: 'boolean' },
+          focusThread: { type: 'boolean' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_agent',
+      description: 'Delegate a task to a configured Autonomous Agent profile.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentQuery: { type: 'string' },
+          provider: { type: 'string', enum: ['grok', 'claude', 'codex', 'antigravity', 'opencode'] },
+          body: { type: 'string' },
+          oddMode: { type: 'boolean' },
+          focusAgent: { type: 'boolean' },
+        },
+        required: ['body'],
       },
     },
   },

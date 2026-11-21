@@ -1,5 +1,6 @@
 import type { ExtendedChatThread } from '../types';
 import { isInternalDispatchItem } from '../chatItemHelpers';
+import { openDiffsInRightDock } from '../../../../lib/diffPreviewNav';
 
 export function composeRewoundPrompt(draft: string, rewound: string): string {
   if (!draft.trim()) return rewound;
@@ -75,4 +76,32 @@ export function changedFilesForTurn(items: ExtendedChatThread['items']) {
     }
   }
   return [...files.values()];
+}
+
+/** Shared composer changed-files strip props opening RightDock Diffs scoped to the turn. */
+export function buildComposerChangedFilesProps(
+  items: ExtendedChatThread['items'],
+  workspaceId?: string | null,
+  workspaceName?: string | null,
+) {
+  const changedFiles = changedFilesForTurn(items);
+  return {
+    changedFiles,
+    changedFilesWorkspaceName: workspaceName ?? null,
+    onOpenTurnDiff: () => {
+      openDiffsInRightDock({
+        workspaceId: workspaceId ?? null,
+        workspaceName: workspaceName ?? null,
+        focusPaths: changedFiles.map((file) => file.path),
+      });
+    },
+    onOpenChangedFile: (path: string) => {
+      openDiffsInRightDock({
+        workspaceId: workspaceId ?? null,
+        workspaceName: workspaceName ?? null,
+        focusPaths: [path],
+        selectedPath: path,
+      });
+    },
+  };
 }

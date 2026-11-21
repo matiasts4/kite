@@ -95,6 +95,13 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
     }
   }, [workMode]);
 
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [workMode, routinesOpen]);
+
   const renderFallbackView = () => {
     if (!isTauriEnvironment()) {
       return (
@@ -156,6 +163,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
             <AgentsView
               agents={agents}
               workspaceId={selectedWorkspaceId}
+              workspaces={workspaces}
               selectedAgentId={selectedAgentId}
               onSelectAgent={(id) => {
                 setSelectedAgentId(id);
@@ -225,6 +233,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
             <AgentsView
               agents={agents}
               workspaceId={selectedWorkspaceId}
+              workspaces={workspaces}
               selectedAgentId={selectedAgentId}
               onSelectAgent={(id) => {
                 setSelectedAgentId(id);
@@ -277,6 +286,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
                   <AgentsView
                     agents={agents}
                     workspaceId={selectedWorkspaceId}
+                    workspaces={workspaces}
                     selectedAgentId={selectedAgentId}
                     onSelectAgent={(id) => {
                       setSelectedAgentId(id);

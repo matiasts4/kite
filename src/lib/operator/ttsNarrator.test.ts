@@ -60,10 +60,18 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
       expect(output).toContain('¿Deseas ejecutarlo?');
     });
 
-    it('cleans inline code backticks, bold, links and emojis', () => {
+    it('cleans inline code backticks, file paths, UUIDs, links and emojis', () => {
       const input = 'Revisa `src/main.ts` y [la documentación](https://example.com) 🚀!';
       const output = cleanTextForSpeech(input);
-      expect(output).toBe('Revisa src/main.ts y la documentación !');
+      expect(output).toBe('Revisa main.ts y la documentación!');
+      expect(output).not.toContain('src/');
+
+      const withUuidAndPath =
+        'Hilo 550e8400-e29b-41d4-a716-446655440000 en C:\\Users\\dev\\repo\\app.ts listo.';
+      const cleaned = cleanTextForSpeech(withUuidAndPath);
+      expect(cleaned).not.toContain('550e8400');
+      expect(cleaned).not.toContain('C:\\Users');
+      expect(cleaned).toContain('app.ts');
     });
   });
 
@@ -352,6 +360,184 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
 
       // Must have spoken each sentence chunk separately
       expect(speakSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('never cuts off a long-duration browser utterance by wall-clock timeout (S9)', async () => {
+      vi.useFakeTimers();
+      try {
+        const utterances: any[] = [];
+        const synth = (globalThis as any).window.speechSynthesis;
+        synth.speak = vi.fn((utterance: any) => {
+          utterances.push(utterance);
+          synth.speaking = true;
+          // Fires onstart immediately, but takes 30s to finish speaking
+          setTimeout(() => {
+            utterance.onstart?.();
+          }, 10);
+          setTimeout(() => {
+            synth.speaking = false;
+            utterance.onend?.();
+          }, 30000);
+        });
+
+        const onStart = vi.fn();
+        const onEnd = vi.fn();
+        const speakPromise = ttsNarrator.speak(
+          'Esta es una oración larga que tarda treinta segundos en leerse completa. Y aquí viene la segunda oración.',
+          { engine: 'browser', onStart, onEnd }
+        );
+
+        // Flush getAvailableVoices() microtasks
+        await vi.advanceTimersByTimeAsync(20);
+        expect(utterances).toHaveLength(1);
+        expect(onStart).toHaveBeenCalledTimes(1);
+
+        // Advance 20 seconds (past the old chunkMaxMs timeout): MUST NOT skip to chunk 2
+        await vi.advanceTimersByTimeAsync(20000);
+        expect(utterances).toHaveLength(1);
+        expect(onEnd).not.toHaveBeenCalled();
+
+        // Finish chunk 1 at 30s, then chunk 2 starts and finishes at 60s
+        await vi.advanceTimersByTimeAsync(10050);
+        expect(utterances).toHaveLength(2);
+
+        await vi.advanceTimersByTimeAsync(30050);
+        await speakPromise;
+        expect(onEnd).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('recovers from a dead browser utterance only when it never started and synth is idle (S9)', async () => {
+      vi.useFakeTimers();
+      try {
+        const utterances: any[] = [];
+        const synth = (globalThis as any).window.speechSynthesis;
+        synth.speaking = false;
+        synth.pending = false;
+        synth.speak = vi.fn((utterance: any) => {
+          utterances.push(utterance);
+          if (utterances.length === 2) {
+            // Second chunk works normally
+            setTimeout(() => {
+              utterance.onstart?.();
+              utterance.onend?.();
+            }, 10);
+          }
+          // First chunk silently drops without onstart/onend/onerror
+        });
+
+        const onEnd = vi.fn();
+        const speakPromise = ttsNarrator.speak('Primera oración colgada. Segunda oración normal.', {
+          engine: 'browser',
+          onEnd,
+        });
+
+        await vi.advanceTimersByTimeAsync(6000);
+        await speakPromise;
+
+        expect(utterances).toHaveLength(2);
+        expect(onEnd).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to browser speechSynthesis when ElevenLabs Audio.onerror fires a DOM error Event (S9)', async () => {
+      const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const mockBlob = new Blob(['bad-audio'], { type: 'audio/mpeg' });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: vi.fn().mockResolvedValue(mockBlob),
+      } as any);
+
+      (globalThis as any).URL = {
+        createObjectURL: vi.fn(() => 'blob:http://localhost/bad-audio'),
+        revokeObjectURL: vi.fn(),
+      };
+
+      (globalThis as any).Audio = class {
+        src = '';
+        volume = 1;
+        paused = true;
+        onplay: (() => void) | null = null;
+        onended: (() => void) | null = null;
+        onerror: ((err: any) => void) | null = null;
+        play() {
+          setTimeout(() => {
+            this.onerror?.({ type: 'error' });
+          }, 5);
+          return Promise.resolve();
+        }
+        pause() {}
+      };
+
+      const onEnd = vi.fn();
+      const onError = vi.fn(() => {
+        // Mirrors ZedStrip calling startListening() -> ttsNarrator.stop() inside onError.
+        ttsNarrator.stop();
+      });
+      await ttsNarrator.speak('Fallback tras error de elemento audio.', {
+        engine: 'elevenlabs',
+        elevenlabsApiKey: 'valid_key',
+        onEnd,
+        onError,
+      });
+
+      expect(consoleWarnSpy).toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect((globalThis as any).window.speechSynthesis.speak).toHaveBeenCalled();
+      expect(onEnd).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to browser speechSynthesis when MediaSource.addSourceBuffer throws (S9)', async () => {
+      const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      class FailingMediaSource {
+        readyState = 'open';
+        addEventListener = vi.fn((event: string, cb: () => void) => {
+          if (event === 'sourceopen') setTimeout(cb, 5);
+        });
+        addSourceBuffer = vi.fn(() => {
+          throw new Error('QuotaExceeded or NotSupportedError');
+        });
+        static isTypeSupported = vi.fn(() => true);
+      }
+      (globalThis as any).MediaSource = FailingMediaSource;
+
+      (globalThis as any).Audio = class {
+        src = '';
+        volume = 1;
+        paused = true;
+        onplay: (() => void) | null = null;
+        onended: (() => void) | null = null;
+        onerror: ((err: any) => void) | null = null;
+        pause() {}
+      };
+
+      (globalThis as any).URL = {
+        createObjectURL: vi.fn(() => 'blob:http://localhost/ms-fail'),
+        revokeObjectURL: vi.fn(),
+      };
+
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { getReader: () => ({ read: vi.fn(), cancel: vi.fn() }) },
+      } as any);
+
+      const onEnd = vi.fn();
+      await ttsNarrator.speak('Fallback cuando MediaSource falla al crear SourceBuffer.', {
+        engine: 'elevenlabs',
+        elevenlabsApiKey: 'valid_key',
+        onEnd,
+      });
+
+      expect(consoleWarnSpy).toHaveBeenCalled();
+      expect((globalThis as any).window.speechSynthesis.speak).toHaveBeenCalled();
+      expect(onEnd).toHaveBeenCalledTimes(1);
     });
   });
 });

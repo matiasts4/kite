@@ -96,6 +96,20 @@ export async function removeAgentSkill(
   });
 }
 
+export async function setAgentSkillEnabled(
+  agentId: string,
+  skillId: string,
+  enabled: boolean,
+  confirmedByBuilder = true
+): Promise<AgentMindSnapshot> {
+  return invokeCommand<AgentMindSnapshot>('set_agent_skill_enabled', {
+    agentId,
+    skillId,
+    enabled,
+    confirmedByBuilder,
+  });
+}
+
 export async function listAgentStarters(supportedCatalogVersion = 1): Promise<StarterSummary[]> {
   return invokeCommand<StarterSummary[]>('list_agent_starters', { supportedCatalogVersion });
 }

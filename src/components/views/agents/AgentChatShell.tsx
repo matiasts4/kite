@@ -16,6 +16,7 @@ import { SubagentGroupRow } from '../chat/SubagentActivityCard';
 import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import { QueuedRunsControl, type QueuedRunRow } from '../chat/QueuedRunsControl';
 import { ChatComposer } from '../chat/ChatComposer';
+import { buildComposerChangedFilesProps } from '../chat/pane/threadTurnHelpers';
 import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
 import { declarationFromCatalog } from '../chat/driverDeclaration';
 import {
@@ -35,8 +36,15 @@ import {
   createWorkspaceBranch,
   renameChatThread,
 } from '../../../lib/ipc';
-import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
-import { useTranscriptLiveEdge, useTranscriptMotion } from '../../../motion/useTranscriptMotion';
+import { useVoiceSession, voiceSessionStore, type VoiceTurnRecord } from '../../../lib/operator/voice/voiceSessionStore';
+import { liveVoiceStageItem, mergeTimeline, voiceTurnsToChatItems } from '../chat/voiceTranscript';
+import { subscribeTrace } from '../../../lib/operator/trace/trace';
+import { runOperatorTurn } from '../../../lib/operator';
+import {
+  buildTranscriptScrollKeys,
+  useTranscriptLiveEdge,
+  useTranscriptMotion,
+} from '../../../motion/useTranscriptMotion';
 import type {
   ExtendedChatThread,
   ChatAttachment,
@@ -60,6 +68,9 @@ interface TeammateMessage {
   senderName: string;
   body: string;
   delivered: boolean;
+  threadId?: string | null;
+  targetAgentId?: string | null;
+  direction?: string;
 }
 
 export interface AgentChatSurfaceProps {
@@ -205,6 +216,108 @@ const AgentTranscriptMotion: React.FC<AgentTranscriptMotionProps> = ({
     </motion.div>
   );
 };
+
+interface AgentChatTranscriptContentProps {
+  threadId: string;
+  effectiveWsId: string | null;
+  activeItems: ExtendedChatThread['items'];
+  transcriptRows: ReturnType<typeof groupTranscriptRows>;
+  liveAt: number;
+  running: boolean;
+  pendingApproval: ExtendedChatThread['pendingApproval'];
+  swarmState: ExtendedChatThread['swarmState'];
+  stoppedByBuilder: boolean;
+  durationSeconds?: number | null;
+  subagentRuns: ExtendedChatThread['subagentRuns'];
+  quotaHandoffOffer: ExtendedChatThread['quotaHandoffOffer'];
+  enterFor: (id: string) => boolean;
+  onEditUserMessage: (text: string) => void;
+}
+
+const AgentChatTranscriptContent = React.memo(function AgentChatTranscriptContent({
+  threadId,
+  effectiveWsId,
+  activeItems,
+  transcriptRows,
+  liveAt,
+  running,
+  pendingApproval,
+  swarmState,
+  stoppedByBuilder,
+  durationSeconds,
+  subagentRuns,
+  quotaHandoffOffer,
+  enterFor,
+  onEditUserMessage,
+}: AgentChatTranscriptContentProps) {
+  return (
+    <div className="chat-transcript__column">
+      {transcriptRows.map((row, index, rows) => {
+        const rowKey =
+          row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
+        return (
+          <React.Fragment key={rowKey}>
+            {index === liveAt ? (
+              <TurnActivityStatus
+                running={running}
+                pendingApproval={pendingApproval}
+                items={activeItems}
+                swarmState={swarmState}
+                interrupted={false}
+                durationSeconds={durationSeconds}
+              />
+            ) : null}
+            {row.kind === 'work' ? (
+              <ChatWorkGroup
+                items={row.items}
+                running={running && index === liveAt}
+                enterFor={enterFor}
+                interrupted={stoppedByBuilder && index === rows.length - 1}
+              />
+            ) : row.kind === 'subagentGroup' ? (
+              <SubagentGroupRow
+                items={row.items}
+                threadId={threadId}
+                workspaceId={effectiveWsId}
+                subagentRuns={subagentRuns}
+                enterFor={enterFor}
+              />
+            ) : (
+              <ChatItemRow
+                item={row.item}
+                threadId={threadId}
+                workspaceId={effectiveWsId}
+                subagentRuns={subagentRuns}
+                swarmState={swarmState}
+                enter={enterFor(row.item.id)}
+                onEditUserMessage={onEditUserMessage}
+              />
+            )}
+          </React.Fragment>
+        );
+      })}
+
+      {liveAt < 0 || !running ? (
+        <TurnActivityStatus
+          running={running}
+          pendingApproval={pendingApproval}
+          items={activeItems}
+          swarmState={swarmState}
+          interrupted={stoppedByBuilder && !running}
+          durationSeconds={durationSeconds}
+        />
+      ) : null}
+
+      {/* Quota Handoff Banner */}
+      {quotaHandoffOffer && (
+        <QuotaHandoffBanner
+          offer={quotaHandoffOffer}
+          threadId={threadId}
+        />
+      )}
+    </div>
+  );
+});
 
 export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   agentId,
@@ -559,9 +672,142 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
 
   const atLiveEdgeRef = useRef(true);
   const threadId = activeThread?.id ?? null;
+  const effectiveThreadId = activeThread?.id || 'draft';
   const activeItems = Array.isArray(activeThread?.items) ? activeThread.items : [];
+  const voice = useVoiceSession();
+  const [voiceTurns, setVoiceTurns] = useState<VoiceTurnRecord[]>(() =>
+    voice.getThreadVoiceTurns(effectiveThreadId)
+  );
+  const [liveVoiceTurn, setLiveVoiceTurn] = useState<{
+    turnId: string;
+    stage: string;
+    detail?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const vs = voiceSessionStore.getSnapshot();
+    if (
+      (vs.phase === 'active' || vs.phase === 'starting') &&
+      (!vs.boundThreadId || vs.boundThreadId === effectiveThreadId)
+    ) {
+      voiceSessionStore.setActiveSurface('thread');
+    }
+    return () => {
+      const latest = voiceSessionStore.getSnapshot();
+      if (
+        (latest.phase === 'active' || latest.phase === 'starting') &&
+        latest.boundThreadId === effectiveThreadId
+      ) {
+        voiceSessionStore.setActiveSurface('orb');
+      }
+    };
+  }, [effectiveThreadId, voice.phase, voice.boundThreadId]);
+
+  useEffect(() => {
+    setVoiceTurns(voice.getThreadVoiceTurns(effectiveThreadId));
+  }, [effectiveThreadId, voice.phase, voice.turnsVersion]);
+
+  useEffect(() => {
+    return subscribeTrace((event) => {
+      const isBound = voice.boundThreadId
+        ? voice.boundThreadId === effectiveThreadId
+        : voice.activeSurface === 'thread';
+      if (!isBound) return;
+
+      if (event.ev === 'turn.start') {
+        setLiveVoiceTurn({
+          turnId: event.turnId,
+          stage: 'planning',
+          detail: 'Pensando y planificando acciones…',
+        });
+      } else if (event.ev === 'plan.created') {
+        const detail = (event as any).chatReachKind === 'read'
+          ? 'Leyendo conversación anterior…'
+          : (event as any).chatReachKind === 'index'
+          ? 'Consultando índice de conversaciones…'
+          : 'Planificando con ' + ((event as any).provider || 'asistente') + '…';
+        setLiveVoiceTurn((prev) => (prev ? { ...prev, stage: 'planning', detail } : null));
+      } else if (event.ev === 'action.start') {
+        setLiveVoiceTurn((prev) =>
+          prev ? { ...prev, stage: 'executing', detail: `Ejecutando ${(event as any).type}…` } : null
+        );
+      } else if (event.ev === 'action.verify') {
+        setLiveVoiceTurn((prev) =>
+          prev ? { ...prev, stage: 'verifying', detail: 'Verificando recibo…' } : null
+        );
+      } else if (event.ev === 'tts.speak') {
+        setLiveVoiceTurn((prev) =>
+          prev ? { ...prev, stage: 'speaking', detail: 'Sintetizando respuesta de voz…' } : null
+        );
+      } else if (event.ev === 'turn.end') {
+        setLiveVoiceTurn(null);
+        setVoiceTurns(voice.getThreadVoiceTurns(effectiveThreadId));
+      }
+    });
+  }, [effectiveThreadId, voice.boundThreadId, voice.activeSurface]);
+
+  const handleSendVoiceTurn = useCallback(
+    async (text: string) => {
+      const clean = text.trim();
+      if (!clean) return;
+      try {
+        setLiveVoiceTurn({
+          turnId: `turn-${Date.now()}`,
+          stage: 'planning',
+          detail: 'Pensando…',
+        });
+        if (voiceSessionStore.hasTextTurnExecutor()) {
+          await voiceSessionStore.submitTextTurn(clean, effectiveThreadId, effectiveWsId ?? undefined);
+          return;
+        }
+        const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const startedAt = Date.now();
+        voiceSessionStore.addThreadVoiceTurn(effectiveThreadId, {
+          turnId,
+          userPrompt: clean,
+          source: 'texto',
+          createdAt: startedAt,
+        });
+        const res = await runOperatorTurn(clean, {
+          turnId,
+          workspaceId: effectiveWsId ?? undefined,
+          mode: 'thread',
+          source: 'texto',
+          ttsEnabled: !voice.speakerMuted,
+          muted: voice.speakerMuted,
+          history: voiceSessionStore.getConversationHistory(effectiveThreadId),
+        });
+        if (res) {
+          voiceSessionStore.addThreadVoiceTurn(effectiveThreadId, {
+            turnId: res.turnId,
+            userPrompt: clean,
+            source: 'texto',
+            strategy: res.strategy,
+            providerId: res.providerId,
+            durationMs: res.durationMs,
+            overallSuccess: res.overallSuccess,
+            receipts: res.receipts,
+            reply: res.reply,
+            createdAt: startedAt,
+          });
+        }
+      } catch (err) {
+        console.warn('[AgentChatShell] Failed to execute voice turn:', err);
+      } finally {
+        setLiveVoiceTurn(null);
+      }
+    },
+    [effectiveThreadId, effectiveWsId, voice.speakerMuted]
+  );
+
+  const timelineItems = React.useMemo(() => {
+    const merged = mergeTimeline(activeItems, voiceTurnsToChatItems(voiceTurns));
+    return liveVoiceTurn ? [...merged, liveVoiceStageItem(liveVoiceTurn)] : merged;
+  }, [activeItems, voiceTurns, liveVoiceTurn]);
+  const effectiveIsDraft = isDraft && voiceTurns.length === 0 && !liveVoiceTurn;
+
   const startVoiceMode = useCallback(async () => {
-    const isBlank = Boolean(activeThread?.id) && activeItems.length === 0 && !running;
+    const isBlank = Boolean(activeThread?.id) && activeItems.length === 0 && voiceTurns.length === 0 && !running;
     if (isBlank && activeThread?.id) {
       voiceSessionStore.startSession(activeThread.id, 'thread');
       return;
@@ -579,12 +825,58 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
         .then(() => window.dispatchEvent(new CustomEvent('kite:threads-changed')))
         .catch(() => undefined);
     }
-  }, [activeThread?.id, activeItems.length, running, onNew]);
+  }, [activeThread?.id, activeItems.length, voiceTurns.length, running, onNew]);
   const enterFor = useTranscriptMotion(
     threadId,
-    activeItems.map((item) => item.id),
+    React.useMemo(() => timelineItems.map((item) => item.id), [timelineItems]),
   );
-  useTranscriptLiveEdge(transcriptRef, threadId, atLiveEdgeRef);
+  const activeTranscriptRows = React.useMemo(
+    () => groupTranscriptRows(timelineItems),
+    [timelineItems],
+  );
+  const activeLiveAt = React.useMemo(
+    () => (running || Boolean(liveVoiceTurn) ? liveActivityRowIndex(activeTranscriptRows) : -1),
+    [running, liveVoiceTurn, activeTranscriptRows],
+  );
+  const composerChangedFilesProps = React.useMemo(
+    () => buildComposerChangedFilesProps(timelineItems, effectiveWsId, effectiveWorkspaceName),
+    [timelineItems, effectiveWsId, effectiveWorkspaceName],
+  );
+  const composerWorkspaces = React.useMemo(
+    () => workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' })),
+    [workspaces],
+  );
+  const transcriptScrollKeys = React.useMemo(
+    () =>
+      buildTranscriptScrollKeys(
+        timelineItems,
+        `${running ? 1 : 0}:${Boolean(activeThread?.pendingApproval)}:${Boolean(activeThread?.quotaHandoffOffer)}:${liveVoiceTurn?.stage ?? ''}:${liveVoiceTurn?.detail ?? ''}`,
+      ),
+    [timelineItems, running, activeThread?.pendingApproval, activeThread?.quotaHandoffOffer, liveVoiceTurn?.stage, liveVoiceTurn?.detail],
+  );
+  const { handleScroll: handleTranscriptScroll, syncLiveEdge } = useTranscriptLiveEdge(
+    transcriptRef,
+    threadId,
+    atLiveEdgeRef,
+    {
+      contentKey: transcriptScrollKeys.contentKey,
+      followTrigger: transcriptScrollKeys.followTrigger,
+    },
+  );
+  const onChangePromptRef = useRef(onChangePrompt);
+  onChangePromptRef.current = onChangePrompt;
+
+  const handleEditUserMessage = useCallback(
+    (text: string) => {
+      onChangePromptRef.current(text);
+      const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(text.length, text.length);
+      }
+    },
+    [],
+  );
 
   const handleStartRename = (id: string, currentTitle: string) => {
     setEditingId(id);
@@ -814,15 +1106,60 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             )}
             {inboxData && inboxData.messages.length > 0 && (
               <ol className="agent-inbox__messages">
-                {inboxData.messages.map((msg) => (
-                  <li key={msg.id} className="agent-inbox__message">
-                    <strong className="agent-inbox__sender">{msg.senderName}</strong>
-                    <span className="agent-inbox__delivery">
-                      {' · '}{msg.delivered ? 'Delivered' : 'Waiting for delivery'}
-                    </span>
-                    <p className="agent-inbox__body">{msg.body}</p>
-                  </li>
-                ))}
+                {inboxData.messages.map((msg) => {
+                  const directionLabel =
+                    msg.direction === 'outgoing'
+                      ? 'Sent'
+                      : msg.direction === 'incoming'
+                        ? 'Received'
+                        : null;
+                  const messageContent = (
+                    <>
+                      <span className="agent-inbox__meta">
+                        <strong className="agent-inbox__sender">{msg.senderName}</strong>
+                        {directionLabel && (
+                          <span className="agent-inbox__direction">{' · '}{directionLabel}</span>
+                        )}
+                        <span className="agent-inbox__delivery">
+                          {' · '}{msg.delivered ? 'Delivered' : 'Waiting for delivery'}
+                        </span>
+                        {msg.threadId && (
+                          <span className="agent-inbox__thread-cue">Open thread →</span>
+                        )}
+                      </span>
+                      <p className="agent-inbox__body">{msg.body}</p>
+                    </>
+                  );
+
+                  return (
+                    <li key={msg.id} className="agent-inbox__message">
+                      {msg.threadId ? (
+                        <button
+                          type="button"
+                          className="agent-inbox__message-btn rounded-control"
+                          aria-label={`Open thread for message from ${msg.senderName}`}
+                          onClick={() => {
+                            const targetThreadId = msg.threadId;
+                            if (!targetThreadId) return;
+                            if (tabs.some((tab) => tab.id === targetThreadId)) {
+                              onSelect(targetThreadId);
+                              return;
+                            }
+                            window.dispatchEvent(
+                              new CustomEvent('kite:select-thread', {
+                                detail: { threadId: targetThreadId, mode: 'chat' },
+                              })
+                            );
+                          }}
+                        >
+                          {messageContent}
+                        </button>
+                      ) : (
+                        messageContent
+                      )}
+                    </li>
+                  );
+                })}
               </ol>
             )}
             <div className="agent-inbox__actions">
@@ -856,98 +1193,38 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
         ) : null}
 
         {/* 3. Direct conversation layout */}
-        <div className={`chat-thread-layout _layout_85ff1_81 scroll-quiet${isDraft ? ' chat-thread-layout--draft' : ''}`}>
+        <div className={`chat-thread-layout _layout_85ff1_81 scroll-quiet${effectiveIsDraft ? ' chat-thread-layout--draft' : ''}`}>
           <div className="chat-thread-layout__body">
             <AnimatePresence initial={false}>
-              {isDraft || !activeThread ? null : (
+              {effectiveIsDraft ? null : (
                 <AgentTranscriptMotion
-                  key={activeThread.id}
+                  key={effectiveThreadId}
                   reducedMotion={reducedMotion}
                   transcriptRef={transcriptRef}
-                  onScroll={(e) => {
-                    const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
-                    atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= 48;
-                  }}
+                  onScroll={handleTranscriptScroll}
                 >
-                  <div className="chat-transcript__column">
-                    {groupTranscriptRows(activeItems).map((row, index, rows) => {
-                      const rowKey =
-                        row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
-                      const liveAt = running ? liveActivityRowIndex(rows) : -1;
-                      return (
-                        <React.Fragment key={rowKey}>
-                          {index === liveAt ? (
-                            <TurnActivityStatus
-                              running={running}
-                              pendingApproval={activeThread.pendingApproval}
-                              items={activeItems}
-                              swarmState={activeThread.swarmState}
-                              interrupted={false}
-                              durationSeconds={activeThread.usage?.durationSeconds}
-                            />
-                          ) : null}
-                          {row.kind === 'work' ? (
-                            <ChatWorkGroup
-                              items={row.items}
-                              running={running && index === liveAt}
-                              enterFor={enterFor}
-                              interrupted={Boolean(activeThread.stoppedByBuilder) && index === rows.length - 1}
-                            />
-                          ) : row.kind === 'subagentGroup' ? (
-                            <SubagentGroupRow
-                              items={row.items}
-                              threadId={activeThread.id}
-                              workspaceId={effectiveWsId}
-                              subagentRuns={activeThread.subagentRuns}
-                              enterFor={enterFor}
-                            />
-                          ) : (
-                            <ChatItemRow
-                              item={row.item}
-                              threadId={activeThread.id}
-                              workspaceId={effectiveWsId}
-                              subagentRuns={activeThread.subagentRuns}
-                              swarmState={activeThread.swarmState}
-                              enter={enterFor(row.item.id)}
-                              onEditUserMessage={(text) => {
-                                onChangePrompt(text);
-                                const el = document.querySelector('.chat-composer textarea') as HTMLTextAreaElement | null;
-                                if (el) {
-                                  el.focus();
-                                  el.setSelectionRange(text.length, text.length);
-                                }
-                              }}
-                            />
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
-
-                    {liveActivityRowIndex(groupTranscriptRows(activeItems)) < 0 || !running ? (
-                      <TurnActivityStatus
-                        running={running}
-                        pendingApproval={activeThread.pendingApproval}
-                        items={activeItems}
-                        swarmState={activeThread.swarmState}
-                        interrupted={Boolean(activeThread.stoppedByBuilder) && !running}
-                        durationSeconds={activeThread.usage?.durationSeconds}
-                      />
-                    ) : null}
-
-                    {/* Quota Handoff Banner */}
-                    {activeThread.quotaHandoffOffer && (
-                      <QuotaHandoffBanner
-                        offer={activeThread.quotaHandoffOffer}
-                        threadId={activeThread.id}
-                      />
-                    )}
-                  </div>
+                  <AgentChatTranscriptContent
+                    threadId={effectiveThreadId}
+                    effectiveWsId={effectiveWsId ?? null}
+                    activeItems={timelineItems}
+                    transcriptRows={activeTranscriptRows}
+                    liveAt={activeLiveAt}
+                    running={running}
+                    pendingApproval={activeThread?.pendingApproval}
+                    swarmState={activeThread?.swarmState}
+                    stoppedByBuilder={Boolean(activeThread?.stoppedByBuilder)}
+                    durationSeconds={activeThread?.usage?.durationSeconds}
+                    subagentRuns={activeThread?.subagentRuns}
+                    quotaHandoffOffer={activeThread?.quotaHandoffOffer}
+                    enterFor={enterFor}
+                    onEditUserMessage={handleEditUserMessage}
+                  />
                 </AgentTranscriptMotion>
               )}
             </AnimatePresence>
           </div>
 
-          {isDraft ? (
+          {effectiveIsDraft ? (
             <motion.div
               key="agent-draft-hero"
               initial={reducedMotion ? false : { opacity: 0, y: shift.handoff }}
@@ -977,9 +1254,10 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             />
 
             <ChatComposer
-              threadId={activeThread?.id || 'draft'}
-              threadItems={activeItems}
-              conversationStarted={!isDraft || queuedRuns.length > 0}
+              threadId={effectiveThreadId}
+              threadItems={timelineItems}
+              conversationStarted={!effectiveIsDraft || queuedRuns.length > 0}
+              {...composerChangedFilesProps}
               agentName={agentName}
               engineLabel={engineLabel}
               threadMode={activeThread ? activeThread.mode : draftMode ?? 'acceptEdits'}
@@ -992,7 +1270,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               branches={branches}
               threadWorkspaceId={effectiveWsId ?? null}
               threadWorkspaceName={effectiveWorkspaceName || 'Local'}
-              workspaces={workspaces?.map((w) => ({ id: w.id, name: w.displayName || w.name || 'Workspace' }))}
+              workspaces={composerWorkspaces}
               onSwitchBranch={handleSwitchBranch}
               onCreateBranch={handleCreateBranch}
               onSelectWorkspace={handleSelectWorkspace}
@@ -1005,6 +1283,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               isRefreshingModels={isRefreshingModels}
               onRefreshModels={onRefreshModels}
               onChangePrompt={onChangePrompt}
+              onHeightChange={syncLiveEdge}
               onQueue={activeThread ? handleQueueFromComposer : undefined}
               onSteer={activeThread ? onSteerPrompt : undefined}
               editingQueuedId={editingQueuedId}
@@ -1028,6 +1307,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                 }
               }}
               onStop={onStop}
+              onSendVoiceTurn={handleSendVoiceTurn}
               onStartVoiceMode={() => void startVoiceMode()}
               onPickAttachments={onPickAttachments}
               onStageFiles={onStageFiles}

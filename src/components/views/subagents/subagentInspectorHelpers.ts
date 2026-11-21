@@ -54,6 +54,40 @@ export function cleanRunPreviewText(run: SubagentRun): string {
   return plainPreviewLine(rawActivity || rawPrompt);
 }
 
+/**
+ * Produces a distinguishable display title for a subagent run so generic
+ * `"Subagent"` fallbacks include a concise task/error excerpt when available.
+ */
+export function formatSubagentDisplayTitle(run: SubagentRun): string {
+  const rawRole = (run.role ?? '').trim();
+  if (rawRole && rawRole.toLowerCase() !== 'subagent') {
+    return rawRole;
+  }
+  const swarmMember = (run.swarmMemberName ?? '').trim();
+  if (swarmMember) {
+    return `@${swarmMember}`;
+  }
+  const typeName = (run.typeName ?? '').trim();
+  if (typeName && typeName.toLowerCase() !== (run.provider ?? '').trim().toLowerCase() && typeName.toLowerCase() !== 'subagent') {
+    return typeName.charAt(0).toUpperCase() + typeName.slice(1);
+  }
+  const rawPrompt = isRawDispatchCommand(run.prompt) ? '' : plainPreviewLine(run.prompt);
+  const excerptSource = rawPrompt || cleanRunPreviewText(run);
+  if (excerptSource) {
+    const clipped = excerptSource.length > 36 ? `${excerptSource.slice(0, 35).trimEnd()}…` : excerptSource;
+    return clipped;
+  }
+  return 'Subagent';
+}
+
+/** True when a failed run has no recorded steps or backing transcript/thread. */
+export function isZeroStepFailedRun(run: SubagentRun): boolean {
+  const s = (run.status ?? '').toLowerCase();
+  if (s !== 'failed' && s !== 'error') return false;
+  const steps = run.stepCount ?? run.items?.length ?? 0;
+  return steps === 0 && !run.childThreadId && !run.transcriptUri;
+}
+
 export function runStatusDotClass(status?: string | null): string {
   const s = (status ?? '').toLowerCase();
   if (isRunBlocked(s)) return 'subagent-dot--waiting';

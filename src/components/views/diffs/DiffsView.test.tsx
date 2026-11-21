@@ -211,10 +211,13 @@ describe('DiffsView Component Tests', () => {
     fireEvent.click(chevrons[0]);
 
     // Now diff content appears inside Shadow DOM
-    await waitFor(() => {
-      const texts = getShadowCodeTexts(container);
-      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
-    });
+    await waitFor(
+      () => {
+        const texts = getShadowCodeTexts(container);
+        expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+      },
+      { timeout: 5000 }
+    );
 
     // Click again to collapse
     const collapseChevron = screen.getByLabelText('Collapse');
@@ -258,10 +261,13 @@ describe('DiffsView Component Tests', () => {
     fireEvent.click(treeItems[0]);
 
     // Now diff content for that file is loaded and rendered
-    await waitFor(() => {
-      const texts = getShadowCodeTexts(container);
-      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
-    });
+    await waitFor(
+      () => {
+        const texts = getShadowCodeTexts(container);
+        expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+      },
+      { timeout: 5000 }
+    );
   });
 
   it('opens authentic ui-menu overflow dropdown when narrow and handles selection and Escape', () => {
@@ -377,10 +383,13 @@ describe('DiffsView Component Tests', () => {
 
     expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(1);
-    await waitFor(() => {
-      const texts = getShadowCodeTexts(container);
-      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
-    });
+    await waitFor(
+      () => {
+        const texts = getShadowCodeTexts(container);
+        expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+      },
+      { timeout: 5000 }
+    );
 
     fireEvent.click(screen.getByRole('button', { name: /Show all \(2\)/i }));
     expect(screen.queryByText('Showing 1 change from thread')).not.toBeInTheDocument();
@@ -435,10 +444,13 @@ describe('DiffsView Component Tests', () => {
       expect(screen.getByText('Showing 1 change from thread')).toBeInTheDocument();
     });
     expect(screen.getAllByRole('article')).toHaveLength(1);
-    await waitFor(() => {
-      const texts = getShadowCodeTexts(container);
-      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
-    });
+    await waitFor(
+      () => {
+        const texts = getShadowCodeTexts(container);
+        expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+      },
+      { timeout: 5000 }
+    );
   });
 
   it('waits for refreshGit before clearing focus when a newly changed file arrives asynchronously while mounted', async () => {
@@ -492,10 +504,13 @@ describe('DiffsView Component Tests', () => {
     const articles = screen.getAllByRole('article');
     expect(articles).toHaveLength(1);
     expect(articles[0]).toHaveAttribute('id', 'diff-file-src%2Fmain.ts');
-    await waitFor(() => {
-      const texts = getShadowCodeTexts(container);
-      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
-    });
+    await waitFor(
+      () => {
+        const texts = getShadowCodeTexts(container);
+        expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+      },
+      { timeout: 5000 }
+    );
   });
 
   it('supports Ignore whitespace, Hide test files, collapsible folder tree, total +X -Y stat, and path copy', async () => {
@@ -598,10 +613,13 @@ describe('DiffsView Component Tests', () => {
     const { container } = render(<DiffsView workspaceId="ws-test" />);
     fireEvent.click(screen.getByLabelText('Expand all files'));
 
-    await waitFor(() => {
-      const texts = getShadowCodeTexts(container);
-      expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
-    });
+    await waitFor(
+      () => {
+        const texts = getShadowCodeTexts(container);
+        expect(texts.some((t) => t.includes('<title>New Clean Diff</title>'))).toBe(true);
+      },
+      { timeout: 5000 }
+    );
     const callsBeforeRefresh = readWorkspaceFileDiffSpy.mock.calls.length;
     expect(callsBeforeRefresh).toBeGreaterThanOrEqual(2);
 

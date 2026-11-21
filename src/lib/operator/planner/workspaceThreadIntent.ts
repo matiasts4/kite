@@ -8,8 +8,8 @@ import {
   normalizeInputForIntent,
   OPEN_VERB_RE,
   OPEN_VERB_SOURCE,
-  COMPATIBLE_TERMINAL_OBJECT_RE,
 } from './heuristicPatterns';
+import { normalizeSpanishVoiceStt } from './voiceNormalizer';
 
 export interface WorkspaceSwitchIntent {
   workspaceQuery: string;
@@ -97,18 +97,23 @@ export function parseWorkspaceSwitchIntent(rawText: string): WorkspaceSwitchInte
   };
 }
 
-export function parseLaunchThreadIntent(text: string): LaunchThreadAction | null {
+export function parseLaunchThreadIntent(rawText: string): LaunchThreadAction | null {
+  const text = normalizeSpanishVoiceStt(rawText).normalized;
   const lower = text.toLowerCase().trim();
+  if (!lower) return null;
 
-  // If the command explicitly requests opening a terminal or console, terminal wins!
-  if (OPEN_VERB_RE.test(lower) && COMPATIBLE_TERMINAL_OBJECT_RE.test(lower)) {
+  // If the command explicitly requests opening a terminal or console (not just "agente"), terminal wins!
+  if (
+    OPEN_VERB_RE.test(lower) &&
+    /\b(?:terminal|terminales|consola|consolas|powershell|pane|panes)\b/i.test(lower)
+  ) {
     return null;
   }
 
-  // 1. "abre/crea/lanza/inicia un [nuevo] thread/hilo [de/con <provider>] [para/con/: <body...>]"
+  // 1. "[...] abre/crea/lanza/inicia un [nuevo] thread/hilo [nuevo] [de/con <provider>] [para/sobre/con/: <body...>]"
   const openMatch = text.match(
     new RegExp(
-      `^(?:${OPEN_VERB_SOURCE})\\s+(?:un\\s+)?(?:nuevo\\s+)?(?:thread|hilo)(?:\\s+(?:de|con)\\s+([a-zA-Z0-9_\\-]+))?(?:\\s+(?:para|:)\\s+(.+)|\\s+(.+))?$`,
+      `(?:^|\\b)(?:${OPEN_VERB_SOURCE})\\s+(?:un\\s+)?(?:nuevo\\s+)?(?:threads?|hilos?)(?:\\s+nuevo)?(?:\\s+(?:de|con|en|usando)\\s+([a-zA-Z0-9_\\-]+))?(?:\\s+(?:para|sobre|:)\\s+(.+)|\\s+(.+))?$`,
       'i'
     )
   );
@@ -116,21 +121,28 @@ export function parseLaunchThreadIntent(text: string): LaunchThreadAction | null
   if (openMatch) {
     const rawEngine = openMatch[1];
     let provider: Engine | undefined = undefined;
+    let bodyPrefix = '';
     if (rawEngine) {
       provider = detectEngineFromText(rawEngine);
+      if (!provider) {
+        bodyPrefix = rawEngine;
+      }
     }
-    const body = (openMatch[2] || openMatch[3] || '').trim() || undefined;
+    const rawBody = [bodyPrefix, openMatch[2] || openMatch[3] || ''].filter(Boolean).join(' ').trim();
+    const body = rawBody || undefined;
+    const oddMode = /\b(?:odd|especificaci[oó]n|plan\s+de\s+implementaci[oó]n)\b/i.test(text) ? true : undefined;
 
     return {
       type: 'launch_thread',
       ...(provider ? { provider } : {}),
       ...(body ? { body } : {}),
+      ...(oddMode ? { oddMode } : {}),
     };
   }
 
   // 2. "en el thread/hilo [<threadId>] [<body...>]"
   const enThreadMatch = text.match(
-    /^en\s+el\s+(?:thread|hilo)(?:\s+([a-zA-Z0-9_\\-]+))?(?:\s+(.+))?$/i
+    /(?:^|\b)en\s+el\s+(?:thread|hilo)(?:\s+([a-zA-Z0-9_\-]+))?(?:\s+(.+))?$/i
   );
 
   if (enThreadMatch) {

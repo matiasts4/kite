@@ -28,6 +28,11 @@ export const StageBackdrop: React.FC<StageBackdropProps> = ({
   const pack = getThemePackById(activePaletteId);
   const effectivePreset: ConcreteBackdropPresetId =
     overridePreset ?? resolveEffectiveBackdropPreset(customizations, pack);
+
+  if (effectivePreset === 'none') {
+    return null;
+  }
+
   const effectiveFigure = resolveEffectiveHeroFigure(customizations, pack);
   const effectiveGrain =
     customizations.backdrop.grain ||
@@ -48,56 +53,48 @@ export const StageBackdrop: React.FC<StageBackdropProps> = ({
       data-grain={effectiveGrain ? 'true' : 'false'}
       data-testid={variant === 'stage' ? 'stage-backdrop' : `stage-backdrop-${variant}`}
     >
-      {effectivePreset !== 'none' && (
-        <div
-          className="stage-backdrop__canvas"
-          data-testid={`stage-backdrop-scene-${effectivePreset}`}
-          style={
-            customizations.backdrop.blur > 0
-              ? {
-                  filter: `blur(${customizations.backdrop.blur}px)`,
-                  transform: 'scale(1.04)',
-                }
-              : undefined
-          }
-        >
-          {presetWallpaperUrl && (
-            <div
-              className="stage-backdrop__wallpaper"
-              data-testid={`stage-backdrop-wallpaper-${effectivePreset}`}
-              style={{
-                backgroundImage: `url("${presetWallpaperUrl}")`,
-              }}
-            />
-          )}
-          {effectivePreset === 'custom-image' && (
-            <div
-              className="stage-backdrop__custom-image"
-              data-testid="stage-backdrop-custom-image"
-              style={
-                safeCustomImageUrl
-                  ? {
-                      backgroundImage: `url("${safeCustomImageUrl}")`,
-                    }
-                  : undefined
+      <div
+        className="stage-backdrop__canvas"
+        data-testid={`stage-backdrop-scene-${effectivePreset}`}
+        style={
+          customizations.backdrop.blur > 0
+            ? {
+                filter: `blur(${customizations.backdrop.blur}px)`,
+                transform: 'scale(1.04)',
               }
-            />
-          )}
-        </div>
-      )}
+            : undefined
+        }
+      >
+        {presetWallpaperUrl && (
+          <div
+            className="stage-backdrop__wallpaper"
+            data-testid={`stage-backdrop-wallpaper-${effectivePreset}`}
+            style={{
+              backgroundImage: `url("${presetWallpaperUrl}")`,
+            }}
+          />
+        )}
+        {effectivePreset === 'custom-image' && (
+          <div
+            className="stage-backdrop__custom-image"
+            data-testid="stage-backdrop-custom-image"
+            style={
+              safeCustomImageUrl
+                ? {
+                    backgroundImage: `url("${safeCustomImageUrl}")`,
+                  }
+                : undefined
+            }
+          />
+        )}
+      </div>
 
-      {effectivePreset !== 'none' && (
-        <div
-          className="stage-backdrop__scrim"
-          style={{
-            opacity: Math.min(0.95, Math.max(0, customizations.backdrop.dimming / 100)),
-            backdropFilter:
-              customizations.backdrop.blur > 0
-                ? `blur(${customizations.backdrop.blur}px)`
-                : undefined,
-          }}
-        />
-      )}
+      <div
+        className="stage-backdrop__scrim"
+        style={{
+          opacity: Math.min(0.95, Math.max(0, customizations.backdrop.dimming / 100)),
+        }}
+      />
 
       {effectiveGrain && <div className="stage-backdrop__grain" />}
 

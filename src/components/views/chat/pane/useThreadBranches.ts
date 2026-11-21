@@ -141,25 +141,42 @@ export function useThreadBranches({ workspaceId }: UseThreadBranchesOptions): Us
     return () => window.removeEventListener('mousedown', handleGlobalClick);
   }, [branchDropdownOpen]);
 
-  return {
-    isRepo,
-    gitBranch,
-    branches,
-    branchesLoading,
-    branchSearch,
-    setBranchSearch,
-    branchDropdownOpen,
-    setBranchDropdownOpen,
-    isCreatingBranch,
-    setIsCreatingBranch,
-    newBranchInput,
-    setNewBranchInput,
-    branchError,
-    setBranchError,
-    branchDropdownRef,
-    filteredBranches,
-    loadBranches,
-    handleSwitchBranch,
-    handleCreateBranch,
-  };
+  return useMemo(
+    () => ({
+      isRepo,
+      gitBranch,
+      branches,
+      branchesLoading,
+      branchSearch,
+      setBranchSearch,
+      branchDropdownOpen,
+      setBranchDropdownOpen,
+      isCreatingBranch,
+      setIsCreatingBranch,
+      newBranchInput,
+      setNewBranchInput,
+      branchError,
+      setBranchError,
+      branchDropdownRef,
+      filteredBranches,
+      loadBranches,
+      handleSwitchBranch,
+      handleCreateBranch,
+    }),
+    [
+      isRepo,
+      gitBranch,
+      branches,
+      branchesLoading,
+      branchSearch,
+      branchDropdownOpen,
+      isCreatingBranch,
+      newBranchInput,
+      branchError,
+      filteredBranches,
+      loadBranches,
+      handleSwitchBranch,
+      handleCreateBranch,
+    ]
+  );
 }

@@ -30,6 +30,75 @@ function decodeObservedBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+export const MAX_ROW_CACHE_ENTRIES = 256;
+
+function rowTextMatches(a: CellSnapshot[] | undefined, b: CellSnapshot[]): boolean {
+  if (!a || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].ch !== b[i].ch || a[i].width !== b[i].width) return false;
+  }
+  return true;
+}
+
+export function updateTerminalRowCache(
+  cache: Map<number, CellSnapshot[]>,
+  matrix: CellSnapshot[][],
+  scrollbackOffset: number,
+  options: {
+    full: boolean;
+    scrollbackChanged: boolean;
+    packed: boolean;
+    dirtyRowIndices?: number[];
+    maxEntries?: number;
+  }
+): void {
+  const maxEntries = options.maxEntries ?? MAX_ROW_CACHE_ENTRIES;
+  const shouldScanAll = options.full || options.scrollbackChanged || !options.dirtyRowIndices;
+
+  const storeRow = (r: number) => {
+    if (r < 0 || r >= matrix.length) return;
+    const rowCells = matrix[r];
+    if (!rowCells || rowCells.length === 0) return;
+    const relRow = r - scrollbackOffset;
+    const existing = cache.get(relRow);
+    if (existing) {
+      if (existing === rowCells || rowTextMatches(existing, rowCells)) {
+        // Refresh LRU order without allocating or cloning cells.
+        cache.delete(relRow);
+        cache.set(relRow, existing);
+        return;
+      }
+      cache.delete(relRow);
+    }
+    // Non-packed rows from commitDirtyRows are immutable per-row arrays; store directly.
+    // Packed grid rows are mutated in place on subsequent frames, so copy only when changed.
+    cache.set(relRow, options.packed ? rowCells.map((c) => ({ ...c })) : rowCells);
+  };
+
+  if (shouldScanAll) {
+    for (let r = 0; r < matrix.length; r += 1) {
+      storeRow(r);
+    }
+  } else {
+    const seen = new Set<number>();
+    for (const r of options.dirtyRowIndices ?? []) {
+      if (seen.has(r)) continue;
+      seen.add(r);
+      storeRow(r);
+    }
+  }
+
+  if (cache.size > maxEntries) {
+    const excess = cache.size - maxEntries;
+    let removed = 0;
+    for (const key of cache.keys()) {
+      cache.delete(key);
+      removed += 1;
+      if (removed >= excess) break;
+    }
+  }
+}
+
 type SnapshotPollResponse = TerminalSnapshotPollResponse & {
   /** Backend benchmark gate state, mirrored into the frontend collector. */
   benchmarkActive?: boolean;
@@ -221,22 +290,19 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
         syncGridState(packedGrid, matrixRef.current, snapshot.cols);
       }
       if (rowCacheRef && !alternateScreenRef.current) {
-        const cache = rowCacheRef.current;
-        for (let r = 0; r < matrixRef.current.length; r += 1) {
-          const rowCells = matrixRef.current[r];
-          if (rowCells && rowCells.length > 0) {
-            cache.set(r - nextScrollbackOffset, rowCells.map((c) => ({ ...c })));
-          }
-        }
-        if (cache.size > 5500) {
-          const excess = cache.size - 5000;
-          let removed = 0;
-          for (const key of cache.keys()) {
-            cache.delete(key);
-            removed += 1;
-            if (removed >= excess) break;
-          }
-        }
+        const isPacked =
+          snapshot.packedDirtyRows !== undefined &&
+          packedGrid !== null &&
+          packedGrid.rows.length === snapshot.rows;
+        const dirtyRowIndices = isPacked
+          ? snapshot.packedDirtyRows!.map((row) => row.index)
+          : snapshot.dirtyRows.map((row) => row.rowIdx);
+        updateTerminalRowCache(rowCacheRef.current, matrixRef.current, nextScrollbackOffset, {
+          full: Boolean(snapshot.full),
+          scrollbackChanged,
+          packed: isPacked,
+          dirtyRowIndices,
+        });
       }
       if (scrollbackChanged) {
         onScrollbackChangeRef.current?.(nextScrollbackOffset);

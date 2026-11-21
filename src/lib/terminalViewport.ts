@@ -1,5 +1,5 @@
-import { FitAddon } from '@xterm/addon-fit';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
+import type { FitAddon } from '@xterm/addon-fit';
+import type { Unicode11Addon } from '@xterm/addon-unicode11';
 import type { IUnicodeVersionProvider, Terminal } from '@xterm/xterm';
 
 export const SAFE_FIT_MIN_WIDTH_PX = 48;
@@ -163,8 +163,9 @@ export class ZwjAwareUnicode11Provider implements IUnicodeVersionProvider {
 
 export function activateTerminalUnicodeProvider(
   term: Terminal,
-  unicodeAddon: Unicode11Addon = new Unicode11Addon(),
+  unicodeAddon?: Unicode11Addon,
 ): void {
+  if (!unicodeAddon) return;
   try {
     term.loadAddon(unicodeAddon);
     const unicode = term.unicode;
@@ -571,15 +572,18 @@ export function resizeConptyViewport(term: Terminal, cols: number, rows: number)
   after.ydisp = wasAtBottom ? nextYbase : Math.min(after.ydisp, nextYbase);
 }
 
-export class StableCellFitAddon extends FitAddon {
+export class StableCellFitAddon implements FitAddon {
   private stableTerminal: Terminal | null = null;
 
-  override activate(terminal: Terminal): void {
+  activate(terminal: Terminal): void {
     this.stableTerminal = terminal;
-    super.activate(terminal);
   }
 
-  override fit(): void {
+  dispose(): void {
+    this.stableTerminal = null;
+  }
+
+  fit(): void {
     const term = this.stableTerminal;
     const dims = this.proposeDimensions();
     if (!dims || !term || Number.isNaN(dims.cols) || Number.isNaN(dims.rows)) {
@@ -590,7 +594,7 @@ export class StableCellFitAddon extends FitAddon {
     }
   }
 
-  override proposeDimensions(): { cols: number; rows: number } | undefined {
+  proposeDimensions(): { cols: number; rows: number } | undefined {
     const term = this.stableTerminal;
     const element = term?.element;
     const parent = element?.parentElement;

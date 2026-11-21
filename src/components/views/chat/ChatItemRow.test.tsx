@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
 import { SubagentGroupRow } from './SubagentActivityCard';
@@ -60,6 +60,87 @@ describe('ChatItemRow Actions and Protocol Filtering', () => {
 
     fireEvent.click(copyBtn);
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Explica cómo funciona la arquitectura de agentes');
+  });
+
+  it('styles user conversation bubbles with translucent 3D depth, directional bevels, and semantic radius without backdrop blur', async () => {
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const chatCoreCss = fs.readFileSync('src/components/views/chat/styles/chat-core.css', 'utf8');
+    const visualLangCss = fs.readFileSync('src/visual-language.css', 'utf8');
+
+    const bubbleMatch = chatCoreCss.match(
+      /\.chat-user-row\.chat-user-row--bubble:not\(\.subagent-brief-card\)\s*\{[^}]*\}/,
+    );
+    expect(bubbleMatch).not.toBeNull();
+    const bubbleBlock = bubbleMatch?.[0] ?? '';
+    expect(bubbleBlock).toContain('var(--dialog-radius');
+    expect(bubbleBlock).toContain('linear-gradient(');
+    expect(bubbleBlock).toContain('var(--chat-user-bubble-base');
+    expect(bubbleBlock).toContain('inset 0 1px 0');
+    expect(bubbleBlock).toContain('backdrop-filter: none;');
+
+    expect(visualLangCss).toContain('--chat-user-bubble-base:');
+    expect(visualLangCss).toContain('--chat-user-bubble-bg:');
+    expect(visualLangCss).toContain('--chat-user-bubble-shadow:');
+    expect(visualLangCss).toMatch(
+      /html\[data-surface-glass='true'\]\s+body\.kite-app\s+\.chat-user-row\.chat-user-row--bubble:not\(\.subagent-brief-card\)\s*\{[^}]*var\(--chat-user-bubble-bg\)[^}]*\}/,
+    );
+    expect(visualLangCss).not.toMatch(
+      /html\[data-surface-glass='true'\]\s+body\.kite-app\s+\.chat-user-row,\s*\r?\n\s*html\[data-surface-glass='true'\]\s+body\.kite-app\s+\.chat-user-row--bubble,/,
+    );
+  });
+
+  it('anchors user message actions below the bubble without text overlap and styles Edit-from-here rewind dialog cleanly', async () => {
+    const onEdit = vi.fn();
+    render(
+      <ChatItemRow
+        item={mockItem({ id: 'u-actions', kind: 'user', text: 'Check action placement' })}
+        onEditUserMessage={onEdit}
+      />,
+    );
+
+    const editBtn = screen.getByTitle('Edit from here');
+    const actionsBar = editBtn.closest('.chat-turn__actions') as HTMLElement | null;
+    expect(actionsBar).not.toBeNull();
+    expect(editBtn).toHaveAttribute('aria-expanded', 'false');
+    expect(actionsBar).not.toHaveAttribute('data-open');
+
+    fireEvent.click(editBtn);
+    expect(editBtn).toHaveAttribute('aria-expanded', 'true');
+    expect(actionsBar).toHaveAttribute('data-open', 'true');
+    expect(screen.getByRole('dialog', { name: 'Edit from here' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Edit from here' })).not.toBeInTheDocument();
+    expect(editBtn).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(editBtn);
+    expect(screen.getByRole('dialog', { name: 'Edit from here' })).toBeInTheDocument();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('dialog', { name: 'Edit from here' })).not.toBeInTheDocument();
+
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const chatCoreCss = fs.readFileSync('src/components/views/chat/styles/chat-core.css', 'utf8');
+    const mdActionsCss = fs.readFileSync('src/components/views/chat/styles/chat-markdown-actions.css', 'utf8');
+
+    const bubbleBlock =
+      chatCoreCss.match(/\.chat-user-row\.chat-user-row--bubble:not\(\.subagent-brief-card\)\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(bubbleBlock).toContain('overflow: visible;');
+
+    expect(mdActionsCss).toMatch(/\.chat-turn--user\s*>\s*\.chat-turn__actions\s*\{[^}]*top:\s*calc\(100%\s*\+/);
+    const actionsBlock = mdActionsCss.match(/\.chat-turn__actions\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(actionsBlock).toContain('var(--menu-plate');
+    expect(actionsBlock).toContain('backdrop-filter: var(--glass-overlay-blur');
+
+    const rewindBlock = mdActionsCss.match(/\.chat-rewind\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(rewindBlock).toContain('position: absolute;');
+    expect(rewindBlock).toContain('flex-direction: column;');
+    expect(rewindBlock).toContain('var(--menu-plate');
   });
 
   it('cleans leaked protocol JSON from assistant messages', () => {
@@ -785,10 +866,12 @@ describe('ChatItemRow Diff Rendering', () => {
 
     const single = render(<ChatItemRow item={runningItem} />);
     expect(single.getByTestId('subagent-role-icon')).toHaveAttribute('data-role-kind', 'explore');
-    expect(single.getByTestId('agent-orbit-spinner')).toBeInTheDocument();
+    expect(single.getByTestId('agent-status-indicator')).toHaveAttribute('data-status', 'running');
 
     const group = render(<SubagentGroupRow items={[runningItem, secondItem]} />);
-    expect(group.getAllByTestId('agent-orbit-spinner').length).toBeGreaterThanOrEqual(2);
+    expect(
+      group.container.querySelectorAll('[data-testid="agent-status-indicator"][data-status="running"]').length
+    ).toBeGreaterThanOrEqual(2);
     const icons = group.getAllByTestId('subagent-role-icon');
     expect(icons.some((el) => el.getAttribute('data-role-kind') === 'review')).toBe(true);
   });
@@ -862,5 +945,232 @@ describe('ChatItemRow Diff Rendering', () => {
     const mdCss = fs.readFileSync('src/components/views/chat/styles/chat-markdown-actions.css', 'utf8');
     expect(mdCss).toContain('min-width: 0');
     expect(mdCss).toContain('box-decoration-break: clone');
+  });
+
+  it('renders GFM markdown tables with safe cell breaks, word-preserving column sizing, and wide transcript expansion', async () => {
+    const tableMarkdown = [
+      '| # | Superficie | Cómo funciona | Cómo se convierte | Propuesta |',
+      '| --- | --- | --- | --- | --- |',
+      '| S11 | Empaquetado como plugin | Usa `plugins/<name>/` en `~/.gemini/config/plugins/` | • Borrar `SKILL.md` sueltos.<br>• Instalar plugin unificado.<br>• Mantener `<br>` literal dentro de código. | Incluir |',
+    ].join('\n');
+
+    const { container } = render(
+      <ChatItemRow item={mockItem({ id: 'a-table', kind: 'assistant', text: tableMarkdown })} />,
+    );
+
+    const anchor = container.querySelector('.md-body .md-table-anchor');
+    const wrap = anchor?.querySelector(':scope > .md-table-wrap');
+    const table = wrap?.querySelector(':scope > table');
+    expect(anchor).toBeInTheDocument();
+    expect(wrap).toBeInTheDocument();
+    expect(table).toBeInTheDocument();
+
+    const cells = Array.from(container.querySelectorAll('.md-body td'));
+    expect(cells).toHaveLength(5);
+    const detailCell = cells[3];
+    expect(detailCell.querySelectorAll('br')).toHaveLength(2);
+    expect(detailCell.textContent).not.toContain('sueltos.<br>');
+    expect(Array.from(detailCell.querySelectorAll('code')).map((c) => c.textContent)).toEqual([
+      'SKILL.md',
+      '<br>',
+    ]);
+
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const mdCss = fs.readFileSync('src/components/views/chat/styles/chat-markdown-actions.css', 'utf8');
+
+    expect(mdCss).toMatch(/\.md-body th,\s*\.md-body td\s*\{[^}]*overflow-wrap:\s*break-word;/);
+    expect(mdCss).toMatch(/\.md-body th,\s*\.md-body td\s*\{[^}]*word-break:\s*normal;/);
+    expect(mdCss).not.toMatch(/\.md-body th,\s*\.md-body td\s*\{[^}]*overflow-wrap:\s*anywhere;/);
+    expect(mdCss).toMatch(/\.md-body th\s*\{[^}]*overflow-wrap:\s*normal;/);
+    expect(mdCss).toMatch(/\.md-body table \.md-inline-code[\s\S]*overflow-wrap:\s*break-word;/);
+    expect(mdCss).toContain('container-name: chat-transcript;');
+    expect(mdCss).toMatch(/@container chat-transcript \(width > 760px\)/);
+  });
+
+  it('preserves Markdown paragraph DOM nodes and active text selection across Quote-on-mouseUp and streaming/poll re-renders', () => {
+    const initialItem = mockItem({
+      id: 'a-sel-1',
+      kind: 'assistant',
+      text: 'First stable paragraph to select.\n\nSecond paragraph still streaming.',
+      streaming: false,
+    });
+    const { container, rerender } = render(
+      <ChatItemRow item={initialItem} subagentRuns={[]} />,
+    );
+
+    const firstParagraph = Array.from(container.querySelectorAll('.md-body p')).find((el) =>
+      el.textContent?.includes('First stable paragraph'),
+    )!;
+    expect(firstParagraph).toBeTruthy();
+
+    const range = document.createRange();
+    range.selectNodeContents(firstParagraph);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    fireEvent.mouseUp(firstParagraph);
+
+    // Releasing mouse updates local citation state, and polling/streaming re-renders with new item/subagentRuns refs
+    expect(screen.getByRole('button', { name: 'Quote in composer' })).toBeInTheDocument();
+    expect(container.querySelectorAll('.md-body p')[0]).toBe(firstParagraph);
+    expect(window.getSelection()?.toString()).toContain('First stable paragraph');
+
+    rerender(
+      <ChatItemRow
+        item={mockItem({
+          id: 'a-sel-1',
+          kind: 'assistant',
+          text: 'First stable paragraph to select.\n\nSecond paragraph still streaming with more tokens.',
+          streaming: true,
+        })}
+        subagentRuns={[
+          {
+            subagentId: 'sub-tick',
+            parentThreadId: 't-1',
+            parentToolCallId: 'call-tick',
+            role: 'Explorer',
+            status: 'running',
+            stepCount: 2,
+            items: [],
+            startedAtUnixMs: 1_700_000_000_000,
+            updatedAtUnixMs: 1_700_000_001_000,
+          },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll('.md-body p')[0]).toBe(firstParagraph);
+    expect(window.getSelection()?.toString()).toContain('First stable paragraph');
+  });
+});
+
+describe('ChatItemRow smooth streaming reveal', () => {
+  it('paces newly appended streaming text across animation frames and snaps on completion or reset', () => {
+    let nextId = 1;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++;
+      frames.set(id, cb);
+      return id;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      frames.delete(id);
+    });
+
+    const flushNextFrame = () => {
+      const first = frames.entries().next();
+      if (first.done) return false;
+      const [id, cb] = first.value;
+      frames.delete(id);
+      act(() => {
+        cb(performance.now());
+      });
+      return true;
+    };
+
+    try {
+      // 1. Initial mount renders initial text immediately without replaying from 0.
+      const base = mockItem({
+        id: 'stream-1',
+        kind: 'assistant',
+        streaming: true,
+        text: 'Hello',
+      });
+      const { container, rerender } = render(<ChatItemRow item={base} />);
+      expect(container.textContent).toContain('Hello');
+      expect(frames.size).toBe(0);
+
+      // 2. Appending a bursty chunk reveals smoothly over multiple frames instead of jumping at once.
+      const fullText = 'Hello from the smooth streaming assistant pipeline across frames';
+      rerender(<ChatItemRow item={{ ...base, text: fullText }} />);
+      expect(container.querySelector('.md-body')?.textContent).toBe('Hello');
+      expect(frames.size).toBeGreaterThan(0);
+
+      expect(flushNextFrame()).toBe(true);
+      const afterFirstFrame = container.querySelector('.md-body')?.textContent ?? '';
+      expect(afterFirstFrame.length).toBeGreaterThan('Hello'.length);
+      expect(afterFirstFrame.length).toBeLessThan(fullText.length);
+
+      // Drain remaining frames to finish revealing the chunk.
+      let guard = 0;
+      while (flushNextFrame() && guard < 100) {
+        guard += 1;
+      }
+      expect(container.querySelector('.md-body')?.textContent).toBe(fullText);
+
+      // 3. Non-monotonic replacement snaps immediately without waiting for frames.
+      const appended = `${fullText} with another chunk incoming soon`;
+      rerender(<ChatItemRow item={{ ...base, text: appended }} />);
+      expect(container.querySelector('.md-body')?.textContent).toBe(fullText);
+
+      const replaced = 'Replaced answer cleanly';
+      rerender(<ChatItemRow item={{ ...base, text: replaced }} />);
+      expect(container.querySelector('.md-body')?.textContent).toBe(replaced);
+
+      // 4. Turning streaming=false snaps any buffered suffix to 100% immediately.
+      const trailingBurst = `${replaced} and even more buffered tokens waiting to appear`;
+      rerender(<ChatItemRow item={{ ...base, text: trailingBurst }} />);
+      expect(container.querySelector('.md-body')?.textContent).toBe(replaced);
+
+      rerender(<ChatItemRow item={{ ...base, streaming: false, text: trailingBurst }} />);
+      expect(container.querySelector('.md-body')?.textContent).toBe(trailingBurst);
+
+      // 5. Reduced-motion mode bypasses rAF buffering and renders appended text synchronously.
+      document.documentElement.dataset.motion = 'reduce';
+      const reduceBase = mockItem({
+        id: 'stream-reduce',
+        kind: 'assistant',
+        streaming: true,
+        text: 'Start',
+      });
+      rerender(<ChatItemRow item={reduceBase} />);
+      const reduceFull = 'Start plus instant full text when reduced motion is enabled';
+      rerender(<ChatItemRow item={{ ...reduceBase, text: reduceFull }} />);
+      expect(container.querySelector('.md-body')?.textContent).toBe(reduceFull);
+    } finally {
+      delete document.documentElement.dataset.motion;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('prevents full-width horizontal scrollbars on chat transcripts and bounds child rows', async () => {
+    const fsSpecifier = ['node', 'fs'].join(':');
+    const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+      readFileSync: (filePath: string, encoding: 'utf8') => string;
+    };
+    const chatCoreCss = fs.readFileSync('src/components/views/chat/styles/chat-core.css', 'utf8');
+    const chatWorkCss = fs.readFileSync('src/components/views/chat/styles/chat-work.css', 'utf8');
+    const chatMdCss = fs.readFileSync('src/components/views/chat/styles/chat-markdown-actions.css', 'utf8');
+    const chatSubagentsCss = fs.readFileSync('src/components/views/chat/styles/chat-subagents.css', 'utf8');
+    const inspectorCss = fs.readFileSync('src/components/views/subagents/inspector.css', 'utf8');
+
+    expect(chatCoreCss).toMatch(/\.chat-thread-layout\{[^}]*min-width:\s*0[^}]*overflow-x:\s*hidden/);
+    expect(chatCoreCss).toMatch(/\.chat-thread-layout__body\{[^}]*min-width:\s*0/);
+    expect(chatCoreCss).toMatch(/\.chat-transcript\{[^}]*min-width:\s*0[^}]*overflow-x:\s*hidden/);
+    expect(chatCoreCss).toMatch(/\.chat-transcript__column\s*\{[\s\S]*?min-width:\s*0;\s*max-width:\s*100%;/);
+    expect(chatCoreCss).toMatch(/\.chat-turn\s*\{[\s\S]*?min-width:\s*0;\s*max-width:\s*100%;/);
+    expect(chatCoreCss).toMatch(/\.chat-error-row > div\s*\{\s*flex:\s*1;\s*min-width:\s*0;\s*\}/);
+    expect(chatCoreCss).toMatch(/\.chat-error-row p\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
+    expect(chatCoreCss).toMatch(/\.chat-approval-card__body\s*\{\s*min-width:\s*0;\s*\}/);
+    expect(chatCoreCss).toMatch(/\.chat-user-row pre\s*\{[\s\S]*?max-width:\s*100%;[\s\S]*?overflow-x:\s*auto;/);
+
+    expect(chatMdCss).toMatch(/\.md-body img[\s\S]*?max-width:\s*100%;\s*height:\s*auto;/);
+    expect(chatMdCss).toMatch(/\.md-table-wrap\s*\{[\s\S]*?box-sizing:\s*border-box;/);
+    expect(chatMdCss).toMatch(/\.md-body :is\(ul, ol, blockquote\) \.md-table-wrap\s*\{[\s\S]*?max-width:\s*100%;/);
+    expect(chatMdCss).toMatch(/\.chat-rewind\s*\{[\s\S]*?min-width:\s*min\(224px,\s*100%\);[\s\S]*?max-width:\s*100%;/);
+
+    expect(chatWorkCss).toMatch(/\.chat-collapsible\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);[\s\S]*?min-width:\s*0;/);
+    expect(chatWorkCss).toMatch(/\.chat-collapsible__inner\s*\{[\s\S]*?min-width:\s*0;\s*max-width:\s*100%;/);
+    expect(chatWorkCss).toMatch(/\.chat-reasoning-row__content\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
+    expect(chatWorkCss).toMatch(/\.chat-work-group,\s*\.chat-work-group__items\s*\{\s*min-width:\s*0;\s*max-width:\s*100%;\s*\}/);
+    expect(chatWorkCss).toMatch(/\.chat-work-entry\s*\{[\s\S]*?min-width:\s*0;\s*max-width:\s*100%;/);
+    expect(chatWorkCss).toMatch(/\.chat-working-caption\s*\{[\s\S]*?max-width:\s*100%;\s*overflow:\s*hidden;/);
+
+    expect(chatSubagentsCss).toMatch(/\.chat-subagent-card\s*\{[\s\S]*?min-width:\s*0;\s*max-width:\s*100%;/);
+    expect(chatSubagentsCss).toMatch(/\.chat-subagent-card__pill\s*\{[\s\S]*?max-width:\s*100%;[\s\S]*?text-overflow:\s*ellipsis;/);
+    expect(inspectorCss).toMatch(/\.subagent-inspector__stream\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow-x:\s*hidden;/);
   });
 });

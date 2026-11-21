@@ -6,6 +6,7 @@ import {
   CHAT_THREAD_STORAGE_PREFIX,
 } from './hooks/useChatGridPersistence';
 import { useChatSession } from './useChatSession';
+import type { AgentProfile } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
 import { requestNewThread } from '../../../lib/newThreadRequest';
 
@@ -1071,5 +1072,89 @@ describe('useChatSession instant hydration', () => {
     });
     expect(result.current.promptMap['t-race']).toBe('Do not drop me');
     expect(result.current.attachmentsMap['t-race']).toEqual([imgAtt]);
+  });
+
+  it('inherits agent defaultMode, defaultPlan, defaultModel, effort and preserves workspaceId when creating an agent thread (S1, S4)', async () => {
+    let capturedCreateAgentChatReq: any = null;
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'list_chat_summaries') return [];
+      if (cmd === 'list_active_chat_runs') return [];
+      if (cmd === 'create_agent_chat') {
+        capturedCreateAgentChatReq = args;
+        return {
+          id: 't-agent-new',
+          profileId: 'agent-launch-1',
+          provider: args?.provider || 'antigravity',
+          mode: args?.mode || 'acceptEdits',
+          plan: Boolean(args?.plan),
+          model: args?.model || null,
+          effort: args?.effort || null,
+          workspaceId: args?.workspaceId || null,
+          items: [],
+          status: 'idle',
+        };
+      }
+      return null;
+    });
+
+    const agent: AgentProfile = {
+      id: 'agent-launch-1',
+      name: 'Launch Specialist',
+      engine: 'antigravity',
+      purpose: 'Specialist tasks',
+      avatar: null,
+      createdAtUnixMs: 1,
+      pinned: false,
+      order: 0,
+      defaultMode: 'fullAccess',
+      defaultPlan: true,
+      defaultModel: 'gemini-2.5-pro',
+      defaultEffort: 'high',
+    };
+
+    const { result } = renderHook(() =>
+      useChatSession({
+        agentId: 'agent-launch-1',
+        agentEngine: 'antigravity',
+        agents: [agent],
+        workspaceId: 'ws-agent-repo',
+        ownsNewThreadRequests: true,
+      })
+    );
+
+    // Initial draftConfig inherits agent defaults
+    expect(result.current.draftConfig.mode).toBe('fullAccess');
+    expect(result.current.draftConfig.plan).toBe(true);
+    expect(result.current.draftConfig.model).toBe('gemini-2.5-pro');
+    expect(result.current.draftConfig.effort).toBe('high');
+
+    // Create new thread preserves workspaceId
+    await act(async () => {
+      await result.current.handleCreateNewThread();
+    });
+
+    expect(capturedCreateAgentChatReq).toMatchObject({
+      agentId: 'agent-launch-1',
+      mode: 'fullAccess',
+      plan: true,
+      model: 'gemini-2.5-pro',
+      effort: 'high',
+      workspaceId: 'ws-agent-repo',
+    });
+
+    // Starting a thread directly from draft home also preserves workspaceId
+    capturedCreateAgentChatReq = null;
+    await act(async () => {
+      await result.current.handleStartThreadFromHome('Inspect workspace files');
+    });
+
+    expect(capturedCreateAgentChatReq).toMatchObject({
+      agentId: 'agent-launch-1',
+      mode: 'fullAccess',
+      plan: true,
+      model: 'gemini-2.5-pro',
+      effort: 'high',
+      workspaceId: 'ws-agent-repo',
+    });
   });
 });

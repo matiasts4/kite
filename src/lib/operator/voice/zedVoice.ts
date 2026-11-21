@@ -15,6 +15,15 @@ import { isTauriEnvironment } from '../../ipc';
 import { startAudioDucking, stopAudioDucking } from './audioDucking';
 import { emitTrace } from '../trace/trace';
 import { joinSpeechPartial } from './speechPartial';
+import {
+  AdaptiveVadController,
+  BargeInGate,
+  PcmPreRollBuffer,
+  computeAdaptiveEndpointMs,
+  computeRms,
+  trimTrailingPcmSamples,
+} from './adaptiveVad';
+import { voiceTurnArbitrator } from './turnArbitrator';
 
 // Re-export submodules for clean modular architecture & 100% backward compatibility
 export {
@@ -26,6 +35,9 @@ export {
 } from './wavEncoder';
 
 export {
+  type SttErrorCode,
+  SttProviderError,
+  isFatalSttError,
   transcribeWithGrokCloud,
   transcribeWithCloudflareWhisper,
 } from './transcriptionProviders';
@@ -75,9 +87,56 @@ let activeRecognition: any = null;
 let activeMediaRecorder: MediaRecorder | null = null;
 let activeAudioContext: AudioContext | null = null;
 let activeProcessor: ScriptProcessorNode | null = null;
+let activeWorkletNode: AudioWorkletNode | null = null;
+let activeWorkletUrl: string | null = null;
+let activeSilentGain: GainNode | null = null;
 let activeAnalyser: AnalyserNode | null = null;
 let activeMediaStream: MediaStream | null = null;
 let audioLevel = 0;
+
+const IDLE_NO_SPEECH_MS = 8000;
+const TRAILING_SILENCE_PAD_MS = 250;
+const PCM_WORKLET_PROCESSOR_NAME = 'kite-pcm-vad-processor';
+const PCM_WORKLET_SOURCE = `
+class KitePcmVadProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buf = new Float32Array(2048);
+    this._offset = 0;
+  }
+  process(inputs) {
+    const input = inputs && inputs[0] && inputs[0][0];
+    if (!input || input.length === 0) return true;
+    let i = 0;
+    while (i < input.length) {
+      const space = this._buf.length - this._offset;
+      const take = Math.min(space, input.length - i);
+      this._buf.set(input.subarray(i, i + take), this._offset);
+      this._offset += take;
+      i += take;
+      if (this._offset >= this._buf.length) {
+        const out = this._buf;
+        this.port.postMessage(out, [out.buffer]);
+        this._buf = new Float32Array(2048);
+        this._offset = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('${PCM_WORKLET_PROCESSOR_NAME}', KitePcmVadProcessor);
+`;
+
+const adaptiveVad = new AdaptiveVadController();
+const bargeInGate = new BargeInGate();
+let preRollBuffer = new PcmPreRollBuffer(16000, 400);
+let bargeInCallback: (() => void) | null = null;
+let isBargeInMonitoring = false;
+let isPersistentGraphActive = false;
+let currentTurnTraceId = '';
+let speechStartTimestamp = 0;
+let lastSilenceWindowMs = 1150;
+let currentContinuousMode = false;
 
 let currentSessionPromise: {
   resolve: (text: string) => void;
@@ -90,6 +149,10 @@ let audioSampleRate = 16000;
 let currentSpeechTranscript = '';
 let currentOptions: StartListeningOptions = {};
 let isSessionActive = false;
+let isSpeechCaptureOpen = false;
+let hasVadVoicedFrame = false;
+let trailingSilenceSamples = 0;
+let lastRecognizedText = '';
 
 export function getCurrentAudioLevel(): number {
   if (!activeAnalyser) return 0;
@@ -111,6 +174,10 @@ export function getCurrentAudioLevel(): number {
 export interface StartListeningOptions {
   language?: string;
   deviceId?: string | null;
+  /** True inside continuous Voice Mode calls so the audio graph stays warm without 8s teardown churn. */
+  continuous?: boolean;
+  /** True when starting immediately from an acoustic barge-in so pre-roll PCM is preserved. */
+  fromBargeIn?: boolean;
   onInterim?: (partial: string) => void;
   onAudioLevel?: (level: number) => void;
   onTranscribing?: () => void;
@@ -120,8 +187,132 @@ export interface StartListeningOptions {
 let startingPromise: Promise<void> | null = null;
 let recordingStartTime = 0;
 let silenceTimer: any = null;
+let noSpeechTimer: any = null;
 let hasDetectedSpeech = false;
 let lastInterimTranscript = '';
+
+function clearVadTimers(): void {
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+    silenceTimer = null;
+  }
+  if (noSpeechTimer) {
+    clearTimeout(noSpeechTimer);
+    noSpeechTimer = null;
+  }
+}
+
+function armNoSpeechTimer(): void {
+  if (noSpeechTimer) {
+    clearTimeout(noSpeechTimer);
+    noSpeechTimer = null;
+  }
+  // In continuous persistent voice sessions, stay quietly armed without tearing down the mic every 8s.
+  if (!isSessionActive || hasDetectedSpeech || currentContinuousMode) return;
+  noSpeechTimer = setTimeout(() => {
+    if (isSessionActive && !hasDetectedSpeech && !currentContinuousMode) {
+      void stopOperatorListening();
+    }
+  }, IDLE_NO_SPEECH_MS);
+}
+
+/**
+ * Arms echo-resistant acoustic barge-in monitoring while SETH is speaking TTS.
+ * Keeps the persistent microphone graph alive, buffers 400ms pre-roll PCM, and invokes
+ * `onBargeIn` immediately upon sustained human speech onset.
+ */
+export function armBargeInMonitor(onBargeIn: () => void): boolean {
+  if (!activeMediaStream || !activeAudioContext) {
+    return false;
+  }
+  bargeInCallback = onBargeIn;
+  isBargeInMonitoring = true;
+  bargeInGate.arm(Date.now());
+  return true;
+}
+
+export function disarmBargeInMonitor(): void {
+  isBargeInMonitoring = false;
+  bargeInCallback = null;
+  bargeInGate.disarm();
+}
+
+function openSpeechPcmCapture(): boolean {
+  if (isSpeechCaptureOpen) return false;
+  isSpeechCaptureOpen = true;
+  trailingSilenceSamples = 0;
+  const preRoll = preRollBuffer.drain();
+  if (preRoll.length > 0) {
+    rawPcmChunks.push(...preRoll);
+  }
+  return true;
+}
+
+function handlePcmFrame(samples: Float32Array): void {
+  const frameDurationMs = (samples.length / Math.max(8000, audioSampleRate)) * 1000;
+  const rms = computeRms(samples);
+
+  // Maintain 400ms circular pre-roll buffer whenever persistent mic is open
+  preRollBuffer.push(samples);
+
+  if (isBargeInMonitoring && !isSessionActive) {
+    if (bargeInGate.evaluateFrame(rms, frameDurationMs, adaptiveVad.getNoiseFloorRms(), Date.now())) {
+      isBargeInMonitoring = false;
+      const cb = bargeInCallback;
+      bargeInCallback = null;
+      voiceTurnArbitrator.transition('barge_in');
+      try {
+        cb?.();
+      } catch {}
+    }
+    return;
+  }
+
+  if (!isSessionActive) return;
+
+  const decision = adaptiveVad.processFrame(rms, frameDurationMs);
+  let openedCaptureOnThisFrame = false;
+
+  if (decision.speechStartedNow) {
+    hasDetectedSpeech = true;
+    if (!speechStartTimestamp) {
+      speechStartTimestamp = Date.now();
+    }
+    openedCaptureOnThisFrame = openSpeechPcmCapture();
+    voiceTurnArbitrator.transition('user_speaking');
+    try {
+      emitTrace({
+        turnId: currentTurnTraceId,
+        ev: 'vad.speech_start',
+        noiseFloorRms: Number(decision.noiseFloorRms.toFixed(4)),
+        bargeIn: Boolean(currentOptions.fromBargeIn),
+      });
+    } catch {}
+  }
+
+  if (decision.isVoiced) {
+    hasDetectedSpeech = true;
+    hasVadVoicedFrame = true;
+    if (!speechStartTimestamp) {
+      speechStartTimestamp = Date.now();
+    }
+    if (!openedCaptureOnThisFrame) {
+      openedCaptureOnThisFrame = openSpeechPcmCapture();
+    }
+    trailingSilenceSamples = 0;
+    resetSilenceTimer();
+  }
+
+  // Gate PCM accumulation behind speech onset so idle waiting silence never inflates RAM or STT billing.
+  if (isSpeechCaptureOpen) {
+    if (!openedCaptureOnThisFrame) {
+      rawPcmChunks.push(new Float32Array(samples));
+    }
+    if (!decision.isVoiced) {
+      trailingSilenceSamples += samples.length;
+    }
+  }
+}
 
 async function transcribeOperatorAudioBlob(audioBlob: Blob): Promise<string> {
   let grokKey = '';
@@ -179,19 +370,138 @@ async function transcribeOperatorAudioBlob(audioBlob: Blob): Promise<string> {
 }
 
 function resetSilenceTimer(): void {
+  if (noSpeechTimer) {
+    clearTimeout(noSpeechTimer);
+    noSpeechTimer = null;
+  }
   if (silenceTimer) {
     clearTimeout(silenceTimer);
     silenceTimer = null;
   }
   if (!isSessionActive || !hasDetectedSpeech) return;
 
-  // Auto-stop after 3.2 seconds of silence once speech was genuine and confirmed
+  const liveText = joinSpeechPartial(currentSpeechTranscript, lastInterimTranscript);
+  const speechDurationMs = speechStartTimestamp > 0 ? Date.now() - speechStartTimestamp : 0;
+  // In continuous Voice Mode use responsive adaptive endpointing (700–1950ms).
+  // In one-shot dictation without live interim text, preserve the 2.4s fallback window.
+  const endpointWindowMs =
+    !currentContinuousMode && !liveText.trim()
+      ? 2400
+      : computeAdaptiveEndpointMs(liveText, speechDurationMs);
+  lastSilenceWindowMs = endpointWindowMs;
+
   silenceTimer = setTimeout(() => {
     if (isSessionActive && hasDetectedSpeech) {
-      console.log('[ZedVoice] Silencio detectado tras voz activa (3.2s), finalizando turno automáticamente.');
+      voiceTurnArbitrator.transition('endpointing');
+      try {
+        emitTrace({
+          turnId: currentTurnTraceId,
+          ev: 'vad.eos',
+          silenceWindowMs: endpointWindowMs,
+          speechDurationMs: speechStartTimestamp > 0 ? Date.now() - speechStartTimestamp : 0,
+        });
+      } catch {}
       void stopOperatorListening();
     }
-  }, 3200);
+  }, endpointWindowMs);
+}
+
+async function ensureAudioGraphOpen(deviceId?: string | null, suppressCue = false): Promise<void> {
+  const hasLiveStream =
+    activeMediaStream &&
+    activeMediaStream.getAudioTracks().some((t) => t.readyState === 'live');
+  if (hasLiveStream && activeAudioContext && activeAudioContext.state !== 'closed') {
+    if (activeAudioContext.state === 'suspended') {
+      try {
+        await activeAudioContext.resume();
+      } catch {}
+    }
+    return;
+  }
+
+  const stream = await getAudioInputStream(deviceId);
+  if (!isSessionActive && !isPersistentGraphActive) {
+    stream.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  activeMediaStream = stream;
+  await startAudioDucking({ suppressCue });
+
+  const AudioContextClass =
+    window.AudioContext || (window as any).webkitAudioContext;
+  if (AudioContextClass) {
+    try {
+      activeAudioContext = new AudioContextClass();
+      if (activeAudioContext.state === 'suspended') {
+        try {
+          await activeAudioContext.resume();
+        } catch {}
+      }
+      audioSampleRate = activeAudioContext.sampleRate || 16000;
+      preRollBuffer = new PcmPreRollBuffer(audioSampleRate, 400);
+      const source = activeAudioContext.createMediaStreamSource(stream);
+      const analyser = activeAudioContext.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      activeAnalyser = analyser;
+
+      let workletAttached = false;
+      if (
+        typeof AudioWorkletNode !== 'undefined' &&
+        activeAudioContext.audioWorklet &&
+        typeof activeAudioContext.audioWorklet.addModule === 'function' &&
+        typeof URL !== 'undefined' &&
+        typeof URL.createObjectURL === 'function'
+      ) {
+        try {
+          const blob = new Blob([PCM_WORKLET_SOURCE], { type: 'application/javascript' });
+          activeWorkletUrl = URL.createObjectURL(blob);
+          await activeAudioContext.audioWorklet.addModule(activeWorkletUrl);
+          if (activeAudioContext && activeAudioContext.state !== 'closed') {
+            const worklet = new AudioWorkletNode(activeAudioContext, PCM_WORKLET_PROCESSOR_NAME);
+            worklet.port.onmessage = (ev: MessageEvent) => {
+              const samples = ev.data;
+              if (samples instanceof Float32Array) {
+                handlePcmFrame(samples);
+              }
+            };
+            source.connect(worklet);
+            if (typeof activeAudioContext.createGain === 'function') {
+              const silentGain = activeAudioContext.createGain();
+              silentGain.gain.value = 0;
+              worklet.connect(silentGain);
+              silentGain.connect(activeAudioContext.destination);
+              activeSilentGain = silentGain;
+            }
+            activeWorkletNode = worklet;
+            workletAttached = true;
+          }
+        } catch {
+          workletAttached = false;
+        }
+      }
+
+      if (!workletAttached) {
+        // Fallback to ScriptProcessorNode (zero-gain sink prevents speaker feedback)
+        try {
+          const processor = activeAudioContext.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            handlePcmFrame(input);
+          };
+          source.connect(processor);
+          if (typeof activeAudioContext.createGain === 'function') {
+            const silentGain = activeAudioContext.createGain();
+            silentGain.gain.value = 0;
+            processor.connect(silentGain);
+            silentGain.connect(activeAudioContext.destination);
+            activeSilentGain = silentGain;
+          }
+          activeProcessor = processor;
+        } catch {}
+      }
+    } catch {}
+  }
 }
 
 /**
@@ -207,67 +517,60 @@ export async function startOperatorListening(
     return Promise.reject(new Error(msg));
   }
 
-  // Drop a stale capture without transcribing it or flipping the orb to "thinking".
-  await stopOperatorListening({ discard: true });
+  disarmBargeInMonitor();
+  const reuseGraph = Boolean(options.continuous && activeMediaStream && activeAudioContext);
+
+  // Drop any stale capture promise without tearing down a warm persistent session graph.
+  await stopOperatorListening({ discard: true, keepAudioGraph: reuseGraph });
 
   currentOptions = options;
+  currentContinuousMode = Boolean(options.continuous);
+  isPersistentGraphActive = currentContinuousMode;
   currentRecordedChunks = [];
-  rawPcmChunks = [];
+  if (options.fromBargeIn) {
+    rawPcmChunks = preRollBuffer.drain();
+    isSpeechCaptureOpen = true;
+    hasVadVoicedFrame = true;
+  } else {
+    preRollBuffer.clear();
+    rawPcmChunks = [];
+    isSpeechCaptureOpen = false;
+    hasVadVoicedFrame = false;
+  }
+  trailingSilenceSamples = 0;
+  lastRecognizedText = '';
   currentSpeechTranscript = '';
   lastInterimTranscript = '';
-  hasDetectedSpeech = false;
-  if (silenceTimer) {
-    clearTimeout(silenceTimer);
-    silenceTimer = null;
-  }
+  hasDetectedSpeech = Boolean(options.fromBargeIn);
+  speechStartTimestamp = options.fromBargeIn ? Date.now() : 0;
+  currentTurnTraceId = `voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  adaptiveVad.resetTurn(true);
+  clearVadTimers();
   isSessionActive = true;
   recordingStartTime = Date.now();
+  voiceTurnArbitrator.transition(options.fromBargeIn ? 'user_speaking' : 'listening');
+  if (options.fromBargeIn) {
+    resetSilenceTimer();
+  } else {
+    armNoSpeechTimer();
+  }
 
   startingPromise = (async () => {
-    // 1. Get default microphone stream
+    // 1. Open or reuse microphone stream + AudioWorklet/Analyser
     if (typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getUserMedia === 'function') {
       try {
-        const stream = await getAudioInputStream(options.deviceId);
+        await ensureAudioGraphOpen(options.deviceId, reuseGraph);
         if (!isSessionActive) {
-          stream.getTracks().forEach((track) => track.stop());
+          if (!isPersistentGraphActive) {
+            stopAudioAnalysis();
+          }
           return;
         }
-        activeMediaStream = stream;
-        await startAudioDucking();
 
-        const AudioContextClass =
-          window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioContextClass) {
-          try {
-            activeAudioContext = new AudioContextClass();
-            if (activeAudioContext.state === 'suspended') {
-              try {
-                await activeAudioContext.resume();
-              } catch {}
-            }
-            audioSampleRate = activeAudioContext.sampleRate || 16000;
-            const source = activeAudioContext.createMediaStreamSource(stream);
-            const analyser = activeAudioContext.createAnalyser();
-            analyser.fftSize = 64;
-            source.connect(analyser);
-            activeAnalyser = analyser;
-
-            // Direct Web Audio PCM capture (foolproof backup that captures audio even if MediaRecorder fails)
-            try {
-              const processor = activeAudioContext.createScriptProcessor(4096, 1, 1);
-              processor.onaudioprocess = (e) => {
-                if (!isSessionActive) return;
-                const input = e.inputBuffer.getChannelData(0);
-                rawPcmChunks.push(new Float32Array(input));
-              };
-              source.connect(processor);
-              processor.connect(activeAudioContext.destination);
-              activeProcessor = processor;
-            } catch {}
-          } catch {}
-        }
-
-        if (typeof MediaRecorder !== 'undefined') {
+        // Only run MediaRecorder as a fallback when Web Audio PCM capture did not attach,
+        // avoiding redundant background WebM encoding during idle silence.
+        const hasPcmCapture = Boolean(activeWorkletNode || activeProcessor);
+        if (activeMediaStream && !hasPcmCapture && typeof MediaRecorder !== 'undefined') {
           try {
             const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
               ? 'audio/webm;codecs=opus'
@@ -276,7 +579,9 @@ export async function startOperatorListening(
               : MediaRecorder.isTypeSupported('audio/mp4')
               ? 'audio/mp4'
               : '';
-            const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+            const recorder = mime
+              ? new MediaRecorder(activeMediaStream, { mimeType: mime })
+              : new MediaRecorder(activeMediaStream);
             recorder.ondataavailable = (e) => {
               if (e.data && e.data.size > 0) {
                 currentRecordedChunks.push(e.data);
@@ -324,6 +629,14 @@ export async function startOperatorListening(
           const currentText = joinSpeechPartial(currentSpeechTranscript, interim);
           if (currentText.length > 1) {
             hasDetectedSpeech = true;
+            if (!speechStartTimestamp) {
+              speechStartTimestamp = Date.now();
+            }
+            openSpeechPcmCapture();
+            if (currentText !== lastRecognizedText) {
+              lastRecognizedText = currentText;
+              trailingSilenceSamples = 0;
+            }
             resetSilenceTimer();
           }
           if (options.onInterim) {
@@ -373,13 +686,16 @@ export async function startOperatorListening(
  * Stops capturing audio, finalizes transcription (Grok Cloud or Cloudflare Whisper Cloud),
  * and resolves the pending startOperatorListening() Promise.
  */
-export async function stopOperatorListening(options?: { discard?: boolean }): Promise<string> {
+export async function stopOperatorListening(options?: {
+  discard?: boolean;
+  keepAudioGraph?: boolean;
+}): Promise<string> {
   const discard = options?.discard === true;
-  if (silenceTimer) {
-    clearTimeout(silenceTimer);
-    silenceTimer = null;
-  }
-  hasDetectedSpeech = false;
+  const keepGraph =
+    options?.keepAudioGraph ?? (isPersistentGraphActive && !discard);
+  clearVadTimers();
+  const speechDetectedBeforeStop = hasDetectedSpeech;
+  const wasFromBargeIn = Boolean(currentOptions.fromBargeIn);
 
   if (startingPromise) {
     try {
@@ -389,13 +705,15 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
 
   const wasRecording = isSessionActive;
 
-  // Ensure at least 300ms has elapsed so audio buffers are flushed and populated
-  const elapsed = Date.now() - recordingStartTime;
-  if (!discard && elapsed < 300 && wasRecording) {
-    await new Promise((r) => setTimeout(r, 300 - elapsed));
-  }
-
   isSessionActive = false;
+  const speechWasDetected = speechDetectedBeforeStop || hasDetectedSpeech;
+  const wasVadVoiced = hasVadVoicedFrame;
+  const trailingSilenceToInspect = trailingSilenceSamples;
+  hasDetectedSpeech = false;
+  isSpeechCaptureOpen = false;
+  hasVadVoicedFrame = false;
+  trailingSilenceSamples = 0;
+  lastRecognizedText = '';
   const promise = currentSessionPromise;
   currentSessionPromise = null;
 
@@ -418,9 +736,13 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
       }
     }
     activeMediaRecorder = null;
-    stopAudioAnalysis();
-    void stopAudioDucking();
-    rawPcmChunks = [];
+    if (!keepGraph) {
+      isPersistentGraphActive = false;
+      stopAudioAnalysis();
+      void stopAudioDucking();
+    } else {
+      rawPcmChunks = [];
+    }
     currentRecordedChunks = [];
     if (promise) promise.resolve('');
     return '';
@@ -430,7 +752,9 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
     currentOptions.onTranscribing?.();
   }
 
-  void stopAudioDucking();
+  if (!keepGraph) {
+    void stopAudioDucking();
+  }
 
   // 1. Stop SpeechRecognition
   if (activeRecognition) {
@@ -441,44 +765,63 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
     activeRecognition = null;
   }
 
-  // 2. Stop MediaRecorder, request remaining data and wait (with safety timeout)
-  if (activeMediaRecorder && activeMediaRecorder.state !== 'inactive') {
-    try {
-      activeMediaRecorder.requestData();
-    } catch {}
-    await new Promise<void>((res) => {
-      if (!activeMediaRecorder) return res();
-      let finished = false;
-      const done = () => {
-        if (!finished) {
-          finished = true;
-          res();
-        }
-      };
-      activeMediaRecorder.onstop = done;
-      const timer = setTimeout(done, 600);
-      try {
-        activeMediaRecorder.stop();
-      } catch {
-        clearTimeout(timer);
-        done();
-      }
-    });
-    activeMediaRecorder = null;
-  }
+  const localTranscript = joinSpeechPartial(currentSpeechTranscript, lastInterimTranscript).trim();
+  const hasSpeechPayload = speechWasDetected || Boolean(localTranscript);
 
-  // 3. Resolve audio blob: Prioritize lossless 16-bit PCM WAV (16kHz Whisper native standard)
+  // 2. Prioritize already-captured PCM WAV, trimming dead trailing endpointing silence
+  //    while retaining a ~250ms acoustic decay pad so closing consonants are never clipped.
   let audioBlob: Blob | null = null;
-  if (rawPcmChunks.length > 0) {
+  const trailingPadSamples = Math.round((audioSampleRate * TRAILING_SILENCE_PAD_MS) / 1000);
+  const samplesToTrim =
+    wasVadVoiced && trailingSilenceToInspect > trailingPadSamples
+      ? trailingSilenceToInspect - trailingPadSamples
+      : 0;
+  const effectivePcmChunks =
+    samplesToTrim > 0 ? trimTrailingPcmSamples(rawPcmChunks, samplesToTrim) : rawPcmChunks;
+  const totalPcmSamples = effectivePcmChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (hasSpeechPayload && totalPcmSamples > 0) {
     try {
-      audioBlob = encodeWavBlob(rawPcmChunks, audioSampleRate);
+      audioBlob = encodeWavBlob(effectivePcmChunks, audioSampleRate);
     } catch (e) {
       console.warn('[ZedVoice] encodeWavBlob error:', e);
     }
   }
 
-  // Dual recording fallback: If raw PCM was somehow empty, fallback to MediaRecorder chunks
-  if (!audioBlob && currentRecordedChunks.length > 0) {
+  // Stop MediaRecorder: await onstop only if we actually need its fallback chunks.
+  if (activeMediaRecorder && activeMediaRecorder.state !== 'inactive') {
+    if (!hasSpeechPayload || (audioBlob && audioBlob.size > 200)) {
+      try {
+        activeMediaRecorder.onstop = null;
+        activeMediaRecorder.stop();
+      } catch {}
+    } else {
+      try {
+        activeMediaRecorder.requestData();
+      } catch {}
+      await new Promise<void>((res) => {
+        if (!activeMediaRecorder) return res();
+        let finished = false;
+        const done = () => {
+          if (!finished) {
+            finished = true;
+            res();
+          }
+        };
+        activeMediaRecorder.onstop = done;
+        const timer = setTimeout(done, 600);
+        try {
+          activeMediaRecorder.stop();
+        } catch {
+          clearTimeout(timer);
+          done();
+        }
+      });
+    }
+    activeMediaRecorder = null;
+  }
+
+  // Dual recording fallback: If raw PCM was empty, use MediaRecorder chunks
+  if (hasSpeechPayload && !audioBlob && currentRecordedChunks.length > 0) {
     const candidate = new Blob(currentRecordedChunks, {
       type: currentRecordedChunks[0]?.type || 'audio/webm',
     });
@@ -487,26 +830,50 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
     }
   }
 
-  // 4. Stop audio stream & analyser
-  stopAudioAnalysis();
-
-  // 5. Resolve transcription (single cloud request — lowest latency for Zed turns)
-  let finalText = '';
-  let lastError = '';
-  const durationSecs = Math.max(0.5, (Date.now() - recordingStartTime) / 1000);
-
-  if (audioBlob && audioBlob.size > 200) {
-    try {
-      finalText = await transcribeOperatorAudioBlob(audioBlob);
-    } catch (err: any) {
-      lastError = err?.message || 'Error en transcripción';
-      console.warn('[ZedVoice] Transcripción cloud error:', err);
-    }
+  // 3. Release audio stream only when NOT in a warm persistent session
+  if (!keepGraph) {
+    isPersistentGraphActive = false;
+    stopAudioAnalysis();
+  } else {
+    rawPcmChunks = [];
   }
 
-  // Priority 3: Native speech transcript fallback (both final and interim)
-  if (!finalText && (currentSpeechTranscript || lastInterimTranscript)) {
-    finalText = (currentSpeechTranscript || lastInterimTranscript).trim();
+  // 4. Resolve transcription (prefer cloud STT when speech was detected; fall back to Web Speech transcript cleanly)
+  let finalText = '';
+  let lastError = '';
+  const capturedAudioMs =
+    totalPcmSamples > 0
+      ? Math.round((totalPcmSamples / Math.max(8000, audioSampleRate)) * 1000)
+      : speechStartTimestamp > 0
+        ? Math.max(0, Date.now() - speechStartTimestamp)
+        : Math.max(0, Date.now() - recordingStartTime);
+  const durationSecs = Math.max(0.5, capturedAudioMs / 1000);
+  const sttStartTs = Date.now();
+  let sttBackend = 'local';
+
+  if (hasSpeechPayload) {
+    if (audioBlob && audioBlob.size > 200) {
+      sttBackend = 'cloud';
+      try {
+        emitTrace({
+          turnId: currentTurnTraceId,
+          ev: 'stt.start',
+          backend: sttBackend,
+          audioDurationMs: capturedAudioMs > 0 ? capturedAudioMs : undefined,
+        });
+      } catch {}
+      try {
+        finalText = await transcribeOperatorAudioBlob(audioBlob);
+      } catch (err: any) {
+        lastError = err?.message || 'Error en transcripción';
+      }
+    }
+
+    // Fallback to local Web Speech transcript whenever cloud STT failed or returned empty
+    if (!finalText && localTranscript) {
+      finalText = localTranscript;
+      sttBackend = 'webspeech-fallback';
+    }
   }
 
   // Drop hallucinated phrases from silence
@@ -514,16 +881,36 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
     finalText = cleanTranscriptionText(finalText, durationSecs);
   }
 
+  if (finalText) {
+    if (wasFromBargeIn) {
+      bargeInGate.recordValidBargeIn();
+    }
+    try {
+      emitTrace({
+        turnId: currentTurnTraceId,
+        ev: 'stt.end',
+        backend: sttBackend,
+        durationMs: Date.now() - sttStartTs,
+        chars: finalText.length,
+        fallback: sttBackend === 'webspeech-fallback',
+      });
+    } catch {}
+  } else if (wasFromBargeIn) {
+    bargeInGate.recordEmptyBargeIn();
+  }
+
   if (!finalText) {
     const discardReason =
-      !audioBlob || audioBlob.size <= 200
-        ? 'Grabación vacía o de duración mínima'
-        : lastError && !(currentSpeechTranscript || lastInterimTranscript)
-          ? `Fallo al transcribir: ${lastError}`
-          : 'No se detectaron palabras legibles en el audio';
+      !speechWasDetected && !localTranscript
+        ? 'Silencio o sin voz detectada'
+        : !audioBlob || audioBlob.size <= 200
+          ? 'Grabación vacía o de duración mínima'
+          : lastError
+            ? `Fallo al transcribir: ${lastError}`
+            : 'No se detectaron palabras legibles en el audio';
 
     try {
-      const voiceTurnId = `voice-${Date.now()}`;
+      const voiceTurnId = currentTurnTraceId || `voice-${Date.now()}`;
       emitTrace({
         turnId: voiceTurnId,
         ev: 'turn.start',
@@ -539,11 +926,11 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
       });
     } catch {}
 
-    if (!audioBlob || audioBlob.size <= 200) {
-      console.log('[ZedVoice] Grabación vacía o de duración mínima, volviendo a reposo limpiamente.');
-    } else if (lastError && !(currentSpeechTranscript || lastInterimTranscript)) {
-      currentOptions.onError?.(`Fallo al transcribir: ${lastError}`);
-    } else if (audioBlob && audioBlob.size > 200) {
+    // Only surface an error when real speech was attempted and no STT backend succeeded.
+    // Pure silence / empty captures settle quietly without spamming error toasts.
+    if (speechWasDetected && lastError && !localTranscript) {
+      currentOptions.onError?.(lastError);
+    } else if (speechWasDetected && audioBlob && audioBlob.size > 200 && !localTranscript && !wasFromBargeIn) {
       currentOptions.onError?.(
         'No se entendió lo que dijiste. Prueba hablar más claro o más cerca del micrófono.'
       );
@@ -560,11 +947,31 @@ export async function stopOperatorListening(options?: { discard?: boolean }): Pr
 }
 
 function stopAudioAnalysis(): void {
+  disarmBargeInMonitor();
+  if (activeWorkletNode) {
+    try {
+      activeWorkletNode.port.onmessage = null;
+      activeWorkletNode.disconnect();
+    } catch {}
+    activeWorkletNode = null;
+  }
+  if (activeWorkletUrl) {
+    try {
+      URL.revokeObjectURL(activeWorkletUrl);
+    } catch {}
+    activeWorkletUrl = null;
+  }
   if (activeProcessor) {
     try {
       activeProcessor.disconnect();
     } catch {}
     activeProcessor = null;
+  }
+  if (activeSilentGain) {
+    try {
+      activeSilentGain.disconnect();
+    } catch {}
+    activeSilentGain = null;
   }
   if (activeMediaStream) {
     try {
@@ -581,20 +988,26 @@ function stopAudioAnalysis(): void {
   activeAnalyser = null;
   audioLevel = 0;
   rawPcmChunks = [];
+  preRollBuffer.clear();
   stopCapturedStreams();
 }
 
 /**
- * Drops any microphone capture Zed still holds and restores ducked volume.
- * Used when listening fails, and when the assistant is closed or minimized.
+ * Drops any microphone capture SETH/Zed still holds and restores ducked volume.
+ * Used when listening fails, and when the assistant is closed, muted, or minimized.
  */
 export async function releaseOperatorCapture(): Promise<void> {
   isSessionActive = false;
+  isPersistentGraphActive = false;
+  currentContinuousMode = false;
   hasDetectedSpeech = false;
-  if (silenceTimer) {
-    clearTimeout(silenceTimer);
-    silenceTimer = null;
-  }
+  isSpeechCaptureOpen = false;
+  hasVadVoicedFrame = false;
+  trailingSilenceSamples = 0;
+  lastRecognizedText = '';
+  clearVadTimers();
+  disarmBargeInMonitor();
+  voiceTurnArbitrator.transition('idle');
   if (activeRecognition) {
     try {
       activeRecognition.onend = null;
@@ -617,4 +1030,8 @@ export async function releaseOperatorCapture(): Promise<void> {
   currentSessionPromise = null;
   if (pending) pending.resolve('');
   await stopAudioDucking();
+}
+
+export function getLastAdaptiveSilenceWindowMs(): number {
+  return lastSilenceWindowMs;
 }

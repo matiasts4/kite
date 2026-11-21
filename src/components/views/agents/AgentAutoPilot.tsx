@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect, useReducer, useCallback } from 'react';
-import { invokeCommand } from '../../../lib/ipc';
+import { listen } from '@tauri-apps/api/event';
+import { invokeCommand, isTauriEnvironment } from '../../../lib/ipc';
 import { BrandLogo, getEngineDisplayName } from './engineMetadata';
+
+const SETTLE_IDLE_MS = 1500;
+const WAIT_RECHECK_MS = 2500;
+const MAX_WATCH_MS = 30000;
+const MAX_TRANSCRIPT_CHARS = 16000;
 
 export type AutoPilotMode = 'complete' | 'dream' | 'harden' | 'review' | 'task';
 export type AutoPilotPhase = 'off' | 'watching' | 'thinking' | 'waiting' | 'done' | 'stuck';
@@ -159,6 +165,57 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   const turnsCompletedRef = useRef(0);
   const previousPromptsRef = useRef<string[]>([]);
   const activeLoopRef = useRef(0);
+  const mountedRef = useRef(true);
+  const transcriptBufferRef = useRef('');
+  const activeWatchRef = useRef<{ loopId: number; mode: AutoPilotMode; taskText: string } | null>(null);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const waitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const maxWatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const objectiveRef = useRef<string | null>(null);
+  const objectivesCompletedRef = useRef(0);
+  const completedObjectivesRef = useRef<string[]>([]);
+  const driveTurnRef = useRef<((m: AutoPilotMode, t: string, tr?: string) => Promise<void>) | null>(null);
+
+  const clearAutoTimers = useCallback(() => {
+    if (settleTimerRef.current !== null) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    if (waitTimerRef.current !== null) {
+      clearTimeout(waitTimerRef.current);
+      waitTimerRef.current = null;
+    }
+    if (maxWatchTimerRef.current !== null) {
+      clearTimeout(maxWatchTimerRef.current);
+      maxWatchTimerRef.current = null;
+    }
+  }, []);
+
+  const captureTranscript = useCallback(async (): Promise<string> => {
+    const live = transcriptBufferRef.current.trim();
+    if (live.length > 0) {
+      return transcriptBufferRef.current.slice(-MAX_TRANSCRIPT_CHARS);
+    }
+    try {
+      const res = await invokeCommand<{ transcript?: string }>('read_terminal_transcript', {
+        sessionId,
+      });
+      const text = typeof res?.transcript === 'string' ? res.transcript : '';
+      return text.slice(-MAX_TRANSCRIPT_CHARS);
+    } catch {
+      return '';
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeLoopRef.current += 1;
+      activeWatchRef.current = null;
+      clearAutoTimers();
+    };
+  }, [clearAutoTimers]);
 
   const engineName = getEngineDisplayName(profile.engine);
   const isEngaged = phase === 'watching' || phase === 'thinking' || phase === 'waiting';
@@ -201,13 +258,17 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   // Stop handler
   const handleStop = useCallback((reason = 'Auto stopped. The Agent terminal is still available.') => {
     activeLoopRef.current += 1;
+    activeWatchRef.current = null;
+    clearAutoTimers();
     void invokeCommand('cancel_autopilot', {}).catch(() => {});
     dispatch({ type: 'transition', phase: 'off', detail: reason });
-  }, []);
+  }, [clearAutoTimers]);
 
   // Drive Auto turn loop
-  const driveTurn = useCallback(async (selectedMode: AutoPilotMode, taskText: string) => {
+  const driveTurn = useCallback(async (selectedMode: AutoPilotMode, taskText: string, capturedTranscript = '') => {
     const loopId = (activeLoopRef.current += 1);
+    activeWatchRef.current = null;
+    clearAutoTimers();
     dispatch({ type: 'transition', phase: 'thinking', detail: 'Auto is deciding next turn…' });
 
     try {
@@ -230,17 +291,17 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
             task: selectedMode === 'task' ? taskText : '',
             mode: selectedMode,
             engine: profile.engine,
-            transcript: '',
+            transcript: capturedTranscript.slice(-MAX_TRANSCRIPT_CHARS),
             turnsCompleted: turnsCompletedRef.current,
-            previousPrompts: previousPromptsRef.current,
-            objective: null,
-            objectivesCompleted: 0,
-            completedObjectives: [],
+            previousPrompts: previousPromptsRef.current.slice(-5),
+            objective: objectiveRef.current,
+            objectivesCompleted: objectivesCompletedRef.current,
+            completedObjectives: completedObjectivesRef.current.slice(-12),
           },
         },
       });
 
-      if (activeLoopRef.current !== loopId) return;
+      if (!mountedRef.current || activeLoopRef.current !== loopId) return;
 
       if (!decision || decision.action === 'stuck') {
         dispatch({
@@ -260,9 +321,40 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
         return;
       }
 
-      if (decision.action === 'prompt' && decision.prompt) {
+      if (decision.action === 'wait') {
+        dispatch({
+          type: 'transition',
+          phase: 'waiting',
+          detail: decision.reason || 'The Agent is still working. Auto will check again.',
+        });
+        waitTimerRef.current = setTimeout(() => {
+          waitTimerRef.current = null;
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          void captureTranscript().then((nextTranscript) => {
+            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+            void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+          });
+        }, WAIT_RECHECK_MS);
+        return;
+      }
+
+      if (decision.action === 'advance') {
+        if (objectiveRef.current && !completedObjectivesRef.current.includes(objectiveRef.current)) {
+          completedObjectivesRef.current = [...completedObjectivesRef.current, objectiveRef.current].slice(-12);
+          objectivesCompletedRef.current += 1;
+        }
+        if (decision.objective) {
+          objectiveRef.current = decision.objective;
+        }
+      } else if (decision.objective) {
+        objectiveRef.current = decision.objective;
+      }
+
+      if ((decision.action === 'prompt' || decision.action === 'advance') && decision.prompt) {
+        transcriptBufferRef.current = '';
         turnsCompletedRef.current += 1;
-        previousPromptsRef.current.push(decision.prompt);
+        previousPromptsRef.current = [...previousPromptsRef.current, decision.prompt].slice(-5);
+        activeWatchRef.current = { loopId, mode: selectedMode, taskText };
         dispatch({
           type: 'transition',
           phase: 'watching',
@@ -278,16 +370,119 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
         } catch (err) {
           console.warn('[AutoPilot] failed to write terminal input:', err);
         }
+
+        if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+        maxWatchTimerRef.current = setTimeout(() => {
+          maxWatchTimerRef.current = null;
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          activeWatchRef.current = null;
+          clearAutoTimers();
+          void captureTranscript().then((nextTranscript) => {
+            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+            void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+          });
+        }, MAX_WATCH_MS);
+      } else if (decision.action === 'advance') {
+        waitTimerRef.current = setTimeout(() => {
+          waitTimerRef.current = null;
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          void captureTranscript().then((nextTranscript) => {
+            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+            void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+          });
+        }, 250);
       }
     } catch (err: any) {
-      if (activeLoopRef.current !== loopId) return;
+      if (!mountedRef.current || activeLoopRef.current !== loopId) return;
       dispatch({
         type: 'transition',
         phase: 'stuck',
         detail: err?.message || 'Auto encountered an unexpected error.',
       });
     }
-  }, [profile.id, profile.engine, paneId, sessionId]);
+  }, [profile.id, profile.engine, paneId, sessionId, clearAutoTimers, captureTranscript]);
+
+  useEffect(() => {
+    driveTurnRef.current = driveTurn;
+  }, [driveTurn]);
+
+  // Listen for terminal output/activity to capture transcript and detect turn settle
+  useEffect(() => {
+    if (!isTauriEnvironment() || !sessionId) return;
+    let active = true;
+    const unlisteners: Array<() => void> = [];
+
+    const scheduleSettleCheck = () => {
+      const watching = activeWatchRef.current;
+      if (!watching || activeLoopRef.current !== watching.loopId) return;
+      if (settleTimerRef.current !== null) {
+        clearTimeout(settleTimerRef.current);
+      }
+      settleTimerRef.current = setTimeout(() => {
+        settleTimerRef.current = null;
+        if (!active || !mountedRef.current) return;
+        const currentWatch = activeWatchRef.current;
+        if (!currentWatch || activeLoopRef.current !== currentWatch.loopId) return;
+        activeWatchRef.current = null;
+        clearAutoTimers();
+        void captureTranscript().then((nextTranscript) => {
+          if (!active || !mountedRef.current || activeLoopRef.current !== currentWatch.loopId) return;
+          void driveTurnRef.current?.(currentWatch.mode, currentWatch.taskText, nextTranscript);
+        });
+      }, SETTLE_IDLE_MS);
+    };
+
+    void listen<{ sessionId?: string; paneId?: string; data?: string; text?: string; chunk?: string }>(
+      'terminal-output',
+      (event) => {
+        if (!active) return;
+        const p = event.payload;
+        if (p?.sessionId !== sessionId && p?.paneId !== paneId) return;
+        const chunk = p?.data ?? p?.text ?? p?.chunk ?? '';
+        if (chunk) {
+          transcriptBufferRef.current = (transcriptBufferRef.current + chunk).slice(-MAX_TRANSCRIPT_CHARS);
+        }
+        scheduleSettleCheck();
+      }
+    ).then((unlisten) => {
+      if (active) unlisteners.push(unlisten);
+      else unlisten();
+    });
+
+    void listen<{ sessionId?: string; exited?: boolean }>(
+      'terminal://activity',
+      (event) => {
+        if (!active) return;
+        const p = event.payload;
+        if (p?.sessionId !== sessionId) return;
+        if (p?.exited) {
+          const watching = activeWatchRef.current;
+          if (watching && activeLoopRef.current === watching.loopId) {
+            activeWatchRef.current = null;
+            clearAutoTimers();
+            dispatch({
+              type: 'transition',
+              phase: 'stuck',
+              detail: 'Terminal exited while Auto was watching.',
+            });
+          }
+          return;
+        }
+        scheduleSettleCheck();
+      }
+    ).then((unlisten) => {
+      if (active) unlisteners.push(unlisten);
+      else unlisten();
+    });
+
+    return () => {
+      active = false;
+      clearAutoTimers();
+      for (const unlisten of unlisteners) {
+        unlisten();
+      }
+    };
+  }, [sessionId, paneId, clearAutoTimers, captureTranscript]);
 
   const handleEngageMode = (m: AutoPilotMode) => {
     dispatch({ type: 'chooseMode', mode: m });

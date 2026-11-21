@@ -2,6 +2,10 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { invokeCommand } from '../../../../lib/ipc';
 import { ChatAttachment } from '../types';
 import { fileToBase64 } from '../chatSessionUtils';
+import {
+  releaseAttachmentPreview,
+  seedAttachmentPreview,
+} from '../attachmentPreview';
 
 export function useChatAttachments() {
   const [attachmentsMap, setAttachmentsMap] = useState<Record<string, ChatAttachment[]>>({});
@@ -71,14 +75,17 @@ export function useChatAttachments() {
             dataBase64,
           });
           if (item?.resourceId) {
+            if (mimeType.startsWith('image/') && file.size <= 2 * 1024 * 1024) {
+              const previewUrl =
+                typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+                  ? URL.createObjectURL(file)
+                  : `data:${mimeType};base64,${dataBase64}`;
+              seedAttachmentPreview(item.resourceId, previewUrl);
+            }
+            const { previewDataUrl: _strippedPreview, ...rest } = item;
             const enriched: ChatAttachment = {
-              ...item,
+              ...rest,
               mimeType: item.mimeType ?? mimeType,
-              previewDataUrl:
-                item.previewDataUrl ??
-                (mimeType.startsWith('image/') && file.size <= 2 * 1024 * 1024
-                  ? `data:${mimeType};base64,${dataBase64}`
-                  : null),
             };
             staged.push(enriched);
           }
@@ -118,6 +125,7 @@ export function useChatAttachments() {
         console.error('[ChatView] release_chat_attachment failed:', err);
         return;
       }
+      releaseAttachmentPreview(resourceId);
       writeAttachments(
         threadId,
         (attachmentsMapRef.current[threadId] || []).filter(

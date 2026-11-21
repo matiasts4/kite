@@ -1,5 +1,5 @@
 import { createElement, useState } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { SingleThreadPane } from './SingleThreadPane';
 import { toast } from '../../../lib/toast';
@@ -183,9 +183,13 @@ describe('SingleThreadPane component', () => {
       ],
     });
 
-    render(createElement(SingleThreadPane, { thread, ...defaultProps }));
+    const { container } = render(createElement(SingleThreadPane, { thread, ...defaultProps }));
 
     const card = screen.getByRole('region', { name: '1 changed file' });
+    const composerMain = container.querySelector('[data-slot="composer-main"]');
+    expect(composerMain).not.toBeNull();
+    expect(container.querySelector('.kite-composer-shell')?.contains(card)).toBe(true);
+    expect(card.compareDocumentPosition(composerMain!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     fireEvent.click(within(card).getByRole('button', { name: 'Open diff' }));
     expect(listener).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
@@ -608,6 +612,68 @@ describe('SingleThreadPane component', () => {
     voiceSessionStore.stopSession();
   });
 
+  it('renders the Kite Voice Stage with interactive living figure, Spanish eyebrow, and quick-action chips when Voice Mode is active on a blank thread', async () => {
+    const { voiceSessionStore } = await import('../../../lib/operator/voice/voiceSessionStore');
+    const { saveOperatorConfig } = await import('../../../lib/operator/operatorConfig');
+    voiceSessionStore.stopSession();
+    const blankThread = createThread({
+      id: 'thread-voice-blank',
+      items: [],
+    });
+
+    const textExecutor = vi.fn().mockResolvedValue(undefined);
+    voiceSessionStore.registerTextTurnExecutor(textExecutor);
+    voiceSessionStore.startSession('thread-voice-blank', 'thread');
+
+    try {
+      render(
+        createElement(SingleThreadPane, {
+          ...defaultProps,
+          thread: blankThread,
+          workspaceName: undefined,
+        }),
+      );
+
+      const hero = screen.getByTestId('thread-voice-hero');
+      expect(hero).toHaveAttribute('data-state', 'listening');
+      const liveOrb = within(hero).getByTestId('zed-orb');
+      expect(liveOrb).toHaveAttribute('data-figure', 'plasma-orb');
+      expect(liveOrb).toHaveAttribute('data-state', 'listening');
+      expect(screen.getByTestId('thread-voice-eyebrow')).toHaveTextContent('SESIÓN DE VOZ · EN VIVO');
+      expect(screen.getByRole('heading', { name: /Listo para coordinar/i })).toBeInTheDocument();
+      expect(screen.queryByText(/Zed/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add a folder' })).not.toBeInTheDocument();
+
+      // Selecting another figure in operator settings updates Voice Mode centerpiece live
+      act(() => {
+        saveOperatorConfig({ persona: { figure: 'silk-wave' } });
+      });
+      expect(within(hero).getByTestId('zed-orb')).toHaveAttribute('data-figure', 'silk-wave');
+
+      // Quick-action chips trigger voice turn cleanly
+      const chip = screen.getByRole('button', { name: '¿Qué agentes están activos?' });
+      fireEvent.click(chip);
+      await waitFor(() => {
+        expect(textExecutor).toHaveBeenCalledWith(
+          '¿Qué agentes están activos?',
+          'thread-voice-blank',
+          'ws-1'
+        );
+      });
+
+      // Wait for transient liveVoiceTurn to settle and draft Voice Stage to reappear, then click the live orb
+      const remountedHero = await screen.findByTestId('thread-voice-hero');
+      fireEvent.click(within(remountedHero).getByTestId('zed-orb'));
+      expect(screen.getByTestId('thread-voice-hero')).toHaveAttribute('data-state', 'muted');
+      expect(screen.getByTestId('thread-voice-eyebrow')).toHaveTextContent('MICRÓFONO EN PAUSA');
+      expect(screen.getByRole('heading', { name: 'Micrófono en pausa' })).toBeInTheDocument();
+    } finally {
+      voiceSessionStore.setMicMuted(false);
+      voiceSessionStore.registerTextTurnExecutor(null);
+      voiceSessionStore.stopSession();
+    }
+  });
+
   it('shows Resume when an interrupted idle thread has stoppedByBuilder and omits follow-up queue prompt on subagent threads with directNotice', () => {
     const stoppedThread = createThread({
       status: 'idle',
@@ -639,6 +705,300 @@ describe('SingleThreadPane component', () => {
     );
     expect(screen.getByText('Message the parent thread.')).toBeInTheDocument();
     expect(screen.queryByPlaceholderText('Write a follow-up while your agent works…')).toBeNull();
+  });
+
+  it('auto-scrolls to the newest message during updates and re-pins when sending a new user turn', () => {
+    const baseItem = (id: string, kind: 'user' | 'assistant', text: string): ChatItem => ({
+      id,
+      kind,
+      text,
+      title: null,
+      detail: null,
+      status: 'completed',
+      streaming: false,
+      exitCode: null,
+      createdAtUnixMs: 1000,
+      attachments: [],
+    });
+
+    const initialThread = createThread({
+      id: 'thread-autoscroll-1',
+      status: 'running',
+      items: [baseItem('u1', 'user', 'Start task')],
+    });
+    const { container, rerender } = render(
+      createElement(SingleThreadPane, {
+        thread: initialThread,
+        ...defaultProps,
+        running: true,
+      }),
+    );
+
+    const scroller = container.querySelector('.chat-transcript') as HTMLDivElement;
+    expect(scroller).not.toBeNull();
+    let scrollHeight = 600;
+    const clientHeight = 300;
+    let scrollTop = 300;
+    Object.defineProperty(scroller, 'scrollHeight', { get: () => scrollHeight, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { get: () => clientHeight, configurable: true });
+    Object.defineProperty(scroller, 'scrollTop', {
+      get: () => scrollTop,
+      set: (val: number) => {
+        scrollTop = Math.min(val, Math.max(0, scrollHeight - clientHeight));
+      },
+      configurable: true,
+    });
+
+    // Streaming assistant response grows while pinned -> scrolls to new bottom
+    scrollHeight = 960;
+    rerender(
+      createElement(SingleThreadPane, {
+        thread: createThread({
+          id: 'thread-autoscroll-1',
+          status: 'running',
+          items: [
+            baseItem('u1', 'user', 'Start task'),
+            baseItem('a1', 'assistant', 'Streaming update 1'),
+          ],
+        }),
+        ...defaultProps,
+        running: true,
+      }),
+    );
+    expect(scrollTop).toBe(660);
+
+    // User scrolls up manually -> stays put while streaming continues
+    scrollTop = 120;
+    fireEvent.scroll(scroller);
+    scrollHeight = 1200;
+    rerender(
+      createElement(SingleThreadPane, {
+        thread: createThread({
+          id: 'thread-autoscroll-1',
+          status: 'running',
+          items: [
+            baseItem('u1', 'user', 'Start task'),
+            baseItem('a1', 'assistant', 'Streaming update 1\n\nMore lines arriving'),
+          ],
+        }),
+        ...defaultProps,
+        running: true,
+      }),
+    );
+    expect(scrollTop).toBe(120);
+
+    // User sends another message -> snaps back to the live edge
+    scrollHeight = 1400;
+    rerender(
+      createElement(SingleThreadPane, {
+        thread: createThread({
+          id: 'thread-autoscroll-1',
+          status: 'running',
+          items: [
+            baseItem('u1', 'user', 'Start task'),
+            baseItem('a1', 'assistant', 'Streaming update 1\n\nMore lines arriving'),
+            baseItem('u2', 'user', 'Next turn'),
+          ],
+        }),
+        ...defaultProps,
+        running: true,
+      }),
+    );
+    expect(scrollTop).toBe(1100);
+  });
+
+  it('keeps window listeners stable while typing and synchronously re-pins the transcript when the composer grows', () => {
+    const addListenerSpy = vi.spyOn(window, 'addEventListener');
+    const items: ChatItem[] = [
+      {
+        id: 'u1',
+        kind: 'user',
+        text: 'Start working',
+        title: null,
+        detail: null,
+        status: null,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: 1,
+        attachments: [],
+      },
+      {
+        id: 'a1',
+        kind: 'assistant',
+        text: 'Working through the codebase now.',
+        title: null,
+        detail: null,
+        status: null,
+        streaming: true,
+        exitCode: null,
+        createdAtUnixMs: 2,
+        attachments: [],
+      },
+    ];
+    const thread = createThread({ items, status: 'running' });
+
+    function StatefulHarness() {
+      const [prompt, setPrompt] = useState('');
+      return createElement(SingleThreadPane, {
+        ...defaultProps,
+        thread,
+        running: true,
+        prompt,
+        onChangePrompt: setPrompt,
+      });
+    }
+
+    const { container } = render(createElement(StatefulHarness));
+    const scroller = container.querySelector('.chat-transcript') as HTMLDivElement;
+    const textarea = container.querySelector('.kite-composer-shell textarea') as HTMLTextAreaElement;
+    expect(scroller).toBeTruthy();
+    expect(textarea).toBeTruthy();
+
+    let scrollerClientHeight = 300;
+    const scrollerScrollHeight = 800;
+    let scrollerScrollTop = 500;
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      get: () => scrollerClientHeight,
+    });
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollerScrollHeight,
+    });
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollerScrollTop,
+      set: (value: number) => {
+        scrollerScrollTop = Math.min(value, Math.max(0, scrollerScrollHeight - scrollerClientHeight));
+      },
+    });
+
+    let composerHeight = 62;
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      get: () => composerHeight,
+    });
+
+    const initialCiteListenerCount = addListenerSpy.mock.calls.filter(
+      ([eventName]) => eventName === 'kite:cite',
+    ).length;
+
+    fireEvent.change(textarea, { target: { value: 'a' } });
+    fireEvent.change(textarea, { target: { value: 'ab' } });
+
+    const citeListenerCountAfterTyping = addListenerSpy.mock.calls.filter(
+      ([eventName]) => eventName === 'kite:cite',
+    ).length;
+    expect(citeListenerCountAfterTyping).toBe(initialCiteListenerCount);
+
+    // Simulate wrapping onto a second line shrinking the transcript viewport synchronously.
+    composerHeight = 96;
+    scrollerClientHeight = 266;
+    fireEvent.change(textarea, { target: { value: 'line 1\nline 2' } });
+
+    expect(textarea.style.height).toBe('96px');
+    expect(scrollerScrollTop).toBe(534);
+
+    addListenerSpy.mockRestore();
+  });
+
+  it('locks composer host minHeight while measuring textarea scrollHeight so multi-line typing never clamps transcript scrollTop', () => {
+    const items: ChatItem[] = [
+      {
+        id: 'u-multi',
+        kind: 'user',
+        text: 'explain the bug',
+        title: null,
+        detail: null,
+        status: null,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: 1,
+        attachments: [],
+      },
+      {
+        id: 'a-multi',
+        kind: 'assistant',
+        text: 'Here is a long completed response.',
+        title: null,
+        detail: null,
+        status: null,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: 2,
+        attachments: [],
+      },
+    ];
+    const thread = createThread({ items, status: 'idle' });
+
+    function StatefulHarness() {
+      const [prompt, setPrompt] = useState('line 1\nline 2\nline 3\nline 4');
+      return createElement(SingleThreadPane, {
+        ...defaultProps,
+        thread,
+        running: false,
+        prompt,
+        onChangePrompt: setPrompt,
+      });
+    }
+
+    const { container } = render(createElement(StatefulHarness));
+    const scroller = container.querySelector('.chat-transcript') as HTMLDivElement;
+    const composerMain = container.querySelector('[data-slot="composer-main"]') as HTMLDivElement;
+    const textarea = container.querySelector('.kite-composer-shell textarea') as HTMLTextAreaElement;
+    expect(scroller).toBeTruthy();
+    expect(composerMain).toBeTruthy();
+    expect(textarea).toBeTruthy();
+
+    let scrollerClientHeight = 551;
+    const scrollerScrollHeight = 1068;
+    let scrollerScrollTop = 517;
+    const scrollTopWrites: number[] = [];
+
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      get: () => scrollerClientHeight,
+    });
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollerScrollHeight,
+    });
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollerScrollTop,
+      set: (value: number) => {
+        scrollTopWrites.push(value);
+        scrollerScrollTop = Math.min(value, Math.max(0, scrollerScrollHeight - scrollerClientHeight));
+      },
+    });
+    Object.defineProperty(composerMain, 'offsetHeight', {
+      configurable: true,
+      get: () => 136,
+    });
+
+    const observedHostMinHeights: string[] = [];
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      get: () => {
+        observedHostMinHeights.push(composerMain.style.minHeight);
+        // Model Blink's flex reflow: if the textarea collapses to 'auto' without the host locked,
+        // the sibling transcript expands by 40px and Blink immediately clamps scrollTop upward.
+        if (textarea.style.height === 'auto' && !composerMain.style.minHeight) {
+          scrollerClientHeight = 591;
+          scrollerScrollTop = Math.min(scrollerScrollTop, scrollerScrollHeight - scrollerClientHeight);
+          scrollerClientHeight = 551;
+        }
+        return 99;
+      },
+    });
+
+    fireEvent.change(textarea, { target: { value: 'line 1\nline 2\nline 3\nline 4a' } });
+
+    expect(observedHostMinHeights).toContain('136px');
+    expect(composerMain.style.minHeight).toBe('');
+    expect(textarea.style.height).toBe('99px');
+    expect(scrollerScrollTop).toBe(517);
+    expect(scrollTopWrites).toHaveLength(0);
   });
 });
 
@@ -821,5 +1181,56 @@ describe('threadTurnHelpers', () => {
       },
     ]);
     expect(extractUserPromptHistory(items)).toEqual(['Inspect and update readme']);
+  });
+
+  it('renders AgentReflectionCard with Save to memory and Dismiss actions', async () => {
+    const user = (await import('@testing-library/user-event')).default.setup();
+    const { render, screen } = await import('@testing-library/react');
+    const agentsIpc = await import('../../../lib/ipc/agents');
+    const loadSpy = vi.spyOn(agentsIpc, 'loadAgentMind').mockResolvedValue({
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '- Preference: Keep diffs small.',
+      user: '',
+      skills: [],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: 'rev-mem-1',
+      userRevision: null,
+      readIssues: [],
+    });
+    const writeSpy = vi.spyOn(agentsIpc, 'writeAgentMemory').mockResolvedValue({} as any);
+    const { AgentReflectionCard } = await import('./AgentReflectionCard');
+    const onDismiss = vi.fn();
+
+    render(
+      <AgentReflectionCard
+        candidate={{
+          agentId: 'agent-1',
+          note: '- Convention: Use Vitest for unit tests.',
+          summary: 'Use Vitest for unit tests.',
+        }}
+        onDismiss={onDismiss}
+      />
+    );
+
+    expect(screen.getByText(/Save learning to agent memory\?/i)).toBeInTheDocument();
+    expect(screen.getByText(/Use Vitest for unit tests\./i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Save to memory/i }));
+
+    expect(loadSpy).toHaveBeenCalledWith('agent-1');
+    expect(writeSpy).toHaveBeenCalledWith(
+      'agent-1',
+      'memory',
+      expect.stringContaining('- Convention: Use Vitest for unit tests.'),
+      'structured',
+      'rev-mem-1',
+      true
+    );
+    expect(onDismiss).toHaveBeenCalled();
+
+    loadSpy.mockRestore();
+    writeSpy.mockRestore();
   });
 });

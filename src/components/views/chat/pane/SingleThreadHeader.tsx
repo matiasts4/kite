@@ -35,7 +35,7 @@ export interface SingleThreadHeaderProps {
   onClosePane: () => void;
 }
 
-export const SingleThreadHeader: React.FC<SingleThreadHeaderProps> = ({
+export const SingleThreadHeader: React.FC<SingleThreadHeaderProps> = React.memo(({
   thread,
   effectiveWorkspaceName,
   workspaces,
@@ -405,4 +405,4 @@ export const SingleThreadHeader: React.FC<SingleThreadHeaderProps> = ({
       </div>
     </header>
   );
-};
+});

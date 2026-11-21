@@ -115,7 +115,7 @@ export function getActiveModelForProvider(
     case 'cloudflare':
       return config.cloudflareModel || '@cf/meta/llama-3.1-8b-instruct-fp8';
     case 'antigravity':
-      return config.antigravityModel || 'gemini-3.8-flash';
+      return config.antigravityModel || 'gemini-3.8-flash-low';
     case 'grok':
       return config.grokModel || 'grok-4.7';
     case 'local':

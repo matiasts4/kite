@@ -37,8 +37,12 @@ export function detectPromptEcho(text: string, systemPrompt?: string): boolean {
   }
 
   // Contiguous slice overlap check against systemPrompt (>= 40 contiguous characters)
+  // Strip few-shot reference examples so legitimate conversational replies (like greetings) are never falsely flagged.
   if (systemPrompt && systemPrompt.length >= 40) {
-    const cleanPrompt = systemPrompt.toLowerCase().replace(/\s+/g, ' ');
+    const promptWithoutExamples = systemPrompt
+      .toLowerCase()
+      .replace(/ejemplos de referencia:[\s\S]*?(?=contexto actual del sistema:|$)/i, ' ');
+    const cleanPrompt = promptWithoutExamples.replace(/\s+/g, ' ');
     const cleanText = lower.replace(/\s+/g, ' ');
     const windowSize = 40;
     for (let i = 0; i <= cleanText.length - windowSize; i += 20) {

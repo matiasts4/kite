@@ -4,18 +4,6 @@ import { VoiceModeFooterBar } from './VoiceModeFooterBar';
 import { voiceSessionStore } from '../../../../lib/operator/voice/voiceSessionStore';
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
 
-vi.mock('../../../../lib/operator/operatorConfig', () => ({
-  loadOperatorConfig: () => ({
-    activeProvider: 'grok',
-    ttsEngine: 'elevenlabs',
-    persona: {
-      name: 'Zed',
-      voice: 'Ara',
-      language: 'es',
-    },
-  }),
-}));
-
 vi.mock('../../../../lib/operator/ttsNarrator', () => ({
   ttsNarrator: {
     stop: vi.fn(),
@@ -31,16 +19,17 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the locked brain model and voice engine from the Zed Assistant settings (S2)', () => {
+  it('hides Zed assistant and TTS pills inside Threads while showing live Spanish voice status (S2, S7)', () => {
     voiceSessionStore.startSession('thread-test-1', 'thread');
 
     render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
 
-    const badge = screen.getByTestId('voice-locked-assistant-badge');
-    expect(badge.tagName).toBe('SPAN'); // not a button: it cannot be changed mid-session
-    expect(badge).toHaveTextContent('Zed · grok-4.7');
-    expect(screen.getByTestId('voice-engine-badge')).toHaveTextContent('ElevenLabs');
-    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Escuchando…');
+    expect(screen.queryByTestId('voice-locked-assistant-badge')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('voice-engine-badge')).not.toBeInTheDocument();
+    const statusPill = screen.getByTestId('voice-live-status-pill');
+    expect(statusPill).toHaveTextContent('Escuchando en vivo');
+    expect(statusPill).toHaveAttribute('data-tone', 'listening');
+    expect(statusPill.querySelectorAll('.kite-voice-status__bar')).toHaveLength(3);
   });
 
   it('reuses the standard composer footer geometry (S7)', () => {
@@ -50,10 +39,10 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
     expect(footer).toHaveClass('kite-composer-footer');
     expect(footer.querySelector('.kite-composer-footer-left')).not.toBeNull();
     expect(footer.querySelector('.kite-composer-footer-right')).not.toBeNull();
-    expect(screen.getByTestId('voice-locked-assistant-badge')).toHaveClass('kite-composer-control-pill');
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveClass('kite-voice-status');
   });
 
-  it('updates the live status when thinking or speaking (S2)', () => {
+  it('updates the live status when thinking, transcribing, speaking, or muted (S2, S7)', () => {
     voiceSessionStore.startSession('thread-test-1', 'thread');
     render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
 
@@ -61,11 +50,20 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
       voiceSessionStore.setActiveTurnStage('planning', 'Planificando con Grok…');
     });
     expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Planificando con Grok…');
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveAttribute('data-tone', 'thinking');
 
     act(() => {
       voiceSessionStore.setActiveTurnStage('speaking');
     });
-    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Hablando…');
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Respondiendo en voz alta…');
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveAttribute('data-tone', 'speaking');
+
+    act(() => {
+      voiceSessionStore.setActiveTurnStage(undefined, undefined);
+      voiceSessionStore.setMicMuted(true);
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Micrófono en pausa');
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveAttribute('data-tone', 'muted');
   });
 
   it('toggles mic mute state on click', () => {

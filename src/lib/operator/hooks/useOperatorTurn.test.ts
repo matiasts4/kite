@@ -182,6 +182,20 @@ describe('useOperatorTurn logic', () => {
         ])
       ).toEqual({});
     });
+
+    it('filters out discarded voice capture traces so STT errors never pollute LLM history (S8, S10)', () => {
+      const traces = [
+        makeTrace('voice-discard-1', 150, '[captura de voz descartada: Fallo al transcribir: HTTP 404]'),
+        makeTrace('turn-1', 100, 'Hola asistente', '¡Hola! ¿En qué trabajamos?'),
+      ];
+
+      const result = withPriorTurnHistory('lancemos un thread', undefined, traces);
+
+      expect(result.history).toEqual([
+        { role: 'user', content: 'Hola asistente' },
+        { role: 'assistant', content: '¡Hola! ¿En qué trabajamos?' },
+      ]);
+    });
   });
 
   describe('createOperatorTurnGate', () => {

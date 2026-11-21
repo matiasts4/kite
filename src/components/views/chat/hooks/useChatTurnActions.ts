@@ -2,11 +2,16 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Dispatch, SetStateAction, MutableRefObject } from 'react';
 import type { ChatItem } from '../../../../types';
 import { invokeCommand } from '../../../../lib/ipc';
+import {
+  areLiveChatRunsEqual,
+  fetchSharedLiveChatRuns,
+  isLiveChatRunsFetchInFlight,
+  subscribeLiveChatRuns,
+} from '../../../../lib/liveChatRunsStore';
 import type { ExtendedChatThread, ChatAttachment, LiveChatRun } from '../types';
 import type { PlanActionPayload } from '../ChatPlanPanel';
 import { expandCitations } from '../citationChip';
 import { pollTurnUpdates } from '../turnPolling';
-import { withTimeout } from '../chatSessionUtils';
 import { readThreadSendBinding } from './useChatConnectionBindings';
 
 export interface UseChatTurnActionsOptions {
@@ -84,16 +89,12 @@ export function useChatTurnActions({
   };
 
   const checkLiveRuns = async () => {
-    if (isCheckingLiveRunsRef.current) return;
+    if (isCheckingLiveRunsRef.current || isLiveChatRunsFetchInFlight()) return;
     isCheckingLiveRunsRef.current = true;
     try {
-      const runs = await withTimeout(
-        invokeCommand<LiveChatRun[]>('list_live_chat_runs'),
-        5000,
-        'list_live_chat_runs'
-      );
+      const runs = await fetchSharedLiveChatRuns(true);
       if (isMountedRef.current && Array.isArray(runs)) {
-        setLiveRuns(runs);
+        setLiveRuns((prev) => (areLiveChatRunsEqual(prev, runs) ? prev : runs));
         setHasCheckedLiveRuns(true);
       }
     } catch {
@@ -103,12 +104,13 @@ export function useChatTurnActions({
     }
   };
 
-  // Periodic poll for live chat runs
+  // Shared deduplicated poll for live chat runs
   useEffect(() => {
-    const timer = setInterval(() => {
-      void checkLiveRuns();
-    }, 4000);
-    return () => clearInterval(timer);
+    return subscribeLiveChatRuns((runs) => {
+      if (!isMountedRef.current) return;
+      setLiveRuns((prev) => (areLiveChatRunsEqual(prev, runs) ? prev : runs));
+      setHasCheckedLiveRuns(true);
+    });
   }, []);
 
   const handleApproval = async (

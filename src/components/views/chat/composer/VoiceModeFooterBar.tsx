@@ -1,15 +1,10 @@
-// Kite Code — Voice Mode Footer Bar for Thread Composer
-// Same footer geometry as the standard composer: the editable pickers become a locked Assistant
-// brain/voice summary on the left, and the call controls take the right-hand action slot.
+// Thread Voice Mode footer bar: displays live voice status on the left without assistant/model pills,
+// and keeps 32px call controls (or Send when typed draft exists) on the right.
 
 import React, { useEffect, useRef } from 'react';
-import { LockIcon, ArrowUpIcon } from '../ChatIcons';
-import {
-  useVoiceSession,
-  getConfiguredAssistantDisplay,
-} from '../../../../lib/operator/voice/voiceSessionStore';
+import { ArrowUpIcon } from '../ChatIcons';
+import { useVoiceSession } from '../../../../lib/operator/voice/voiceSessionStore';
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
-import { ComposerControlSeparator } from './ComposerControl';
 
 export interface VoiceModeFooterBarProps {
   threadId?: string | null;
@@ -20,8 +15,8 @@ export interface VoiceModeFooterBarProps {
 }
 
 const iconProps = {
-  width: 14,
-  height: 14,
+  width: 15,
+  height: 15,
   viewBox: '0 0 24 24',
   fill: 'none',
   stroke: 'currentColor',
@@ -41,9 +36,6 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   const voice = useVoiceSession();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Brain model and voice engine come straight from the Zed Assistant settings.
-  const assistant = getConfiguredAssistantDisplay();
-
   const isThinking =
     voice.activeTurnStage === 'planning' ||
     voice.activeTurnStage === 'executing' ||
@@ -51,28 +43,53 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   const isSpeaking = Boolean(voice.isSpeaking) || voice.activeTurnStage === 'speaking';
 
   const statusText = (() => {
-    if (voice.micMuted) return 'Micrófono silenciado';
-    if (voice.isPausedForDictation) return 'Pausado por dictado';
-    if (isThinking) return voice.activeTurnDetail || 'Pensando…';
-    if (isSpeaking) return 'Hablando…';
-    if (voice.isTranscribing) return 'Transcribiendo…';
-    return 'Escuchando…';
+    if (voice.micMuted) return 'Micrófono en pausa';
+    if (voice.isPausedForDictation) return 'En pausa por dictado';
+    if (isThinking) return voice.activeTurnDetail || 'Ejecutando en el espacio de trabajo…';
+    if (isSpeaking) return 'Respondiendo en voz alta…';
+    if (voice.isTranscribing) return 'Transcribiendo tu orden…';
+    return 'Escuchando en vivo';
   })();
 
   const statusTone = voice.micMuted
     ? 'muted'
+    : voice.isPausedForDictation
+    ? 'paused'
     : isThinking
     ? 'thinking'
     : isSpeaking
     ? 'speaking'
+    : voice.isTranscribing
+    ? 'transcribing'
     : 'listening';
 
-  // Live waveform animation on canvas (28px × 12px)
+  // Live audio-reactive waveform animation on canvas (28px × 12px), throttled to conserve CPU
   useEffect(() => {
     let animId = 0;
     let tick = 0;
+    let lastDraw = 0;
+    const barShapes = [0.62, 0.92, 1.0, 0.84, 0.58];
 
-    const render = () => {
+    const render = (now: number) => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        animId = requestAnimationFrame(render);
+        return;
+      }
+
+      const level = Math.max(0, Math.min(1, voice.liveAudioLevel || 0));
+      const speakingActive = Boolean(voice.isSpeaking) || voice.activeTurnStage === 'speaking';
+      const activeSignal =
+        voice.phase === 'active' &&
+        !voice.micMuted &&
+        !voice.isPausedForDictation &&
+        (speakingActive || level >= 0.03);
+      const minInterval = activeSignal ? 20 : 48;
+      if (lastDraw && now - lastDraw < minInterval) {
+        animId = requestAnimationFrame(render);
+        return;
+      }
+      lastDraw = now;
+
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
@@ -82,24 +99,32 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
       const height = canvas.height;
       ctx.clearRect(0, 0, width, height);
 
-      tick += 0.15;
+      tick += 0.14;
       const barCount = 5;
       const barWidth = 3;
       const gap = 2;
       const totalWidth = barCount * barWidth + (barCount - 1) * gap;
       const startX = (width - totalWidth) / 2;
 
-      ctx.fillStyle = '#ffffff';
+      const computedColor =
+        typeof window !== 'undefined' ? window.getComputedStyle(canvas).color : '';
+      ctx.fillStyle = computedColor || '#5c8fff';
 
       for (let i = 0; i < barCount; i++) {
         const x = startX + i * (barWidth + gap);
-        const levelBoost = Math.max(0, Math.min(1, voice.liveAudioLevel || 0)) * 0.45;
-        const factor =
-          voice.phase === 'active'
-            ? voice.micMuted
-              ? 0.2
-              : Math.min(1, 0.38 + levelBoost + 0.55 * Math.abs(Math.sin(tick + i * 1.1)))
-            : 0.3;
+        let factor = 0.24;
+
+        if (voice.phase === 'active' && !voice.micMuted && !voice.isPausedForDictation) {
+          if (speakingActive) {
+            factor = Math.min(1, 0.34 + 0.52 * Math.abs(Math.sin(tick * 1.15 + i * 0.9)));
+          } else if (level >= 0.03) {
+            const waveMod = 0.78 + 0.22 * Math.sin(tick * 1.4 + i * 1.1);
+            factor = Math.min(1, 0.26 + level * 0.74 * barShapes[i] * waveMod);
+          } else {
+            factor = 0.22 + 0.08 * Math.abs(Math.sin(tick * 0.45 + i * 0.9));
+          }
+        }
+
         const barHeight = Math.max(3, Math.min(height, height * factor));
         const y = (height - barHeight) / 2;
         ctx.beginPath();
@@ -114,9 +139,9 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
       animId = requestAnimationFrame(render);
     };
 
-    render();
+    animId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animId);
-  }, [voice.phase, voice.micMuted, voice.liveAudioLevel]);
+  }, [voice.phase, voice.micMuted, voice.isPausedForDictation, voice.liveAudioLevel, voice.isSpeaking, voice.activeTurnStage]);
 
   const handleToggleSpeaker = () => {
     if (!voice.speakerMuted) {
@@ -137,35 +162,8 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
       data-thread-id={threadId || undefined}
       className={`kite-composer-footer kite-voice-footer ${className}`.trim()}
     >
-      {/* Left cluster — same slot as the model / effort / permission pickers */}
+      {/* Left cluster — clean live voice status without Zed or technical badges */}
       <div className="kite-composer-footer-left">
-        <span
-          data-testid="voice-locked-assistant-badge"
-          title={`${assistant.personaName} · ${assistant.providerLabel} (${assistant.modelId}). Bloqueado durante la sesión de voz.`}
-          className="kite-composer-control-pill kite-voice-pill--static"
-        >
-          <LockIcon size={12} className="kite-voice-pill__icon" />
-          <span className="kite-composer-control-label">
-            {assistant.personaName} · {assistant.modelId}
-          </span>
-        </span>
-
-        <ComposerControlSeparator />
-
-        <span
-          data-testid="voice-engine-badge"
-          title={`Voz: ${assistant.ttsLabel} (${assistant.voiceName})`}
-          className="kite-composer-control-pill kite-voice-pill--static"
-        >
-          <svg {...iconProps} width={12} height={12} className="kite-voice-pill__icon">
-            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-          </svg>
-          <span className="kite-composer-control-label">{assistant.ttsLabel}</span>
-        </span>
-
-        <ComposerControlSeparator />
-
         <span
           data-testid="voice-live-status-pill"
           className="kite-voice-status"
@@ -174,11 +172,16 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
           aria-live="polite"
         >
           <span className="kite-voice-status__dot" aria-hidden="true" />
+          <span className="kite-voice-status__bars" aria-hidden="true">
+            <span className="kite-voice-status__bar" />
+            <span className="kite-voice-status__bar" />
+            <span className="kite-voice-status__bar" />
+          </span>
           <span className="kite-voice-status__text">{statusText}</span>
         </span>
       </div>
 
-      {/* Right cluster — call controls, or Send while a draft is typed */}
+      {/* Right cluster — 32px call controls, or Send while a draft is typed */}
       <div className="kite-composer-footer-right">
         {hasDraftText ? (
           <button

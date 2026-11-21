@@ -72,15 +72,19 @@ let isCurrentlyDucked = false;
 
 /**
  * Starts audio ducking (reduces system volume to 20%) and plays the Zen start chime.
+ * Idempotent when already ducked so persistent continuous sessions never replay chimes in silence.
  */
-export async function startAudioDucking(): Promise<void> {
+export async function startAudioDucking(options?: { suppressCue?: boolean }): Promise<void> {
+  const alreadyDucked = isCurrentlyDucked;
   isCurrentlyDucked = true;
 
-  // 1. Play Zen start chime instantly
-  playZenCue(true);
+  // 1. Play Zen start chime once per session/capture unless suppressed
+  if (!alreadyDucked && !options?.suppressCue) {
+    playZenCue(true);
+  }
 
   // 2. Trigger native Windows WASAPI ducking if running inside Tauri
-  if (isTauriEnvironment()) {
+  if (!alreadyDucked && isTauriEnvironment()) {
     try {
       await operatorDuckAudio(0.20);
     } catch {
@@ -93,7 +97,7 @@ export async function startAudioDucking(): Promise<void> {
  * Stops audio ducking (restores system volume to original level),
  * waits 60ms for the curve to initialize, and plays the Zen stop chime.
  */
-export async function stopAudioDucking(): Promise<void> {
+export async function stopAudioDucking(options?: { suppressCue?: boolean }): Promise<void> {
   const wasDucked = isCurrentlyDucked;
   isCurrentlyDucked = false;
 
@@ -107,7 +111,7 @@ export async function stopAudioDucking(): Promise<void> {
     }
   }
 
-  if (!wasDucked) return;
+  if (!wasDucked || options?.suppressCue) return;
 
   setTimeout(() => {
     playZenCue(false);

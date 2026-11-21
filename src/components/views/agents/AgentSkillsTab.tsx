@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { invokeCommand } from '../../../lib/ipc';
+import { setAgentSkillEnabled, writeAgentSkill } from '../../../lib/ipc/agents';
 import {
   AgentMindSnapshot,
   LearnedSkillDocument,
@@ -269,7 +270,31 @@ export interface AgentSkillsTabProps {
   onNavigateToStarters?: () => void;
   starters?: StarterSummary[];
   onInstallStarter?: (starterId: string) => Promise<void>;
+  onMindUpdated?: (nextMind: AgentMindSnapshot) => void;
   readOnly?: boolean;
+}
+
+function slugifySkillId(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 64);
+  return slug || 'custom-skill';
+}
+
+function formatLastUsedLabel(lastUsed: string | null): string | null {
+  if (!lastUsed) return null;
+  const numeric = Number(lastUsed);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return formatRelativeAge(numeric);
+  }
+  const parsed = Date.parse(lastUsed);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return formatRelativeAge(parsed);
+  }
+  return lastUsed;
 }
 
 export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
@@ -285,12 +310,19 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
   onClearSelectedSkill,
   starters: startersProp,
   onInstallStarter: onInstallStarterProp,
+  onMindUpdated,
   readOnly = false,
 }) => {
   const [isEditingSkill, setIsEditingSkill] = useState<boolean>(false);
   const [skillSourceDraft, setSkillSourceDraft] = useState<string>('');
   const [isConfirmingDeleteSkill, setIsConfirmingDeleteSkill] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [isCreatingSkill, setIsCreatingSkill] = useState<boolean>(false);
+  const [newSkillName, setNewSkillName] = useState<string>('');
+  const [newSkillDescription, setNewSkillDescription] = useState<string>('');
+  const [newSkillBody, setNewSkillBody] = useState<string>('');
+  const [creatingSkill, setCreatingSkill] = useState<boolean>(false);
+  const [togglingSkillId, setTogglingSkillId] = useState<string | null>(null);
 
   // Starters state
   const [startersList, setStartersList] = useState<StarterSummary[]>(startersProp || []);
@@ -441,6 +473,80 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
       setInstallingStarterId(null);
     }
   };
+
+  const handleCreateNewSkill = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (readOnly || hasSkillsFolderIssue || !mind?.agentId) return;
+    const trimmedName = newSkillName.trim();
+    const trimmedDesc = newSkillDescription.trim();
+    const trimmedBody = newSkillBody.trim();
+    if (!trimmedName || !trimmedBody) {
+      setLocalError('Provide a skill name and instructions body.');
+      return;
+    }
+    const baseSlug = slugifySkillId(trimmedName);
+    const existingIds = new Set((mind.skills ?? []).map((s) => s.id));
+    let skillId = baseSlug;
+    let suffix = 2;
+    while (existingIds.has(skillId)) {
+      skillId = `${baseSlug.slice(0, 58)}-${suffix}`;
+      suffix += 1;
+    }
+    const source = `---\nname: ${trimmedName}\ndescription: ${trimmedDesc}\n---\n\n${trimmedBody}\n`;
+    setCreatingSkill(true);
+    setLocalError(null);
+    try {
+      const nextMind = await writeAgentSkill(
+        mind.agentId,
+        skillId,
+        source,
+        null as unknown as string,
+        true
+      );
+      onMindUpdated?.(nextMind);
+      setIsCreatingSkill(false);
+      setNewSkillName('');
+      setNewSkillDescription('');
+      setNewSkillBody('');
+    } catch (err: unknown) {
+      console.error('[AgentSkillsTab] Failed to create skill:', err);
+      setLocalError(err instanceof Error ? err.message : 'Failed to create skill');
+    } finally {
+      setCreatingSkill(false);
+    }
+  };
+
+  const handleToggleSkillEnabled = async (skillId: string, currentEnabled: boolean) => {
+    if (readOnly || !mind?.agentId || togglingSkillId) return;
+    setTogglingSkillId(skillId);
+    setLocalError(null);
+    try {
+      const nextMind = await setAgentSkillEnabled(mind.agentId, skillId, !currentEnabled, true);
+      onMindUpdated?.(nextMind);
+    } catch (err: unknown) {
+      console.error('[AgentSkillsTab] Failed to toggle skill:', err);
+      setLocalError(err instanceof Error ? err.message : 'Failed to update skill status');
+    } finally {
+      setTogglingSkillId(null);
+    }
+  };
+
+  const renderNewSkillButton = () => (
+    <button
+      type="button"
+      className="secondary-button action-button--row"
+      disabled={readOnly || hasSkillsFolderIssue}
+      onClick={() => {
+        setIsCreatingSkill(true);
+        setLocalError(null);
+      }}
+    >
+      <span aria-hidden="true" className="action-button__icon">
+        <PlusSvg size={11} />
+      </span>
+      + New Skill
+    </button>
+  );
 
   // Starter menu and button component
   const hasAvailableStarters = availableStarters.length > 0 || startersLoading;
@@ -684,8 +790,11 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
               ) : null}
             </button>
           </div>
-          {hasAvailableStarters && skillsCount > 0 ? (
-            <div className="ui-tabs__trailing">{renderStarterControl()}</div>
+          {skillsCount > 0 ? (
+            <div className="ui-tabs__trailing">
+              {renderNewSkillButton()}
+              {hasAvailableStarters ? renderStarterControl() : null}
+            </div>
           ) : null}
         </div>
       </div>
@@ -709,6 +818,69 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
       )}
 
       <div className="agent-skills__list-scroll">
+        {isCreatingSkill && (
+          <div className="agent-mind-column">
+            <form className="ui-card agent-skills__new-form" onSubmit={(e) => void handleCreateNewSkill(e)}>
+              <div className="agent-skills__new-field">
+                <label htmlFor="new-skill-name">Skill name</label>
+                <input
+                  id="new-skill-name"
+                  type="text"
+                  className="ui-field"
+                  value={newSkillName}
+                  onChange={(e) => setNewSkillName(e.currentTarget.value)}
+                  placeholder="e.g. Release checklist"
+                  disabled={creatingSkill}
+                />
+              </div>
+              <div className="agent-skills__new-field">
+                <label htmlFor="new-skill-description">When it fires</label>
+                <input
+                  id="new-skill-description"
+                  type="text"
+                  className="ui-field"
+                  value={newSkillDescription}
+                  onChange={(e) => setNewSkillDescription(e.currentTarget.value)}
+                  placeholder="Use when preparing a release or changelog"
+                  disabled={creatingSkill}
+                />
+              </div>
+              <div className="agent-skills__new-field">
+                <label htmlFor="new-skill-body">Instructions</label>
+                <textarea
+                  id="new-skill-body"
+                  className="ui-field ui-field--area"
+                  rows={5}
+                  value={newSkillBody}
+                  onChange={(e) => setNewSkillBody(e.currentTarget.value)}
+                  placeholder="Write the step-by-step procedure..."
+                  disabled={creatingSkill}
+                />
+              </div>
+              <div className="agent-skills__new-actions">
+                <button
+                  type="button"
+                  className="secondary-button action-button--row"
+                  disabled={creatingSkill}
+                  onClick={() => {
+                    setIsCreatingSkill(false);
+                    setLocalError(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button action-button--row"
+                  disabled={creatingSkill || !newSkillName.trim() || !newSkillBody.trim()}
+                >
+                  {creatingSkill ? 'Creating…' : 'Create skill'}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {mind && mind.skills && mind.skills.length > 0 ? (
           <div className="agent-mind-column">
             <p className="agent-mind-lede">
@@ -718,40 +890,66 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
             <div className="ui-card agent-skills__rows">
               {mind.skills.map((skill) => {
                 const hasIssue = hasSkillReadIssue(mind, skill.id);
+                const isEnabled = (skill as typeof skill & { enabled?: boolean }).enabled !== false;
+                const lastUsedLabel = formatLastUsedLabel(skill.lastUsed);
                 return (
-                  <button
+                  <div
                     key={skill.id}
-                    type="button"
                     className={
-                      hasIssue ? 'ui-card__row agent-skills__row--read-issue' : 'ui-card__row'
-                    }
-                    aria-label={`${skill.name}. ${skill.description}`}
-                    title={
                       hasIssue
-                        ? 'This skill opened read-only because its source could not be verified'
-                        : `Updated ${formatTimestamp(skill.updatedAtUnixMs)}`
+                        ? 'ui-card__row agent-skills__row--read-issue'
+                        : !isEnabled
+                          ? 'ui-card__row agent-skills__row--disabled'
+                          : 'ui-card__row'
                     }
-                    onClick={() => void onSelectSkill(skill.id)}
                   >
-                    <span aria-hidden="true" className="agent-skills__row-icon">
-                      <FileTextSvg size={14} />
-                    </span>
-
-                    <span className="agent-skills__row-copy">
-                      <strong>{skill.name}</strong>
-                      <span>{skill.description || 'No description — the agent should add one.'}</span>
-                      {skill.uses > 0 ? (
-                        <small>{skill.uses === 1 ? 'Fired once' : `Fired ${skill.uses}×`}</small>
-                      ) : null}
-                    </span>
-
-                    <span aria-hidden="true" className="agent-skills__stamp">
-                      <span className="agent-skills__stamp-age">
-                        {formatRelativeAge(skill.updatedAtUnixMs)}
+                    <button
+                      type="button"
+                      className="agent-skills__row-main"
+                      aria-label={`${skill.name}. ${skill.description}`}
+                      title={
+                        hasIssue
+                          ? 'This skill opened read-only because its source could not be verified'
+                          : `Updated ${formatTimestamp(skill.updatedAtUnixMs)}`
+                      }
+                      onClick={() => void onSelectSkill(skill.id)}
+                    >
+                      <span aria-hidden="true" className="agent-skills__row-icon">
+                        <FileTextSvg size={14} />
                       </span>
-                      <span className="agent-skills__stamp-open">Open</span>
-                    </span>
-                  </button>
+
+                      <span className="agent-skills__row-copy">
+                        <strong>{skill.name}</strong>
+                        <span>{skill.description || 'No description — the agent should add one.'}</span>
+                        {(skill.uses > 0 || lastUsedLabel) ? (
+                          <small>
+                            {skill.uses > 0 ? (skill.uses === 1 ? 'Fired once' : `Fired ${skill.uses}×`) : ''}
+                            {skill.uses > 0 && lastUsedLabel ? ' · ' : ''}
+                            {lastUsedLabel ? `Last used ${lastUsedLabel}` : ''}
+                          </small>
+                        ) : null}
+                      </span>
+
+                      <span aria-hidden="true" className="agent-skills__stamp">
+                        <span className="agent-skills__stamp-age">
+                          {formatRelativeAge(skill.updatedAtUnixMs)}
+                        </span>
+                        <span className="agent-skills__stamp-open">Open</span>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isEnabled}
+                      aria-label={`Enable ${skill.name}`}
+                      className={`agent-skills__switch${isEnabled ? ' is-checked' : ''}`}
+                      disabled={readOnly || hasIssue || togglingSkillId === skill.id}
+                      onClick={() => void handleToggleSkillEnabled(skill.id, isEnabled)}
+                    >
+                      <span className="agent-skills__switch-thumb" />
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -767,7 +965,10 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
                 When it works out how to do something you’ll ask for again, it writes the procedure here and reads it back when the work matches. Add a starter to give it something to pattern-match against.
               </p>
             </div>
-            {hasAvailableStarters ? renderStarterControl('Add starter skill') : null}
+            <div className="agent-skills__empty-actions">
+              {renderNewSkillButton()}
+              {hasAvailableStarters ? renderStarterControl('Add starter skill') : null}
+            </div>
           </section>
         )}
       </div>

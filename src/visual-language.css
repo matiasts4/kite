@@ -54,6 +54,10 @@ body.kite-app {
   --glass-sticky-bg: var(--sidebar-fill, var(--pane, #141414));
   --glass-sticky-pane-bg: var(--pane, #141414);
   --glass-elevated-bg: var(--composer, var(--block-fill, #18181b));
+  --glass-composer-bg: var(--composer, var(--block-fill, #18181b));
+  --glass-composer-strip-bg: color-mix(in srgb, var(--pane, #141414) 92%, var(--composer, #18181b));
+  --glass-subagent-card-bg: color-mix(in srgb, var(--composer, #1c1c1e) 76%, var(--pane, #141414));
+  --glass-subagent-card-hover-bg: color-mix(in srgb, var(--composer, #1c1c1e) 84%, var(--text-primary) 6%);
   --glass-code-bg: var(--terminal-canvas, #0a0b0e);
   --glass-terminal-bg: var(--terminal-canvas, #0a0b0e);
   --glass-overlay-bg: var(--menu-plate, var(--pane, #1c1c1f));
@@ -77,6 +81,29 @@ body.kite-app {
   --vl-shadow-card: 0 14px 28px -18px rgba(0, 0, 0, 0.8);
   --vl-shadow-overlay: 0 18px 40px -24px rgba(0, 0, 0, 0.8);
 
+  /* Tactile 3D user conversation bubble tokens (nearly solid color with subtle low-contrast 3D depth) */
+  --chat-user-bubble-base: color-mix(
+    in srgb,
+    var(--composer, var(--menu-plate, #1c1c1e)) 76%,
+    var(--pane, #141414)
+  );
+  --chat-user-bubble-bg:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.025) 0%,
+      transparent 45%,
+      rgba(0, 0, 0, 0.05) 100%
+    ),
+    var(--chat-user-bubble-base);
+  --chat-user-bubble-border: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  --chat-user-bubble-border-top: color-mix(in srgb, #ffffff 9%, transparent);
+  --chat-user-bubble-border-bottom: color-mix(in srgb, var(--text-primary) 6%, rgba(0, 0, 0, 0.24));
+  --chat-user-bubble-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.18),
+    0 2px 8px -2px rgba(0, 0, 0, 0.36),
+    0 1px 2px rgba(0, 0, 0, 0.24);
+
   --vl-primary-top: #1a2029;
   --vl-primary-bottom: #0b0f14;
   --vl-primary-top-hover: #222a34;
@@ -91,6 +118,22 @@ html[data-theme='light'] body.kite-app {
   --vl-inset-field: inset 0 1px 2px rgba(0, 0, 0, 0.08);
   --vl-shadow-card: 0 14px 28px -18px rgba(0, 0, 0, 0.18);
   --vl-shadow-overlay: 0 18px 40px -24px rgba(0, 0, 0, 0.2);
+  --chat-user-bubble-bg:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.42) 0%,
+      rgba(255, 255, 255, 0.12) 50%,
+      rgba(15, 23, 42, 0.025) 100%
+    ),
+    var(--chat-user-bubble-base);
+  --chat-user-bubble-border: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  --chat-user-bubble-border-top: rgba(255, 255, 255, 0.8);
+  --chat-user-bubble-border-bottom: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  --chat-user-bubble-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.75),
+    inset 0 -1px 0 rgba(15, 23, 42, 0.05),
+    0 2px 8px -2px rgba(15, 23, 42, 0.1),
+    0 1px 2px rgba(15, 23, 42, 0.06);
   --vl-primary-top: #1f252e;
   --vl-primary-bottom: #0b0f14;
   --vl-primary-ink: #f7fafc;
@@ -1009,6 +1052,33 @@ html[data-surface-glass='true'] body.kite-app {
     var(--composer, var(--pane, #18181b)) clamp(28%, calc(var(--theme-surface-opacity, 56%) * 0.82), 84%),
     transparent
   );
+  --glass-composer-bg: color-mix(
+    in srgb,
+    var(--composer, var(--pane, #18181b)) clamp(72%, calc(var(--theme-surface-opacity, 56%) + 24%), 92%),
+    transparent
+  );
+  --glass-composer-strip-bg: color-mix(
+    in srgb,
+    var(--pane, #141414) clamp(66%, calc(var(--theme-surface-opacity, 56%) + 18%), 88%),
+    transparent
+  );
+  --glass-subagent-card-bg: color-mix(
+    in srgb,
+    var(--composer, var(--pane, #1c1c1e)) clamp(70%, calc(var(--theme-surface-opacity, 56%) + 20%), 88%),
+    transparent
+  );
+  --glass-subagent-card-hover-bg: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--composer, #1c1c1e) 92%, var(--text-primary) 8%)
+      clamp(76%, calc(var(--theme-surface-opacity, 56%) + 26%), 93%),
+    transparent
+  );
+  --chat-user-bubble-base: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--composer, var(--menu-plate, #1c1c1e)) 76%, var(--pane, #141414))
+      clamp(92%, calc(var(--theme-surface-opacity, 56%) + 40%), 98%),
+    transparent
+  );
   --glass-code-bg: color-mix(
     in srgb,
     var(--terminal-canvas, #0a0b0e) clamp(16%, calc(var(--theme-surface-opacity, 56%) * 0.48), 54%),
@@ -1042,6 +1112,18 @@ html[data-surface-glass='true'] body.kite-app {
 
 html[data-surface-glass='true'][data-theme='light'],
 html[data-surface-glass='true'][data-theme='light'] body.kite-app {
+  --glass-subagent-card-bg: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--composer, #ffffff) 82%, var(--pane, #fffdf9))
+      clamp(72%, calc(var(--theme-surface-opacity, 56%) + 22%), 90%),
+    transparent
+  );
+  --glass-subagent-card-hover-bg: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--composer, #ffffff) 90%, var(--text-primary) 4%)
+      clamp(78%, calc(var(--theme-surface-opacity, 56%) + 28%), 94%),
+    transparent
+  );
   --glass-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff 45%, transparent);
   --glass-shadow:
     inset 0 1px 0 color-mix(in srgb, #ffffff 45%, transparent),
@@ -1053,8 +1135,8 @@ html[data-surface-glass='true'][data-theme='light'] body.kite-app {
 /* Reusable semantic glass utility classes for components & views */
 body.kite-app .glass-island {
   background: var(--glass-island-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-color: var(--glass-border);
   box-shadow: var(--glass-shadow);
 }
@@ -1094,17 +1176,16 @@ body.kite-app .glass-overlay {
   box-shadow: var(--glass-shadow);
 }
 
-/* Top-level Translucent Frosted Glass Islands layered over StageBackdrop */
+/* Top-level Translucent Tinted Glass Islands layered over pre-blurred StageBackdrop */
 html[data-surface-glass='true'] body.kite-app .sidebar,
 html[data-surface-glass='true'] body.kite-app .SettingsSidebar,
 html[data-surface-glass='true'] body.kite-app .app-browser-sidebar:not(.app-browser-sidebar--fullscreen),
 html[data-surface-glass='true'] body.kite-app .right-dock {
   background: var(--glass-sidebar-bg) !important;
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-color: var(--glass-border) !important;
   box-shadow: var(--glass-shadow);
-  transform: translateZ(0);
 }
 
 html[data-surface-glass='true'] body.kite-app .pane,
@@ -1114,11 +1195,10 @@ html[data-surface-glass='true'] body.kite-app .empty-surface:not(.empty-surface-
 html[data-surface-glass='true'] body.kite-app .settings-view:not(.settings-modal-window),
 html[data-surface-glass='true'] body.kite-app .app-browser-sidebar--fullscreen {
   background: var(--glass-island-bg) !important;
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   border-color: var(--glass-border) !important;
   box-shadow: var(--glass-shadow);
-  transform: translateZ(0);
 }
 
 html[data-surface-glass='true'] body.kite-app .settings-modal-window,
@@ -1128,7 +1208,6 @@ html[data-surface-glass='true'] body.kite-app .ui-sheet {
   backdrop-filter: var(--glass-overlay-blur);
   border-color: var(--glass-border) !important;
   box-shadow: var(--glass-shadow);
-  transform: translateZ(0);
 }
 
 body.kite-app .ui-sheet::backdrop {
@@ -1230,8 +1309,11 @@ html[data-surface-glass='true'] body.kite-app .workspace-roster__pinned {
   backdrop-filter: none;
 }
 
-/* Compositor isolation for smooth chat transcript & resource popover scrolling */
-body.kite-app .chat-transcript,
+/* Compositor isolation for resource popover scrolling without promoting every chat transcript */
+body.kite-app .chat-transcript {
+  contain: layout style;
+}
+
 body.kite-app .system-resource-popover__scroll {
   transform: translateZ(0);
   will-change: scroll-position;
@@ -1239,7 +1321,8 @@ body.kite-app .system-resource-popover__scroll {
 }
 
 body.kite-app .system-resource-popover {
-  background: var(--glass-modal-bg, var(--menu-plate, var(--pane, #141416)));
+  background: var(--menu-plate, var(--pane, #141416)) !important;
+  border-color: var(--control-stroke, var(--block-stroke)) !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   contain: layout style paint;
@@ -1255,8 +1338,7 @@ html[data-surface-glass='true'] body.kite-app .tickets-pane textarea,
 html[data-surface-glass='true'] body.kite-app .agent-dashboard__card,
 html[data-surface-glass='true'] body.kite-app .subagent-inspector__empty,
 html[data-surface-glass='true'] body.kite-app .subagent-global__group,
-html[data-surface-glass='true'] body.kite-app .chat-user-row,
-html[data-surface-glass='true'] body.kite-app .chat-user-row--bubble,
+html[data-surface-glass='true'] body.kite-app .chat-user-row.subagent-brief-card,
 html[data-surface-glass='true'] body.kite-app .chat-plan-panel,
 html[data-surface-glass='true'] body.kite-app .chat-approval-card,
 html[data-surface-glass='true'] body.kite-app .rail-landing-slot,
@@ -1269,6 +1351,17 @@ html[data-surface-glass='true'] body.kite-app .bv-sound {
   background: var(--glass-elevated-bg) !important;
   border-color: var(--glass-border) !important;
   box-shadow: var(--glass-highlight);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* User conversation bubbles keep glass translucency with tactile 3D bevels and elevation */
+html[data-surface-glass='true'] body.kite-app .chat-user-row.chat-user-row--bubble:not(.subagent-brief-card) {
+  border: 1px solid var(--chat-user-bubble-border) !important;
+  border-top-color: var(--chat-user-bubble-border-top) !important;
+  border-bottom-color: var(--chat-user-bubble-border-bottom) !important;
+  background: var(--chat-user-bubble-bg) !important;
+  box-shadow: var(--chat-user-bubble-shadow);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -1306,21 +1399,21 @@ html[data-surface-glass='true'] body.kite-app .pane-drag-ghost {
   backdrop-filter: var(--glass-overlay-blur);
 }
 
-/* Floating tooltip & composers (drop nested backdrop-filter when hosted inside blurred islands) */
+/* Keep ThreadTurnRail preview card opaque in glass mode (no bleed-through over transcript) */
 html[data-surface-glass='true'] body.kite-app .chat-turn-rail__card {
-  background: var(--glass-overlay-bg) !important;
-  border-color: var(--glass-border) !important;
-  -webkit-backdrop-filter: blur(calc(var(--theme-surface-blur, 20px) * 0.7)) saturate(135%);
-  backdrop-filter: blur(calc(var(--theme-surface-blur, 20px) * 0.7)) saturate(135%);
+  background: var(--menu-plate, var(--composer, var(--pane, #1c1c1f))) !important;
+  border-color: var(--control-stroke, var(--glass-border)) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
 }
 
 html[data-surface-glass='true'] body.kite-app .composer,
 html[data-surface-glass='true'] body.kite-app .chat-composer {
-  background: var(--glass-elevated-bg) !important;
+  background: var(--glass-composer-bg) !important;
   border-color: var(--glass-border) !important;
   box-shadow: var(--glass-highlight);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 html[data-surface-glass='true'] body.kite-app :is(.sidebar, .pane, .right-dock, .code-pane-panel, .app-browser-sidebar, .settings-modal-window, .chat-surface) :is(.glass-overlay, .ui-menu, .ui-popover, .ui-tooltip, .select-menu, .composer, .chat-composer, .chat-turn-rail__card, .update-detail-card) {

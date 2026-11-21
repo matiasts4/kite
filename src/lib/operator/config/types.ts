@@ -21,6 +21,25 @@ export type ZedAfterCallMode =
   | 'summary'
   | 'nothing';
 
+export type ZedFigureId =
+  | 'plasma-orb'
+  | 'ferrofluid'
+  | 'frosted-sphere'
+  | 'eclipse-halo'
+  | 'silk-wave'
+  | 'crystal-prism'
+  | 'orbital-gyro'
+  | 'chromatic-pearl';
+
+export interface ZedFigureDescriptor {
+  id: ZedFigureId;
+  label: string;
+  blurb: string;
+  shaderMode: number;
+  resourceTier: 'optimized' | 'balanced';
+  resourceLabel: string;
+}
+
 export interface OpenCodeModelOption {
   id: string;
   label: string;
@@ -39,6 +58,7 @@ export interface ZedPersonaConfig {
   standingInstructions: string;
   rememberBetweenCalls: boolean;
   afterCallMode: ZedAfterCallMode;
+  figure?: ZedFigureId;
 }
 
 export interface OperatorProviderConfig {

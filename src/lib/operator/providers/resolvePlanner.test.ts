@@ -18,6 +18,7 @@ describe('resolveVerifiedModel', () => {
       '@cf/meta/llama-3.1-8b-instruct-fp8'
     );
     expect(resolveVerifiedModel('opencode', undefined, 'diagnosis')).toBe('deepseek-v4-pro');
+    expect(resolveVerifiedModel('antigravity', undefined, 'fast')).toBe('gemini-3.8-flash-low');
   });
 });
 

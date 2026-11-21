@@ -23,7 +23,7 @@
   flex-direction: column;
   container: composer-main / inline-size;
   border-radius: var(--card-radius, 12px);
-  background: var(--glass-elevated-bg, color-mix(in srgb, var(--composer, #18181b) 85%, transparent));
+  background: var(--glass-composer-bg, color-mix(in srgb, var(--composer, #18181b) 82%, transparent));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   border: 1px solid var(--glass-border, var(--chat-composer-outline, var(--vl-stroke, rgba(255, 255, 255, 0.08))));
@@ -37,7 +37,7 @@
 }
 
 [data-theme='light'] .kite-composer-main {
-  background: var(--glass-elevated-bg, color-mix(in srgb, var(--composer, #ffffff) 90%, transparent));
+  background: var(--glass-composer-bg, color-mix(in srgb, var(--composer, #ffffff) 90%, transparent));
   border-color: var(--glass-border, var(--vl-stroke, rgba(0, 0, 0, 0.1)));
   box-shadow: var(--glass-highlight, 0 16px 36px -18px rgba(15, 23, 42, 0.18), 0 2px 6px rgba(15, 23, 42, 0.06));
 }
@@ -79,7 +79,7 @@
   height: 1.75rem; /* 28px */
   padding: 0 0.625rem;
   border-radius: var(--control-radius, 8px);
-  background: var(--glass-elevated-bg, var(--composer, #1e1e24));
+  background: var(--glass-composer-strip-bg, var(--composer, #1e1e24));
   border: 1px solid var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.08)));
   font-size: 0.75rem;
   color: var(--text-primary, #f4f4f5);
@@ -258,7 +258,7 @@
   border-radius: 0 0 var(--card-radius, 12px) var(--card-radius, 12px);
   border: 1px solid var(--glass-border, var(--chat-composer-outline, var(--vl-stroke, rgba(255, 255, 255, 0.08))));
   border-top: none;
-  background: var(--glass-elevated-bg, color-mix(in srgb, var(--pane, #111114) 82%, transparent));
+  background: var(--glass-composer-strip-bg, color-mix(in srgb, var(--pane, #111114) 82%, transparent));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   font-size: 0.75rem;
@@ -267,7 +267,7 @@
 }
 
 [data-theme='light'] .kite-composer-context-strip {
-  background: var(--glass-elevated-bg, color-mix(in srgb, var(--pane, #f4f4f5) 85%, transparent));
+  background: var(--glass-composer-strip-bg, color-mix(in srgb, var(--pane, #f4f4f5) 85%, transparent));
   border-color: var(--glass-border, var(--vl-stroke, rgba(0, 0, 0, 0.1)));
 }
 
@@ -291,6 +291,219 @@
 .kite-context-strip-btn:hover {
   background: var(--hover-fill, rgba(255, 255, 255, 0.06));
   color: var(--text-primary, #f4f4f5);
+}
+
+/* 6b. Recessed Upper Changed-Files Strip (Flush atop main composer, mirrors lower context strip) */
+.kite-composer-top-strip-wrap {
+  position: relative;
+  z-index: 5;
+  width: 100%;
+}
+
+.kite-composer-top-strip {
+  position: relative;
+  z-index: 5;
+  margin-left: auto;
+  margin-right: auto;
+  margin-bottom: 0;
+  width: calc(100% - 2.5rem);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--card-radius, 12px) var(--card-radius, 12px) 0 0;
+  border: 1px solid var(--glass-border, var(--chat-composer-outline, var(--vl-stroke, rgba(255, 255, 255, 0.08))));
+  border-bottom: none;
+  background: var(--glass-composer-strip-bg, color-mix(in srgb, var(--pane, #111114) 82%, transparent));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  font-size: 0.75rem;
+  color: var(--text-secondary, #a1a1aa);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+[data-theme='light'] .kite-composer-top-strip {
+  background: var(--glass-composer-strip-bg, color-mix(in srgb, var(--pane, #f4f4f5) 85%, transparent));
+  border-color: var(--glass-border, var(--vl-stroke, rgba(0, 0, 0, 0.1)));
+}
+
+.kite-composer-top-strip .changed-files-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 2.125rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.875rem;
+  box-sizing: border-box;
+}
+
+.kite-composer-top-strip .changed-files-card__summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.kite-composer-top-strip .changed-files-card__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+.kite-composer-top-strip__lead-icon {
+  color: var(--text-secondary, #a1a1aa);
+  opacity: 0.78;
+  flex-shrink: 0;
+}
+
+.kite-composer-top-strip .changed-files-card__title {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-primary, #f4f4f5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kite-composer-top-strip .diff-stat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.kite-composer-top-strip .diff-stat-label__add {
+  color: #34d399;
+}
+
+.kite-composer-top-strip .diff-stat-label__del {
+  color: #f87171;
+}
+
+.kite-composer-top-strip__drawer {
+  overflow: hidden;
+  border-bottom: 1px solid var(--separator, var(--vl-stroke, rgba(255, 255, 255, 0.08)));
+  background: color-mix(in srgb, var(--pane, #111114) 76%, transparent);
+}
+
+[data-theme='light'] .kite-composer-top-strip__drawer {
+  background: color-mix(in srgb, var(--pane, #f4f4f5) 82%, transparent);
+}
+
+.kite-composer-top-strip .changed-files-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0.375rem;
+  border-top: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(220px, 32vh);
+  overflow-y: auto;
+}
+
+.kite-composer-top-strip .changed-files-card__item {
+  display: flex;
+  align-items: center;
+}
+
+.kite-composer-top-strip .changed-files-card__file-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: var(--control-row, 28px);
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--control-radius, 8px);
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.kite-composer-top-strip .changed-files-card__file-btn:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #f4f4f5);
+}
+
+.kite-composer-top-strip .changed-files-card__file-btn:focus-visible {
+  outline: 2px solid var(--accent, #5c8fff);
+  outline-offset: -2px;
+}
+
+.kite-composer-top-strip .changed-files-card__icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.kite-composer-top-strip .changed-files-card__path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.71875rem;
+}
+
+.kite-composer-top-strip__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  height: var(--vl-control-sm, 26px);
+  padding: 0 0.5rem;
+  border-radius: var(--control-radius, 8px);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  outline: none;
+  white-space: nowrap;
+}
+
+.kite-composer-top-strip__btn:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #f4f4f5);
+}
+
+.kite-composer-top-strip__btn--open-diff {
+  background: var(--block-fill, rgba(255, 255, 255, 0.05));
+  border-color: var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+  color: var(--text-primary, #f4f4f5);
+}
+
+.kite-composer-top-strip__btn--open-diff:hover {
+  background: var(--hover-fill, rgba(255, 255, 255, 0.1));
+  border-color: var(--control-stroke-hover, var(--vl-stroke-strong, rgba(255, 255, 255, 0.18)));
+}
+
+.kite-composer-top-strip__chevron {
+  flex-shrink: 0;
+  opacity: 0.75;
+  transform: rotate(180deg);
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.kite-composer-top-strip__chevron--expanded {
+  transform: rotate(0deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-composer-top-strip__chevron {
+    transition: none;
+  }
 }
 
 /* 7. Floating Portals Common Card Styling */
@@ -937,33 +1150,44 @@
   border-color: color-mix(in srgb, var(--status-failed, #ef4444) 30%, transparent);
 }
 
-/* 14. Voice Mode footer — reuses `.kite-composer-footer` geometry; only the voice-specific parts live here */
-.kite-voice-pill--static {
-  cursor: default;
-}
-
-.kite-voice-pill--static:hover {
-  background: transparent;
-  color: var(--text-secondary, #a1a1aa);
-}
-
-.kite-voice-pill__icon {
-  flex-shrink: 0;
-  opacity: 0.75;
-}
-
+/* 14. Voice Mode footer — reuses `.kite-composer-footer` geometry; thread-native without Zed badges */
 .kite-voice-status {
   display: inline-flex;
   align-items: center;
-  gap: 0.375rem;
-  height: 1.75rem; /* 28px — same row height as the control pills */
-  padding: 0 0.375rem;
+  gap: 0.5rem;
+  height: var(--vl-control-md, 32px);
+  padding: 0 0.6875rem;
   min-width: 0;
+  max-width: 100%;
+  border-radius: var(--control-radius, 8px);
+  background: var(--chip-fill, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
   font-size: 0.75rem;
   font-weight: 500;
-  color: var(--text-secondary, #a1a1aa);
+  color: var(--text-primary, #f4f4f5);
   user-select: none;
   box-sizing: border-box;
+  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+}
+
+.kite-voice-status[data-tone='listening'] {
+  border-color: color-mix(in srgb, var(--status-done, #10b981) 32%, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+}
+
+.kite-voice-status[data-tone='transcribing'],
+.kite-voice-status[data-tone='thinking'],
+.kite-voice-status[data-tone='speaking'] {
+  border-color: color-mix(in srgb, var(--accent, #5c8fff) 42%, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+  background: color-mix(in srgb, var(--accent, #5c8fff) 10%, var(--chip-fill, rgba(255, 255, 255, 0.05)));
+}
+
+.kite-voice-status[data-tone='paused'] {
+  border-color: color-mix(in srgb, var(--warning-text, #f59e0b) 38%, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+}
+
+.kite-voice-status[data-tone='muted'] {
+  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 36%, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+  color: var(--text-secondary, #a1a1aa);
 }
 
 .kite-voice-status__text {
@@ -972,25 +1196,95 @@
   white-space: nowrap;
 }
 
-.kite-voice-status__dot {
-  width: 0.375rem;
-  height: 0.375rem;
-  border-radius: 9999px;
+.kite-voice-status__bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 10px;
   flex-shrink: 0;
-  background: #10b981;
+  color: var(--accent, #5c8fff);
+}
+
+.kite-voice-status[data-tone='listening'] .kite-voice-status__bars {
+  color: var(--status-done, #10b981);
+}
+
+.kite-voice-status[data-tone='paused'] .kite-voice-status__bars {
+  color: var(--warning-text, #f59e0b);
+}
+
+.kite-voice-status[data-tone='muted'] .kite-voice-status__bars {
+  color: var(--status-failed, #ef4444);
+  opacity: 0.55;
+}
+
+.kite-voice-status__bar {
+  width: 2px;
+  height: 6px;
+  border-radius: var(--pill-radius, 9999px);
+  background: currentColor;
+  transform-origin: center;
+}
+
+.kite-voice-status__bar:nth-child(2) {
+  height: 10px;
+}
+
+.kite-voice-status__bar:nth-child(3) {
+  height: 7px;
+}
+
+.kite-voice-status[data-tone='listening'] .kite-voice-status__bar,
+.kite-voice-status[data-tone='speaking'] .kite-voice-status__bar {
+  animation: kite-voice-bar-pulse 1.15s ease-in-out infinite;
+}
+
+.kite-voice-status__bar:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.kite-voice-status__bar:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes kite-voice-bar-pulse {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+.kite-voice-status__dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: var(--pill-radius, 9999px);
+  flex-shrink: 0;
+  background: var(--status-done, #10b981);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-done, #10b981) 18%, transparent);
   animation: kite-voice-pulse 1.6s ease-in-out infinite;
 }
 
-.kite-voice-status[data-tone='thinking'] .kite-voice-status__dot {
-  background: #a855f7;
+.kite-voice-status[data-tone='transcribing'] .kite-voice-status__dot,
+.kite-voice-status[data-tone='thinking'] .kite-voice-status__dot,
+.kite-voice-status[data-tone='speaking'] .kite-voice-status__dot {
+  background: var(--accent, #5c8fff);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #5c8fff) 22%, transparent);
 }
 
-.kite-voice-status[data-tone='speaking'] .kite-voice-status__dot {
-  background: #339cff;
+.kite-voice-status[data-tone='paused'] .kite-voice-status__dot {
+  background: var(--warning-text, #f59e0b);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning-text, #f59e0b) 18%, transparent);
+  animation: none;
 }
 
 .kite-voice-status[data-tone='muted'] .kite-voice-status__dot {
   background: var(--status-failed, #ef4444);
+  box-shadow: none;
   animation: none;
 }
 
@@ -998,16 +1292,24 @@
   0%,
   100% {
     opacity: 1;
+    transform: scale(1);
   }
   50% {
-    opacity: 0.35;
+    opacity: 0.45;
+    transform: scale(0.88);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .kite-voice-status__dot {
+  .kite-voice-status__dot,
+  .kite-voice-status__bar {
     animation: none;
   }
+}
+
+html[data-motion='reduce'] .kite-voice-status__dot,
+html[data-motion='reduce'] .kite-voice-status__bar {
+  animation: none;
 }
 
 .kite-voice-call-controls {
@@ -1017,60 +1319,79 @@
   flex-shrink: 0;
 }
 
-/* Mic / speaker toggles match the dictation and Voice Mode triggers of the normal footer */
+/* Mic / speaker toggles share the 32px (--vl-control-md) height of the Voice Mode footer */
 .kite-voice-ctrl-btn {
-  width: 1.75rem; /* 28px */
-  height: 1.75rem;
+  width: var(--vl-control-md, 32px);
+  height: var(--vl-control-md, 32px);
   border-radius: var(--control-radius, 8px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid transparent;
-  background: transparent;
+  border: 1px solid var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.1)));
+  background: var(--chip-fill, rgba(255, 255, 255, 0.05));
   color: var(--text-secondary, #a1a1aa);
   cursor: pointer;
   padding: 0;
   outline: none;
   flex-shrink: 0;
-  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease, transform 0.1s ease;
   box-sizing: border-box;
 }
 
 .kite-voice-ctrl-btn:hover {
-  background: var(--hover-fill, rgba(255, 255, 255, 0.06));
+  background: var(--hover-fill, rgba(255, 255, 255, 0.1));
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.2));
   color: var(--text-primary, #ffffff);
+}
+
+.kite-voice-ctrl-btn:active {
+  transform: scale(0.95);
+}
+
+.kite-voice-ctrl-btn:focus-visible,
+.kite-voice-end-pill:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent, #5c8fff));
+  outline-offset: 2px;
 }
 
 .kite-voice-ctrl-btn[data-muted] {
   color: var(--status-failed, #ef4444);
   background: color-mix(in srgb, var(--status-failed, #ef4444) 14%, transparent);
-  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 30%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 36%, transparent);
 }
 
-/* Replaces the circular Send action in the same 32px slot */
+/* Architectural Kite Voice Session End Capsule (32px, glass + accent hairline, danger hint on hover) */
 .kite-voice-end-pill {
-  height: 2rem; /* 32px — same as the Send action */
+  height: var(--vl-control-md, 32px);
   padding: 0 0.875rem 0 0.75rem;
-  border-radius: 9999px;
+  border-radius: var(--pill-radius, 9999px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  background: #339cff;
-  color: #ffffff;
-  border: none;
+  background: color-mix(in srgb, var(--accent, #5c8fff) 14%, var(--glass-elevated-bg, var(--chip-fill, rgba(24, 24, 28, 0.9))));
+  color: var(--text-primary, #f4f4f5);
+  border: 1px solid color-mix(in srgb, var(--accent, #5c8fff) 44%, var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.12))));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary, #ffffff) 12%, transparent),
+    0 6px 16px -8px color-mix(in srgb, var(--accent, #5c8fff) 40%, transparent);
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
   user-select: none;
   outline: none;
   flex-shrink: 0;
-  transition: background-color 0.12s ease, transform 0.1s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
   box-sizing: border-box;
 }
 
 .kite-voice-end-pill:hover {
-  background: #2b8beb;
+  background: color-mix(in srgb, var(--status-failed, #ef4444) 16%, var(--glass-elevated-bg, var(--chip-fill, rgba(24, 24, 28, 0.94))));
+  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 52%, var(--glass-border, rgba(255, 255, 255, 0.14)));
+  color: var(--status-failed, #f87171);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary, #ffffff) 10%, transparent),
+    0 6px 16px -8px color-mix(in srgb, var(--status-failed, #ef4444) 38%, transparent);
 }
 
 .kite-voice-end-pill:active {
@@ -1081,4 +1402,10 @@
   width: 28px;
   height: 12px;
   flex-shrink: 0;
+  color: var(--accent, #5c8fff);
+  transition: color 0.15s ease;
+}
+
+.kite-voice-end-pill:hover .kite-voice-end-pill__wave {
+  color: var(--status-failed, #f87171);
 }

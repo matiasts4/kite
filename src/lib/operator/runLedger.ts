@@ -126,6 +126,29 @@ export function redactSecrets(text: string): string {
   return redacted;
 }
 
+const NON_SECRET_TOKEN_TELEMETRY_KEYS = new Set([
+  'tokencounts',
+  'token_counts',
+  'firsttoken',
+  'firsttokenms',
+  'first_token',
+  'first_token_ms',
+  'prompttokens',
+  'prompt_tokens',
+  'completiontokens',
+  'completion_tokens',
+  'cachedtokens',
+  'cached_tokens',
+  'inputtokens',
+  'input_tokens',
+  'outputtokens',
+  'output_tokens',
+  'maxtokens',
+  'max_tokens',
+  'totaltokens',
+  'total_tokens',
+]);
+
 /**
  * Deep redaction for structured objects.
  */
@@ -141,12 +164,14 @@ export function redactDeep<T>(value: T): T {
     const copy: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
       const lower = k.toLowerCase();
+      const isTelemetryTokenMetric = NON_SECRET_TOKEN_TELEMETRY_KEYS.has(lower);
       if (
-        lower.includes('secret') ||
-        lower.includes('apikey') ||
-        lower.includes('api_key') ||
-        lower.includes('password') ||
-        lower.includes('token')
+        !isTelemetryTokenMetric &&
+        (lower.includes('secret') ||
+          lower.includes('apikey') ||
+          lower.includes('api_key') ||
+          lower.includes('password') ||
+          lower.includes('token'))
       ) {
         copy[k] = '[REDACTED_SECRET]';
       } else {

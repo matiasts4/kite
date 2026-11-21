@@ -66,7 +66,7 @@ describe('Operator Providers & Latency Benchmarks', () => {
       const config = getOperatorConfig();
       expect(config.activeProvider).toBe(DEFAULT_OPERATOR_CONFIG.activeProvider);
       expect(config.opencodeModel).toBe('deepseek-v4.1-flash');
-      expect(config.antigravityModel).toBe('gemini-3.8-flash');
+      expect(config.antigravityModel).toBe('gemini-3.8-flash-low');
       expect(config.grokModel).toBe('grok-4.7');
     });
 
@@ -88,6 +88,19 @@ describe('Operator Providers & Latency Benchmarks', () => {
       expect(reloaded.antigravityModel).toBe('gemini-2.5-flash');
 
       window.removeEventListener('kite:operator-config-changed', eventSpy);
+    });
+
+    it('upgrades untouched legacy gemini-3.8-flash default once while preserving explicit selection', () => {
+      localStorage.setItem(
+        'kite.operator.providerConfig.v2',
+        JSON.stringify({ activeProvider: 'antigravity', antigravityModel: 'gemini-3.8-flash' })
+      );
+      localStorage.setItem('kite_operator_seed_v4', '1');
+
+      expect(getOperatorConfig().antigravityModel).toBe('gemini-3.8-flash-low');
+
+      saveOperatorConfig({ activeProvider: 'antigravity', antigravityModel: 'gemini-3.8-flash' });
+      expect(getOperatorConfig().antigravityModel).toBe('gemini-3.8-flash');
     });
 
     it('records latency metrics and aggregates stats per provider', () => {

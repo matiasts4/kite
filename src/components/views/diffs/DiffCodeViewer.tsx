@@ -1,7 +1,10 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import type { FileDiffContentsLoader } from '@pierre/diffs';
-import { KiteDiffView } from '../../diffs/KiteDiffView';
 import type { DiffData } from '../chat/types';
+
+const LazyKiteDiffView = React.lazy(() =>
+  import('../../diffs/KiteDiffView').then((m) => ({ default: m.KiteDiffView }))
+);
 
 export interface DiffCodeViewerProps {
   diff: DiffData | null;
@@ -27,19 +30,21 @@ export const DiffCodeViewer = React.memo<DiffCodeViewerProps>(({
   loadDiffFiles,
 }) => {
   return (
-    <KiteDiffView
-      diff={diff}
-      filePath={filePath}
-      oldPath={oldPath}
-      status={status}
-      layout={layout}
-      wordWrap={wordWrap}
-      ignoreWhitespace={ignoreWhitespace}
-      hideFileHeader={true}
-      lineDiffType="word-alt"
-      cacheKey={cacheKey}
-      loadDiffFiles={loadDiffFiles}
-      emptyMessage="No changes in this file or file is empty."
-    />
+    <Suspense fallback={<div className="kite-diff-surface kite-diff-surface--loading" />}>
+      <LazyKiteDiffView
+        diff={diff}
+        filePath={filePath}
+        oldPath={oldPath}
+        status={status}
+        layout={layout}
+        wordWrap={wordWrap}
+        ignoreWhitespace={ignoreWhitespace}
+        hideFileHeader={true}
+        lineDiffType="word-alt"
+        cacheKey={cacheKey}
+        loadDiffFiles={loadDiffFiles}
+        emptyMessage="No changes in this file or file is empty."
+      />
+    </Suspense>
   );
 });

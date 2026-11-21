@@ -81,6 +81,21 @@ describe('AppMainStage lazy mode mounting', () => {
     expect(chatLayer).not.toHaveClass('mode-layer--visible');
     expect(codeLayer).toHaveAttribute('aria-hidden', 'false');
     expect(codeLayer).toHaveClass('mode-layer--visible');
+
+    const resizeSpy = vi.fn();
+    window.addEventListener('resize', resizeSpy);
+    try {
+      rerender(<AppMainStage {...baseProps} workMode="chat" />);
+      await vi.waitFor(() => {
+        expect(resizeSpy).toHaveBeenCalled();
+      });
+      expect(chatLayer).toHaveClass('mode-layer--visible');
+      expect(chatLayer).toHaveAttribute('aria-hidden', 'false');
+      expect(codeLayer).not.toHaveClass('mode-layer--visible');
+      expect(codeLayer).toHaveAttribute('aria-hidden', 'true');
+    } finally {
+      window.removeEventListener('resize', resizeSpy);
+    }
   });
 
   it('isolates view render errors inside an ErrorBoundary instead of blanking the shell', async () => {

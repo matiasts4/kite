@@ -3,9 +3,17 @@
 // emits durable run ledger events, and falls back gracefully with explicit reasons.
 
 import { buildOperatorSystemPrompt } from './prompt';
-import { planTurnHeuristic, isNegatedTerminalImperative } from './heuristic';
+import { planTurnHeuristic } from './heuristic';
+import { analyzeClausePolarity } from './clausePolarity';
+import { normalizeSpanishVoiceStt } from './voiceNormalizer';
 import { detectPromptEcho, isPredominantlyEnglish, sanitizeReply } from './sanitize';
-import { ActionSchema, type OperatorPlan, type TurnContext, type OperatorContractAction } from '../contract';
+import {
+  ActionSchema,
+  ClarificationSchema,
+  type OperatorPlan,
+  type TurnContext,
+  type OperatorContractAction,
+} from '../contract';
 import type { PlannerProvider, ProviderMessage } from '../providers/types';
 import { emitTrace } from '../trace/trace';
 import { runLedger } from '../runLedger';
@@ -15,21 +23,20 @@ import {
   liveChatReader,
   type ConsultChatsResult,
 } from '../chatIndex';
+import { StreamingJsonReplyExtractor } from '../voice/speechProsody';
+import type { PendingDisambiguationState } from '../voice/voiceSessionStore';
 
 const EXPLICIT_CLOSE_REASON = 'filtered-unsafe-close';
 
-// Explicit close verbs the user must have written before any close action is allowed.
-const EXPLICIT_CLOSE_VERB_RE =
-  /(?<![a-záéíóúñ])(?:cierra|cerrar|cierre|cierres|cierren|ci[eé]rral[ao]s?|ci[eé]rrenl[ao]s?|ci[eé]rrel[ao]s?|ci[eé]rrame|cerr[aá]l[ao]s?|cerr[aá]me|sierra|serrar|sierre|sierres|sierren|si[eé]rral[ao]s?|close|kill|mata|matar|mates|maten|m[aá]tal[ao]s?|m[aá]tenl[ao]s?|termina|terminar|termines|terminen|term[ií]nal[ao]s?|elimina|eliminar|elimines|eliminen|elim[ií]nal[ao]s?|apaga|apagar|apagues|apaguen|ap[aá]gal[ao]s?|borra|borrar|borres|borren)(?![a-záéíóúñ])/i;
-
 /**
- * A close action is only allowed when the user explicitly asked to close something
- * and did not negate the order ("no cierres las terminales").
+ * A close action is only allowed when at least one non-negated, non-subordinate clause
+ * explicitly requests closing ("no cierres las terminales, abre un hilo" => false;
+ * "no abras terminales, cierra Orion" => true).
  */
 function allowsCloseAction(userInput?: string): boolean {
   if (!userInput) return true;
-  if (isNegatedTerminalImperative(userInput)) return false;
-  return EXPLICIT_CLOSE_VERB_RE.test(userInput);
+  const normalized = normalizeSpanishVoiceStt(userInput).normalized;
+  return analyzeClausePolarity(normalized).allowsClose;
 }
 
 function logFilteredClose(userInput?: string): void {
@@ -134,22 +141,39 @@ function parseAndValidateModelPlan(
     validatedActions.push(validated);
   }
 
+  const parsedClarification = parsed.clarification
+    ? ClarificationSchema.safeParse(parsed.clarification)
+    : null;
+  const clarification = parsedClarification?.success ? parsedClarification.data : undefined;
+
+  const fallbackText = clarification?.question || 'Acción planificada con éxito.';
   const reply = sanitizeReply(
     filteredUnsafeClose && validatedActions.length === 0
       ? 'No ejecuté el cierre porque la orden no lo pedía explícitamente.'
-      : candidateReply,
-    'Acción planificada con éxito.'
+      : candidateReply || (typeof parsed.answer === 'string' ? parsed.answer : ''),
+    fallbackText
   );
 
   const plan: OperatorPlan = {
     strategy: 'llm',
-    actions: validatedActions,
+    actions: clarification ? [] : validatedActions,
     reply,
-    answer: typeof parsed.answer === 'string' ? parsed.answer : undefined,
+    answer:
+      typeof parsed.answer === 'string'
+        ? parsed.answer
+        : clarification
+          ? clarification.question
+          : undefined,
+    ...(clarification ? { clarification } : {}),
     ...(filteredUnsafeClose ? { fallbackReason: EXPLICIT_CLOSE_REASON } : {}),
   };
 
   return { plan, actions: validatedActions, reply };
+}
+
+export interface PlanTurnLLMOptions {
+  onStreamSentence?: (sentence: string) => void;
+  pendingDisambiguation?: PendingDisambiguationState | null;
 }
 
 export async function planTurnLLM(
@@ -157,7 +181,8 @@ export async function planTurnLLM(
   provider: PlannerProvider,
   context?: TurnContext,
   turnId?: string,
-  history?: ProviderMessage[]
+  history?: ProviderMessage[],
+  planOptions?: PlanTurnLLMOptions
 ): Promise<OperatorPlan> {
   const currentTurnId = turnId || `turn-${Date.now()}`;
   if (!runLedger.getRun(currentTurnId)) {
@@ -166,25 +191,25 @@ export async function planTurnLLM(
 
   let chatReach: ConsultChatsResult | undefined;
   try {
-    const catalog = await fetchLiveChatCatalog();
+    const catalog = await fetchLiveChatCatalog(context?.workspaceId);
     if (catalog.entries.length > 0) {
       chatReach = await consultChats(input, catalog, liveChatReader);
-      if (chatReach && (chatReach.kind === 'read' || chatReach.kind === 'index')) {
-        emitTrace({
-          turnId: currentTurnId,
-          ev: 'plan.created',
-          strategy: 'llm',
-          actions: [],
-          chatReachKind: chatReach.kind,
-          chatReachText: chatReach.text,
-        });
-      }
     }
   } catch (chatErr) {
     console.warn('[Zed] Error consultando índice de chats:', chatErr);
   }
 
-  const systemPrompt = buildOperatorSystemPrompt(context, chatReach);
+  const chatReachTraceFields =
+    chatReach && (chatReach.kind === 'read' || chatReach.kind === 'index')
+      ? {
+          chatReachKind: chatReach.kind,
+          chatReachText: chatReach.text,
+        }
+      : {};
+
+  const systemPrompt = buildOperatorSystemPrompt(context, chatReach, {
+    pendingDisambiguation: planOptions?.pendingDisambiguation,
+  });
 
   const messages = buildPlannerMessages(systemPrompt, input, history);
 
@@ -194,6 +219,7 @@ export async function planTurnLLM(
 
   try {
     console.info(`[Zed] Planificando con ${provider.id}…`);
+    const requestStartedAt = Date.now();
     runLedger.recordProviderRequest(currentTurnId, {
       provider: provider.id,
       model: modelName,
@@ -202,6 +228,29 @@ export async function planTurnLLM(
 
     // Attempt 1: primary call with streaming & native tool-call listening
     let firstTokenSeen = false;
+    let firstSentenceEmitted = false;
+    // Stream only `"answer"` (conversational / clarification turns with actions: [])
+    // so we never speak unverified confirmations for mutating actions before execution.
+    const sentenceExtractor = planOptions?.onStreamSentence
+      ? new StreamingJsonReplyExtractor(['answer'])
+      : null;
+
+    const emitStreamedSentences = (sentences: string[]) => {
+      if (!planOptions?.onStreamSentence) return;
+      for (const s of sentences) {
+        if (!firstSentenceEmitted) {
+          firstSentenceEmitted = true;
+          emitTrace({
+            turnId: currentTurnId,
+            ev: 'tts.first_sentence',
+            chars: s.length,
+            streamed: true,
+          });
+        }
+        planOptions.onStreamSentence(s);
+      }
+    };
+
     const res = await provider.plan(messages, {
       stream: true,
       reasoning: 'low',
@@ -209,8 +258,23 @@ export async function planTurnLLM(
         if (!firstTokenSeen) {
           firstTokenSeen = true;
           runLedger.recordFirstToken(currentTurnId, ts);
+          emitTrace({
+            turnId: currentTurnId,
+            ev: 'llm.first_token',
+            ts,
+            provider: provider.id,
+            firstTokenMs: Math.max(0, ts - requestStartedAt),
+          });
         }
       },
+      onDelta: sentenceExtractor
+        ? (delta) => {
+            const ready = sentenceExtractor.pushDelta(delta);
+            if (ready.length > 0) {
+              emitStreamedSentences(ready);
+            }
+          }
+        : undefined,
       onToolCall: (tc) => {
         runLedger.recordToolEmission(currentTurnId, {
           name: tc.name,
@@ -218,6 +282,13 @@ export async function planTurnLLM(
         });
       },
     });
+
+    if (sentenceExtractor && firstSentenceEmitted) {
+      const remaining = sentenceExtractor.finish();
+      if (remaining.length > 0) {
+        emitStreamedSentences(remaining);
+      }
+    }
 
     rawOutput = res.rawText;
     latencyMs = res.latencyMs;
@@ -271,6 +342,7 @@ export async function planTurnLLM(
         actions: validatedActions,
         fallbackReason: plan.fallbackReason,
         rawModelOutputTruncated: rawOutput.slice(0, 2000),
+        ...chatReachTraceFields,
       });
 
       return plan;
@@ -288,6 +360,7 @@ export async function planTurnLLM(
         latencyMs,
         actions: validated.actions,
         rawModelOutputTruncated: rawOutput.slice(0, 2000),
+        ...chatReachTraceFields,
       });
 
       for (const act of validated.actions) {
@@ -325,6 +398,7 @@ export async function planTurnLLM(
         latencyMs,
         actions: retryValidated.actions,
         rawModelOutputTruncated: rawOutput.slice(0, 2000),
+        ...chatReachTraceFields,
       });
 
       for (const act of retryValidated.actions) {

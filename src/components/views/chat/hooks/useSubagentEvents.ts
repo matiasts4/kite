@@ -10,6 +10,12 @@ export type ChatSubagentEventPayload =
       run?: SubagentRun;
     }
   | {
+      kind: 'subagentRunRemoved';
+      threadId: string;
+      subagentId?: string | null;
+      parentToolCallId?: string | null;
+    }
+  | {
       kind: 'subagentStepsUpdated';
       threadId: string;
       subagentId: string;
@@ -55,7 +61,11 @@ export function shouldDispatchThreadsChanged(
   payload: ChatSubagentEventPayload | undefined
 ): boolean {
   if (!payload?.threadId) return false;
-  if (payload.kind === 'subagentRunUpdated' || payload.kind === 'swarmStateUpdated') {
+  if (
+    payload.kind === 'subagentRunUpdated' ||
+    payload.kind === 'subagentRunRemoved' ||
+    payload.kind === 'swarmStateUpdated'
+  ) {
     return true;
   }
   return (
@@ -75,6 +85,25 @@ export function applySubagentEvent(
       ...thread,
       swarmId: payload.swarmState.swarmId || thread.swarmId || null,
       swarmState: payload.swarmState,
+    };
+  }
+
+  if (payload.kind === 'subagentRunRemoved') {
+    const existingRuns = thread.subagentRuns ?? [];
+    const targetSid = payload.subagentId?.trim() || null;
+    const targetCallId = payload.parentToolCallId?.trim() || null;
+    if (!targetSid && !targetCallId) return thread;
+    const nextRuns = existingRuns.filter(
+      (r) =>
+        !(
+          (targetSid && r.subagentId === targetSid) ||
+          (targetCallId && r.parentToolCallId === targetCallId)
+        )
+    );
+    if (nextRuns.length === existingRuns.length) return thread;
+    return {
+      ...thread,
+      subagentRuns: nextRuns,
     };
   }
 

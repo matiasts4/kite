@@ -68,7 +68,29 @@ export const AgentRoster: React.FC<AgentRosterProps> = ({
   const menuTargetId = contextMenuTargetId ?? activeContextMenuTargetId;
 
   const shownAvailability = probedAvailability ?? availability;
-  const shownActivity = { ...agentActivity, ...railActivity };
+  const shownActivity = (() => {
+    const merged: NonNullable<SidebarProps['agentActivity']> = { ...agentActivity };
+    for (const [id, rail] of Object.entries(railActivity)) {
+      const prev = merged[id];
+      if (!prev) {
+        merged[id] = rail;
+        continue;
+      }
+      const runningCount = Math.max(prev.runningCount ?? 0, rail.runningCount ?? 0);
+      const needsYou = Boolean(prev.needsYou || rail.needsYou);
+      const atUnixMs =
+        prev.atUnixMs != null && rail.atUnixMs != null
+          ? Math.max(prev.atUnixMs, rail.atUnixMs)
+          : (rail.atUnixMs ?? prev.atUnixMs);
+      merged[id] = {
+        runningCount,
+        needsYou,
+        atUnixMs,
+        line: rail.line ?? prev.line,
+      };
+    }
+    return merged;
+  })();
 
   const allAgents = (() => {
     const ids = new Set(agents.map((a) => a.id));

@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { setActiveSubagentInspection } from '../../lib/subagentNav';
 import { ThreadRoster } from './ThreadRoster';
 import type { ChatThreadSummary } from './types';
 import type { Workspace } from '../../types';
@@ -361,5 +362,77 @@ describe('ThreadRoster live shelves', () => {
       );
     });
     expect(screen.getByText('Draft Thread')).toBeInTheDocument();
+  });
+
+  it('surfaces native activeSubagents with orbital spinner, caps visible rows to 3 with +N more, syncs inspected highlight, and passes subagentId', () => {
+    setActiveSubagentInspection(null);
+    const dockEvents: CustomEvent[] = [];
+    const listener = (ev: Event) => dockEvents.push(ev as CustomEvent);
+    window.addEventListener('kite:open-right-dock-subagent', listener);
+    try {
+      render(
+        <ThreadRoster
+          threads={[
+            thread({
+              id: 'parent-native',
+              title: 'Orchestrator Thread',
+              status: 'running',
+              activeSubagents: [
+                { subagentId: 'sub-a', role: 'Backend Engineer', provider: 'antigravity', status: 'running' },
+                { subagentId: 'sub-b', role: 'Frontend Engineer', provider: 'antigravity', status: 'running' },
+                { subagentId: 'sub-c', role: 'Subagent', provider: 'grok', status: 'running', prompt: 'Check API schemas' },
+                { subagentId: 'sub-d', role: 'Verifier', provider: 'claude', status: 'running', swarmId: 'swarm-1' },
+                { subagentId: 'sub-e', role: 'Docs Writer', provider: 'codex', status: 'waiting' },
+              ],
+            }),
+          ]}
+          selectedThreadId="parent-native"
+        />,
+      );
+
+      // Priority sorts waiting ('Docs Writer') first, then 2 running items, capping at 3.
+      expect(screen.getByRole('button', { name: 'Docs Writer, Blocked' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Backend Engineer, Running' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Frontend Engineer, Running' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Check API schemas, Running' })).not.toBeInTheDocument();
+
+      // Active running indicator renders on active rows without literal "Running" text clutter.
+      expect(
+        document.querySelectorAll('[data-testid="agent-status-indicator"][data-status="running"]').length
+      ).toBeGreaterThanOrEqual(2);
+      expect(screen.queryByText('Running')).not.toBeInTheDocument();
+
+      // Expand +2 more to reveal Check API schemas & Verifier.
+      fireEvent.click(screen.getByRole('button', { name: '+2 more' }));
+      const schemaBtn = screen.getByRole('button', { name: 'Check API schemas, Running' });
+      expect(schemaBtn).toBeInTheDocument();
+
+      // Clicking passes subagentId and highlights the inspected child row.
+      fireEvent.click(schemaBtn);
+      expect(dockEvents).toHaveLength(1);
+      expect(dockEvents[0].detail).toMatchObject({
+        threadId: 'parent-native',
+        subagentId: 'sub-c',
+        mode: 'subagent',
+      });
+      expect(schemaBtn.className).toContain('chat-thread-child-row--inspected');
+
+      // Clicking a swarm worker with a subagentId inspects that worker in subagent mode.
+      fireEvent.click(screen.getByRole('button', { name: 'Verifier, Running' }));
+      expect(dockEvents).toHaveLength(2);
+      expect(dockEvents[1].detail).toMatchObject({
+        threadId: 'parent-native',
+        subagentId: 'sub-d',
+        swarmId: 'swarm-1',
+        mode: 'subagent',
+      });
+
+      // Collapse entire child group via persistent chevron toggle.
+      fireEvent.click(screen.getByRole('button', { name: 'Collapse subagents for Orchestrator Thread' }));
+      expect(screen.queryByRole('button', { name: 'Backend Engineer, Running' })).not.toBeInTheDocument();
+    } finally {
+      setActiveSubagentInspection(null);
+      window.removeEventListener('kite:open-right-dock-subagent', listener);
+    }
   });
 });

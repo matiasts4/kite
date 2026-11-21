@@ -36,38 +36,255 @@
   opacity: 0.72;
 }
 
-/* 4-dot orbital circular spinner */
-.agent-orbit-spinner {
+/* Configurable running activity glyphs */
+.agent-activity-glyph {
   display: inline-block;
   flex: none;
-  transform-origin: center;
-  animation: kite-orbit-spin 1.15s linear infinite;
+  overflow: visible;
 }
 
-.agent-orbit-spinner__dot {
+/* Pulse Aura */
+.agent-activity-pulse-aura__ring,
+.agent-activity-pulse-aura__core {
   transform-box: fill-box;
   transform-origin: center;
 }
 
-.agent-orbit-spinner__dot--1 {
-  opacity: 1;
+.agent-activity-pulse-aura__ring {
+  animation: kite-pulse-aura-ring 1.65s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
-.agent-orbit-spinner__dot--2 {
-  opacity: 0.78;
+.agent-activity-pulse-aura__core {
+  animation: kite-pulse-aura-core 1.65s ease-in-out infinite;
 }
 
-.agent-orbit-spinner__dot--3 {
-  opacity: 0.48;
+@keyframes kite-pulse-aura-ring {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.66);
+  }
+  75%,
+  100% {
+    opacity: 0;
+    transform: scale(1.22);
+  }
 }
 
-.agent-orbit-spinner__dot--4 {
-  opacity: 0.25;
+@keyframes kite-pulse-aura-core {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.78;
+    transform: scale(0.85);
+  }
 }
 
-@keyframes kite-orbit-spin {
+/* Signal Bars */
+.agent-activity-signal-bars__bar {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-signal-bar 1.05s ease-in-out infinite;
+}
+
+.agent-activity-signal-bars__bar--2 {
+  animation-delay: 170ms;
+}
+
+.agent-activity-signal-bars__bar--3 {
+  animation-delay: 340ms;
+}
+
+@keyframes kite-signal-bar {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scaleY(0.36);
+  }
+  45% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+/* Matrix Grid 2x2 */
+.agent-activity-matrix-grid__cell {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-matrix-cell 1.2s ease-in-out infinite;
+}
+
+.agent-activity-matrix-grid__cell--2 {
+  animation-delay: 180ms;
+}
+
+.agent-activity-matrix-grid__cell--3 {
+  animation-delay: 360ms;
+}
+
+.agent-activity-matrix-grid__cell--4 {
+  animation-delay: 540ms;
+}
+
+@keyframes kite-matrix-cell {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: scale(0.82);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Kite Diamond */
+.agent-activity-kite-diamond__frame,
+.agent-activity-kite-diamond__core {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.agent-activity-kite-diamond__frame {
+  animation: kite-diamond-frame 1.8s ease-in-out infinite;
+}
+
+.agent-activity-kite-diamond__core {
+  animation: kite-diamond-core 1.8s ease-in-out infinite;
+}
+
+@keyframes kite-diamond-frame {
+  0%,
+  100% {
+    opacity: 0.48;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 0.96;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes kite-diamond-core {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.68);
+  }
+}
+
+/* Matrix Grid 3x3 diagonal ripple */
+.agent-activity-matrix-3x3__cell {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-matrix-3x3-cell 1.35s ease-in-out infinite;
+}
+
+.agent-activity-matrix-3x3__cell--w1 {
+  animation-delay: 0ms;
+}
+
+.agent-activity-matrix-3x3__cell--w2 {
+  animation-delay: 110ms;
+}
+
+.agent-activity-matrix-3x3__cell--w3 {
+  animation-delay: 220ms;
+}
+
+.agent-activity-matrix-3x3__cell--w4 {
+  animation-delay: 330ms;
+}
+
+.agent-activity-matrix-3x3__cell--w5 {
+  animation-delay: 440ms;
+}
+
+@keyframes kite-matrix-3x3-cell {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.72);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Wave Dots horizontal luminous cadence */
+.agent-activity-wave-dots__dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-wave-dot 1.25s ease-in-out infinite;
+}
+
+.agent-activity-wave-dots__dot--2 {
+  animation-delay: 180ms;
+}
+
+.agent-activity-wave-dots__dot--3 {
+  animation-delay: 360ms;
+}
+
+@keyframes kite-wave-dot {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.76);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+/* Radar Sweep precision hairline ring */
+.agent-activity-radar-sweep__track {
+  opacity: 0.2;
+}
+
+.agent-activity-radar-sweep__arc {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-radar-sweep 1.05s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+@keyframes kite-radar-sweep {
+  from {
+    transform: rotate(0deg);
+  }
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Chevron Flow directional pulse */
+.agent-activity-chevron-flow__arm {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kite-chevron-arm 1.15s ease-in-out infinite;
+}
+
+.agent-activity-chevron-flow__arm--2 {
+  animation-delay: 220ms;
+}
+
+@keyframes kite-chevron-arm {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateX(-0.9px);
+  }
+  45% {
+    opacity: 1;
+    transform: translateX(0.9px);
   }
 }
 
@@ -251,7 +468,16 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-orbit-spinner,
+  .agent-activity-pulse-aura__ring,
+  .agent-activity-pulse-aura__core,
+  .agent-activity-signal-bars__bar,
+  .agent-activity-matrix-grid__cell,
+  .agent-activity-kite-diamond__frame,
+  .agent-activity-kite-diamond__core,
+  .agent-activity-matrix-3x3__cell,
+  .agent-activity-wave-dots__dot,
+  .agent-activity-radar-sweep__arc,
+  .agent-activity-chevron-flow__arm,
   .agent-dot-bounce__dot,
   .agent-status-attention__ping,
   .agent-avatar--running circle[data-avatar-badge="true"] {

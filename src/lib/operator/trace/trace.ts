@@ -8,6 +8,8 @@ import type {
   OperatorTurnTrace,
   TraceEventInput,
   ActionReceiptTraceEntry,
+  LatencyPercentileBucket,
+  VoiceLatencySummary,
 } from './types';
 
 export type {
@@ -17,6 +19,8 @@ export type {
   OperatorPlanTrace,
   ActionReceiptTraceEntry,
   ActionReceiptVerification,
+  LatencyPercentileBucket,
+  VoiceLatencySummary,
 } from './types';
 
 const TRACE_STORAGE_KEY = 'kite.operator.trace.v2';
@@ -25,7 +29,13 @@ const MAX_TURNS = 200;
 // Exhaustive map: adding a new `TraceEventKind` forces this table to be updated,
 // so the JSONL parser never silently drops a valid event kind.
 const TRACE_EVENT_KIND_MAP: Record<TraceEventKind, true> = {
+  'vad.speech_start': true,
+  'vad.eos': true,
+  'stt.start': true,
+  'stt.end': true,
   'turn.start': true,
+  'intent.route': true,
+  'llm.first_token': true,
   'plan.created': true,
   'action.start': true,
   'ui.request': true,
@@ -33,6 +43,8 @@ const TRACE_EVENT_KIND_MAP: Record<TraceEventKind, true> = {
   'action.verify': true,
   'action.end': true,
   'reply.composed': true,
+  'tts.first_sentence': true,
+  'tts.first_audio': true,
   'tts.speak': true,
   'turn.end': true,
 };
@@ -376,4 +388,100 @@ export async function revealOperatorTraceDiskFolder(): Promise<void> {
   } catch (err) {
     console.warn('[Trace] No se pudo abrir la carpeta de trazas:', err);
   }
+}
+
+function summarizeLatencies(samples: number[]): LatencyPercentileBucket {
+  if (samples.length === 0) {
+    return { count: 0, p50: 0, p95: 0, avg: 0 };
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const pick = (p: number) => {
+    const idx = (p / 100) * (sorted.length - 1);
+    const lo = Math.floor(idx);
+    const hi = Math.ceil(idx);
+    const w = idx - lo;
+    return Math.round(sorted[lo] * (1 - w) + sorted[hi] * w);
+  };
+  const avg = Math.round(sorted.reduce((sum, n) => sum + n, 0) / sorted.length);
+  return {
+    count: sorted.length,
+    p50: pick(50),
+    p95: pick(95),
+    avg,
+  };
+}
+
+/**
+ * Aggregates end-to-end voice latency milestones across turns (STT, TTFT, TTFA, EoS -> First Audio).
+ */
+export function computeVoiceLatencySummary(
+  traces: OperatorTurnTrace[] = getTurnTraces()
+): VoiceLatencySummary {
+  const sttSamples: number[] = [];
+  const ttftSamples: number[] = [];
+  const ttfaSamples: number[] = [];
+  const eosToAudioSamples: number[] = [];
+
+  for (const turn of traces) {
+    let eosTs: number | undefined;
+    let sttStartTs: number | undefined;
+    let sttEndTs: number | undefined;
+    let sttDurationMs: number | undefined;
+    let turnStartTs: number | undefined;
+    let firstTokenTs: number | undefined;
+    let firstAudioTs: number | undefined;
+
+    for (const ev of turn.events) {
+      switch (ev.ev) {
+        case 'vad.eos':
+          if (eosTs === undefined) eosTs = ev.ts;
+          break;
+        case 'stt.start':
+          if (sttStartTs === undefined) sttStartTs = ev.ts;
+          break;
+        case 'stt.end':
+          sttEndTs = ev.ts;
+          if (typeof ev.durationMs === 'number' && ev.durationMs >= 0) {
+            sttDurationMs = ev.durationMs;
+          }
+          break;
+        case 'turn.start':
+          if (turnStartTs === undefined) turnStartTs = ev.ts;
+          break;
+        case 'llm.first_token':
+          if (firstTokenTs === undefined) firstTokenTs = ev.ts;
+          break;
+        case 'tts.first_audio':
+          if (firstAudioTs === undefined) firstAudioTs = ev.ts;
+          break;
+        default:
+          break;
+      }
+    }
+
+    if (sttDurationMs !== undefined) {
+      sttSamples.push(sttDurationMs);
+    } else if (sttStartTs !== undefined && sttEndTs !== undefined && sttEndTs >= sttStartTs) {
+      sttSamples.push(sttEndTs - sttStartTs);
+    }
+
+    if (turnStartTs !== undefined && firstTokenTs !== undefined && firstTokenTs >= turnStartTs) {
+      ttftSamples.push(firstTokenTs - turnStartTs);
+    }
+
+    if (turnStartTs !== undefined && firstAudioTs !== undefined && firstAudioTs >= turnStartTs) {
+      ttfaSamples.push(firstAudioTs - turnStartTs);
+    }
+
+    if (eosTs !== undefined && firstAudioTs !== undefined && firstAudioTs >= eosTs) {
+      eosToAudioSamples.push(firstAudioTs - eosTs);
+    }
+  }
+
+  return {
+    sttMs: summarizeLatencies(sttSamples),
+    turnToFirstTokenMs: summarizeLatencies(ttftSamples),
+    turnToFirstAudioMs: summarizeLatencies(ttfaSamples),
+    eosToFirstAudioMs: summarizeLatencies(eosToAudioSamples),
+  };
 }

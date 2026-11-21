@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "kite-code"
-version = "0.1.65"
+version = "0.1.78"
 dependencies = [
  "dotenvy",
  "kite-ctx",

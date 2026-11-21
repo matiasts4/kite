@@ -6,6 +6,202 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.78] - 2026-11-21
+
+> SETH orquestador conversacional con retorno de subagentes y captura VAD sin silencio
+
+### Added
+- Orquestador conversacional SETH con hilo de voz anclado y subagentes exploradores en solo lectura (explore vs odd/execute), reservando launch_thread para pedidos explicitos de hilo aparte.
+- Lazo cerrado de retorno de subagentes (subagentReturnWatcher): al terminar un subagente hijo lee su salida real via dispatch_read, guarda hallazgos y los narra por voz respetando VoiceTurnArbitrator y barge-in.
+- Memoria viva rodante de sesion larga (WorkingContext) por hilo de voz con tema actual, decisiones acordadas, hallazgos de subagentes y compactacion automatica de turnos antiguos mas alla de la ventana de 8 turnos.
+- Lectura real de resultados de subagentes e hilos en narrate_summary (incluyendo consultas como "como va el subagente" o "que encontro el explorador") y hallazgos visibles en el roster del proyecto.
+
+### Fixed
+- Compuerta de captura PCM por VAD en modo de voz continuo con pre-roll de 400 ms y recorte de silencio final a 250 ms para evitar acumular silencio en RAM y facturar tiempo vacio en STT.
+
+---
+
+## [0.1.77] - 2026-11-21
+
+> Nuevos fondos cosmicos de escenario y mejora de Aurora Boreal
+
+### Added
+- Nuevos fondos de escenario cosmicos: Horizonte de Eventos (agujero negro con disco de acrecion luminoso) y Claro de Luna (luna sobre oceano nocturno estrellado).
+
+### Changed
+- Renovado el fondo Aurora Boreal con cintas organicas luminosas sobre fiordo nordico reflejado en el agua.
+
+### Fixed
+- Permitida la invocacion directa del generador de imagenes integrado en Thread Mode dentro del hook de subagentes.
+
+---
+
+## [0.1.76] - 2026-11-20
+
+> Modo de voz SETH: barge-in real, streaming de baja latencia e inteligencia contextual
+
+### Added
+- Barge-in acustico real durante la narracion TTS con captura AudioWorklet persistente, buffer pre-roll de 400 ms, VAD adaptativo por piso de ruido y arbitraje de turnos sin solapamientos ni reinicios cada 8 segundos.
+- Streaming HTTP nativo en Rust con cliente pooled keep-alive (proxy_operator_http_stream), streaming LLM a TTS por oraciones en turnos conversacionales y telemetria completa de latencia de voz (vad, stt, llm.first_token, tts.first_audio).
+- Conciencia estricta del workspace activo (terminales, hilos, subagentes y agentes autonomos sin fugas entre proyectos), memoria episodica persistente por workspace y recuperacion temporal para consultas entre sesiones.
+- Normalizador fonetico STT en espanol, polaridad mixta por clausula, matriz de superficies hilo/subagente/agente/terminal y desambiguacion activa con maximo una pregunta concreta antes de delegar.
+
+### Fixed
+- Prosodia hablada limpia sin UUIDs, rutas de disco, URLs ni muletillas de plantilla, identidad SETH conectada al planner y preservacion de metricas tokenCounts en trazas y runLedger.
+
+---
+
+## [0.1.75] - 2026-11-20
+
+> Envio instantaneo en Voice Mode, soporte en Agentes y sesion fijada al hilo
+
+### Fixed
+- En Voice Mode, el mensaje hablado aparece al instante como burbuja del usuario y limpia el cuadro de texto mientras el asistente piensa, evitando que parezca congelado durante respuestas largas.
+- Fijado el hilo destino y el modo thread antes de invocar al planner para que las respuestas nunca se descarten si cambia la vista o se finaliza la sesion en curso.
+- Soporte completo de turnos de voz, estado en vivo y envio hibrido en AgentChatShell (modo Agentes), y tecla Escape acotada solo al orbe flotante visible para no cerrar Voice Mode en hilos.
+
+---
+
+## [0.1.74] - 2026-11-20
+
+> Estabilidad de Voice Mode, resumen hablado completo y delegacion ODD-first
+
+### Added
+- Orquestacion conversacional en Voice Mode con memoria por hilo y delegacion ODD-first a hilos, subagentes reales (dispatch_run) y agentes autonomos con recibos clicables en la conversacion.
+
+### Changed
+- Resumenes hablados concisos separados de los recibos tecnicos detallados, presupuesto del planner ampliado a 1400 tokens y recorte de resumenes en limites de oracion.
+
+### Fixed
+- Estabilidad de entrada y ciclo de vida en Voice Mode con corte automatico por silencio basado en energia RMS (VAD), manejo limpio de errores fatales de STT, respeto de microfono silenciado al rearmar, cierre limpio de sesion y eliminacion del orbe WebGL oculto duplicado.
+- Eliminado el corte de narracion por tiempo en sintesis nativa, corregido el fallback automatico de ElevenLabs a voz nativa y resuelto el falso positivo del filtro de eco en respuestas conversacionales.
+
+---
+
+## [0.1.73] - 2026-11-20
+
+> Refinamiento visual de burbujas, acciones flotantes y densidad glass en Thread
+
+### Changed
+- Estilo mate 3D sutil casi solido para burbujas de mensajes del usuario consistente en modo oscuro, claro y glass.
+- Mayor densidad glass en el compositor, selector de modelo, tiras de archivos modificados y contexto, y tarjetas de subagentes en chat y RightDock.
+
+### Fixed
+- Reubicacion y placa esmerilada legible para acciones de mensajes del usuario junto con menu popover vertical estructurado para Edit from here.
+
+---
+
+## [0.1.72] - 2026-11-19
+
+> Indicadores configurables de actividad de agentes y color
+
+### Added
+- Indicadores de actividad de agentes seleccionables en Configuracion -> Apariencia con 8 estilos geometricos (Matriz neural, Barras activas, Pulso sereno, Cometa Kite, Grilla 3x3, Pulso en linea, Anillo fluido y Flujo activo) y vista previa compacta en vivo.
+- Selector de color configurable para el indicador de actividad con sincronizacion automatica al acento del tema, paleta rapida y color hexadecimal personalizado.
+
+### Changed
+- Reemplazo de la orbita anterior por Matriz neural como indicador predeterminado y soporte de animacion reducida en todas las variantes.
+
+---
+
+## [0.1.71] - 2026-11-19
+
+> Optimizacion de contexto Fase 1: filtros sin fugas y Auto-CCR
+
+### Added
+- Techo universal Auto-CCR (16,000 chars) en comandos de kite-ctx que conserva cabecera, errores intermedios, cola y recuperacion <<ccr:HASH>>.
+
+### Changed
+- Filtros mejorados para git grep/rg (reparto por archivo + CCR), git diff/show (plegado de lockfiles y stat-first), git status por carpetas y cargo check/build con warnings deduplicados.
+
+### Fixed
+- Resolucion compartida de subcomandos con flags globales (npx --prefix, npm --prefix, git -C/-c, cargo --manifest-path) y omision de hooks en git -C commit.
+- Descubrimiento de sesiones Antigravity en profundidad 4 con deteccion de reescrituras por hook, y atribucion de agentes en hilos por rol sin exponer titulos de usuario.
+
+---
+
+## [0.1.70] - 2026-11-19
+
+> Estabilidad de subagentes, streaming fluido y eliminacion de consolas externas
+
+### Changed
+- Streaming de chat mas fluido con coalescencia de deltas a 24 ms, texto suavizado y mejoras en el renderizado del hilo y tarjetas de subagentes.
+
+### Fixed
+- Eliminacion de ventanas externas de consola en Windows al generar borradores de agentes mediante hidden_exec::run.
+- Limpieza deterministica de arboles de procesos descendientes con Job Objects en hidden_exec::run para evitar procesos huerfanos y bloqueos de pipes.
+- Aislamiento de pruebas unitarias del backend Rust para evitar ejecuciones reales de CLIs externas durante cargo test.
+- Recuperacion y reconciliacion mas robusta de turnos y subagentes interrumpidos, paginacion completa de eventos y limpieza de estado tras errores.
+
+---
+
+## [0.1.69] - 2026-11-19
+
+> Optimizacion profunda de memoria RAM, GPU y recursos en reposo
+
+### Added
+- Figuras interactivas de 8 modos en WebGL2 para Modo Voz y Asistente Zed con miniaturas PNG pre-renderizadas de bajo consumo.
+
+### Changed
+- Optimizacion integral de RAM y persistencia SQLite en Rust: eliminacion de duplicacion permanente del estado en memoria, guardado incremental solo de hilos modificados, checkpoint de WAL acotado y lecturas directas en el daemon sin cargar historiales de chat.
+- Code-splitting y carga diferida de vistas de diffs, Mermaid, modales frios, monitor de recursos y Zed Strip, con pool unico compartido de workers de diffs, eliminacion de importaciones muertas de xterm y reduccion de iconos estaticos.
+- Reduccion de capas GPU y compositor eliminando doble blur en fondos, sustituyendo backdrop-filter permanente en paneles por superficies tintadas, suspendiendo capas de modos inactivos y reemplazando miniaturas pesadas en Personalizaciones.
+- Ajuste del pool persistente de sesiones con limite mas acotado, limpieza deterministica de arboles de procesos mediante Job Objects en Windows y limites acotados para historial de eventos y comandos.
+- Externalizacion de vistas previas base64 de adjuntos con lectura bajo demanda y cache LRU, limpieza de adjuntos al enviar, resumenes livianos sin items en localStorage y limites LRU en cachés de hilos, archivos y git diffs.
+- Optimizacion de memoria en terminal con cache LRU acotada sin clonado por frame de filas sin cambios, scrollback por defecto ajustado y runtime Tokio acotado en el daemon.
+
+### Fixed
+- Eliminacion de ciclos de polling y despertares en reposo en notificaciones, buzon de agentes, ejecuciones activas compartidas, panel derecho oculto, bucle TCP bloqueante de dispatch y planificadores reutilizables de terminal.
+
+---
+
+## [0.1.68] - 2026-11-18
+
+> Plataforma autonoma de agentes, auto-scroll estable y mejoras visuales en Thread
+
+### Added
+- Plataforma autonoma de agentes multi-proveedor con enlace real de workspace y Places, memoria dinamica, user.txt compartido, indice incremental de hilos, creacion y edicion con borrador por IA, habilidades con telemetria y tarjetas de reflexion post-turno.
+- Herramientas CLI y MCP de agente (kite_thread, kite_memory, kite_routine, kite_teammate) con control de permisos y plugins, resolucion de perfiles entre los 7 proveedores, activacion en frio por mensaje, rutinas en segundo plano, AutoPilot multi-turno e inbox con enlaces directos.
+
+### Changed
+- Tarjeta ChangedFilesCard acoplada al borde superior del compositor con despliegue hacia arriba e icono de microfono alineado opticamente en la barra de entrada.
+
+### Fixed
+- Auto-scroll continuo en vivo y seleccion estable de texto sin saltos ni reinicios al arrastrar en Thread, Agent Chat, inspector de subagentes y Swarm Board.
+- Superficies opacas en selector de subagentes, vista previa del riel lateral y monitor de recursos sin filtracion de fondo, junto con silencio de avisos y sonidos al terminar subagentes y workers.
+
+---
+
+## [0.1.67] - 2026-11-18
+
+> Inspector compacto de subagentes, organizacion lateral y estabilidad MCP
+
+### Changed
+- Reestructuracion compacta del inspector de subagentes en RightDock (header fijo en 2 filas, selector desplegable SubagentRunSwitcher con buscador, Task Brief a ancho completo, Jump to latest sin solapamiento y agrupacion de fallos vacios).
+- Organizacion de subagentes en la barra lateral izquierda con resumen nativo de ejecuciones activas, indicador orbital limpio, toggle persistente, sincronizacion de resaltado y limite de 3 filas con +N more.
+- Modelo predeterminado de subagentes configurado a gemini-4-hydrogen en Antigravity con configuracion editable desde Ajustes, enlace de workspace y Places en AgentsView, y preservacion de instrucciones de repositorio en modo Agents.
+
+### Fixed
+- Separacion de llamadas spawn frente a wait/read/send para eliminar tarjetas repetidas o fantasma con auto-reparacion de hilos persistidos, esquema PreToolUse compatible por agente, timeouts acotados en kite dispatch mcp (120s/150s) y reduccion de polling en dispatch_audit.
+
+---
+
+## [0.1.66] - 2026-11-18
+
+> Plugin unificado kite-dispatch, MCP de subagentes y mejoras en Thread
+
+### Added
+- Servidor MCP nativo (kite dispatch mcp) con herramientas kite_subagent_run, kite_subagent_send, kite_subagent_wait, kite_subagent_read y kite_swarm, interceptor PreToolUse/BeforeTool (kite dispatch hook-subagent) y regla concisa rules/AGENTS.md sin skills sueltas.
+- Delegacion paralela de multiples subagentes (--task repetible, --count y batch members en Swarm) y envio de tareas de seguimiento sobre subagentes existentes (kite dispatch send thread:<id> --wait) con tarjetas nativas en Thread y RightDock.
+
+### Changed
+- Ruteo unificado de subagentes y workers hacia el tier de modelos livianos (defaultDelegation -> stack -> modelo rapido) con limite seguro de effort y migracion de roles de ejemplo a command: auto.
+
+### Fixed
+- Supresion de avisos internos duplicados (wait --children all|any, internalDispatch), recuperacion de subagentes e hilos interrumpidos, y correccion de tablas Markdown en Thread (ancho en paneles amplios, columnas laterales y saltos <br>).
+
+---
+
 ## [0.1.65] - 2026-11-18
 
 > Hooks obligatorios de contexto, compresión in-process y proxy MCP

@@ -79,6 +79,8 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
    - Discovery before specs: suggest every copyable part with its behavior and look, confirm totality, then land detailed `S#` on the ODD. Do not implement one slice as the whole feature.
    - Public `odd/tasks`, docs, UI copy, and comments stay product-focused. They never name the source product. Internal notes live under `.kite/tasks/` (gitignored).
    - Follow `.agents/skills/port-from-product/SKILL.md` when triggered.
+4. **Manual QA Task Handoff (Key Areas)**:
+   - For changes touching **Voice Mode**, **Zed / SETH Assistant**, or **Agent / Orchestration**, follow `.agents/skills/qa-task-handoff/SKILL.md`: propose **one consolidated verification task** in **Kite Tasks** (with `oddPath`, `sourceAgent`, and `sourceThreadId` traceability) at closeout and wait for user confirmation unless explicitly requested.
 
 ---
 
@@ -112,4 +114,5 @@ Before executing matching work, read the full `SKILL.md` file rather than guessi
 | `port-from-product` | Feature parity requests (`copy from`, `match`, `parity`, `port`) and full surface inventories | [`.agents/skills/port-from-product/SKILL.md`](.agents/skills/port-from-product/SKILL.md) |
 | `cognitive-doc-design` | Writing or refactoring guides, READMEs, RFCs, or review docs with low cognitive load | [`.agents/skills/cognitive-doc-design/SKILL.md`](.agents/skills/cognitive-doc-design/SKILL.md) |
 | `kite-desktop-qa` | Desktop E2E, Tauri CDP verification, layout matrix, and sabotage fault checks | [`.agents/skills/kite-desktop-qa/SKILL.md`](.agents/skills/kite-desktop-qa/SKILL.md) |
+| `qa-task-handoff` | QA task, manual test, testeo pendiente, crear en Tasks for Voice Mode, Zed/SETH, and Agent | [`.agents/skills/qa-task-handoff/SKILL.md`](.agents/skills/qa-task-handoff/SKILL.md) |
 | `skill-creator` | Creating or updating skills inside `.agents/skills/` | [`.agents/skills/skill-creator/SKILL.md`](.agents/skills/skill-creator/SKILL.md) |

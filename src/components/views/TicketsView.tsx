@@ -28,6 +28,7 @@ import { TicketsHeaderBar } from './tickets/TicketsHeaderBar';
 import { TicketsBoardView } from './tickets/TicketsBoardView';
 import { TicketsListView } from './tickets/TicketsListView';
 import { TicketContextMenu, TicketContextMenuState } from './tickets/TicketContextMenu';
+import './tickets/tickets.css';
 import {
   readStoredView,
   persistStoredView,
@@ -170,6 +171,9 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
             relatedTo: Array.isArray(it.relatedTo) ? it.relatedTo : [],
             branch: it.branch,
             dueDate: it.dueDate || null,
+            oddPath: it.oddPath ?? null,
+            sourceAgent: it.sourceAgent ?? null,
+            sourceThreadId: it.sourceThreadId ?? null,
             createdAt: it.createdAt || new Date().toISOString(),
             updatedAt: it.updatedAt || new Date().toISOString(),
             archivedAt: it.archivedAt || null,
@@ -292,9 +296,11 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
     labels: string[];
     dueDate?: string | null;
     project?: string;
+    oddPath?: string;
   }) => {
     const nextNum = issues.length + 1;
     const nextId = `KITE-${nextNum}`;
+    const trimmedOddPath = data.oddPath?.trim() || null;
     const newIssue: TicketIssue = {
       id: nextId,
       uuid:
@@ -313,6 +319,7 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
       blocks: [],
       relatedTo: [],
       dueDate: data.dueDate || null,
+      oddPath: trimmedOddPath,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -384,7 +391,7 @@ export const TicketsView: React.FC<TicketsViewProps> = ({
           {
             mcpServers: {
               'kite-tasks': {
-                command: 'kite-code',
+                command: 'kite',
                 args: [
                   'mcp',
                   'tasks',

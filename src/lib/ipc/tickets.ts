@@ -43,7 +43,7 @@ export async function ticketConnect(
     return {
       mcpServers: {
         'kite-tasks': {
-          command: 'kite-code',
+          command: 'kite',
           args: [
             'mcp',
             'tasks',
@@ -64,7 +64,7 @@ export async function ticketConfiguration(id: string): Promise<Record<string, un
     return {
       mcpServers: {
         'kite-tasks': {
-          command: 'kite-code',
+          command: 'kite',
           args: ['mcp', 'tasks', '--connection-id', id],
         },
       },

@@ -9,8 +9,57 @@ import {
   COLUMNS,
 } from './types';
 import { PriorityGlyph, StateGlyph, TicketAvatar } from './TicketCard';
+import { readStoredLabels, readStoredProjects } from './ticketStorage';
+import { TagGlyph } from './ticketIcons';
+import { openFileInRightDock } from '../../../lib/filePreviewNav';
 import { SelectMenu } from '../../ui/SelectMenu';
 import { ChevronLeftGlyph, ChevronRightGlyph, MoreHorizontalGlyph } from '../../dockIcons';
+
+const ODD_PATH_SPLIT_RE = /((?:odd|\.kite)\/tasks\/[a-z0-9._-]+\.md)/g;
+
+function renderDescriptionWithOddLinks(text: string): React.ReactNode {
+  const parts = text.split(ODD_PATH_SPLIT_RE);
+  if (parts.length === 1) return text;
+  return parts.map((part, idx) =>
+    idx % 2 === 1 ? (
+      <button
+        key={`${idx}-${part}`}
+        type="button"
+        className="ticket-odd-link"
+        onClick={() => openFileInRightDock({ candidate: part })}
+      >
+        {part}
+      </button>
+    ) : (
+      <React.Fragment key={idx}>{part}</React.Fragment>
+    )
+  );
+}
+
+const KITE_THREAD_ID_RE =
+  /^(?:thr[-_][a-z0-9-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function parseSourceThread(raw?: string | null): {
+  raw: string;
+  isKiteThread: boolean;
+  threadId: string;
+} | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('thread:')) {
+    const stripped = trimmed.slice('thread:'.length).trim();
+    return {
+      raw: trimmed,
+      isKiteThread: Boolean(stripped),
+      threadId: stripped,
+    };
+  }
+  return {
+    raw: trimmed,
+    isKiteThread: KITE_THREAD_ID_RE.test(trimmed),
+    threadId: trimmed,
+  };
+}
 
 export interface TicketDetailViewProps {
   issue: TicketIssue;
@@ -143,22 +192,6 @@ const ArchiveRestoreGlyph: React.FC<{ size?: number }> = ({ size = 13 }) => (
   </svg>
 );
 
-const CheckIcon: React.FC<{ size?: number }> = ({ size = 13 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2.5}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
 export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
   issue,
   snapshot,
@@ -179,6 +212,7 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
   const [delegate, setDelegate] = useState(issue.delegate || '');
   const [dueDate, setDueDate] = useState(issue.dueDate || '');
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [copiedThread, setCopiedThread] = useState(false);
   const actionsBtnRef = useRef<HTMLButtonElement>(null);
 
   const [comments, setComments] = useState<
@@ -204,6 +238,7 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
     setAssignee(issue.assignee || '');
     setDelegate(issue.delegate || '');
     setDueDate(issue.dueDate || '');
+    setCopiedThread(false);
   }, [issue]);
 
   const handleTitleBlur = () => {
@@ -270,11 +305,32 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
     setCommentText('');
   };
 
-  const availableLabels = (snapshot?.labels ?? []).map((l) =>
+  const handleCopySourceThread = async (value: string) => {
+    try {
+      await navigator.clipboard?.writeText(value);
+      setCopiedThread(true);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+
+  const rawLabels =
+    snapshot?.labels && snapshot.labels.length > 0 ? snapshot.labels : readStoredLabels();
+  const baseLabels = rawLabels.map((l) =>
     typeof l === 'string' ? { id: l, name: l } : { id: l.id, name: l.name }
   );
+  const availableLabels = [...baseLabels];
+  for (const existing of issue.labels ?? []) {
+    if (!availableLabels.some((l) => l.name.toLowerCase() === existing.toLowerCase())) {
+      availableLabels.push({ id: existing, name: existing });
+    }
+  }
 
-  const availableProjects = snapshot?.projects ?? [];
+  const availableProjects =
+    snapshot?.projects && snapshot.projects.length > 0
+      ? snapshot.projects
+      : readStoredProjects();
+  const parsedThread = parseSourceThread(issue.sourceThreadId);
   const otherIssues = (snapshot?.issues ?? []).filter(
     (t) => t.id !== issue.id && !t.archivedAt
   );
@@ -417,6 +473,67 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
           }}
         />
 
+        {(issue.oddPath || issue.sourceAgent || parsedThread) ? (
+          <div aria-label="Traceability" className="ticket-traceability">
+            {issue.oddPath ? (
+              <span className="ticket-traceability__item">
+                <span className="ticket-traceability__label">ODD</span>
+                <button
+                  type="button"
+                  className="ticket-traceability__btn ticket-traceability__btn--path"
+                  title={`Open ${issue.oddPath} in RightDock Files`}
+                  onClick={() => openFileInRightDock({ candidate: issue.oddPath! })}
+                >
+                  <span className="ticket-traceability__btn-text">{issue.oddPath}</span>
+                </button>
+              </span>
+            ) : null}
+
+            {issue.sourceAgent ? (
+              <span className="ticket-traceability__item">
+                <span className="ticket-traceability__label">Agent</span>
+                <span className="ticket-traceability__badge">{issue.sourceAgent}</span>
+              </span>
+            ) : null}
+
+            {parsedThread ? (
+              <span className="ticket-traceability__item">
+                <span className="ticket-traceability__label">Thread</span>
+                {parsedThread.isKiteThread ? (
+                  <button
+                    type="button"
+                    className="ticket-traceability__btn"
+                    title={`Open thread ${parsedThread.threadId}`}
+                    onClick={() => {
+                      window.dispatchEvent(new CustomEvent('kite:navigate-mode', { detail: 'chat' }));
+                      window.dispatchEvent(
+                        new CustomEvent('kite:select-thread', {
+                          detail: { threadId: parsedThread.threadId, mode: 'chat' },
+                        })
+                      );
+                    }}
+                  >
+                    Open thread
+                  </button>
+                ) : (
+                  <>
+                    <code className="ticket-traceability__code" title={parsedThread.raw}>
+                      {parsedThread.raw}
+                    </code>
+                    <button
+                      type="button"
+                      className="ticket-traceability__btn"
+                      onClick={() => void handleCopySourceThread(parsedThread.raw)}
+                    >
+                      {copiedThread ? 'Copied' : 'Copy'}
+                    </button>
+                  </>
+                )}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
         <section aria-label="Description" className="ticket-description">
           {isEditingDescription ? (
             <>
@@ -457,7 +574,7 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
                   description ? '' : ' ticket-detail__body--empty'
                 }`}
               >
-                {description || 'No description.'}
+                {description ? renderDescriptionWithOddLinks(description) : 'No description.'}
               </p>
               <button
                 type="button"
@@ -537,7 +654,8 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
             <SelectMenu
               disabled={busy}
               label="Status"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
               value={state}
               triggerIcon={<StateGlyph state={state} />}
               triggerLabel={state}
@@ -557,7 +675,8 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
             <SelectMenu
               disabled={busy}
               label="Priority"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
               value={getPriorityId(priority)}
               triggerIcon={<PriorityGlyph priority={priority} />}
               triggerLabel={getPriorityTitle(priority)}
@@ -613,25 +732,20 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
           <span className="ticket-properties__label">Labels</span>
           <span className="ticket-properties__value">
             <SelectMenu
-              disabled={busy || availableLabels.length === 0}
+              disabled={busy}
               label="Labels"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
+              closeOnSelect={false}
               value=""
               triggerLabel={
-                (issue.labels ?? []).length > 0
-                  ? issue.labels.join(', ')
-                  : availableLabels.length === 0
-                    ? 'No labels yet'
-                    : 'Add label'
+                (issue.labels ?? []).length > 0 ? issue.labels.join(', ') : 'Add label'
               }
               rows={availableLabels.map((lbl) => ({
                 id: lbl.name,
                 title: lbl.name,
-                icon: (issue.labels ?? []).includes(lbl.name) ? (
-                  <CheckIcon size={13} />
-                ) : (
-                  <span aria-hidden="true" className="ticket-menu-blank" />
-                ),
+                icon: <TagGlyph size={12} />,
+                selected: (issue.labels ?? []).includes(lbl.name),
               }))}
               onSelect={handleToggleLabel}
             />
@@ -642,14 +756,12 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
           <span className="ticket-properties__label">Project</span>
           <span className="ticket-properties__value">
             <SelectMenu
-              disabled={busy || availableProjects.length === 0}
+              disabled={busy}
               label="Project"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
               value={issue.projectId ?? ''}
-              triggerLabel={
-                activeProject?.name ??
-                (availableProjects.length === 0 ? 'No projects yet' : 'No project')
-              }
+              triggerLabel={activeProject?.name ?? 'No project'}
               rows={[
                 { id: '', title: 'No project' },
                 ...availableProjects.map((p) => ({ id: p.id, title: p.name })),
@@ -687,7 +799,8 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
             <SelectMenu
               disabled={busy || otherIssues.length === 0}
               label="Parent"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
               value={issue.parentId ?? ''}
               triggerLabel={issue.parentId ?? 'No parent'}
               rows={[
@@ -712,7 +825,9 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
             <SelectMenu
               disabled={busy || otherIssues.length === 0}
               label="Blocks"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
+              closeOnSelect={false}
               value=""
               triggerLabel={
                 (issue.blocks ?? []).length > 0
@@ -723,11 +838,8 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
                 id: t.id,
                 title: t.id,
                 detail: t.title,
-                icon: (issue.blocks ?? []).includes(t.id) ? (
-                  <CheckIcon size={13} />
-                ) : (
-                  <span aria-hidden="true" className="ticket-menu-blank" />
-                ),
+                icon: <StateGlyph state={t.state} />,
+                selected: (issue.blocks ?? []).includes(t.id),
               }))}
               onSelect={(id) => {
                 const cur = issue.blocks ?? [];
@@ -757,7 +869,9 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
             <SelectMenu
               disabled={busy || otherIssues.length === 0}
               label="Related"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
+              closeOnSelect={false}
               value=""
               triggerLabel={
                 (issue.relatedTo ?? []).length > 0
@@ -768,11 +882,8 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
                 id: t.id,
                 title: t.id,
                 detail: t.title,
-                icon: (issue.relatedTo ?? []).includes(t.id) ? (
-                  <CheckIcon size={13} />
-                ) : (
-                  <span aria-hidden="true" className="ticket-menu-blank" />
-                ),
+                icon: <StateGlyph state={t.state} />,
+                selected: (issue.relatedTo ?? []).includes(t.id),
               }))}
               onSelect={(id) => {
                 const cur = issue.relatedTo ?? [];
@@ -791,7 +902,8 @@ export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
             <SelectMenu
               disabled={busy || otherIssues.length === 0}
               label="Duplicate of"
-              variant="toolbar"
+              variant="field"
+              minWidth={220}
               value={issue.duplicateOf ?? ''}
               triggerLabel={issue.duplicateOf ?? 'Not a duplicate'}
               rows={[

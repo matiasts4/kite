@@ -79,4 +79,41 @@ describe('CreateTicketModal - Form & Behavioral Tests', () => {
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  it('renders inside a <dialog> Sheet, supports multi-select labels, project selection, and optional ODD link', async () => {
+    const user = userEvent.setup();
+    const onCreate = vi.fn();
+
+    render(<CreateTicketModal onClose={vi.fn()} onCreate={onCreate} />);
+
+    const dialog = document.querySelector('dialog[open]');
+    expect(dialog).toBeTruthy();
+
+    await user.type(screen.getByPlaceholderText('Task title'), 'Verify Voice Mode handoff');
+    await user.type(
+      screen.getByPlaceholderText(/ODD path/i),
+      'odd/tasks/qa-task-handoff-and-tickets-ux.md'
+    );
+
+    // Multi-select Labels (menu remains open across selections)
+    await user.click(screen.getByRole('combobox', { name: /labels/i }));
+    await user.click(screen.getByRole('option', { name: 'Frontend' }));
+    expect(screen.getByRole('option', { name: 'Backend' })).toBeInTheDocument();
+    await user.click(screen.getByRole('option', { name: 'Backend' }));
+
+    // Select Project
+    await user.click(screen.getByRole('combobox', { name: /project/i }));
+    await user.click(screen.getByRole('option', { name: 'Kite Code' }));
+
+    await user.click(screen.getByRole('button', { name: /create task/i }));
+
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Verify Voice Mode handoff',
+        oddPath: 'odd/tasks/qa-task-handoff-and-tickets-ux.md',
+        labels: ['Frontend', 'Backend'],
+        project: 'proj-kite',
+      })
+    );
+  });
 });

@@ -20,6 +20,7 @@ export interface SelectMenuRow {
   detail?: string;
   badge?: string;
   disabled?: boolean;
+  selected?: boolean;
   engine?: string;
   icon?: React.ReactNode;
   sectionTitle?: string;
@@ -35,6 +36,8 @@ export interface SelectMenuProps {
   disabled?: boolean;
   locked?: boolean;
   searchable?: boolean;
+  minWidth?: number;
+  closeOnSelect?: boolean;
   triggerLabel?: React.ReactNode;
   triggerEngine?: string;
   triggerIcon?: React.ReactNode;
@@ -114,7 +117,7 @@ const LockIcon: React.FC<{ size?: number; className?: string }> = ({ size = 9, c
   </svg>
 );
 
-const MENU_Z = 60;
+const MENU_Z = 10200;
 const OVERLAY_LIFT = 20;
 
 /** Lists portaled beside a modal must paint above that modal, not behind it. */
@@ -142,10 +145,47 @@ interface CoordsState {
   portalHost: HTMLElement;
 }
 
+function findFixedContainingBlock(portalHost: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = portalHost;
+  while (node && node !== document.documentElement) {
+    const style = window.getComputedStyle(node);
+    const webkitBackdropFilter = (
+      style as CSSStyleDeclaration & { webkitBackdropFilter?: string }
+    ).webkitBackdropFilter;
+    const hasTransform = Boolean(style.transform) && style.transform !== 'none';
+    const hasFilter = Boolean(style.filter) && style.filter !== 'none';
+    const hasBackdrop =
+      (Boolean(style.backdropFilter) && style.backdropFilter !== 'none') ||
+      (Boolean(webkitBackdropFilter) && webkitBackdropFilter !== 'none');
+    const hasPerspective = Boolean(style.perspective) && style.perspective !== 'none';
+    const hasContain =
+      Boolean(style.contain) && /\b(layout|paint|strict|content)\b/.test(style.contain);
+    if (hasTransform || hasFilter || hasBackdrop || hasPerspective || hasContain) {
+      return node;
+    }
+    // A modal <dialog open> paints in the browser Top Layer, so outer ancestors
+    // never establish a fixed-position containing block for its descendants.
+    if (node.tagName === 'DIALOG' && node.hasAttribute('open')) {
+      return null;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function getAnchoredGeometry(element: HTMLElement) {
+  const openDialog = element.closest('dialog[open]') as HTMLElement | null;
   const scaledHost = element.closest('.app-frame--scaled') as HTMLElement | null;
-  const hostRect = scaledHost?.getBoundingClientRect();
-  const rawScale = Number(scaledHost ? window.getComputedStyle(scaledHost).getPropertyValue('--ui-scale') : 1);
+  const portalHost = openDialog ?? scaledHost ?? document.body;
+  const containingBlock = findFixedContainingBlock(portalHost);
+  const hostRect = containingBlock?.getBoundingClientRect();
+  const rawScale = Number(
+    openDialog && !containingBlock
+      ? 1
+      : scaledHost
+        ? window.getComputedStyle(scaledHost).getPropertyValue('--ui-scale')
+        : 1
+  );
   const scale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
   const originX = hostRect?.left ?? 0;
   const originY = hostRect?.top ?? 0;
@@ -153,6 +193,25 @@ function getAnchoredGeometry(element: HTMLElement) {
   const winWidth = window.innerWidth;
   const winHeight = window.innerHeight;
   const zIndex = overlayMenuZIndex(element);
+
+  let clipLeft = -originX / scale;
+  let clipTop = -originY / scale;
+  let clipRight = (winWidth - originX) / scale;
+  let clipBottom = (winHeight - originY) / scale;
+
+  if (containingBlock && hostRect) {
+    const cbStyle = window.getComputedStyle(containingBlock);
+    const clipsX = cbStyle.overflowX && cbStyle.overflowX !== 'visible';
+    const clipsY = cbStyle.overflowY && cbStyle.overflowY !== 'visible';
+    if (clipsX) {
+      clipLeft = Math.max(clipLeft, 0);
+      clipRight = Math.min(clipRight, hostRect.width / scale);
+    }
+    if (clipsY) {
+      clipTop = Math.max(clipTop, 0);
+      clipBottom = Math.min(clipBottom, hostRect.height / scale);
+    }
+  }
 
   return {
     bounds: {
@@ -164,15 +223,15 @@ function getAnchoredGeometry(element: HTMLElement) {
       height: rect.height / scale,
     },
     viewport: {
-      left: -originX / scale,
-      top: -originY / scale,
-      right: (winWidth - originX) / scale,
-      bottom: (winHeight - originY) / scale,
-      width: winWidth / scale,
-      height: winHeight / scale,
+      left: clipLeft,
+      top: clipTop,
+      right: clipRight,
+      bottom: clipBottom,
+      width: Math.max(0, clipRight - clipLeft),
+      height: Math.max(0, clipBottom - clipTop),
     },
     zIndex,
-    portalHost: scaledHost ?? document.body,
+    portalHost,
   };
 }
 
@@ -192,6 +251,8 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
   onSelect,
   disabled = false,
   locked = false,
+  minWidth = MIN_WIDTH,
+  closeOnSelect = true,
   triggerLabel,
   triggerEngine,
   triggerIcon,
@@ -275,7 +336,10 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     const rowsClientHeight = rowsEl ? rowsEl.clientHeight : 0;
     const rowsScrollHeight = rowsEl ? rowsEl.scrollHeight : 0;
 
-    const width = Math.max(bounds.width, MIN_WIDTH);
+    const width = Math.min(
+      Math.max(bounds.width, minWidth),
+      Math.max(160, viewport.width - EDGE_PADDING * 2)
+    );
     const left = Math.max(
       viewport.left + EDGE_PADDING,
       Math.min(bounds.left, viewport.right - width - EDGE_PADDING)
@@ -296,7 +360,8 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
       } else {
         panelHeight = panelOffsetHeight;
       }
-    } else {
+    }
+    if (panelHeight === 0) {
       panelHeight = spaceBelow < 200 && spaceAbove > spaceBelow ? Math.min(spaceAbove, 180) : 0;
     }
 
@@ -332,7 +397,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
         portalHost,
       };
     });
-  }, [panelEl]);
+  }, [minWidth, panelEl]);
 
   const schedulePositionUpdate = useCallback(() => {
     if (rafIdRef.current !== null) {
@@ -359,6 +424,8 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     if (triggerRef.current) ro.observe(triggerRef.current);
     const scaledHost = triggerRef.current?.closest('.app-frame--scaled');
     if (scaledHost) ro.observe(scaledHost);
+    const openDialog = triggerRef.current?.closest('dialog[open]');
+    if (openDialog && openDialog !== scaledHost) ro.observe(openDialog);
     return () => {
       ro.disconnect();
       if (rafIdRef.current !== null) {
@@ -423,7 +490,9 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 
   const handlePick = (row: SelectMenuRow) => {
     if (row.disabled) return;
-    closeMenu(true);
+    if (closeOnSelect) {
+      closeMenu(true);
+    }
     onSelect(row.id);
   };
 
@@ -609,7 +678,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
 
                 <div ref={rowsRef} className="select-menu__rows" role="listbox">
                   {filteredRows.map((row) => {
-                    const isSelected = row.id === value;
+                    const isSelected = row.selected ?? row.id === value;
                     const isHighlighted = row.id === highlightedId;
                     const hasMark = row.engine !== undefined || row.icon !== undefined;
 
@@ -669,7 +738,7 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
                           <span className="select-menu__row-check">
                             {isSelected ? (
                               <motion.span
-                                layoutId={`${menuId}-check`}
+                                layoutId={closeOnSelect ? `${menuId}-check` : undefined}
                                 className="select-menu__check-surface"
                                 transition={springs.highlight}
                                 initial={false}

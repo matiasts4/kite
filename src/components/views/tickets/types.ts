@@ -57,6 +57,9 @@ export interface TicketIssue {
   relatedTo?: string[];
   branch?: string;
   dueDate?: string | null;
+  oddPath?: string | null;
+  sourceAgent?: string | null;
+  sourceThreadId?: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
@@ -162,10 +165,10 @@ export function formatMcpToml(jsonConfig: string): string {
     const parsed = JSON.parse(jsonConfig);
     const servers = parsed?.mcpServers ?? {};
     const key = Object.keys(servers)[0] || 'kite-tasks';
-    const srv = servers[key] || { command: 'kite-code', args: ['mcp', 'tasks'] };
+    const srv = servers[key] || { command: 'kite', args: ['mcp', 'tasks'] };
     return `[mcp_servers.${key}]\ncommand = ${JSON.stringify(srv.command)}\nargs = ${JSON.stringify(srv.args)}\n`;
   } catch {
-    return `[mcp_servers.kite-tasks]\ncommand = "kite-code"\nargs = ["mcp", "tasks"]\n`;
+    return `[mcp_servers.kite-tasks]\ncommand = "kite"\nargs = ["mcp", "tasks"]\n`;
   }
 }
 

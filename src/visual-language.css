@@ -1416,9 +1416,39 @@ html[data-surface-glass='true'] body.kite-app .chat-composer {
   backdrop-filter: none;
 }
 
-html[data-surface-glass='true'] body.kite-app :is(.sidebar, .pane, .right-dock, .code-pane-panel, .app-browser-sidebar, .settings-modal-window, .chat-surface) :is(.glass-overlay, .ui-menu, .ui-popover, .ui-tooltip, .select-menu, .composer, .chat-composer, .chat-turn-rail__card, .update-detail-card) {
+html[data-surface-glass='true'] body.kite-app :is(.sidebar, .pane, .right-dock, .code-pane-panel, .app-browser-sidebar, .settings-modal-window, .chat-surface, dialog.ui-sheet) :is(.glass-overlay, .ui-menu, .ui-popover, .ui-tooltip, .select-menu, .composer, .chat-composer, .chat-turn-rail__card, .update-detail-card) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
+}
+
+body.kite-app dialog.ui-sheet.ticket-sheet {
+  overflow: visible;
+}
+
+body.kite-app dialog.ui-sheet.ticket-sheet .ui-sheet__form {
+  max-height: calc(100vh - 80px);
+}
+
+body.kite-app dialog.ui-sheet.ticket-sheet .ui-sheet__body {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+body.kite-app dialog.ui-sheet .select-menu,
+html[data-surface-glass='true'] body.kite-app dialog.ui-sheet .select-menu {
+  background: var(--menu-plate, var(--glass-overlay-bg, #1c1c1f)) !important;
+  border-color: var(--glass-border, var(--panel-stroke)) !important;
+  box-shadow: var(--glass-shadow, var(--shadow-overlay));
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+body.kite-app .ticket-properties__value .select-menu-trigger,
+body.kite-app .ticket-inline__input,
+body.kite-app .ticket-new__chips .select-menu-trigger,
+body.kite-app .ticket-new input.ticket-new__chip-input {
+  border-radius: var(--control-radius);
+  height: var(--control-row);
 }
 
 /* Translucent terminal canvas tint without stacked backdrop-filter stalls */
